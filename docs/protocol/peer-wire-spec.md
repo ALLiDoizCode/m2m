@@ -217,19 +217,20 @@ one `minimumDelivery` the sender set.
 
 Peer-wire REJECTs use the existing RFC-0027 §3.3 codes:
 
-| Code              | Meaning here                                                                                |
-| ----------------- | ------------------------------------------------------------------------------------------- |
-| `F00`             | A terminated envelope's `target` attempted to escape the route's handler path (issue #596). |
-| `F01`             | Malformed frame or packet; absent/all-zero `executionCondition` (§3.1).                     |
-| `F02`             | No route to `destination`.                                                                  |
-| `F08`             | Duplicate packet (replay of a `correlationId` already answered).                            |
-| `R00`             | PREPARE expired before it could be forwarded or answered.                                   |
-| `R01`             | This hop cannot meet the declared `minimumDelivery` after its fee (§4).                     |
-| `R02`             | `expiresAt` leaves insufficient time for this hop to forward and get a reply.               |
-| `T00`             | Internal error at this connector (retryable).                                               |
-| `T01`             | The configured next-hop peer is unreachable (stream down).                                  |
-| `T04`             | This connector's exposure ceiling for the inbound peer is exceeded (§5.3).                  |
-| `F99`/`T99`/`R99` | Application-level reject from the terminating app, passed through unchanged.                |
+| Code              | Meaning here                                                                                                                                      |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `F00`             | A terminated envelope's `target` attempted to escape the route's handler path (issue #596).                                                       |
+| `F01`             | Malformed frame or packet; absent/all-zero `executionCondition` (§3.1).                                                                           |
+| `F02`             | No route to `destination`.                                                                                                                        |
+| `F08`             | Duplicate packet (replay of a `correlationId` already answered).                                                                                  |
+| `R00`             | PREPARE expired before it could be forwarded or answered.                                                                                         |
+| `R01`             | This hop cannot meet the declared `minimumDelivery` after its fee (§4).                                                                           |
+| `R02`             | `expiresAt` leaves insufficient time for this hop to forward and get a reply.                                                                     |
+| `F03`             | The PREPARE resolved to one of this connector's own priced terminated routes, but `amount` did not cover that route's `price` (§5.4, issue #752). |
+| `T00`             | Internal error at this connector (retryable).                                                                                                     |
+| `T01`             | The configured next-hop peer is unreachable (stream down).                                                                                        |
+| `T04`             | This connector's exposure ceiling for the inbound peer is exceeded (§5.3).                                                                        |
+| `F99`/`T99`/`R99` | Application-level reject from the terminating app, passed through unchanged.                                                                      |
 
 `F06_UNEXPECTED_PAYMENT`, previously used to reject a PREPARE arriving without an inline claim
 under the prepay model, has no peer-wire use: PREPAREs never carry claims now (§3.2), so there is
@@ -244,13 +245,16 @@ and issue #523 -- the fees of the hops the packet actually passed through, plus 
 route that terminated it, if it reached one. The field starts at `0`:
 
 - When a connector **originates** a REJECT for a reason that added no value to the packet at all
-  (no route, expired, ceiling exceeded, cannot meet minimum delivery, the terminating app itself
-  unreachable, or an envelope target that attempted to escape the route's handler path), it sets
+  (no route, expired, ceiling exceeded, cannot meet minimum delivery, an underpriced peer-wire
+  arrival at a priced terminated route (§5.4, issue #752), the terminating app itself unreachable,
+  or an envelope target that attempted to escape the route's handler path), it sets
   `accumulatedCost = 0` on the REJECT it sends upstream — it never forwarded or terminated this
   packet, so nothing applies to a hop it never used. An app that could not be reached (`T01`) is
   the termination-side mirror of a forwarding hop that cannot reach its own peer: no priced work
   was done, so no price is added. A refused target (`F00`, issue #596) is the same reasoning one
-  step earlier — the app was never even called, so nothing accumulates.
+  step earlier — the app was never even called, so nothing accumulates. An underpriced peer-wire
+  arrival is the same reasoning again, one step earlier still: the app is never even consulted, so
+  the route's price is not owed by a payer who was never even asked to cover it.
 - When a connector **originates** a REJECT because the packet reached one of its own terminated
   routes and was rejected there (an application-level reject from the terminating app, or a
   fulfillment that didn't match the execution condition), it sets `accumulatedCost` to that
@@ -285,6 +289,30 @@ covered by an acknowledged claim, §3.2–§3.4). A PREPARE that would push that
 relation's configured ceiling MUST be rejected with `T04_INSUFFICIENT_LIQUIDITY` — retryable,
 since the condition clears once the payer's pending claim is acknowledged (`CONTEXT.md`
 "Ceiling").
+
+### 5.4 A priced termination reached over the peer wire requires enough value to cover it
+
+Issue #752 closes the second gap [ADR 0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md)
+left open: a connector whose priced _terminated_ route was reached over the peer wire used to serve
+it without charging anything, since only the client edge checked a route's price. When a peer-role
+PREPARE resolves to one of this connector's own terminated routes and that route's `price` is
+greater than zero, the connector MUST check `amount >= price` **before** opening the wrap or
+consulting the app. If `amount < price`, it MUST reject with `F03_INVALID_AMOUNT` and
+`accumulatedCost = 0` (§5.2 — no priced work was done) without ever calling the app. `price = 0`
+(an operator's deliberate free termination, [ADR 0020](../adr/0020-a-price-is-flat-and-attaches-to-a-handler.md))
+never triggers this check.
+
+This is a per-packet check answered from the amount already on the PREPARE, not a relation-wide
+throttle — it needs no new state, leaves the claim exchange (§3.2–§3.4) and the exposure ceiling
+(§5.3, `T04`) exactly as they were, and requires no x402 greeting or negotiation
+(`peer-carriage-spec.md` §3.1 stands: a peer-role PREPARE is never greeted). It composes with the
+existing mechanisms rather than replacing any of them: an arrival that clears this check is
+delivered, and on fulfilment its full `amount` — never less than `price` by construction — becomes
+the exposure the sending peer owes this connector (§3.2), so the ordinary claim exchange that later
+covers that exposure is guaranteed to cover at least this route's price too. A peer that never
+advances a claim, or advances one by less than it owes, is still bounded by the pre-existing ceiling
+and claim-ack rules (§3.4, §5.3) exactly as before — this section only ensures that what accrues as
+exposure in the first place was never less than the route's own price.
 
 ## 6. Consistency
 

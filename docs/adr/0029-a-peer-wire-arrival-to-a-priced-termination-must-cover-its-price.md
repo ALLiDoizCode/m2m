@@ -1,0 +1,121 @@
+# A peer-wire arrival to a priced termination must cover its price, per packet, before delivery
+
+A peer-role PREPARE that resolves to one of this connector's own priced `handler_url` routes is
+now checked against that route's `price` before the app is ever consulted: `amount >= price`, or
+the connector rejects `F03_INVALID_AMOUNT` with `accumulatedCost = 0` and never opens the wrap.
+
+## Context
+
+Issue #620 gave a `peer_id` route a client-facing `price`, closed by ADR 0028 — but ADR 0028's own
+"What this does not change" named a second gap and left it open: **a connector whose priced
+_terminated_ route is reached over the peer wire still serves it without charging.**
+`StaticRoute::price` was consulted in exactly one place, `Connector::deliver_to_app` /
+`deliver_opened_envelope`, and only to fill in a REJECT's `accumulatedCost` — never to decide
+whether to deliver at all. `ClaimBook::accept_inbound` verifies a peer's claim signature and its
+nonce/amount monotonicity, but deliberately never calls `connector_domain::validate_price` (its own
+code comment said so); it has no notion of which route a claim is paying for in the first place.
+The result: a peer forwarding into a priced termination — with a stale claim, an unadvancing one, or
+none at all — got the app's work for free, discoverable only by the fact that nothing ever refused
+it.
+
+Issue #752 (dispatched off the back of #714's Shape A decision — one connector per box, each fronting
+its own app) made this concrete rather than theoretical: under Shape A the store box's own priced
+termination is reached from the apex over the peer wire, and ADR 0028's stated workaround — "the
+first hop's price covers the whole path" — collapses the fee split back into Shape B (the apex
+collects everything, the store earns nothing) if the store box cannot itself verify it was paid.
+
+Two questions were explicitly left open by the issue for whoever closed it:
+
+1. **Mechanism.** The peer wire's claim exchange is not per-packet (`peer-wire-spec.md` §3.2 — a
+   claim rides the _next_ packet, trailing the fulfilment that created the obligation) while a
+   price is inherently per-delivery. Checking a price against a running, trailing balance is not the
+   same operation as checking it against a single claim the way the client edge's `ClientClaimGate`
+   does.
+2. **Per-packet refusal, or relation-level throttle?** `peer-wire-spec.md` §5.3's `T04` ceiling
+   already throttles a whole peering relation once its unclaimed exposure grows too large. The issue
+   asked whether an underpriced arrival should be answered the same way, as a property of the
+   relation, rather than of the one packet.
+
+## Decision
+
+**The check is per-packet, and it is answered from the PREPARE already in hand — not from the claim
+exchange at all.**
+
+Value on the peer wire moves by [ADR 0004](0004-value-moves-on-fulfilment.md): a PREPARE's `amount`
+is exactly what becomes owed to this connector, as exposure, the moment it fulfils
+(`peer-wire-spec.md` §3.2, `Connector::handle_peer_prepare`'s `record_inbound_delivery`). That
+`amount` already carries the answer this ticket needs — a hop cannot increase it forwarding
+(`peer-wire-spec.md` §4: outgoing amount is always incoming amount minus fee), so if the amount
+arriving at a termination is at least that route's price, whatever exposure this delivery creates is
+guaranteed to be at least that route's price too, and the ordinary claim exchange that later covers
+that exposure (§3.2–§3.4) is guaranteed to cover the route's price as a consequence — with no new
+claim-level machinery, no change to how a claim is signed or verified, and no attempt to tie one
+specific claim to one specific packet the way the client edge does.
+
+`Connector::handle_peer_prepare` therefore gates on `Connector::client_route` — the same
+longest-prefix, same-priority lookup ADR 0028 already uses to price the client edge — immediately
+after the exposure-ceiling check and before calling `Connector::handle_prepare`:
+
+- Only `ClientRouteKind::Terminated` routes are gated. A `Forwarded` (`peer_id`) route reached over
+  the peer wire is ordinary multi-hop forwarding, fee-metered exactly as it always was; `price` on
+  such a route is a client-edge fact this connector's own peer-role handling has no reason to
+  consult.
+- `price = 0` never gates. An operator's deliberate free termination (ADR 0020) stays free reached
+  from a peer, exactly as it stays free reached from a client.
+- A rejected arrival never opens the wrap, never reaches the app, and records no exposure — the app
+  did no work, so nothing accumulates (`peer-wire-spec.md` §5.2's existing "no value added" rule,
+  which this decision adds a new member to) and the sending peer is not charged for a delivery that
+  never happened.
+
+**This answers question 2 directly: per packet, not a relation throttle.** `T04`'s ceiling and this
+check answer different questions and are kept separate rather than merged into one code path:
+
+- `T04` (§5.3) is about **how much unclaimed value this connector tolerates being owed by a peer in
+  total**, independent of what any individual packet costs. It already existed, already fires first
+  in `handle_peer_prepare`, and is unaffected by this change.
+- `F03` (this decision, §5.4) is about **whether one specific arrival brought enough value for the
+  specific route it reached.** A relation can be nowhere near its ceiling and still send a PREPARE
+  that underpays a route's price — the two failures are independent, and conflating them (e.g.
+  throttling the whole relation over one underpriced packet, or waiting for the ceiling to catch an
+  underpriced pattern statistically) would either overreact to an isolated misconfiguration or fail
+  to catch one at all. A per-packet reject is also the shape every other amount-driven refusal on
+  this wire already takes (`R01`'s minimum-delivery check, ADR 0028's own `F03` over-carry cap at
+  the client edge) — this decision keeps that precedent rather than introducing a second kind of
+  amount enforcement.
+
+## What this does not change
+
+**The claim exchange itself (§3.2–§3.4) is untouched.** `ClaimBook::accept_inbound` still verifies
+only signature and nonce/amount monotonicity, exactly as before; it still has no notion of which
+route a claim is paying for, and none is added. This decision verifies the _packet_, not the claim.
+
+**The exposure ceiling (§5.3, `T04`) is untouched**, checked first, and this decision's own gate
+never touches exposure bookkeeping — a rejected arrival never calls `record_inbound_delivery`.
+
+**No upper bound.** Unlike ADR 0028's client-edge cap (a priced _forwarded_ route refuses an
+`amount` greater than `price`, because the excess would be real money this connector forwards and
+never collected), a priced _termination_ has nowhere to forward the excess — this connector is the
+end of the path. A peer that overpays a termination is not refused; the money is simply not returned
+either, the same as any other overpayment this design has never tried to detect.
+
+**No x402 greeting.** `peer-carriage-spec.md` §3.1 stands verbatim: a peer-role PREPARE is never
+greeted. A peer that sends too little is simply rejected, the same way `R01` refuses a PREPARE this
+hop cannot forward at the declared minimum delivery — told the packet failed, not invited to retry
+with different terms.
+
+**Leased routes are unaffected.** `Connector::client_route` already excludes them (ADR 0028); they
+carry no price and this decision adds none.
+
+## Consequences
+
+Under #714's Shape A, the store box's own priced termination is now verified on its own terms when
+reached from the apex over the peer wire: an apex misconfigured to forward less than the store's
+`price`, or a store-facing peering that stops claiming altogether, is now visible as `F03` rejects
+at the store rather than as silent free service. The apex's own workaround — pricing the first hop
+to cover the whole path — is no longer the only thing standing between the store box and working for
+free.
+
+An operator who terminates the same route behind two doors at two different prices (the exact shape
+issue #557's free-gateway guard and the live `g.toon.relay` incident both name) is unaffected by this
+decision specifically — it does not reconcile two prices for one handler, only whether one path's own
+declared price was met by what it received.

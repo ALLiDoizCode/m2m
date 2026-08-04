@@ -641,6 +641,21 @@ impl Connector {
     /// can be checked and no exposure is recorded for this call, matching
     /// how a peer with no configured channel never gets a claim emitted
     /// either.
+    ///
+    /// Issue #752: a destination that resolves to one of this connector's
+    /// own priced *terminated* routes is refused `F03_INVALID_AMOUNT`
+    /// before the app is ever consulted if `prepare.amount` does not cover
+    /// that route's `price` -- otherwise a peer forwarding into a priced
+    /// route paid for by nothing (or by less than the route is worth) got
+    /// the same free service ADR 0028 already closed off at the client
+    /// edge. This is a per-packet gate, not a relation-wide throttle
+    /// (`peer-wire-spec.md` §5.4): it is answered from the amount already
+    /// on this PREPARE via the same `client_route` lookup the client edge
+    /// prices with (ADR 0028), leaves the exposure ceiling (§5.3, `T04`,
+    /// checked above) and the claim exchange itself (§3.2) untouched, and
+    /// carries no x402 greeting -- `peer-carriage-spec.md` §3.1 still holds
+    /// on a peer-role PREPARE. A route priced at `0` (an operator's
+    /// deliberate free termination, ADR 0020) never trips this check.
     pub async fn handle_peer_prepare(
         &self,
         prepare: Prepare,
@@ -658,6 +673,25 @@ impl Connector {
                     code: RejectCode::t04_insufficient_liquidity(),
                     triggered_by: String::new(),
                     message: format!("exposure ceiling exceeded for channel '{channel_id}'"),
+                    data: Vec::new(),
+                    accumulated_cost: 0,
+                });
+                return (self.finish(reject), ack);
+            }
+        }
+
+        if let Some(route) = self.client_route(&prepare.destination) {
+            if route.kind == ClientRouteKind::Terminated
+                && route.price > 0
+                && prepare.amount < route.price
+            {
+                let reject = PacketResponse::Reject(Reject {
+                    code: RejectCode::f03_invalid_amount(),
+                    triggered_by: String::new(),
+                    message: format!(
+                        "'{}' costs {} but the peer arrival carried only {}",
+                        prepare.destination, route.price, prepare.amount
+                    ),
                     data: Vec::new(),
                     accumulated_cost: 0,
                 });
@@ -4084,6 +4118,163 @@ mod tests {
                 }
                 other => panic!("expected a reject, got {other:?}"),
             }
+        }
+    }
+
+    /// Issue #752: a peer-role PREPARE reaching one of this connector's own
+    /// priced terminated routes must itself carry enough value to cover
+    /// that route's price, checked in `Connector::handle_peer_prepare`
+    /// before the app is ever consulted -- closing the gap ADR 0028 named
+    /// and left open (a connector whose priced terminated route was
+    /// reached over the peer wire served it for free).
+    mod peer_wire_termination_price {
+        use super::*;
+        use connector_signer::LocalSigner;
+
+        /// A route priced at 25, reached over the peer wire with a PREPARE
+        /// carrying only 10, is refused before the app is ever called --
+        /// unlike every other reject this connector originates for a
+        /// packet that never reached its termination, this one is possible
+        /// only because the connector consulted the route's price, so it
+        /// gets its own dedicated proof that the app truly never saw it.
+        #[tokio::test]
+        async fn an_underpriced_peer_arrival_is_refused_before_the_app_is_reached() {
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"irrelevant"));
+            let connector = connector_with(vec![route], app_client.clone(), test_clock());
+
+            let (response, ack) = connector
+                .handle_peer_prepare(prepare_with_amount("g.example.app", 10), 0, None, None)
+                .await;
+
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "F03");
+                    assert_eq!(reject.accumulated_cost, 0);
+                }
+                other => panic!("expected an F03 reject, got {other:?}"),
+            }
+            assert_eq!(ack, ClaimAckOutcome::NotSent);
+            assert!(app_client.deliveries().is_empty());
+        }
+
+        /// The boundary: a PREPARE carrying exactly the route's price is
+        /// enough -- this is not a strict-greater-than check.
+        #[tokio::test]
+        async fn a_peer_arrival_that_exactly_covers_the_routes_price_is_delivered() {
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"irrelevant"));
+            let connector = connector_with(vec![route], app_client.clone(), test_clock());
+
+            let (response, _ack) = connector
+                .handle_peer_prepare(prepare_with_amount("g.example.app", 25), 0, None, None)
+                .await;
+
+            assert!(matches!(response, PacketResponse::Fulfill(_)));
+            assert_eq!(app_client.deliveries().len(), 1);
+        }
+
+        /// Unlike a priced *forwarded* route at the client edge (ADR 0028's
+        /// `F03` over-carry cap), a priced terminated route reached over the
+        /// peer wire has no upper bound -- this connector never forwards the
+        /// excess anywhere, so nothing is lost by a peer that overpays it.
+        #[tokio::test]
+        async fn a_peer_arrival_that_overpays_the_routes_price_is_still_delivered() {
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"irrelevant"));
+            let connector = connector_with(vec![route], app_client.clone(), test_clock());
+
+            let (response, _ack) = connector
+                .handle_peer_prepare(prepare_with_amount("g.example.app", 100), 0, None, None)
+                .await;
+
+            assert!(matches!(response, PacketResponse::Fulfill(_)));
+        }
+
+        /// A route explicitly priced at zero (an operator's deliberate free
+        /// termination, ADR 0020) is untouched by this check -- an operator
+        /// who wrote `price = 0` still gets free carriage over the peer
+        /// wire, exactly as over the client edge.
+        #[tokio::test]
+        async fn a_free_terminated_route_is_unaffected_by_the_price_check() {
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            assert_eq!(route.price(), 0);
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"irrelevant"));
+            let connector = connector_with(vec![route], app_client.clone(), test_clock());
+
+            let (response, _ack) = connector
+                .handle_peer_prepare(prepare_with_amount("g.example.app", 0), 0, None, None)
+                .await;
+
+            assert!(matches!(response, PacketResponse::Fulfill(_)));
+        }
+
+        /// The new gate fires ahead of the exposure ceiling's own
+        /// bookkeeping (issue #424): a rejected, underpriced arrival never
+        /// calls `record_inbound_delivery`, so it leaves the channel's
+        /// exposure exactly where it was rather than charging the peer for
+        /// work this connector never did.
+        #[tokio::test]
+        async fn an_underpriced_peer_arrival_records_no_exposure() {
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"irrelevant"));
+            let payer_signer = Arc::new(LocalSigner::generate("payer-claim-key"));
+            let payer_address = derive_evm_address(&payer_signer.public_key().unwrap());
+            let connector = with_test_channel(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_channel_ceiling(test_channel_id(1), 1000)
+                .with_identity_signer(identity_signer()),
+                1,
+                payer_address,
+            );
+
+            let (response, _ack) = connector
+                .handle_peer_prepare(
+                    prepare_with_amount("g.example.app", 10),
+                    0,
+                    None,
+                    Some(test_channel_id(1)),
+                )
+                .await;
+
+            assert!(matches!(response, PacketResponse::Reject(_)));
+            assert_eq!(connector.exposure()[0].exposure, 0);
+        }
+
+        /// This check is specific to the peer wire. A destination reached
+        /// through [`Connector::handle_prepare`] directly -- what the
+        /// client edge itself calls, only after its own claim gate already
+        /// charged `price` (issue #522) -- is never subject to it, since
+        /// `handle_prepare` cannot tell whether `prepare.amount` reflects
+        /// anything a client actually paid.
+        #[tokio::test]
+        async fn handle_prepare_itself_is_not_gated_by_the_peer_wire_price_check() {
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"irrelevant"));
+            let connector = connector_with(vec![route], app_client.clone(), test_clock());
+
+            let response = connector
+                .handle_prepare(prepare_with_amount("g.example.app", 10), 0)
+                .await;
+
+            assert!(matches!(response, PacketResponse::Fulfill(_)));
         }
     }
 
