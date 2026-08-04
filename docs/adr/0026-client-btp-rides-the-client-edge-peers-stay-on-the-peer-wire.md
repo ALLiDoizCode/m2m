@@ -1,5 +1,16 @@
 # Client BTP rides the client edge; peers stay on the peer wire
 
+> **Conclusion partly superseded, architecture reaffirmed (2026-08-03) by
+> [ADR 0027](0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md).** Peers
+> now use both carriages too, so the title's second clause and the "every BTP session is a client
+> session by construction" argument below no longer hold: role is decided by authentication (a
+> configured `[[peers]]` credential **and** a `[[peer_channels]]` binding), not by transport or
+> carriage. Everything else stands — and this ADR's central architecture, **one gate and two
+> carriages that are factored so they cannot drift**, is the explicit precedent ADR 0027 builds the
+> peer side on, including the reason for it: when the carriages did drift, it caused a devnet
+> incident. Note for anyone chasing a reference: an unmerged draft on branch `adr/btp-peer-transport`
+> also carried the number 0026; it was renumbered to 0027. This file keeps 0026.
+
 `crates/connector-client-edge` now serves a BTP websocket transport at `GET /ilp/btp`
 (client-edge-spec.md §1.9), mounted on the same router — and therefore the same bind address, the
 same `ClientClaimGate` instance, the same watermarks and journal — as `POST /ilp`. It is a second
@@ -46,8 +57,9 @@ The only BTP speakers this edge must interoperate with are `@toon-protocol/clien
 `IsomorphicBtpClient` and its consumers — the deployed wire. That dialect (fixed-width
 protocolData list, ILP packet as a trailing length-prefixed field beside it, MESSAGE/RESPONSE/
 ERROR only, no TRANSFER) is simpler than RFC-23 and is what §1.9 specifies normatively. The unit
-vectors in `crates/connector-client-edge/src/btp.rs` pin it byte-for-byte against the TS
-serializer. Implementing RFC-23's full grammar would add frames no deployed client sends, to a
+vectors pin it byte-for-byte against the TS serializer (they lived in
+`crates/connector-client-edge/src/btp.rs` when this ADR was written; issue #713 moved them, and
+the codec they pin, to `crates/connector-btp` so ADR 0027's peer carriage cannot fork them). Implementing RFC-23's full grammar would add frames no deployed client sends, to a
 transport ADR 0003 already versions behind the client edge's own discipline.
 
 ## Update (issue #697): the grammar is now additively symmetric
@@ -94,3 +106,44 @@ accept — the same direction every other staleness bound in this gate already e
 production caller decides _when_ to credit a channel; connector#698's session registry remains the
 next ticket that closes that gap. Solana channels net nothing yet: `ClientPayoutLedger` wraps
 `ClaimBook`, which only ever signs an EVM balance proof.
+
+## Update (issue #698): the session registry exists — "the socket is the lease"
+
+`crates/connector-client-edge/src/session_registry.rs`'s `SessionRegistry` answers the question
+this ADR's own §"Update (issue #697)" deferred: which socket, right now, is the live session for a
+client-edge address. One instance lives on `ClientEdgeState`, shared by every session
+`btp::btp_session` serves — bound at auth (keyed by the declared `peerId`), cleared when that same
+session's read loop ends. Deliberately the only record of reachability: no separate route entry
+with its own TTL, because a route record and a socket can disagree, and during the disagreement
+this connector would route paid work into a hole (`toon-meta#262` decision 12).
+
+Each bind is assigned the next generation from one monotonic counter shared by the whole registry;
+the highest generation for an address always wins, and a rebind's own later cleanup can never
+evict a binding at a generation newer than the one it names — buzz's own fencing law
+(`buzz-relay-mesh/src/wire.rs`: "the mesh may say 'don't dial' — it may never say 'take over'"),
+applied here to a socket instead of a mesh peer. `SessionRegistry::deliver` originates a MESSAGE
+through whichever session is current, fenced against a caller's stale remembered generation, and
+answers every failure path — no live session, or one that died or timed out mid-delivery — with a
+`T01` (Peer Unreachable) reject rather than `R00`, since the packet itself is fine and the sender
+should simply retry. A 120s backstop TTL (`SESSION_LEASE_BACKSTOP_TTL`) covers only a socket that
+looks alive at the TCP layer but has stopped producing frames; the primary liveness signal remains
+the socket's own read loop ending. `buzz#84`'s relay-side provider-freshness window must never
+exceed this constant's value.
+
+`bind`/`touch`/`unbind` are live in production — every real BTP session runs through them today.
+`deliver` still has no production caller: deciding when a packet's fulfillment should trigger a
+payout or a job dispatch, and to which address, remains the next ticket's job, same posture
+#697/#699 already shipped their own foundations under. Claim watermarks are unaffected by any of
+this — they stay exactly where issue #699's update already confirmed they survive reconnect: per
+channel in `ClientClaimGate`, never per session.
+
+## Update (issue #722): the backstop TTL is now on the wire, not just in a Rust const
+
+`buzz#84`'s relay-side provider-freshness window "must never exceed" `SESSION_LEASE_BACKSTOP_TTL`
+was, until this update, an instruction no TypeScript consumer could actually follow — the constant
+is a Rust `pub const` with no import path from another language. The §1.4 x402 greeting (reused by
+both the HTTP and BTP carriages via `x402_terms_body`) now carries it as `extra.sessionLeaseTtlMs`,
+always present, derived directly from `SESSION_LEASE_BACKSTOP_TTL` at the point the greeting is
+built rather than typed a second time (`client-edge-spec.md` §1.4, §1.9). A same-crate test pins
+the two together. Wiring `buzz#84`'s `providerAvailability.ts` to read this field is left as a
+follow-up in the `buzz` repository.

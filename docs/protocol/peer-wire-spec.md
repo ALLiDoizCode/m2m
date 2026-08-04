@@ -3,6 +3,7 @@
 **Status:** Normative for §3–§6. **§1–§2 are deleted** — superseded by
 [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md),
 and the implementation they described was removed in issue #679.
+Originally: normative, version 1 — clean-room design per [ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md).
 **Consumers:** the Rust `connector-runtime` peer transport port and every implementation of
 it (contract-tested per [ADR 0007](../adr/0007-testing-doctrine-fakes-yes-mocks-no.md)); any
 non-Rust connector that wishes to peer with this fleet.
@@ -33,7 +34,7 @@ consistency — and ADR 0027 re-hosts them rather than rewriting them. Section n
 deliberately left alone so that every existing citation of §3.2, §3.4, §3.5, §5.2 and §5.3 in
 the code, the ADRs and `client-edge-spec.md` still resolves. Where these sections say "frame",
 read "whatever the configured carriage frames it as"; ADR 0027's table is the mapping, and
-FLUSH (§3.3) and CLAIM_ACK (§3.4) are the two whose mapping is not obvious.
+FLUSH (§3.3) and CLAIM_ACK (§3.4) are the two whose mapping is not obvious — on BTP a FLUSH is a TRANSFER and a CLAIM_ACK is a `claim-ack` protocolData entry on the RESPONSE.
 
 Everything below reuses ILPv4's packet semantics (RFC-0027) for the PREPARE/FULFILL/REJECT
 fields themselves, since those are Interledger-network-level concepts this connector still

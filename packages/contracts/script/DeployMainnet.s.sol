@@ -91,7 +91,7 @@ contract DeployMainnetScript is Script {
         returns (TokenNetworkRegistry registry, TokenNetwork tokenNetwork)
     {
         registry = new TokenNetworkRegistry();
-        tokenNetwork = new TokenNetwork(usdc, maxChannelDeposit, maxChannelLifetime);
+        tokenNetwork = new TokenNetwork(usdc, maxChannelDeposit, maxChannelLifetime, address(0));
     }
 
     function logSummary(TokenNetworkRegistry registry, TokenNetwork tokenNetwork) internal view {

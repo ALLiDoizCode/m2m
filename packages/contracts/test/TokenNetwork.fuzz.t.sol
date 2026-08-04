@@ -18,7 +18,7 @@ contract TokenNetworkFuzzTest is Test {
         token = new MockERC20("Test Token", "TEST", 18);
 
         // Deploy TokenNetwork with 1M token deposit limit
-        tokenNetwork = new TokenNetwork(address(token), 1_000_000 * 10 ** 18, 365 days);
+        tokenNetwork = new TokenNetwork(address(token), 1_000_000 * 10 ** 18, 365 days, address(0));
 
         // Create test accounts
         alice = vm.addr(0xA11CE);

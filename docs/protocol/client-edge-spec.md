@@ -464,7 +464,12 @@ byte-for-byte, base64-encoded, in a `Payment-Required` response header:
       "payTo": "g.example.app",
       "maxTimeoutSeconds": 60,
       "httpEndpoint": "/ilp",
-      "extra": { "ilpAddress": "g.example.app", "endpoint": "/ilp", "price": "100" }
+      "extra": {
+        "ilpAddress": "g.example.app",
+        "endpoint": "/ilp",
+        "price": "100",
+        "sessionLeaseTtlMs": 120000
+      }
     }
   ]
 }
@@ -492,6 +497,22 @@ carries `requiredTransport` (`"http"` or `"btp"`), naming the transport the rout
 requires. An ordinary unpaid-request greeting (above) never sets this field. The BTP carriage
 answers the mirror case (a route restricted to HTTP, reached over the websocket session) the same
 way; see §1.9 step 3.
+
+**`extra.sessionLeaseTtlMs`** ([issue #722](https://github.com/toon-protocol/connector/issues/722),
+`toon-meta#262` decision 12): unlike every other `extra` field above, always present, on every
+greeting this connector answers — a settlement-less node still has a client session registry. The
+value is
+[`connector_client_edge::session_registry::SESSION_LEASE_BACKSTOP_TTL`](../../crates/connector-client-edge/src/session_registry.rs)
+in milliseconds, the same constant §1.9's "Session registry: the socket is the lease" section
+describes — never a second literal typed nearby, so this field cannot drift from what the registry
+actually enforces. It exists because that constant is a Rust `pub const`: nothing outside this
+crate, and nothing outside Rust at all, has any path to read it except off the wire. A consumer in
+any language — `buzz#84`'s relay-side provider-freshness window among them — reads this field
+instead of hardcoding a guessed millisecond count, satisfying the cross-plane invariant that
+freshness must never exceed this connector's own lease. Wiring `buzz#84`'s
+`providerAvailability.ts` to read this field is left to a follow-up in the `buzz` repository; this
+connector's obligation is that the value is on the wire and provably tied to the enforced constant
+(pinned by a same-crate test), not that every consumer has been updated yet.
 
 ### 1.5 Request-request binding (RFC 9421)
 
@@ -651,9 +672,16 @@ A second carriage for exactly the pipeline §1.1–§1.6 specify over HTTP: one 
 streaming many paid writes advances its claim nonces on one socket in one order instead of racing
 parallel HTTP requests. Nothing here changes what is validated or charged — the same claim gate
 instance, watermarks, journal and refusal taxonomy serve both carriages, and a write that arrived
-over BTP is indistinguishable downstream from one that arrived over HTTP. Peers do NOT use this
-transport: connector↔connector traffic stays on the peer wire (`docs/protocol/peer-wire-spec.md`),
-so every BTP session is a client session by construction (ADR 0026).
+over BTP is indistinguishable downstream from one that arrived over HTTP.
+
+**Peer sessions (ADR 0027).** This section previously stated that peers do not use this transport,
+so every BTP session was a client session by construction (ADR 0026). ADR 0027 reverses that: the
+raw-TCP peer wire is deleted and connectors peer over BTP on the same codec. A session is a **peer**
+session only if it presented a credential configured in `[[peers]]` _and_ has a `[[peer_channels]]`
+binding; anything else is a client session, with no fallthrough, and everything below in this section
+describes client sessions exactly as before. The peer sub-protocol entries — `claim-ack` and
+`toon-minimum-delivery` beside the `payment-channel-claim` and `toon-accumulated-cost` entries this
+section already defines — are specified for the peer direction, not here.
 
 > **Superseded** by [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md):
 > the raw-TCP peer wire is deleted (issue #679) and peers ride this same carriage, or
@@ -693,7 +721,7 @@ property ("duplicate IDs are never in-flight at the same time") for whatever it 
 as the deployed client's own allocator does for its own ids; the two id spaces are independent, so
 neither side needs to know what the other has chosen. Server origination is a foundation-only
 capability as of #697 — the mechanics (allocate, send, correlate the answer) are implemented and
-tested (`crates/connector-client-edge/src/btp.rs`), but nothing in this connector originates a
+tested (`crates/connector-btp/src/session.rs`), but nothing in this connector originates a
 request yet; that is the session registry and payout-ledger work `toon-meta#262` builds on top.
 Today's deployed client never sends TRANSFER and never receives a server-originated MESSAGE, and
 observes no change: steps 1–5 below (all client-originated) are preserved byte-for-byte, and an
@@ -706,6 +734,12 @@ silently dropped exactly as it was before TRANSFER existed.
    answered with an empty RESPONSE (same requestId). The contents are not verified — §1.2 is not
    yet implemented on the HTTP carriage either, and an empty `secret` is the documented
    permissionless mirror. Authorization to _write_ comes from the claim, never the session.
+
+   **Update (issue #698):** a non-empty `peerId` also binds this session into the client session
+   registry, keyed by that value — see "Session registry: the socket is the lease" below. Binding
+   is best-effort and never blocks the ack: a session with no usable `peerId` is simply never
+   registered.
+
 2. **Prepare + claim**: a MESSAGE with a non-empty `ilpPacket` is decoded as a PREPARE. A
    protocolData entry named `payment-channel-claim` carries the claim as **raw UTF-8 JSON**
    (`JSON.stringify(claim)` — no base64 layer; the base64 in §1.3's table is an HTTP-header
@@ -751,7 +785,12 @@ silently dropped exactly as it was before TRANSFER existed.
    `payout_claim_protocol_data` carries it as a payout TRANSFER's `payout-claim` protocolData
    entry, JSON like every other entry this dialect carries. This only _creates credit_ and has no
    production caller yet: deciding when a packet's fulfillment should trigger a payout, and to
-   which channel, belongs to the session registry (connector#698) this ticket was held for.
+   which channel, is job-dispatch work built on top of the session registry below (issue #698).
+
+   **Update (issue #698):** the session registry now exists (see "Session registry: the socket is
+   the lease" below) and `SessionRegistry::deliver` can originate a MESSAGE through it end to end,
+   fenced against a stale generation — but nothing yet decides _when_ to call it for a payout or a
+   job. That decision remains the next ticket's.
 
 8. **A RESPONSE or ERROR whose requestId this connector itself originated** (issue #697): resolved
    against that outbound request rather than treated as inbound traffic. One this connector never
@@ -771,6 +810,41 @@ them; `requestId` is the correlation, per this section's own frame grammar, and 
 client resolves responses through its pending-request map by exactly that id. A client MUST NOT
 assume responses arrive in request order. Concurrent sessions writing on the same channel still
 serialize at the gate's watermark lock, exactly as concurrent HTTP requests do.
+
+**Session registry: the socket is the lease (issue #698, `toon-meta#262` decision 12).**
+`connector_client_edge::SessionRegistry` answers, for a client-edge address, which BTP session is
+live right now — bound at step 1's auth (keyed by the declared `peerId`) and cleared when that
+same session's read loop ends. This is deliberately the only record of reachability: there is no
+separate route entry with its own TTL, because a route record and a socket can disagree, and
+during the disagreement this connector would route paid work into a hole.
+
+- **Fencing generations.** Each bind for an address is assigned the next number from one
+  monotonic counter shared by the whole registry. The highest generation for an address always
+  wins; a rebind's cleanup can never remove a binding at a generation newer than the one it names.
+  This is buzz's own fencing law (`buzz-relay-mesh/src/wire.rs`): "membership is a hint; the
+  fenced generation is the arbiter. The mesh may say 'don't dial' — it may never say 'take over.'"
+  A caller retrying a delivery across a reconnect passes the generation it last saw; if the
+  address has since moved to a higher one, the attempt is discarded rather than raced against the
+  session that superseded it.
+- **T-class rejection, never R00.** Every failure path — no live session for the address at all,
+  or one that died or timed out mid-delivery — answers `T01` (Peer Unreachable): the packet is
+  fine, there is currently no way to reach this peer, and the sender should retry. `R00` (Transfer
+  Timed Out) would wrongly imply the packet's own expiry passed.
+- **Backstop TTL.** The primary liveness signal is the socket's own read loop ending, which
+  unbinds a session immediately. `connector_client_edge::session_registry::SESSION_LEASE_BACKSTOP_TTL`
+  (120s) exists only for a socket that still looks alive at the TCP layer but has stopped
+  producing frames, checked lazily on lookup rather than by a background sweep.
+  **Cross-plane invariant:** `buzz#84`'s relay-side provider-freshness window must never exceed
+  this value, or a buyer pays for a job advertised as routable here after this connector has
+  already given up on it. `buzz#84` is TypeScript and has no path to import a Rust `pub const`
+  (issue #722) — it reads `extra.sessionLeaseTtlMs` off the §1.4 greeting instead (see §1.4), the
+  same value this constant enforces, rather than duplicating a guess.
+
+No production caller decides when to push a job to a client session yet — that is the next
+ticket's job, the same posture #697/#699 shipped their own foundations under. What this ticket
+lands is real in production today: every BTP session's auth, per-frame liveness and close already
+run through `bind`/`touch`/`unbind`, so the registry and its fencing invariant are exercised by
+every live session, not only by tests.
 
 ### 1.10 Owner-authenticated claim state: `POST /ilp/claim-state` (issue #693)
 
