@@ -70,13 +70,16 @@
 //!
 //! # EVM only, on purpose (#732)
 //!
-//! Peer claims are EIP-712 balance proofs; `ClaimBook` verifies nothing
-//! else, and `[[peer_channels]]` is EVM-shaped by construction (`chain_id`
-//! and `token_network` have no Solana analogue). Everything below is
+//! Peer claims are EIP-712 balance proofs; `ClaimBook` verifies nothing else
+//! here. `[[peer_channels]]` itself grew a Solana shape (issue #759,
+//! `program_id` alongside `channel_account`/`counterparty_key`), but
+//! `ClaimBook` still has no `Connector` builder wiring a Solana row's
+//! verification key or signer from config -- issue #759's own follow-up
+//! note -- so this fixture's chain setup stays EVM. Everything below is
 //! therefore parameterised by *carriage*, never by chain, and the chain
-//! setup is one function ([`PeerFixture::spawn`]). #732 extends this file by
-//! giving that function a Solana arm and the claim signer a second shape --
-//! not by adding a second test.
+//! setup is one function ([`PeerFixture::spawn`]). A future issue extends
+//! this file by giving that function a Solana arm and the claim signer a
+//! second shape -- not by adding a second test.
 
 use std::io::Write as _;
 

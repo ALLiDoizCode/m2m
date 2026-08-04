@@ -111,31 +111,21 @@ pub fn canonical_evm_channel_id(channel_id: &str) -> String {
 /// edge.
 const ZERO_BYTES32: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
-/// The `programId` a rendered Solana claim carries (issue #742): base58 of
-/// the all-zeros System Program address. `parse_solana` (issue #732)
-/// requires the field to be present and base58 of 32-44 chars, but neither
-/// it nor `ClaimBook::accept_inbound` ever checks it against anything --
-/// a claim's channel is judged by `channelAccount` against
-/// `ClaimBook::set_solana_channel`'s own record, never by `programId`
-/// (`parse`'s own doc, below). A literal placeholder is therefore exactly
-/// as correct as a config-sourced value would be, and there is nowhere to
-/// source one from yet: no `[[peer_channels]]` row carries a Solana program
-/// id (issue #742 is signing capability, not the config schema addition
-/// that would be).
-const PLACEHOLDER_SOLANA_PROGRAM_ID: &str = "11111111111111111111111111111111";
-
 /// Render `claim` as the §4 JSON, signed by `signer_address` (EVM) or
-/// `solana_signer_public_key` (Solana), on `domain` where the claim is EVM.
+/// `solana_signer_public_key` (Solana), on `domain` where the claim is EVM
+/// or under `solana_program_id` where it is Solana.
 ///
 /// Which arm renders is decided by `claim.signature`'s own discriminant,
 /// not by which parameter is `Some` -- mirroring `ClaimBook::record_fulfillment`
 /// (issue #742), which never produces a `ClaimSignature::Solana` without a
 /// `solana_signer` configured to have signed it. `solana_signer_public_key`
-/// being `None` while `claim.signature` is `ClaimSignature::Solana` is
-/// therefore a caller bug (a transport driving a claim it has no identity
-/// to render), not a reachable production state -- panics with a message
+/// or `solana_program_id` being `None` while `claim.signature` is
+/// `ClaimSignature::Solana` is therefore a caller bug (a transport driving a
+/// claim it has no identity, or no `[[peer_channels]]` program id, to
+/// render), not a reachable production state -- panics with a message
 /// naming which side is missing rather than rendering a claim with no
-/// `signerPublicKey`, which `parse_solana` would refuse anyway.
+/// `signerPublicKey` or a placeholder `programId`, either of which
+/// `parse_solana` would refuse or silently mis-describe (issue #759).
 ///
 /// `message_id` and `timestamp` are the caller's, deliberately: §6.3
 /// requires a payer's retransmission of an unacknowledged claim to be
@@ -147,6 +137,7 @@ pub fn encode(
     claim: &WireClaim,
     signer_address: &[u8; 20],
     solana_signer_public_key: Option<&[u8; 32]>,
+    solana_program_id: Option<&str>,
     domain: Option<PeerClaimDomain>,
     message_id: &str,
     timestamp: &str,
@@ -197,6 +188,15 @@ pub fn encode(
                      identity to render (issue #742)"
                 )
             });
+            let program_id = solana_program_id.unwrap_or_else(|| {
+                panic!(
+                    "a Solana claim on channel '{}' was handed to the dial side with no \
+                     solana_program_id -- render it only for a channel with a Solana \
+                     '[[peer_channels]]' row, whose 'program_id' is required at config load \
+                     (issue #759)",
+                    claim.channel_id
+                )
+            });
             // Deliberately no `chainId`/`tokenNetworkAddress`-style domain
             // fields here: a Solana claim's signature covers
             // `solana_balance_proof_message`'s 48 bytes, which carry no
@@ -209,7 +209,7 @@ pub fn encode(
                 "messageId": message_id,
                 "timestamp": timestamp,
                 "senderId": signer,
-                "programId": PLACEHOLDER_SOLANA_PROGRAM_ID,
+                "programId": program_id,
                 "channelAccount": claim.channel_id,
                 "nonce": claim.nonce,
                 "transferredAmount": claim.cumulative_amount.to_string(),
@@ -373,6 +373,7 @@ mod tests {
             &claim,
             &[0x44; 20],
             None,
+            None,
             Some(domain()),
             "0x…:4",
             "2030-01-01T00:00:00.000Z",
@@ -390,6 +391,7 @@ mod tests {
         let json = encode(
             &wire_claim(),
             &[0x44; 20],
+            None,
             None,
             Some(domain()),
             "m",
@@ -409,6 +411,7 @@ mod tests {
         let json = encode(
             &wire_claim(),
             &[0x44; 20],
+            None,
             None,
             Some(domain()),
             "m",
@@ -460,6 +463,7 @@ mod tests {
             let json = encode(
                 &claim,
                 &[0x44; 20],
+                None,
                 None,
                 Some(domain()),
                 "m",
@@ -526,6 +530,12 @@ mod tests {
 
     const SIGNER_PUBLIC_KEY: [u8; 32] = [0x77u8; 32];
 
+    /// A real base58-encoded 32-byte Solana program id (the deployed SPL
+    /// Token program's, reused here only as a well-formed fixture) --
+    /// issue #759's config-sourced replacement for the deleted
+    /// `PLACEHOLDER_SOLANA_PROGRAM_ID`.
+    const SOLANA_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+
     #[test]
     fn a_solana_claim_encodes_and_parses_back_through_the_client_edges_own_validator() {
         let claim = wire_solana_claim();
@@ -533,6 +543,7 @@ mod tests {
             &claim,
             &[0x44; 20],
             Some(&SIGNER_PUBLIC_KEY),
+            Some(SOLANA_PROGRAM_ID),
             None,
             "m",
             "2030-01-01T00:00:00Z",
@@ -543,16 +554,19 @@ mod tests {
         assert_eq!(parsed, claim);
     }
 
-    /// A rendered Solana claim carries no EIP-712 domain -- there is none
-    /// to render -- and its `senderId`/`signerPublicKey` are this
+    /// Issue #759's AC, mechanically: a rendered outbound Solana claim
+    /// carries the *configured* `programId` -- never the deleted
+    /// `PLACEHOLDER_SOLANA_PROGRAM_ID` -- and carries no EIP-712 domain,
+    /// since there is none to render. `senderId`/`signerPublicKey` are this
     /// connector's own ed25519 identity, base58, never the EVM
     /// `signer_address` also passed in.
     #[test]
-    fn a_solana_claim_carries_its_own_identity_and_no_evm_domain() {
+    fn a_solana_claim_carries_its_configured_program_id_and_no_evm_domain() {
         let json = encode(
             &wire_solana_claim(),
             &[0x44; 20],
             Some(&SIGNER_PUBLIC_KEY),
+            Some(SOLANA_PROGRAM_ID),
             Some(domain()),
             "m",
             "2030-01-01T00:00:00Z",
@@ -563,6 +577,7 @@ mod tests {
         assert_eq!(value["blockchain"], "solana");
         assert_eq!(value["senderId"], expected);
         assert_eq!(value["signerPublicKey"], expected);
+        assert_eq!(value["programId"], SOLANA_PROGRAM_ID);
         assert!(value.get("chainId").is_none());
         assert!(value.get("tokenNetworkAddress").is_none());
     }
@@ -578,6 +593,26 @@ mod tests {
         encode(
             &wire_solana_claim(),
             &[0x44; 20],
+            None,
+            Some(SOLANA_PROGRAM_ID),
+            None,
+            "m",
+            "2030-01-01T00:00:00Z",
+        );
+    }
+
+    /// Issue #759's counterpart of the panic above: `programId` is a
+    /// required wire field (unlike an EVM claim's optional `chainId`), so a
+    /// Solana claim rendered for a channel with no `[[peer_channels]]`
+    /// program id is exactly as much a caller bug as one with no signing
+    /// identity -- caught here rather than reintroducing a placeholder.
+    #[test]
+    #[should_panic(expected = "no solana_program_id")]
+    fn rendering_a_solana_claim_with_no_configured_program_id_panics() {
+        encode(
+            &wire_solana_claim(),
+            &[0x44; 20],
+            Some(&SIGNER_PUBLIC_KEY),
             None,
             None,
             "m",
@@ -637,6 +672,7 @@ mod tests {
         let json = encode(
             &wire_claim(),
             &[0x44; 20],
+            None,
             None,
             Some(domain()),
             "m",

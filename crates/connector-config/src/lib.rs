@@ -23,7 +23,7 @@ pub use config::Config;
 pub use error::ConfigError;
 pub use operator::OperatorConfig;
 pub use peer::{PeerCarriage, PeerConfig, PeerCredential, PeerExposure};
-pub use peer_channel::PeerChannelConfig;
+pub use peer_channel::{EvmPeerChannelConfig, PeerChannelConfig, SolanaPeerChannelConfig};
 pub use route::{PeerRouteConfig, StaticRoute, TransportPolicy};
 pub use secret::SecretLocation;
 pub use settlement::{

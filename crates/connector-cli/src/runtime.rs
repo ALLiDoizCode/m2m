@@ -18,8 +18,8 @@ use connector_client_edge::{
     UnresolvableLookupBudgetPolicy,
 };
 use connector_config::{
-    ClientChannelConfig, Config, EvmSettlementConfig, SecretLocation, SettlementChain,
-    SettlementConfig, SolanaSettlementConfig,
+    ClientChannelConfig, Config, EvmSettlementConfig, PeerChannelConfig, SecretLocation,
+    SettlementChain, SettlementConfig, SolanaSettlementConfig,
 };
 use connector_runtime::{
     ChannelDomain, Connector, FileJournal, HttpAppClient, InMemoryJournal, Journal, JournalError,
@@ -551,12 +551,25 @@ fn peer_claim_identity(config: &Config) -> Result<Option<PeerClaimIdentity>, Run
 /// and picking the last would make the answer depend on file order. Every
 /// row is still accepted *inbound* -- a counterparty may legitimately claim
 /// on any channel the two of them have bound.
+///
+/// EVM rows only: a Solana `[[peer_channels]]` row (issue #759) is
+/// validated by `Config::load` and reaches claim *rendering* (its
+/// `program_id` reaches `PeerRelation::from_config` in
+/// `connector-peer-btp`/`connector-peer-http`), but `ClaimBook` has no
+/// `Connector` builder to accept a Solana verification key or signer from
+/// config yet -- that is the config/CLI identity wiring issue #742/#757
+/// left as a named follow-up, not this issue's job. A Solana row is
+/// therefore skipped here rather than wired into a method that does not
+/// exist.
 fn wire_peer_channels(
     mut connector: Connector,
     config: &Config,
 ) -> Result<Connector, RuntimeError> {
     let mut claiming_against: Vec<&str> = Vec::new();
     for channel in config.peer_channels() {
+        let PeerChannelConfig::Evm(channel) = channel else {
+            continue;
+        };
         if !claiming_against.contains(&channel.peer_id()) {
             claiming_against.push(channel.peer_id());
             connector = connector.with_peer_claim_channel(channel.peer_id(), channel.channel_id());

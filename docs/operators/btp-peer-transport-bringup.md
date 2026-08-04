@@ -199,6 +199,24 @@ peer_id = "store"
 fee = 3
 ```
 
+`[[peer_channels]]` also accepts a Solana-shaped row (issue #759) -- `channel_account` and
+`counterparty_key` instead of `channel_id`, no `chain_id`/`token_network` (a Solana channel has
+neither), and a required `program_id`:
+
+```toml
+[[peer_channels]]
+peer_id = "store"
+channel_account = "…"       # the base58 channel PDA
+counterparty_key = "…"      # the base58 ed25519 key whose signature is accepted
+program_id = "…"            # the base58 program id this channel was opened under
+```
+
+A Solana row with no `program_id` fails load: unlike an EVM claim's `chainId`/`tokenNetworkAddress`,
+a Solana claim's `programId` is a required wire field, so there is no "render without it" fallback.
+This row's `program_id` reaches claim rendering; `ClaimBook`'s Solana verification key and signer
+still have no config wiring (a later issue's job), so this alone does not yet make the peering able
+to accept or sign a claim on that channel.
+
 ### The peering id is one string both operators write
 
 `[[peers]].id` names the peering **relation**, and it is the `peerId` the dialing side puts in its
@@ -307,19 +325,21 @@ watermark held only in memory is not a replay defence.
 Every one of these stops the node before it serves anything (ADR 0009), and every message names
 this document.
 
-| Error                          | What it means                                                                           | Fix                                                          |
-| ------------------------------ | --------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| `PeerUndialable`               | `peer_expose = "neither"` and a peer has no `endpoint` — nothing dials, nothing accepts | give the peer an endpoint, or expose a carriage              |
-| `PeerEndpointScheme`           | an `endpoint` whose scheme selects no carriage (`ws://`, `http://`, `tcp://`, …)        | use `wss://` for BTP or `https://` for ILP-over-HTTP         |
-| `PeerCredentialMissing`        | a `[[peers]]` entry with no credential, or an empty secret                              | add `credential = { secret = "…" }` with a real secret       |
-| `PeerChannelUnbound`           | a `[[peers]]` entry with no `[[peer_channels]]` row                                     | add the channel binding, or remove the peering               |
-| `PeerChannelOrphaned`          | a `[[peer_channels]]` row naming a `peer_id` no `[[peers]]` entry configures            | fix the `peer_id` typo, or add the peer                      |
-| `ChannelInBothNamespaces`      | one channel id in both `[[peer_channels]]` and `[[client_channels]]`                    | keep the namespaces disjoint — pick one                      |
-| `AcceptOnlyPeerWithoutCeiling` | a peering this node cannot dial and that carries no explicit `ceiling`                  | set an explicit `ceiling`; it is that peering's only bound   |
-| `PeerRouteUndeliverable`       | a route whose next hop is a peer this node can never originate to                       | give the peer an endpoint, or include `btp` in `peer_expose` |
-| `DuplicatePeerId`              | two `[[peers]]` entries with the same `id`                                              | rename one                                                   |
-| `PeerAddrRemoved`              | a `[[peers]]` entry still setting `addr`                                                | replace it with `endpoint`                                   |
-| `PeerWireAddrRemoved`          | a config still setting `peer_wire_addr`                                                 | delete the line and set `peer_expose` instead                |
+| Error                               | What it means                                                                           | Fix                                                          |
+| ----------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `PeerUndialable`                    | `peer_expose = "neither"` and a peer has no `endpoint` — nothing dials, nothing accepts | give the peer an endpoint, or expose a carriage              |
+| `PeerEndpointScheme`                | an `endpoint` whose scheme selects no carriage (`ws://`, `http://`, `tcp://`, …)        | use `wss://` for BTP or `https://` for ILP-over-HTTP         |
+| `PeerCredentialMissing`             | a `[[peers]]` entry with no credential, or an empty secret                              | add `credential = { secret = "…" }` with a real secret       |
+| `PeerChannelUnbound`                | a `[[peers]]` entry with no `[[peer_channels]]` row                                     | add the channel binding, or remove the peering               |
+| `PeerChannelOrphaned`               | a `[[peer_channels]]` row naming a `peer_id` no `[[peers]]` entry configures            | fix the `peer_id` typo, or add the peer                      |
+| `ChannelInBothNamespaces`           | one channel id in both `[[peer_channels]]` and `[[client_channels]]`                    | keep the namespaces disjoint — pick one                      |
+| `AcceptOnlyPeerWithoutCeiling`      | a peering this node cannot dial and that carries no explicit `ceiling`                  | set an explicit `ceiling`; it is that peering's only bound   |
+| `PeerRouteUndeliverable`            | a route whose next hop is a peer this node can never originate to                       | give the peer an endpoint, or include `btp` in `peer_expose` |
+| `DuplicatePeerId`                   | two `[[peers]]` entries with the same `id`                                              | rename one                                                   |
+| `PeerAddrRemoved`                   | a `[[peers]]` entry still setting `addr`                                                | replace it with `endpoint`                                   |
+| `PeerWireAddrRemoved`               | a config still setting `peer_wire_addr`                                                 | delete the line and set `peer_expose` instead                |
+| `PeerChannelMissingSolanaProgramId` | a Solana `[[peer_channels]]` row with no `program_id`                                   | set `program_id` to the base58 deployed program address      |
+| `PeerChannelInvalidSolanaAccount`   | a Solana `[[peer_channels]]` row's account/key is not base58 of a 32-byte value         | fix the base58 value                                         |
 
 Two more guard the same shape: `InvalidPeerEndpoint` (an `endpoint` that is not a URL at all — the
 old `host:port` spelling lands here) and `InvalidPeerExposure` (a `peer_expose` value that is not

@@ -273,6 +273,22 @@ pub enum ConfigError {
     PeerChannelDuplicate { value: String },
 
     #[error(
+        "invalid [[peer_channels]] {field} '{value}': must be base58 encoding a 32-byte \
+         Solana account"
+    )]
+    PeerChannelInvalidSolanaAccount { field: &'static str, value: String },
+
+    #[error(
+        "peer '{peer_id}' names a Solana '[[peer_channels]]' row with no 'program_id': a \
+         rendered outbound Solana claim's 'programId' is a required wire field \
+         (client-edge-spec.md §1.3), not an optional domain the way an EVM claim's 'chainId' \
+         is, so there is no configuration this connector could fall back to render without one \
+         (issue #759). Set 'program_id' to the base58 address of the deployed payment-channel \
+         program this channel was opened under"
+    )]
+    PeerChannelMissingSolanaProgramId { peer_id: String },
+
+    #[error(
         "[[peer_channels]] is configured but 'state_dir' is not: this node would accept peer \
          claims and keep their replay watermarks only in memory, so every claim a peer has \
          already spent becomes spendable again the next time this process restarts (issue \
