@@ -23,6 +23,7 @@ mod address;
 mod claim_signature;
 mod claim_state_challenge;
 mod crypto;
+mod ed25519_signer;
 mod error;
 pub mod giftwrap;
 mod kms;
@@ -40,6 +41,7 @@ pub use claim_state_challenge::{
     evm_claim_state_challenge_digest, solana_claim_state_challenge_message,
     verify_evm_claim_state_challenge, verify_solana_claim_state_challenge, EvmClaimStateChallenge,
 };
+pub use ed25519_signer::{Ed25519Signer, LocalEd25519Signer};
 pub use error::{SignerError, TreasuryError};
 pub use giftwrap::GiftWrapError;
 pub use kms::{InMemoryKmsBackend, KmsBackend, KmsSigner};

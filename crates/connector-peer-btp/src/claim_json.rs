@@ -111,20 +111,31 @@ pub fn canonical_evm_channel_id(channel_id: &str) -> String {
 /// edge.
 const ZERO_BYTES32: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
-/// Render `claim` as the §4 **EVM** JSON, signed by `signer_address` on
-/// `domain`.
+/// The `programId` a rendered Solana claim carries (issue #742): base58 of
+/// the all-zeros System Program address. `parse_solana` (issue #732)
+/// requires the field to be present and base58 of 32-44 chars, but neither
+/// it nor `ClaimBook::accept_inbound` ever checks it against anything --
+/// a claim's channel is judged by `channelAccount` against
+/// `ClaimBook::set_solana_channel`'s own record, never by `programId`
+/// (`parse`'s own doc, below). A literal placeholder is therefore exactly
+/// as correct as a config-sourced value would be, and there is nowhere to
+/// source one from yet: no `[[peer_channels]]` row carries a Solana program
+/// id (issue #742 is signing capability, not the config schema addition
+/// that would be).
+const PLACEHOLDER_SOLANA_PROGRAM_ID: &str = "11111111111111111111111111111111";
+
+/// Render `claim` as the §4 JSON, signed by `signer_address` (EVM) or
+/// `solana_signer_public_key` (Solana), on `domain` where the claim is EVM.
 ///
-/// EVM-only, and that is a property of the *emitting* side rather than of
-/// this codec: `ClaimBook::record_fulfillment` signs through the
-/// `connector_signer::Signer` port, whose two implementations
-/// (`LocalSigner`, `KmsSigner`) are both secp256k1, so a claim this
-/// connector owes is always an [`ClaimSignature::Evm`] one. Inbound is a
-/// different matter -- [`parse`] accepts both chains (issue #732) --
-/// because what a peer signs is the peer's business. The `unreachable!`
-/// below is therefore about this connector's own freshly signed claim, not
-/// about anything a peer controls; a Solana peer claim never reaches it.
-/// Signing one is issue #699's ed25519 signing capability, not this
-/// module's.
+/// Which arm renders is decided by `claim.signature`'s own discriminant,
+/// not by which parameter is `Some` -- mirroring `ClaimBook::record_fulfillment`
+/// (issue #742), which never produces a `ClaimSignature::Solana` without a
+/// `solana_signer` configured to have signed it. `solana_signer_public_key`
+/// being `None` while `claim.signature` is `ClaimSignature::Solana` is
+/// therefore a caller bug (a transport driving a claim it has no identity
+/// to render), not a reachable production state -- panics with a message
+/// naming which side is missing rather than rendering a claim with no
+/// `signerPublicKey`, which `parse_solana` would refuse anyway.
 ///
 /// `message_id` and `timestamp` are the caller's, deliberately: §6.3
 /// requires a payer's retransmission of an unacknowledged claim to be
@@ -135,50 +146,78 @@ const ZERO_BYTES32: &str = "0x00000000000000000000000000000000000000000000000000
 pub fn encode(
     claim: &WireClaim,
     signer_address: &[u8; 20],
+    solana_signer_public_key: Option<&[u8; 32]>,
     domain: Option<PeerClaimDomain>,
     message_id: &str,
     timestamp: &str,
 ) -> String {
-    let ClaimSignature::Evm(signature) = claim.signature else {
-        unreachable!(
-            "this connector signs peer claims through the secp256k1 `Signer` port, so it never \
-             owes a Solana peer claim to render (issue #699)"
-        )
-    };
-    let signer = format!("0x{}", hex::encode(signer_address));
-    let mut json = serde_json::json!({
-        "version": "1.0",
-        "blockchain": "evm",
-        "messageId": message_id,
-        "timestamp": timestamp,
-        "senderId": signer,
-        "channelId": canonical_evm_channel_id(&claim.channel_id),
-        "nonce": claim.nonce,
-        "transferredAmount": claim.cumulative_amount.to_string(),
-        // Hashed as zeros, always (§3.1, ADR 0024): the deployed
-        // `TokenNetwork.sol` typehash requires the fields, and this
-        // connector has no locks to put in them.
-        "lockedAmount": "0",
-        "locksRoot": ZERO_BYTES32,
-        "signature": format!("0x{}", hex::encode(signature.to_bytes())),
-        "signerAddress": signer,
-    });
-    // `chainId`/`tokenNetworkAddress` are optional in the claim shape
-    // (`client-edge-spec.md` §1.3), so a channel this connector has no
-    // `[[peer_channels]]` row for is rendered **without** them rather than
-    // with a zero domain that would fail structural validation at the far
-    // end. The counterparty then judges it against its own record, which is
-    // where a channel neither end has bound gets its honest
-    // `unknown_channel`.
-    if let Some(domain) = domain {
-        let object = json.as_object_mut().expect("a json! object");
-        object.insert("chainId".to_string(), domain.chain_id.into());
-        object.insert(
-            "tokenNetworkAddress".to_string(),
-            format!("0x{}", hex::encode(domain.token_network)).into(),
-        );
+    match claim.signature {
+        ClaimSignature::Evm(signature) => {
+            let signer = format!("0x{}", hex::encode(signer_address));
+            let mut json = serde_json::json!({
+                "version": "1.0",
+                "blockchain": "evm",
+                "messageId": message_id,
+                "timestamp": timestamp,
+                "senderId": signer,
+                "channelId": canonical_evm_channel_id(&claim.channel_id),
+                "nonce": claim.nonce,
+                "transferredAmount": claim.cumulative_amount.to_string(),
+                // Hashed as zeros, always (§3.1, ADR 0024): the deployed
+                // `TokenNetwork.sol` typehash requires the fields, and this
+                // connector has no locks to put in them.
+                "lockedAmount": "0",
+                "locksRoot": ZERO_BYTES32,
+                "signature": format!("0x{}", hex::encode(signature.to_bytes())),
+                "signerAddress": signer,
+            });
+            // `chainId`/`tokenNetworkAddress` are optional in the claim
+            // shape (`client-edge-spec.md` §1.3), so a channel this
+            // connector has no `[[peer_channels]]` row for is rendered
+            // **without** them rather than with a zero domain that would
+            // fail structural validation at the far end. The counterparty
+            // then judges it against its own record, which is where a
+            // channel neither end has bound gets its honest
+            // `unknown_channel`.
+            if let Some(domain) = domain {
+                let object = json.as_object_mut().expect("a json! object");
+                object.insert("chainId".to_string(), domain.chain_id.into());
+                object.insert(
+                    "tokenNetworkAddress".to_string(),
+                    format!("0x{}", hex::encode(domain.token_network)).into(),
+                );
+            }
+            serde_json::to_string(&json).expect("a json! object always serializes")
+        }
+        ClaimSignature::Solana(signature) => {
+            let signer_public_key = solana_signer_public_key.unwrap_or_else(|| {
+                panic!(
+                    "a Solana claim was handed to the dial side with no solana_signer_public_key \
+                     configured on the transport -- ClaimBook signed a claim this carriage has no \
+                     identity to render (issue #742)"
+                )
+            });
+            // Deliberately no `chainId`/`tokenNetworkAddress`-style domain
+            // fields here: a Solana claim's signature covers
+            // `solana_balance_proof_message`'s 48 bytes, which carry no
+            // EIP-712 domain to render (`SolanaChannel`'s own doc,
+            // `connector_runtime::claim`).
+            let json = serde_json::json!({
+                "version": "1.0",
+                "blockchain": "solana",
+                "messageId": message_id,
+                "timestamp": timestamp,
+                "senderId": bs58::encode(signer_public_key).into_string(),
+                "programId": PLACEHOLDER_SOLANA_PROGRAM_ID,
+                "channelAccount": claim.channel_id,
+                "nonce": claim.nonce,
+                "transferredAmount": claim.cumulative_amount.to_string(),
+                "signature": BASE64.encode(signature),
+                "signerPublicKey": bs58::encode(signer_public_key).into_string(),
+            });
+            serde_json::to_string(&json).expect("a json! object always serializes")
+        }
     }
-    serde_json::to_string(&json).expect("a json! object always serializes")
 }
 
 /// The `payment-channel-claim` protocolData entry carrying `json` as **raw
@@ -332,6 +371,7 @@ mod tests {
         let json = encode(
             &claim,
             &[0x44; 20],
+            None,
             Some(domain()),
             "0x…:4",
             "2030-01-01T00:00:00.000Z",
@@ -349,6 +389,7 @@ mod tests {
         let json = encode(
             &wire_claim(),
             &[0x44; 20],
+            None,
             Some(domain()),
             "m",
             "2030-01-01T00:00:00Z",
@@ -367,6 +408,7 @@ mod tests {
         let json = encode(
             &wire_claim(),
             &[0x44; 20],
+            None,
             Some(domain()),
             "m",
             "2030-01-01T00:00:00Z",
@@ -417,6 +459,7 @@ mod tests {
             let json = encode(
                 &claim,
                 &[0x44; 20],
+                None,
                 Some(domain()),
                 "m",
                 "2030-01-01T00:00:00Z",
@@ -464,6 +507,81 @@ mod tests {
 
         assert_eq!(parsed.channel_id, CHANNEL_ACCOUNT);
         assert_ne!(parsed.channel_id, CHANNEL_ACCOUNT.to_ascii_lowercase());
+    }
+
+    /// Issue #742: the outbound half. `ClaimBook::record_fulfillment` can
+    /// now produce a `ClaimSignature::Solana` `WireClaim`; this is the
+    /// same round trip `an_emitted_claim_parses_back_through_the_client_edges_own_validator`
+    /// proves for EVM, over the Solana arm `encode` used to `unreachable!`
+    /// on.
+    fn wire_solana_claim() -> WireClaim {
+        WireClaim {
+            channel_id: CHANNEL_ACCOUNT.to_string(),
+            nonce: 4,
+            cumulative_amount: 12_500,
+            signature: ClaimSignature::Solana([0x5au8; 64]),
+        }
+    }
+
+    const SIGNER_PUBLIC_KEY: [u8; 32] = [0x77u8; 32];
+
+    #[test]
+    fn a_solana_claim_encodes_and_parses_back_through_the_client_edges_own_validator() {
+        let claim = wire_solana_claim();
+        let json = encode(
+            &claim,
+            &[0x44; 20],
+            Some(&SIGNER_PUBLIC_KEY),
+            None,
+            "m",
+            "2030-01-01T00:00:00Z",
+        );
+
+        let parsed = parse(json.as_bytes()).expect("the client edge validator accepts it");
+
+        assert_eq!(parsed, claim);
+    }
+
+    /// A rendered Solana claim carries no EIP-712 domain -- there is none
+    /// to render -- and its `senderId`/`signerPublicKey` are this
+    /// connector's own ed25519 identity, base58, never the EVM
+    /// `signer_address` also passed in.
+    #[test]
+    fn a_solana_claim_carries_its_own_identity_and_no_evm_domain() {
+        let json = encode(
+            &wire_solana_claim(),
+            &[0x44; 20],
+            Some(&SIGNER_PUBLIC_KEY),
+            Some(domain()),
+            "m",
+            "2030-01-01T00:00:00Z",
+        );
+
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let expected = bs58::encode(SIGNER_PUBLIC_KEY).into_string();
+        assert_eq!(value["blockchain"], "solana");
+        assert_eq!(value["senderId"], expected);
+        assert_eq!(value["signerPublicKey"], expected);
+        assert!(value.get("chainId").is_none());
+        assert!(value.get("tokenNetworkAddress").is_none());
+    }
+
+    /// The `unreachable!()` this replaced (issue #699/#742) treated a
+    /// Solana claim as impossible to receive at all; now that `ClaimBook`
+    /// can sign one, a transport that was never given an identity to
+    /// render it under is a caller bug, not a silent no-op -- caught here
+    /// rather than shipping a claim with no `signerPublicKey`.
+    #[test]
+    #[should_panic(expected = "no solana_signer_public_key configured")]
+    fn rendering_a_solana_claim_with_no_configured_identity_panics() {
+        encode(
+            &wire_solana_claim(),
+            &[0x44; 20],
+            None,
+            None,
+            "m",
+            "2030-01-01T00:00:00Z",
+        );
     }
 
     /// The signature is base64 of exactly 64 ed25519 bytes -- the client
@@ -518,6 +636,7 @@ mod tests {
         let json = encode(
             &wire_claim(),
             &[0x44; 20],
+            None,
             Some(domain()),
             "m",
             "2030-01-01T00:00:00Z",
