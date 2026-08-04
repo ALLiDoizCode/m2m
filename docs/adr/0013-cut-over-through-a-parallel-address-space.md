@@ -62,3 +62,6 @@ The conditions for recognizing that moment — what must be observably true of t
 and channels before the old prefix is deleted, and what is irreversible if they are wrong — are
 written down in
 [`docs/operators/prefix-retirement-checklist.md`](../operators/prefix-retirement-checklist.md).
+The concrete box-by-box execution of that deletion on the devnet fleet's two boxes — exact nginx
+edits, verification and rollback — is
+[`docs/operators/rust-cutover-runbook.md`](../operators/rust-cutover-runbook.md).
