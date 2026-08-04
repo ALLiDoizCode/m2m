@@ -149,14 +149,36 @@ const APEX_LIVE_SETTLEMENT_SECTIONS: &[&str] = &[
 const APEX_SOLANA_SETTLEMENT_SECTIONS: &[&str] =
     &["[settlement.solana]", "[settlement.solana.key]"];
 
-/// The `price` both committed files put on their terminating route, and so
-/// the amount the x402 greeting must quote. Deliberately a literal rather
-/// than something parsed back out of the file under test: a test that read
-/// the expected value from the thing it is testing would keep passing if
-/// that value went back to `0`, which is exactly the regression issue #557
-/// exists to prevent. Parity with the TypeScript fleet's `price: '1000'` on
-/// the same box (`infra/linode-node/connector.yaml`).
-const EXPECTED_PRICE: u64 = 1000;
+/// The `price` the committed files put on their **store** routes, and so
+/// the amount the x402 greeting must quote for them. Deliberately a literal
+/// rather than something parsed back out of the file under test: a test
+/// that read the expected value from the thing it is testing would keep
+/// passing if that value went back to `0`, which is exactly the regression
+/// issue #557 exists to prevent. Parity with the TypeScript fleet's
+/// `price: '1000'` on the same box (`infra/linode-node/connector.yaml`).
+const EXPECTED_STORE_PRICE: u64 = 1000;
+
+/// The `price` the apex file puts on `g.toon.relay`, which is **not** the
+/// store price and is deliberately not folded into one constant.
+///
+/// The apex box served `1` from 2026-08-03; the repo said `1000` while the
+/// comment above the value asserted parity with the TypeScript route on the
+/// same box. Owner decision 2026-08-04: **`1` is correct** -- 1 micro-USDC
+/// is the per-frame price the buzz huddles workload needs (49 fps over BTP,
+/// toon-meta#262), and a general-write price is the wrong frame for this
+/// route. The repo is moved to the box rather than the box to the repo.
+///
+/// Two separate literals, not one, because the two prices now genuinely
+/// differ and a single constant would have to be loosened to a range --
+/// which is how #557's guard would rot into asserting nothing. Each is
+/// still a literal for exactly the reason above.
+///
+/// **This is a live 1000x gap against the TypeScript fleet's own
+/// `g.toon.relay` (`price: '1000'`), which fronts the same `relay:3100`.**
+/// It is not an oversight and it does not need reconciling: TypeScript is
+/// being retired, and on the day the Rust connector becomes the default
+/// edge this value simply becomes the devnet's relay price.
+const EXPECTED_RELAY_PRICE: u64 = 1;
 
 /// `str::replace`, but a pattern that matches nothing is a test failure
 /// rather than a silent no-op -- otherwise renaming a line in a committed
@@ -424,14 +446,28 @@ fn unpaid_prepare(destination: &str) -> Prepare {
 
 /// Issue #557's core proof: a claimless request to `destination` on a node
 /// started from a committed devnet config is answered with the x402
-/// greeting (HTTP 402, terms naming [`EXPECTED_PRICE`]) instead of being
+/// greeting (HTTP 402, terms naming `expected_price`) instead of being
 /// forwarded to the app -- the free-gateway failure mode this issue closes.
-async fn assert_answered_with_x402_greeting(client_edge_addr: &str, destination: &str) {
+///
+/// The price is a parameter rather than one module constant because the
+/// apex prices `g.toon.relay` and its store legs differently (see
+/// [`EXPECTED_RELAY_PRICE`]). Every caller passes a literal, so the guard
+/// keeps the property #557 needs: the expectation is never read back out of
+/// the file under test.
+async fn assert_answered_with_x402_greeting(
+    client_edge_addr: &str,
+    destination: &str,
+    expected_price: u64,
+) {
     let terms = x402_terms(client_edge_addr, destination).await;
     assert_eq!(
         terms["accepts"][0]["amount"],
-        EXPECTED_PRICE.to_string(),
-        "greeted price must match the route's committed `price`"
+        expected_price.to_string(),
+        "greeted price for {destination} must match the route's committed `price`"
+    );
+    assert_ne!(
+        expected_price, 0,
+        "a zero price is the free-gateway regression issue #557 exists to catch"
     );
 }
 
@@ -470,7 +506,12 @@ async fn the_apex_relay_side_devnet_config_loads_and_serves_verbatim() {
         state_dir.path(),
     ));
 
-    assert_answered_with_x402_greeting(&connector.client_edge_addr, "g.toon.relay").await;
+    assert_answered_with_x402_greeting(
+        &connector.client_edge_addr,
+        "g.toon.relay",
+        EXPECTED_RELAY_PRICE,
+    )
+    .await;
     // The store leg (#600): `g.toon.ario` -- the destination the TS fleet's
     // kind:10032 announce names as `routes.store`, i.e. what rig actually
     // dials -- and this fleet's own `g.toon.store` alias are BOTH priced,
@@ -478,8 +519,18 @@ async fn the_apex_relay_side_devnet_config_loads_and_serves_verbatim() {
     // would greet nothing and charge nothing (the free-gateway gap #620
     // tracks), so these greetings are the regression guard that the store
     // leg stays on the paid path.
-    assert_answered_with_x402_greeting(&connector.client_edge_addr, "g.toon.ario").await;
-    assert_answered_with_x402_greeting(&connector.client_edge_addr, "g.toon.store").await;
+    assert_answered_with_x402_greeting(
+        &connector.client_edge_addr,
+        "g.toon.ario",
+        EXPECTED_STORE_PRICE,
+    )
+    .await;
+    assert_answered_with_x402_greeting(
+        &connector.client_edge_addr,
+        "g.toon.store",
+        EXPECTED_STORE_PRICE,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -519,9 +570,24 @@ async fn the_store_side_devnet_config_loads_and_serves_verbatim() {
         state_dir.path(),
     ));
 
-    assert_answered_with_x402_greeting(&connector.client_edge_addr, "g.toon.ario").await;
-    assert_answered_with_x402_greeting(&connector.client_edge_addr, "g.toon.relay.ario").await;
-    assert_answered_with_x402_greeting(&connector.client_edge_addr, "g.toon.store").await;
+    assert_answered_with_x402_greeting(
+        &connector.client_edge_addr,
+        "g.toon.ario",
+        EXPECTED_STORE_PRICE,
+    )
+    .await;
+    assert_answered_with_x402_greeting(
+        &connector.client_edge_addr,
+        "g.toon.relay.ario",
+        EXPECTED_STORE_PRICE,
+    )
+    .await;
+    assert_answered_with_x402_greeting(
+        &connector.client_edge_addr,
+        "g.toon.store",
+        EXPECTED_STORE_PRICE,
+    )
+    .await;
 }
 
 /// The two boxes' Rust configs must price the same prefix the same. They
@@ -670,7 +736,7 @@ async fn the_apex_devnet_settlement_section_boots_against_a_deployed_contract() 
 /// The apex file's Solana leg (`https://api.devnet.solana.com`) and the
 /// deployed `payment-channel` program it settles through, wired in #633 --
 /// asserted as literals here, exactly like [`APEX_LIVE_REGISTRY`] and
-/// [`EXPECTED_PRICE`], so that reading the expected values back out of the
+/// [`EXPECTED_STORE_PRICE`], so that reading the expected values back out of the
 /// file under test cannot make this pass on a file that drifted.
 const APEX_SOLANA_RPC_URL: &str = "https://api.devnet.solana.com";
 const APEX_SOLANA_PROGRAM_ID: &str = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip";
