@@ -56,7 +56,7 @@ use std::time::Duration;
 
 use connector_domain::{Reject, RejectCode};
 
-use crate::btp::{BtpFrame, BtpSessionHandle, OriginateError, ProtocolData};
+use connector_btp::{BtpFrame, BtpSessionHandle, OriginateError, ProtocolData};
 
 /// Backstop TTL for a half-open socket (issue #698 AC5): the primary
 /// liveness signal is the socket's own read loop ending, which unbinds a
@@ -70,8 +70,12 @@ use crate::btp::{BtpFrame, BtpSessionHandle, OriginateError, ProtocolData};
 /// side advertises a provider's reachability and must never advertise for
 /// longer than this connector actually honors a session as live, or a
 /// buyer pays for a job that cannot land. This constant is where that
-/// value lives; buzz#84 should read it from here rather than duplicating
-/// a guess.
+/// value lives -- but it is a Rust `pub const`, and buzz's desktop is
+/// TypeScript, so there is no path by which it imports this directly
+/// (issue #722). A consumer in any language reads it off the wire instead:
+/// every x402 greeting this client edge answers (`extra.sessionLeaseTtlMs`,
+/// `client-edge-spec.md` §1.4/§1.9) carries exactly this value, derived
+/// here rather than typed a second time.
 pub const SESSION_LEASE_BACKSTOP_TTL: Duration = Duration::from_secs(120);
 
 /// One address's current binding: the fencing generation it was installed
@@ -257,7 +261,7 @@ fn no_live_session_reject(address: &str) -> Reject {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::btp::{decode_frame, OutboundRequests};
+    use connector_btp::{decode_frame, OutboundRequests};
     use std::sync::Arc;
     use tokio::sync::mpsc;
 

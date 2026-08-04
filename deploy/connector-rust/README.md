@@ -130,10 +130,13 @@ To peer, set `peer_expose` (which peer carriages this node listens for),
 add a `[[peers]]` entry with a `wss://` or `https://` `endpoint` and a
 `credential`, a `[[peer_channels]]` row binding it to a channel, and a
 `[[routes]]` entry that names the peer's `id` instead of a `handler_url`.
-The template's commented peering block annotates every field. **The
-carriages that dial are not shipped yet** (issue #676): the surface
-validates today, and a packet routed to a peer is answered `T01` until they
-land. See `docs/operators/btp-peer-transport-bringup.md`.
+The template's commented peering block annotates every field. ADR 0027
+deleted the raw-TCP peer wire that preceded this (issue #679), along with
+`peer_wire_addr` and the `SocketAddr`-shaped `[[peers]].addr`; a config
+still setting either now fails config load by name. **The carriages that
+dial are not shipped yet** (issue #676): the surface validates today, and a
+packet routed to a peer is answered `T01 peer unreachable` until they land.
+See `docs/operators/btp-peer-transport-bringup.md`.
 
 ## 4b. (Optional) settlement
 

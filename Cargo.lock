@@ -1074,6 +1074,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "connector-btp"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "connector-cli"
 version = "0.1.0"
 dependencies = [
@@ -1112,6 +1119,7 @@ dependencies = [
  "base64 0.22.1",
  "bs58",
  "chrono",
+ "connector-btp",
  "connector-config",
  "connector-domain",
  "connector-runtime",

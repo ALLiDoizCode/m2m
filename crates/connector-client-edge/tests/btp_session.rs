@@ -11,7 +11,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use chrono::{TimeZone, Utc};
-use connector_client_edge::{ClientChannelRegistry, ClientClaimGate, DepositFloor, EvmChannel};
+use connector_client_edge::{
+    ClientChannelRegistry, ClientClaimGate, DepositFloor, EvmChannel, SESSION_LEASE_BACKSTOP_TTL,
+};
 use connector_config::{StaticRoute, TransportPolicy};
 use connector_domain::{
     derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Prepare, Reject,
@@ -411,6 +413,13 @@ async fn a_claimless_prepare_to_a_priced_route_is_refused_with_the_terms() {
             .expect("the terms are the §1.4 JSON");
     assert_eq!(terms["x402Version"], 2);
     assert_eq!(terms["accepts"][0]["amount"], PRICE.to_string());
+    // Issue #722: the same greeting also carries the session lease backstop
+    // TTL the client session registry actually enforces, over BTP exactly
+    // as over HTTP -- both carriages share `x402_terms_body`.
+    assert_eq!(
+        terms["accepts"][0]["extra"]["sessionLeaseTtlMs"],
+        SESSION_LEASE_BACKSTOP_TTL.as_millis() as u64
+    );
 }
 
 /// Issue #701 (toon-meta#262 decision 11): a route restricted to HTTP

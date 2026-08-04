@@ -464,7 +464,12 @@ byte-for-byte, base64-encoded, in a `Payment-Required` response header:
       "payTo": "g.example.app",
       "maxTimeoutSeconds": 60,
       "httpEndpoint": "/ilp",
-      "extra": { "ilpAddress": "g.example.app", "endpoint": "/ilp", "price": "100" }
+      "extra": {
+        "ilpAddress": "g.example.app",
+        "endpoint": "/ilp",
+        "price": "100",
+        "sessionLeaseTtlMs": 120000
+      }
     }
   ]
 }
@@ -492,6 +497,22 @@ carries `requiredTransport` (`"http"` or `"btp"`), naming the transport the rout
 requires. An ordinary unpaid-request greeting (above) never sets this field. The BTP carriage
 answers the mirror case (a route restricted to HTTP, reached over the websocket session) the same
 way; see §1.9 step 3.
+
+**`extra.sessionLeaseTtlMs`** ([issue #722](https://github.com/toon-protocol/connector/issues/722),
+`toon-meta#262` decision 12): unlike every other `extra` field above, always present, on every
+greeting this connector answers — a settlement-less node still has a client session registry. The
+value is
+[`connector_client_edge::session_registry::SESSION_LEASE_BACKSTOP_TTL`](../../crates/connector-client-edge/src/session_registry.rs)
+in milliseconds, the same constant §1.9's "Session registry: the socket is the lease" section
+describes — never a second literal typed nearby, so this field cannot drift from what the registry
+actually enforces. It exists because that constant is a Rust `pub const`: nothing outside this
+crate, and nothing outside Rust at all, has any path to read it except off the wire. A consumer in
+any language — `buzz#84`'s relay-side provider-freshness window among them — reads this field
+instead of hardcoding a guessed millisecond count, satisfying the cross-plane invariant that
+freshness must never exceed this connector's own lease. Wiring `buzz#84`'s
+`providerAvailability.ts` to read this field is left to a follow-up in the `buzz` repository; this
+connector's obligation is that the value is on the wire and provably tied to the enforced constant
+(pinned by a same-crate test), not that every consumer has been updated yet.
 
 ### 1.5 Request-request binding (RFC 9421)
 
@@ -651,9 +672,26 @@ A second carriage for exactly the pipeline §1.1–§1.6 specify over HTTP: one 
 streaming many paid writes advances its claim nonces on one socket in one order instead of racing
 parallel HTTP requests. Nothing here changes what is validated or charged — the same claim gate
 instance, watermarks, journal and refusal taxonomy serve both carriages, and a write that arrived
-over BTP is indistinguishable downstream from one that arrived over HTTP. Peers do NOT use this
-transport: connector↔connector traffic stays on the peer wire (`docs/protocol/peer-wire-spec.md`),
-so every BTP session is a client session by construction (ADR 0026).
+over BTP is indistinguishable downstream from one that arrived over HTTP.
+
+**Peer sessions (ADR 0027).** This section previously stated that peers do not use this transport,
+so every BTP session was a client session by construction (ADR 0026). ADR 0027 reverses that: the
+raw-TCP peer wire is deleted and connectors peer over BTP on the same codec. A session is a **peer**
+session only if it presented a credential configured in `[[peers]]` _and_ has a `[[peer_channels]]`
+binding; anything else is a client session, with no fallthrough, and everything below in this section
+describes client sessions exactly as before. The peer sub-protocol entries — `claim-ack` and
+`toon-minimum-delivery` beside the `payment-channel-claim` and `toon-accumulated-cost` entries this
+section already defines — are specified for the peer direction, not here.
+
+> **Superseded** by [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md):
+> the raw-TCP peer wire is deleted (issue #679) and peers ride this same carriage, or
+> ILP-over-HTTP. A session is a _peer_ session if and only if it presented a configured peer
+> credential **and** has a `[[peer_channels]]` entry — role by authentication, not by transport
+> or port. "Every BTP session is a client session by construction" no longer holds, and the
+> classification it replaces is code, which is why it is a named stop-ship regression test on
+> both carriages. Everything else in this section — one gate, one journal, one refusal
+> taxonomy, indistinguishable downstream — is what ADR 0027 extends to peers rather than
+> changes. ADR 0026's carriage architecture stands; only its peer conclusion is superseded.
 
 - **Method/path:** `GET /ilp/btp`, websocket upgrade. The `btp` subprotocol is selected when
   offered; an upgrade offering no subprotocol is accepted identically.
@@ -683,7 +721,7 @@ property ("duplicate IDs are never in-flight at the same time") for whatever it 
 as the deployed client's own allocator does for its own ids; the two id spaces are independent, so
 neither side needs to know what the other has chosen. Server origination is a foundation-only
 capability as of #697 — the mechanics (allocate, send, correlate the answer) are implemented and
-tested (`crates/connector-client-edge/src/btp.rs`), but nothing in this connector originates a
+tested (`crates/connector-btp/src/session.rs`), but nothing in this connector originates a
 request yet; that is the session registry and payout-ledger work `toon-meta#262` builds on top.
 Today's deployed client never sends TRANSFER and never receives a server-originated MESSAGE, and
 observes no change: steps 1–5 below (all client-originated) are preserved byte-for-byte, and an
@@ -798,7 +836,9 @@ during the disagreement this connector would route paid work into a hole.
   producing frames, checked lazily on lookup rather than by a background sweep.
   **Cross-plane invariant:** `buzz#84`'s relay-side provider-freshness window must never exceed
   this value, or a buyer pays for a job advertised as routable here after this connector has
-  already given up on it — read the value from that constant rather than duplicating a guess.
+  already given up on it. `buzz#84` is TypeScript and has no path to import a Rust `pub const`
+  (issue #722) — it reads `extra.sessionLeaseTtlMs` off the §1.4 greeting instead (see §1.4), the
+  same value this constant enforces, rather than duplicating a guess.
 
 No production caller decides when to push a job to a client session yet — that is the next
 ticket's job, the same posture #697/#699 shipped their own foundations under. What this ticket

@@ -504,7 +504,9 @@ key_file = "{key_file}"
     );
 }
 
-// -- The peer config surface (issue #677, peer-carriage-spec.md §11) --
+// -- The deleted raw-TCP peer wire (ADR 0027, issue #679) and the peer
+// config surface that replaced it (issue #677, peer-carriage-spec.md
+// §11) --
 
 /// ADR 0009's "refuse to start" contract against the peer config surface:
 /// a route naming a `peer_id` no `[[peers]]` entry configures is exactly
@@ -540,9 +542,36 @@ peer_id = "peer-b"
 }
 
 /// The devnet boxes run bind-mounted configs that lead the repo copies, so
-/// a stale one naming the removed `[[peers]].addr` has to stop the binary
+/// a stale one naming the removed `peer_wire_addr` has to stop the binary
 /// and say where to read about it -- not be ignored into a node that looks
 /// healthy and never peers.
+#[test]
+fn exits_non_zero_when_a_stale_config_sets_peer_wire_addr() {
+    let key_file = write_raw_key_file();
+    let config_file = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+peer_wire_addr = "0.0.0.0:4001"
+
+[signer]
+key_file = "{}"
+"#,
+        key_file.path().display()
+    ));
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("peer_wire_addr")
+            && stderr.contains("docs/operators/btp-peer-transport-bringup.md"),
+        "expected a named removal error pointing at the bring-up doc, got: {stderr}"
+    );
+}
+
+/// The `[[peers]]` half: a `SocketAddr`-shaped `addr` is the other thing a
+/// stale config carries, and it fails the same way.
 #[test]
 fn exits_non_zero_when_a_stale_peer_entry_sets_addr() {
     let key_file = write_raw_key_file();

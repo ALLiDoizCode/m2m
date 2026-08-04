@@ -95,6 +95,7 @@ pub use lookup_budget::{
     DEFAULT_UNRESOLVABLE_LOOKUP_WINDOW, MAX_UNRESOLVABLE_LOOKUP_WINDOW,
 };
 pub use outbound_ledger::ClientPayoutLedger;
+pub use session_registry::SESSION_LEASE_BACKSTOP_TTL;
 
 /// The BTP carriage's default per-session in-flight window (issue #688):
 /// how many of one session's frames may be past claim admission at once.
@@ -458,6 +459,17 @@ struct X402ChannelExtra {
         default
     )]
     required_transport: Option<String>,
+    /// The session lease backstop TTL this node's client session registry
+    /// actually enforces (issue #722, toon-meta#262 decision 12's
+    /// cross-plane invariant), in milliseconds -- always present, unlike
+    /// `settlement`/`settlements`/`requiredTransport`, since every node has
+    /// a session registry regardless of settlement backend. Always the same
+    /// value [`crate::session_registry::SESSION_LEASE_BACKSTOP_TTL`]
+    /// enforces, never a second literal typed nearby: a client (buzz#84's
+    /// relay-side freshness window among them) reads this instead of
+    /// hardcoding a guessed millisecond count.
+    #[serde(rename = "sessionLeaseTtlMs")]
+    session_lease_ttl_ms: u64,
 }
 
 /// What an unaffiliated buyer needs to OPEN a channel with this node,
@@ -641,6 +653,8 @@ fn x402_terms_body(
                 settlement: settlement.cloned(),
                 settlements: settlements.to_vec(),
                 required_transport: required_transport.map(str::to_string),
+                session_lease_ttl_ms: crate::session_registry::SESSION_LEASE_BACKSTOP_TTL
+                    .as_millis() as u64,
             },
         }],
     };
@@ -992,8 +1006,7 @@ mod tests {
     use connector_config::StaticRoute;
     use connector_domain::{derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Reject};
     use connector_runtime::{
-        AppOutcome, FakeAppClient, InMemoryJournal, InProcessPeerTransport, NetworkPeerTransport,
-        PeerRoute, PeerWireServer, TestClock,
+        AppOutcome, FakeAppClient, InMemoryJournal, InProcessPeerTransport, PeerRoute, TestClock,
     };
     use connector_signer::LocalSigner;
     use tower::ServiceExt;
@@ -1459,20 +1472,26 @@ mod tests {
         assert!(reject.message.contains("g.example.app"));
     }
 
-    /// Two separate connectors, forwarding over the peer wire's network
-    /// implementation (issue #416) rather than the in-process stand-in: a
-    /// client posts to the first connector's router, which has no app of
-    /// its own for this destination and forwards the packet over a real
-    /// TCP connection to the second connector's [`PeerWireServer`], which
-    /// delivers it to its app and the fulfillment travels back the same
-    /// way.
+    /// Two separate connectors: a client posts to the first connector's
+    /// router, which has no app of its own for this destination and
+    /// forwards the packet across the [`PeerTransport`] port to the second
+    /// connector, which delivers it to its app -- and the fulfillment
+    /// travels back the same way.
+    ///
+    /// This used to run over the raw-TCP peer wire's `PeerWireServer`.
+    /// ADR 0027 / issue #679 deleted that wire, so the hop is made over
+    /// the in-process transport instead; what is under test here is the
+    /// client edge handing a peer-routed packet to whatever transport is
+    /// installed, which is carriage-independent. The statement that a
+    /// *network* transport upholds the port's contract belongs to
+    /// `peer_transport.rs`'s contract suite, which #676's carriages join.
     #[tokio::test]
-    async fn a_client_packet_is_forwarded_over_the_network_transport_to_a_second_connector() {
+    async fn a_client_packet_is_forwarded_over_the_peer_transport_to_a_second_connector() {
         let second_hop_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let second_hop_app_client = Arc::new(FakeAppClient::new());
         second_hop_app_client.respond(
             second_hop_route.handler_url(),
-            answered(b"delivered over the network transport"),
+            answered(b"delivered over the peer transport"),
         );
         let second_hop_identity = test_signer();
         let second_hop = Arc::new(
@@ -1485,12 +1504,9 @@ mod tests {
             )
             .with_identity_signer(second_hop_identity.clone()),
         );
-        let server = PeerWireServer::bind("127.0.0.1:0".parse().unwrap(), second_hop)
-            .await
-            .unwrap();
 
-        let mut peer_transport = NetworkPeerTransport::new();
-        peer_transport.add_peer("second-hop", server.local_addr());
+        let mut peer_transport = InProcessPeerTransport::new();
+        peer_transport.add_peer("second-hop", second_hop);
         let first_hop = Arc::new(Connector::new(
             vec![],
             vec![PeerRoute::new("g.example.app", "second-hop", 0)],
@@ -1515,7 +1531,7 @@ mod tests {
         let fulfill = Fulfill::decode(&bytes).expect("decode fulfill");
         assert_eq!(
             open_sealed_envelope(&shared_secret, &fulfill.data),
-            fulfill_envelope(b"delivered over the network transport")
+            fulfill_envelope(b"delivered over the peer transport")
         );
     }
 
@@ -1671,6 +1687,42 @@ mod tests {
         assert!(
             extra.get("settlements").is_none(),
             "a settlement-less node's greeting must not carry a settlements key: {extra}"
+        );
+    }
+
+    /// Issue #722: the x402 greeting advertises the session lease backstop
+    /// TTL the client session registry actually enforces, so a TS (or any
+    /// other language) client can honour freshness <= lease without
+    /// duplicating a Rust `pub const`. This pins the advertised value
+    /// directly to `SESSION_LEASE_BACKSTOP_TTL` -- changing the constant
+    /// changes what is advertised, provably, because both sides of this
+    /// assertion read the same const.
+    #[tokio::test]
+    async fn the_x402_greeting_advertises_the_session_lease_ttl() {
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+        let connector = Arc::new(Connector::new(
+            vec![route],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router(connector, test_signer());
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(sample_prepare("g.example.app").encode()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let terms: X402PaymentRequired = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            terms.accepts[0].extra.session_lease_ttl_ms,
+            crate::session_registry::SESSION_LEASE_BACKSTOP_TTL.as_millis() as u64,
+            "the advertised lease must be exactly what the session registry enforces"
         );
     }
 

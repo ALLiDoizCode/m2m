@@ -12,6 +12,7 @@
 resolver = "2"
 members = [
     "packages/solana-program",
+    "crates/connector-btp",
     "crates/connector-domain",
     "crates/connector-runtime",
     "crates/connector-settlement",
