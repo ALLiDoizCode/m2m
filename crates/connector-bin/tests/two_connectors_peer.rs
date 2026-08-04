@@ -16,54 +16,40 @@
 //!
 //! | # | Assertion | Here |
 //! | - | --------- | ---- |
-//! | 1 | a packet crosses the peering and is fulfilled | [`two_connectors_move_a_paid_packet_over_btp`] / [`_over_http`](two_connectors_move_a_paid_packet_over_http) -- **`#[ignore]`, blocked on #678** |
-//! | 2 | a claim advances the peer ledger and is acknowledged (§6) | [`a_peer_claim_is_acknowledged_over_btp`] / [`_over_http`](a_peer_claim_is_acknowledged_over_http) -- **`#[ignore]`, blocked on #678** |
-//! | 3 | the idempotent re-ack of a byte-identical retransmission (§6.3) | same two tests, second half -- **`#[ignore]`, blocked on #678** |
+//! | 1 | a packet crosses the peering and is fulfilled | [`two_connectors_move_a_paid_packet_over_btp`] / [`_over_http`](two_connectors_move_a_paid_packet_over_http) -- **runs, green** |
+//! | 2 | a claim advances the peer ledger and is acknowledged (§6) | [`a_peer_claim_is_acknowledged_over_btp`] / [`_over_http`](a_peer_claim_is_acknowledged_over_http) -- **runs, green** |
+//! | 3 | the idempotent re-ack of a byte-identical retransmission (§6.3) | same two tests, second half -- **runs, green** |
 //! | 4 | role-by-auth on a real socket (§1.9) | [`a_credential_that_fails_p1_or_p2_reaches_no_peer_handling_over_http`] and [`_over_btp`](a_credential_that_fails_p1_or_p2_reaches_no_peer_handling_over_btp) -- **runs, green** |
 //! | 5 | both carriages | every test above exists in a `wss://` and an `https://` form |
 //!
-//! Plus one test that is not on #734's list and exists only to keep this
-//! file honest: [`a_packet_routed_to_a_configured_peer_is_answered_t01`]
-//! pins the bring-up gap itself, so "blocked on #678" is a fact the suite
-//! re-checks on every run rather than a comment that rots. When #678 lands,
-//! that test is the one to delete.
+//! # What #678 closed, and where
 //!
-//! # What #678 owns, stated exactly
+//! All five assertions run because issue #678 wired the three things this
+//! file's own header used to list as missing. Named here because a reader
+//! arriving from #734 needs to know where the wiring lives:
 //!
-//! Three separate gaps, all of them bring-up, none of them stubable from a
-//! test without inventing the thing under test:
-//!
-//! 1. **No accept side is bound to a socket.** `connector-peer-btp` and
-//!    `connector-peer-http` are workspace members that *no binary depends
-//!    on*: neither `connector-cli` nor `connector-bin` lists either in its
-//!    `Cargo.toml`. `connector-peer-http`'s own header says so -- *"Listener
-//!    wiring (issue #678's bring-up: this crate answers a `PeerRequest` and
-//!    never opens a port)"*. The client edge's router
-//!    (`connector-client-edge`'s `/ilp` and `/ilp/btp`) contains no
-//!    `Toon-Peer-Auth` read, no `claim-ack` emission and no call to
-//!    `connector_peer_auth::decide_role`. So a peer credential presented to a
-//!    running binary today reaches no peer handling *because there is none* --
-//!    which is why assertion 4 passes and 1--3 cannot.
-//! 2. **No dial side is built from config.** `connector_cli::runtime::build`
-//!    installs `InProcessPeerTransport::new()` unconditionally and says why:
-//!    *"Until one lands this node holds an empty `InProcessPeerTransport`, so
-//!    a packet routed to a peer is answered `T01 peer unreachable`."*
-//!    `BtpPeerTransport::add_peers_from_config` and its HTTP twin exist and
-//!    take exactly the `&[PeerConfig]` / `&[PeerChannelConfig]` a loaded
-//!    `Config` already yields; nothing calls them.
-//! 3. **There is no TLS story for a peer endpoint.** `[[peers]].endpoint`
-//!    accepts `wss://` and `https://` and nothing else
-//!    (`ConfigError::PeerEndpointScheme`), so a connector cannot dial a
-//!    plaintext loopback socket even for a test. On devnet the accept side
-//!    sits behind a TLS terminator; a laptop-runnable e2e needs either that
-//!    terminator in the harness or a trust knob the config does not have.
-//!    This is the gap most likely to be discovered late, because it is
-//!    invisible until the first real dial.
-//!
-//! Gaps 1 and 2 are why the `#[ignore]`d tests are ignored. Gap 3 is why
-//! their `[[peers]] endpoint` lines are written against a TLS terminator
-//! this harness does not yet stand up, and is flagged again at the point of
-//! use.
+//! 1. **The accept side is bound to this node's own listeners.**
+//!    `connector-client-edge`'s `peer` module reads `Toon-Peer-Auth` on
+//!    `POST /ilp` and the `auth` entry on `GET /ilp/btp`, calls
+//!    [`connector_peer_auth::decide_role`], and hands a peer-role
+//!    interaction to `connector-peer-http` or `connector-peer-btp`. There is
+//!    **no second socket**: `docs/operators/btp-peer-transport-bringup.md`
+//!    settles that peer carriages *"ride this node's own listeners"*, and
+//!    §1.3 forbids the listener deciding role in any case.
+//! 2. **The dial side is built from config.**
+//!    `connector_cli::peer_transport` turns `[[peers]]` into a
+//!    `PeerTransport` that dispatches by peer id -- `wss://` to
+//!    `BtpPeerTransport`, `https://` to `HttpPeerTransport` -- and a peer it
+//!    cannot dial still answers `T01` (§2.2). `[[peer_channels]]` reaches
+//!    `ClaimBook` in the same commit, which is what makes a peer claim
+//!    verifiable at all.
+//! 3. **A plaintext endpoint is one explicit, default-false opt-in.**
+//!    `peer_allow_plaintext_endpoints` lets `ws://` and `http://` resolve
+//!    onto the same two carriages their TLS twins do, for loopback and
+//!    tests. Every config that does not set it -- which is every deployed
+//!    one -- still refuses them with `PeerEndpointScheme`, and a node that
+//!    does set it logs a `WARN` naming every plaintext peering at startup.
+//!    [`spawn_payer`] is the only config in this repo that sets it.
 //!
 //! # EVM only, on purpose (#732)
 //!
@@ -249,10 +235,19 @@ impl Carriage {
     /// value is a carriage name. Confusing them is a load-time error
     /// (`InvalidPeerExposure`), which is the point of keeping the two
     /// spellings in one place.
+    ///
+    /// **Plaintext, because this harness stands up no TLS terminator**
+    /// (issue #678, gap 3). The production spellings are `wss://` and
+    /// `https://`, and they stay the only ones a config accepts unless it
+    /// sets `peer_allow_plaintext_endpoints` -- which [`spawn_payer`] does
+    /// and every deployed config does not. `ws://` selects the same BTP
+    /// carriage `wss://` does and `http://` the same ILP-over-HTTP one:
+    /// the switch widens which schemes resolve, never what they resolve
+    /// to.
     fn scheme(self) -> &'static str {
         match self {
-            Carriage::Btp => "wss",
-            Carriage::Http => "https",
+            Carriage::Btp => "ws",
+            Carriage::Http => "http",
         }
     }
 
@@ -497,6 +492,11 @@ fn spawn_payer(
 client_edge_addr = "127.0.0.1:0"
 state_dir = "{state_dir}"
 peer_expose = "{expose}"
+# Issue #678, gap 3. The payee below is a plain loopback socket with no TLS
+# terminator in front of it, and a peer endpoint is `wss://`/`https://`
+# only unless a node says otherwise -- one top-level line, default false,
+# and the node logs a WARN naming every plaintext peering at startup.
+peer_allow_plaintext_endpoints = true
 
 [signer]
 key_file = "{key_file}"
@@ -594,9 +594,19 @@ async fn post_peer_request(
 }
 
 /// The BTP twin of [`post_peer_request`]: one websocket session to
-/// `/ilp/btp`, one MESSAGE carrying the `auth` entry, the claim entry and
-/// the OER PREPARE, and the RESPONSE that answers it -- returning the
-/// `claim-ack` entry's payload if one rode back.
+/// `/ilp/btp`, the `auth` entry on its own first MESSAGE, then a second
+/// MESSAGE carrying the claim entry and the OER PREPARE -- returning that
+/// second frame's answer and its `claim-ack` entry's payload, if one rode
+/// back.
+///
+/// **Two frames, not one.** §1.4 puts the credential *"on the session's
+/// first MESSAGE"*, and a BTP `auth` frame is answered on its own on both
+/// edges: the client edge acknowledges it and reads nothing else off it,
+/// and so does the peer carriage. §1.5 is the reason -- role is bound
+/// before anything else on the session happens, and frames processed
+/// before the binding are client frames forever -- so a claim riding the
+/// very frame that binds the role would be a claim judged in whichever
+/// namespace the reader happened to check first.
 async fn send_peer_message(
     addr: &str,
     credential: Option<&str>,
@@ -607,14 +617,25 @@ async fn send_peer_message(
         .await
         .expect("upgrade the peer carriage's websocket");
 
-    let mut protocol_data = Vec::new();
     if let Some(credential) = credential {
-        protocol_data.push(ProtocolData {
+        let auth = ProtocolData {
             name: AUTH_PROTOCOL.to_string(),
             content_type: CONTENT_TYPE_TEXT,
             data: credential.as_bytes().to_vec(),
-        });
+        };
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Binary(
+                encode_message(1, &[auth], &[]),
+            ))
+            .await
+            .expect("send the auth MESSAGE");
+        // Both roles answer an `auth` frame with the same empty RESPONSE:
+        // received, nothing more to say, and the role decision is not
+        // disclosed on either outcome.
+        next_binary(&mut socket).await;
     }
+
+    let mut protocol_data = Vec::new();
     if let Some(claim) = claim {
         protocol_data.push(ProtocolData {
             name: CLAIM_PROTOCOL.to_string(),
@@ -622,22 +643,13 @@ async fn send_peer_message(
             data: claim.as_bytes().to_vec(),
         });
     }
-    let frame = encode_message(1, &protocol_data, &prepare.encode());
+    let frame = encode_message(2, &protocol_data, &prepare.encode());
     socket
         .send(tokio_tungstenite::tungstenite::Message::Binary(frame))
         .await
         .expect("send the peer MESSAGE");
 
-    let reply = loop {
-        let message = socket
-            .next()
-            .await
-            .expect("the session answered")
-            .expect("websocket read");
-        if let tokio_tungstenite::tungstenite::Message::Binary(bytes) = message {
-            break bytes;
-        }
-    };
+    let reply = next_binary(&mut socket).await;
     let decoded = decode_frame(&reply).expect("decode the answering frame");
     assert_eq!(
         decoded.frame_type, BTP_RESPONSE,
@@ -650,6 +662,29 @@ async fn send_peer_message(
         .find(|entry| entry.name == CLAIM_ACK_PROTOCOL)
         .map(|entry| String::from_utf8(entry.data.clone()).expect("ack entry is UTF-8"));
     (decoded.ilp_packet, ack)
+}
+
+/// The next binary frame off a websocket, skipping whatever ping/pong or
+/// text the transport layer interleaves.
+async fn next_binary<S>(socket: &mut S) -> Vec<u8>
+where
+    S: futures_util::Stream<
+            Item = Result<
+                tokio_tungstenite::tungstenite::Message,
+                tokio_tungstenite::tungstenite::Error,
+            >,
+        > + Unpin,
+{
+    loop {
+        let message = socket
+            .next()
+            .await
+            .expect("the session answered")
+            .expect("websocket read");
+        if let tokio_tungstenite::tungstenite::Message::Binary(bytes) = message {
+            return bytes;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -836,58 +871,7 @@ secret = "{PEER_SECRET}"
 }
 
 // ---------------------------------------------------------------------------
-// The bring-up gap itself, pinned. Delete this when #678 lands.
-// ---------------------------------------------------------------------------
-
-/// **The gap, asserted rather than commented.**
-///
-/// `connector_cli::runtime::build` installs an empty
-/// `InProcessPeerTransport` for every node, whatever its `[[peers]]` say,
-/// so a packet routed to a configured peer is answered `T01 peer
-/// unreachable`. That is correct behaviour for a node with no carriage --
-/// §2.2 requires `T01` with the peer named, *"never `T00` and never a silent
-/// drop"* -- and it is also precisely why the four `#[ignore]`d tests below
-/// cannot run.
-///
-/// This test exists so that "blocked on #678" is re-checked on every run
-/// rather than rotting into a stale comment. **When #678 wires a carriage,
-/// this test starts failing, and the correct fix is to delete it and remove
-/// the `#[ignore]`s below** -- the two changes belong in the same commit.
-#[tokio::test]
-async fn a_packet_routed_to_a_configured_peer_is_answered_t01() {
-    let Some(fixture) = PeerFixture::spawn().await else {
-        return;
-    };
-    let state_dir = tempfile::tempdir().expect("temp state dir");
-    // A `wss://` endpoint that nothing is listening on: the point is that
-    // the answer is `T01` before any socket is attempted, because no
-    // transport was ever built from this config.
-    let (payer, _config, _key) = spawn_payer(
-        &fixture,
-        state_dir.path(),
-        Carriage::Btp,
-        "wss://127.0.0.1:1/ilp/btp",
-    );
-
-    let payee_identity = identity_from_key_seed(PAYEE_SIGNER_SEED);
-    let prepare = peer_bound_prepare(APP_PREFIX, b"across the peering", &payee_identity);
-    let client = reqwest::Client::new();
-    let (status, body, _ack) =
-        post_peer_request(&client, &payer.client_edge_addr, None, None, &prepare).await;
-    assert_eq!(status, reqwest::StatusCode::OK);
-    let reject = Reject::decode(&body).expect("decode reject");
-    assert_eq!(
-        reject.code.as_str(),
-        "T01",
-        "no peer carriage is built from config yet (issue #678): \
-         `connector_cli::runtime::build` installs an empty InProcessPeerTransport, \
-         so every peer-routed packet is unreachable. When this assertion fails, \
-         #678 has landed -- delete this test and un-ignore the four below."
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Assertions 1, 2 and 3, over both carriages. Blocked on #678.
+// Assertions 1, 2 and 3, over both carriages. Unblocked by #678.
 // ---------------------------------------------------------------------------
 
 /// **Assertion 1, over `wss://`: a packet crosses the peering and is
@@ -897,16 +881,13 @@ async fn a_packet_routed_to_a_configured_peer_is_answered_t01() {
 /// payer terminates nothing under [`APP_PREFIX`], so a fulfilled answer can
 /// only have crossed the peering.
 ///
-/// `#[ignore]`d on **issue #678**, and on all three of its gaps at once
-/// (this module's header): the payer builds no dialer from `[[peers]]`, the
-/// payee binds no acceptor to its listener, and `wss://` is the only scheme
-/// the payer's config will accept, so the endpoint below needs a TLS
-/// terminator this harness does not stand up. Nothing here is stubbed
+/// Unblocked by **issue #678**, whose three gaps this exercises at once:
+/// the payer builds its dialer from `[[peers]]`, the payee's own listener
+/// serves the peer carriage beside the client edge, and
+/// `peer_allow_plaintext_endpoints` lets the two find each other on
+/// loopback with no TLS terminator in the harness. Nothing here is stubbed
 /// around: a stub of the accept side would be a test of the stub.
 #[tokio::test]
-#[ignore = "blocked on issue #678 (peer carriage bring-up): no dialer is built \
-            from [[peers]], no acceptor is bound to the listener, and a peer \
-            endpoint must be wss:// or https:// with no TLS story for loopback"]
 async fn two_connectors_move_a_paid_packet_over_btp() {
     two_connectors_move_a_paid_packet(Carriage::Btp).await;
 }
@@ -920,7 +901,6 @@ async fn two_connectors_move_a_paid_packet_over_btp() {
 /// packets and the payer is structurally the payer. That is why the payee's
 /// `[[peers]]` entry carries an explicit `ceiling` and no `endpoint`.
 #[tokio::test]
-#[ignore = "blocked on issue #678 (peer carriage bring-up) -- see the BTP twin"]
 async fn two_connectors_move_a_paid_packet_over_http() {
     two_connectors_move_a_paid_packet(Carriage::Http).await;
 }
@@ -935,11 +915,12 @@ async fn two_connectors_move_a_paid_packet(carriage: Carriage) {
     let (payee, _payee_config, _payee_key) =
         spawn_payee(&fixture, payee_state.path(), &stub_app.addr);
 
-    // Gap 3 in this module's header: `[[peers]].endpoint` accepts only
-    // `wss://` and `https://`, so the payer cannot be pointed at the
-    // payee's plaintext loopback socket. Written as the endpoint it will
-    // be once #678 supplies a terminator (or a trust knob), so the shape of
-    // the config under test is the real one.
+    // The payee's own listener, plaintext: this harness stands up no TLS
+    // terminator, and `peer_allow_plaintext_endpoints` on the payer's
+    // config (issue #678, gap 3) is what lets a `ws://`/`http://` endpoint
+    // resolve onto the same two carriages `wss://`/`https://` do. The path
+    // is the client edge's own -- peer carriages ride this node's
+    // listeners, not a second socket.
     let endpoint = format!(
         "{}://{}{}",
         carriage.scheme(),
@@ -955,27 +936,47 @@ async fn two_connectors_move_a_paid_packet(carriage: Carriage) {
     // The packet is sealed to the **payee's** identity: it terminates
     // there, and the payer is a forwarding hop that cannot open it (§8.1).
     let payee_identity = identity_from_key_seed(PAYEE_SIGNER_SEED);
-    let prepare = peer_bound_prepare(APP_PREFIX, b"across the peering", &payee_identity);
-
     let client = reqwest::Client::new();
-    let (status, body, _ack) =
-        post_peer_request(&client, &payer.client_edge_addr, None, None, &prepare).await;
-    assert_eq!(status, reqwest::StatusCode::OK);
-    connector_domain::Fulfill::decode(&body).unwrap_or_else(|_| {
-        let reject = Reject::decode(&body).expect("an answer that is neither FULFILL nor REJECT");
-        panic!(
-            "the packet did not cross the peering: {} {}",
-            reject.code.as_str(),
-            reject.message
-        )
-    });
+    let cross = |body: &'static [u8]| {
+        let prepare = peer_bound_prepare(APP_PREFIX, body, &payee_identity);
+        let client = client.clone();
+        let addr = payer.client_edge_addr.clone();
+        async move {
+            let (status, body, _ack) =
+                post_peer_request(&client, &addr, None, None, &prepare).await;
+            assert_eq!(status, reqwest::StatusCode::OK);
+            connector_domain::Fulfill::decode(&body).unwrap_or_else(|_| {
+                let reject =
+                    Reject::decode(&body).expect("an answer that is neither FULFILL nor REJECT");
+                panic!(
+                    "the packet did not cross the peering: {} {}",
+                    reject.code.as_str(),
+                    reject.message
+                )
+            });
+        }
+    };
 
-    // And the claim the crossing owes advanced the payee's peer ledger --
-    // delivery alone is what the deleted test settled for.
+    cross(b"across the peering").await;
+
+    // **Twice, because value moves on fulfilment** (ADR 0004,
+    // `peer-wire-spec.md` §3.2). The payer owes nothing until the first
+    // crossing has actually fulfilled, so the claim covering crossing *n*
+    // is signed after it and rides crossing *n + 1*. One packet proves
+    // delivery; the second is what proves the peering is *paid*, which is
+    // the property #620 exists for and the one a free-write path would
+    // silently lose.
+    cross(b"across the peering again").await;
+
+    // Delivery alone is what the deleted test settled for. This asserts the
+    // money: the payee's peer claim ledger records a claim on this
+    // peering's channel, so the crossing was charged and the claim was
+    // accepted rather than merely sent.
     assert!(
         peer_journal(payee_state.path()).contains(&fixture.channel_id),
         "§3.2: the sender owes for the crossing, so the payee's peer claim \
-         ledger must record a claim on this peering's channel"
+         ledger must record a claim on this peering's channel. Ledger was:\n{}",
+        peer_journal(payee_state.path())
     );
 }
 
@@ -1000,9 +1001,6 @@ async fn two_connectors_move_a_paid_packet(carriage: Carriage) {
 ///    wide, and a payee that answered `accepted` here would be accepting a
 ///    second, different claim for the same money.
 #[tokio::test]
-#[ignore = "blocked on issue #678 (peer carriage bring-up): the client edge's \
-            router reads no Toon-Peer-Auth, calls no decide_role and emits no \
-            claim-ack, so no credential can reach peer handling"]
 async fn a_peer_claim_is_acknowledged_over_btp() {
     a_peer_claim_is_acknowledged(Carriage::Btp).await;
 }
@@ -1012,7 +1010,6 @@ async fn a_peer_claim_is_acknowledged_over_btp() {
 /// header instead of the `claim-ack` protocolData entry, and the status
 /// `200` regardless of the claim verdict (§6.2).
 #[tokio::test]
-#[ignore = "blocked on issue #678 (peer carriage bring-up) -- see the BTP twin"]
 async fn a_peer_claim_is_acknowledged_over_http() {
     a_peer_claim_is_acknowledged(Carriage::Http).await;
 }
