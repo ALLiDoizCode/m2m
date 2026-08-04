@@ -189,6 +189,106 @@ pub struct ChannelDomain {
     pub token_network_address: Address,
 }
 
+/// A Solana peer channel's binding (issue #732): the 32-byte channel
+/// account whose raw bytes open the ed25519 balance-proof message
+/// (`connector_signer::solana_balance_proof_message`), and the ed25519
+/// public key whose signature this connector accepts on a claim naming it.
+///
+/// Deliberately **not** folded into [`ChannelDomain`]. A Solana claim's
+/// signature covers a 48-byte little-endian message with no domain
+/// separator, no `verifyingContract` and no chain id -- there is nothing an
+/// EIP-712 domain and this have in common to abstract over, and merging
+/// them would mean one of the two carrying fields the other's verifier
+/// silently ignores. `connector_domain::client_claim::ClientClaim`
+/// discriminates the same two chains the same way, and this is the peer
+/// wire's counterpart to that decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SolanaChannel {
+    /// The raw 32 bytes the channel account's base58 id decodes to --
+    /// parsed once, at [`ClaimBook::set_solana_channel`] time, exactly as
+    /// [`ChannelDomain`]'s `OnChainChannelId` is.
+    pub channel_account: [u8; 32],
+    /// The counterparty's ed25519 public key, raw. Never a claim's own
+    /// self-declared `signerPublicKey` -- see
+    /// [`ClaimBook::set_verification_key`] for why the peer wire reads
+    /// this from its own record.
+    pub counterparty_public_key: [u8; 32],
+}
+
+/// A Solana channel account or counterparty key supplied to
+/// [`ClaimBook::set_solana_channel`] that is not base58 of exactly 32
+/// bytes. Refused where channels are configured rather than padded,
+/// truncated or hashed into shape -- the same rule [`InvalidChannelId`]
+/// enforces for the EVM side, and for the same reason: a channel account
+/// that is not the account is a signature check against the wrong message.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{field} {value:?} is not base58 of exactly 32 bytes")]
+pub struct InvalidSolanaChannel {
+    pub field: &'static str,
+    pub value: String,
+}
+
+/// Decode a base58 Solana account/key into its exact 32 bytes, or refuse.
+pub(crate) fn parse_base58_32(
+    field: &'static str,
+    value: &str,
+) -> Result<[u8; 32], InvalidSolanaChannel> {
+    let refuse = || InvalidSolanaChannel {
+        field,
+        value: value.to_string(),
+    };
+    let decoded = bs58::decode(value).into_vec().map_err(|_| refuse())?;
+    let bytes: [u8; 32] = decoded.try_into().map_err(|_| refuse())?;
+    Ok(bytes)
+}
+
+/// A peer claim's signature, discriminated by the scheme its chain
+/// actually uses (issue #732). The two are different lengths over
+/// different messages verified by different primitives, and the peer wire
+/// keeps them apart for the whole of their travel rather than flattening
+/// both into one opaque byte string -- a 64-byte ed25519 signature stuffed
+/// into a 65-byte `r ‖ s ‖ v` slot is a claim this connector could no
+/// longer tell you how to check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimSignature {
+    /// secp256k1 `r ‖ s ‖ v` over ADR 0024's EIP-712 `BalanceProof`
+    /// digest.
+    Evm(Signature),
+    /// ed25519 over
+    /// `connector_signer::solana_balance_proof_message`'s 48 bytes.
+    Solana([u8; 64]),
+}
+
+impl ClaimSignature {
+    /// The signature's own bytes, in the length its scheme defines -- 65
+    /// for EVM, 64 for Solana. This is what a journal entry records and
+    /// what a settlement backend is later handed; nothing pads one to the
+    /// other's width.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            ClaimSignature::Evm(signature) => signature.to_bytes().to_vec(),
+            ClaimSignature::Solana(signature) => signature.to_vec(),
+        }
+    }
+
+    /// The EVM signature this carries, or `None` for a Solana one. Used by
+    /// the paths that are EVM-only by construction (on-chain redemption
+    /// through `connector_settlement::Claim`, whose `signature` field is
+    /// `connector_signer::Signature`).
+    pub fn as_evm(&self) -> Option<Signature> {
+        match self {
+            ClaimSignature::Evm(signature) => Some(*signature),
+            ClaimSignature::Solana(_) => None,
+        }
+    }
+}
+
+impl From<Signature> for ClaimSignature {
+    fn from(signature: Signature) -> ClaimSignature {
+        ClaimSignature::Evm(signature)
+    }
+}
+
 /// A channel id supplied to [`ClaimBook::set_channel_domain`] that is not
 /// the on-chain `bytes32` a claim's EIP-712 digest must be computed over
 /// (issue #575's AC: "an id that is not one is refused where channels are
@@ -300,6 +400,16 @@ pub struct ClaimBook {
     /// via `connector_signer::verify_evm_balance_proof`, never the claim's
     /// own self-declared field.
     counterparties: HashMap<String, Address>,
+    /// `channel_id` -> its Solana binding (issue #732): the channel account
+    /// bytes a claim's ed25519 message is built over and the counterparty
+    /// key its signature must verify against. Deliberately a **second**
+    /// map rather than a chain field on the first: a channel is registered
+    /// on exactly one chain, and a lookup that misses here after hitting
+    /// `channel_domains` (or vice versa) is the honest
+    /// [`ClaimRejectReason::UnknownChannel`] a claim presenting the wrong
+    /// chain's signature for a channel deserves. See
+    /// [`ClaimBook::set_solana_channel`].
+    solana_channels: HashMap<String, SolanaChannel>,
     /// `channel_id` -> the exposure ceiling this connector tolerates before
     /// it stops forwarding for that channel's counterparty (ADR 0005,
     /// peer-wire-spec.md §5.3, issue #424). A channel with none configured
@@ -333,6 +443,7 @@ impl ClaimBook {
             outbound_channels,
             channel_domains: HashMap::new(),
             counterparties,
+            solana_channels: HashMap::new(),
             ceilings: HashMap::new(),
             outbound: RwLock::new(HashMap::new()),
             inbound_watermarks: RwLock::new(HashMap::new()),
@@ -407,6 +518,48 @@ impl ClaimBook {
         let on_chain_id = parse_channel_id(&channel_id)?;
         self.channel_domains
             .insert(channel_id, (on_chain_id, domain));
+        Ok(())
+    }
+
+    /// Register `channel_account` as a Solana peer channel whose claims
+    /// this connector accepts from `counterparty_public_key` (issue #732)
+    /// -- the Solana counterpart to [`ClaimBook::set_channel_domain`] plus
+    /// [`ClaimBook::set_verification_key`] in one call, because on Solana
+    /// the two are inseparable: the account *is* the whole of the signed
+    /// message's domain, and there is no separate `verifyingContract` for
+    /// a second call to carry.
+    ///
+    /// `channel_account` is the base58 account id, and doubles as the
+    /// `channel_id` a claim names and a watermark is filed under -- the
+    /// same string the wire's `channelAccount` field carries. Base58 of an
+    /// exact 32-byte decode has one spelling, so unlike the EVM side there
+    /// is nothing to canonicalise (see
+    /// `connector_domain::client_claim::canonical_channel_key`'s own
+    /// reasoning), and an id that does not decode to exactly 32 bytes is
+    /// refused here rather than padded into shape.
+    ///
+    /// A channel registered here can never be confused with one registered
+    /// by `set_channel_domain`: a claim's chain is decided by which
+    /// signature scheme it carries, and each scheme reads only its own map
+    /// (see [`ClaimBook::accept_inbound`]). Registering the same string in
+    /// both maps therefore still yields two independent channels, not one
+    /// ambiguous one -- and in practice cannot happen, since a 32-byte
+    /// base58 id is never `0x` + 64 hex nor a decimal numeral.
+    pub fn set_solana_channel(
+        &mut self,
+        channel_account: impl Into<String>,
+        counterparty_public_key: &str,
+    ) -> Result<(), InvalidSolanaChannel> {
+        let channel_account = channel_account.into();
+        let account_bytes = parse_base58_32("channel account", &channel_account)?;
+        let counterparty_public_key = parse_base58_32("counterparty key", counterparty_public_key)?;
+        self.solana_channels.insert(
+            channel_account,
+            SolanaChannel {
+                channel_account: account_bytes,
+                counterparty_public_key,
+            },
+        );
         Ok(())
     }
 

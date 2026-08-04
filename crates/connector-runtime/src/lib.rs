@@ -14,7 +14,8 @@ mod test_support;
 
 pub use app_client::{AppClient, AppOutcome, Delivery, FakeAppClient, HttpAppClient};
 pub use claim::{
-    ChannelDomain, ClaimAckOutcome, ClaimBook, ClaimRejectReason, InvalidChannelId, WireClaim,
+    ChannelDomain, ClaimAckOutcome, ClaimBook, ClaimRejectReason, ClaimSignature, InvalidChannelId,
+    InvalidSolanaChannel, SolanaChannel, WireClaim,
 };
 pub use clock::{Clock, SystemClock, TestClock};
 pub use connector::{
