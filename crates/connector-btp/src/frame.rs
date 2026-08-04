@@ -40,6 +40,19 @@ pub const ACCUMULATED_COST_PROTOCOL: &str = "toon-accumulated-cost";
 /// entry itself is the carriage's job -- it needs a claim type this crate
 /// deliberately cannot see -- but the name it goes out under is grammar.
 pub const PAYOUT_CLAIM_PROTOCOL: &str = "payout-claim";
+/// The claim acknowledgement (`peer-carriage-spec.md` §3, §6.1): a field on
+/// the RESPONSE that already answers the claim-bearing MESSAGE or TRANSFER,
+/// never a frame of its own. Its HTTP twin is `Toon-Claim-Ack` (#728).
+pub const CLAIM_ACK_PROTOCOL: &str = "claim-ack";
+/// The original sender's minimum-delivery declaration
+/// (`peer-carriage-spec.md` §3, §5.1), decimal uint64 as UTF-8 text on a
+/// peer MESSAGE. Its HTTP twin is `Toon-Minimum-Delivery` (#728).
+///
+/// Declared here beside the other entry names rather than in a peer module
+/// for spec I2's reason: the BTP name and the HTTP name for one concept are
+/// a pair, and a second `const` spelling either of them somewhere else is
+/// exactly the fork issue #713 was opened to prevent.
+pub const MINIMUM_DELIVERY_PROTOCOL: &str = "toon-minimum-delivery";
 
 /// The contentType the client itself uses for its JSON claim entry (its
 /// parser never reads the field back). Emitted on every server entry for
@@ -61,7 +74,7 @@ pub struct ProtocolData {
 /// }` carries (`None` for every other frame type -- `ilp_packet` is likewise
 /// always empty on a TRANSFER, which has no ILP-packet field in either RFC-23
 /// or this dialect's extension of it).
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtpFrame {
     pub frame_type: u8,
     pub request_id: u32,

@@ -1,0 +1,125 @@
+//! The **BTP peer carriage** (`docs/protocol/peer-carriage-spec.md`,
+//! ADR 0027, issue #727): peering with another connector over RFC-0023
+//! frames on a `wss://` websocket, in both directions -- [`dial`] a peer's
+//! endpoint, [`accept`] a session a peer dialed into us.
+//!
+//! # What this crate is, and what it deliberately is not
+//!
+//! It is the **carriage**: where the bytes ride. It is not the semantics.
+//! Claim exchange, flush, fees, ceilings, minimum delivery and the refusal
+//! taxonomy are `peer-wire-spec.md` §3--§6's and live above the
+//! [`connector_runtime::PeerTransport`] port, unchanged by which wire
+//! carried them. This crate maps §3's table onto frames and back, and
+//! nothing else:
+//!
+//! | Concept | BTP |
+//! | ------- | --- |
+//! | PREPARE | MESSAGE (type 6), OER PREPARE in `ilpPacket` |
+//! | FULFILL / REJECT | RESPONSE (type 1) under that `requestId` |
+//! | piggybacked claim | `payment-channel-claim` entry, raw UTF-8 JSON ([`claim_json`]) |
+//! | **FLUSH** | **TRANSFER (type 7)**: `amount` = the claim's new cumulative, claim in `payment-channel-claim`, **no `ilpPacket`** |
+//! | CLAIM_ACK | `claim-ack` entry on the RESPONSE that already answers the claim-bearing frame ([`ack`]) |
+//! | `minimumDelivery` | `toon-minimum-delivery` entry ([`fields`]) |
+//! | `accumulatedCost` | `toon-accumulated-cost` entry on a REJECT ([`fields`]) |
+//! | peer credential | `auth` entry, raw UTF-8 JSON |
+//!
+//! # Three things this crate must not do, and how it cannot
+//!
+//! 1. **Fork the frame grammar.** Every frame is encoded and decoded by
+//!    [`connector_btp`], the codec extracted in issue #713 precisely so the
+//!    peer carriage and the client edge cannot drift. There is no encoder
+//!    here. A peer uses RFC-23's *full* grammar (it originates, and it
+//!    sends TRANSFER) while the deployed client sends a narrower subset --
+//!    that difference is caller-side, expressed by which functions each
+//!    carriage calls, never by a flag on the codec.
+//! 2. **Re-decide role.** [`connector_peer_auth::decide_role`] owns
+//!    §1.2's P1/P2 rule, and [`accept`] calls it. What this crate owns is
+//!    what a *session* adds and that crate cannot see: role bound once and
+//!    never re-evaluated, a second `auth` frame as an ERROR rather than an
+//!    escalation, and frames processed before the binding staying client
+//!    frames forever (§1.5).
+//! 3. **Fork the claim.** §4's claim JSON *is* the client edge's claim
+//!    JSON, parsed by the client edge's own structural validator and
+//!    judged by the same `ClaimBook` (spec I4). See [`claim_json`].
+//!
+//! # Ordering (§7.1)
+//!
+//! Identical to the client edge's, and reusing its mechanism rather than a
+//! peer-specific one: **claims on one session are judged strictly
+//! sequentially in arrival order**, inline on the session task, so claims
+//! sent in order on one socket cannot race each other into
+//! `nonce_not_advancing`. Only the post-admission tail -- routing, the
+//! downstream round trip, writing the RESPONSE -- overlaps, bounded by the
+//! same `btp_session_window` (#688) whose absence was the measured
+//! ~125--150 events/s admission wall.
+//!
+//! # What is not here
+//!
+//! The ILP-over-HTTP carriage (issue #728) and the paired
+//! `peer_carriage` vectors (issue #729). Where this crate names a §3 field
+//! it uses the constant [`connector_btp`] declares for it, so the HTTP
+//! carriage's header twin is added beside that one declaration (spec I2)
+//! rather than beside a second copy here.
+
+pub mod accept;
+pub mod ack;
+pub mod claim_json;
+pub mod dial;
+pub mod fields;
+pub mod ws;
+
+pub use accept::{AcceptedClaims, PeerAcceptPolicy, PeerCarriageState, PeerSession};
+pub use claim_json::{ClaimDecodeError, PeerClaimDomain};
+pub use dial::{BtpPeerTransport, DialError, PeerDialer, PeerRelation};
+pub use ws::TungsteniteDialer;
+
+use connector_config::PeerConfig;
+
+/// Warn about a peering whose `claim_ack_timeout_ms` exceeds its
+/// `flush_interval_ms` (`peer-carriage-spec.md` §6.3, §11).
+///
+/// §6.3 makes `claimAckTimeoutMs <= flushIntervalMs` a SHOULD: a timed-out
+/// flush ought to be *superseded* by the next flush tick rather than
+/// overlapping it, and a configuration where the deadline outlives the
+/// interval quietly stacks retransmissions of the same pending claim.
+///
+/// The warning is emitted **here** rather than in `connector-config`
+/// because that crate has no logging seam and takes no `tracing`
+/// dependency -- issue #723 exposed both values on [`PeerConfig`] and
+/// handed the SHOULD to whichever carriage has a subscriber. This is that
+/// carriage. Call it once per peering at bring-up; it is pure apart from
+/// the log line, and returns whether it warned so a test can assert the
+/// SHOULD is actually checked rather than merely documented.
+///
+/// A peering with no configured `flush_interval_ms` is not warned about:
+/// the runtime's own default applies and this connector's config does not
+/// say what it is, so there is no comparison to make.
+pub fn warn_if_claim_ack_outlives_flush(peer: &PeerConfig) -> bool {
+    let Some(flush_interval_ms) = peer.flush_interval_ms() else {
+        return false;
+    };
+    warn_if_claim_ack_outlives(peer.id(), peer.claim_ack_timeout_ms(), flush_interval_ms)
+}
+
+/// [`warn_if_claim_ack_outlives_flush`]'s decision, over the two figures
+/// alone -- for a caller that holds the values without a [`PeerConfig`]
+/// around them, and so the SHOULD is testable without standing up a config
+/// file to hold two integers.
+pub fn warn_if_claim_ack_outlives(
+    peer_id: &str,
+    claim_ack_timeout_ms: u64,
+    flush_interval_ms: u64,
+) -> bool {
+    if claim_ack_timeout_ms <= flush_interval_ms {
+        return false;
+    }
+    tracing::warn!(
+        peer_id,
+        claim_ack_timeout_ms,
+        flush_interval_ms,
+        "peer-carriage-spec.md §6.3: claim_ack_timeout_ms should not exceed \
+         flush_interval_ms -- a timed-out flush will overlap the next flush \
+         tick rather than being superseded by it"
+    );
+    true
+}

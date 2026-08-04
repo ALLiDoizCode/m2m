@@ -1204,6 +1204,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "connector-peer-btp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "connector-btp",
+ "connector-config",
+ "connector-domain",
+ "connector-peer-auth",
+ "connector-runtime",
+ "connector-signer",
+ "futures-util",
+ "hex",
+ "libsecp256k1",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "connector-runtime"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,1110 @@
+//! The BTP peer carriage end to end (`docs/protocol/peer-carriage-spec.md`,
+//! issue #727): a [`BtpPeerTransport`] **dials**, a [`PeerSession`]
+//! **accepts**, and the frames between them are the ones §3's table names.
+//!
+//! Nothing here is a fake shortcut past the thing under test. The two sides
+//! are joined by an in-memory duplex standing in for the websocket and
+//! *only* for the websocket: every frame is encoded and decoded by
+//! `connector-btp`, every role decision is
+//! `connector_peer_auth::decide_role`'s, every claim is judged by the real
+//! `ClaimBook` behind a real `Connector`, and the payer reaches the payee
+//! only through the `PeerTransport` port. What is not exercised is TLS and
+//! the socket itself.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use chrono::{TimeZone, Utc};
+use connector_btp::{
+    decode_frame, encode_message, encode_response, BtpFrame, BtpSessionHandle, OutboundRequests,
+    ProtocolData, AUTH_PROTOCOL, BTP_ERROR, BTP_RESPONSE, BTP_TRANSFER, CLAIM_PROTOCOL,
+    CONTENT_TYPE_TEXT,
+};
+use connector_config::PeerCredential;
+use connector_domain::{PacketResponse, Prepare};
+use connector_peer_auth::{encode_raw, PeerAuthPolicy, PresentedCredential};
+use connector_peer_btp::accept::{PeerAcceptPolicy, PeerSession, SessionEnd};
+use connector_peer_btp::dial::{DialError, PeerDialer, PeerRelation};
+use connector_peer_btp::{ack, AcceptedClaims, BtpPeerTransport, PeerCarriageState};
+use connector_runtime::{
+    ChannelDomain, ClaimAckOutcome, ClaimRejectReason, Clock, Connector, FakeAppClient,
+    InProcessPeerTransport, PeerTransport, TestClock, WireClaim,
+};
+use connector_signer::{
+    derive_evm_address, evm_balance_proof_digest, EvmBalanceProof, LocalSigner, Signature, Signer,
+};
+use tokio::sync::mpsc;
+use url::Url;
+
+// ─── fixtures ───
+
+const CHAIN_ID: u64 = 84_532;
+const TOKEN_NETWORK: [u8; 20] = [0x33; 20];
+const PEER_ID: &str = "peer-b";
+const SECRET: &str = "a-shared-secret";
+
+fn channel_id() -> String {
+    format!("0x{:064x}", 7)
+}
+
+fn clock() -> Arc<TestClock> {
+    Arc::new(TestClock::new(
+        Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+    ))
+}
+
+fn domain() -> ChannelDomain {
+    ChannelDomain {
+        chain_id: CHAIN_ID,
+        token_network_address: TOKEN_NETWORK,
+    }
+}
+
+/// A claim on [`channel_id`] signed by `signer`, exactly as `ClaimBook`
+/// signs one: the EIP-712 `BalanceProof` digest of ADR 0024, with
+/// `lockedAmount`/`locksRoot` as zeros.
+fn sign_claim(signer: &dyn Signer, nonce: u64, cumulative_amount: u64) -> WireClaim {
+    let mut on_chain_id = [0u8; 32];
+    on_chain_id[31] = 7;
+    let proof = EvmBalanceProof {
+        channel_id: on_chain_id,
+        nonce,
+        transferred_amount: u128::from(cumulative_amount),
+        locked_amount: 0,
+        locks_root: [0u8; 32],
+        chain_id: CHAIN_ID,
+        token_network_address: TOKEN_NETWORK,
+    };
+    WireClaim {
+        channel_id: channel_id(),
+        nonce,
+        cumulative_amount,
+        signature: signer
+            .sign(&evm_balance_proof_digest(&proof))
+            .expect("sign"),
+    }
+}
+
+/// The payee: a connector with no routes -- so every packet it is handed
+/// answers `F02` and the *claim*'s verdict is visibly independent of the
+/// packet's (§6.2) -- and one `[[peer_channels]]`-shaped channel whose
+/// counterparty is `payer`.
+fn payee(payer: &dyn Signer) -> Arc<Connector> {
+    let counterparty = derive_evm_address(&payer.public_key().unwrap());
+    Arc::new(
+        Connector::new(
+            vec![],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            clock(),
+        )
+        .with_channel_verification_key(channel_id(), counterparty)
+        .with_channel_domain(channel_id(), domain())
+        .expect("a bytes32 channel id"),
+    )
+}
+
+/// A policy in which `PEER_ID` is configured, has a secret, and is channel
+/// bound -- P1 and P2 both satisfiable.
+fn bound_policy() -> Arc<PeerAuthPolicy> {
+    let credential = PeerCredential::new(SECRET);
+    Arc::new(PeerAuthPolicy::new(
+        vec![(PEER_ID, &credential)],
+        vec![PEER_ID],
+    ))
+}
+
+fn carriage(connector: Arc<Connector>, policy: Arc<PeerAuthPolicy>) -> Arc<PeerCarriageState> {
+    Arc::new(PeerCarriageState::new(
+        connector,
+        policy,
+        Arc::new(AcceptedClaims::new()),
+        PeerAcceptPolicy::default(),
+    ))
+}
+
+fn prepare(destination: &str) -> Prepare {
+    Prepare {
+        amount: 100,
+        expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
+        execution_condition: [0x9a; 32],
+        destination: destination.to_string(),
+        data: b"sealed to whoever terminates this route".to_vec(),
+    }
+}
+
+// ─── the in-memory duplex standing in for the websocket ───
+
+/// Runs one accepting [`PeerSession`] per dial, joined to the dialing side
+/// by two channels. Every byte between them goes through the real codec.
+struct LoopbackDialer {
+    state: Arc<PeerCarriageState>,
+    /// Every frame the dialing side wrote, in order -- so a test can assert
+    /// what actually went on the wire (§3's table) and not merely what came
+    /// back.
+    sent: Arc<Mutex<Vec<BtpFrame>>>,
+}
+
+impl LoopbackDialer {
+    fn new(state: Arc<PeerCarriageState>) -> Arc<LoopbackDialer> {
+        Arc::new(LoopbackDialer {
+            state,
+            sent: Arc::new(Mutex::new(Vec::new())),
+        })
+    }
+}
+
+#[async_trait]
+impl PeerDialer for LoopbackDialer {
+    async fn dial(&self, _peer_id: &str, _endpoint: &Url) -> Result<BtpSessionHandle, DialError> {
+        let (to_peer, mut to_peer_rx) = mpsc::channel::<Vec<u8>>(32);
+        let (from_peer, mut from_peer_rx) = mpsc::channel::<Vec<u8>>(32);
+        let outbound = Arc::new(OutboundRequests::new());
+        let handle = BtpSessionHandle::new(to_peer, Arc::clone(&outbound));
+
+        // The accepting side, reading exactly the bytes the dialing side
+        // wrote.
+        let (tap, sent) = (mpsc::channel::<Vec<u8>>(32), Arc::clone(&self.sent));
+        let (tapped, tapped_rx) = tap;
+        tokio::spawn(async move {
+            while let Some(bytes) = to_peer_rx.recv().await {
+                sent.lock()
+                    .expect("sent frames lock")
+                    .push(decode_frame(&bytes).expect("our own encoder"));
+                if tapped.send(bytes).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let session = PeerSession::new(Arc::clone(&self.state), from_peer);
+        tokio::spawn(session.run(tapped_rx));
+
+        // The answer path: a RESPONSE/ERROR resolves whichever outbound
+        // request it names (§7.3), which is the only correlation either
+        // carriage has or needs.
+        tokio::spawn(async move {
+            while let Some(bytes) = from_peer_rx.recv().await {
+                if let Ok(frame) = decode_frame(&bytes) {
+                    outbound.resolve(frame);
+                }
+            }
+        });
+        Ok(handle)
+    }
+}
+
+/// A dialer that never connects -- the "the remote does not expose what we
+/// dial" case §2.2 says is not locally detectable and must surface as an
+/// ordinary dial failure.
+struct DeadDialer;
+
+#[async_trait]
+impl PeerDialer for DeadDialer {
+    async fn dial(&self, peer_id: &str, endpoint: &Url) -> Result<BtpSessionHandle, DialError> {
+        Err(DialError {
+            peer_id: peer_id.to_string(),
+            endpoint: endpoint.to_string(),
+            reason: "connection refused".to_string(),
+        })
+    }
+}
+
+fn relation() -> PeerRelation {
+    let mut domains = HashMap::new();
+    domains.insert(
+        channel_id(),
+        connector_peer_btp::PeerClaimDomain {
+            chain_id: CHAIN_ID,
+            token_network: TOKEN_NETWORK,
+        },
+    );
+    PeerRelation::new(
+        PEER_ID,
+        Url::parse("wss://peer.example:443/btp").unwrap(),
+        PresentedCredential::new(PEER_ID, SECRET),
+        domains,
+        Duration::from_millis(30_000),
+        Duration::from_millis(30_000),
+    )
+}
+
+fn transport(dialer: Arc<dyn PeerDialer>, payer: &dyn Signer) -> BtpPeerTransport {
+    let mut transport = BtpPeerTransport::new(
+        dialer,
+        derive_evm_address(&payer.public_key().unwrap()),
+        clock() as Arc<dyn Clock>,
+    );
+    transport.add_peer(relation());
+    transport
+}
+
+// ─── §3, §6: a claim rides a PREPARE and is acknowledged ───
+
+/// §6.2, the property whose loss would silently destroy ADR 0024's
+/// semantics: **one RESPONSE carries two independent answers**. The packet
+/// is rejected (the payee has no route for it) and the claim that rode it
+/// is accepted, on the same frame.
+#[tokio::test]
+async fn a_claim_riding_a_prepare_is_judged_independently_of_the_packet() {
+    let payer_signer = LocalSigner::generate("payer");
+    let state = carriage(payee(&payer_signer), bound_policy());
+    let dialer = LoopbackDialer::new(state);
+    let transport = transport(Arc::clone(&dialer) as Arc<dyn PeerDialer>, &payer_signer);
+    let claim = sign_claim(&payer_signer, 1, 500);
+
+    let (response, ack, reached) = transport
+        .forward(PEER_ID, prepare("g.nowhere"), 0, Some(claim))
+        .await;
+
+    match response {
+        PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "F02"),
+        other => panic!("expected the payee's own reject, got {other:?}"),
+    }
+    assert_eq!(ack, ClaimAckOutcome::Accepted);
+    assert!(reached, "the peer answered, so this hop forwarded");
+}
+
+/// §3's table, on the wire: the claim rides a `payment-channel-claim`
+/// entry as **raw UTF-8 JSON** on a MESSAGE whose `ilpPacket` is the OER
+/// PREPARE, and the auth credential rode the session's first MESSAGE.
+#[tokio::test]
+async fn the_frames_a_dialed_peering_puts_on_the_wire_are_the_ones_section_3_names() {
+    let payer_signer = LocalSigner::generate("payer");
+    let state = carriage(payee(&payer_signer), bound_policy());
+    let dialer = LoopbackDialer::new(state);
+    let transport = transport(Arc::clone(&dialer) as Arc<dyn PeerDialer>, &payer_signer);
+
+    let _ = transport
+        .forward(
+            PEER_ID,
+            prepare("g.nowhere"),
+            1_250,
+            Some(sign_claim(&payer_signer, 1, 500)),
+        )
+        .await;
+
+    let sent = dialer.sent.lock().expect("sent frames lock").clone();
+    let auth = &sent[0];
+    assert_eq!(auth.frame_type, connector_btp::BTP_MESSAGE);
+    let credential = auth
+        .protocol_data
+        .iter()
+        .find(|pd| pd.name == AUTH_PROTOCOL)
+        .expect("the credential rode the first MESSAGE");
+    let json: serde_json::Value = serde_json::from_slice(&credential.data).expect("raw UTF-8 JSON");
+    assert_eq!(json["peerId"], PEER_ID);
+
+    let message = &sent[1];
+    assert_eq!(message.frame_type, connector_btp::BTP_MESSAGE);
+    assert!(
+        Prepare::decode(&message.ilp_packet).is_ok(),
+        "the OER PREPARE rides ilpPacket"
+    );
+    let claim = message
+        .protocol_data
+        .iter()
+        .find(|pd| pd.name == CLAIM_PROTOCOL)
+        .expect("the claim rode as protocolData");
+    let claim_json: serde_json::Value =
+        serde_json::from_slice(&claim.data).expect("raw UTF-8 JSON, no base64 layer");
+    assert_eq!(claim_json["blockchain"], "evm");
+    assert_eq!(claim_json["nonce"], 1);
+    let minimum_delivery = message
+        .protocol_data
+        .iter()
+        .find(|pd| pd.name == connector_btp::MINIMUM_DELIVERY_PROTOCOL)
+        .expect("the sender's floor rode unchanged");
+    assert_eq!(minimum_delivery.data, b"1250".to_vec());
+}
+
+// ─── §3, §6: FLUSH is a TRANSFER ───
+
+/// §3's FLUSH row: a **TRANSFER (type 7)** whose `amount` is the claim's
+/// new cumulative, carrying the claim in `payment-channel-claim` and **no
+/// `ilpPacket`**; answered by a RESPONSE carrying the `claim-ack`.
+#[tokio::test]
+async fn a_flush_is_a_transfer_whose_amount_is_the_claims_new_cumulative() {
+    let payer_signer = LocalSigner::generate("payer");
+    let state = carriage(payee(&payer_signer), bound_policy());
+    let dialer = LoopbackDialer::new(state);
+    let transport = transport(Arc::clone(&dialer) as Arc<dyn PeerDialer>, &payer_signer);
+
+    let ack = transport
+        .flush(PEER_ID, sign_claim(&payer_signer, 1, 900))
+        .await;
+
+    assert_eq!(ack, ClaimAckOutcome::Accepted);
+    let sent = dialer.sent.lock().expect("sent frames lock").clone();
+    let flush = sent
+        .iter()
+        .find(|frame| frame.frame_type == BTP_TRANSFER)
+        .expect("the flush rode a TRANSFER, not a MESSAGE");
+    assert_eq!(flush.amount, Some(900), "amount is the new cumulative");
+    assert!(
+        flush.ilp_packet.is_empty(),
+        "a FLUSH carries no ILP packet at all"
+    );
+    assert!(flush
+        .protocol_data
+        .iter()
+        .any(|pd| pd.name == CLAIM_PROTOCOL));
+}
+
+// ─── §6.3: the idempotent re-ack ───
+
+/// §6.3, the rule that stands between a lost ack and a permanently wedged
+/// peering: a byte-identical retransmission of the claim already at the
+/// watermark is answered **`accepted`**, never `nonce_not_advancing`, and
+/// nothing is advanced or recorded.
+#[tokio::test]
+async fn a_byte_identical_retransmission_at_the_watermark_is_accepted_again() {
+    let payer_signer = LocalSigner::generate("payer");
+    let state = carriage(payee(&payer_signer), bound_policy());
+    let dialer = LoopbackDialer::new(state);
+    let transport = transport(Arc::clone(&dialer) as Arc<dyn PeerDialer>, &payer_signer);
+    let claim = sign_claim(&payer_signer, 3, 900);
+
+    let first = transport.flush(PEER_ID, claim.clone()).await;
+    let retransmitted = transport.flush(PEER_ID, claim.clone()).await;
+
+    assert_eq!(first, ClaimAckOutcome::Accepted);
+    assert_eq!(
+        retransmitted,
+        ClaimAckOutcome::Accepted,
+        "a lost ack must not wedge the peering"
+    );
+
+    // And the retransmission really was byte-identical: the payer reused
+    // the exact JSON it emitted, timestamp included (§6.3).
+    let sent = dialer.sent.lock().expect("sent frames lock").clone();
+    let claims: Vec<&ProtocolData> = sent
+        .iter()
+        .filter(|frame| frame.frame_type == BTP_TRANSFER)
+        .filter_map(|frame| {
+            frame
+                .protocol_data
+                .iter()
+                .find(|pd| pd.name == CLAIM_PROTOCOL)
+        })
+        .collect();
+    assert_eq!(claims.len(), 2);
+    assert_eq!(claims[0].data, claims[1].data);
+}
+
+/// §6.3's other half: the *same nonce* with any other field changed is a
+/// different claim, refused `nonce_not_advancing` exactly as §3.2's
+/// strictly-advancing rule requires. Together with the test above this
+/// pins the whole boundary.
+#[tokio::test]
+async fn the_same_nonce_with_different_bytes_is_refused_nonce_not_advancing() {
+    let payer_signer = LocalSigner::generate("payer");
+    let state = carriage(payee(&payer_signer), bound_policy());
+    let dialer = LoopbackDialer::new(state);
+    let transport = transport(Arc::clone(&dialer) as Arc<dyn PeerDialer>, &payer_signer);
+
+    let accepted = transport
+        .flush(PEER_ID, sign_claim(&payer_signer, 3, 900))
+        .await;
+    let same_nonce_more_money = transport
+        .flush(PEER_ID, sign_claim(&payer_signer, 3, 1_500))
+        .await;
+
+    assert_eq!(accepted, ClaimAckOutcome::Accepted);
+    assert_eq!(
+        same_nonce_more_money,
+        ClaimAckOutcome::Rejected(ClaimRejectReason::NonceNotAdvancing)
+    );
+}
+
+// ─── §6.3: absence, malformation and the timeout ───
+
+/// A payee that answers the claim-bearing frame but carries **no**
+/// `claim-ack`. §6.3: not acknowledged -- never accepted, never rejected,
+/// never inferred from the packet's own verdict.
+#[tokio::test]
+async fn a_response_carrying_no_ack_leaves_the_claim_not_acknowledged() {
+    let payer_signer = LocalSigner::generate("payer");
+    let transport = transport(
+        Arc::new(SilentPayee { ack: None }) as Arc<dyn PeerDialer>,
+        &payer_signer,
+    );
+
+    let ack = transport
+        .flush(PEER_ID, sign_claim(&payer_signer, 1, 500))
+        .await;
+
+    assert_eq!(ack, ClaimAckOutcome::NotSent);
+}
+
+/// §6.3: a malformed ack is likewise not acknowledged, and must not be
+/// read as either verdict.
+#[tokio::test]
+async fn a_malformed_ack_leaves_the_claim_not_acknowledged() {
+    let payer_signer = LocalSigner::generate("payer");
+    let transport = transport(
+        Arc::new(SilentPayee {
+            ack: Some(br#"{"result":"probably"}"#.to_vec()),
+        }) as Arc<dyn PeerDialer>,
+        &payer_signer,
+    );
+
+    let ack = transport
+        .flush(PEER_ID, sign_claim(&payer_signer, 1, 500))
+        .await;
+
+    assert_eq!(ack, ClaimAckOutcome::NotSent);
+}
+
+/// A payee that answers every request with an empty RESPONSE, optionally
+/// carrying `ack` bytes verbatim -- for the absence and malformation cases
+/// a well-behaved `PeerSession` will not produce.
+struct SilentPayee {
+    ack: Option<Vec<u8>>,
+}
+
+#[async_trait]
+impl PeerDialer for SilentPayee {
+    async fn dial(&self, _peer_id: &str, _endpoint: &Url) -> Result<BtpSessionHandle, DialError> {
+        let (to_peer, mut to_peer_rx) = mpsc::channel::<Vec<u8>>(32);
+        let outbound = Arc::new(OutboundRequests::new());
+        let handle = BtpSessionHandle::new(to_peer, Arc::clone(&outbound));
+        let ack = self.ack.clone();
+        tokio::spawn(async move {
+            while let Some(bytes) = to_peer_rx.recv().await {
+                let frame = decode_frame(&bytes).expect("our own encoder");
+                let entries: Vec<ProtocolData> = ack
+                    .iter()
+                    .map(|data| ProtocolData {
+                        name: connector_btp::CLAIM_ACK_PROTOCOL.to_string(),
+                        content_type: CONTENT_TYPE_TEXT,
+                        data: data.clone(),
+                    })
+                    .collect();
+                let answer = encode_response(frame.request_id, &entries, &[]);
+                let _ = outbound.resolve(decode_frame(&answer).expect("our own encoder"));
+            }
+        });
+        Ok(handle)
+    }
+}
+
+// ─── §2.2: a peer that cannot be dialed ───
+
+/// §2.2: whether the remote exposes what we dial is not locally
+/// detectable, so it surfaces as an ordinary dial failure -- and a packet
+/// routed there rejects **`T01`**, never `T00` and never a silent drop.
+/// `reached` is false, so no fee of this hop's belongs on the reject that
+/// goes back (ADR 0011).
+#[tokio::test]
+async fn a_peer_that_cannot_be_dialed_rejects_t01_and_was_never_reached() {
+    let payer_signer = LocalSigner::generate("payer");
+    let transport = transport(Arc::new(DeadDialer) as Arc<dyn PeerDialer>, &payer_signer);
+
+    let (response, ack, reached) = transport
+        .forward(PEER_ID, prepare("g.somewhere"), 0, None)
+        .await;
+
+    match response {
+        PacketResponse::Reject(reject) => {
+            assert_eq!(reject.code.as_str(), "T01");
+            assert!(reject.message.contains(PEER_ID));
+        }
+        other => panic!("expected T01, got {other:?}"),
+    }
+    assert_eq!(ack, ClaimAckOutcome::NotSent);
+    assert!(!reached);
+}
+
+#[tokio::test]
+async fn a_peer_id_this_connector_does_not_dial_rejects_t01() {
+    let payer_signer = LocalSigner::generate("payer");
+    let transport = transport(Arc::new(DeadDialer) as Arc<dyn PeerDialer>, &payer_signer);
+
+    let (response, _ack, reached) = transport
+        .forward("nowhere", prepare("g.somewhere"), 0, None)
+        .await;
+
+    match response {
+        PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "T01"),
+        other => panic!("expected T01, got {other:?}"),
+    }
+    assert!(!reached);
+}
+
+// ─── §1: role is decided by authentication ───
+
+/// A session driver for the accept side alone: feed frames in, read the
+/// answers out.
+struct Accepting {
+    frames: mpsc::Sender<Vec<u8>>,
+    answers: mpsc::Receiver<Vec<u8>>,
+    session: tokio::task::JoinHandle<SessionEnd>,
+}
+
+fn accepting(state: Arc<PeerCarriageState>) -> Accepting {
+    let (frames, frames_rx) = mpsc::channel::<Vec<u8>>(32);
+    let (replies, answers) = mpsc::channel::<Vec<u8>>(32);
+    let session = tokio::spawn(PeerSession::new(state, replies).run(frames_rx));
+    Accepting {
+        frames,
+        answers,
+        session,
+    }
+}
+
+impl Accepting {
+    async fn send(&self, frame: Vec<u8>) {
+        self.frames.send(frame).await.expect("the session is live");
+    }
+
+    async fn answer(&mut self) -> BtpFrame {
+        let bytes = self
+            .answers
+            .recv()
+            .await
+            .expect("the session answered the request");
+        decode_frame(&bytes).expect("our own encoder")
+    }
+}
+
+fn auth_frame(request_id: u32, peer_id: &str, secret: &str) -> Vec<u8> {
+    let credential = PresentedCredential::new(peer_id, secret);
+    encode_message(
+        request_id,
+        &[ProtocolData {
+            name: AUTH_PROTOCOL.to_string(),
+            content_type: CONTENT_TYPE_TEXT,
+            data: encode_raw(&credential),
+        }],
+        &[],
+    )
+}
+
+fn claim_frame(request_id: u32, claim_json: &str) -> Vec<u8> {
+    encode_message(
+        request_id,
+        &[ProtocolData {
+            name: CLAIM_PROTOCOL.to_string(),
+            content_type: CONTENT_TYPE_TEXT,
+            data: claim_json.as_bytes().to_vec(),
+        }],
+        &prepare("g.nowhere").encode(),
+    )
+}
+
+fn claim_as_json(claim: &WireClaim, payer: &dyn Signer) -> String {
+    connector_peer_btp::claim_json::encode(
+        claim,
+        &derive_evm_address(&payer.public_key().unwrap()),
+        Some(connector_peer_btp::PeerClaimDomain {
+            chain_id: CHAIN_ID,
+            token_network: TOKEN_NETWORK,
+        }),
+        "message-1",
+        "2030-01-01T00:00:00.000Z",
+    )
+}
+
+/// **The named regression (§1.9).** `toon-sandbox` admitted an anonymous
+/// BTP session with `btp_auth … success:true mode:"no-auth"` and then
+/// treated it as a quasi-peer. Each of the five interactions below is
+/// classified `client` and reaches **no peer handling whatsoever** --
+/// testable, per §1.9, as: no `claim-ack` was emitted, and the claim they
+/// carried moved no peer watermark (proved by a subsequent *genuine* peer
+/// claim at nonce 1 being accepted, which it could not be if any of these
+/// had advanced anything).
+#[tokio::test]
+async fn the_named_regression_no_interaction_becomes_a_peer_without_p1_and_p2() {
+    let payer_signer = LocalSigner::generate("payer");
+    let credential = PeerCredential::new(SECRET);
+    // `unbound` is configured and has a secret, but no `[[peer_channels]]`
+    // row: P2 alone failing.
+    let unbound = PeerCredential::new(SECRET);
+    let policy = Arc::new(PeerAuthPolicy::new(
+        vec![(PEER_ID, &credential), ("unbound", &unbound)],
+        vec![PEER_ID],
+    ));
+    let connector = payee(&payer_signer);
+    let state = carriage(Arc::clone(&connector), policy);
+    let json = claim_as_json(&sign_claim(&payer_signer, 1, 500), &payer_signer);
+
+    let asserted: Vec<Option<(&str, &str)>> = vec![
+        // 1. no credential at all
+        None,
+        // 2. an empty secret
+        Some((PEER_ID, "")),
+        // 3. a correct peer id with a wrong secret
+        Some((PEER_ID, "not-the-secret")),
+        // 4. a correct credential for a peer with no channel binding
+        Some(("unbound", SECRET)),
+        // 5. a valid credential naming a peer id that is not configured
+        Some(("stranger", SECRET)),
+    ];
+
+    for (index, credential) in asserted.into_iter().enumerate() {
+        let mut session = accepting(Arc::clone(&state));
+        if let Some((peer_id, secret)) = credential {
+            session.send(auth_frame(1, peer_id, secret)).await;
+            let ack = session.answer().await;
+            assert_eq!(
+                ack.frame_type, BTP_RESPONSE,
+                "case {index}: an asserted credential is not refused for the assertion alone (§1.6)"
+            );
+        }
+        session.send(claim_frame(2, &json)).await;
+        let answer = session.answer().await;
+        assert!(
+            ack::from_protocol_data(&answer.protocol_data).is_none(),
+            "case {index}: a client interaction gets no claim-ack (§1.7)"
+        );
+    }
+
+    // Nothing above moved a peer watermark: a genuine peer's claim at
+    // nonce 1 is still fresh.
+    let mut peer = accepting(Arc::clone(&state));
+    peer.send(auth_frame(1, PEER_ID, SECRET)).await;
+    let _ = peer.answer().await;
+    peer.send(claim_frame(2, &json)).await;
+    let answer = peer.answer().await;
+    assert_eq!(
+        ack::from_protocol_data(&answer.protocol_data),
+        Some(ClaimAckOutcome::Accepted),
+        "no client interaction had advanced this channel's peer watermark"
+    );
+}
+
+/// §1.5: a second `auth` entry on a session whose role is already bound is
+/// **not evaluated**. It is a BTP ERROR (`F00 NotAcceptedError`), and the
+/// role is left exactly as it was. Re-authentication mid-session is the
+/// escalation path this closes.
+#[tokio::test]
+async fn a_second_auth_frame_is_an_error_and_never_an_escalation() {
+    let payer_signer = LocalSigner::generate("payer");
+    let state = carriage(payee(&payer_signer), bound_policy());
+    let mut session = accepting(Arc::clone(&state));
+
+    // Bind as a *client* first: a credential that fails P1.
+    session.send(auth_frame(1, PEER_ID, "wrong")).await;
+    assert_eq!(session.answer().await.frame_type, BTP_RESPONSE);
+
+    // Now present the correct one. It must not be evaluated.
+    session.send(auth_frame(2, PEER_ID, SECRET)).await;
+    let answer = session.answer().await;
+
+    assert_eq!(answer.frame_type, BTP_ERROR);
+    // And the role really is unchanged: a claim still gets no ack.
+    let json = claim_as_json(&sign_claim(&payer_signer, 1, 500), &payer_signer);
+    session.send(claim_frame(3, &json)).await;
+    let answer = session.answer().await;
+    assert!(ack::from_protocol_data(&answer.protocol_data).is_none());
+}
+
+/// §1.5: more than one `auth` entry on one frame is **refused, not
+/// resolved** -- never the first, never the last, never a concatenation.
+/// This is the credential-smuggling defence, and its absence is how "which
+/// credential did we check?" becomes unanswerable.
+#[tokio::test]
+async fn two_auth_entries_on_one_frame_are_refused_rather_than_resolved() {
+    let payer_signer = LocalSigner::generate("payer");
+    let state = carriage(payee(&payer_signer), bound_policy());
+    let mut session = accepting(Arc::clone(&state));
+
+    let entry = |peer_id: &str, secret: &str| ProtocolData {
+        name: AUTH_PROTOCOL.to_string(),
+        content_type: CONTENT_TYPE_TEXT,
+        data: encode_raw(&PresentedCredential::new(peer_id, secret)),
+    };
+    session
+        .send(encode_message(
+            1,
+            &[entry(PEER_ID, "wrong"), entry(PEER_ID, SECRET)],
+            &[],
+        ))
+        .await;
+    let answer = session.answer().await;
+
+    assert_eq!(answer.frame_type, BTP_ERROR);
+    // Neither credential was adopted: the session is still a client, and
+    // the role is still unbound, so a *later* single auth entry binds it.
+    let json = claim_as_json(&sign_claim(&payer_signer, 1, 500), &payer_signer);
+    session.send(claim_frame(2, &json)).await;
+    let answer = session.answer().await;
+    assert!(ack::from_protocol_data(&answer.protocol_data).is_none());
+}
+
+/// §1.5: frames processed **before** the role is bound are client frames
+/// and are never retroactively reclassified. The claim below arrives
+/// first, gets no ack (a client's claim is not judged in the peer
+/// namespace), and authenticating afterwards does not reach back and
+/// change that.
+#[tokio::test]
+async fn a_frame_before_auth_stays_a_client_frame_after_auth() {
+    let payer_signer = LocalSigner::generate("payer");
+    let state = carriage(payee(&payer_signer), bound_policy());
+    let mut session = accepting(Arc::clone(&state));
+    let json = claim_as_json(&sign_claim(&payer_signer, 1, 500), &payer_signer);
+
+    session.send(claim_frame(1, &json)).await;
+    let before = session.answer().await;
+    assert!(
+        ack::from_protocol_data(&before.protocol_data).is_none(),
+        "a pre-auth frame is a client frame"
+    );
+
+    session.send(auth_frame(2, PEER_ID, SECRET)).await;
+    let _ = session.answer().await;
+
+    // The pre-auth claim was never judged, so nonce 1 is still fresh --
+    // which is exactly what "not retroactively reclassified" means here.
+    session.send(claim_frame(3, &json)).await;
+    let after = session.answer().await;
+    assert_eq!(
+        ack::from_protocol_data(&after.protocol_data),
+        Some(ClaimAckOutcome::Accepted)
+    );
+}
+
+/// §1.10's bounded escape hatch: on a **dedicated peer listener with
+/// mandatory authentication** an interaction that fails P1 or P2 is
+/// refused outright rather than downgraded -- safe only because such a
+/// listener serves no clients. Role is still decided by P1 and P2; the
+/// listener never becomes the decider.
+#[tokio::test]
+async fn a_dedicated_peer_listener_refuses_rather_than_downgrades() {
+    let payer_signer = LocalSigner::generate("payer");
+    let state = Arc::new(PeerCarriageState::new(
+        payee(&payer_signer),
+        bound_policy(),
+        Arc::new(AcceptedClaims::new()),
+        PeerAcceptPolicy {
+            mandatory_auth: true,
+            ..PeerAcceptPolicy::default()
+        },
+    ));
+    let mut session = accepting(state);
+
+    session.send(auth_frame(1, PEER_ID, "wrong")).await;
+    let answer = session.answer().await;
+
+    assert_eq!(answer.frame_type, BTP_ERROR);
+    assert_eq!(
+        session.session.await.expect("the session task"),
+        SessionEnd::Refused
+    );
+}
+
+// ─── §5.1: minimum delivery ───
+
+/// §5.1: a malformed `toon-minimum-delivery` rejects the PREPARE `F01`
+/// and is **never** silently treated as zero -- zero is the weakest
+/// possible floor, and substituting it turns a framing bug into an
+/// under-delivery. The claim that rode the same frame is still
+/// acknowledged (§6.2).
+#[tokio::test]
+async fn a_malformed_minimum_delivery_rejects_f01_and_is_never_silently_zero() {
+    let payer_signer = LocalSigner::generate("payer");
+    let state = carriage(payee(&payer_signer), bound_policy());
+    let mut session = accepting(state);
+    session.send(auth_frame(1, PEER_ID, SECRET)).await;
+    let _ = session.answer().await;
+
+    let json = claim_as_json(&sign_claim(&payer_signer, 1, 500), &payer_signer);
+    session
+        .send(encode_message(
+            2,
+            &[
+                ProtocolData {
+                    name: CLAIM_PROTOCOL.to_string(),
+                    content_type: CONTENT_TYPE_TEXT,
+                    data: json.into_bytes(),
+                },
+                ProtocolData {
+                    name: connector_btp::MINIMUM_DELIVERY_PROTOCOL.to_string(),
+                    content_type: CONTENT_TYPE_TEXT,
+                    data: b"twelve".to_vec(),
+                },
+            ],
+            &prepare("g.nowhere").encode(),
+        ))
+        .await;
+    let answer = session.answer().await;
+
+    let reject = connector_domain::Reject::decode(&answer.ilp_packet).expect("a REJECT");
+    assert_eq!(reject.code.as_str(), "F01");
+    assert_eq!(
+        ack::from_protocol_data(&answer.protocol_data),
+        Some(ClaimAckOutcome::Accepted),
+        "the claim's verdict is independent of the packet's (§6.2)"
+    );
+}
+
+// ─── §6.1: the four reasons reach the wire ───
+
+/// A claim signed by somebody who is not the channel's configured
+/// counterparty is `signature_invalid`, and that verdict reaches the payer
+/// as §6.1's JSON.
+#[tokio::test]
+async fn a_claim_from_the_wrong_signer_is_acknowledged_signature_invalid() {
+    let payer_signer = LocalSigner::generate("payer");
+    let impostor = LocalSigner::generate("impostor");
+    let state = carriage(payee(&payer_signer), bound_policy());
+    let dialer = LoopbackDialer::new(state);
+    let transport = transport(Arc::clone(&dialer) as Arc<dyn PeerDialer>, &payer_signer);
+
+    let ack = transport
+        .flush(PEER_ID, sign_claim(&impostor, 1, 500))
+        .await;
+
+    assert_eq!(
+        ack,
+        ClaimAckOutcome::Rejected(ClaimRejectReason::SignatureInvalid)
+    );
+}
+
+/// A claim naming a channel this connector has no record of is
+/// `unknown_channel`.
+#[tokio::test]
+async fn a_claim_on_an_unconfigured_channel_is_acknowledged_unknown_channel() {
+    let payer_signer = LocalSigner::generate("payer");
+    let state = carriage(payee(&payer_signer), bound_policy());
+    let dialer = LoopbackDialer::new(state);
+    let transport = transport(Arc::clone(&dialer) as Arc<dyn PeerDialer>, &payer_signer);
+    let claim = WireClaim {
+        channel_id: format!("0x{:064x}", 99),
+        ..sign_claim(&payer_signer, 1, 500)
+    };
+
+    let ack = transport.flush(PEER_ID, claim).await;
+
+    assert_eq!(
+        ack,
+        ClaimAckOutcome::Rejected(ClaimRejectReason::UnknownChannel)
+    );
+}
+
+// ─── §7.1: ordering ───
+
+/// §7.1: claims on one session are judged **strictly sequentially, in
+/// arrival order**, so claims sent in order on one socket cannot race each
+/// other into `nonce_not_advancing`. Sixteen advancing claims are sent
+/// back to back without waiting for any answer; every one is accepted.
+#[tokio::test]
+async fn claims_sent_in_order_on_one_session_never_race_each_other() {
+    let payer_signer = LocalSigner::generate("payer");
+    let state = carriage(payee(&payer_signer), bound_policy());
+    let mut session = accepting(state);
+    session.send(auth_frame(1, PEER_ID, SECRET)).await;
+    let _ = session.answer().await;
+
+    for nonce in 1..=16u64 {
+        let json = claim_as_json(
+            &sign_claim(&payer_signer, nonce, nonce * 100),
+            &payer_signer,
+        );
+        session
+            .send(encode_message(
+                nonce as u32 + 1,
+                &[ProtocolData {
+                    name: CLAIM_PROTOCOL.to_string(),
+                    content_type: CONTENT_TYPE_TEXT,
+                    data: json.into_bytes(),
+                }],
+                &[],
+            ))
+            .await;
+    }
+
+    for _ in 1..=16 {
+        let answer = session.answer().await;
+        assert_eq!(
+            ack::from_protocol_data(&answer.protocol_data),
+            Some(ClaimAckOutcome::Accepted)
+        );
+    }
+}
+
+// ─── §1.7: a client's peer-shaped bytes ───
+
+/// §1.7/§12(5): a client interaction's `toon-minimum-delivery` is
+/// **ignored** -- not rejected and not applied -- so a client SDK that
+/// sets an unrecognised entry is not broken by a peer feature and no error
+/// message discloses the peer surface. A malformed one on a client frame
+/// is therefore not an `F01` either.
+#[tokio::test]
+async fn a_client_interactions_peer_shaped_bytes_are_ignored_not_refused() {
+    let payer_signer = LocalSigner::generate("payer");
+    let state = carriage(payee(&payer_signer), bound_policy());
+    let mut session = accepting(state);
+
+    session
+        .send(encode_message(
+            1,
+            &[ProtocolData {
+                name: connector_btp::MINIMUM_DELIVERY_PROTOCOL.to_string(),
+                content_type: CONTENT_TYPE_TEXT,
+                data: b"twelve".to_vec(),
+            }],
+            &prepare("g.nowhere").encode(),
+        ))
+        .await;
+    let answer = session.answer().await;
+
+    let reject = connector_domain::Reject::decode(&answer.ilp_packet).expect("a REJECT");
+    assert_ne!(
+        reject.code.as_str(),
+        "F01",
+        "a client's minimum-delivery is ignored, never refused"
+    );
+    assert!(ack::from_protocol_data(&answer.protocol_data).is_none());
+}
+
+// ─── §2.3: BTP is symmetric once established ───
+
+/// §2.3: after auth either side may originate on the one session -- the
+/// whole of the difference between the two carriages, and why BTP needs no
+/// `Toon-Flush-Requested` analogue (§6.4). The accepting side's handle
+/// originates a MESSAGE and the dialing side answers it.
+#[tokio::test]
+async fn the_accepting_side_can_originate_on_the_session_it_accepted() {
+    let payer_signer = LocalSigner::generate("payer");
+    let state = carriage(payee(&payer_signer), bound_policy());
+    let (frames, frames_rx) = mpsc::channel::<Vec<u8>>(32);
+    let (replies, mut answers) = mpsc::channel::<Vec<u8>>(32);
+    let session = PeerSession::new(state, replies);
+    let handle = session.handle();
+    let driver = tokio::spawn(session.run(frames_rx));
+
+    let counterparty = tokio::spawn(async move {
+        let bytes = answers.recv().await.expect("the originated MESSAGE");
+        let frame = decode_frame(&bytes).expect("our own encoder");
+        assert_eq!(frame.frame_type, connector_btp::BTP_MESSAGE);
+        frames
+            .send(encode_response(frame.request_id, &[], b"answered"))
+            .await
+            .expect("the session is live");
+    });
+
+    let answer = handle
+        .send_message(&[], &[])
+        .await
+        .expect("the counterparty answered");
+
+    assert_eq!(answer.ilp_packet, b"answered".to_vec());
+    counterparty.await.expect("the counterparty task");
+    drop(driver);
+}
+
+// ─── §6.3, §11: the load-time warning #723 handed off ───
+
+/// §6.3's SHOULD, warned where a subscriber exists: `connector-config` has
+/// no logging seam, so it exposed both values and left the warning to a
+/// carriage.
+#[test]
+fn a_claim_ack_timeout_outliving_the_flush_interval_warns() {
+    assert!(connector_peer_btp::warn_if_claim_ack_outlives(
+        PEER_ID, 30_000, 5_000
+    ));
+    assert!(!connector_peer_btp::warn_if_claim_ack_outlives(
+        PEER_ID, 5_000, 30_000
+    ));
+    assert!(
+        !connector_peer_btp::warn_if_claim_ack_outlives(PEER_ID, 5_000, 5_000),
+        "equal is the SHOULD satisfied, not violated"
+    );
+}
+
+// ─── the port's own contract (spec I5) ───
+
+/// Establishing that nothing above the port can tell which carriage
+/// delivered a packet: the `PeerTransport` contract statements, restated
+/// against the BTP carriage. A registered peer's own answer comes back
+/// unchanged, and an unregistered peer id produces `T01` with
+/// `reached == false`.
+#[tokio::test]
+async fn the_btp_carriage_upholds_the_peer_transport_contract() {
+    let payer_signer = LocalSigner::generate("payer");
+    let state = carriage(payee(&payer_signer), bound_policy());
+    let dialer = LoopbackDialer::new(state);
+    let transport = transport(Arc::clone(&dialer) as Arc<dyn PeerDialer>, &payer_signer);
+
+    let (response, _ack, reached) = transport
+        .forward(PEER_ID, prepare("g.nowhere-on-the-peer"), 0, None)
+        .await;
+    match response {
+        PacketResponse::Reject(reject) => {
+            assert_eq!(reject.code.as_str(), "F02");
+            assert!(reject.message.contains("g.nowhere-on-the-peer"));
+        }
+        other => panic!("expected the peer's own reject, got {other:?}"),
+    }
+    assert!(reached);
+
+    let (response, ack, reached) = transport
+        .forward("unregistered", prepare("g.anything"), 0, None)
+        .await;
+    match response {
+        PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "T01"),
+        other => panic!("expected T01, got {other:?}"),
+    }
+    assert_eq!(ack, ClaimAckOutcome::NotSent);
+    assert!(!reached);
+}
+
+/// A dialed session is established once and reused: eight concurrent
+/// forwards to one peer do not open eight sessions.
+#[tokio::test]
+async fn concurrent_forwards_share_one_dialed_session() {
+    let payer_signer = LocalSigner::generate("payer");
+    let state = carriage(payee(&payer_signer), bound_policy());
+    let dialer = LoopbackDialer::new(state);
+    let transport = Arc::new(transport(
+        Arc::clone(&dialer) as Arc<dyn PeerDialer>,
+        &payer_signer,
+    ));
+
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let transport = Arc::clone(&transport);
+        handles.push(tokio::spawn(async move {
+            transport
+                .forward(PEER_ID, prepare("g.nowhere"), 0, None)
+                .await
+        }));
+    }
+    for handle in handles {
+        let (response, _, reached) = handle.await.expect("task");
+        assert!(matches!(response, PacketResponse::Reject(_)));
+        assert!(reached);
+    }
+
+    let sent = dialer.sent.lock().expect("sent frames lock").clone();
+    let auth_frames = sent
+        .iter()
+        .filter(|frame| {
+            frame
+                .protocol_data
+                .iter()
+                .any(|pd| pd.name == AUTH_PROTOCOL)
+        })
+        .count();
+    assert_eq!(auth_frames, 1, "one session, authenticated once");
+}
+
+/// A signature is 65 bytes and its recovery id rides raw (§4.2) -- proved
+/// here against a claim that actually verifies at the far end, so the
+/// byte layout is not merely asserted but *used*.
+#[test]
+fn a_signed_claim_carries_a_65_byte_signature() {
+    let payer_signer = LocalSigner::generate("payer");
+    let claim = sign_claim(&payer_signer, 1, 500);
+    let Signature { recovery_id, .. } = claim.signature;
+
+    assert_eq!(claim.signature.to_bytes().len(), 65);
+    assert!(
+        recovery_id <= 1,
+        "libsecp256k1's {{0, 1}}, never {{27, 28}}"
+    );
+}
