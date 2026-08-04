@@ -672,9 +672,16 @@ A second carriage for exactly the pipeline §1.1–§1.6 specify over HTTP: one 
 streaming many paid writes advances its claim nonces on one socket in one order instead of racing
 parallel HTTP requests. Nothing here changes what is validated or charged — the same claim gate
 instance, watermarks, journal and refusal taxonomy serve both carriages, and a write that arrived
-over BTP is indistinguishable downstream from one that arrived over HTTP. Peers do NOT use this
-transport: connector↔connector traffic stays on the peer wire (`docs/protocol/peer-wire-spec.md`),
-so every BTP session is a client session by construction (ADR 0026).
+over BTP is indistinguishable downstream from one that arrived over HTTP.
+
+**Peer sessions (ADR 0027).** This section previously stated that peers do not use this transport,
+so every BTP session was a client session by construction (ADR 0026). ADR 0027 reverses that: the
+raw-TCP peer wire is deleted and connectors peer over BTP on the same codec. A session is a **peer**
+session only if it presented a credential configured in `[[peers]]` _and_ has a `[[peer_channels]]`
+binding; anything else is a client session, with no fallthrough, and everything below in this section
+describes client sessions exactly as before. The peer sub-protocol entries — `claim-ack` and
+`toon-minimum-delivery` beside the `payment-channel-claim` and `toon-accumulated-cost` entries this
+section already defines — are specified for the peer direction, not here.
 
 - **Method/path:** `GET /ilp/btp`, websocket upgrade. The `btp` subprotocol is selected when
   offered; an upgrade offering no subprotocol is accepted identically.
