@@ -681,7 +681,14 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     let peer_routes = config
         .peer_routes()
         .iter()
-        .map(|route| PeerRoute::new(route.prefix(), route.peer_id(), route.fee()))
+        // ADR 0028: a forwarded route carries the client-edge `price` its
+        // config entry names, alongside the `fee` this hop retains. Built
+        // with `new_priced` rather than `new` so a route that loses its
+        // price on the way into the runtime is a compile error, not a
+        // silently free gateway.
+        .map(|route| {
+            PeerRoute::new_priced(route.prefix(), route.peer_id(), route.fee(), route.price())
+        })
         .collect();
     let mut connector = Connector::new(
         config.routes().to_vec(),

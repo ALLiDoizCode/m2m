@@ -204,13 +204,57 @@ fn correlation_id(execution_condition: &[u8; 32]) -> String {
         .collect()
 }
 
-/// An app route's price and transport policy together, as
-/// [`Connector::app_route`] returns them from a single route lookup (issue
-/// #701).
+/// Which of the two configured route kinds matched, as
+/// [`Connector::select_configured_route`] resolves it -- the subset of
+/// [`RouteTarget`] that exists in configuration, so a caller reading
+/// configured routes alone (the client edge) needs no arm for a leased
+/// route it can never be handed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AppRouteFacts {
+enum ConfiguredTarget {
+    App(usize),
+    Peer(usize),
+}
+
+impl ConfiguredTarget {
+    fn as_route_target(self) -> RouteTarget {
+        match self {
+            ConfiguredTarget::App(index) => RouteTarget::App(index),
+            ConfiguredTarget::Peer(index) => RouteTarget::Peer(index),
+        }
+    }
+
+    /// The same tie-break [`RouteTarget::priority`] applies, read off the
+    /// same table rather than restated, so configured-route precedence
+    /// cannot drift between the router and the client edge.
+    fn priority(self) -> u8 {
+        self.as_route_target().priority()
+    }
+}
+
+/// Whether the route a client's destination resolves to terminates at this
+/// connector's own app or forwards over a peering (ADR 0028). The client
+/// edge charges both identically; it needs the distinction only for the
+/// two rules that genuinely differ -- a forwarded route applies no
+/// transport policy, and a priced forwarded route bounds the amount it will
+/// carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientRouteKind {
+    /// A `handler_url` route: `price` buys the app's work (issue #520).
+    Terminated,
+    /// A `peer_id` route: `price` buys the whole path, of which this hop
+    /// retains `fee` (ADR 0028).
+    Forwarded,
+}
+
+/// What the client edge needs to know about the configured route a
+/// destination resolves to, from a single lookup (issue #701, ADR 0028):
+/// the price to greet and charge, the transport policy to enforce, and
+/// which kind of route answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientRouteFacts {
     pub price: u64,
     pub transport_policy: TransportPolicy,
+    pub kind: ClientRouteKind,
 }
 
 /// The connector's packet plane: a fixed set of terminated routes and peer
@@ -700,6 +744,17 @@ impl Connector {
     /// which is exactly the figure a real request would be charged and, for
     /// a local termination, the whole path cost: no hop was traversed to
     /// reach it.
+    ///
+    /// A destination that *forwards* from here under a price (ADR 0028) is
+    /// answered the same way, for both of the same reasons. The figure is
+    /// the whole of what a real request would be charged at this edge and
+    /// is known locally, so traversing to discover it would discover
+    /// nothing; and a probe that traversed would make this connector
+    /// forward the packet, sign a peer claim for the value it carried, and
+    /// be paid nothing for it -- free traversal turned into free carriage.
+    /// An unpriced forwarded route (`price = 0`, an operator's deliberate
+    /// free carriage) still traverses and accumulates fees, which is ADR
+    /// 0011's mechanism unchanged.
     pub async fn handle_probe(
         &self,
         channel_id: &str,
@@ -712,17 +767,28 @@ impl Connector {
         if !self.probe_rate_limiter.allow(channel_id, self.clock.now()) {
             return Err(ProbeDenied::RateLimited);
         }
-        if let Some(price) = self.app_route_price(&prepare.destination) {
-            return Ok(PacketResponse::Reject(Reject {
-                code: RejectCode::f03_invalid_amount(),
-                triggered_by: String::new(),
-                message: format!(
-                    "probe: '{}' terminates at this connector and costs {price}",
-                    prepare.destination
-                ),
-                data: Vec::new(),
-                accumulated_cost: price,
-            }));
+        if let Some(route) = self.client_route(&prepare.destination) {
+            let answer_here = match route.kind {
+                ClientRouteKind::Terminated => true,
+                ClientRouteKind::Forwarded => route.price > 0,
+            };
+            if answer_here {
+                let price = route.price;
+                let disposition = match route.kind {
+                    ClientRouteKind::Terminated => "terminates at this connector",
+                    ClientRouteKind::Forwarded => "forwards from this connector",
+                };
+                return Ok(PacketResponse::Reject(Reject {
+                    code: RejectCode::f03_invalid_amount(),
+                    triggered_by: String::new(),
+                    message: format!(
+                        "probe: '{}' {disposition} and costs {price}",
+                        prepare.destination
+                    ),
+                    data: Vec::new(),
+                    accumulated_cost: price,
+                }));
+            }
         }
         Ok(self.handle_prepare(prepare, minimum_delivery).await)
     }
@@ -781,18 +847,15 @@ impl Connector {
             .filter(|route| !is_expired(route.expires_at(), now))
             .collect();
 
-        let peer_prefixes: Vec<&str> = self.peer_routes.iter().map(PeerRoute::prefix).collect();
         let leased_prefixes: Vec<&str> = active_leased.iter().map(|route| route.prefix()).collect();
 
-        let app_match = self
-            .select_app_route(&prepare.destination)
-            .map(|index| (self.routes[index].prefix().len(), RouteTarget::App(index)));
-        let peer_match = select_route(&prepare.destination, &peer_prefixes).map(|index| {
-            (
-                self.peer_routes[index].prefix().len(),
-                RouteTarget::Peer(index),
-            )
-        });
+        // Configured routes -- terminated and forwarded -- are selected by
+        // the same method the client edge's own price lookup calls (ADR
+        // 0028), so what a packet is charged and where it is then sent can
+        // never come from two different answers to the same question.
+        let configured_match = self
+            .select_configured_route(&prepare.destination)
+            .map(|(len, target)| (len, target.as_route_target()));
         let leased_match = select_route(&prepare.destination, &leased_prefixes).map(|index| {
             (
                 active_leased[index].prefix().len(),
@@ -800,7 +863,7 @@ impl Connector {
             )
         });
 
-        let Some((_, target)) = [app_match, peer_match, leased_match]
+        let Some((_, target)) = [configured_match, leased_match]
             .into_iter()
             .flatten()
             .max_by_key(|(len, target)| (*len, target.priority()))
@@ -1057,39 +1120,78 @@ impl Connector {
     }
 
     /// The index into `self.routes` that `destination` longest-prefix
-    /// matches against, if any -- the one place app-route selection lives,
-    /// shared by [`Self::handle_prepare_traced`] and [`Self::app_route_price`]
-    /// so the client edge's claim gate (issue #522) asks here rather than
-    /// keeping a second copy of this selection.
+    /// matches against, if any.
     fn select_app_route(&self, destination: &str) -> Option<usize> {
         let app_prefixes: Vec<&str> = self.routes.iter().map(StaticRoute::prefix).collect();
         select_route(destination, &app_prefixes)
     }
 
-    /// The price of the app route `destination` would resolve to, or
-    /// `None` if no app route matches it.
-    pub fn app_route_price(&self, destination: &str) -> Option<u64> {
-        self.select_app_route(destination)
-            .map(|index| self.routes[index].price())
+    /// The configured route -- terminated or forwarded -- `destination`
+    /// longest-prefix matches, with the length of the prefix that matched.
+    ///
+    /// The one place configured-route selection lives, shared by
+    /// [`Self::handle_prepare_traced`] (which then weighs a leased route
+    /// against the answer) and [`Self::client_route`] (which does not, ADR
+    /// 0028). That sharing is the point: the client edge's claim gate
+    /// (issue #522) and x402 greeting must price the route the router will
+    /// actually use, and a forwarded route being priced at all (issue #620)
+    /// makes "app routes only" no longer a safe simplification for either.
+    fn select_configured_route(&self, destination: &str) -> Option<(usize, ConfiguredTarget)> {
+        let app_match = self.select_app_route(destination).map(|index| {
+            (
+                self.routes[index].prefix().len(),
+                ConfiguredTarget::App(index),
+            )
+        });
+        let peer_prefixes: Vec<&str> = self.peer_routes.iter().map(PeerRoute::prefix).collect();
+        let peer_match = select_route(destination, &peer_prefixes).map(|index| {
+            (
+                self.peer_routes[index].prefix().len(),
+                ConfiguredTarget::Peer(index),
+            )
+        });
+        [app_match, peer_match]
+            .into_iter()
+            .flatten()
+            .max_by_key(|(len, target)| (*len, target.priority()))
     }
 
-    /// The transport policy of the app route `destination` would resolve
-    /// to, or `None` if no app route matches it.
-    pub fn app_route_transport_policy(&self, destination: &str) -> Option<TransportPolicy> {
-        self.select_app_route(destination)
-            .map(|index| self.routes[index].transport_policy())
-    }
-
-    /// Price and transport policy together, from one `select_app_route`
-    /// lookup, or `None` if no app route matches `destination` -- the client
-    /// edge's two carriages need both facts per request (issue #701) and
-    /// would otherwise pay the prefix scan twice, once per accessor above.
-    pub fn app_route(&self, destination: &str) -> Option<AppRouteFacts> {
-        self.select_app_route(destination)
-            .map(|index| AppRouteFacts {
-                price: self.routes[index].price(),
-                transport_policy: self.routes[index].transport_policy(),
+    /// Price, transport policy and route kind for the configured route
+    /// `destination` resolves to (ADR 0028), or `None` when no configured
+    /// route matches -- the single lookup both client-edge carriages make
+    /// per request, so the greeting, the claim gate, the journal and
+    /// `GET /ilp/routes/price` all charge one number.
+    ///
+    /// A forwarded route reports [`TransportPolicy::Both`]: `transport` is
+    /// refused on such a route at load, so it accepts a client's request
+    /// over either carriage, which is what every route did before issue
+    /// #701.
+    ///
+    /// Leased routes (issue #427) are deliberately absent. A lease is
+    /// pushed over the operator surface and carries no price, so folding
+    /// one in here would let an operator-pushed longer-prefix lease zero a
+    /// configured route's price -- the free-gateway failure issue #557
+    /// exists to prevent, arrived at from the other direction.
+    pub fn client_route(&self, destination: &str) -> Option<ClientRouteFacts> {
+        self.select_configured_route(destination)
+            .map(|(_, target)| match target {
+                ConfiguredTarget::App(index) => ClientRouteFacts {
+                    price: self.routes[index].price(),
+                    transport_policy: self.routes[index].transport_policy(),
+                    kind: ClientRouteKind::Terminated,
+                },
+                ConfiguredTarget::Peer(index) => ClientRouteFacts {
+                    price: self.peer_routes[index].price(),
+                    transport_policy: TransportPolicy::Both,
+                    kind: ClientRouteKind::Forwarded,
+                },
             })
+    }
+
+    /// [`Self::client_route`]'s price alone, for a caller with no use for
+    /// the rest.
+    pub fn client_route_price(&self, destination: &str) -> Option<u64> {
+        self.client_route(destination).map(|route| route.price)
     }
 
     /// This node's static routes, for the operator surface's read-only
@@ -2021,21 +2123,70 @@ mod tests {
     }
 
     #[test]
-    fn app_route_price_reports_the_matched_routes_price() {
+    fn client_route_price_reports_the_matched_routes_price() {
         let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
         let app_client = Arc::new(FakeAppClient::new());
         let clock = test_clock();
         let connector = connector_with(vec![route], app_client, clock);
 
-        assert_eq!(connector.app_route_price("g.example.app"), Some(25));
-        assert_eq!(connector.app_route_price("g.example.app.sub"), Some(25));
-        assert_eq!(connector.app_route_price("g.nowhere"), None);
+        assert_eq!(connector.client_route_price("g.example.app"), Some(25));
+        assert_eq!(connector.client_route_price("g.example.app.sub"), Some(25));
+        assert_eq!(connector.client_route_price("g.nowhere"), None);
     }
 
-    /// Issue #701: the client edge's two carriages ask
-    /// `app_route_transport_policy` the same way they already ask
-    /// `app_route_price`, so it needs the same longest-prefix matching and
-    /// the same `None`-for-unmatched behavior.
+    /// ADR 0028: the same lookup answers for a route that *forwards* over a
+    /// peering, with that route's own `price` -- the whole of what makes a
+    /// forwarded destination greetable and chargeable at the client edge.
+    /// Its `fee` is deliberately a different number here, so a lookup that
+    /// reached for the fee instead would fail rather than coincide.
+    #[test]
+    fn client_route_price_reports_a_forwarded_routes_price_not_its_fee() {
+        let app_client = Arc::new(FakeAppClient::new());
+        let connector = Connector::new(
+            vec![],
+            vec![PeerRoute::new_priced("g.example.store", "store", 3, 100)],
+            app_client,
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        );
+
+        let facts = connector
+            .client_route("g.example.store.sub")
+            .expect("a forwarded route answers the client-edge lookup");
+        assert_eq!(facts.price, 100);
+        assert_eq!(facts.kind, ClientRouteKind::Forwarded);
+        // A forwarded route applies no transport policy: it accepts a
+        // client's request over either carriage.
+        assert_eq!(facts.transport_policy, TransportPolicy::Both);
+        assert_eq!(connector.client_route_price("g.nowhere"), None);
+    }
+
+    /// The client edge must price the route the router will actually use.
+    /// A longer forwarded prefix beneath a terminated one is the case where
+    /// asking only about app routes -- what this lookup used to do -- would
+    /// charge the app's price and then forward the packet over the peering.
+    #[test]
+    fn client_route_prices_the_route_the_router_would_choose() {
+        let app_client = Arc::new(FakeAppClient::new());
+        let connector = Connector::new(
+            vec![StaticRoute::new_priced("g.example", "http://localhost:4000", 25).unwrap()],
+            vec![PeerRoute::new_priced("g.example.store", "store", 3, 100)],
+            app_client,
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        );
+
+        assert_eq!(connector.client_route_price("g.example.relay"), Some(25));
+        assert_eq!(connector.client_route_price("g.example.store"), Some(100));
+        assert_eq!(
+            connector.client_route_price("g.example.store.sub"),
+            Some(100)
+        );
+    }
+
+    /// Issue #701: the client edge's two carriages read a transport policy
+    /// off the same lookup they read a price off, so it needs the same
+    /// longest-prefix matching and the same `None`-for-unmatched behavior.
     #[test]
     fn app_route_transport_policy_reports_the_matched_routes_policy() {
         let route = StaticRoute::new_priced_with_transport(
@@ -2050,14 +2201,23 @@ mod tests {
         let connector = connector_with(vec![route], app_client, clock);
 
         assert_eq!(
-            connector.app_route_transport_policy("g.example.relay"),
+            connector
+                .client_route("g.example.relay")
+                .map(|route| route.transport_policy),
             Some(TransportPolicy::Btp)
         );
         assert_eq!(
-            connector.app_route_transport_policy("g.example.relay.sub"),
+            connector
+                .client_route("g.example.relay.sub")
+                .map(|route| route.transport_policy),
             Some(TransportPolicy::Btp)
         );
-        assert_eq!(connector.app_route_transport_policy("g.nowhere"), None);
+        assert_eq!(
+            connector
+                .client_route("g.nowhere")
+                .map(|route| route.transport_policy),
+            None
+        );
     }
 
     /// A route that never set `transport` reports the default -- both
@@ -2070,7 +2230,9 @@ mod tests {
         let connector = connector_with(vec![route], app_client, clock);
 
         assert_eq!(
-            connector.app_route_transport_policy("g.example.app"),
+            connector
+                .client_route("g.example.app")
+                .map(|route| route.transport_policy),
             Some(TransportPolicy::Both)
         );
     }
