@@ -246,7 +246,7 @@ selfAnnounce:
   refreshIntervalSecs: 300
   # Public-facing endpoints for the STORE box (TLS terminated by the env, so the
   # connector can't infer them).
-  btpEndpoint: wss://proxy.store.devnet.toonprotocol.dev:443
+  btpEndpoint: wss://proxy.store.devnet.toonprotocol.dev/ilp/btp
   httpEndpoint: https://proxy.store.devnet.toonprotocol.dev/ilp
   relayUrl: wss://relay-ws.devnet.toonprotocol.dev
   assetCode: USDC
