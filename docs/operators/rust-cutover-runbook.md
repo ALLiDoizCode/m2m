@@ -500,7 +500,7 @@ from their `.bak.<UTC>` copies if they were edited.
 The image must still be pullable — step 3 records the digest before anything is deleted. The store
 box's connector holds no durable state beyond its config; the apex's TS connector's channel state
 is the one thing to check before stage 12 — **do not remove it while it holds unredeemed claims.**
-Verify with the admin API before the metrics block is deleted.
+Verify with the admin API before stage 12 removes the container.
 
 **Announcer rollback:** revert the env in `docker-compose.node.announcer.yml` and recreate. Stale
 announces self-expire in 600s.
@@ -526,7 +526,7 @@ announces self-expire in 600s.
 - [ ] The loss of `X-TOON-*` attribution is recorded against #535 with this date.
 - [ ] Follow-up ticket filed for a real `GET /ilp/health` on the Rust client edge.
 
-## Relationship to #714
+## 10. Relationship to #714
 
 This document does not change #714's decision to retire the TypeScript connectors — it turns that
 decision into exact edits, exact verification and exact rollback for two specific boxes as they
