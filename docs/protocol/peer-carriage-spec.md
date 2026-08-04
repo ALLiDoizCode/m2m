@@ -705,9 +705,13 @@ the envelope's `target` beneath the route's handler path (ADR 0025). That the pa
 peer rather than from a client changes **nothing** about any of it — including the fact that the app
 supplies no preimage and there is no `TOON-Fulfillment` response header.
 
-The one thing the peer arrival _does_ change is accounting, and it is already specified: the
-terminating connector's REJECT carries that route's configured price as `accumulatedCost`
-(`peer-wire-spec.md` §5.2), and the peer hop that forwarded to it adds its own fee on the way back.
+The one thing the peer arrival _does_ change is accounting. Before any of the above happens, the
+terminating connector checks that the PREPARE's own `amount` covers that route's `price`
+(`peer-wire-spec.md` §5.4, issue #752); an arrival that does not is refused `F03` with
+`accumulatedCost = 0` and the wrap is never opened. An arrival that clears that check is delivered
+exactly as described above, and if the termination itself then rejects it, the REJECT carries that
+route's configured price as `accumulatedCost` (`peer-wire-spec.md` §5.2); the peer hop that
+forwarded to it adds its own fee on the way back.
 
 ### 8.3 The layering invariant
 

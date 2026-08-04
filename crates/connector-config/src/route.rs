@@ -244,9 +244,10 @@ impl StaticRoute {
 
     /// The flat price a claim must advance by to pay for this route (issue
     /// #520). Never emitted to a client -- ADR 0006 keeps this connector
-    /// mechanism, not a discovery source. Charging it against a claim is
-    /// out of scope for this ticket; the value is only loaded and read
-    /// back here.
+    /// mechanism, not a discovery source. Charged against a client-edge
+    /// claim (issue #522) and, since issue #752, checked against a
+    /// peer-wire arrival's own `amount` before it is delivered
+    /// (`Connector::handle_peer_prepare`).
     pub fn price(&self) -> u64 {
         self.price
     }

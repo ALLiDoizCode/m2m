@@ -88,11 +88,12 @@ answer a **peer-role** PREPARE with the x402 greeting. Everything above is the _
 direction of the same node. Peer fees remain bilateral configuration, never a negotiation, and a
 peer-role arrival is priced by the claim exchange of `peer-wire-spec.md` §3, not by a 402.
 
-**Charging for a peer-wire arrival at the terminating connector** — issue #620's second gap —
-remains open. A connector whose priced _terminated_ route is reached over the peer wire still
-serves it without charging; only the client edge charges. This decision makes the first hop's
-client leg payable, which is what a client-facing deployment needs, and leaves the terminating
-side to its own change.
+**Charging for a peer-wire arrival at the terminating connector** — issue #620's second gap — was
+left open here. This decision made the first hop's client leg payable, which is what a
+client-facing deployment needs, and left the terminating side to its own change.
+[ADR 0029](0029-a-peer-wire-arrival-to-a-priced-termination-must-cover-its-price.md) (issue #752)
+closes it: a peer-role PREPARE reaching a priced terminated route is now refused per packet,
+before the app is consulted, when its `amount` does not cover that route's price.
 
 **Leased routes (issue #427) stay unpriced at the client edge.** `client_route` reads the
 configured table only. A lease is pushed over the bearer-gated operator surface and its API

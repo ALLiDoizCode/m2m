@@ -218,13 +218,15 @@ shape wants a real apex↔store peer link, gated on:
 - **#732** — peer claims are EVM-only while production peering settles on `solana:devnet`
   (`crates/connector-peer-btp/src/claim_json.rs:191` returns `UnsupportedChain("solana")`);
   explicitly blocks #714.
-- **#620** — half closed. A `peer_id` route now carries its own client-edge `price` and is
+- **#620** — closed. A `peer_id` route now carries its own client-edge `price` and is
   greeted, claim-gated and journaled exactly as a terminating route is ([ADR
   0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md)), so a forwarded
   `g.toon.store` is no longer a free-write lane and config load refuses one that omits the price.
-  Still open on the far side: a terminating connector does not charge its `price` for a peer-wire
-  arrival, so the store box would serve an apex-forwarded packet for free unless the apex's
-  `price` covers the whole path — which it can, and which is the operator's number to set.
+  The far side's own gap — a terminating connector not charging its `price` for a peer-wire
+  arrival — is closed by #752 / [ADR
+  0029](../adr/0029-a-peer-wire-arrival-to-a-priced-termination-must-cover-its-price.md): the
+  store box now refuses an apex-forwarded packet whose `amount` does not cover its own `price`,
+  rather than depending on the apex's `price` alone to cover the whole path.
 - **#678** — the bring-up itself, still open.
 
 **Shape B — no peer link at all.** The apex's **live** `connector-rust.toml` has **no
