@@ -867,6 +867,7 @@ token_network = "{PEER_TOKEN_NETWORK}"
 prefix = "g.example.store"
 peer_id = "store"
 fee = 3
+price = 1000
 "#,
             state_dir = state_dir.display(),
             key_file = key_path.display(),
@@ -1386,6 +1387,7 @@ key_file = "{}"
 [[routes]]
 prefix = "g.peer-b"
 peer_id = "peer-b"
+price = 1000
 "#,
                 key_path.display()
             )
@@ -1978,6 +1980,7 @@ price = 100
 prefix = "g.example.store"
 peer_id = "store"
 fee = 3
+price = 1000
 
 [[children]]
 name = "child"

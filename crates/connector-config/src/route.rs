@@ -164,7 +164,8 @@ impl std::str::FromStr for TransportPolicy {
 /// `prefix` are delivered to the app at `handler_url`, which charges
 /// `price` for the work it does -- distinct from a peer route's `fee`,
 /// which buys carriage rather than the terminating app's work (issue
-/// #520). A route is never silently free: [`resolve_routes`] refuses to
+/// #520). A peer route has a `price` of its own (ADR 0028), meaning the
+/// same client-facing thing this one does. A route is never silently free: [`resolve_routes`] refuses to
 /// return one with no configured price, so `price == 0` always means the
 /// operator wrote it deliberately.
 ///
@@ -1069,9 +1070,11 @@ mod tests {
         ));
     }
 
-    /// Mirror image of `PeerRouteHasPrice`: a peer route has no client
-    /// transport to restrict, so writing one is refused rather than
-    /// silently ignored (issue #556's principle, applied by issue #701).
+    /// A peer route's `transport` is refused rather than silently ignored
+    /// (issue #556's principle, applied by issue #701). ADR 0028 changed
+    /// why, not whether: such a route *is* reached over a client transport
+    /// now, so the field is no longer meaningless -- it is simply not
+    /// applied to a forwarded route, which accepts both.
     #[test]
     fn a_peer_route_that_sets_a_transport_is_rejected_rather_than_ignored() {
         let result = resolve_routes(

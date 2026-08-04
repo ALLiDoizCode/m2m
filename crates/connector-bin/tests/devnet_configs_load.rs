@@ -515,10 +515,14 @@ async fn the_apex_relay_side_devnet_config_loads_and_serves_verbatim() {
     // The store leg (#600): `g.toon.ario` -- the destination the TS fleet's
     // kind:10032 announce names as `routes.store`, i.e. what rig actually
     // dials -- and this fleet's own `g.toon.store` alias are BOTH priced,
-    // claim-gated terminated routes on this apex. A peer-forwarded route
-    // would greet nothing and charge nothing (the free-gateway gap #620
-    // tracks), so these greetings are the regression guard that the store
-    // leg stays on the paid path.
+    // claim-gated terminated routes on this apex.
+    //
+    // These greetings are the regression guard that the store leg stays on
+    // the paid path, and since ADR 0028 they are no longer a guard against
+    // repointing it at a peering: a `peer_id` route carries a `price` of
+    // its own now, is greeted from the same lookup, and cannot load
+    // without one. What this still catches is a route that loses its
+    // price, whichever kind it is.
     assert_answered_with_x402_greeting(
         &connector.client_edge_addr,
         "g.toon.ario",
@@ -546,10 +550,13 @@ async fn the_store_side_devnet_config_loads_and_serves_verbatim() {
 
     // No peer wire: this node accepts no inbound peer connection and dials
     // no peer, so only the client edge comes up. ADR 0003's raw-TCP wire
-    // cannot carry the public inter-node link this fleet needs (#623) and a
-    // peer-forwarded route is unpriced on both sides (#620), so the file
-    // configures neither -- see its header. When the inter-connector
-    // transport decision lands, this is the assertion that changes.
+    // cannot carry the public inter-node link this fleet needs (#623), so
+    // the file configures neither -- see its header. (A peer-forwarded
+    // route being unpriced on both sides was the file's other stated
+    // reason; ADR 0028 removed it, and #678 wired the carriages, so what
+    // remains is a deployment decision rather than a missing mechanism.)
+    // When the inter-connector transport decision lands, this is the
+    // assertion that changes.
     // Line-anchored, like the `chain = ` check further down: the header is
     // free to *name* `peer_wire_addr` while explaining at length why it is
     // gone, so only an actual uncommented assignment counts.

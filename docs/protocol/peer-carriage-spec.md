@@ -356,6 +356,17 @@ additively extensible) and MUST NOT be emitted.
   §4), not a negotiation, and `requiredTransport` (issue #701) is a client-edge route policy with
   no peer analogue.
 
+  This survives [ADR
+  0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md) unchanged, and the
+  distinction is worth stating because that ADR looks at first like it contradicts this rule. A
+  `[[routes]]` entry naming a `peer_id` now carries a `price`, and a **client-role** PREPARE to
+  it is greeted, claim-gated and journaled exactly as one to a terminated route is (issue #620).
+  That is the client-facing direction of the same node. A **peer-role** PREPARE arriving over
+  either carriage is still answered by nothing of the sort: it is priced by the claim exchange of
+  §4 and `peer-wire-spec.md` §3, and a connector that greeted it would be inventing a negotiation
+  where a bilateral agreement already exists. The route's `price` is a fact about this node's
+  client edge; its `fee` is the fact its peers agreed to.
+
 ### 3.2 The `WireClaim` binary encoding is not used on either carriage
 
 `connector_runtime::WireClaim::encode`'s length-prefixed binary form was the deleted peer wire's ad

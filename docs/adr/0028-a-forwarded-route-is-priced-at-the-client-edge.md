@@ -19,7 +19,7 @@ for.
 
 That is why the devnet's store leg was terminated at the apex over a private segment (issue #600)
 instead of being routed to the store box's own connector: repointing `g.toon.store` at a `peer_id`
-would have turned a claim-gated route into a free one *and* started the apex paying the store box
+would have turned a claim-gated route into a free one _and_ started the apex paying the store box
 out of its own channel. Issue #557's free-gateway guard exists for exactly the shape a peer route
 had by construction, and could not see it.
 
@@ -46,7 +46,7 @@ charge, exactly as it writes down what a terminated route charges.
 
 **`price` is required on a forwarded route**, mirroring `ConfigError::RouteMissingPrice` on a
 terminated one. `ConfigError::PeerRouteMissingPrice` replaces `PeerRouteHasPrice`. A forwarded
-route is never *silently* free: `price = 0` is a deliberate free-carriage declaration by an
+route is never _silently_ free: `price = 0` is a deliberate free-carriage declaration by an
 operator who wrote it, which is the whole of what issue #557 asks of any route.
 
 **The client edge treats the two kinds identically.** One lookup —
@@ -75,7 +75,7 @@ than safe.
 
 **A probe short-circuits at a priced forwarded route.** `handle_probe` already answers a
 destination that terminates here with that route's price as `accumulated_cost` rather than
-delivering (issue #548). A destination that *forwards* from here under a price is answered the same
+delivering (issue #548). A destination that _forwards_ from here under a price is answered the same
 way, for both of that rule's reasons: the figure is exactly what a real request would be charged
 and is known locally, so no traversal is needed to discover it; and free traversal must not become
 a way to make this connector sign a peer claim it was not paid for. An unpriced forwarded route
@@ -84,12 +84,12 @@ still traverses and accumulates fees, which is ADR 0011's mechanism and is untou
 ## What this does not change
 
 **The peer-facing direction.** `peer-carriage-spec.md` §3.1 stands verbatim: a connector MUST NOT
-answer a **peer-role** PREPARE with the x402 greeting. Everything above is the *client-facing*
+answer a **peer-role** PREPARE with the x402 greeting. Everything above is the _client-facing_
 direction of the same node. Peer fees remain bilateral configuration, never a negotiation, and a
 peer-role arrival is priced by the claim exchange of `peer-wire-spec.md` §3, not by a 402.
 
 **Charging for a peer-wire arrival at the terminating connector** — issue #620's second gap —
-remains open. A connector whose priced *terminated* route is reached over the peer wire still
+remains open. A connector whose priced _terminated_ route is reached over the peer wire still
 serves it without charging; only the client edge charges. This decision makes the first hop's
 client leg payable, which is what a client-facing deployment needs, and leaves the terminating
 side to its own change.
@@ -102,7 +102,7 @@ issue #557 exists to prevent — rather than close a hole. When the lease surfac
 joins the same lookup.
 
 **`transport` on a forwarded route stays refused.** `ConfigError::PeerRouteHasTransport` remains,
-but its stated reason does not survive this change: a forwarded route *is* now reached over a
+but its stated reason does not survive this change: a forwarded route _is_ now reached over a
 client transport, so "restricting it to `http` or `btp` means nothing" is no longer true. It is
 refused because the policy is not implemented for it, not because it is meaningless, and a
 forwarded route accordingly accepts both transports — the default every route had before issue

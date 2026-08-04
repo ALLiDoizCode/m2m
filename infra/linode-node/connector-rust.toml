@@ -53,12 +53,16 @@
 #     nothing to hang a handshake on. It carries signed balance proofs
 #     (ADR 0004), so exposing it plaintext on a public IP is not an
 #     acceptable interim.
-#   * The PAID forwarded path is structurally unwired anyway (issue #620):
-#     the client edge prices only locally-terminated routes (a peer route
-#     greets nothing and charges nothing), the terminating side never
-#     charges its `price` for a peer-wire arrival, and ADR 0024's peer
-#     claims cannot be configured from any connector.toml. A peer-forwarded
-#     g.toon.store would have served the store app FOR FREE end to end.
+#   * The PAID forwarded path was structurally unwired when this leg was
+#     terminated here (issue #620): the client edge priced only
+#     locally-terminated routes, so a peer route greeted nothing and
+#     charged nothing, and a peer-forwarded g.toon.store would have served
+#     the store app FOR FREE end to end while this node paid the store box
+#     out of its own channel. #678 wired ADR 0024's peer claims to config
+#     and ADR 0028 gave a `peer_id` route a client-edge `price`, so the
+#     client leg is now payable; what is still unwired is the far side --
+#     a terminating connector does not charge its `price` for a peer-wire
+#     arrival (issue #620's second gap).
 #
 # Terminating here instead puts the store leg on the same claim-gated
 # client-edge path the proven g.toon.relay route uses (x402 greeting, F03
