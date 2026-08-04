@@ -147,10 +147,6 @@ const PAYEE_PRIVATE_KEY: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8
 const PEER_ROUTE_PREFIX: &str = "g.example.beta";
 const APP_PREFIX: &str = "g.example.beta.app";
 
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 fn channel_id_bytes(id: &str) -> [u8; 32] {
     let hex_digits = id.trim_start_matches("0x");
     let mut out = [0u8; 32];
@@ -205,20 +201,23 @@ fn evm_claim_json(
     };
     let signature = sign_evm(secret, &evm_balance_proof_digest(&proof));
 
-    format!(
-        r#"{{"version":"1.0","blockchain":"evm","messageId":"msg-{nonce}",\
-"timestamp":"2026-02-02T12:00:00.000Z","senderId":"{PAYER_ID}",\
-"channelId":"{channel_id_hex}","nonce":{nonce},\
-"transferredAmount":"{transferred_amount}","lockedAmount":"0",\
-"locksRoot":"0x{zeros}","signature":"0x{signature}",\
-"signerAddress":"{address}","chainId":{ANVIL_CHAIN_ID},\
-"tokenNetworkAddress":"{token_network_address}"}}"#,
-        zeros = "0".repeat(64),
-        signature = hex_encode(&signature),
-        address = to_hex(&address),
-        token_network_address = to_hex(&token_network_address),
-    )
-    .replace("\\\n", "")
+    serde_json::json!({
+        "version": "1.0",
+        "blockchain": "evm",
+        "messageId": format!("msg-{nonce}"),
+        "timestamp": "2026-02-02T12:00:00.000Z",
+        "senderId": PAYER_ID,
+        "channelId": channel_id_hex,
+        "nonce": nonce,
+        "transferredAmount": transferred_amount.to_string(),
+        "lockedAmount": "0",
+        "locksRoot": format!("0x{}", "0".repeat(64)),
+        "signature": format!("0x{}", hex::encode(&signature)),
+        "signerAddress": to_hex(&address),
+        "chainId": ANVIL_CHAIN_ID,
+        "tokenNetworkAddress": to_hex(&token_network_address),
+    })
+    .to_string()
 }
 
 /// §1.4's credential, in its HTTP encoding: `base64(JSON)` of
@@ -319,7 +318,7 @@ impl PeerFixture {
 
         let payee_backend = EvmSettlementBackend::connect(
             &anvil.rpc_url,
-            PEER_SETTLEMENT_KEY_PLACEHOLDER,
+            PAYEE_PRIVATE_KEY,
             registry_address,
             token,
             6,
@@ -392,12 +391,6 @@ key_file = "{key_file}"
         )
     }
 }
-
-/// The payee's settlement private key, as `EvmSettlementBackend::connect`
-/// takes it. Named separately from [`PAYEE_PRIVATE_KEY`] only because the
-/// constant is used both here and to write the spawned binary's key file,
-/// and a reader should see that they are the same key.
-const PEER_SETTLEMENT_KEY_PLACEHOLDER: &str = PAYEE_PRIVATE_KEY;
 
 /// Spawn the **payee**: a real compiled `connector` binary that terminates
 /// [`APP_PREFIX`] at a real stub app, exposes both peer carriages, and
