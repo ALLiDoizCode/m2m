@@ -7,7 +7,13 @@ license.workspace = true
 [dependencies]
 connector-config = { path = "../connector-config" }
 connector-client-edge = { path = "../connector-client-edge" }
+connector-domain = { path = "../connector-domain" }
 connector-operator = { path = "../connector-operator" }
+# The two dial-side carriages (issue #678 gap 2): `[[peers]]` becomes a
+# transport here, dispatched by peer id, because this is the one place a
+# loaded `Config` and a `Connector` are both in scope.
+connector-peer-btp = { path = "../connector-peer-btp" }
+connector-peer-http = { path = "../connector-peer-http" }
 connector-runtime = { path = "../connector-runtime" }
 connector-settlement = { path = "../connector-settlement" }
 connector-settlement-evm = { path = "../connector-settlement-evm" }

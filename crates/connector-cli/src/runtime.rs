@@ -14,20 +14,23 @@ use axum::Router;
 
 use connector_client_edge::{
     ChannelLivenessPolicy, ChannelLookupFailed, ClientChannelRegistry, ClientChannelSource,
-    ClientClaimGate, DepositFloor, EvmChannel, SolanaChannel, UnresolvableLookupBudgetPolicy,
+    ClientClaimGate, DepositFloor, EvmChannel, PeerCarriages, SolanaChannel,
+    UnresolvableLookupBudgetPolicy,
 };
 use connector_config::{
     ClientChannelConfig, Config, EvmSettlementConfig, SecretLocation, SettlementChain,
     SettlementConfig, SolanaSettlementConfig,
 };
 use connector_runtime::{
-    Connector, FileJournal, HttpAppClient, InMemoryJournal, InProcessPeerTransport, Journal,
-    JournalError, PeerRoute, SystemClock,
+    ChannelDomain, Connector, FileJournal, HttpAppClient, InMemoryJournal, Journal, JournalError,
+    PeerRoute, SystemClock,
 };
 use connector_settlement::{SettlementBackend, SettlementError};
 use connector_settlement_evm::EvmSettlementBackend;
 use connector_settlement_solana::SolanaSettlementBackend;
-use connector_signer::{LocalSigner, Signer, SignerError};
+use connector_signer::{derive_evm_address, LocalSigner, Signer, SignerError};
+
+use crate::peer_transport;
 use ethers::types::U256;
 use solana_sdk::pubkey::Pubkey;
 
@@ -89,6 +92,14 @@ pub enum RuntimeError {
     /// watermarks this node cannot vouch for, which is exactly the defect
     /// issue #605 describes.
     JournalUnreplayable { path: PathBuf, source: JournalError },
+    /// A `[[peer_channels]]` row's `channel_id` is not a shape
+    /// [`connector_runtime::ClaimBook`] can file a watermark under (issue
+    /// #678). Unreachable through `Config::load`, which canonicalizes the
+    /// id to `0x` + 64 lowercase hex before this code ever sees it -- kept
+    /// as a named startup failure rather than an `expect` so a future
+    /// widening of the config shape refuses to start instead of panicking
+    /// on the first peer claim.
+    PeerChannelUnusable { channel_id: String },
 }
 
 impl fmt::Display for RuntimeError {
@@ -141,6 +152,12 @@ impl fmt::Display for RuntimeError {
                  the connector refuses to start rather than keep claim watermarks only in \
                  memory, where a restart would make every already-spent claim replayable",
                 path.display()
+            ),
+            RuntimeError::PeerChannelUnusable { channel_id } => write!(
+                f,
+                "the [[peer_channels]] row for channel '{channel_id}' names an id the claim \
+                 ledger cannot file a watermark under -- a peer channel id must be the \
+                 channel's on-chain bytes32"
             ),
             RuntimeError::JournalUnreplayable { path, source } => write!(
                 f,
@@ -470,6 +487,108 @@ fn open_journal(state_dir: &Path, name: &str) -> Result<Arc<dyn Journal>, Runtim
     Ok(Arc::new(journal))
 }
 
+/// Name every plaintext peering at startup, loudly (issue #678, gap 3).
+///
+/// `peer_allow_plaintext_endpoints` is a loopback-and-test opt-in and
+/// nothing else: a peering carries signed balance proofs (ADR 0004), so
+/// `ws://` and `http://` remain a hard `PeerEndpointScheme` load error on
+/// every config that does not set it. A node that *did* set it is one whose
+/// peer credentials and claims cross the wire in the clear, and the only
+/// thing worse than that in a test harness is that in production with
+/// nobody noticing.
+fn warn_about_plaintext_peerings(config: &Config) {
+    for (peer_id, endpoint) in config.plaintext_peerings() {
+        tracing::warn!(
+            peer_id,
+            %endpoint,
+            "peer_allow_plaintext_endpoints is set and this peering is dialed in the clear -- \
+             the credential and every claim on it are readable on the wire. This is a loopback \
+             and test setting; see docs/operators/btp-peer-transport-bringup.md"
+        );
+    }
+}
+
+/// The key this node signs outbound **peer** claims with, and the EVM
+/// address that key derives -- `None` for a node with no `[settlement.evm]`
+/// table (ADR 0024's balance proof has no meaning without one).
+///
+/// It is the settlement key rather than `[signer]`'s identity key because a
+/// peer claim is redeemed on chain by the counterparty against the
+/// `TokenNetwork` this node is a channel participant in, and the participant
+/// is the settlement address. The two keys are separate on purpose (ADR
+/// 0022's two audiences); conflating them would produce claims that verify
+/// nowhere.
+fn peer_claim_identity(
+    config: &Config,
+) -> Result<Option<(Arc<dyn Signer>, [u8; 20])>, RuntimeError> {
+    let Some(evm) = config
+        .settlements()
+        .iter()
+        .find_map(|settlement| match settlement {
+            SettlementConfig::Evm(evm) => Some(evm),
+            SettlementConfig::Solana(_) => None,
+        })
+    else {
+        return Ok(None);
+    };
+    let secret = read_settlement_key_bytes(evm.key())?;
+    let signer = LocalSigner::from_secret_bytes("peer-claim-signer", secret)?;
+    let address = derive_evm_address(&signer.public_key()?);
+    Ok(Some((Arc::new(signer), address)))
+}
+
+/// Wire every `[[peer_channels]]` row into the claim ledger (issue #678,
+/// `peer-carriage-spec.md` §11): which channel this node claims against
+/// when it owes a peer, whose signature it accepts on a claim naming that
+/// channel, the EIP-712 domain both are judged under (ADR 0024), and the
+/// peering's exposure ceiling (§5.3).
+///
+/// A peering with several rows claims against the **first**: an outbound
+/// ledger is per peer, so there is exactly one channel this node can owe on,
+/// and picking the last would make the answer depend on file order. Every
+/// row is still accepted *inbound* -- a counterparty may legitimately claim
+/// on any channel the two of them have bound.
+fn wire_peer_channels(
+    mut connector: Connector,
+    config: &Config,
+) -> Result<Connector, RuntimeError> {
+    let mut claiming_against: Vec<&str> = Vec::new();
+    for channel in config.peer_channels() {
+        if !claiming_against.contains(&channel.peer_id()) {
+            claiming_against.push(channel.peer_id());
+            connector = connector.with_peer_claim_channel(channel.peer_id(), channel.channel_id());
+        }
+        connector = connector
+            .with_channel_verification_key(channel.channel_id(), channel.counterparty_key());
+        connector = connector
+            .with_channel_domain(
+                channel.channel_id(),
+                ChannelDomain {
+                    chain_id: channel.chain_id(),
+                    token_network_address: channel.token_network(),
+                },
+            )
+            .map_err(|_| RuntimeError::PeerChannelUnusable {
+                channel_id: channel.channel_id().to_string(),
+            })?;
+        // §5.3/§6.4(3): the peering's ceiling is a property of the
+        // *relation*, and the ledger accounts exposure per channel -- so
+        // each of a relation's channels carries the relation's figure. A
+        // peering with no explicit ceiling has none here either, which is
+        // allowed only for one this node can dial (config load refuses the
+        // other shape as `AcceptOnlyPeerWithoutCeiling`).
+        if let Some(ceiling) = config
+            .peers()
+            .iter()
+            .find(|peer| peer.id() == channel.peer_id())
+            .and_then(|peer| peer.ceiling())
+        {
+            connector = connector.with_channel_ceiling(channel.channel_id(), ceiling);
+        }
+    }
+    Ok(connector)
+}
+
 /// Everything [`build`] produced from a validated [`Config`], and
 /// everything [`router`] needs from it. A struct rather than a tuple
 /// because the third member is the kind of thing that only ever grows: as
@@ -532,14 +651,30 @@ pub struct Runtime {
 /// peer transport port and was untouched by #679's deletion.
 pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     let signer = build_signer(config.signer_key())?;
-    // No peer transport is wired from config any more. `[[peers]].addr`
-    // was a `SocketAddr` for the raw-TCP peer wire, and ADR 0027 deleted
-    // that wire (issue #679); issue #677 replaced the field with an
-    // `endpoint` URL whose scheme selects a carriage, and the carriages
-    // that dial it are issue #676's. Until one lands this node holds an
+    // Issue #678 gap 3, said once and loudly. A plaintext peering could not
+    // have loaded unless somebody wrote `peer_allow_plaintext_endpoints`,
+    // and the whole point of a loopback-and-test opt-in is that a node that
+    // took it says so where an operator will see it.
+    warn_about_plaintext_peerings(config);
+    // The claim identity of this node's peerings (ADR 0024): the EVM
+    // settlement key, because an outbound peer claim is an EIP-712 balance
+    // proof the counterparty's `TokenNetwork` verifies against the channel
+    // participant this node *is* on chain -- which is the settlement
+    // address, never `[signer]`'s identity key (that one opens gift wraps
+    // and answers `GET /ilp/identity`). A node with no `[settlement.evm]`
+    // table has no such identity, emits no claim, and says so here rather
+    // than signing one under a key nothing would accept.
+    let peer_claim_identity = peer_claim_identity(config)?;
+    let peer_signer_address = peer_claim_identity
+        .as_ref()
+        .map(|(_, address)| *address)
+        .unwrap_or([0u8; 20]);
+    // Issue #678 gap 2: the dial side, built from `[[peers]]` and
+    // `[[peer_channels]]`. A node with no dialable peering still holds an
     // empty `InProcessPeerTransport`, so a packet routed to a peer is
     // answered `T01 peer unreachable` rather than silently dropped.
-    let peer_transport = InProcessPeerTransport::new();
+    let peer_transport =
+        peer_transport::build_peer_transport(config, peer_signer_address, Arc::new(SystemClock));
     let peer_routes = config
         .peer_routes()
         .iter()
@@ -549,10 +684,20 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
         config.routes().to_vec(),
         peer_routes,
         Arc::new(HttpAppClient::new()),
-        Arc::new(peer_transport),
+        peer_transport,
         Arc::new(SystemClock),
     )
     .with_identity_signer(signer.clone());
+    // `[[peer_channels]]` reaching `ClaimBook` at last (§11: "it MUST
+    // actually wire `ClaimBook`'s signer, verification key and EIP-712
+    // domain, with no code-only setters left on the config path"). Before
+    // this, the table loaded, validated, and reached nothing -- so every
+    // peer claim was refused `unknown_channel` and none was ever signed,
+    // which is #620's gap 3 surviving into the bring-up.
+    if let Some((claim_signer, _)) = peer_claim_identity {
+        connector = connector.with_signer(claim_signer);
+    }
+    connector = wire_peer_channels(connector, config)?;
     let mut client_channel_source_evm: Option<Arc<dyn ClientChannelSource>> = None;
     let mut client_channel_source_solana: Option<Arc<dyn ClientChannelSource>> = None;
     let mut settlement_terms: Option<connector_client_edge::X402SettlementTerms> = None;
@@ -803,7 +948,7 @@ fn client_claim_gate(
 pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError> {
     let connector = runtime.connector.clone();
     let signer = runtime.signer.clone();
-    let app = connector_client_edge::router_with_gate_terms_and_btp_window(
+    let app = connector_client_edge::router_with_peer_carriages(
         connector.clone(),
         signer.clone(),
         None,
@@ -817,6 +962,17 @@ pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError
         config
             .btp_session_window()
             .unwrap_or(connector_client_edge::DEFAULT_BTP_SESSION_WINDOW),
+        // Issue #678 gap 1: the accept side. There is no second listener --
+        // the peer carriages ride the `POST /ilp` and `GET /ilp/btp` this
+        // router already serves, and role is decided by authentication
+        // (`peer-carriage-spec.md` §1.3), never by the port. `None` for a
+        // node whose `peer_expose` is `"neither"`, which is the default.
+        PeerCarriages::from_config(
+            connector.clone(),
+            config.peers(),
+            config.peer_channels(),
+            config.peer_expose(),
+        ),
     );
     Ok(match config.operator() {
         Some(operator) => app.merge(connector_operator::router(

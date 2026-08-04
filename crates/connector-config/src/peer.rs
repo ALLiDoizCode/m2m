@@ -509,7 +509,8 @@ mod tests {
 
     #[test]
     fn resolves_a_wss_peer_onto_the_btp_carriage() {
-        let peers = resolve_peers(vec![raw("peer-b")], PeerExposure::Neither, false).expect("resolve");
+        let peers =
+            resolve_peers(vec![raw("peer-b")], PeerExposure::Neither, false).expect("resolve");
 
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].id(), "peer-b");

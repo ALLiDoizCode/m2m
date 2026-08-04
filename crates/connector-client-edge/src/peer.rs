@@ -273,8 +273,7 @@ fn peer_headers(headers: &HeaderMap) -> Headers {
 /// (§6.2): `200` regardless of a claim's verdict, and `4xx` only where
 /// there is no ILP answer at all.
 fn into_axum(response: connector_peer_http::PeerResponse) -> Response {
-    let status =
-        StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let mut out = Response::builder().status(status);
     if response.status == 200 {
         out = out.header(axum::http::header::CONTENT_TYPE, crate::OCTET_STREAM);
@@ -351,12 +350,7 @@ token_network = "0x00000000000000000000000000000000000000bb"
 
     fn carriages(expose: PeerExposure) -> Option<Arc<PeerCarriages>> {
         let config = peering();
-        PeerCarriages::from_config(
-            connector(),
-            config.peers(),
-            config.peer_channels(),
-            expose,
-        )
+        PeerCarriages::from_config(connector(), config.peers(), config.peer_channels(), expose)
     }
 
     fn credential(peer_id: &str, secret: &str) -> String {
@@ -382,7 +376,9 @@ token_network = "0x00000000000000000000000000000000000000bb"
         let mut headers = HeaderMap::new();
         headers.insert(
             PEER_AUTH_HEADER,
-            credential(PEER_ID, PEER_SECRET).parse().expect("header value"),
+            credential(PEER_ID, PEER_SECRET)
+                .parse()
+                .expect("header value"),
         );
 
         assert!(carriages.handle_http(&headers, b"").await.is_none());
@@ -423,7 +419,10 @@ token_network = "0x00000000000000000000000000000000000000bb"
                 "{case} must be a client request"
             );
         }
-        assert!(carriages.handle_http(&HeaderMap::new(), b"").await.is_none());
+        assert!(carriages
+            .handle_http(&HeaderMap::new(), b"")
+            .await
+            .is_none());
     }
 
     /// The BTP twin: the same shapes §1.9 enumerates, peeked off a frame
@@ -435,9 +434,9 @@ token_network = "0x00000000000000000000000000000000000000bb"
         let entry = |peer_id: &str, secret: &str| ProtocolData {
             name: PEER_AUTH_PROTOCOL_ENTRY.to_string(),
             content_type: connector_btp::CONTENT_TYPE_TEXT,
-            data: connector_peer_auth::encode_raw(
-                &connector_peer_auth::PresentedCredential::new(peer_id, secret),
-            ),
+            data: connector_peer_auth::encode_raw(&connector_peer_auth::PresentedCredential::new(
+                peer_id, secret,
+            )),
         };
         let proven = entry(PEER_ID, PEER_SECRET);
 
