@@ -26,6 +26,14 @@ serde_json = "1"
 # owns the socket owns the runtime.
 tokio = { version = "1", features = ["sync", "time"] }
 tracing = "0.1"
+# The one place this crate touches a socket (`ws`): the same 0.20 the
+# client edge's own BTP integration test speaks, and the same rustls +
+# webpki roots already in the lockfile. `wss://` only -- a peering carries
+# signed balance proofs, so `ws://` selects no carriage at all.
+tokio-tungstenite = { version = "0.20", features = ["rustls-tls-webpki-roots"] }
+# `split` on the dialed websocket: one writer task owns the send half while
+# the read loop correlates answers and serves the far side's requests.
+futures-util = "0.3"
 url = "2"
 
 [dev-dependencies]

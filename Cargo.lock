@@ -1215,10 +1215,12 @@ dependencies = [
  "connector-peer-auth",
  "connector-runtime",
  "connector-signer",
+ "futures-util",
  "hex",
  "libsecp256k1",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "url",
 ]

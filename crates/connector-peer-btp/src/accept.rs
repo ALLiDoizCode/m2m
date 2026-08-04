@@ -255,11 +255,27 @@ pub enum SessionEnd {
 impl PeerSession {
     #[must_use]
     pub fn new(state: Arc<PeerCarriageState>, replies: mpsc::Sender<Vec<u8>>) -> Self {
+        Self::with_outbound(state, replies, Arc::new(OutboundRequests::new()))
+    }
+
+    /// A session over an `outbound` table somebody else already holds --
+    /// what a **dialed** session needs (§2.3): one socket, one read loop,
+    /// and both halves of RFC-23's symmetric grammar on it. The dialing
+    /// side reserves request ids through its [`BtpSessionHandle`] while
+    /// this session resolves the answers and serves whatever the far side
+    /// originates, and a second correlation table would mean answers
+    /// resolving against the wrong one.
+    #[must_use]
+    pub fn with_outbound(
+        state: Arc<PeerCarriageState>,
+        replies: mpsc::Sender<Vec<u8>>,
+        outbound: Arc<OutboundRequests>,
+    ) -> Self {
         let window = Arc::new(Semaphore::new(state.policy.session_window.get() as usize));
         PeerSession {
             state,
             binding: SessionRoleBinding::new(),
-            outbound: Arc::new(OutboundRequests::new()),
+            outbound,
             replies,
             window,
         }
