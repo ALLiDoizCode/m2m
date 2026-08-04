@@ -22,6 +22,23 @@
 //! | 4 | role-by-auth on a real socket (§1.9) | [`a_credential_that_fails_p1_or_p2_reaches_no_peer_handling_over_http`] and [`_over_btp`](a_credential_that_fails_p1_or_p2_reaches_no_peer_handling_over_btp) -- **runs, green** |
 //! | 5 | both carriages | every test above exists in a `wss://` and an `https://` form |
 //!
+//! # The client leg (issue #620, ADR 0028)
+//!
+//! Assertion 1 above proves the *peer hop* is paid, and until ADR 0028 it
+//! deliberately said nothing about the *client* leg -- it could not: the
+//! payer's forwarded route was unpriced by construction, since `price`
+//! alongside `peer_id` was a hard config error. A client therefore reached
+//! the payee across the peering for nothing while the payer signed a real
+//! peer claim for the value it carried, which is the free-gateway shape
+//! issue #557 exists to catch and could not see.
+//!
+//! [`two_connectors_move_a_paid_packet`] now drives the whole path: a
+//! claimless client is answered with the route's x402 terms quoting
+//! [`CLIENT_PRICE`], and every crossing carries a real client claim that
+//! lands in the payer's own client-edge journal. The `[[client_channels]]`
+//! row and the second funded channel on [`PeerFixture`] are what make that
+//! a real payment rather than a stubbed one.
+//!
 //! # What #678 closed, and where
 //!
 //! All five assertions run because issue #678 wired the three things this
@@ -103,6 +120,25 @@ const ANVIL_BASE_PORT: u16 = 19_100;
 /// -- deliberately small so "the watermark advanced by exactly this" reads
 /// plainly.
 const PEER_FEE: u64 = 100;
+
+/// The **client-facing** price of the payer's forwarded route (ADR 0028):
+/// what the payer's own client edge charges a client for a packet to
+/// [`APP_PREFIX`], as distinct from [`PEER_FEE`], which is only what the
+/// payer retains of it.
+///
+/// Equal to [`peer_bound_prepare`]'s declared `amount`, which is the whole
+/// arithmetic in one line: the payer collects `CLIENT_PRICE` from the
+/// client, forwards `CLIENT_PRICE - PEER_FEE` to the payee
+/// (`peer-wire-spec.md` §4), and so earns exactly `PEER_FEE`. A larger
+/// declared amount is refused -- see
+/// [`a_client_may_not_declare_more_than_the_forwarded_route_charges`].
+const CLIENT_PRICE: u64 = 10 * PEER_FEE;
+
+/// The client's own EIP-712 signing identity -- not the payer's, and not
+/// the payee's. A client leg is a *third* party to the peering: it holds
+/// its own channel with the payer, on the same `TokenNetwork`, and the
+/// payer's `[[client_channels]]` is what makes its signature recognisable.
+const CLIENT_SECRET_SEED: u8 = 23;
 
 /// The shared secret the two nodes' `[[peers]]` entries agree on. A real
 /// value rather than the empty string, because an empty configured secret
@@ -190,6 +226,7 @@ fn sign_evm(secret: &SecretKey, digest: &[u8; 32]) -> Vec<u8> {
 /// this reason; a test that re-rendered would be proving the wrong thing.
 fn evm_claim_json(
     secret: &SecretKey,
+    sender_id: &str,
     channel_id_hex: &str,
     nonce: u64,
     transferred_amount: u128,
@@ -211,7 +248,7 @@ fn evm_claim_json(
 
     format!(
         r#"{{"version":"1.0","blockchain":"evm","messageId":"msg-{nonce}",\
-"timestamp":"2026-02-02T12:00:00.000Z","senderId":"{PAYER_ID}",\
+"timestamp":"2026-02-02T12:00:00.000Z","senderId":"{sender_id}",\
 "channelId":"{channel_id_hex}","nonce":{nonce},\
 "transferredAmount":"{transferred_amount}","lockedAmount":"0",\
 "locksRoot":"0x{zeros}","signature":"0x{signature}",\
@@ -295,6 +332,16 @@ struct PeerFixture {
     payer_address: [u8; 20],
     payee_address: [u8; 20],
     channel_id: String,
+    /// The **client leg** (ADR 0028): a second real, funded channel on the
+    /// same `TokenNetwork`, opened by the payer naming an ordinary client
+    /// as counterparty. Distinct from `channel_id` in every sense that
+    /// matters -- a different counterparty, a different namespace
+    /// (`[[client_channels]]` rather than `[[peer_channels]]`, which
+    /// `ChannelInBothNamespaces` refuses to conflate) and a different
+    /// watermark journal.
+    client_secret: SecretKey,
+    client_address: [u8; 20],
+    client_channel_id: String,
 }
 
 impl PeerFixture {
@@ -358,6 +405,24 @@ impl PeerFixture {
             "a real transaction genuinely moved this value on chain"
         );
 
+        // The client leg: a second channel on the same `TokenNetwork`,
+        // opened by the payer naming an ordinary client, and funded from
+        // the same real supply. Nothing about it is synthetic -- the
+        // payer's claim gate resolves it on chain like any other, and an
+        // undercollateralised one would be refused (issue #646).
+        let client_secret = SecretKey::parse(&[CLIENT_SECRET_SEED; 32])
+            .expect("the client's secp256k1 secret is valid");
+        let client_address =
+            derive_evm_address(&PublicKey::from_secret_key(&client_secret).serialize());
+        let client_channel = payer_backend
+            .open(client_address.to_vec(), ChronoDuration::hours(1))
+            .await
+            .expect("the payer opens a client channel");
+        payer_backend
+            .fund(&client_channel, u128::from(100 * CLIENT_PRICE))
+            .await
+            .expect("fund the client channel with real ERC-20 value");
+
         Some(PeerFixture {
             rpc_url: anvil.rpc_url.clone(),
             _anvil: anvil,
@@ -368,6 +433,9 @@ impl PeerFixture {
             payer_address,
             payee_address,
             channel_id: channel.0,
+            client_secret,
+            client_address,
+            client_channel_id: client_channel.0,
         })
     }
 
@@ -376,9 +444,24 @@ impl PeerFixture {
     fn claim(&self, nonce: u64) -> String {
         evm_claim_json(
             &self.payer_secret,
+            PAYER_ID,
             &self.channel_id,
             nonce,
             u128::from(nonce) * u128::from(PEER_FEE),
+            self.token_network_address,
+        )
+    }
+
+    /// The claim a **client** would sign for the `n`th packet it sends
+    /// across the payer's forwarded route: cumulative `n * CLIENT_PRICE` at
+    /// nonce `n`, on the client channel rather than the peering's.
+    fn client_claim(&self, nonce: u64) -> String {
+        evm_claim_json(
+            &self.client_secret,
+            "client",
+            &self.client_channel_id,
+            nonce,
+            u128::from(nonce) * u128::from(CLIENT_PRICE),
             self.token_network_address,
         )
     }
@@ -488,7 +571,9 @@ token_network = "{token_network}"
 
 /// Spawn the **payer**: a real compiled `connector` binary whose only route
 /// to [`APP_PREFIX`] is the peering, dialed at `payee_endpoint` on
-/// `carriage`.
+/// `carriage` -- priced at [`CLIENT_PRICE`] for its own clients (ADR 0028)
+/// and holding a `[[client_channels]]` row for the one this fixture funded,
+/// so both legs of the path it sits on are payable.
 fn spawn_payer(
     fixture: &PeerFixture,
     state_dir: &std::path::Path,
@@ -522,10 +607,19 @@ key_file = "{key_file}"
 # The only path to the app: a `peer_id`-targeted route. Nothing about this
 # node terminates `{APP_PREFIX}`, so a fulfilled packet addressed there can
 # only have crossed the peering.
+#
+# ADR 0028's two numbers, and the whole of issue #620's client leg. `price`
+# is what this node's own client edge charges a client for a packet to this
+# prefix -- greeted, claim-gated and journaled exactly as a terminated
+# route's price is. `fee` is only what this hop retains of it; the
+# difference is what reaches the payee. Before ADR 0028 `price` here was a
+# hard config error, which is precisely why a forwarded route was a free
+# gateway that also paid its own peer.
 [[routes]]
 prefix = "{PEER_ROUTE_PREFIX}"
 peer_id = "{PAYEE_ID}"
 fee = {PEER_FEE}
+price = {CLIENT_PRICE}
 
 [[peers]]
 id = "{PAYEE_ID}"
@@ -541,6 +635,18 @@ channel_id = "{channel_id}"
 counterparty_key = "{payee}"
 chain_id = {ANVIL_CHAIN_ID}
 token_network = "{token_network}"
+
+# The client leg's channel, in the *other* namespace (§1.8): whose
+# signature this node accepts on a claim presented at its client edge. A
+# channel id may appear in exactly one of the two tables --
+# `ChannelInBothNamespaces` refuses a file that lists one in both -- so
+# these two rows are two genuinely separate relationships, judged against
+# two separate watermark journals.
+[[client_channels]]
+channel_id = "{client_channel_id}"
+counterparty = "{client}"
+chain_id = {ANVIL_CHAIN_ID}
+token_network_address = "{token_network}"
 "#,
         state_dir = state_dir.display(),
         key_file = key_file.path().display(),
@@ -548,6 +654,8 @@ token_network = "{token_network}"
         settlement = fixture.settlement_block(settlement_key_file.path()),
         channel_id = fixture.channel_id,
         payee = to_hex(&fixture.payee_address),
+        client_channel_id = fixture.client_channel_id,
+        client = to_hex(&fixture.client_address),
         token_network = to_hex(&fixture.token_network_address),
     ));
     let connector = spawn_connector(config.path());
@@ -923,6 +1031,41 @@ async fn two_connectors_move_a_paid_packet_over_http() {
     two_connectors_move_a_paid_packet(Carriage::Http).await;
 }
 
+/// A **claimless** client PREPARE to `destination` on `client_edge_addr`,
+/// and the x402 terms it must be answered with (client-edge-spec.md §1.4).
+///
+/// Claimless in the strictest sense the wire allows: no
+/// `ILP-Payment-Channel-Claim`, no wrapped twin, no `Toon-Peer-Auth`. This
+/// is an anonymous, unpaying client, and it is the exact shape that used to
+/// be forwarded across the peering for nothing.
+async fn claimless_client_terms(
+    client: &reqwest::Client,
+    client_edge_addr: &str,
+    prepare: &Prepare,
+) -> serde_json::Value {
+    let response = client
+        .post(format!("http://{client_edge_addr}/ilp"))
+        .body(prepare.encode())
+        .send()
+        .await
+        .expect("POST /ilp");
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::PAYMENT_REQUIRED,
+        "a claimless client request to a priced forwarded route must be greeted, \
+         not carried"
+    );
+    response.json().await.expect("x402 JSON terms")
+}
+
+/// The client-edge claim journal the payer keeps under its `state_dir`
+/// (`connector_cli::runtime`'s `CLIENT_EDGE_JOURNAL`) -- the *client* leg's
+/// counterpart to [`peer_journal`], and how "the client was charged" is
+/// asserted against a live binary rather than taken on the node's word.
+fn client_journal(state_dir: &std::path::Path) -> String {
+    std::fs::read_to_string(state_dir.join("client-edge-claims.log")).unwrap_or_default()
+}
+
 async fn two_connectors_move_a_paid_packet(carriage: Carriage) {
     let Some(fixture) = PeerFixture::spawn().await else {
         return;
@@ -955,19 +1098,56 @@ async fn two_connectors_move_a_paid_packet(carriage: Carriage) {
     // there, and the payer is a forwarding hop that cannot open it (§8.1).
     let payee_identity = identity_from_key_seed(PAYEE_SIGNER_SEED);
     let client = reqwest::Client::new();
-    let cross = |body: &'static [u8]| {
+
+    // **The client leg, refused** (ADR 0028, issue #620). Before the
+    // forwarded route could carry a `price`, this same request was carried
+    // across the peering for nothing -- and the payer signed a real peer
+    // claim for the value it carried. It is now answered with the route's
+    // terms, quoting the price the config wrote, exactly as a terminated
+    // route's would be. Asserted *first*, so a regression that made the
+    // route free again could not be masked by the paid crossings below
+    // happening to work.
+    let terms = claimless_client_terms(
+        &client,
+        &payer.client_edge_addr,
+        &peer_bound_prepare(APP_PREFIX, b"unpaid", &payee_identity),
+    )
+    .await;
+    assert_eq!(
+        terms["accepts"][0]["amount"],
+        CLIENT_PRICE.to_string(),
+        "the greeting must quote the forwarded route's own `price`"
+    );
+    assert_eq!(
+        terms["accepts"][0]["extra"]["price"],
+        CLIENT_PRICE.to_string(),
+        "§1.4: the top-level `amount` and `extra.price` are always equal"
+    );
+    assert!(
+        client_journal(payer_state.path()).is_empty(),
+        "a greeting changes no state: nothing may have been journaled for a \
+         request that was never paid for. Journal was:\n{}",
+        client_journal(payer_state.path())
+    );
+
+    // **The client leg, paid.** Every crossing below carries a real,
+    // EIP-712-signed client claim on the client channel, advancing by
+    // exactly `CLIENT_PRICE` each time -- what a paying client actually
+    // sends, and the only thing that now gets a packet across this route.
+    let cross = |body: &'static [u8], nonce: u64| {
         let prepare = peer_bound_prepare(APP_PREFIX, body, &payee_identity);
+        let claim = fixture.client_claim(nonce);
         let client = client.clone();
         let addr = payer.client_edge_addr.clone();
         async move {
             let (status, body, _ack) =
-                post_peer_request(&client, &addr, None, None, &prepare).await;
+                post_peer_request(&client, &addr, None, Some(&claim), &prepare).await;
             assert_eq!(status, reqwest::StatusCode::OK);
             connector_domain::Fulfill::decode(&body).unwrap_or_else(|_| {
                 let reject =
                     Reject::decode(&body).expect("an answer that is neither FULFILL nor REJECT");
                 panic!(
-                    "the packet did not cross the peering: {} {}",
+                    "the paid packet did not cross the peering: {} {}",
                     reject.code.as_str(),
                     reject.message
                 )
@@ -975,7 +1155,7 @@ async fn two_connectors_move_a_paid_packet(carriage: Carriage) {
         }
     };
 
-    cross(b"across the peering").await;
+    cross(b"across the peering", 1).await;
 
     // **Twice, because value moves on fulfilment** (ADR 0004,
     // `peer-wire-spec.md` §3.2). The payer owes nothing until the first
@@ -984,17 +1164,112 @@ async fn two_connectors_move_a_paid_packet(carriage: Carriage) {
     // delivery; the second is what proves the peering is *paid*, which is
     // the property #620 exists for and the one a free-write path would
     // silently lose.
-    cross(b"across the peering again").await;
+    cross(b"across the peering again", 2).await;
 
     // Delivery alone is what the deleted test settled for. This asserts the
-    // money: the payee's peer claim ledger records a claim on this
-    // peering's channel, so the crossing was charged and the claim was
-    // accepted rather than merely sent.
+    // money on the **peer** leg: the payee's peer claim ledger records a
+    // claim on this peering's channel, so the crossing was charged and the
+    // claim was accepted rather than merely sent.
     assert!(
         peer_journal(payee_state.path()).contains(&fixture.channel_id),
         "§3.2: the sender owes for the crossing, so the payee's peer claim \
          ledger must record a claim on this peering's channel. Ledger was:\n{}",
         peer_journal(payee_state.path())
+    );
+
+    // And on the **client** leg (ADR 0028): the payer's own client-edge
+    // journal records the client's claims on the client channel. Without
+    // this the test above still passes while the payer pays the payee out
+    // of its own pocket -- which is exactly the state issue #620 found and
+    // the reason the devnet's store leg was never repointed at a peering.
+    let charged = client_journal(payer_state.path());
+    assert!(
+        charged.contains(&fixture.client_channel_id),
+        "the client leg must be charged: the payer's client-edge claim \
+         journal must record a claim on the client's channel. Journal was:\n{charged}"
+    );
+}
+
+/// **The amount a priced forwarded route will carry is bounded by its
+/// price** (ADR 0028). A client that pays `CLIENT_PRICE` and declares a
+/// larger `amount` is asking this connector to forward `amount - PEER_FEE`
+/// downstream -- and to sign a peer claim for it -- having paid for
+/// `CLIENT_PRICE`. That difference is this connector's money, chosen by
+/// whoever sends the packet, which is why it is refused rather than
+/// carried.
+///
+/// `F03` (Invalid Amount), the same code an underpaying claim gets: the
+/// packet is fine and the amount is not. Refused *before* the claim is
+/// ingested, so the client's watermark is not spent on a packet that never
+/// moves.
+///
+/// One carriage is enough here, unlike every other test in this file: the
+/// rule lives in `over_carried_reject`, which both carriages call from the
+/// same place, and §9's no-drift concern is about behaviour that exists on
+/// one carriage and not the other rather than about which one a shared
+/// function is proven through.
+#[tokio::test]
+async fn a_client_may_not_declare_more_than_the_forwarded_route_charges() {
+    let Some(fixture) = PeerFixture::spawn().await else {
+        return;
+    };
+    let payee_state = tempfile::tempdir().expect("temp payee state dir");
+    let payer_state = tempfile::tempdir().expect("temp payer state dir");
+    let stub_app = spawn_stub_app();
+    let (payee, _payee_config, _payee_key) =
+        spawn_payee(&fixture, payee_state.path(), &stub_app.addr);
+    let endpoint = format!("http://{}/ilp", payee.client_edge_addr);
+    let (payer, _payer_config, _payer_key) =
+        spawn_payer(&fixture, payer_state.path(), Carriage::Http, &endpoint);
+
+    let payee_identity = identity_from_key_seed(PAYEE_SIGNER_SEED);
+    let (data, shared_secret) = sealed_prepare_data(b"over-carried", &payee_identity);
+    let over_carried = Prepare {
+        amount: CLIENT_PRICE + 1,
+        ..sample_prepare(APP_PREFIX, data, &shared_secret)
+    };
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/ilp", payer.client_edge_addr))
+        .header(
+            "ilp-payment-channel-claim",
+            BASE64.encode(fixture.client_claim(1)),
+        )
+        .body(over_carried.encode())
+        .send()
+        .await
+        .expect("POST /ilp");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    // `accumulatedCost` is a carriage-layer field, not a packet one
+    // (`peer-carriage-spec.md` §3): it rides the `Toon-Accumulated-Cost`
+    // response header, so it is read here rather than off the decoded
+    // REJECT, whose own field is only this process's in-memory carrier.
+    let accumulated_cost = response
+        .headers()
+        .get("toon-accumulated-cost")
+        .expect("every REJECT this edge answers carries its running cost")
+        .to_str()
+        .expect("the accumulated-cost header is ASCII")
+        .to_string();
+    let body = response.bytes().await.expect("response body").to_vec();
+    let reject = Reject::decode(&body).expect("an over-carried packet is refused, not fulfilled");
+    assert_eq!(
+        reject.code.as_str(),
+        "F03",
+        "an amount larger than the price is an amount problem, not a packet one: {}",
+        reject.message
+    );
+    assert_eq!(
+        accumulated_cost,
+        CLIENT_PRICE.to_string(),
+        "issue #548: the figure the sender must fit under rides home as a \
+         number, not only as English"
+    );
+    assert!(
+        client_journal(payer_state.path()).is_empty(),
+        "the claim must not be spent on a packet this connector refused to \
+         carry. Journal was:\n{}",
+        client_journal(payer_state.path())
     );
 }
 
@@ -1115,6 +1390,7 @@ async fn a_peer_claim_is_acknowledged(carriage: Carriage) {
     // (3) ...and the narrowing is exactly one claim wide.
     let different_at_the_same_nonce = evm_claim_json(
         &fixture.payer_secret,
+        PAYER_ID,
         &fixture.channel_id,
         1,
         u128::from(PEER_FEE) + 1,
