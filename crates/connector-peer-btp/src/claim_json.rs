@@ -202,18 +202,19 @@ pub fn encode(
             // `solana_balance_proof_message`'s 48 bytes, which carry no
             // EIP-712 domain to render (`SolanaChannel`'s own doc,
             // `connector_runtime::claim`).
+            let signer = bs58::encode(signer_public_key).into_string();
             let json = serde_json::json!({
                 "version": "1.0",
                 "blockchain": "solana",
                 "messageId": message_id,
                 "timestamp": timestamp,
-                "senderId": bs58::encode(signer_public_key).into_string(),
+                "senderId": signer,
                 "programId": PLACEHOLDER_SOLANA_PROGRAM_ID,
                 "channelAccount": claim.channel_id,
                 "nonce": claim.nonce,
                 "transferredAmount": claim.cumulative_amount.to_string(),
                 "signature": BASE64.encode(signature),
-                "signerPublicKey": bs58::encode(signer_public_key).into_string(),
+                "signerPublicKey": signer,
             });
             serde_json::to_string(&json).expect("a json! object always serializes")
         }

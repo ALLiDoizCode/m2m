@@ -864,16 +864,16 @@ impl ClaimBook {
     ) -> Option<WireClaim> {
         let channel_id = self.outbound_channels.get(peer_id)?.clone();
 
-        enum Binding {
-            Evm(OnChainChannelId, ChannelDomain),
-            Solana(SolanaChannel),
+        enum Binding<'a> {
+            Evm(&'a Arc<dyn Signer>, OnChainChannelId, ChannelDomain),
+            Solana(&'a Arc<dyn Ed25519Signer>, SolanaChannel),
         }
         let binding = if let Some(&(on_chain_id, domain)) = self.channel_domains.get(&channel_id) {
-            self.signer.as_ref()?;
-            Binding::Evm(on_chain_id, domain)
+            let signer = self.signer.as_ref()?;
+            Binding::Evm(signer, on_chain_id, domain)
         } else if let Some(&channel) = self.solana_channels.get(&channel_id) {
-            self.solana_signer.as_ref()?;
-            Binding::Solana(channel)
+            let solana_signer = self.solana_signer.as_ref()?;
+            Binding::Solana(solana_signer, channel)
         } else {
             return None;
         };
@@ -888,28 +888,18 @@ impl ClaimBook {
         ledger.cumulative_amount += amount;
         ledger.nonce += 1;
         let signature = match binding {
-            Binding::Evm(on_chain_id, domain) => {
+            Binding::Evm(signer, on_chain_id, domain) => {
                 let proof = evm_proof(on_chain_id, domain, ledger.nonce, ledger.cumulative_amount);
-                let signature = self
-                    .signer
-                    .as_ref()
-                    .expect("checked above")
-                    .sign(&evm_balance_proof_digest(&proof))
-                    .ok()?;
+                let signature = signer.sign(&evm_balance_proof_digest(&proof)).ok()?;
                 ClaimSignature::Evm(signature)
             }
-            Binding::Solana(channel) => {
+            Binding::Solana(solana_signer, channel) => {
                 let message = solana_balance_proof_message(
                     &channel.channel_account,
                     ledger.nonce,
                     ledger.cumulative_amount,
                 );
-                ClaimSignature::Solana(
-                    self.solana_signer
-                        .as_ref()
-                        .expect("checked above")
-                        .sign(&message),
-                )
+                ClaimSignature::Solana(solana_signer.sign(&message))
             }
         };
         let claim = WireClaim {
