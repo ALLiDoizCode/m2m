@@ -101,7 +101,7 @@ services:
     # as an unknown top-level key and exits 1 on config load. Every
     # `rust-sha-` tag is well past #605, so this is a constraint on rolling
     # BACK, not on rolling forward.
-    image: ghcr.io/toon-protocol/connector:rust-sha-20e2969
+    image: ghcr.io/toon-protocol/connector:rust-sha-54a967d
     volumes:
       - ./connector-rust.toml:/app/config/connector.toml:ro
       - ./signer-rust.key:/app/data/signer.key:ro
