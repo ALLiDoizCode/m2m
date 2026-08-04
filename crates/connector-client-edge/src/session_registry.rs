@@ -40,14 +40,17 @@
 //! tell the sender its packet's own expiry passed, which is not what
 //! happened when a laptop's Wi-Fi drops mid-flight.
 //!
-//! No production caller of [`SessionRegistry::deliver`] exists yet --
-//! deciding when a job should be pushed to a client session, and to
-//! which address, is the next ticket's job (toon-meta#262's job-dispatch
-//! work), same posture #697/#699 already shipped their own foundations
-//! under. `bind`/`touch`/`unbind` ARE live in production: every BTP
-//! session's auth, per-frame liveness and close already run through them
+//! [`SessionRegistry::deliver`]'s production caller (issue #736,
+//! toon-meta#262's job-dispatch work this module deferred) is
+//! [`crate::session_route::route_prepare`], wrapped around
+//! `Connector::handle_prepare` at both client-edge ingresses (`lib.rs`'s
+//! `POST /ilp`, `btp.rs`'s BTP carriage) rather than folded into
+//! `handle_prepare` itself -- `connector-runtime` depends on nothing in
+//! this crate and so cannot see this registry at all. `bind`/`touch`/
+//! `unbind` were already live in production before that: every BTP
+//! session's auth, per-frame liveness and close run through them
 //! (`btp::btp_session`), so the registry itself, and its fencing
-//! invariant, are exercised by every real session today.
+//! invariant, are exercised by every real session.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -94,7 +97,6 @@ struct SessionBinding {
 /// `expected_generation`, so a rebind that happened in between fences the
 /// stale attempt off rather than letting it race the session that
 /// superseded it.
-#[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) struct SessionLease {
     pub(crate) generation: u64,
@@ -217,11 +219,6 @@ impl SessionRegistry {
     /// caller's assumptions (issue #698's explicit test: "old generation
     /// sends after a new one is established, and must be discarded"). Pass
     /// `None` for a delivery with no prior lease to fence against.
-    ///
-    /// `#[allow(dead_code)]`: no production caller yet -- deciding when to
-    /// push a job to a client session is the next ticket's job (see this
-    /// module's own doc comment).
-    #[allow(dead_code)]
     pub(crate) async fn deliver(
         &self,
         address: &str,
