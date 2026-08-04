@@ -8,6 +8,7 @@
 //! wire, not to itself.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use chrono::{TimeZone, Utc};
@@ -876,6 +877,12 @@ async fn a_prepare_to_a_never_bound_destination_still_answers_f02_over_btp() {
 struct SlowApp {
     inner: Arc<FakeAppClient>,
     delay: std::time::Duration,
+    /// How many deliveries are between `sleep` and answer right now --
+    /// the pipelining signal itself. A lockstep session never gets above
+    /// `1`; a windowed one overlaps up to `btp_session_window` of them.
+    in_flight: Arc<AtomicUsize>,
+    /// The high-water mark of `in_flight`, read back once the run is done.
+    max_in_flight: Arc<AtomicUsize>,
 }
 
 #[async_trait::async_trait]
@@ -885,18 +892,25 @@ impl connector_runtime::AppClient for SlowApp {
         handler_url: &url::Url,
         request: &connector_domain::EnvelopeRequest,
     ) -> AppOutcome {
+        let now_in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_in_flight
+            .fetch_max(now_in_flight, Ordering::SeqCst);
         tokio::time::sleep(self.delay).await;
-        self.inner.deliver(handler_url, request).await
+        let outcome = self.inner.deliver(handler_url, request).await;
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        outcome
     }
 }
 
 /// [`serve_edge`], with the downstream taking `delay` per delivery and the
 /// claim gate journaling to `journal` -- the two real costs (a downstream
-/// round-trip, an fsync) the lockstep session serialized per frame.
+/// round-trip, an fsync) the lockstep session serialized per frame. The
+/// returned [`AtomicUsize`] is [`SlowApp`]'s high-water mark of concurrent
+/// deliveries, the pipelining signal a caller reads back once done.
 async fn serve_slow_edge(
     delay: std::time::Duration,
     journal: Arc<dyn connector_runtime::Journal>,
-) -> (SocketAddr, Arc<dyn Signer>) {
+) -> (SocketAddr, Arc<dyn Signer>, Arc<AtomicUsize>) {
     let route = StaticRoute::new_priced("g.test.app", "http://localhost:4000", PRICE).unwrap();
     let inner = Arc::new(FakeAppClient::new());
     inner.respond(
@@ -910,11 +924,17 @@ async fn serve_slow_edge(
         },
     );
     let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("btp-throughput-test"));
+    let max_in_flight = Arc::new(AtomicUsize::new(0));
     let connector = Arc::new(
         Connector::new(
             vec![route],
             vec![],
-            Arc::new(SlowApp { inner, delay }),
+            Arc::new(SlowApp {
+                inner,
+                delay,
+                in_flight: Arc::new(AtomicUsize::new(0)),
+                max_in_flight: max_in_flight.clone(),
+            }),
             Arc::new(InProcessPeerTransport::new()),
             test_clock(),
         )
@@ -926,25 +946,32 @@ async fn serve_slow_edge(
     let server = axum::Server::bind(&"127.0.0.1:0".parse().unwrap()).serve(app.into_make_service());
     let addr = server.local_addr();
     tokio::spawn(server);
-    (addr, signer)
+    (addr, signer, max_in_flight)
 }
 
-/// Issue #688's own number, demonstrated rather than estimated: with the
+/// Issue #688's own property, demonstrated rather than estimated: with the
 /// downstream taking a real 20 ms per delivery and the journal a real
-/// fsync (a `FileJournal` on disk, group-committed per #686), one session
-/// sustains **more than 150 paid writes per second** -- the measured
-/// per-session admission wall of the lockstep loop, which at 20 ms
-/// downstream could never exceed ~40/s. 300 strictly-advancing claims are
-/// written back-to-back; the bar is 300 answers inside 2 s (= 150/s), and
-/// the whole margin comes from overlap, since 300 × (20 ms + fsync)
-/// serialized is over 6 s on any disk.
+/// fsync (a `FileJournal` on disk, group-committed per #686), one session's
+/// admission is **pipelined, not serialized** -- deliveries overlap up to
+/// `DEFAULT_BTP_SESSION_WINDOW` at once instead of one completing before
+/// the next starts.
+///
+/// This asserts concurrency actually observed in flight rather than a
+/// wall-clock rate (issue #747): a wall-clock threshold placed at the
+/// measured ceiling (the original form of this test asserted
+/// `>150 writes/s`, the number issue #685 documents as that ceiling) has no
+/// headroom against CI contention and goes red on a busy runner with no
+/// regression underneath it. Whether deliveries overlapped at all is a
+/// property of the session's own scheduling, not of how fast the runner
+/// happened to be while it ran, so it stays green under load and still
+/// catches a real regression to lockstep (fixed at max-observed = 1).
 #[tokio::test(flavor = "multi_thread")]
-async fn a_single_session_sustains_more_than_150_paid_writes_per_second() {
+async fn a_single_session_pipelines_admission_instead_of_serializing_it() {
     const WRITES: u64 = 300;
     let dir = tempfile::tempdir().expect("tempdir");
     let journal = connector_runtime::FileJournal::open(dir.path().join("claims.log"))
         .expect("open the journal");
-    let (addr, signer) =
+    let (addr, signer, max_in_flight) =
         serve_slow_edge(std::time::Duration::from_millis(20), Arc::new(journal)).await;
     let session = connect(addr).await;
     let receiver = signer.public_key().unwrap();
@@ -1002,10 +1029,31 @@ async fn a_single_session_sustains_more_than_150_paid_writes_per_second() {
         "every write was answered exactly once, correlated by requestId"
     );
     let per_second = WRITES as f64 / elapsed.as_secs_f64();
-    println!("single-session pipelined admission: {WRITES} paid writes in {elapsed:?} = {per_second:.0}/s");
+    let observed_max = max_in_flight.load(Ordering::SeqCst);
+    let window = connector_client_edge::DEFAULT_BTP_SESSION_WINDOW.get() as usize;
+    println!(
+        "single-session pipelined admission: {WRITES} paid writes in {elapsed:?} = \
+         {per_second:.0}/s, max {observed_max} of {window} concurrently in flight"
+    );
+    // A lockstep session (issue #688's regression case) is pinned at
+    // `max_in_flight == 1`: the next delivery cannot start before the
+    // previous one's window slot is released, ever. `>= 2` is already a
+    // strict, binary line between pipelined and serialized -- the
+    // property issue #747 asks this test to prove, not an estimate of how
+    // much overlap "normal" looks like -- and it is set no higher:
+    // measured under artificial CPU contention on a 4-core box (multiple
+    // `yes` loops fighting the test for cores, well past what a busy CI
+    // neighbor does), max observed concurrency fell as low as 2-3 while
+    // still genuinely pipelined, at a wall-clock rate under 40/s that
+    // would have failed the old >150/s assertion many times over. This
+    // floor stays green through exactly the contention that made that
+    // assertion flaky.
+    let pipelining_floor = 2;
     assert!(
-        per_second > 150.0,
-        "one session admitted {per_second:.0} paid writes/s ({WRITES} in {elapsed:?}) -- at or \
-         below the ~150/s serialized wall this pipeline exists to clear"
+        observed_max >= pipelining_floor,
+        "one session peaked at only {observed_max} of {window} deliveries concurrently in \
+         flight, short of the {pipelining_floor} floor ({WRITES} writes in {elapsed:?} = \
+         {per_second:.0}/s) -- that is admission serializing rather than pipelining, not a slow \
+         runner (a busy runner does not lower observed concurrency, only wall-clock rate)"
     );
 }
