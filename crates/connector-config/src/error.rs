@@ -110,17 +110,17 @@ pub enum ConfigError {
     TerminatedRouteHasFee { prefix: String, fee: u64 },
 
     #[error(
-        "route '{prefix}' forwards to a peer and sets 'price = {price}', which only a route \
-         terminating at a 'handler_url' can charge (issue #520) -- carriage over a peering \
-         relation is paid for by 'fee'. Remove the 'price', or write 'fee = {price}' if that \
-         is what was meant"
+        "route '{prefix}' forwards to peer '{peer_id}' but sets no 'price': a forwarded route \
+         is never silently free either (ADR 0028) -- 'price' is what this connector's client \
+         edge charges a client for a packet to this prefix, and 'fee' is only what this hop \
+         retains of it. Set 'price = 0' if free carriage is deliberate"
     )]
-    PeerRouteHasPrice { prefix: String, price: u64 },
+    PeerRouteMissingPrice { prefix: String, peer_id: String },
 
     #[error(
-        "route '{prefix}' forwards to a peer and sets 'transport = \"{value}\"', which only a \
-         route terminating at a 'handler_url' can restrict (issue #701) -- a peer route always \
-         travels the peer wire, never a client transport. Remove the 'transport' field"
+        "route '{prefix}' forwards to a peer and sets 'transport = \"{value}\"', which this \
+         connector does not yet apply to a forwarded route (issue #701, ADR 0028) -- such a \
+         route accepts both client transports. Remove the 'transport' field"
     )]
     PeerRouteHasTransport { prefix: String, value: String },
 

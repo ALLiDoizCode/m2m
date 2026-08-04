@@ -174,9 +174,26 @@ write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STE
 # chain_id = 31337
 # token_network = "0x0000000000000000000000000000000000000000"
 #
-# # A route forwarding over the peering. `fee` buys carriage; a peer route
-# # never carries a `price` (that is the terminating app's work).
+# # A route forwarding over the peering. Both numbers are required and they
+# # answer different questions (ADR 0028):
+# #
+# #   price -- what THIS node's client edge charges a client for a packet to
+# #            this prefix. Greeted with x402 terms, claim-gated and
+# #            journaled exactly as a terminated route's price is. A
+# #            forwarded route is never silently free: omitting `price` is a
+# #            refuse-to-start error, and `price = 0` means free carriage
+# #            was deliberate.
+# #   fee   -- what THIS hop retains of that price for the carriage (ADR
+# #            0010). The difference, `price - fee`, is what reaches the
+# #            peer, so a client's packet may not declare an amount larger
+# #            than `price`.
+# #
+# # Set `price` to at least what the rest of the path charges plus this
+# # hop's `fee`, or this node forwards value it was not paid for. The
+# # connector cannot check that -- it does not know what the far end
+# # charges -- so it is the operator's number to get right.
 # [[routes]]
 # prefix = "g.example.store"
 # peer_id = "store"
 # fee = 3
+# price = 1000

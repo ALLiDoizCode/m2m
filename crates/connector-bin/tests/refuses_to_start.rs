@@ -370,11 +370,14 @@ fee = 5
     );
 }
 
-/// The mirror image: `price` on a route forwarding to a peer charged
-/// nothing, so a node written to earn 100 per forwarded packet carried
-/// them free.
+/// The mirror image (ADR 0028): a route forwarding to a peer with no
+/// `price` charged the client nothing, so a node written to forward
+/// packets carried them -- and paid its own peer for the carriage -- for
+/// free. `price` is required on the forwarded branch exactly as it is on
+/// the terminated one; issue #557's "never silently free" is not a
+/// property of terminating.
 #[test]
-fn exits_non_zero_when_a_peer_route_sets_a_price() {
+fn exits_non_zero_when_a_peer_route_sets_no_price() {
     let key_file = write_raw_key_file();
     let config_file = write_config(&format!(
         r#"
@@ -386,7 +389,7 @@ key_file = "{}"
 [[routes]]
 prefix = "g.example.store"
 peer_id = "store"
-price = 100
+fee = 3
 "#,
         key_file.path().display()
     ));
@@ -397,7 +400,7 @@ price = 100
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("price"),
-        "expected an actionable price-on-a-peer-route error, got: {stderr}"
+        "expected an actionable missing-price-on-a-peer-route error, got: {stderr}"
     );
 }
 

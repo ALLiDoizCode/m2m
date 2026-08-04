@@ -19,7 +19,8 @@ pub use claim::{
 };
 pub use clock::{Clock, SystemClock, TestClock};
 pub use connector::{
-    AppRouteFacts, ChannelOperationError, Connector, LeaseRouteError, ProbeDenied,
+    ChannelOperationError, ClientRouteFacts, ClientRouteKind, Connector, LeaseRouteError,
+    ProbeDenied,
 };
 // Re-exported for callers that hold a `Connector` but not a config-crate
 // dependency of their own (`connector-operator`): the chain key

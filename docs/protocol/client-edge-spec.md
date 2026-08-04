@@ -432,13 +432,29 @@ clearly and immediately; it is not owed a code path, only an unambiguous refusal
 ### 1.4 Answering an unpaid request: x402 v2 terms
 
 An unpaid request — no claim header of either kind — addressing a route this connector both
-terminates and prices is answered `402` with that route's terms instead of being routed at all
+serves and prices is answered `402` with that route's terms instead of being routed at all
 ([issue #526](https://github.com/toon-protocol/connector/issues/526), [ADR
 0022](../adr/0022-a-connector-answers-it-does-not-announce.md)): the app behind a priced route is
 never asked to do free work for an anonymous, unpaying caller. A present claim header (valid or
 not) suppresses this response unconditionally — its validation is §1.3's job, not this section's
 — and an unpaid request to an unpriced or unmatched destination falls through unchanged, exactly
 as it always has.
+
+**"Serves" spans both kinds of configured route** ([ADR
+0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md), [issue
+#620](https://github.com/toon-protocol/connector/issues/620)): one that terminates here, whose
+`price` buys the app's work, and one that forwards over a peering, whose `price` buys the whole
+path and out of which this hop retains its `fee`. The terms are byte-identical either way —
+nothing in the shape below names a route kind, and a client cannot tell, and has no reason to
+care, which one it is paying. Before ADR 0028 a forwarded destination was greeted with nothing,
+required no claim and was carried for free; that was a free gateway, not a design.
+
+Two rules attach to the forwarded case and to nothing else. A client-edge PREPARE to a priced
+forwarded destination is refused `F03_INVALID_AMOUNT` when its declared `amount` exceeds that
+`price` — this connector never puts more value on the peer wire than it collected, and the
+refusal is decided before the claim is ingested so a packet that will not be carried never spends
+a watermark. And a _peer-role_ PREPARE is never answered with this greeting at all
+(`peer-carriage-spec.md` §3.1): everything in this section is the client-facing direction.
 
 This is **answering, not announcing** ([ADR 0022](../adr/0022-a-connector-answers-it-does-not-announce.md)):
 a reply to the request that asked, changing no state and reaching nobody who did not ask. [ADR
@@ -631,14 +647,17 @@ state, and is never pushed into a network unprompted.
   operator-authenticated caller asking a different question — and the two routers are merged onto
   one port whenever the operator surface is enabled.
 - **`GET /ilp/routes/price?destination=<ILP address>`** — unauthenticated. Returns `200` with the
-  price of the locally-terminated route `destination` would match, reading the same
+  price of the configured route `destination` would match — terminated or forwarded ([ADR
+  0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md)) — reading the same
   longest-prefix lookup the x402 terms (§1.4) and claim value binding (§1.3) charge against, so
   this never states a price a real request wouldn't also be charged:
   ```json
   { "destination": "g.example.app", "price": 100 }
   ```
-  `404` when no locally-terminated route matches `destination` — this endpoint never fabricates a
-  price for a route it does not serve.
+  `404` when no route this connector serves matches `destination` — this endpoint never fabricates
+  a price for a route it does not serve. It answered `404` for a forwarded destination before ADR
+  0028, which was correct only while such a destination was also uncharged; answering it now is
+  the same rule applied to a route that is charged for.
 
 ### 1.8 Sealing (issue #524)
 

@@ -27,23 +27,33 @@ fn is_valid_ilp_address(address: &str) -> bool {
 
 /// A `[[routes]]` entry as written in the config file: forwards to the app
 /// at `handler_url`, or to the peer named `peer_id` -- exactly one of the
-/// two must be set. `fee` is only meaningful alongside `peer_id` (ADR
-/// 0010) and defaults to zero there; `price` is only meaningful alongside
-/// `handler_url` (issue #520) and is required there -- see
-/// [`ConfigError::RouteMissingPrice`]. `transport` is likewise only
-/// meaningful alongside `handler_url` (toon-meta#262 decision 11, issue
-/// #701): a peer route always travels the peer wire, never a client
-/// transport, so restricting it to `"http"` or `"btp"` means nothing.
+/// two must be set.
+///
+/// `price` is required on **both** branches (ADR 0028), and means the same
+/// thing on each: what this connector's client edge charges a client for a
+/// packet to this prefix. On a terminated route it buys the app's work
+/// (issue #520); on a forwarded one it buys the whole path, of which this
+/// hop keeps `fee`. Its absence is [`ConfigError::RouteMissingPrice`] or
+/// [`ConfigError::PeerRouteMissingPrice`] respectively -- no route is ever
+/// silently free (issue #557).
+///
+/// `fee` is only meaningful alongside `peer_id` (ADR 0010) and defaults to
+/// zero there: it is what this hop *retains* of the price, realized on the
+/// wire as the difference between the amount received and the amount
+/// forwarded (`peer-wire-spec.md` §4). `transport` is only meaningful
+/// alongside `handler_url` (toon-meta#262 decision 11, issue #701) -- not
+/// because a forwarded route is unreachable over a client transport (ADR
+/// 0028 makes it reachable over both), but because the policy is not
+/// applied to one.
 ///
 /// Neither field is silently ignored on the branch it does not belong to
 /// (issue #556): `fee` is an `Option` rather than a defaulted `u64`
 /// precisely so [`resolve_routes`] can tell "written as zero" from "not
 /// written", and refuse the former on a terminated route
-/// ([`ConfigError::TerminatedRouteHasFee`]) exactly as it refuses a `price`
-/// on a peer route ([`ConfigError::PeerRouteHasPrice`]) and a `transport`
-/// on a peer route ([`ConfigError::PeerRouteHasTransport`]). Before that, a
-/// `peer_id` route with `price = 100` charged nothing and a `handler_url`
-/// route with `fee = 5` earned nothing, and neither was an error.
+/// ([`ConfigError::TerminatedRouteHasFee`]) exactly as it refuses a
+/// `transport` on a peer route ([`ConfigError::PeerRouteHasTransport`]).
+/// Before that, a `handler_url` route with `fee = 5` earned nothing and was
+/// not an error.
 ///
 /// `deny_unknown_fields` closes the same hole for every other key: a
 /// mistyped `pefix` or `handler_ur` is a refuse-to-start error, not a route
@@ -154,7 +164,8 @@ impl std::str::FromStr for TransportPolicy {
 /// `prefix` are delivered to the app at `handler_url`, which charges
 /// `price` for the work it does -- distinct from a peer route's `fee`,
 /// which buys carriage rather than the terminating app's work (issue
-/// #520). A route is never silently free: [`resolve_routes`] refuses to
+/// #520). A peer route has a `price` of its own (ADR 0028), meaning the
+/// same client-facing thing this one does. A route is never silently free: [`resolve_routes`] refuses to
 /// return one with no configured price, so `price == 0` always means the
 /// operator wrote it deliberately.
 ///
@@ -259,6 +270,7 @@ pub struct PeerRouteConfig {
     prefix: String,
     peer_id: String,
     fee: u64,
+    price: u64,
 }
 
 impl PeerRouteConfig {
@@ -273,9 +285,19 @@ impl PeerRouteConfig {
         &self.peer_id
     }
 
-    /// This peering relation's flat per-packet fee (ADR 0010).
+    /// This peering relation's flat per-packet fee (ADR 0010) -- what this
+    /// hop retains of [`Self::price`], not what a client is charged.
     pub fn fee(&self) -> u64 {
         self.fee
+    }
+
+    /// The flat price this connector's client edge charges a client for a
+    /// packet to this prefix (ADR 0028) -- greeted, gated and journaled on
+    /// exactly the path a terminated route's own price is. Always written
+    /// down: [`resolve_routes`] refuses a forwarded route with no price, so
+    /// `price == 0` always means deliberate free carriage.
+    pub fn price(&self) -> u64 {
+        self.price
     }
 }
 
@@ -374,15 +396,21 @@ fn build_peer_route(
     prefix: String,
     peer_id: String,
     fee: u64,
+    price: Option<u64>,
 ) -> Result<PeerRouteConfig, ConfigError> {
     let prefix = validate_prefix(prefix)?;
     if peer_id.trim().is_empty() {
         return Err(ConfigError::RoutePeerIdEmpty { prefix });
     }
+    let price = price.ok_or_else(|| ConfigError::PeerRouteMissingPrice {
+        prefix: prefix.clone(),
+        peer_id: peer_id.clone(),
+    })?;
     Ok(PeerRouteConfig {
         prefix,
         peer_id,
         fee,
+        price,
     })
 }
 
@@ -430,23 +458,21 @@ pub(crate) fn resolve_routes(
                 routes.push(route);
             }
             (None, Some(peer_id)) => {
-                // Mirror image: a forwarded route has no terminating app
-                // whose work a `price` could pay for, and no client
-                // transport a `transport` restriction could mean anything
-                // against -- it always travels the peer wire (issue #701).
-                if let Some(price) = raw.price {
-                    return Err(ConfigError::PeerRouteHasPrice {
-                        prefix: raw.prefix,
-                        price,
-                    });
-                }
+                // A forwarded route carries both numbers (ADR 0028):
+                // `price` is what this connector's client edge charges a
+                // client for the packet, `fee` is what this hop retains of
+                // it. What it still cannot carry is a `transport` policy --
+                // not because it is unreachable over a client transport,
+                // but because that policy is not applied to a forwarded
+                // route (issue #701); refused rather than read and
+                // discarded (issue #556).
                 if let Some(value) = raw.transport {
                     return Err(ConfigError::PeerRouteHasTransport {
                         prefix: raw.prefix,
                         value,
                     });
                 }
-                let route = build_peer_route(raw.prefix, peer_id, raw.fee.unwrap_or(0))?;
+                let route = build_peer_route(raw.prefix, peer_id, raw.fee.unwrap_or(0), raw.price)?;
                 insert_unique_prefix(&mut seen, route.prefix())?;
                 peer_routes.push(route);
             }
@@ -506,12 +532,16 @@ mod tests {
     }
 
     fn peer_route(prefix: &str, peer_id: &str, fee: u64) -> RawRoute {
+        priced_peer_route(prefix, peer_id, fee, 0)
+    }
+
+    fn priced_peer_route(prefix: &str, peer_id: &str, fee: u64, price: u64) -> RawRoute {
         RawRoute {
             prefix: prefix.to_string(),
             handler_url: None,
             peer_id: Some(peer_id.to_string()),
             fee: Some(fee),
-            price: None,
+            price: Some(price),
             transport: None,
         }
     }
@@ -621,26 +651,23 @@ mod tests {
         ));
     }
 
-    /// The mirror image: `price` was read only on the `handler_url`
-    /// branch, so a peer route that wrote `price = 100` charged nothing.
+    /// ADR 0028: a forwarded route carries both numbers. `price` is what
+    /// this connector's client edge charges the client; `fee` is what this
+    /// hop retains of it. Before ADR 0028 this combination was a hard
+    /// `PeerRouteHasPrice` error, which is exactly why no configuration
+    /// could charge for a packet that crossed a peering (issue #620).
     #[test]
-    fn a_peer_route_that_sets_a_price_is_rejected_rather_than_ignored() {
-        let result = resolve_routes(
+    fn a_peer_route_carries_both_a_price_and_a_fee() {
+        let (routes, peer_routes) = resolve_routes(
             None,
-            vec![RawRoute {
-                prefix: "g.example.store".to_string(),
-                handler_url: None,
-                peer_id: Some("store".to_string()),
-                fee: Some(3),
-                price: Some(100),
-                transport: None,
-            }],
+            vec![priced_peer_route("g.example.store", "store", 3, 100)],
             vec![],
-        );
-        assert!(matches!(
-            result,
-            Err(ConfigError::PeerRouteHasPrice { price: 100, .. })
-        ));
+        )
+        .expect("resolve");
+
+        assert!(routes.is_empty());
+        assert_eq!(peer_routes[0].price(), 100);
+        assert_eq!(peer_routes[0].fee(), 3);
     }
 
     /// The counterweight to both: each field on the branch it belongs to
@@ -674,7 +701,7 @@ mod tests {
                 handler_url: None,
                 peer_id: Some("store".to_string()),
                 fee: None,
-                price: None,
+                price: Some(100),
                 transport: None,
             }],
             vec![],
@@ -695,12 +722,40 @@ mod tests {
         assert_eq!(routes[0].price(), 0);
     }
 
+    /// Issue #557's "never silently free", applied to the forwarded branch
+    /// too (ADR 0028): a `peer_id` route with no `price` is a refuse-to-
+    /// start error rather than a route that quietly charges nothing at the
+    /// client edge -- which is precisely the free-gateway shape a peer
+    /// route had by construction before this change.
     #[test]
-    fn a_peer_route_needs_no_price() {
+    fn a_peer_route_with_no_price_is_rejected_at_load() {
+        let result = resolve_routes(
+            None,
+            vec![RawRoute {
+                prefix: "g.peer-b".to_string(),
+                handler_url: None,
+                peer_id: Some("peer-b".to_string()),
+                fee: Some(5),
+                price: None,
+                transport: None,
+            }],
+            vec![],
+        );
+        assert!(matches!(
+            result,
+            Err(ConfigError::PeerRouteMissingPrice { peer_id, .. }) if peer_id == "peer-b"
+        ));
+    }
+
+    /// The counterweight, exactly as for a terminated route: `price = 0` is
+    /// deliberate free carriage, written down, and is not an error.
+    #[test]
+    fn a_peer_route_priced_zero_is_deliberately_free_not_rejected() {
         let (_, peer_routes) =
             resolve_routes(None, vec![peer_route("g.peer-b", "peer-b", 5)], vec![])
                 .expect("resolve");
         assert_eq!(peer_routes[0].fee(), 5);
+        assert_eq!(peer_routes[0].price(), 0);
     }
 
     #[test]
@@ -1015,9 +1070,11 @@ mod tests {
         ));
     }
 
-    /// Mirror image of `PeerRouteHasPrice`: a peer route has no client
-    /// transport to restrict, so writing one is refused rather than
-    /// silently ignored (issue #556's principle, applied by issue #701).
+    /// A peer route's `transport` is refused rather than silently ignored
+    /// (issue #556's principle, applied by issue #701). ADR 0028 changed
+    /// why, not whether: such a route *is* reached over a client transport
+    /// now, so the field is no longer meaningless -- it is simply not
+    /// applied to a forwarded route, which accepts both.
     #[test]
     fn a_peer_route_that_sets_a_transport_is_rejected_rather_than_ignored() {
         let result = resolve_routes(

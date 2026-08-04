@@ -71,7 +71,7 @@ use serde::{Deserialize, Serialize};
 
 use connector_config::TransportPolicy;
 use connector_domain::{PacketResponse, Prepare, Reject, RejectCode};
-use connector_runtime::{Connector, ProbeDenied};
+use connector_runtime::{ClientRouteKind, Connector, ProbeDenied};
 use connector_signer::nip59::{unwrap_claim, WrappedClaim};
 use connector_signer::{PublicKeyBytes, Signer};
 
@@ -417,10 +417,12 @@ struct RoutePriceQuery {
 
 /// What a given destination would cost to deliver to, per ADR 0022's
 /// "a sender can ask what a route of its costs" -- reuses
-/// [`Connector::app_route_price`], the same longest-prefix lookup the
+/// [`Connector::client_route_price`], the same longest-prefix lookup the
 /// x402 greeting and the claim gate's value binding already use, so this
 /// answers with exactly the price a real request to `destination` would be
-/// charged, never a second source of truth.
+/// charged, never a second source of truth. That lookup spans configured
+/// routes of both kinds since ADR 0028, so a destination this connector
+/// forwards over a peering is answered here too -- it is charged here too.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct RoutePriceView {
     destination: String,
@@ -431,7 +433,7 @@ async fn route_price(
     State(state): State<Arc<ClientEdgeState>>,
     Query(query): Query<RoutePriceQuery>,
 ) -> Response {
-    match state.connector.app_route_price(&query.destination) {
+    match state.connector.client_route_price(&query.destination) {
         Some(price) => Json(RoutePriceView {
             destination: query.destination,
             price,
@@ -440,7 +442,7 @@ async fn route_price(
         None => (
             StatusCode::NOT_FOUND,
             format!(
-                "no locally-terminated route matches '{}'",
+                "no route this connector serves matches '{}'",
                 query.destination
             ),
         )
@@ -613,11 +615,16 @@ pub struct X402SolanaSettlementTerms {
 const X402_VERSION: u32 = 2;
 const X402_MAX_TIMEOUT_SECONDS: u64 = 60;
 
-/// Answer an unpaid request to `destination`, a route this connector
-/// terminates and prices at `price`, with its terms instead of performing
-/// the app's work (client-edge-spec.md §1.4, ADR 0022) -- this changes no
-/// state and is only ever a reply to the request that asked. `settlement`
-/// is the node's legacy EVM-shaped channel-opening facts (issue #617),
+/// Answer an unpaid request to `destination`, a route this connector serves
+/// and prices at `price`, with its terms instead of doing the work
+/// (client-edge-spec.md §1.4, ADR 0022) -- this changes no state and is
+/// only ever a reply to the request that asked. "Serves" spans both kinds
+/// of configured route since ADR 0028: a route that terminates here, whose
+/// price buys the app's work, and one that forwards over a peering, whose
+/// price buys the carriage. The terms are byte-identical either way --
+/// nothing in this shape names a route kind, and a client cannot tell (and
+/// has no reason to care) which one it is paying. `settlement` is the
+/// node's legacy EVM-shaped channel-opening facts (issue #617),
 /// `settlements` is the additive per-chain list (issue #632); both are
 /// included exactly when the node has the relevant backend(s).
 fn payment_required(
@@ -909,6 +916,53 @@ fn claim_rejected_response(rejection: ClaimIngestRejection, price: u64) -> Respo
 /// wraps it for HTTP, the `btp` module frames it for a websocket session
 /// (§1.9), so the taxonomy the comment above reasons through stays
 /// single-sourced.
+/// A client-edge PREPARE to a priced *forwarded* destination may not
+/// declare a carried `amount` larger than the `price` it is charged (ADR
+/// 0028). `None` when the packet is within its price, or when the route is
+/// not one this rule governs.
+///
+/// The arithmetic this protects is `peer-wire-spec.md` §4's, at the one hop
+/// where "upstream" is a client rather than a peer: this connector collects
+/// `price`, forwards `amount - fee`, and so earns `fee` exactly when
+/// `amount == price`. Let the client pick a larger `amount` and it picks
+/// this connector's loss instead -- the peer claim signed on fulfilment is
+/// real value, against this node's own channel, for carriage nobody paid
+/// for. A terminated route needs no such rule: nothing downstream of it is
+/// paid out of the price, and `amount` reaches no wire at all.
+///
+/// Only the priced branch is governed. An unpriced forwarded route
+/// (`price = 0`) is an operator's deliberate free carriage, and bounding
+/// its amount to zero would make free carriage impossible rather than safe;
+/// it keeps the behavior it had before ADR 0028 exactly.
+///
+/// `F03` (Invalid Amount) rather than `F01`: the packet is structurally and
+/// cryptographically fine, and the refusal is about an amount -- the same
+/// reading underpayment already gets. `accumulated_cost` reports the price
+/// for issue #548's reason, since the price is the very figure the sender
+/// must fit its amount under and it should not have to parse English to
+/// learn it.
+fn over_carried_reject(
+    destination: &str,
+    kind: ClientRouteKind,
+    amount: u64,
+    price: u64,
+) -> Option<Reject> {
+    if kind != ClientRouteKind::Forwarded || price == 0 || amount <= price {
+        return None;
+    }
+    Some(Reject {
+        code: RejectCode::f03_invalid_amount(),
+        triggered_by: String::new(),
+        message: format!(
+            "packet to '{destination}' declares amount {amount}, more than the {price} this \
+             connector charges to forward it -- a forwarded packet never carries more value \
+             than it was paid for"
+        ),
+        data: Vec::new(),
+        accumulated_cost: price,
+    })
+}
+
 fn claim_rejection_reject(rejection: ClaimIngestRejection, price: u64) -> Reject {
     let (code, accumulated_cost) = match rejection {
         ClaimIngestRejection::Underpayment { .. } => (RejectCode::f03_invalid_amount(), price),
@@ -950,30 +1004,34 @@ async fn handle_ilp(
     };
 
     // An unpaid request -- no claim header of either kind -- addressing a
-    // route this connector terminates and prices is answered with that
-    // route's terms instead of being routed at all (client-edge-spec.md
-    // §1.4, ADR 0022): the app is never asked to do free work for an
-    // anonymous, unpaying caller. A present claim header suppresses the
-    // greeting unconditionally (its validation, including underpayment, is
-    // §1.3's job below); an unpriced or unmatched destination is
-    // unaffected and falls through unchanged, exactly as it always has.
+    // route this connector serves and prices is answered with that route's
+    // terms instead of being routed at all (client-edge-spec.md §1.4, ADR
+    // 0022): no free work for an anonymous, unpaying caller, whether the
+    // work is an app's or a peering's carriage. A present claim header
+    // suppresses the greeting unconditionally (its validation, including
+    // underpayment, is §1.3's job below); an unpriced or unmatched
+    // destination is unaffected and falls through unchanged, exactly as it
+    // always has.
     let has_claim_header =
         headers.contains_key(CLAIM_HEADER) || headers.contains_key(CLAIM_WRAPPED_HEADER);
-    // No matching app route means nothing here is priced -- routing itself
-    // (not this gate) is what refuses an unroutable destination, with F02.
-    // One lookup serves both facts (issue #701): the price and the
-    // transport policy come from the same matched route, so there is no
-    // reason to walk the route table twice for one request.
-    let app_route = state.connector.app_route(&prepare.destination);
-    let price = app_route.map_or(0, |route| route.price);
+    // No matching configured route means nothing here is priced -- routing
+    // itself (not this gate) is what refuses an unroutable destination,
+    // with F02. One lookup serves every fact (issue #701, ADR 0028): the
+    // price, the transport policy and the route kind come from the same
+    // matched route, and it is the same selection `handle_prepare` will
+    // route by, so what is charged and where the packet goes cannot
+    // disagree.
+    let client_route = state.connector.client_route(&prepare.destination);
+    let price = client_route.map_or(0, |route| route.price);
 
     // Transport policy (issue #701, toon-meta#262 decision 11) is checked
     // before payment is considered at all: a route restricted to BTP is
     // unreachable over HTTP whether or not the request carries a valid
     // claim, so a paid request over the wrong transport is refused exactly
-    // like an unpaid one. A destination matching no app route is
-    // unaffected -- `None` here, same as an unmatched destination's price.
-    if let Some(policy) = app_route.map(|route| route.transport_policy) {
+    // like an unpaid one. A destination matching no configured route is
+    // unaffected -- `None` here, same as an unmatched destination's price
+    // -- and a forwarded route reports `Both`, so this never fires for one.
+    if let Some(policy) = client_route.map(|route| route.transport_policy) {
         if !policy.accepts_http() {
             return wrong_transport_required(
                 &prepare.destination,
@@ -992,6 +1050,18 @@ async fn handle_ilp(
             state.settlement_terms.as_ref(),
             &state.settlements,
         );
+    }
+
+    // ADR 0028: refused *before* the claim is ingested, so a packet this
+    // connector will not carry never spends the client's watermark. The
+    // greeting above runs first, so an unpaying client learns the price it
+    // must size its amount under rather than this refusal.
+    if let Some(route) = client_route {
+        if let Some(reject) =
+            over_carried_reject(&prepare.destination, route.kind, prepare.amount, price)
+        {
+            return packet_response(PacketResponse::Reject(reject));
+        }
     }
 
     // A claim header's validation failure rejects the packet before it is
@@ -3441,6 +3511,302 @@ mod tests {
             let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
             Fulfill::decode(&bytes).expect("a packet funded from the probe's figure fulfils");
             assert_eq!(app_client.deliveries().len(), 2);
+        }
+    }
+    /// Issue #620 / ADR 0028: a route that *forwards* over a peering is
+    /// greeted, gated and journaled at this client edge on exactly the path
+    /// a terminated one uses.
+    ///
+    /// Hermetic on purpose. `connector-bin`'s `two_connectors_peer.rs`
+    /// proves the same properties against two real spawned binaries, real
+    /// sockets and a real chain -- and skips itself entirely when `anvil`
+    /// is unavailable. These cases need no chain, so the free-gateway guard
+    /// they carry cannot be silently skipped in an environment that lacks
+    /// one, which is the whole point of writing them here as well.
+    mod forwarded_routes {
+        use super::claim_headers::{evm_claim_json, request_with_claim_header, test_channels};
+        use super::*;
+
+        /// What the forwarded route charges this connector's own clients,
+        /// and what it retains of that -- deliberately different numbers,
+        /// so a lookup that reached for the fee could not coincide with the
+        /// right answer.
+        const FORWARD_PRICE: u64 = 100;
+        const FORWARD_FEE: u64 = 3;
+
+        const PEER_ID: &str = "beta";
+        const FORWARD_PREFIX: &str = "g.example.beta";
+        const REMOTE_APP: &str = "g.example.beta.app";
+
+        /// A payer whose only route to [`REMOTE_APP`] is a priced peering,
+        /// and the real downstream `Connector` on the other end of it --
+        /// returned so a test can assert on what did or did not reach the
+        /// app *behind* the peering, which is what "carried for free" means
+        /// concretely.
+        fn payer_over_a_priced_peering(
+            signer: Arc<dyn connector_signer::Signer>,
+        ) -> (Arc<Connector>, Arc<FakeAppClient>) {
+            let remote_route = StaticRoute::new(REMOTE_APP, "http://localhost:4000").unwrap();
+            let remote_app = Arc::new(FakeAppClient::new());
+            remote_app.respond(remote_route.handler_url(), answered(b"across the peering"));
+            let payee = Arc::new(
+                Connector::new(
+                    vec![remote_route],
+                    vec![],
+                    remote_app.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone()),
+            );
+
+            let mut transport = InProcessPeerTransport::new();
+            transport.add_peer(PEER_ID, payee);
+            let payer = Arc::new(
+                Connector::new(
+                    vec![],
+                    vec![PeerRoute::new_priced(
+                        FORWARD_PREFIX,
+                        PEER_ID,
+                        FORWARD_FEE,
+                        FORWARD_PRICE,
+                    )],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(transport),
+                    test_clock(),
+                )
+                .with_identity_signer(signer),
+            );
+            (payer, remote_app)
+        }
+
+        /// The free-gateway guard, on the forwarded branch. Before ADR 0028
+        /// this exact request was carried across the peering and answered
+        /// by the app behind it, for nothing -- while the payer signed a
+        /// peer claim for the value it carried.
+        #[tokio::test]
+        async fn an_unpaid_request_to_a_priced_forwarded_route_is_greeted_not_carried() {
+            let signer = test_signer();
+            let (payer, remote_app) = payer_over_a_priced_peering(signer.clone());
+            let app = router(payer, signer);
+
+            let request = Request::builder()
+                .method("POST")
+                .uri("/ilp")
+                .body(Body::from(sample_prepare(REMOTE_APP).encode()))
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+
+            assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let terms: X402PaymentRequired = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(terms.resource.url, REMOTE_APP);
+            assert_eq!(
+                terms.accepts[0].amount,
+                FORWARD_PRICE.to_string(),
+                "the greeting quotes the forwarded route's `price`, never its `fee`"
+            );
+            assert!(
+                remote_app.deliveries().is_empty(),
+                "an unpaid request must not cross the peering at all"
+            );
+        }
+
+        /// The paying half: a real claim covering the price gets the packet
+        /// across the peering and fulfilled, so the greeting above is a
+        /// gate rather than a wall.
+        #[tokio::test]
+        async fn a_claim_covering_the_price_carries_the_packet_across_the_peering() {
+            let signer = test_signer();
+            let (payer, remote_app) = payer_over_a_priced_peering(signer.clone());
+            let app = router_with_gate(payer, signer.clone(), None, test_gate(test_channels()));
+
+            // `amount == price` is the arithmetic ADR 0028 intends: the hop
+            // collects `FORWARD_PRICE` and forwards `FORWARD_PRICE -
+            // FORWARD_FEE`, earning exactly its fee.
+            let (prepare, shared_secret) = sealed_sample_prepare_with_amount(
+                REMOTE_APP,
+                FORWARD_PRICE,
+                &signer.public_key().unwrap(),
+            );
+            let response = app
+                .oneshot(request_with_claim_header(
+                    &prepare,
+                    CLAIM_HEADER,
+                    &evm_claim_json(1, FORWARD_PRICE),
+                ))
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let fulfill = Fulfill::decode(&bytes).expect("a paid forwarded packet fulfils");
+            assert_eq!(
+                open_sealed_envelope(&shared_secret, &fulfill.data),
+                fulfill_envelope(b"across the peering")
+            );
+            assert_eq!(remote_app.deliveries().len(), 1);
+        }
+
+        /// A claim that does not cover the forwarded route's price is
+        /// refused for exactly the reason a terminated route's would be
+        /// (§1.3) -- underpayment is not a property of terminating.
+        #[tokio::test]
+        async fn a_claim_below_the_price_never_crosses_the_peering() {
+            let signer = test_signer();
+            let (payer, remote_app) = payer_over_a_priced_peering(signer.clone());
+            let app = router_with_gate(payer, signer.clone(), None, test_gate(test_channels()));
+
+            let (prepare, _shared_secret) = sealed_sample_prepare_with_amount(
+                REMOTE_APP,
+                FORWARD_PRICE,
+                &signer.public_key().unwrap(),
+            );
+            let response = app
+                .oneshot(request_with_claim_header(
+                    &prepare,
+                    CLAIM_HEADER,
+                    &evm_claim_json(1, FORWARD_PRICE - 1),
+                ))
+                .await
+                .unwrap();
+
+            let cost = response
+                .headers()
+                .get(ACCUMULATED_COST_HEADER)
+                .expect("an underpayment reports the price it fell short of")
+                .to_str()
+                .unwrap()
+                .to_string();
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = Reject::decode(&bytes).expect("an underpaid packet is rejected");
+            assert_eq!(reject.code.as_str(), "F03");
+            assert_eq!(cost, FORWARD_PRICE.to_string());
+            assert!(
+                remote_app.deliveries().is_empty(),
+                "an underpaid request must not cross the peering either"
+            );
+        }
+
+        /// ADR 0028's amount bound: paying `FORWARD_PRICE` does not buy the
+        /// carriage of an arbitrarily larger amount. The packet is refused
+        /// before the claim is ingested, so nothing downstream sees it and
+        /// nothing is spent.
+        #[tokio::test]
+        async fn a_forwarded_route_never_carries_more_value_than_its_price() {
+            let signer = test_signer();
+            let (payer, remote_app) = payer_over_a_priced_peering(signer.clone());
+            let app = router_with_gate(payer, signer.clone(), None, test_gate(test_channels()));
+
+            let (prepare, _shared_secret) = sealed_sample_prepare_with_amount(
+                REMOTE_APP,
+                FORWARD_PRICE + 1,
+                &signer.public_key().unwrap(),
+            );
+            let response = app
+                .oneshot(request_with_claim_header(
+                    &prepare,
+                    CLAIM_HEADER,
+                    &evm_claim_json(1, FORWARD_PRICE),
+                ))
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = Reject::decode(&bytes).expect("an over-carried packet is rejected");
+            assert_eq!(reject.code.as_str(), "F03");
+            assert!(
+                remote_app.deliveries().is_empty(),
+                "the packet this connector refused to carry must not have been carried"
+            );
+        }
+
+        /// The counterweight: an unpriced forwarded route (`price = 0`, an
+        /// operator's deliberate free carriage) keeps the behavior it had
+        /// before ADR 0028 -- no greeting, no claim required, and no bound
+        /// on the amount it carries beyond the fee arithmetic itself.
+        #[tokio::test]
+        async fn an_unpriced_forwarded_route_still_carries_for_free() {
+            let signer = test_signer();
+            let remote_route = StaticRoute::new(REMOTE_APP, "http://localhost:4000").unwrap();
+            let remote_app = Arc::new(FakeAppClient::new());
+            remote_app.respond(remote_route.handler_url(), answered(b"free carriage"));
+            let payee = Arc::new(
+                Connector::new(
+                    vec![remote_route],
+                    vec![],
+                    remote_app.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone()),
+            );
+            let mut transport = InProcessPeerTransport::new();
+            transport.add_peer(PEER_ID, payee);
+            let payer = Arc::new(
+                Connector::new(
+                    vec![],
+                    vec![PeerRoute::new_priced(FORWARD_PREFIX, PEER_ID, 0, 0)],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(transport),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone()),
+            );
+            let app = router(payer, signer.clone());
+
+            let (prepare, _shared_secret) =
+                sealed_sample_prepare(REMOTE_APP, &signer.public_key().unwrap());
+            let request = Request::builder()
+                .method("POST")
+                .uri("/ilp")
+                .body(Body::from(prepare.encode()))
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            Fulfill::decode(&bytes).expect("a deliberately free forwarded route still carries");
+            assert_eq!(remote_app.deliveries().len(), 1);
+        }
+
+        /// §1.7: `GET /ilp/routes/price` answers for a destination this
+        /// connector forwards, because it charges for one. Answering `404`
+        /// here -- what it did when the lookup read terminated routes only
+        /// -- would tell a client a route it is about to be charged for is
+        /// free.
+        #[tokio::test]
+        async fn the_price_endpoint_answers_for_a_forwarded_destination() {
+            let signer = test_signer();
+            let (payer, _remote_app) = payer_over_a_priced_peering(signer.clone());
+            let app = router(payer, signer);
+
+            let request = Request::builder()
+                .uri(format!("/ilp/routes/price?destination={REMOTE_APP}"))
+                .body(Body::empty())
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let view: RoutePriceView = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                view,
+                RoutePriceView {
+                    destination: REMOTE_APP.to_string(),
+                    price: FORWARD_PRICE,
+                }
+            );
+
+            let unmatched = Request::builder()
+                .uri("/ilp/routes/price?destination=g.nowhere")
+                .body(Body::empty())
+                .unwrap();
+            assert_eq!(
+                app.oneshot(unmatched).await.unwrap().status(),
+                StatusCode::NOT_FOUND,
+                "a destination this connector serves no route for is still 404"
+            );
         }
     }
 }

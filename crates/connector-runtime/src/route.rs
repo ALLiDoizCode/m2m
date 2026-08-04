@@ -6,23 +6,45 @@
 use chrono::{DateTime, Utc};
 
 /// A route whose traffic this connector forwards to a peer's connector for
-/// the next hop, rather than terminating it at an app of its own. `fee` is
-/// this peering relation's flat per-packet fee (ADR 0010) -- charged once
-/// per forwarded packet, agreed bilaterally, and never a share of the
-/// amount being carried.
+/// the next hop, rather than terminating it at an app of its own.
+///
+/// The two numbers answer different questions (ADR 0028). `fee` is this
+/// peering relation's flat per-packet fee (ADR 0010) -- what this hop
+/// *retains*, charged once per forwarded packet, agreed bilaterally, and
+/// never a share of the amount being carried. `price` is what this
+/// connector's own client edge charges a *client* for a packet to this
+/// prefix, out of which the rest of the path is paid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerRoute {
     prefix: String,
     peer_id: String,
     fee: u64,
+    price: u64,
 }
 
 impl PeerRoute {
+    /// A forwarded route that this connector's client edge serves for free
+    /// -- `price` zero. The shape a leased route (which has no price field
+    /// at all) always has, and the shorthand a test that is about carriage
+    /// rather than charging wants.
     pub fn new(prefix: impl Into<String>, peer_id: impl Into<String>, fee: u64) -> PeerRoute {
+        PeerRoute::new_priced(prefix, peer_id, fee, 0)
+    }
+
+    /// A forwarded route with an explicit client-edge price (ADR 0028) --
+    /// what `connector-cli` builds from a `[[routes]]` entry's own `price`,
+    /// which config load requires to be written down.
+    pub fn new_priced(
+        prefix: impl Into<String>,
+        peer_id: impl Into<String>,
+        fee: u64,
+        price: u64,
+    ) -> PeerRoute {
         PeerRoute {
             prefix: prefix.into(),
             peer_id: peer_id.into(),
             fee,
+            price,
         }
     }
 
@@ -37,9 +59,18 @@ impl PeerRoute {
         &self.peer_id
     }
 
-    /// This peering relation's flat per-packet fee (ADR 0010).
+    /// This peering relation's flat per-packet fee (ADR 0010) -- what this
+    /// hop retains, not what a client is charged.
     pub fn fee(&self) -> u64 {
         self.fee
+    }
+
+    /// The flat price this connector's client edge charges a client for a
+    /// packet to this prefix (ADR 0028), greeted and gated on exactly the
+    /// path a terminated route's price is. Zero on a leased route, which
+    /// has no price field to carry.
+    pub fn price(&self) -> u64 {
+        self.price
     }
 }
 

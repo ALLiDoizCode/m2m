@@ -62,10 +62,13 @@
 #     0003's design, and SocketAddr-only addressing — see
 #     crates/connector-config/src/peer.rs, where a peer is `{ id, addr }` and
 #     nothing else, with nothing to hang a handshake on;
-#   * the paid forwarded path is structurally unwired (#620): a peer route is
-#     neither priced at the client edge nor charged on arrival at the
-#     terminating side, so a peer-forwarded `g.toon.store` would have served
-#     this store app FOR FREE, beside the apex's paid door.
+#   * the paid forwarded path was structurally unwired when this file was
+#     written (#620): a peer route was neither priced at the client edge nor
+#     charged on arrival at the terminating side, so a peer-forwarded
+#     `g.toon.store` would have served this store app FOR FREE, beside the
+#     apex's paid door. ADR 0028 closed the first half -- a `peer_id` route
+#     now carries a `price` its client edge greets and charges, and cannot
+#     load without one -- so what remains open is arrival-side charging.
 #
 # Binding an unauthenticated plaintext listener on a box with no private
 # segment is a hazard with no upside while all three hold, so this node

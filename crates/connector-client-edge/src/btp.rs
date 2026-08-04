@@ -507,10 +507,10 @@ async fn handle_frame(
         }
     };
 
-    // One lookup serves both facts (issue #701): see `handle_ilp`'s mirror
-    // of this on the HTTP carriage.
-    let app_route = state.connector.app_route(&prepare.destination);
-    let price = app_route.map_or(0, |route| route.price);
+    // One lookup serves every fact (issue #701, ADR 0028): see
+    // `handle_ilp`'s mirror of this on the HTTP carriage.
+    let client_route = state.connector.client_route(&prepare.destination);
+    let price = client_route.map_or(0, |route| route.price);
 
     // Transport policy (issue #701, toon-meta#262 decision 11), BTP-shaped:
     // checked before payment is considered at all, exactly like the HTTP
@@ -522,7 +522,7 @@ async fn handle_frame(
     // `payment-required` protocolData slot the §1.4 greeting below uses,
     // self-diagnosing via `extra.requiredTransport` rather than a second
     // mechanism.
-    if let Some(policy) = app_route.map(|route| route.transport_policy) {
+    if let Some(policy) = client_route.map(|route| route.transport_policy) {
         if !policy.accepts_btp() {
             let terms = x402_terms_body(
                 &prepare.destination,
@@ -590,6 +590,22 @@ async fn handle_frame(
             ),
         )
         .await;
+    }
+
+    // ADR 0028's amount bound, BTP-shaped: the same rule as `handle_ilp`'s,
+    // in the same place -- after the greeting, before the claim is admitted
+    // -- so a packet this connector will not carry never spends the
+    // client's watermark on either carriage (§9's no-drift invariant).
+    if let Some(route) = client_route {
+        if let Some(reject) =
+            crate::over_carried_reject(&prepare.destination, route.kind, prepare.amount, price)
+        {
+            return reply(
+                replies,
+                reject_response(frame.request_id, reject, Vec::new()),
+            )
+            .await;
+        }
     }
 
     // §1.3, verbatim: the same gate, watermarks and refusal taxonomy as
