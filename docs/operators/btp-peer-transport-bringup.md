@@ -15,10 +15,10 @@ sent you here, the section that matches your error message is below.
 
 ## What was removed
 
-| Removed field       | Replaced by                                        |
-| ------------------- | -------------------------------------------------- |
-| `peer_wire_addr`    | `peer_expose` — peer carriages ride this node's own listeners, not a second socket |
-| `[[peers]].addr`    | `[[peers]].endpoint` — a `wss://` or `https://` URL, not a `SocketAddr` |
+| Removed field    | Replaced by                                                                        |
+| ---------------- | ---------------------------------------------------------------------------------- |
+| `peer_wire_addr` | `peer_expose` — peer carriages ride this node's own listeners, not a second socket |
+| `[[peers]].addr` | `[[peers]].endpoint` — a `wss://` or `https://` URL, not a `SocketAddr`            |
 
 Both are **hard, named errors**, never a silent ignore. The devnet boxes run bind-mounted configs
 that lead the repo copies, so a stale file has to stop the node rather than come up looking healthy
@@ -44,7 +44,7 @@ peer_expose = "btp"   # "btp" | "http" | "both" | "neither"; default "neither"
 
 A peering establishes only if at least one side dials a carriage the other exposes. What the far
 side exposes is not knowable from this file, so that half surfaces as an ordinary dial failure
-naming the peer and the endpoint. What *is* knowable is refused at load — see `PeerUndialable` and
+naming the peer and the endpoint. What _is_ knowable is refused at load — see `PeerUndialable` and
 `PeerRouteUndeliverable` below.
 
 **An HTTP-only node can neither reach nor be reached by a NAT'd peer.** A NAT'd node exposes
@@ -113,19 +113,19 @@ watermark held only in memory is not a replay defence.
 Every one of these stops the node before it serves anything (ADR 0009), and every message names
 this document.
 
-| Error                          | What it means                                                                                 | Fix                                                                       |
-| ------------------------------ | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| `PeerUndialable`               | `peer_expose = "neither"` and a peer has no `endpoint` — nothing dials, nothing accepts       | give the peer an endpoint, or expose a carriage                            |
-| `PeerEndpointScheme`           | an `endpoint` whose scheme selects no carriage (`ws://`, `http://`, `tcp://`, …)              | use `wss://` for BTP or `https://` for ILP-over-HTTP                       |
-| `PeerCredentialMissing`        | a `[[peers]]` entry with no credential, or an empty secret                                     | add `credential = { secret = "…" }` with a real secret                     |
-| `PeerChannelUnbound`           | a `[[peers]]` entry with no `[[peer_channels]]` row                                            | add the channel binding, or remove the peering                             |
-| `PeerChannelOrphaned`          | a `[[peer_channels]]` row naming a `peer_id` no `[[peers]]` entry configures                   | fix the `peer_id` typo, or add the peer                                    |
-| `ChannelInBothNamespaces`      | one channel id in both `[[peer_channels]]` and `[[client_channels]]`                           | keep the namespaces disjoint — pick one                                    |
-| `AcceptOnlyPeerWithoutCeiling` | a peering this node cannot dial and that carries no explicit `ceiling`                         | set an explicit `ceiling`; it is that peering's only bound                  |
-| `PeerRouteUndeliverable`       | a route whose next hop is a peer this node can never originate to                              | give the peer an endpoint, or include `btp` in `peer_expose`               |
-| `DuplicatePeerId`              | two `[[peers]]` entries with the same `id`                                                     | rename one                                                                 |
-| `PeerAddrRemoved`              | a `[[peers]]` entry still setting `addr`                                                       | replace it with `endpoint`                                                 |
-| `PeerWireAddrRemoved`          | a config still setting `peer_wire_addr`                                                        | delete the line and set `peer_expose` instead                              |
+| Error                          | What it means                                                                           | Fix                                                          |
+| ------------------------------ | --------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `PeerUndialable`               | `peer_expose = "neither"` and a peer has no `endpoint` — nothing dials, nothing accepts | give the peer an endpoint, or expose a carriage              |
+| `PeerEndpointScheme`           | an `endpoint` whose scheme selects no carriage (`ws://`, `http://`, `tcp://`, …)        | use `wss://` for BTP or `https://` for ILP-over-HTTP         |
+| `PeerCredentialMissing`        | a `[[peers]]` entry with no credential, or an empty secret                              | add `credential = { secret = "…" }` with a real secret       |
+| `PeerChannelUnbound`           | a `[[peers]]` entry with no `[[peer_channels]]` row                                     | add the channel binding, or remove the peering               |
+| `PeerChannelOrphaned`          | a `[[peer_channels]]` row naming a `peer_id` no `[[peers]]` entry configures            | fix the `peer_id` typo, or add the peer                      |
+| `ChannelInBothNamespaces`      | one channel id in both `[[peer_channels]]` and `[[client_channels]]`                    | keep the namespaces disjoint — pick one                      |
+| `AcceptOnlyPeerWithoutCeiling` | a peering this node cannot dial and that carries no explicit `ceiling`                  | set an explicit `ceiling`; it is that peering's only bound   |
+| `PeerRouteUndeliverable`       | a route whose next hop is a peer this node can never originate to                       | give the peer an endpoint, or include `btp` in `peer_expose` |
+| `DuplicatePeerId`              | two `[[peers]]` entries with the same `id`                                              | rename one                                                   |
+| `PeerAddrRemoved`              | a `[[peers]]` entry still setting `addr`                                                | replace it with `endpoint`                                   |
+| `PeerWireAddrRemoved`          | a config still setting `peer_wire_addr`                                                 | delete the line and set `peer_expose` instead                |
 
 Two more guard the same shape: `InvalidPeerEndpoint` (an `endpoint` that is not a URL at all — the
 old `host:port` spelling lands here) and `InvalidPeerExposure` (a `peer_expose` value that is not
