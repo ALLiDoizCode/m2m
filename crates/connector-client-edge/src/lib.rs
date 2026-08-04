@@ -109,7 +109,11 @@ pub const DEFAULT_BTP_SESSION_WINDOW: NonZeroU32 = match NonZeroU32::new(16) {
 };
 
 const OCTET_STREAM: &str = "application/octet-stream";
-const CLAIM_HEADER: &str = "ilp-payment-channel-claim";
+/// The one declaration, read rather than re-spelled (spec I2): the peer
+/// carriage's HTTP claim header *is* this one, because ADR 0027 reuses the
+/// claim carriage verbatim rather than minting a second decoder
+/// (`peer-carriage-spec.md` §12.1).
+const CLAIM_HEADER: &str = connector_btp::CLAIM_HEADER;
 const CLAIM_WRAPPED_HEADER: &str = "ilp-payment-channel-claim-wrapped";
 const PAYMENT_REQUIRED_HEADER: &str = "payment-required";
 /// client-edge-spec.md §1.6: a REJECT's running cost total rides beside the
@@ -117,7 +121,7 @@ const PAYMENT_REQUIRED_HEADER: &str = "payment-required";
 /// `data` is reserved for an application-level reject's own diagnostic
 /// payload. Decimal `uint64`, present on every REJECT this edge answers
 /// with (issue #548).
-const ACCUMULATED_COST_HEADER: &str = "toon-accumulated-cost";
+const ACCUMULATED_COST_HEADER: &str = connector_btp::ACCUMULATED_COST_HEADER;
 
 struct ClientEdgeState {
     connector: Arc<Connector>,

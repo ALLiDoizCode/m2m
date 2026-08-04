@@ -54,6 +54,95 @@ pub const CLAIM_ACK_PROTOCOL: &str = "claim-ack";
 /// exactly the fork issue #713 was opened to prevent.
 pub const MINIMUM_DELIVERY_PROTOCOL: &str = "toon-minimum-delivery";
 
+/// The HTTP twin of each entry name above, in its canonical lower-case form
+/// (`peer-carriage-spec.md` §3; header names match case-insensitively per
+/// RFC 9110, and the canonical form is the one the vectors pin).
+///
+/// Declared **here, beside the protocolData entry names**, because spec I2
+/// requires the BTP name and the HTTP name for one concept to be declared
+/// once, *as a pair*, in one shared module -- the spec offers this crate or
+/// `connector-domain`, and the entry halves already live here after issue
+/// #713. "Adding a header without its protocolData twin must be impossible
+/// to express, not merely noticed in review": [`CARRIAGE_NAMES`] is the
+/// table that makes it so, and [`tests::every_carriage_field_declares_both_halves`]
+/// is what fails when a half goes missing.
+///
+/// That this crate is named for BTP is an artefact of where the codec was
+/// extracted to, not a claim that these strings are BTP's. Nothing here
+/// encodes an HTTP request; the ILP-over-HTTP carriage (issue #728) reads
+/// these names and does that.
+///
+/// `ilp-payment-channel-claim` is the **deployed** spelling
+/// (`client-edge-spec.md` §1.3, and `connector-client-edge`'s own header
+/// constant, which is this one). ADR 0027's table originally wrote
+/// `Payment-Channel-Claim`, mirroring the entry name; peer-carriage-spec
+/// §12.1 pinned the deployed name instead under the ADR's own "one codec,
+/// reused verbatim" rule -- a new header name would need a second decoder on
+/// the HTTP path, which is the drift I2 exists to prevent -- and the ADR was
+/// amended.
+pub const CLAIM_HEADER: &str = "ilp-payment-channel-claim";
+/// The HTTP twin of [`CLAIM_ACK_PROTOCOL`] (§3, §6.1).
+pub const CLAIM_ACK_HEADER: &str = "toon-claim-ack";
+/// The HTTP twin of [`MINIMUM_DELIVERY_PROTOCOL`] (§3, §5.1).
+pub const MINIMUM_DELIVERY_HEADER: &str = "toon-minimum-delivery";
+/// The HTTP twin of [`ACCUMULATED_COST_PROTOCOL`] (§3, §5.2) -- already
+/// implemented on the client edge and reused verbatim.
+pub const ACCUMULATED_COST_HEADER: &str = "toon-accumulated-cost";
+/// **The one field with no BTP twin** (§3, §6.4): the flush prompt a payee
+/// that cannot originate MAY set on a response. BTP needs none, because on
+/// BTP the payee can originate a request of its own -- so this constant
+/// deliberately does not appear in [`CARRIAGE_NAMES`], and §10.2 item 17
+/// requires the vector set record that absence explicitly rather than
+/// leaving the pair incomplete.
+pub const FLUSH_REQUESTED_HEADER: &str = "toon-flush-requested";
+
+/// One concept's two names: what it is called on each carriage.
+///
+/// A pair rather than two constants because the pairing *is* the invariant
+/// (spec I2). A carriage reads a name out of this table; it never spells one
+/// itself, so a second `const` naming half a concept somewhere else is
+/// exactly the fork issue #713 was opened to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CarriageNames {
+    /// What the concept is called, for a diagnostic that has to name it.
+    pub concept: &'static str,
+    /// The BTP `protocolData` entry name.
+    pub btp_protocol_entry: &'static str,
+    /// The HTTP header name, canonical lower-case.
+    pub http_header: &'static str,
+}
+
+/// Every §3 field that rides both carriages, as pairs.
+///
+/// The peer credential is the one pair declared elsewhere --
+/// `connector_peer_auth::PEER_AUTH_NAMES` -- because the crate that *decides
+/// role* must not be able to name a frame or a socket (§1.3), so it cannot
+/// depend on this one. Its own test asserts its BTP half is
+/// [`AUTH_PROTOCOL`], which is the same pairing discipline reached from the
+/// other side.
+pub const CARRIAGE_NAMES: &[CarriageNames] = &[
+    CarriageNames {
+        concept: "claim",
+        btp_protocol_entry: CLAIM_PROTOCOL,
+        http_header: CLAIM_HEADER,
+    },
+    CarriageNames {
+        concept: "claim-ack",
+        btp_protocol_entry: CLAIM_ACK_PROTOCOL,
+        http_header: CLAIM_ACK_HEADER,
+    },
+    CarriageNames {
+        concept: "minimum-delivery",
+        btp_protocol_entry: MINIMUM_DELIVERY_PROTOCOL,
+        http_header: MINIMUM_DELIVERY_HEADER,
+    },
+    CarriageNames {
+        concept: "accumulated-cost",
+        btp_protocol_entry: ACCUMULATED_COST_PROTOCOL,
+        http_header: ACCUMULATED_COST_HEADER,
+    },
+];
+
 /// The contentType the client itself uses for its JSON claim entry (its
 /// parser never reads the field back). Emitted on every server entry for
 /// consistency rather than meaning.
@@ -490,6 +579,79 @@ mod tests {
     #[test]
     fn a_frame_shorter_than_its_header_is_too_short() {
         assert_eq!(decode_frame(&[6, 0, 0]), Err(BtpDecodeError::TooShort));
+    }
+
+    /// Spec I2, mechanically: every §3 field that rides both carriages
+    /// declares **both** halves, and both are non-empty. A header added
+    /// without its protocolData twin cannot even be written down here.
+    #[test]
+    fn every_carriage_field_declares_both_halves() {
+        assert!(!CARRIAGE_NAMES.is_empty(), "the pairing table is the point");
+        for names in CARRIAGE_NAMES {
+            assert!(
+                !names.btp_protocol_entry.is_empty(),
+                "'{}' has no BTP entry name",
+                names.concept
+            );
+            assert!(
+                !names.http_header.is_empty(),
+                "'{}' has no HTTP header name",
+                names.concept
+            );
+            assert_eq!(
+                names.http_header,
+                names.http_header.to_ascii_lowercase(),
+                "'{}' declares its header in a non-canonical case (§3)",
+                names.concept
+            );
+        }
+    }
+
+    /// The pairs are the constants, not copies of them: a carriage reading
+    /// the table reads exactly what a carriage reading the constant reads.
+    #[test]
+    fn the_pairing_table_names_the_declared_constants() {
+        let by_concept = |concept: &str| {
+            *CARRIAGE_NAMES
+                .iter()
+                .find(|names| names.concept == concept)
+                .expect("a declared concept")
+        };
+
+        assert_eq!(by_concept("claim").btp_protocol_entry, CLAIM_PROTOCOL);
+        assert_eq!(by_concept("claim").http_header, CLAIM_HEADER);
+        assert_eq!(
+            by_concept("claim-ack").btp_protocol_entry,
+            CLAIM_ACK_PROTOCOL
+        );
+        assert_eq!(by_concept("claim-ack").http_header, CLAIM_ACK_HEADER);
+        assert_eq!(
+            by_concept("minimum-delivery").btp_protocol_entry,
+            MINIMUM_DELIVERY_PROTOCOL
+        );
+        assert_eq!(
+            by_concept("minimum-delivery").http_header,
+            MINIMUM_DELIVERY_HEADER
+        );
+        assert_eq!(
+            by_concept("accumulated-cost").http_header,
+            ACCUMULATED_COST_HEADER
+        );
+    }
+
+    /// §6.4/§10.2 item 17: the flush prompt exists on HTTP only, and the
+    /// absence of a BTP twin is recorded rather than left as an incomplete
+    /// pair. BTP needs none -- there the payee can originate a request of
+    /// its own.
+    #[test]
+    fn the_flush_prompt_is_http_only_and_pairs_with_nothing() {
+        assert_eq!(FLUSH_REQUESTED_HEADER, "toon-flush-requested");
+        assert!(
+            !CARRIAGE_NAMES
+                .iter()
+                .any(|names| names.http_header == FLUSH_REQUESTED_HEADER),
+            "the flush prompt has no BTP twin and must not claim one"
+        );
     }
 
     #[test]
