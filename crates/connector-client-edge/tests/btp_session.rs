@@ -1048,11 +1048,11 @@ async fn a_single_session_pipelines_admission_instead_of_serializing_it() {
     // would have failed the old >150/s assertion many times over. This
     // floor stays green through exactly the contention that made that
     // assertion flaky.
-    let pipelining_floor = 2;
+    const PIPELINING_FLOOR: usize = 2;
     assert!(
-        observed_max >= pipelining_floor,
+        observed_max >= PIPELINING_FLOOR,
         "one session peaked at only {observed_max} of {window} deliveries concurrently in \
-         flight, short of the {pipelining_floor} floor ({WRITES} writes in {elapsed:?} = \
+         flight, short of the {PIPELINING_FLOOR} floor ({WRITES} writes in {elapsed:?} = \
          {per_second:.0}/s) -- that is admission serializing rather than pipelining, not a slow \
          runner (a busy runner does not lower observed concurrency, only wall-clock rate)"
     );
