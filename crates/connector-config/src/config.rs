@@ -323,8 +323,11 @@ impl Config {
         // client watermarks are separate records by design, which is only
         // safe while no channel is in both: two namespaces over one
         // channel would let the same claim be counted as credit twice.
-        // Both sides are canonicalized lowercase `0x` hex by their own
-        // resolvers, so this compares like with like.
+        // Compared within its own chain only -- an EVM `channel_id`
+        // against an EVM `channel_id` (both canonicalized lowercase `0x`
+        // hex), a Solana `channel_account` against a Solana
+        // `channel_account` (both base58) -- each side canonicalized by
+        // its own resolver, so this compares like with like.
         for peer_channel in &peer_channels {
             let (collides, value) = match peer_channel {
                 PeerChannelConfig::Evm(evm_peer) => (
