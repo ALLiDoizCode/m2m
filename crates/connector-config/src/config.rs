@@ -1007,6 +1007,66 @@ fee = 3
         }
     }
 
+    /// Issue #678, gap 3: `peer_allow_plaintext_endpoints` widens which
+    /// **schemes** resolve, never what they resolve to. `ws://` selects the
+    /// same BTP carriage `wss://` does and `http://` the same
+    /// ILP-over-HTTP one, so a harness can point one connector at another's
+    /// loopback socket without a TLS terminator -- and a scheme that names
+    /// no carriage at all is still refused, switch or no switch.
+    #[test]
+    fn the_plaintext_opt_in_resolves_ws_and_http_onto_the_same_two_carriages() {
+        for (written, carriage) in [
+            ("ws://store.example/btp", PeerCarriage::Btp),
+            ("http://store.example/ilp", PeerCarriage::Http),
+        ] {
+            let config = load_peering(|text| {
+                text.replace("wss://store.example:443/btp", written)
+                    .replace(
+                        "peer_expose = \"btp\"",
+                        "peer_expose = \"btp\"\npeer_allow_plaintext_endpoints = true",
+                    )
+            })
+            .expect("a plaintext endpoint loads once the node has opted in");
+
+            assert!(config.peer_allow_plaintext_endpoints());
+            assert_eq!(config.peers()[0].dial(), Some(carriage));
+            assert_eq!(
+                config
+                    .plaintext_peerings()
+                    .map(|(id, endpoint)| (id.to_string(), endpoint.as_str().to_string()))
+                    .collect::<Vec<_>>()
+                    .len(),
+                1,
+                "a node that opted in must be able to name every peering it dials in the clear"
+            );
+        }
+
+        let result = load_peering(|text| {
+            text.replace("wss://store.example:443/btp", "tcp://store.example:4001")
+                .replace(
+                    "peer_expose = \"btp\"",
+                    "peer_expose = \"btp\"\npeer_allow_plaintext_endpoints = true",
+                )
+        });
+        assert!(matches!(
+            result,
+            Err(ConfigError::PeerEndpointScheme { .. })
+        ));
+    }
+
+    /// The default is off, and off is the production answer: a config that
+    /// does not mention the field refuses `ws://` exactly as it did before
+    /// the field existed -- which is what
+    /// `rejects_an_endpoint_scheme_that_selects_no_carriage` above asserts,
+    /// asserted here from the switch's own side.
+    #[test]
+    fn the_plaintext_opt_in_is_off_unless_a_config_says_otherwise() {
+        let config = load_peering(|text| text).expect("load");
+
+        assert!(!config.peer_allow_plaintext_endpoints());
+        assert_eq!(config.plaintext_peerings().count(), 0);
+    }
+
     /// The old shape was a `SocketAddr`, so URL parsing is new and its
     /// failures need a name of their own -- separate from the scheme
     /// error, because "you wrote a host:port" and "you wrote the wrong

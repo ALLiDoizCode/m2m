@@ -508,6 +508,11 @@ fn warn_about_plaintext_peerings(config: &Config) {
     }
 }
 
+/// The key this node signs outbound **peer** claims with (ADR 0024), and
+/// the EVM address it derives -- the `senderId`/`signerAddress` every claim
+/// this node emits carries (`peer-carriage-spec.md` §4).
+type PeerClaimIdentity = (Arc<dyn Signer>, [u8; 20]);
+
 /// The key this node signs outbound **peer** claims with, and the EVM
 /// address that key derives -- `None` for a node with no `[settlement.evm]`
 /// table (ADR 0024's balance proof has no meaning without one).
@@ -518,9 +523,7 @@ fn warn_about_plaintext_peerings(config: &Config) {
 /// is the settlement address. The two keys are separate on purpose (ADR
 /// 0022's two audiences); conflating them would produce claims that verify
 /// nowhere.
-fn peer_claim_identity(
-    config: &Config,
-) -> Result<Option<(Arc<dyn Signer>, [u8; 20])>, RuntimeError> {
+fn peer_claim_identity(config: &Config) -> Result<Option<PeerClaimIdentity>, RuntimeError> {
     let Some(evm) = config
         .settlements()
         .iter()
