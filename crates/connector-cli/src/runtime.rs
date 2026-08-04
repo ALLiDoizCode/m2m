@@ -532,6 +532,13 @@ pub struct Runtime {
 /// peer transport port and was untouched by #679's deletion.
 pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     let signer = build_signer(config.signer_key())?;
+    // No peer transport is wired from config any more. `[[peers]].addr`
+    // was a `SocketAddr` for the raw-TCP peer wire, and ADR 0027 deleted
+    // that wire (issue #679); issue #677 replaced the field with an
+    // `endpoint` URL whose scheme selects a carriage, and the carriages
+    // that dial it are issue #676's. Until one lands this node holds an
+    // empty `InProcessPeerTransport`, so a packet routed to a peer is
+    // answered `T01 peer unreachable` rather than silently dropped.
     let peer_transport = InProcessPeerTransport::new();
     let peer_routes = config
         .peer_routes()

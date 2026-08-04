@@ -383,9 +383,6 @@ client_edge_addr = "127.0.0.1:0"
 [signer]
 key_file = "{}"
 
-[[peers]]
-id = "store"
-
 [[routes]]
 prefix = "g.example.store"
 peer_id = "store"
@@ -507,7 +504,9 @@ key_file = "{key_file}"
     );
 }
 
-// -- The deleted raw-TCP peer wire (ADR 0027, issue #679) --
+// -- The deleted raw-TCP peer wire (ADR 0027, issue #679) and the peer
+// config surface that replaced it (issue #677, peer-carriage-spec.md
+// §11) --
 
 /// ADR 0009's "refuse to start" contract against the peer config surface:
 /// a route naming a `peer_id` no `[[peers]]` entry configures is exactly
@@ -597,5 +596,38 @@ addr = "127.0.0.1:4001"
     assert!(
         stderr.contains("store") && stderr.contains("docs/operators/btp-peer-transport-bringup.md"),
         "expected a named removal error pointing at the bring-up doc, got: {stderr}"
+    );
+}
+
+/// A peering that names no credential can never take the peer role, so it
+/// would come up looking configured and admit its counterparty as an
+/// ordinary client. The whole point of issue #677's load-time checks is
+/// that this is loud.
+#[test]
+fn exits_non_zero_when_a_peer_configures_no_credential() {
+    let key_file = write_raw_key_file();
+    let config_file = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+peer_expose = "btp"
+
+[signer]
+key_file = "{}"
+
+[[peers]]
+id = "store"
+endpoint = "wss://store.example/btp"
+"#,
+        key_file.path().display()
+    ));
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("credential")
+            && stderr.contains("docs/operators/btp-peer-transport-bringup.md"),
+        "expected a named missing-credential error pointing at the bring-up doc, got: {stderr}"
     );
 }
