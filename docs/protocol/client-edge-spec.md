@@ -657,7 +657,7 @@ so every BTP session is a client session by construction (ADR 0026).
 
 > **Superseded** by [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md):
 > the raw-TCP peer wire is deleted (issue #679) and peers ride this same carriage, or
-> ILP-over-HTTP. A session is a *peer* session if and only if it presented a configured peer
+> ILP-over-HTTP. A session is a _peer_ session if and only if it presented a configured peer
 > credential **and** has a `[[peer_channels]]` entry — role by authentication, not by transport
 > or port. "Every BTP session is a client session by construction" no longer holds, and the
 > classification it replaces is code, which is why it is a named stop-ship regression test on

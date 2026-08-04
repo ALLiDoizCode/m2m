@@ -12,7 +12,7 @@ are per RFC 2119.
 ## What this document is now
 
 This document used to define a whole protocol: a raw-TCP framing (§1), the ILPv4 packet
-structure carried on it (§2), and the peer *semantics* riding on top (§3–§6). ADR 0027 split
+structure carried on it (§2), and the peer _semantics_ riding on top (§3–§6). ADR 0027 split
 those apart. Connectors peer over one of the two carriages the client edge already serves —
 **BTP (RFC-0023) over `wss://`** or **ILP-over-HTTP over `https://`** — so there is no
 peer-specific framing left to specify, and the raw-TCP wire that was the only implementation
@@ -20,14 +20,14 @@ of §1–§2 has been deleted. It never carried a production packet.
 
 **§1 Framing and §2 Packet structure are therefore gone.** What replaced them:
 
-| What §1–§2 defined                        | Where it lives now                                                                                                                                   |
-| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| The stream, framing and the six frame types | ADR 0027's carriage table — each former frame is a BTP MESSAGE/RESPONSE/TRANSFER or an HTTP request/response, with the extra fields as protocolData entries or headers |
-| Session mechanics on a persistent socket    | [`client-edge-spec.md`](client-edge-spec.md) §1.9 (BTP) and §1.3 (HTTP) — one pipeline, two carriages, per ADR 0026                                    |
-| ILPv4 packet fields and their OER encoding  | `connector_domain::oer` and `vectors/wire-vectors.json`, which were never peer-specific ([ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md), [ADR 0023](../adr/0023-oer-length-determinants-are-canonical.md)) |
-| Peer identity as configuration, not a handshake | Role-by-authentication (ADR 0027): a configured credential **and** a `[[peer_channels]]` entry. Config schema is issue #677; the carriages are #676 |
+| What §1–§2 defined                              | Where it lives now                                                                                                                                                                                                        |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The stream, framing and the six frame types     | ADR 0027's carriage table — each former frame is a BTP MESSAGE/RESPONSE/TRANSFER or an HTTP request/response, with the extra fields as protocolData entries or headers                                                    |
+| Session mechanics on a persistent socket        | [`client-edge-spec.md`](client-edge-spec.md) §1.9 (BTP) and §1.3 (HTTP) — one pipeline, two carriages, per ADR 0026                                                                                                       |
+| ILPv4 packet fields and their OER encoding      | `connector_domain::oer` and `vectors/wire-vectors.json`, which were never peer-specific ([ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md), [ADR 0023](../adr/0023-oer-length-determinants-are-canonical.md)) |
+| Peer identity as configuration, not a handshake | Role-by-authentication (ADR 0027): a configured credential **and** a `[[peer_channels]]` entry. Config schema is issue #677; the carriages are #676                                                                       |
 
-**§3–§6 below are unchanged and still normative.** They are the semantics *both* carriages
+**§3–§6 below are unchanged and still normative.** They are the semantics _both_ carriages
 carry — claim exchange, fees and minimum delivery, reject codes and accumulated cost,
 consistency — and ADR 0027 re-hosts them rather than rewriting them. Section numbering is
 deliberately left alone so that every existing citation of §3.2, §3.4, §3.5, §5.2 and §5.3 in
