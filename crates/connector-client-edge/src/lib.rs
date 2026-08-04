@@ -83,6 +83,7 @@ mod lookup_budget;
 mod outbound_ledger;
 mod peer;
 mod session_registry;
+mod session_route;
 pub use channels::{
     ChannelLivenessPolicy, ChannelLookupFailed, ChannelResolutionError, ClientChannelRegistry,
     ClientChannelSource, DepositFloor, EvmChannel, InvalidChannelIdentifier, SolanaChannel,
@@ -1009,7 +1010,11 @@ async fn handle_ilp(
     // peer-wire-spec.md scopes it to the peer wire) -- a client-originated
     // packet declares no guarantee yet, so this hop enforces none, exactly
     // matching today's actual (unguaranteed) behavior.
-    packet_response(state.connector.handle_prepare(prepare, 0).await)
+    //
+    // Issue #736: routing is `Connector::handle_prepare`'s three configured
+    // sources first, then whatever client session `state.session_registry`
+    // has bound to this destination -- see `session_route::route_prepare`.
+    packet_response(session_route::route_prepare(&state, prepare, price).await)
 }
 
 /// `POST /ilp/probe` -- a probe's ingress (client-edge-spec.md §1.6, ADR
