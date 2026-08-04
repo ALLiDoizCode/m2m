@@ -1095,13 +1095,19 @@ fn answer_case(spec: AnswerCaseSpec) -> PeerAnswerCase {
     }
 }
 
-fn generate_answer_cases() -> (
-    PeerAnswerCase,
-    PeerAnswerCase,
-    Vec<PeerAnswerCase>,
-    PeerAnswerCase,
-    PeerAnswerCase,
-) {
+/// [`generate_answer_cases`]'s output, named so its four same-typed
+/// [`PeerAnswerCase`] values can't be silently transposed by position the
+/// way a same-typed tuple return could be -- the return-side counterpart
+/// to [`AnswerCaseSpec`] grouping the argument side.
+struct AnswerCases {
+    fulfill_ack_accepted: PeerAnswerCase,
+    fulfill_ack_rejected: PeerAnswerCase,
+    ack_rejected_reasons: Vec<PeerAnswerCase>,
+    reject_with_cost: PeerAnswerCase,
+    ack_absent: PeerAnswerCase,
+}
+
+fn generate_answer_cases() -> AnswerCases {
     let fulfill_bytes = fixture_fulfill().encode();
 
     // Item 7: a FULFILL, acknowledged accepted.
@@ -1209,13 +1215,13 @@ fn generate_answer_cases() -> (
         accumulated_cost: None,
     });
 
-    (
+    AnswerCases {
         fulfill_ack_accepted,
         fulfill_ack_rejected,
         ack_rejected_reasons,
         reject_with_cost,
         ack_absent,
-    )
+    }
 }
 
 /// Item 14: the answer to a FLUSH -- an **empty** packet, acknowledged
@@ -1497,13 +1503,13 @@ fn generate_peer_carriage_vectors(
     let claim_evm = generate_peer_claim_evm_case(claim_fixture);
     let claim_solana = generate_peer_claim_solana_case();
     let (prepare, prepare_no_claim) = generate_prepare_pair_cases(&claim_evm);
-    let (
+    let AnswerCases {
         fulfill_ack_accepted,
         fulfill_ack_rejected,
         ack_rejected_reasons,
         reject_with_cost,
         ack_absent,
-    ) = generate_answer_cases();
+    } = generate_answer_cases();
     let flush_ack = generate_flush_ack_case();
     let ack_malformed = generate_ack_malformed_case();
     let flush = generate_flush_case(&claim_evm);
