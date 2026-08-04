@@ -11,6 +11,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use connector_domain::{derive_condition, EnvelopeRequest, Prepare};
@@ -142,6 +143,36 @@ pub fn spawn_connector(config_path: &std::path::Path) -> ConnectorProcess {
         .spawn()
         .expect("spawn connector");
     let mut stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
+
+    // Drained from its own thread, from the moment the process starts, for
+    // two reasons.
+    //
+    // The first is diagnostic: a node that exits before it listens exits
+    // *for a reason* -- ADR 0009 makes every startup refusal a named message
+    // here -- and a failure that reports only "it exited" costs a bisect to
+    // recover what one line already said.
+    //
+    // The second is that an undrained pipe is a **deadlock**, not merely a
+    // lost message. A pipe holds ~64 KiB; once it fills, the connector's own
+    // `tracing` writer blocks inside whatever task is logging -- which, on
+    // the packet path, is the task answering the request the test is waiting
+    // on. The symptom is a `hyper::Error(IncompleteMessage)` at the test,
+    // arbitrarily far from the cause, and it appears only once a test drives
+    // enough traffic to fill the buffer.
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let startup_error = Arc::new(Mutex::new(String::new()));
+    {
+        let startup_error = startup_error.clone();
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = std::io::Read::read_to_string(&mut stderr, &mut text);
+            startup_error
+                .lock()
+                .expect("stderr buffer lock poisoned")
+                .push_str(&text);
+        });
+    }
+
     let process = Process { child };
 
     // One listener since ADR 0027 / issue #679 deleted the raw-TCP peer
@@ -150,11 +181,30 @@ pub fn spawn_connector(config_path: &std::path::Path) -> ConnectorProcess {
     let client_edge_addr = loop {
         line.clear();
         let read = stdout.read_line(&mut line).expect("read stdout");
-        assert!(read > 0, "connector exited before logging a listen address");
+        if read == 0 {
+            // The draining thread may still be mid-read; give it the moment
+            // it needs so the panic carries the refusal rather than "".
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let reason = startup_error
+                .lock()
+                .expect("stderr buffer lock poisoned")
+                .clone();
+            panic!(
+                "connector exited before logging a listen address: {}",
+                reason.trim()
+            );
+        }
         if line.contains("connector listening") {
             break parse_json_log_addr(&line);
         }
     };
+
+    // And keep draining stdout for the process's whole life, for the same
+    // deadlock reason: the listen line is the *first* of many.
+    std::thread::spawn(move || {
+        let mut sink = String::new();
+        let _ = std::io::Read::read_to_string(&mut stdout, &mut sink);
+    });
 
     ConnectorProcess {
         _process: process,
