@@ -950,6 +950,32 @@ Recorded explicitly so review can accept or overturn each, rather than discoveri
 6. **`ChannelInBothNamespaces` (§1.8).** ADR 0027 requires separate roles; the double-counting risk
    of one channel in both namespaces is not addressed there. Enforcing disjointness in config is
    the cheapest safe answer.
+7. **The credential's `peerId` names the peering _relation_, so both operators write the same
+   string (§1.4, §1.2 P1).** §1.4's example shows one credential and does not say whose id is in
+   it, and P1 is stated from the accepting side ("a peer id `p` that appears in `[[peers]]`") —
+   which leaves "the dialing side's own id, as the accepting side configured it" and "the accepting
+   side's id, as the dialing side configured it" both readable. Issue #678 found the ambiguity the
+   expensive way: the first real dial presented the id it had configured for the _remote_, the
+   remote had no such entry, and the interaction was admitted as an ordinary client — correctly,
+   silently, and uselessly. The resolution costs no new configuration surface: `[[peers]].id` is
+   the relation's name on both sides, presented by the dialer and looked up by the accepter, so a
+   peering establishes only when the two files carry the same literal string. There is deliberately
+   no separate "the id this peer knows me by" field; a second name for one relation is a second
+   thing to keep in step, and this is a bilateral configuration either way (`peer-wire-spec.md`
+   §4). **A mismatched id is invisible by design** (§1.6 keeps an unconfigured id silent), so it is
+   the first thing to check when a peering will not establish.
+8. **One node-wide, default-false opt-in may widen which endpoint _schemes_ resolve (§2.1).**
+   §2.1's "any other scheme MUST be a load-time error" is kept as the default and as the only
+   production configuration. A connector MAY offer a single explicit switch — this implementation's
+   `peer_allow_plaintext_endpoints` — under which `ws://` resolves onto the BTP carriage and
+   `http://` onto the ILP-over-HTTP one, for loopback and tests. It widens which schemes resolve
+   and **nothing else**: the carriage each selects, the role rule, the claim and every other
+   requirement of this document are unchanged, and a connector that offers it MUST log a loud
+   startup event naming every plaintext peering. Per-peer forms of the switch are forbidden — a
+   per-peer field reads as an ordinary property of that peering and travels into production one
+   line at a time. The reason to have it at all is that without it the end-to-end proof of this
+   specification cannot run anywhere but a deployment: two connectors on one laptop cannot dial
+   each other, and a specification whose acceptance test needs a TLS terminator is one nobody runs.
 
 Nothing in this document reopens ADR 0027's decisions: not the two carriages, not FLUSH-as-TRANSFER,
 not the claim ack as a field, not role-by-auth, not the deletion of the raw-TCP wire.
