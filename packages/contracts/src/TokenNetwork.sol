@@ -4,15 +4,22 @@ pragma solidity ^0.8.24;
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/Context.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/metatx/ERC2771Context.sol";
 
 /// @title TokenNetwork
 /// @notice Manages payment channels for a specific ERC20 token
 /// @dev Deployed by TokenNetworkRegistry for each token. Supports channel opening, deposits, closure, and settlement.
-contract TokenNetwork is ReentrancyGuard, EIP712, Pausable, Ownable {
+///      ERC-2771 aware: calls relayed through the trusted forwarder authenticate as the forwarded
+///      `from` address, not the forwarder, so an EOA holding zero native gas can still open, fund,
+///      close and claim channels via a relayer. Every authorization check below therefore reads
+///      `_msgSender()`, never raw `msg.sender` -- the one exception is the `Ownable(msg.sender)`
+///      constructor argument, which runs during CREATE and can never be forwarded.
+contract TokenNetwork is ReentrancyGuard, EIP712, Pausable, Ownable, ERC2771Context {
     using SafeERC20 for IERC20;
 
     /// @notice The ERC20 token address this TokenNetwork manages
@@ -173,10 +180,30 @@ contract TokenNetwork is ReentrancyGuard, EIP712, Pausable, Ownable {
     /// @param _token The ERC20 token address
     /// @param _maxChannelDeposit Maximum deposit per participant per channel (default: 1M tokens scaled by decimals)
     /// @param _maxChannelLifetime Maximum channel lifetime before force-close allowed (default: 365 days)
-    constructor(address _token, uint256 _maxChannelDeposit, uint256 _maxChannelLifetime) EIP712("TokenNetwork", "1") Ownable(msg.sender) {
+    /// @param _trustedForwarder The ERC-2771 trusted forwarder address (address(0) disables meta-transactions)
+    constructor(address _token, uint256 _maxChannelDeposit, uint256 _maxChannelLifetime, address _trustedForwarder)
+        EIP712("TokenNetwork", "1")
+        Ownable(msg.sender)
+        ERC2771Context(_trustedForwarder)
+    {
         token = _token;
         maxChannelDeposit = _maxChannelDeposit;
         maxChannelLifetime = _maxChannelLifetime;
+    }
+
+    /// @dev Resolves through the trusted forwarder per ERC-2771; falls back to `msg.sender` otherwise.
+    function _msgSender() internal view override(Context, ERC2771Context) returns (address) {
+        return ERC2771Context._msgSender();
+    }
+
+    /// @dev Resolves through the trusted forwarder per ERC-2771; falls back to `msg.data` otherwise.
+    function _msgData() internal view override(Context, ERC2771Context) returns (bytes calldata) {
+        return ERC2771Context._msgData();
+    }
+
+    /// @dev Resolves through the trusted forwarder per ERC-2771; falls back to 0 otherwise.
+    function _contextSuffixLength() internal view override(Context, ERC2771Context) returns (uint256) {
+        return ERC2771Context._contextSuffixLength();
     }
 
     /// @notice Open a new payment channel with another participant
@@ -185,15 +212,17 @@ contract TokenNetwork is ReentrancyGuard, EIP712, Pausable, Ownable {
     /// @return channelId The unique identifier for the created channel
     /// @dev Computes channelId as keccak256(p1, p2, channelCounter). Emits ChannelOpened event.
     function openChannel(address participant2, uint256 settlementTimeout) external nonReentrant whenNotPaused returns (bytes32) {
+        address sender = _msgSender();
+
         // Validate participants
         if (participant2 == address(0)) revert InvalidParticipant();
-        if (msg.sender == participant2) revert InvalidParticipant();
+        if (sender == participant2) revert InvalidParticipant();
 
         // Validate settlement timeout
         if (settlementTimeout < MIN_SETTLEMENT_TIMEOUT) revert InvalidSettlementTimeout();
 
         // Normalize participant order (p1 < p2 lexicographically)
-        (address p1, address p2) = msg.sender < participant2 ? (msg.sender, participant2) : (participant2, msg.sender);
+        (address p1, address p2) = sender < participant2 ? (sender, participant2) : (participant2, sender);
 
         // Compute unique channel ID
         bytes32 channelId = keccak256(abi.encodePacked(p1, p2, channelCounter));
@@ -239,8 +268,9 @@ contract TokenNetwork is ReentrancyGuard, EIP712, Pausable, Ownable {
         uint256 depositAmount = totalDeposit - currentDeposit;
 
         // Transfer tokens using SafeERC20 and measure actual balance change
+        // Pulled from _msgSender() (the forwarded signer), never the forwarder's own balance/allowance
         uint256 balanceBefore = IERC20(token).balanceOf(address(this));
-        IERC20(token).safeTransferFrom(msg.sender, address(this), depositAmount);
+        IERC20(token).safeTransferFrom(_msgSender(), address(this), depositAmount);
         uint256 balanceAfter = IERC20(token).balanceOf(address(this));
         uint256 actualReceived = balanceAfter - balanceBefore;
 
@@ -272,13 +302,15 @@ contract TokenNetwork is ReentrancyGuard, EIP712, Pausable, Ownable {
         Channel storage channel = channels[channelId];
         if (channel.state != ChannelState.Opened && channel.state != ChannelState.Closed) revert InvalidChannelState();
 
+        address sender = _msgSender();
+
         // Validate caller is a participant
-        if (msg.sender != channel.participant1 && msg.sender != channel.participant2) {
+        if (sender != channel.participant1 && sender != channel.participant2) {
             revert InvalidParticipant();
         }
 
         // Determine counterparty (the one who signed the balance proof / the sender)
-        address counterparty = msg.sender == channel.participant1 ? channel.participant2 : channel.participant1;
+        address counterparty = sender == channel.participant1 ? channel.participant2 : channel.participant1;
 
         // Validate balance proof channelId matches
         if (balanceProof.channelId != channelId) revert InvalidBalanceProof();
@@ -307,7 +339,7 @@ contract TokenNetwork is ReentrancyGuard, EIP712, Pausable, Ownable {
         if (balanceProof.nonce <= counterpartyState.nonce) revert InvalidNonce();
 
         // Calculate claimable amount (delta since last claim)
-        uint256 previouslyClaimed = claimedAmounts[channelId][msg.sender];
+        uint256 previouslyClaimed = claimedAmounts[channelId][sender];
         uint256 newTransferred = balanceProof.transferredAmount;
         if (newTransferred <= previouslyClaimed) revert NothingToClaim();
         uint256 claimAmount = newTransferred - previouslyClaimed;
@@ -323,13 +355,13 @@ contract TokenNetwork is ReentrancyGuard, EIP712, Pausable, Ownable {
         counterpartyState.transferredAmount = newTransferred;
 
         // Update claimed amounts tracking
-        claimedAmounts[channelId][msg.sender] = newTransferred;
+        claimedAmounts[channelId][sender] = newTransferred;
 
-        // Transfer the claimed tokens to the caller
-        IERC20(token).safeTransfer(msg.sender, claimAmount);
+        // Transfer the claimed tokens to the caller (the forwarded signer, never the forwarder)
+        IERC20(token).safeTransfer(sender, claimAmount);
 
         // Emit event
-        emit ChannelClaimed(channelId, msg.sender, claimAmount, newTransferred);
+        emit ChannelClaimed(channelId, sender, claimAmount, newTransferred);
     }
 
     /// @notice Close a payment channel, starting the grace period
@@ -346,8 +378,10 @@ contract TokenNetwork is ReentrancyGuard, EIP712, Pausable, Ownable {
         Channel storage channel = channels[channelId];
         if (channel.state != ChannelState.Opened) revert InvalidChannelState();
 
+        address sender = _msgSender();
+
         // Validate caller is a participant
-        if (msg.sender != channel.participant1 && msg.sender != channel.participant2) {
+        if (sender != channel.participant1 && sender != channel.participant2) {
             revert InvalidParticipant();
         }
 
@@ -356,7 +390,7 @@ contract TokenNetwork is ReentrancyGuard, EIP712, Pausable, Ownable {
         channel.closedAt = block.timestamp;
 
         // Emit event
-        emit ChannelClosed(channelId, msg.sender);
+        emit ChannelClosed(channelId, sender);
     }
 
     /// @notice Settle a channel after the grace period expires

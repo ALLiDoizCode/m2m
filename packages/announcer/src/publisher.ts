@@ -86,7 +86,6 @@ async function publishToHttpIngress(
     : `${relayUrl.replace(/\/$/, '')}/write`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
-  (timer as { unref?: () => void }).unref?.();
   try {
     const res = await fetchFn(target, {
       method: 'POST',
@@ -141,7 +140,6 @@ export function publishToRelay(
     const timer = setTimeout(() => {
       settle({ relay: relayUrl, ok: false, detail: 'timeout waiting for relay OK' });
     }, opts.timeoutMs);
-    timer.unref?.();
 
     let ws: WebSocketLike;
     try {

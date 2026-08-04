@@ -23,6 +23,12 @@ contract TokenNetworkRegistry is Ownable, Pausable {
     /// @notice Whether whitelist is enabled (default: false for permissionless deployment)
     bool public whitelistEnabled;
 
+    /// @notice ERC-2771 trusted forwarder passed to every TokenNetwork this registry deploys
+    /// @dev Defaults to address(0) (meta-transactions disabled) so existing deployments are unaffected.
+    ///      Each TokenNetwork's forwarder is fixed at its own creation time (ERC2771Context is
+    ///      immutable) -- changing this only affects TokenNetworks created after the change.
+    address public trustedForwarder;
+
     /// @notice Thrown when attempting to create a TokenNetwork for a token that already has one
     /// @param token The token address that triggered the error
     error TokenNetworkAlreadyExists(address token);
@@ -55,6 +61,9 @@ contract TokenNetworkRegistry is Ownable, Pausable {
     /// @param token The token address
     event TokenRemovedFromWhitelist(address indexed token);
 
+    /// @notice Emitted when the trusted forwarder used for future TokenNetwork deployments changes
+    event TrustedForwarderUpdated(address indexed previousForwarder, address indexed newForwarder);
+
     /// @notice Deploy a new TokenNetworkRegistry
     /// @dev Sets the deployer as the initial owner
     constructor() Ownable(msg.sender) {}
@@ -78,7 +87,7 @@ contract TokenNetworkRegistry is Ownable, Pausable {
         }
 
         // Deploy new TokenNetwork contract with default 1M token deposit limit and 365 day lifetime
-        TokenNetwork tokenNetwork = new TokenNetwork(token, 1_000_000 * 10 ** 18, 365 days);
+        TokenNetwork tokenNetwork = new TokenNetwork(token, 1_000_000 * 10 ** 18, 365 days, trustedForwarder);
         address tokenNetworkAddress = address(tokenNetwork);
 
         // Validate deployment succeeded
@@ -130,6 +139,15 @@ contract TokenNetworkRegistry is Ownable, Pausable {
     function removeTokenFromWhitelist(address token) external onlyOwner {
         whitelistedTokens[token] = false;
         emit TokenRemovedFromWhitelist(token);
+    }
+
+    /// @notice Set the ERC-2771 trusted forwarder used for TokenNetworks created from now on
+    /// @param _trustedForwarder The trusted forwarder address (address(0) disables meta-transactions)
+    /// @dev Only owner can change it. Does not affect TokenNetworks already deployed -- each one's
+    ///      forwarder is fixed immutably at its own creation time.
+    function setTrustedForwarder(address _trustedForwarder) external onlyOwner {
+        emit TrustedForwarderUpdated(trustedForwarder, _trustedForwarder);
+        trustedForwarder = _trustedForwarder;
     }
 
     /// @notice Pause all TokenNetwork creation in emergency
