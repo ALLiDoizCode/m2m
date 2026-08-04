@@ -42,3 +42,4 @@ connector-signer = { path = "../connector-signer" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 libsecp256k1 = "0.6"
 serde_json = "1"
+tempfile = "3"
