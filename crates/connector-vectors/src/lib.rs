@@ -14,9 +14,31 @@
 //! non-secret bytes chosen only so this crate compiles to the same output
 //! every time it runs -- never a real operator's key.
 
+use std::collections::HashMap;
+
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
+use connector_btp::{
+    decode_frame, encode_message, encode_response, encode_transfer, ProtocolData,
+    ACCUMULATED_COST_HEADER, CLAIM_ACK_HEADER, CLAIM_ACK_PROTOCOL, CLAIM_HEADER, CONTENT_TYPE_TEXT,
+    FLUSH_REQUESTED_HEADER, MINIMUM_DELIVERY_HEADER, MINIMUM_DELIVERY_PROTOCOL,
+};
 use connector_domain::{
     derive_condition, fulfillment_matches_condition, EnvelopeError, EnvelopeRequest,
-    EnvelopeResponse,
+    EnvelopeResponse, Fulfill, Prepare, Reject, RejectCode,
+};
+use connector_peer_auth::{
+    encode_base64 as auth_encode_base64, encode_raw as auth_encode_raw, present_base64,
+    present_raw, PresentedCredential, SessionRole,
+};
+use connector_peer_btp::{ack, claim_json, fields, AcceptedClaims, PeerClaimDomain};
+use connector_peer_http::headers::{
+    accumulated_cost as http_accumulated_cost, claim_ack as http_claim_ack, claim_ack_header_value,
+    claim_header_value, claim_json as http_claim_json, flush_requested as http_flush_requested,
+    minimum_delivery as http_minimum_delivery, Headers,
+};
+use connector_runtime::{
+    ChannelDomain, ClaimAckOutcome, ClaimBook, ClaimRejectReason, ClaimSignature, WireClaim,
 };
 use connector_signer::giftwrap::{
     derive_fulfillment, open_request, open_response, seal_request_with_randomness,
@@ -52,6 +74,7 @@ pub struct WireVectors {
     pub giftwrap: GiftwrapVectors,
     pub fulfilment: FulfilmentVectors,
     pub claim: ClaimVectors,
+    pub peer_carriage: PeerCarriageVectors,
 }
 
 #[derive(Debug, Serialize)]
@@ -495,7 +518,23 @@ fn generate_fulfilment_vectors(giftwrap_shared_secret: [u8; 32]) -> FulfilmentVe
     }
 }
 
-fn generate_claim_vectors() -> ClaimVectors {
+/// The Rust-typed values behind [`ClaimCase`]'s hex-string fields, passed
+/// on to [`generate_peer_carriage_vectors`] so item 2's claim and item 3's
+/// digest are built from -- and pinned equal to -- this section's own
+/// fixture rather than a second, independently chosen one (§10.2 item 3:
+/// "pinned **unchanged** against the existing claim section").
+struct ClaimFixture {
+    chain_id: u64,
+    token_network_address: Address,
+    channel_id: [u8; 32],
+    nonce: u64,
+    transferred_amount: u64,
+    signer_address: Address,
+    signature: connector_signer::Signature,
+    digest_hex: String,
+}
+
+fn generate_claim_vectors() -> (ClaimVectors, ClaimFixture) {
     let signer_secret = seq_bytes::<32>(0xa1);
     let signer = LocalSigner::from_secret_bytes("vector-fixture-claim-key", signer_secret)
         .expect("fixture claim secret is a valid secp256k1 scalar");
@@ -529,21 +568,977 @@ fn generate_claim_vectors() -> ClaimVectors {
         "the fixture signature must recover to the fixture signer's own address"
     );
 
-    ClaimVectors {
-        cases: vec![ClaimCase {
-            name: "evm_balance_proof_digest_and_signature",
+    let digest_hex = hex_of(&digest);
+    (
+        ClaimVectors {
+            cases: vec![ClaimCase {
+                name: "evm_balance_proof_digest_and_signature",
+                chain_id,
+                token_network_address_hex: hex_of(&token_network_address),
+                channel_id_hex: hex_of(&channel_id),
+                nonce,
+                transferred_amount,
+                locked_amount,
+                locks_root_hex: hex_of(&locks_root),
+                digest_hex: digest_hex.clone(),
+                signer_secret_hex: hex_of(&signer_secret),
+                signer_address_hex: hex_of(&signer_address),
+                signature_hex: hex_of(&signature_bytes),
+            }],
+        },
+        ClaimFixture {
             chain_id,
-            token_network_address_hex: hex_of(&token_network_address),
-            channel_id_hex: hex_of(&channel_id),
+            token_network_address,
+            channel_id,
             nonce,
             transferred_amount,
-            locked_amount,
-            locks_root_hex: hex_of(&locks_root),
-            digest_hex: hex_of(&digest),
-            signer_secret_hex: hex_of(&signer_secret),
-            signer_address_hex: hex_of(&signer_address),
-            signature_hex: hex_of(&signature_bytes),
-        }],
+            signer_address,
+            signature,
+            digest_hex,
+        },
+    )
+}
+
+// ---------------------------------------------------------------------
+// Peer carriage (issue #729, `docs/protocol/peer-carriage-spec.md` §10)
+// ---------------------------------------------------------------------
+//
+// Twenty items, most of them *(pair)*: one BTP encoding and one HTTP
+// encoding of the same fixture value, generated in one pass and asserted
+// decoded-equal (§10.1's pairing rule, spec I1). Every function here calls
+// the real carriage code -- `connector_peer_btp`'s codec and
+// `connector_peer_http::headers`' wrappers over it -- never a
+// hand-rolled parallel encoder, so a vector this module emits is a vector
+// its own implementation would also accept.
+
+/// One BTP `auth` entry and its `Toon-Peer-Auth` HTTP twin, decoded back
+/// through the real carriage-facing parsers (§10.2 item 1).
+#[derive(Debug, Serialize)]
+pub struct PeerAuthCase {
+    pub name: &'static str,
+    pub peer_id: String,
+    pub secret: String,
+    pub btp_raw_hex: String,
+    pub http_base64: String,
+}
+
+/// A peer claim JSON and its two transfer encodings (§10.2 items 2, 4):
+/// raw UTF-8 on BTP, `base64` in the HTTP header -- the same JSON both
+/// ways (§4).
+#[derive(Debug, Serialize)]
+pub struct PeerClaimCase {
+    pub name: &'static str,
+    pub blockchain: &'static str,
+    pub json: String,
+    pub btp_raw_hex: String,
+    pub http_base64: String,
+    pub wire_channel_id: String,
+    pub wire_nonce: u64,
+    pub wire_cumulative_amount: u64,
+    pub wire_signature_hex: String,
+}
+
+/// The OER `Prepare` a claim-bearing PREPARE carries, and the two carriage
+/// framings around it (§10.2 items 5, 6).
+#[derive(Debug, Serialize)]
+pub struct PreparePacketFields {
+    pub amount: u64,
+    pub expires_at: String,
+    pub execution_condition_hex: String,
+    pub destination: String,
+    pub data_hex: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PreparePairCase {
+    pub name: &'static str,
+    pub prepare: PreparePacketFields,
+    pub claim_json: Option<String>,
+    pub minimum_delivery: Option<u64>,
+    pub btp_message_hex: String,
+    pub http_headers: Vec<(String, String)>,
+    pub http_body_hex: String,
+}
+
+/// A judged claim's verdict, as it rides a RESPONSE (§10.2 items 7-9).
+#[derive(Debug, Serialize)]
+pub struct AckFields {
+    pub result: &'static str,
+    pub reason: Option<&'static str>,
+}
+
+/// A RESPONSE answering a claim-bearing frame: the packet it answers, and
+/// the claim-ack riding beside it -- independently (§6.2), including the
+/// combinations item 8, item 10, item 11 and item 14 each name (§10.2
+/// items 7, 8, 9, 10, 11, 14).
+#[derive(Debug, Serialize)]
+pub struct PeerAnswerCase {
+    pub name: String,
+    pub packet: &'static str,
+    pub packet_hex: String,
+    pub ack: Option<AckFields>,
+    pub accumulated_cost: Option<u64>,
+    pub btp_response_hex: String,
+    pub http_status: u16,
+    pub http_headers: Vec<(String, String)>,
+    pub http_body_hex: String,
+}
+
+/// An ack whose JSON does not decode to either verdict -- §6.3's "not
+/// acknowledged", pinned as a raw payload rather than through
+/// [`ack::encode`], which can never produce one (§10.2 item 12).
+#[derive(Debug, Serialize)]
+pub struct PeerMalformedAckCase {
+    pub name: &'static str,
+    pub malformed_json: String,
+    pub btp_raw_hex: String,
+    pub http_base64: String,
+}
+
+/// FLUSH: a TRANSFER carrying the claim's new cumulative as its amount, and
+/// the HTTP standalone-claim POST (§10.2 item 13).
+#[derive(Debug, Serialize)]
+pub struct PeerFlushCase {
+    pub name: &'static str,
+    pub claim_json: String,
+    pub transfer_amount: u64,
+    pub btp_transfer_hex: String,
+    pub http_headers: Vec<(String, String)>,
+    pub http_body_hex: String,
+}
+
+/// §6.3's idempotent re-ack and its boundary (§10.2 items 15, 16): a
+/// byte-identical retransmission is accepted again, and a same-nonce claim
+/// that differs in any other field is refused `nonce_not_advancing`.
+#[derive(Debug, Serialize)]
+pub struct PeerRetransmitCase {
+    pub name: &'static str,
+    pub first_claim_json: String,
+    pub second_claim_json: String,
+    pub first_ack: &'static str,
+    pub second_ack: &'static str,
+    pub second_ack_reason: Option<&'static str>,
+}
+
+/// `Toon-Flush-Requested` -- HTTP only, no BTP counterpart (§6.4, §10.2
+/// item 17).
+#[derive(Debug, Serialize)]
+pub struct PeerFlushRequestedCase {
+    pub name: &'static str,
+    pub channel_id: String,
+    pub http_header_value: String,
+    pub note: &'static str,
+}
+
+/// `minimumDelivery`'s absent-means-zero and malformed-is-`F01` rules
+/// (§5.1, §10.2 items 18, 19).
+#[derive(Debug, Serialize)]
+pub struct PeerMinimumDeliveryCase {
+    pub name: &'static str,
+    pub present: bool,
+    pub raw_value: Option<String>,
+    pub decoded_minimum_delivery: Option<u64>,
+    pub reject_code: Option<&'static str>,
+}
+
+/// A sealed giftwrap payload carried unchanged as a PREPARE's `data`, on
+/// both carriages (§8.1, §10.2 item 20).
+#[derive(Debug, Serialize)]
+pub struct PeerForwardedDataCase {
+    pub name: &'static str,
+    pub sealed_data_hex: String,
+    pub btp_ilp_packet_prepare_hex: String,
+    pub http_body_hex: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PeerCarriageVectors {
+    pub credential: PeerAuthCase,
+    pub claim_evm: PeerClaimCase,
+    /// §10.2 item 3: pinned equal to [`ClaimCase::digest_hex`] of this same
+    /// run's `claim` section -- demonstrating ADR 0024's digest is
+    /// untouched by carriage, not a second, independently computed one.
+    pub claim_digest_hex: String,
+    pub claim_solana: PeerClaimCase,
+    pub prepare: PreparePairCase,
+    pub prepare_no_claim: PreparePairCase,
+    pub fulfill_ack_accepted: PeerAnswerCase,
+    pub fulfill_ack_rejected: PeerAnswerCase,
+    pub ack_rejected_reasons: Vec<PeerAnswerCase>,
+    pub reject_with_cost: PeerAnswerCase,
+    pub ack_absent: PeerAnswerCase,
+    pub ack_malformed: PeerMalformedAckCase,
+    pub flush: PeerFlushCase,
+    pub flush_ack: PeerAnswerCase,
+    pub claim_retransmit: PeerRetransmitCase,
+    pub claim_same_nonce_different_bytes: PeerRetransmitCase,
+    pub flush_requested: PeerFlushRequestedCase,
+    pub minimum_delivery_absent: PeerMinimumDeliveryCase,
+    pub minimum_delivery_malformed: PeerMinimumDeliveryCase,
+    pub forwarded_data_unchanged: PeerForwardedDataCase,
+}
+
+fn headers_pairs(headers: &Headers) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect()
+}
+
+fn prepare_fields(prepare: &Prepare) -> PreparePacketFields {
+    PreparePacketFields {
+        amount: prepare.amount,
+        expires_at: prepare
+            .expires_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        execution_condition_hex: hex_of(&prepare.execution_condition),
+        destination: prepare.destination.clone(),
+        data_hex: hex_of(&prepare.data),
+    }
+}
+
+fn generate_peer_auth_case() -> PeerAuthCase {
+    let credential = PresentedCredential::new("store-box", "s3cret-peering-key");
+    let raw = auth_encode_raw(&credential);
+    let based = auth_encode_base64(&credential);
+
+    // I1: both encodings decode to the same asserted identity and prove
+    // the same configured secret, through the real carriage-facing
+    // decoders -- not a hand round trip of `encode`/`decode` alone.
+    let from_raw = present_raw(std::iter::once(raw.as_slice()))
+        .expect("one credential is never ambiguous")
+        .expect("a credential was presented");
+    let from_base64 = present_base64(std::iter::once(based.as_bytes()))
+        .expect("one credential is never ambiguous")
+        .expect("a credential was presented");
+    let configured = connector_config::PeerCredential::new("s3cret-peering-key");
+    assert_eq!(from_raw.asserted_peer_id(), "store-box");
+    assert_eq!(from_base64.asserted_peer_id(), "store-box");
+    assert!(from_raw.proves(&configured));
+    assert!(from_base64.proves(&configured));
+
+    PeerAuthCase {
+        name: "peer_auth",
+        peer_id: "store-box".to_string(),
+        secret: "s3cret-peering-key".to_string(),
+        btp_raw_hex: hex_of(&raw),
+        http_base64: based,
+    }
+}
+
+fn generate_peer_claim_evm_case(fixture: &ClaimFixture) -> PeerClaimCase {
+    let claim = WireClaim {
+        channel_id: format!("0x{}", hex::encode(fixture.channel_id)),
+        nonce: fixture.nonce,
+        cumulative_amount: fixture.transferred_amount,
+        signature: ClaimSignature::Evm(fixture.signature),
+    };
+    let domain = PeerClaimDomain {
+        chain_id: fixture.chain_id,
+        token_network: fixture.token_network_address,
+    };
+    let json = claim_json::encode(
+        &claim,
+        &fixture.signer_address,
+        Some(domain),
+        "vector-fixture:evm:1",
+        "2030-01-01T00:00:00.000Z",
+    );
+
+    // I4/I1: the emitted claim parses back through the client edge's own
+    // validator, and both carriage encodings hand that parser the same
+    // bytes.
+    let reparsed = claim_json::parse(json.as_bytes()).expect("the emitted claim parses back");
+    assert_eq!(reparsed, claim);
+
+    let raw_entry = claim_json::protocol_data(&json);
+    let http_value = claim_header_value(&json);
+    let mut headers = Headers::new();
+    headers.push(CLAIM_HEADER, &http_value);
+    let via_http = http_claim_json(&headers)
+        .expect("a claim rode")
+        .expect("valid base64");
+    assert_eq!(via_http, json.as_bytes());
+
+    PeerClaimCase {
+        name: "peer_claim_evm",
+        blockchain: "evm",
+        json,
+        btp_raw_hex: hex_of(&raw_entry.data),
+        http_base64: http_value,
+        wire_channel_id: claim.channel_id,
+        wire_nonce: claim.nonce,
+        wire_cumulative_amount: claim.cumulative_amount,
+        wire_signature_hex: hex_of(&claim.signature.to_bytes()),
+    }
+}
+
+/// §10.2 item 4: marked **aspirational**, exactly as `peer-wire-spec.md`
+/// §3.5 marks the Solana claim row -- pinning the shape before an emitting
+/// implementation exists on this connector (outbound peer claims are
+/// EVM-only, `claim_json::encode`'s own doc). What *does* exist and is
+/// exercised here for real is the inbound half: `claim_json::parse`
+/// already accepts a Solana claim (issue #732).
+fn generate_peer_claim_solana_case() -> PeerClaimCase {
+    let channel_account = "GDDMwNyyx8uB6zrqwBFHjLLG3TBYk2F1Mh6usnNPUsqk";
+    let signer_public_key = "11111111111111111111111111111113";
+    let signature_bytes = seq_bytes::<64>(0xe1);
+    let json = serde_json::json!({
+        "version": "1.0",
+        "blockchain": "solana",
+        "messageId": "vector-fixture:solana:1",
+        "timestamp": "2030-01-01T00:00:00.000Z",
+        "senderId": signer_public_key,
+        "programId": "11111111111111111111111111111111",
+        "channelAccount": channel_account,
+        "nonce": 1,
+        "transferredAmount": "250000",
+        "signature": BASE64.encode(signature_bytes),
+        "signerPublicKey": signer_public_key,
+    })
+    .to_string();
+
+    let parsed = claim_json::parse(json.as_bytes()).expect("the aspirational solana shape parses");
+    assert_eq!(
+        parsed,
+        WireClaim {
+            channel_id: channel_account.to_string(),
+            nonce: 1,
+            cumulative_amount: 250_000,
+            signature: ClaimSignature::Solana(signature_bytes),
+        }
+    );
+
+    let raw_entry = claim_json::protocol_data(&json);
+    let http_value = claim_header_value(&json);
+    let mut headers = Headers::new();
+    headers.push(CLAIM_HEADER, &http_value);
+    assert_eq!(
+        http_claim_json(&headers)
+            .expect("a claim rode")
+            .expect("valid base64"),
+        json.as_bytes()
+    );
+
+    PeerClaimCase {
+        name: "peer_claim_solana",
+        blockchain: "solana",
+        json,
+        btp_raw_hex: hex_of(&raw_entry.data),
+        http_base64: http_value,
+        wire_channel_id: channel_account.to_string(),
+        wire_nonce: 1,
+        wire_cumulative_amount: 250_000,
+        wire_signature_hex: hex_of(&signature_bytes),
+    }
+}
+
+fn generate_prepare_pair_cases(evm_claim: &PeerClaimCase) -> (PreparePairCase, PreparePairCase) {
+    let prepare = Prepare {
+        amount: 250_000,
+        expires_at: "2030-01-01T00:01:00Z".parse().expect("fixed literal"),
+        execution_condition: seq_bytes::<32>(0xf1),
+        destination: "g.toon.store-box.settle".to_string(),
+        data: b"vector-fixture-prepare-data".to_vec(),
+    };
+    let prepare_bytes = prepare.encode();
+    assert_eq!(
+        Prepare::decode(&prepare_bytes).expect("self-generated prepare decodes"),
+        prepare
+    );
+
+    let minimum_delivery: u64 = 100_000;
+    let md_entry =
+        fields::minimum_delivery_protocol_data(minimum_delivery).expect("a non-zero floor rides");
+    let claim_entry = claim_json::protocol_data(&evm_claim.json);
+    let role = SessionRole::peer("store-box");
+
+    // Item 5: claim + minimum-delivery, both riding one PREPARE.
+    let btp_with_claim = encode_message(
+        9_001,
+        &[claim_entry.clone(), md_entry.clone()],
+        &prepare_bytes,
+    );
+    let decoded = decode_frame(&btp_with_claim).expect("self-generated frame decodes");
+    assert_eq!(decoded.ilp_packet, prepare_bytes);
+    assert_eq!(
+        claim_json::from_protocol_data(&decoded.protocol_data),
+        Some(evm_claim.json.as_bytes())
+    );
+    assert_eq!(
+        fields::minimum_delivery(&role, &decoded.protocol_data),
+        Ok(minimum_delivery)
+    );
+
+    let mut headers_with_claim = Headers::new();
+    headers_with_claim.push(CLAIM_HEADER, claim_header_value(&evm_claim.json));
+    headers_with_claim.push(MINIMUM_DELIVERY_HEADER, minimum_delivery.to_string());
+    assert_eq!(
+        http_claim_json(&headers_with_claim)
+            .expect("a claim rode")
+            .expect("valid base64"),
+        evm_claim.json.as_bytes()
+    );
+    assert_eq!(
+        http_minimum_delivery(&role, &headers_with_claim),
+        Ok(minimum_delivery)
+    );
+
+    let with_claim = PreparePairCase {
+        name: "peer_prepare",
+        prepare: prepare_fields(&prepare),
+        claim_json: Some(evm_claim.json.clone()),
+        minimum_delivery: Some(minimum_delivery),
+        btp_message_hex: hex_of(&btp_with_claim),
+        http_headers: headers_pairs(&headers_with_claim),
+        http_body_hex: hex_of(&prepare_bytes),
+    };
+
+    // Item 6: the same PREPARE with no claim entry/header -- "claimless is
+    // legal" pinned rather than assumed.
+    let btp_no_claim = encode_message(9_002, &[md_entry], &prepare_bytes);
+    let decoded_no_claim = decode_frame(&btp_no_claim).expect("self-generated frame decodes");
+    assert!(claim_json::from_protocol_data(&decoded_no_claim.protocol_data).is_none());
+
+    let mut headers_no_claim = Headers::new();
+    headers_no_claim.push(MINIMUM_DELIVERY_HEADER, minimum_delivery.to_string());
+    assert!(http_claim_json(&headers_no_claim).is_none());
+
+    let without_claim = PreparePairCase {
+        name: "peer_prepare_no_claim",
+        prepare: prepare_fields(&prepare),
+        claim_json: None,
+        minimum_delivery: Some(minimum_delivery),
+        btp_message_hex: hex_of(&btp_no_claim),
+        http_headers: headers_pairs(&headers_no_claim),
+        http_body_hex: hex_of(&prepare_bytes),
+    };
+
+    (with_claim, without_claim)
+}
+
+fn fixture_fulfill() -> Fulfill {
+    Fulfill {
+        fulfillment: seq_bytes::<32>(0x51),
+        data: b"vector-fixture-fulfill-data".to_vec(),
+    }
+}
+
+fn fixture_reject() -> Reject {
+    Reject {
+        code: RejectCode::t04_insufficient_liquidity(),
+        triggered_by: "g.toon.store-box".to_string(),
+        message: "vector fixture reject".to_string(),
+        data: Vec::new(),
+        // Never part of `Reject::encode`'s wire bytes (its own doc); the
+        // real value this vector pins travels as the carriage's own
+        // `accumulated-cost` entry/header, built separately below.
+        accumulated_cost: 0,
+    }
+}
+
+/// [`answer_case`]'s inputs, grouped so the function itself takes one
+/// argument instead of a long positional list.
+struct AnswerCaseSpec {
+    name: String,
+    request_id: u32,
+    packet: &'static str,
+    packet_bytes: Vec<u8>,
+    protocol_data: Vec<ProtocolData>,
+    http_headers: Vec<(String, String)>,
+    ack: Option<AckFields>,
+    accumulated_cost: Option<u64>,
+}
+
+/// One judged-claim RESPONSE, on both carriages: `protocol_data` rides the
+/// BTP RESPONSE beside `ilp_packet`, and the same fields ride as HTTP
+/// headers beside the same body -- always status `200` (§6.2).
+fn answer_case(spec: AnswerCaseSpec) -> PeerAnswerCase {
+    let btp = encode_response(spec.request_id, &spec.protocol_data, &spec.packet_bytes);
+    let decoded = decode_frame(&btp).expect("self-generated frame decodes");
+    assert_eq!(decoded.ilp_packet, spec.packet_bytes);
+
+    let mut headers = Headers::new();
+    for (name, value) in &spec.http_headers {
+        headers.push(name.clone(), value.clone());
+    }
+
+    // I1, on the ack and the accumulated-cost fields alike: whatever this
+    // case pins is read back identically off both encodings by the real
+    // decoders.
+    let expected_ack = spec.ack.as_ref().map(|fields| match fields.reason {
+        None => ClaimAckOutcome::Accepted,
+        Some(reason) => ClaimAckOutcome::Rejected(
+            ack::reason_from_name(reason).expect("a name this module itself just wrote"),
+        ),
+    });
+    assert_eq!(
+        ack::from_protocol_data(&decoded.protocol_data),
+        expected_ack
+    );
+    assert_eq!(http_claim_ack(&headers), expected_ack);
+    if let Some(cost) = spec.accumulated_cost {
+        assert_eq!(fields::accumulated_cost(&decoded.protocol_data), cost);
+        assert_eq!(http_accumulated_cost(&headers), cost);
+    }
+
+    PeerAnswerCase {
+        name: spec.name,
+        packet: spec.packet,
+        packet_hex: hex_of(&spec.packet_bytes),
+        ack: spec.ack,
+        accumulated_cost: spec.accumulated_cost,
+        btp_response_hex: hex_of(&btp),
+        http_status: 200,
+        http_headers: spec.http_headers,
+        http_body_hex: hex_of(&spec.packet_bytes),
+    }
+}
+
+/// [`generate_answer_cases`]'s output, named so its four same-typed
+/// [`PeerAnswerCase`] values can't be silently transposed by position the
+/// way a same-typed tuple return could be -- the return-side counterpart
+/// to [`AnswerCaseSpec`] grouping the argument side.
+struct AnswerCases {
+    fulfill_ack_accepted: PeerAnswerCase,
+    fulfill_ack_rejected: PeerAnswerCase,
+    ack_rejected_reasons: Vec<PeerAnswerCase>,
+    reject_with_cost: PeerAnswerCase,
+    ack_absent: PeerAnswerCase,
+}
+
+fn generate_answer_cases() -> AnswerCases {
+    let fulfill_bytes = fixture_fulfill().encode();
+
+    // Item 7: a FULFILL, acknowledged accepted.
+    let ack_entry = ack::protocol_data(ClaimAckOutcome::Accepted).expect("a judged claim");
+    let ack_header = claim_ack_header_value(ClaimAckOutcome::Accepted).expect("a judged claim");
+    let fulfill_ack_accepted = answer_case(AnswerCaseSpec {
+        name: "peer_fulfill_ack_accepted".to_string(),
+        request_id: 9_101,
+        packet: "fulfill",
+        packet_bytes: fulfill_bytes.clone(),
+        protocol_data: vec![ack_entry],
+        http_headers: vec![(CLAIM_ACK_HEADER.to_string(), ack_header)],
+        ack: Some(AckFields {
+            result: "accepted",
+            reason: None,
+        }),
+        accumulated_cost: None,
+    });
+
+    // Item 8: **the single most important vector in this set** (§10.2) --
+    // a FULFILL answer carrying a *rejected* claim-ack on the same
+    // response, pinning §6.2's independence of the two verdicts.
+    let rejected_signature_invalid = ClaimAckOutcome::Rejected(ClaimRejectReason::SignatureInvalid);
+    let ack_entry = ack::protocol_data(rejected_signature_invalid).expect("a judged claim");
+    let ack_header = claim_ack_header_value(rejected_signature_invalid).expect("a judged claim");
+    let fulfill_ack_rejected = answer_case(AnswerCaseSpec {
+        name: "peer_fulfill_ack_rejected".to_string(),
+        request_id: 9_102,
+        packet: "fulfill",
+        packet_bytes: fulfill_bytes.clone(),
+        protocol_data: vec![ack_entry],
+        http_headers: vec![(CLAIM_ACK_HEADER.to_string(), ack_header)],
+        ack: Some(AckFields {
+            result: "rejected",
+            reason: Some("signature_invalid"),
+        }),
+        accumulated_cost: None,
+    });
+
+    // Item 9: one pair per §6.1 reason.
+    let mut ack_rejected_reasons = Vec::new();
+    for (index, reason) in [
+        ClaimRejectReason::SignatureInvalid,
+        ClaimRejectReason::NonceNotAdvancing,
+        ClaimRejectReason::AmountNotAdvancing,
+        ClaimRejectReason::UnknownChannel,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let outcome = ClaimAckOutcome::Rejected(reason);
+        let reason_name = ack::reason_name(reason);
+        let ack_entry = ack::protocol_data(outcome).expect("a judged claim");
+        let ack_header = claim_ack_header_value(outcome).expect("a judged claim");
+        ack_rejected_reasons.push(answer_case(AnswerCaseSpec {
+            name: format!("peer_ack_rejected_{reason_name}"),
+            request_id: 9_110 + index as u32,
+            packet: "fulfill",
+            packet_bytes: fulfill_bytes.clone(),
+            protocol_data: vec![ack_entry],
+            http_headers: vec![(CLAIM_ACK_HEADER.to_string(), ack_header)],
+            ack: Some(AckFields {
+                result: "rejected",
+                reason: Some(reason_name),
+            }),
+            accumulated_cost: None,
+        }));
+    }
+
+    // Item 10: a REJECT carrying accumulated-cost **and** a claim-ack, both
+    // on one response.
+    let reject_bytes = fixture_reject().encode();
+    let accumulated_cost = 4_200u64;
+    let cost_entry = fields::accumulated_cost_protocol_data(accumulated_cost);
+    let cost_header = accumulated_cost.to_string();
+    let ack_entry = ack::protocol_data(ClaimAckOutcome::Accepted).expect("a judged claim");
+    let ack_header = claim_ack_header_value(ClaimAckOutcome::Accepted).expect("a judged claim");
+    let reject_with_cost = answer_case(AnswerCaseSpec {
+        name: "peer_reject_with_cost".to_string(),
+        request_id: 9_120,
+        packet: "reject",
+        packet_bytes: reject_bytes,
+        protocol_data: vec![cost_entry, ack_entry],
+        http_headers: vec![
+            (ACCUMULATED_COST_HEADER.to_string(), cost_header),
+            (CLAIM_ACK_HEADER.to_string(), ack_header),
+        ],
+        ack: Some(AckFields {
+            result: "accepted",
+            reason: None,
+        }),
+        accumulated_cost: Some(accumulated_cost),
+    });
+
+    // Item 11: a response answering a claim-bearing request with **no**
+    // ack at all -- pinned as NOT ACKNOWLEDGED (§6.3), not a verdict.
+    let ack_absent = answer_case(AnswerCaseSpec {
+        name: "peer_ack_absent".to_string(),
+        request_id: 9_130,
+        packet: "fulfill",
+        packet_bytes: fulfill_bytes,
+        protocol_data: Vec::new(),
+        http_headers: Vec::new(),
+        ack: None,
+        accumulated_cost: None,
+    });
+
+    AnswerCases {
+        fulfill_ack_accepted,
+        fulfill_ack_rejected,
+        ack_rejected_reasons,
+        reject_with_cost,
+        ack_absent,
+    }
+}
+
+/// Item 14: the answer to a FLUSH -- an **empty** packet, acknowledged
+/// accepted. Shares [`answer_case`]'s machinery with items 7-11 over a
+/// zero-length `packet_bytes`.
+fn generate_flush_ack_case() -> PeerAnswerCase {
+    let ack_entry = ack::protocol_data(ClaimAckOutcome::Accepted).expect("a judged claim");
+    let ack_header = claim_ack_header_value(ClaimAckOutcome::Accepted).expect("a judged claim");
+    answer_case(AnswerCaseSpec {
+        name: "peer_flush_ack".to_string(),
+        request_id: 9_140,
+        packet: "none",
+        packet_bytes: Vec::new(),
+        protocol_data: vec![ack_entry],
+        http_headers: vec![(CLAIM_ACK_HEADER.to_string(), ack_header)],
+        ack: Some(AckFields {
+            result: "accepted",
+            reason: None,
+        }),
+        accumulated_cost: None,
+    })
+}
+
+fn generate_ack_malformed_case() -> PeerMalformedAckCase {
+    let malformed = r#"{"result":"maybe"}"#.to_string();
+    assert_eq!(
+        ack::decode(malformed.as_bytes()),
+        None,
+        "§6.3: an unknown result is not acknowledged, never a verdict"
+    );
+    let entry = ProtocolData {
+        name: CLAIM_ACK_PROTOCOL.to_string(),
+        content_type: CONTENT_TYPE_TEXT,
+        data: malformed.as_bytes().to_vec(),
+    };
+    assert_eq!(ack::from_protocol_data(&[entry]), None);
+
+    let http_value = BASE64.encode(&malformed);
+    let mut headers = Headers::new();
+    headers.push(CLAIM_ACK_HEADER, &http_value);
+    assert_eq!(http_claim_ack(&headers), None);
+
+    PeerMalformedAckCase {
+        name: "peer_ack_malformed",
+        malformed_json: malformed.clone(),
+        btp_raw_hex: hex_of(malformed.as_bytes()),
+        http_base64: http_value,
+    }
+}
+
+fn generate_flush_case(evm_claim: &PeerClaimCase) -> PeerFlushCase {
+    let claim_entry = claim_json::protocol_data(&evm_claim.json);
+    let amount = evm_claim.wire_cumulative_amount;
+
+    let btp = encode_transfer(9_150, amount, &[claim_entry]);
+    let decoded = decode_frame(&btp).expect("self-generated frame decodes");
+    assert_eq!(decoded.amount, Some(amount));
+    assert!(
+        decoded.ilp_packet.is_empty(),
+        "a TRANSFER carries no ilpPacket"
+    );
+    assert_eq!(
+        claim_json::from_protocol_data(&decoded.protocol_data),
+        Some(evm_claim.json.as_bytes())
+    );
+
+    let mut headers = Headers::new();
+    headers.push(CLAIM_HEADER, claim_header_value(&evm_claim.json));
+    assert_eq!(
+        http_claim_json(&headers)
+            .expect("a claim rode")
+            .expect("valid base64"),
+        evm_claim.json.as_bytes()
+    );
+
+    PeerFlushCase {
+        name: "peer_flush",
+        claim_json: evm_claim.json.clone(),
+        transfer_amount: amount,
+        btp_transfer_hex: hex_of(&btp),
+        http_headers: headers_pairs(&headers),
+        http_body_hex: String::new(),
+    }
+}
+
+/// Items 15 and 16: §6.3's idempotent re-ack and its boundary, exercised
+/// against the *real* gate a carriage checks -- [`AcceptedClaims`] first
+/// (in-process, per relation), falling through to [`ClaimBook`]'s
+/// strictly-advancing rule exactly as `connector-peer-btp`'s and
+/// `connector-peer-http`'s own accept paths do (`accept.rs`'s
+/// `judge_claim`).
+fn generate_retransmit_cases() -> (PeerRetransmitCase, PeerRetransmitCase) {
+    let signer =
+        LocalSigner::from_secret_bytes("vector-fixture-retransmit-key", seq_bytes::<32>(0xb1))
+            .expect("fixture retransmit secret is a valid secp256k1 scalar");
+    let signer_address = derive_evm_address(&signer.public_key().expect("fixture has a key"));
+    let channel_id = seq_bytes::<32>(0xb5);
+    let chain_id = 84_532u64;
+    let token_network_address: Address = seq_bytes::<20>(0xb9);
+    let peer_domain = PeerClaimDomain {
+        chain_id,
+        token_network: token_network_address,
+    };
+
+    let sign = |nonce: u64, amount: u64| -> WireClaim {
+        let proof = EvmBalanceProof {
+            channel_id,
+            nonce,
+            transferred_amount: u128::from(amount),
+            locked_amount: 0,
+            locks_root: [0u8; 32],
+            chain_id,
+            token_network_address,
+        };
+        let signature = signer
+            .sign(&evm_balance_proof_digest(&proof))
+            .expect("fixture signer signs its own digest");
+        WireClaim {
+            channel_id: format!("0x{}", hex::encode(channel_id)),
+            nonce,
+            cumulative_amount: amount,
+            signature: ClaimSignature::Evm(signature),
+        }
+    };
+    let render = |claim: &WireClaim| {
+        claim_json::encode(
+            claim,
+            &signer_address,
+            Some(peer_domain),
+            "vector-fixture:retransmit",
+            "2030-01-01T00:00:00.000Z",
+        )
+    };
+
+    let first = sign(11, 800_000);
+    let first_json = render(&first);
+
+    let watermark = AcceptedClaims::new();
+    assert!(!watermark.is_at_watermark("peer-b", &first));
+    watermark.record("peer-b", &first);
+    assert!(
+        watermark.is_at_watermark("peer-b", &first),
+        "a byte-identical retransmission must be recognised at the watermark"
+    );
+
+    let retransmit = PeerRetransmitCase {
+        name: "peer_claim_retransmit",
+        first_claim_json: first_json.clone(),
+        second_claim_json: first_json.clone(),
+        first_ack: "accepted",
+        second_ack: "accepted",
+        second_ack_reason: None,
+    };
+
+    // Item 16: a genuinely different, validly signed claim at the *same*
+    // nonce is not the one at the watermark, and falls through to
+    // `ClaimBook`'s own strictly-advancing rule -- exactly as the carriage
+    // falls through once `is_at_watermark` says no.
+    let different = sign(11, 950_000);
+    assert!(!watermark.is_at_watermark("peer-b", &different));
+
+    let mut counterparties = HashMap::new();
+    counterparties.insert(first.channel_id.clone(), signer_address);
+    let mut book = ClaimBook::new(None, HashMap::new(), counterparties);
+    book.set_channel_domain(
+        &first.channel_id,
+        ChannelDomain {
+            chain_id,
+            token_network_address,
+        },
+    )
+    .expect("a fixed on-chain channel id is always valid");
+    assert_eq!(book.accept_inbound(&first), ClaimAckOutcome::Accepted);
+    assert_eq!(
+        book.accept_inbound(&different),
+        ClaimAckOutcome::Rejected(ClaimRejectReason::NonceNotAdvancing)
+    );
+
+    let different_bytes = PeerRetransmitCase {
+        name: "peer_claim_same_nonce_different_bytes",
+        first_claim_json: first_json,
+        second_claim_json: render(&different),
+        first_ack: "accepted",
+        second_ack: "rejected",
+        second_ack_reason: Some("nonce_not_advancing"),
+    };
+
+    (retransmit, different_bytes)
+}
+
+fn generate_flush_requested_case() -> PeerFlushRequestedCase {
+    let channel_id = format!("0x{}", hex::encode(seq_bytes::<32>(0xc5)));
+    let mut headers = Headers::new();
+    headers.push(FLUSH_REQUESTED_HEADER, &channel_id);
+    assert_eq!(http_flush_requested(&headers), vec![channel_id.clone()]);
+
+    PeerFlushRequestedCase {
+        name: "peer_flush_requested",
+        channel_id: channel_id.clone(),
+        http_header_value: channel_id,
+        note: "HTTP only -- BTP has no counterpart (peer-carriage-spec.md §6.4): the payee can \
+               originate a request of its own",
+    }
+}
+
+fn generate_minimum_delivery_cases() -> (PeerMinimumDeliveryCase, PeerMinimumDeliveryCase) {
+    let role = SessionRole::peer("store-box");
+
+    assert_eq!(fields::minimum_delivery(&role, &[]), Ok(0));
+    assert_eq!(http_minimum_delivery(&role, &Headers::new()), Ok(0));
+    let absent = PeerMinimumDeliveryCase {
+        name: "peer_minimum_delivery_absent",
+        present: false,
+        raw_value: None,
+        decoded_minimum_delivery: Some(0),
+        reject_code: None,
+    };
+
+    let malformed_value = "twelve";
+    let entry = ProtocolData {
+        name: MINIMUM_DELIVERY_PROTOCOL.to_string(),
+        content_type: CONTENT_TYPE_TEXT,
+        data: malformed_value.as_bytes().to_vec(),
+    };
+    let error = fields::minimum_delivery(&role, &[entry])
+        .expect_err("a malformed value is refused, never silently zero");
+    let reject = fields::malformed_minimum_delivery_reject(&error);
+    assert_eq!(reject.code.as_str(), "F01");
+
+    let mut headers = Headers::new();
+    headers.push(MINIMUM_DELIVERY_HEADER, malformed_value);
+    assert!(http_minimum_delivery(&role, &headers).is_err());
+
+    let malformed = PeerMinimumDeliveryCase {
+        name: "peer_minimum_delivery_malformed",
+        present: true,
+        raw_value: Some(malformed_value.to_string()),
+        decoded_minimum_delivery: None,
+        reject_code: Some("F01"),
+    };
+
+    (absent, malformed)
+}
+
+fn generate_forwarded_data_case(giftwrap: &GiftwrapVectors) -> PeerForwardedDataCase {
+    let sealed = hex::decode(&giftwrap.cases[0].request_wrap_hex)
+        .expect("hex from this run's own giftwrap section");
+    let prepare = Prepare {
+        amount: 250_000,
+        expires_at: "2030-01-01T00:01:00Z".parse().expect("fixed literal"),
+        execution_condition: seq_bytes::<32>(0xfa),
+        destination: "g.toon.store-box.settle".to_string(),
+        data: sealed.clone(),
+    };
+    let prepare_bytes = prepare.encode();
+    let decoded = Prepare::decode(&prepare_bytes).expect("self-generated prepare decodes");
+    assert_eq!(
+        decoded.data, sealed,
+        "§8.1: a forwarding hop must carry `data` byte-for-byte unchanged"
+    );
+
+    let btp = encode_message(9_199, &[], &prepare_bytes);
+    let via_btp = decode_frame(&btp).expect("self-generated frame decodes");
+    assert_eq!(via_btp.ilp_packet, prepare_bytes);
+
+    PeerForwardedDataCase {
+        name: "peer_forwarded_data_unchanged",
+        sealed_data_hex: hex_of(&sealed),
+        btp_ilp_packet_prepare_hex: hex_of(&btp),
+        http_body_hex: hex_of(&prepare_bytes),
+    }
+}
+
+fn generate_peer_carriage_vectors(
+    claim_fixture: &ClaimFixture,
+    giftwrap: &GiftwrapVectors,
+) -> PeerCarriageVectors {
+    let credential = generate_peer_auth_case();
+    let claim_evm = generate_peer_claim_evm_case(claim_fixture);
+    let claim_solana = generate_peer_claim_solana_case();
+    let (prepare, prepare_no_claim) = generate_prepare_pair_cases(&claim_evm);
+    let AnswerCases {
+        fulfill_ack_accepted,
+        fulfill_ack_rejected,
+        ack_rejected_reasons,
+        reject_with_cost,
+        ack_absent,
+    } = generate_answer_cases();
+    let flush_ack = generate_flush_ack_case();
+    let ack_malformed = generate_ack_malformed_case();
+    let flush = generate_flush_case(&claim_evm);
+    let (claim_retransmit, claim_same_nonce_different_bytes) = generate_retransmit_cases();
+    let flush_requested = generate_flush_requested_case();
+    let (minimum_delivery_absent, minimum_delivery_malformed) = generate_minimum_delivery_cases();
+    let forwarded_data_unchanged = generate_forwarded_data_case(giftwrap);
+
+    PeerCarriageVectors {
+        claim_digest_hex: claim_fixture.digest_hex.clone(),
+        credential,
+        claim_evm,
+        claim_solana,
+        prepare,
+        prepare_no_claim,
+        fulfill_ack_accepted,
+        fulfill_ack_rejected,
+        ack_rejected_reasons,
+        reject_with_cost,
+        ack_absent,
+        ack_malformed,
+        flush,
+        flush_ack,
+        claim_retransmit,
+        claim_same_nonce_different_bytes,
+        flush_requested,
+        minimum_delivery_absent,
+        minimum_delivery_malformed,
+        forwarded_data_unchanged,
     }
 }
 
@@ -554,7 +1549,8 @@ pub fn generate() -> WireVectors {
     let envelope = generate_envelope_vectors();
     let (giftwrap, shared_secret) = generate_giftwrap_vectors();
     let fulfilment = generate_fulfilment_vectors(shared_secret);
-    let claim = generate_claim_vectors();
+    let (claim, claim_fixture) = generate_claim_vectors();
+    let peer_carriage = generate_peer_carriage_vectors(&claim_fixture, &giftwrap);
 
     WireVectors {
         schema_version: SCHEMA_VERSION,
@@ -562,6 +1558,7 @@ pub fn generate() -> WireVectors {
         giftwrap,
         fulfilment,
         claim,
+        peer_carriage,
     }
 }
 

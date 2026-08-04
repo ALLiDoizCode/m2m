@@ -184,3 +184,84 @@ signer_address_hex, signature_hex }`.
   the same `digest_hex` from the other fields, and that a 65-byte `r || s || recovery_id` signature
   over that digest (`signature_hex`; `recovery_id` is raw `0`/`1`, not the `27`/`28` a wallet's own
   signature carries) recovers to `signer_address_hex`.
+
+### `peer_carriage`
+
+Issue #729, [ADR 0021](../docs/adr/0021-vectors-are-normative-prose-is-not.md): the 20 items of
+`docs/protocol/peer-carriage-spec.md` §10, generated from one fixture set per concept and
+self-checked against the same functions -- `connector-peer-btp`'s codec and
+`connector-peer-http`'s wrappers over it -- that judge them at runtime. **Most items are a pair**:
+a BTP encoding and an HTTP encoding of the same fixture, and a replaying SDK should confirm both
+decode to the same value (§10.1, spec I1) rather than trust either encoding alone.
+
+Every JSON claim, ack and credential value below is the plain string a real interaction carries; a
+`btp_raw_hex` field is that string's raw UTF-8 bytes (the BTP `protocolData` entry payload), and an
+`http_base64` field is `base64` of the same bytes (the HTTP header value) -- never a second
+encoding of a different value (§4, §1.4). Header names throughout are the canonical lower-case
+forms `docs/protocol/peer-carriage-spec.md` §3 pins; header values in `http_headers` pair each
+name with its value as `[name, value]`, in the order a real response would carry them.
+
+- **`credential`** (item 1) -- `{ name, peer_id, secret, btp_raw_hex, http_base64 }`: the peer
+  credential JSON of §1.4 (`{"peerId": ..., "secret": ...}`), on the `auth` protocolData entry and
+  the `Toon-Peer-Auth` header.
+- **`claim_evm`** (item 2) -- `{ name, blockchain, json, btp_raw_hex, http_base64, wire_channel_id,
+wire_nonce, wire_cumulative_amount, wire_signature_hex }`: an EVM peer claim, the same JSON shape
+  `client-edge-spec.md` §1.3 defines for a client claim (spec I4). `wire_*` fields are what the
+  claim decodes to in-process (`connector_runtime::WireClaim`) -- the value both carriage decoders
+  must agree on.
+- **`claim_digest_hex`** (item 3) -- the same string as this file's `claim.cases[0].digest_hex`,
+  repeated here rather than recomputed, demonstrating ADR 0024's EIP-712 digest is untouched by
+  carriage.
+- **`claim_solana`** (item 4) -- shaped like `claim_evm`, over a Solana claim. **Aspirational**
+  (`peer-wire-spec.md` §3.5): this connector's outbound peer claims are EVM-only, so nothing today
+  emits this shape, but `claim_json::parse` already accepts it inbound (issue #732) and this vector
+  pins that shape before an emitter exists.
+- **`prepare`** / **`prepare_no_claim`** (items 5, 6) -- `{ name, prepare, claim_json,
+minimum_delivery, btp_message_hex, http_headers, http_body_hex }`: a claim-bearing PREPARE.
+  `prepare` is `{ amount, expires_at, execution_condition_hex, destination, data_hex }`, the OER
+  `Prepare` both `btp_message_hex` (a complete BTP MESSAGE frame: type, `requestId`, the
+  `payment-channel-claim` and `toon-minimum-delivery` protocolData entries, then the OER PREPARE)
+  and `http_body_hex` (the same OER bytes as a POST body) carry. `prepare_no_claim` is the same
+  fixture with the claim entry/header removed -- "claimless is legal" pinned rather than assumed.
+  `claim_json` is `null` there.
+- **`fulfill_ack_accepted`**, **`fulfill_ack_rejected`**, **`ack_rejected_reasons[]`**,
+  **`reject_with_cost`**, **`ack_absent`**, **`flush_ack`** (items 7-11, 14) -- one shape,
+  `{ name, packet ("fulfill"|"reject"|"none"), packet_hex, ack, accumulated_cost, btp_response_hex,
+http_status, http_headers, http_body_hex }`. `ack` is `null` (absent, item 11) or `{ result,
+reason }` (`reason` only when `result` is `"rejected"`). `http_status` is always `200` -- §6.2's
+  independence of the packet's own verdict from the claim's. `fulfill_ack_rejected` is **the single
+  most important vector in this set** (§10.2 item 8): a `FULFILL` answer carrying a _rejected_
+  claim-ack on the one response, proving the two verdicts never couple. `ack_rejected_reasons[]` has
+  one entry per §6.1 reason (`signature_invalid`, `nonce_not_advancing`, `amount_not_advancing`,
+  `unknown_channel`), named `peer_ack_rejected_<reason>`. `reject_with_cost` carries both
+  `accumulated_cost` and `ack` on one response. `flush_ack` answers an empty packet
+  (`packet: "none"`, `packet_hex: ""`) -- the answer to a FLUSH.
+- **`ack_malformed`** (item 12) -- `{ name, malformed_json, btp_raw_hex, http_base64 }`: an ack
+  whose JSON does not decode to either verdict (here, an unrecognised `result`). Both carriages must
+  read this as **not acknowledged** (§6.3), the same as `ack_absent` -- never an error, never a
+  verdict.
+- **`flush`** (item 13) -- `{ name, claim_json, transfer_amount, btp_transfer_hex, http_headers,
+http_body_hex }`: `btp_transfer_hex` is a complete BTP TRANSFER frame whose `amount` equals
+  `transfer_amount` (the claim's own cumulative amount -- the generator asserts this equality, not
+  just a reader) and carries the claim entry with **no** `ilpPacket`. `http_body_hex` is empty; the
+  claim rides the `ILP-Payment-Channel-Claim` header alone.
+- **`claim_retransmit`**, **`claim_same_nonce_different_bytes`** (items 15, 16) -- `{ name,
+first_claim_json, second_claim_json, first_ack, second_ack, second_ack_reason }`: §6.3's
+  idempotent re-ack and its boundary. In `claim_retransmit`, `second_claim_json` is
+  byte-identical to `first_claim_json` and both acks are `"accepted"` -- a retransmission of the
+  claim already at the watermark is accepted again, not refused. In
+  `claim_same_nonce_different_bytes`, `second_claim_json` carries the same nonce but a different
+  (still validly signed) amount, and `second_ack` is `"rejected"` with `second_ack_reason:
+"nonce_not_advancing"`.
+- **`flush_requested`** (item 17) -- `{ name, channel_id, http_header_value, note }`. **HTTP
+  only**: `note` records that BTP has no counterpart (§6.4) -- on BTP the payee can originate a
+  request of its own, so the hint has nothing to ride.
+- **`minimum_delivery_absent`**, **`minimum_delivery_malformed`** (items 18, 19) -- `{ name,
+present, raw_value, decoded_minimum_delivery, reject_code }`. Absent decodes to
+  `decoded_minimum_delivery: 0`; a malformed value (here, non-decimal text) decodes to `null` and
+  `reject_code: "F01"` -- never silently zero.
+- **`forwarded_data_unchanged`** (item 20) -- `{ name, sealed_data_hex, btp_ilp_packet_prepare_hex,
+http_body_hex }`: one sealed request wrap from this file's own `giftwrap` section (§8.1), carried
+  as a PREPARE's `data` on both carriages. `sealed_data_hex` must appear byte-for-byte inside both
+  `btp_ilp_packet_prepare_hex`'s OER PREPARE and `http_body_hex` -- a forwarding hop never
+  re-encodes, re-wraps or truncates a payload it holds no key for.
