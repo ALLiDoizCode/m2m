@@ -133,10 +133,22 @@ add a `[[peers]]` entry with a `wss://` or `https://` `endpoint` and a
 The template's commented peering block annotates every field. ADR 0027
 deleted the raw-TCP peer wire that preceded this (issue #679), along with
 `peer_wire_addr` and the `SocketAddr`-shaped `[[peers]].addr`; a config
-still setting either now fails config load by name. **The carriages that
-dial are not shipped yet** (issue #676): the surface validates today, and a
-packet routed to a peer is answered `T01 peer unreachable` until they land.
-See `docs/operators/btp-peer-transport-bringup.md`.
+still setting either now fails config load by name.
+
+Two things to get right, both of which fail silently rather than loudly:
+
+- **`[[peers]].id` is one string both operators write.** It is the `peerId`
+  the dialing side presents, and the accepting side proves it against its
+  own `[[peers]]` table — so an id the far side does not have is admitted
+  as an ordinary client, with nothing in the log.
+- **There is no peer port.** A peer's `endpoint` is
+  `wss://<host>/ilp/btp` or `https://<host>/ilp` — this node's own client
+  edge — because peer carriages ride the listener it already serves and
+  role is decided by the credential, not by the port.
+
+A packet routed to a peer this node cannot dial is still answered
+`T01 peer unreachable`, never dropped. See
+`docs/operators/btp-peer-transport-bringup.md`.
 
 ## 4b. (Optional) settlement
 

@@ -108,23 +108,34 @@ write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STE
 # establish, and a route forwarding to a peer this node can never originate
 # to could only ever answer T01.
 #
-# NOTE: this block is commented out because the carriages that dial it are
-# issue #676 and are not shipped yet. Uncommenting it today gives you a
-# validated peering that nothing traverses.
+# There is NO peer port. A node that exposes a carriage serves it on the
+# paths its client edge already serves, on `client_edge_addr`:
+# BTP on `GET /ilp/btp`, ILP-over-HTTP on `POST /ilp`. Role is decided by
+# the credential, never by the listener, so there is nothing extra to open
+# and nothing extra to firewall.
+#
+# NOTE: uncommenting this block gives you a live peering as of issue #678 --
+# the dial side is built from these lines and the accept side rides the
+# listener above. Before #678 it validated and traversed nothing.
 #
 # peer_expose = "btp"
 #
 # [[peers]]
 # # The id a [[routes]] entry's peer_id names, and the peerId the
-# # credential JSON carries.
+# # credential JSON carries -- so BOTH operators must write the SAME
+# # string. The far side proves the credential by looking this id up in
+# # its own [[peers]] table; an id it does not have is admitted as an
+# # ordinary client, silently. It names the relation, not "the other guy".
 # id = "store"
 #
 # # The URL this node dials to reach the peer. The SCHEME selects the
 # # carriage and nothing else does: wss:// is BTP, https:// is
 # # ILP-over-HTTP. Both are TLS-only -- a peering carries signed balance
-# # proofs -- so ws:// and http:// are refused at load. Omit `endpoint`
-# # entirely for a peering that dials IN to this node instead.
-# endpoint = "wss://store.example.net:443/btp"
+# # proofs -- so ws:// and http:// are refused at load unless this node
+# # sets `peer_allow_plaintext_endpoints = true`, which is a loopback and
+# # test switch and must never be set here. Omit `endpoint` entirely for a
+# # peering that dials IN to this node instead.
+# endpoint = "wss://store.example.net:443/ilp/btp"
 #
 # # The shared secret this peering is authenticated by. Role is decided by
 # # authentication and by nothing else: not the port, not the source
