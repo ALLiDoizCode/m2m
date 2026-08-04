@@ -210,19 +210,23 @@ only once §1.2–§1.5 are implemented and the fleet charges for a write.
 Not demonstrated end-to-end: doing so means publishing a permanent event, so the last link is
 read out of the relay's handler rather than executed.
 
-It also settles how the peer wire had to be protected. A ufw rule would not have contained it —
+It also settled how the peer wire had to be protected. A ufw rule would not have contained it —
 only refusing to publish it on the public interface does, which is why
-`docker-compose.store.rust.yml` binds 4001 to `${STORE_PEER_WIRE_BIND}` rather than adding a
-firewall rule.
+`docker-compose.store.rust.yml` used to bind 4001 to `${STORE_PEER_WIRE_BIND}` rather than
+adding a firewall rule. **Superseded (ADR 0027, issue #679):** the raw-TCP peer wire is deleted,
+that publish and that variable are gone, and peers ride TLS carriages behind the existing nginx
+front. The general finding — a Docker `ports:` publish is internet-reachable regardless of ufw —
+is unaffected and is why the client edge's own publish is still loopback-only.
 
 ## What was not tested
 
 Not reached, and still open:
 
 - **The store hop.** No store box existed. `g.rust.store` points at an RFC 5737 placeholder.
-- **Peer-wire behaviour between two Rust nodes on a real network.** Same reason. The peer dial is
-  lazy (`NetworkPeerTransport` connects on first packet), so the apex came up and served
-  `g.rust.relay` with the placeholder in place — which is the only reason apex-first worked.
+- **Peer behaviour between two Rust nodes on a real network.** Same reason. The peer dial was
+  lazy (the since-deleted `NetworkPeerTransport` connected on first packet), so the apex came up
+  and served `g.rust.relay` with the placeholder in place — which is the only reason apex-first
+  worked. That this link was never exercised is one of the audit findings ADR 0027 rests on.
 - **Migration and rollback of a client.** Both need a funded payment channel with the new apex
   (ADR 0013: a channel is bilateral and does not follow an address change), which needs the
   `evm`/`sol`/`mina` boxes.
@@ -234,7 +238,8 @@ Not reached, and still open:
 ## Decisions taken here
 
 - **The peer wire is never published on the public interface.** See above, and
-  `docker-compose.store.rust.yml`'s header for the full reasoning.
+  `docker-compose.store.rust.yml`'s header. Overtaken by ADR 0027 / issue #679: there is no
+  raw-TCP peer listener to publish at all any more.
 - **The overlays stay a manual `up`.** #490 left open whether they should join `bootstrap.sh`'s
   automatic path. They should not, for now: the prefix is disposable by design (ADR 0013), the
   store side is unproven, and putting an unproven overlay on the path every box reboot takes is a

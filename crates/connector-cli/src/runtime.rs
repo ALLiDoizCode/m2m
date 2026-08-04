@@ -21,8 +21,8 @@ use connector_config::{
     SettlementConfig, SolanaSettlementConfig,
 };
 use connector_runtime::{
-    Connector, FileJournal, HttpAppClient, InMemoryJournal, Journal, JournalError,
-    NetworkPeerTransport, PeerRoute, SystemClock,
+    Connector, FileJournal, HttpAppClient, InMemoryJournal, InProcessPeerTransport, Journal,
+    JournalError, PeerRoute, SystemClock,
 };
 use connector_settlement::{SettlementBackend, SettlementError};
 use connector_settlement_evm::EvmSettlementBackend;
@@ -441,7 +441,7 @@ impl ClientChannelSource for SolanaChannelSource {
 /// different owner at startup; sharing one file would mean each replaying
 /// the other's entries and each holding a second writer's file handle on
 /// the same path.
-const PEER_WIRE_JOURNAL: &str = "peer-claims.log";
+const PEER_CLAIM_JOURNAL: &str = "peer-claims.log";
 const CLIENT_EDGE_JOURNAL: &str = "client-edge-claims.log";
 
 /// Open `name` under this node's configured `state_dir`, creating the
@@ -505,11 +505,15 @@ pub struct Runtime {
 }
 
 /// Construct the live [`Connector`] and [`Signer`] a validated [`Config`]
-/// describes. Every configured `[[peers]]` entry is dialed lazily through a
-/// [`NetworkPeerTransport`] (issue #488 -- peer addressing finally has a
-/// config-file representation, closing the gap #416 deferred), and every
-/// `peer_id`-targeted `[[routes]]` entry becomes a [`PeerRoute`] alongside
-/// the terminated [`connector_config::StaticRoute`]s. Every configured
+/// describes. Every `peer_id`-targeted `[[routes]]` entry becomes a
+/// [`PeerRoute`] alongside the terminated
+/// [`connector_config::StaticRoute`]s -- though nothing can currently
+/// traverse one: ADR 0027 / issue #679 deleted the raw-TCP peer wire that
+/// was the only [`connector_runtime::PeerTransport`] a built node held,
+/// and the carriages replacing it (BTP over `wss://`, ILP-over-HTTP over
+/// `https://`) are issue #676. Until one lands this node holds an empty
+/// [`InProcessPeerTransport`], so a packet routed to a peer is answered
+/// `T01 peer unreachable` rather than dropped. Every configured
 /// `[settlement.<chain>]` table's real chain-backed [`SettlementBackend`]
 /// is connected and attached under its own chain via
 /// [`Connector::with_settlement`] (issues #542, #630 -- a node with both
@@ -522,15 +526,13 @@ pub struct Runtime {
 /// [`ClientChannelSource`] (issue #556): one chain connection, used both
 /// to move value and to read who a channel belongs to.
 ///
-/// A node that names a `state_dir` also has its peer-wire claim journal
-/// armed here (issue #605), so the watermarks that wire's `ClaimBook`
-/// keeps outlive the process exactly as the client edge's do.
+/// A node that names a `state_dir` also has its peer claim journal armed
+/// here (issue #605), so the watermarks `ClaimBook` keeps outlive the
+/// process exactly as the client edge's do. That ledger sits *above* the
+/// peer transport port and was untouched by #679's deletion.
 pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     let signer = build_signer(config.signer_key())?;
-    let mut peer_transport = NetworkPeerTransport::new();
-    for peer in config.peers() {
-        peer_transport.add_peer(peer.id().to_string(), peer.addr());
-    }
+    let peer_transport = InProcessPeerTransport::new();
     let peer_routes = config
         .peer_routes()
         .iter()
@@ -620,10 +622,10 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     // and arming one while leaving the other in memory would mean shipping
     // the fix and the bug side by side.
     if let Some(state_dir) = config.state_dir() {
-        let journal = open_journal(state_dir, PEER_WIRE_JOURNAL)?;
+        let journal = open_journal(state_dir, PEER_CLAIM_JOURNAL)?;
         let (armed, divergences) = connector.with_journal(journal).map_err(|source| {
             RuntimeError::JournalUnreplayable {
-                path: state_dir.join(PEER_WIRE_JOURNAL),
+                path: state_dir.join(PEER_CLAIM_JOURNAL),
                 source,
             }
         })?;
@@ -1457,7 +1459,7 @@ key_file = "{key_path}"
     /// not a fix for the client edge and the same bug left standing on the
     /// wire between connectors.
     #[tokio::test]
-    async fn a_configured_state_dir_also_arms_the_peer_wire_journal() {
+    async fn a_configured_state_dir_also_arms_the_peer_claim_journal() {
         let state_dir = tempfile::tempdir().expect("temp state dir");
         let (config, _key_path) = config_with_raw_key_file(|key_path| {
             format!(
@@ -1474,7 +1476,7 @@ key_file = "{key_path}"
         });
 
         let _runtime = build(&config).await.expect("build");
-        assert!(state_dir.path().join(PEER_WIRE_JOURNAL).exists());
+        assert!(state_dir.path().join(PEER_CLAIM_JOURNAL).exists());
     }
 
     /// A node with no `state_dir` still builds -- config load has already

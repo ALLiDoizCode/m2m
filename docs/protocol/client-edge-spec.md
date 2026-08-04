@@ -683,6 +683,16 @@ describes client sessions exactly as before. The peer sub-protocol entries — `
 `toon-minimum-delivery` beside the `payment-channel-claim` and `toon-accumulated-cost` entries this
 section already defines — are specified for the peer direction, not here.
 
+> **Superseded** by [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md):
+> the raw-TCP peer wire is deleted (issue #679) and peers ride this same carriage, or
+> ILP-over-HTTP. A session is a _peer_ session if and only if it presented a configured peer
+> credential **and** has a `[[peer_channels]]` entry — role by authentication, not by transport
+> or port. "Every BTP session is a client session by construction" no longer holds, and the
+> classification it replaces is code, which is why it is a named stop-ship regression test on
+> both carriages. Everything else in this section — one gate, one journal, one refusal
+> taxonomy, indistinguishable downstream — is what ADR 0027 extends to peers rather than
+> changes. ADR 0026's carriage architecture stands; only its peer conclusion is superseded.
+
 - **Method/path:** `GET /ilp/btp`, websocket upgrade. The `btp` subprotocol is selected when
   offered; an upgrade offering no subprotocol is accepted identically.
 - **Frames:** binary websocket messages, one BTP frame per message. Text frames are ignored.

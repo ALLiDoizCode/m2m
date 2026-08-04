@@ -590,7 +590,7 @@ impl Connector {
     /// rejected claim does not reject the PREPARE it rode in on (§3.4), and
     /// this method decides neither from the other. `channel_id` identifies
     /// which inbound peering relation this PREPARE belongs to -- the peer
-    /// wire has no identity handshake yet (#416), so a caller supplies
+    /// side has no identity handshake yet (ADR 0027, #676), so a caller supplies
     /// whatever channel it last learned for this connection (typically from
     /// an accompanying claim, cached across calls that carry none); `None`
     /// when no channel has been established yet, in which case no ceiling
@@ -1105,7 +1105,8 @@ impl Connector {
             .collect()
     }
 
-    /// This node's peers. Always empty: no peer wire exists yet (#416).
+    /// This node's peers. Always empty: no peer transport exists yet
+    /// (ADR 0027, #676).
     pub fn peers(&self) -> Vec<PeerView> {
         Vec::new()
     }
@@ -2380,8 +2381,8 @@ mod tests {
         let clock = test_clock();
         let connector = connector_with(vec![], app_client, clock);
 
-        // `peers()` is always empty: the peer wire has no identity
-        // handshake yet (#416).
+        // `peers()` is always empty: there is no peer identity handshake
+        // yet (ADR 0027, #676).
         assert!(connector.peers().is_empty());
         assert!(connector.channels().await.is_empty());
         // No signer, peer claim channel or ceiling configured, and no
@@ -2474,8 +2475,8 @@ mod tests {
             ));
             let mut peer_transport = InProcessPeerTransport::new();
             peer_transport.add_peer("second-hop", second_hop.clone());
-            // Standing in for the identity a real peer-wire handshake would
-            // establish (#416, not yet built): without this, the link only
+            // Standing in for the identity a real peer handshake would
+            // establish (ADR 0027, #676, not yet built): without this, the link only
             // learns the channel once a claim first rides a frame, so the
             // very first delivery would go unrecorded (issue #424).
             peer_transport.set_peer_channel("second-hop", test_channel_id(1));

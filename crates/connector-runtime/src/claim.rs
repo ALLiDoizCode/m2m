@@ -52,10 +52,10 @@ const SIGNATURE_LEN: usize = 65; // r(32) + s(32) + recovery_id(1)
 impl WireClaim {
     /// Length-prefixed `channel_id` (so no two distinct tuples can ever
     /// collide on the same byte string) followed by `nonce`,
-    /// `cumulative_amount` and the raw signature -- the peer wire's ad hoc
-    /// encoding for fields RFC-0027 has no concept of, matching the
-    /// precedent `network_peer_transport.rs` already sets for
-    /// `minimumDelivery`.
+    /// `cumulative_amount` and the raw signature -- the ad hoc encoding for
+    /// fields RFC-0027 has no concept of. ADR 0027 re-hosts this same byte
+    /// string as a `payment-channel-claim` BTP protocolData entry or a
+    /// `Payment-Channel-Claim` HTTP header; only the carriage moves.
     pub fn encode(&self) -> Vec<u8> {
         let channel_id_bytes = self.channel_id.as_bytes();
         let mut out = Vec::with_capacity(2 + channel_id_bytes.len() + 8 + 8 + SIGNATURE_LEN);
@@ -272,10 +272,11 @@ struct OutboundLedger {
 /// Outbound state (what this connector owes a peer) is keyed by `peer_id`,
 /// since that is what routing decides. Inbound state (a peer's watermark
 /// on a channel) is keyed by the claim's own `channel_id` instead of by
-/// peer id: the peer wire has no identity handshake yet (peer-wire-spec.md
-/// §1.1 leaves "a configured peer id and verification key" as
-/// configuration, and `network_peer_transport.rs`'s accepting side does not
-/// know which configured peer dialed it -- issue #416 deferred that). A
+/// peer id: there is no peer identity handshake yet. ADR 0027 makes peer
+/// role a matter of authentication -- a configured credential plus a
+/// `[[peer_channels]]` entry -- but that config surface is issue #677 and
+/// the carriages that would present it are #676, so today's accepting side
+/// does not know which configured peer reached it. A
 /// claim already carries its own `channel_id`, so verification and the
 /// watermark it advances need nothing else to identify which channel it is
 /// -- only which address is trusted to sign for that channel, configured
@@ -379,7 +380,7 @@ impl ClaimBook {
     /// Whether `channel_id` is one this connector recognizes -- a
     /// counterparty address has been configured for it, this connector's
     /// own record of an established payment channel absent a full
-    /// peer-wire identity handshake (#416). Used by probe gating (issue
+    /// peer identity handshake (ADR 0027, #676). Used by probe gating (issue
     /// #426, ADR 0011): a sender with no recognized channel gets no free
     /// traversal of this connector's network.
     pub fn has_verification_key(&self, channel_id: &str) -> bool {

@@ -385,7 +385,6 @@ key_file = "{}"
 
 [[peers]]
 id = "store"
-addr = "127.0.0.1:4001"
 
 [[routes]]
 prefix = "g.example.store"
@@ -505,5 +504,98 @@ key_file = "{key_file}"
     assert!(
         stderr.contains("client-edge-claims.log"),
         "expected the error to name the journal it could not replay, got: {stderr}"
+    );
+}
+
+// -- The deleted raw-TCP peer wire (ADR 0027, issue #679) --
+
+/// ADR 0009's "refuse to start" contract against the peer config surface:
+/// a route naming a `peer_id` no `[[peers]]` entry configures is exactly
+/// the kind of misconfigured node that must never come up quietly
+/// connected to nothing. (Moved here from
+/// `two_connectors_and_a_stub_app.rs`, which was deleted with the raw-TCP
+/// wire it proved.)
+#[test]
+fn exits_non_zero_when_a_peer_route_names_an_unconfigured_peer_id() {
+    let key_file = write_raw_key_file();
+    let config_file = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+
+[[routes]]
+prefix = "g.b"
+peer_id = "peer-b"
+"#,
+        key_file.path().display()
+    ));
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("peer-b"),
+        "expected an actionable unknown-peer-id error, got: {stderr}"
+    );
+}
+
+/// The devnet boxes run bind-mounted configs that lead the repo copies, so
+/// a stale one naming the removed `peer_wire_addr` has to stop the binary
+/// and say where to read about it -- not be ignored into a node that looks
+/// healthy and never peers.
+#[test]
+fn exits_non_zero_when_a_stale_config_sets_peer_wire_addr() {
+    let key_file = write_raw_key_file();
+    let config_file = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+peer_wire_addr = "0.0.0.0:4001"
+
+[signer]
+key_file = "{}"
+"#,
+        key_file.path().display()
+    ));
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("peer_wire_addr")
+            && stderr.contains("docs/operators/btp-peer-transport-bringup.md"),
+        "expected a named removal error pointing at the bring-up doc, got: {stderr}"
+    );
+}
+
+/// The `[[peers]]` half: a `SocketAddr`-shaped `addr` is the other thing a
+/// stale config carries, and it fails the same way.
+#[test]
+fn exits_non_zero_when_a_stale_peer_entry_sets_addr() {
+    let key_file = write_raw_key_file();
+    let config_file = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+
+[[peers]]
+id = "store"
+addr = "127.0.0.1:4001"
+"#,
+        key_file.path().display()
+    ));
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("store") && stderr.contains("docs/operators/btp-peer-transport-bringup.md"),
+        "expected a named removal error pointing at the bring-up doc, got: {stderr}"
     );
 }

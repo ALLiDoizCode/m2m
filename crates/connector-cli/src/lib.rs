@@ -8,7 +8,6 @@ use std::path::Path;
 
 use axum::Router;
 use connector_config::{Config, ConfigError};
-use connector_runtime::PeerWireServer;
 
 pub use runtime::{build, router, Runtime, RuntimeError};
 
@@ -23,9 +22,6 @@ pub enum CliError {
     /// The config loaded but the runtime it describes could not be built
     /// (e.g. an unreadable or malformed signer key).
     Runtime(RuntimeError),
-    /// `peer_wire_addr` was configured but the socket could not be bound
-    /// (e.g. the port is already in use).
-    PeerWireBind(std::io::Error),
 }
 
 impl fmt::Display for CliError {
@@ -34,9 +30,6 @@ impl fmt::Display for CliError {
             CliError::Usage(message) => write!(f, "{message}"),
             CliError::Config(source) => write!(f, "{source}"),
             CliError::Runtime(source) => write!(f, "{source}"),
-            CliError::PeerWireBind(source) => {
-                write!(f, "failed to bind peer_wire_addr: {source}")
-            }
         }
     }
 }
@@ -69,50 +62,34 @@ pub fn load_config<S: AsRef<str>>(args: &[S]) -> Result<Config, CliError> {
     Config::load(Path::new(path.as_ref())).map_err(CliError::from)
 }
 
-/// Everything a running node needs beyond a bound client-edge socket:
-/// [`connector_cli::run`] already binds the peer wire (if configured), so
-/// `connector-bin` only has to hold [`RunningNode::peer_wire_server`] alive
-/// for the process lifetime -- it never touches the connector or the peer
-/// wire directly.
+/// Everything a running node needs beyond a bound client-edge socket.
+///
+/// A node used to also bind a second, peer-only listener here. ADR 0027
+/// removed it: peers ride the carriages the client edge already serves
+/// (BTP over `wss://`, ILP-over-HTTP over `https://`) and are told apart
+/// from clients by authentication, not by port -- so there is one listener
+/// again, and nothing for the binary to hold alive.
 pub struct RunningNode {
     /// The merged client-edge (and, if configured, operator) router.
     pub router: Router,
     /// The socket address the client edge binds.
     pub client_edge_addr: SocketAddr,
-    /// The peer wire's bound address, if `peer_wire_addr` was configured.
-    pub peer_wire_addr: Option<SocketAddr>,
-    /// The peer wire's accepting server, if `peer_wire_addr` was
-    /// configured -- kept alive for as long as this value is held, and
-    /// otherwise unused by the caller.
-    pub peer_wire_server: Option<PeerWireServer>,
 }
 
 /// Everything between process arguments and a running node: load the
-/// config, build the runtime it describes, merge its routers, and bind the
-/// peer wire if `peer_wire_addr` is configured. The one function
-/// `connector-bin` calls before binding the client-edge socket -- per ADR
-/// 0001 the binary itself makes no decision beyond "did this fail".
+/// config, build the runtime it describes, and merge its routers. The one
+/// function `connector-bin` calls before binding the client-edge socket --
+/// per ADR 0001 the binary itself makes no decision beyond "did this
+/// fail".
 pub async fn run<S: AsRef<str>>(args: &[S]) -> Result<RunningNode, CliError> {
     let config = load_config(args)?;
     let runtime = build(&config).await?;
     let client_edge_addr = config.client_edge_addr();
     let router = router(&runtime, &config)?;
 
-    let peer_wire_server = match config.peer_wire_addr() {
-        Some(addr) => Some(
-            PeerWireServer::bind(addr, runtime.connector.clone())
-                .await
-                .map_err(CliError::PeerWireBind)?,
-        ),
-        None => None,
-    };
-    let peer_wire_addr = peer_wire_server.as_ref().map(PeerWireServer::local_addr);
-
     Ok(RunningNode {
         router,
         client_edge_addr,
-        peer_wire_addr,
-        peer_wire_server,
     })
 }
 
@@ -154,7 +131,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_with_no_peer_wire_addr_binds_no_peer_wire_server() {
+    async fn run_produces_a_node_with_only_a_client_edge_listener() {
         let key_file = write_raw_key_file();
         let config_file = write_config(&format!(
             r#"
@@ -173,12 +150,15 @@ key_file = "{}"
         .await
         .expect("run");
 
-        assert!(node.peer_wire_addr.is_none());
-        assert!(node.peer_wire_server.is_none());
+        assert_eq!(node.client_edge_addr, "127.0.0.1:0".parse().unwrap());
     }
 
+    /// ADR 0027 / issue #679: `peer_wire_addr` is gone, and a config that
+    /// still sets it fails at boot by name -- the devnet boxes run
+    /// bind-mounted configs that lead the repo copies, so a stale one must
+    /// stop the node rather than quietly start it without peering.
     #[tokio::test]
-    async fn run_with_a_peer_wire_addr_binds_a_real_listener() {
+    async fn run_with_a_stale_peer_wire_addr_fails_by_name() {
         let key_file = write_raw_key_file();
         let config_file = write_config(&format!(
             r#"
@@ -191,16 +171,21 @@ key_file = "{}"
             key_file.path().display()
         ));
 
-        let node = run(&[
+        let result = run(&[
             "connector".to_string(),
             config_file.path().display().to_string(),
         ])
-        .await
-        .expect("run");
+        .await;
+        let Err(error) = result else {
+            panic!("stale peer_wire_addr must fail config load");
+        };
 
-        let addr = node.peer_wire_addr.expect("peer wire addr");
-        assert!(node.peer_wire_server.is_some());
-        // Port 0 was requested; the OS assigned a real one.
-        assert_ne!(addr.port(), 0);
+        assert!(matches!(
+            error,
+            CliError::Config(ConfigError::PeerWireAddrRemoved)
+        ));
+        assert!(error
+            .to_string()
+            .contains("docs/operators/btp-peer-transport-bringup.md"));
     }
 }
