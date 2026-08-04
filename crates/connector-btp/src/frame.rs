@@ -74,7 +74,7 @@ pub struct ProtocolData {
 /// }` carries (`None` for every other frame type -- `ilp_packet` is likewise
 /// always empty on a TRANSFER, which has no ILP-packet field in either RFC-23
 /// or this dialect's extension of it).
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtpFrame {
     pub frame_type: u8,
     pub request_id: u32,

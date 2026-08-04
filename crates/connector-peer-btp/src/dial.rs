@@ -288,19 +288,13 @@ impl BtpPeerTransport {
                 return claim_json::protocol_data(json);
             }
         }
-        // A `[[peer_channels]]` row this connector does not have would be
-        // a claim it could not have signed either; the zero domain is the
-        // honest rendering and the peer refuses it `unknown_channel`,
-        // which is the right answer to a channel neither end has bound.
-        let domain = state
-            .relation
-            .domains
-            .get(&channel_id)
-            .copied()
-            .unwrap_or(PeerClaimDomain {
-                chain_id: 0,
-                token_network: [0u8; 20],
-            });
+        // A channel with no `[[peer_channels]]` row here rides without a
+        // domain: the fields are optional, and a *zero* domain would be a
+        // structurally invalid claim the peer could not even read a verdict
+        // out of. Omitted, the peer judges it against its own record and
+        // answers `unknown_channel`, which is the right answer to a channel
+        // neither end has bound.
+        let domain = state.relation.domains.get(&channel_id).copied();
         let json = claim_json::encode(
             claim,
             &self.signer_address,

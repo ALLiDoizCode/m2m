@@ -96,12 +96,23 @@ pub fn warn_if_claim_ack_outlives_flush(peer: &PeerConfig) -> bool {
     let Some(flush_interval_ms) = peer.flush_interval_ms() else {
         return false;
     };
-    let claim_ack_timeout_ms = peer.claim_ack_timeout_ms();
+    warn_if_claim_ack_outlives(peer.id(), peer.claim_ack_timeout_ms(), flush_interval_ms)
+}
+
+/// [`warn_if_claim_ack_outlives_flush`]'s decision, over the two figures
+/// alone -- for a caller that holds the values without a [`PeerConfig`]
+/// around them, and so the SHOULD is testable without standing up a config
+/// file to hold two integers.
+pub fn warn_if_claim_ack_outlives(
+    peer_id: &str,
+    claim_ack_timeout_ms: u64,
+    flush_interval_ms: u64,
+) -> bool {
     if claim_ack_timeout_ms <= flush_interval_ms {
         return false;
     }
     tracing::warn!(
-        peer_id = peer.id(),
+        peer_id,
         claim_ack_timeout_ms,
         flush_interval_ms,
         "peer-carriage-spec.md §6.3: claim_ack_timeout_ms should not exceed \

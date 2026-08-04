@@ -113,12 +113,12 @@ const ZERO_BYTES32: &str = "0x00000000000000000000000000000000000000000000000000
 pub fn encode(
     claim: &WireClaim,
     signer_address: &[u8; 20],
-    domain: PeerClaimDomain,
+    domain: Option<PeerClaimDomain>,
     message_id: &str,
     timestamp: &str,
 ) -> String {
     let signer = format!("0x{}", hex::encode(signer_address));
-    let json = serde_json::json!({
+    let mut json = serde_json::json!({
         "version": "1.0",
         "blockchain": "evm",
         "messageId": message_id,
@@ -134,9 +134,22 @@ pub fn encode(
         "locksRoot": ZERO_BYTES32,
         "signature": format!("0x{}", hex::encode(claim.signature.to_bytes())),
         "signerAddress": signer,
-        "chainId": domain.chain_id,
-        "tokenNetworkAddress": format!("0x{}", hex::encode(domain.token_network)),
     });
+    // `chainId`/`tokenNetworkAddress` are optional in the claim shape
+    // (`client-edge-spec.md` §1.3), so a channel this connector has no
+    // `[[peer_channels]]` row for is rendered **without** them rather than
+    // with a zero domain that would fail structural validation at the far
+    // end. The counterparty then judges it against its own record, which is
+    // where a channel neither end has bound gets its honest
+    // `unknown_channel`.
+    if let Some(domain) = domain {
+        let object = json.as_object_mut().expect("a json! object");
+        object.insert("chainId".to_string(), domain.chain_id.into());
+        object.insert(
+            "tokenNetworkAddress".to_string(),
+            format!("0x{}", hex::encode(domain.token_network)).into(),
+        );
+    }
     serde_json::to_string(&json).expect("a json! object always serializes")
 }
 
@@ -240,7 +253,7 @@ mod tests {
         let json = encode(
             &claim,
             &[0x44; 20],
-            domain(),
+            Some(domain()),
             "0x…:4",
             "2030-01-01T00:00:00.000Z",
         );
@@ -257,7 +270,7 @@ mod tests {
         let json = encode(
             &wire_claim(),
             &[0x44; 20],
-            domain(),
+            Some(domain()),
             "m",
             "2030-01-01T00:00:00Z",
         );
@@ -275,7 +288,7 @@ mod tests {
         let json = encode(
             &wire_claim(),
             &[0x44; 20],
-            domain(),
+            Some(domain()),
             "m",
             "2030-01-01T00:00:00Z",
         );
@@ -319,7 +332,13 @@ mod tests {
                 },
                 ..wire_claim()
             };
-            let json = encode(&claim, &[0x44; 20], domain(), "m", "2030-01-01T00:00:00Z");
+            let json = encode(
+                &claim,
+                &[0x44; 20],
+                Some(domain()),
+                "m",
+                "2030-01-01T00:00:00Z",
+            );
             let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
             let signature = value["signature"].as_str().expect("a string");
             assert_eq!(
@@ -368,7 +387,7 @@ mod tests {
         let json = encode(
             &wire_claim(),
             &[0x44; 20],
-            domain(),
+            Some(domain()),
             "m",
             "2030-01-01T00:00:00Z",
         )
