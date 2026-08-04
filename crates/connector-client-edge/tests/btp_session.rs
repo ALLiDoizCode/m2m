@@ -26,6 +26,7 @@ use connector_signer::{
     PublicKeyBytes, Signer,
 };
 use futures_util::{SinkExt, StreamExt};
+use hyper::{Body as HttpBody, Client as HttpClient, Request as HttpRequest, StatusCode};
 use libsecp256k1::{Message as SecpMessage, PublicKey, SecretKey};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
@@ -77,15 +78,22 @@ fn btp_transfer(request_id: u32, amount: u64, protocol_data: &[(&str, &[u8])]) -
 }
 
 /// Serialize a bare RESPONSE frame -- what a client answers a
-/// server-originated MESSAGE with. No test today drives the connector to
-/// originate one over a real socket (issue #697's session registry is a
-/// separate ticket), but a client is free to send a RESPONSE/ERROR the
-/// connector never asked for, and the session must not choke on it.
+/// server-originated MESSAGE with. A client is also free to send a
+/// RESPONSE/ERROR the connector never asked for, and the session must not
+/// choke on it.
 fn btp_response(request_id: u32) -> Vec<u8> {
+    btp_response_with_packet(request_id, &[])
+}
+
+/// As [`btp_response`], but carrying `ilp_packet` -- what a session-bound
+/// client answers a server-originated PREPARE with (issue #736): a FULFILL
+/// or REJECT, OER-encoded, exactly as it would answer any other PREPARE.
+fn btp_response_with_packet(request_id: u32, ilp_packet: &[u8]) -> Vec<u8> {
     let mut out = vec![BTP_RESPONSE];
     out.extend_from_slice(&request_id.to_be_bytes());
     out.push(0); // no protocolData
-    out.extend_from_slice(&0u32.to_be_bytes()); // no ILP packet
+    out.extend_from_slice(&(ilp_packet.len() as u32).to_be_bytes());
+    out.extend_from_slice(ilp_packet);
     out
 }
 
@@ -690,6 +698,172 @@ async fn an_unsolicited_response_is_silently_dropped_and_the_session_survives() 
         auth.request_id, 1,
         "the stray RESPONSE produced no answer of its own"
     );
+}
+
+// ─── issue #736: a bound BTP client session answers a PREPARE addressed to it ───
+
+/// The exact scenario issue #736 reports: a provider's BTP session is bound
+/// under its own address, and a buyer's PREPARE addressed there -- sent over
+/// the *other* carriage, `POST /ilp` -- is delivered through that session
+/// and fulfilled, rather than F02ing at the router because
+/// `Connector::handle_prepare` has no fourth arm for a live session.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_prepare_over_http_addressed_to_a_bound_btp_session_is_delivered_and_fulfilled() {
+    let (addr, _signer) = serve_edge().await;
+
+    // The provider connects over BTP and binds "g.toon.provider" as its
+    // own address -- issue #698's session registry, exercised for real.
+    let mut provider = connect(addr).await;
+    send(
+        &mut provider,
+        btp_message(
+            1,
+            &[("auth", br#"{"peerId":"g.toon.provider","secret":""}"#)],
+            &[],
+        ),
+    )
+    .await;
+    let ack = next_answer(&mut provider).await;
+    assert_eq!(ack.frame_type, BTP_RESPONSE);
+
+    // The buyer's PREPARE, over the HTTP carriage entirely -- no static
+    // route names "g.toon.provider" and no claim is required, since a
+    // dynamic session address like this is unpriced today (issue #736's
+    // charging AC: only a *configured* route is ever priced).
+    let fulfillment = [42u8; 32];
+    let condition = derive_condition(&fulfillment);
+    let prepare = Prepare {
+        amount: 0,
+        expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
+        execution_condition: condition,
+        destination: "g.toon.provider".to_string(),
+        data: Vec::new(),
+    };
+    let body = prepare.encode();
+
+    let buyer = tokio::spawn(async move {
+        let client = HttpClient::new();
+        let request = HttpRequest::builder()
+            .method("POST")
+            .uri(format!("http://{addr}/ilp"))
+            .body(HttpBody::from(body))
+            .expect("well-formed request");
+        let response = client
+            .request(request)
+            .await
+            .expect("the connector answers");
+        assert_eq!(response.status(), StatusCode::OK);
+        hyper::body::to_bytes(response.into_body())
+            .await
+            .expect("a response body")
+    });
+
+    // The provider's own socket receives the forwarded PREPARE as a
+    // server-originated MESSAGE (issue #697's symmetric grammar) and
+    // answers it exactly as it would answer any other PREPARE: a FULFILL
+    // whose fulfilment matches the buyer's own execution condition.
+    let forwarded = next_answer(&mut provider).await;
+    assert_eq!(forwarded.frame_type, BTP_MESSAGE);
+    let forwarded_prepare =
+        Prepare::decode(&forwarded.ilp_packet).expect("the connector forwards a real PREPARE");
+    assert_eq!(forwarded_prepare.destination, "g.toon.provider");
+    assert_eq!(forwarded_prepare.execution_condition, condition);
+
+    send(
+        &mut provider,
+        btp_response_with_packet(
+            forwarded.request_id,
+            &Fulfill {
+                fulfillment,
+                data: Vec::new(),
+            }
+            .encode(),
+        ),
+    )
+    .await;
+
+    let answer_body = buyer.await.expect("the buyer's request task");
+    let fulfill = Fulfill::decode(&answer_body).expect("decode fulfill");
+    assert_eq!(fulfill.fulfillment, fulfillment);
+}
+
+/// The mirror of the test above, entirely over BTP: both the provider's
+/// bound session and the buyer's PREPARE ride the same carriage, on two
+/// separate sockets -- session registration is per-address, not per-socket
+/// pair.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_prepare_over_btp_addressed_to_a_bound_btp_session_is_delivered_and_fulfilled() {
+    let (addr, _signer) = serve_edge().await;
+
+    let mut provider = connect(addr).await;
+    send(
+        &mut provider,
+        btp_message(
+            1,
+            &[("auth", br#"{"peerId":"g.toon.other-provider","secret":""}"#)],
+            &[],
+        ),
+    )
+    .await;
+    let ack = next_answer(&mut provider).await;
+    assert_eq!(ack.frame_type, BTP_RESPONSE);
+
+    let mut buyer = connect(addr).await;
+    let fulfillment = [43u8; 32];
+    let condition = derive_condition(&fulfillment);
+    let prepare = Prepare {
+        amount: 0,
+        expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
+        execution_condition: condition,
+        destination: "g.toon.other-provider".to_string(),
+        data: Vec::new(),
+    };
+    send(&mut buyer, btp_message(1, &[], &prepare.encode())).await;
+
+    let forwarded = next_answer(&mut provider).await;
+    assert_eq!(forwarded.frame_type, BTP_MESSAGE);
+    send(
+        &mut provider,
+        btp_response_with_packet(
+            forwarded.request_id,
+            &Fulfill {
+                fulfillment,
+                data: Vec::new(),
+            }
+            .encode(),
+        ),
+    )
+    .await;
+
+    let answer = next_answer(&mut buyer).await;
+    assert_eq!(answer.frame_type, BTP_RESPONSE);
+    assert_eq!(answer.request_id, 1);
+    let fulfill = Fulfill::decode(&answer.ilp_packet).expect("decode fulfill");
+    assert_eq!(fulfill.fulfillment, fulfillment);
+}
+
+/// A destination that has never had a session bound to it, and matches no
+/// configured route either, still answers `F02` -- issue #736's "matches
+/// nothing at all" case, proven over a real BTP session rather than only at
+/// the router.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_prepare_to_a_never_bound_destination_still_answers_f02_over_btp() {
+    let (addr, _signer) = serve_edge().await;
+    let mut session = connect(addr).await;
+
+    let prepare = Prepare {
+        amount: 0,
+        expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
+        execution_condition: derive_condition(&[1u8; 32]),
+        destination: "g.toon.nobody-ever-bound-this".to_string(),
+        data: Vec::new(),
+    };
+    send(&mut session, btp_message(1, &[], &prepare.encode())).await;
+
+    let answer = next_answer(&mut session).await;
+    assert_eq!(answer.frame_type, BTP_RESPONSE);
+    let reject = Reject::decode(&answer.ilp_packet).expect("decode reject");
+    assert_eq!(reject.code.as_str(), "F02");
 }
 
 // ─── issue #688: the pipelined session's throughput, measured for real ───

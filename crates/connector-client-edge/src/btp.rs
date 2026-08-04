@@ -577,7 +577,10 @@ async fn finish_frame(
         }
     }
 
-    let response = match state.connector.handle_prepare(prepare, 0).await {
+    // Issue #736: the same fourth routing arm `handle_ilp`'s HTTP carriage
+    // uses -- a configured route first, then whatever client session
+    // `state.session_registry` has bound to this destination.
+    let response = match crate::session_route::route_prepare(&state, prepare, price).await {
         PacketResponse::Fulfill(fulfill) => encode_response(request_id, &[], &fulfill.encode()),
         PacketResponse::Reject(reject) => reject_response(request_id, reject, Vec::new()),
     };
