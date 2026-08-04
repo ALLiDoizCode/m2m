@@ -81,6 +81,7 @@ mod claim_gate;
 mod claim_state;
 mod lookup_budget;
 mod outbound_ledger;
+mod peer;
 mod session_registry;
 mod session_route;
 pub use channels::{
@@ -96,6 +97,7 @@ pub use lookup_budget::{
     DEFAULT_UNRESOLVABLE_LOOKUP_WINDOW, MAX_UNRESOLVABLE_LOOKUP_WINDOW,
 };
 pub use outbound_ledger::ClientPayoutLedger;
+pub use peer::PeerCarriages;
 pub use session_registry::SESSION_LEASE_BACKSTOP_TTL;
 
 /// The BTP carriage's default per-session in-flight window (issue #688):
@@ -154,6 +156,18 @@ struct ClientEdgeState {
     /// serves -- bound at auth, cleared on close -- so a reconnect on a
     /// different socket is visible to every other session immediately.
     session_registry: Arc<session_registry::SessionRegistry>,
+    /// The peer carriages this node exposes (issue #678, ADR 0027,
+    /// `peer-carriage-spec.md` §1). `None` -- the default, and every node
+    /// whose `peer_expose` is `"neither"` -- means this edge serves clients
+    /// only and every interaction on it is a client's, exactly as it was
+    /// before the carriages existed.
+    ///
+    /// Peer traffic rides *these* listeners rather than a second socket
+    /// (`docs/operators/btp-peer-transport-bringup.md`), so this field is
+    /// what makes `POST /ilp` and `GET /ilp/btp` serve two audiences; §1.3
+    /// forbids the listener itself deciding which, and it does not --
+    /// `peer::PeerCarriages` decides by credential alone.
+    peers: Option<Arc<PeerCarriages>>,
 }
 
 /// Mount the client edge at `connector`, signing/answering identity with
@@ -269,6 +283,45 @@ pub fn router_with_gate_terms_and_btp_window(
     settlements: Vec<X402ChainSettlementTerms>,
     btp_session_window: NonZeroU32,
 ) -> Router {
+    router_with_peer_carriages(
+        connector,
+        signer,
+        wrap_receiver_secret,
+        claim_gate,
+        settlement_terms,
+        settlements,
+        btp_session_window,
+        None,
+    )
+}
+
+/// As [`router_with_gate_terms_and_btp_window`], but also mounting this
+/// node's **peer carriages** on the listeners it already serves (issue
+/// #678, ADR 0027).
+///
+/// `peers` is [`PeerCarriages::from_config`]'s value -- `None` for a node
+/// whose `peer_expose` is `"neither"` or that configures no peering, which
+/// is every node this router served before the carriages existed and is
+/// byte-identical to what it served then.
+///
+/// There is no second listener and no second port
+/// (`docs/operators/btp-peer-transport-bringup.md`: peer carriages *"ride
+/// this node's own listeners"*). A peer PREPARE is the same OER encoding
+/// `POST /ilp` already carries (`peer-carriage-spec.md` §3.1), and what
+/// tells a peer interaction from a client one is
+/// [`connector_peer_auth::decide_role`] -- never the carriage, the
+/// listener, the port or the bind address (§1.3).
+#[allow(clippy::too_many_arguments)]
+pub fn router_with_peer_carriages(
+    connector: Arc<Connector>,
+    signer: Arc<dyn Signer>,
+    wrap_receiver_secret: Option<[u8; 32]>,
+    claim_gate: ClientClaimGate,
+    settlement_terms: Option<X402SettlementTerms>,
+    settlements: Vec<X402ChainSettlementTerms>,
+    btp_session_window: NonZeroU32,
+    peers: Option<Arc<PeerCarriages>>,
+) -> Router {
     let state = Arc::new(ClientEdgeState {
         connector,
         signer,
@@ -278,6 +331,7 @@ pub fn router_with_gate_terms_and_btp_window(
         settlements,
         btp_session_window,
         session_registry: Arc::new(session_registry::SessionRegistry::new()),
+        peers,
     });
     Router::new()
         .route("/ilp", post(handle_ilp))
@@ -878,6 +932,18 @@ async fn handle_ilp(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    // **Role is decided before anything else happens** (peer-carriage-spec.md
+    // §1.5): before a claim is decoded, before a watermark is consulted,
+    // before a packet is even decoded -- a peer FLUSH is a POST with an
+    // *empty* body (§3), which the client edge's own decode below would
+    // refuse as malformed. A client-role request gets `None` back and every
+    // line after this one runs exactly as it did before peering existed.
+    if let Some(peers) = state.peers.as_ref() {
+        if let Some(response) = peers.handle_http(&headers, &body).await {
+            return response;
+        }
+    }
+
     let prepare = match Prepare::decode(&body) {
         Ok(prepare) => prepare,
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),

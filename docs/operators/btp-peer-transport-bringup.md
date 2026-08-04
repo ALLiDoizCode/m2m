@@ -140,9 +140,27 @@ peer_expose = "btp"   # "btp" | "http" | "both" | "neither"; default "neither"
   originate on the one session.
 - `https://` selects the **ILP-over-HTTP** carriage. Only the dialing side can originate.
 - Any other scheme is a load-time error. Both are TLS-only, because a peering carries signed
-  balance proofs — `ws://` and `http://` are refused too.
+  balance proofs — `ws://` and `http://` are refused too, unless the node has explicitly opted in
+  (see `peer_allow_plaintext_endpoints` below).
 - **No `endpoint` at all** means accept-only: this node never dials that peer, and the peer dials
   in.
+
+### Where a peer connects: this node's own listener
+
+There is **no peer port**. A node that exposes a peer carriage serves it on the paths its client
+edge already serves, on `client_edge_addr`:
+
+| Carriage      | Path           | What a peer sends                                           |
+| ------------- | -------------- | ----------------------------------------------------------- |
+| BTP           | `GET /ilp/btp` | the websocket upgrade, then `auth` on its first MESSAGE     |
+| ILP-over-HTTP | `POST /ilp`    | the OER PREPARE, with `Toon-Peer-Auth` on **every** request |
+
+So a peer's `endpoint` is `wss://<host>/ilp/btp` or `https://<host>/ilp`, and nginx needs no new
+`location` beyond whatever already fronts the client edge — the `wss` upgrade included.
+
+What tells a peer interaction from a client one on that shared socket is the credential and nothing
+else (below). The listener, the port and the bind address are explicitly **not** allowed to decide,
+which is why there is nothing to open and nothing to firewall separately.
 
 A peering establishes only if at least one side dials a carriage the other exposes. What the far
 side exposes is not knowable from this file, so that half surfaces as an ordinary dial failure
@@ -180,6 +198,46 @@ prefix = "g.example.store"
 peer_id = "store"
 fee = 3
 ```
+
+### The peering id is one string both operators write
+
+`[[peers]].id` names the peering **relation**, and it is the `peerId` the dialing side puts in its
+credential (`{"peerId": …, "secret": …}`). The accepting side proves P1 by looking that id up in
+**its own** `[[peers]]` table — so a peering only establishes when the two config files carry the
+**same literal string**, not each operator's private name for the other.
+
+```toml
+# apex/connector.toml                # store/connector.toml
+[[peers]]                            [[peers]]
+id = "apex-store"                    id = "apex-store"     # the same string
+endpoint = "wss://store…/ilp/btp"    # no endpoint: the apex dials in
+```
+
+Get this wrong and there is **nothing in the logs**: a credential naming an id no `[[peers]]` entry
+configures is deliberately silent (see `peer_auth_refused` below), so the symptom is a peering that
+quietly behaves as an ordinary client. Check the id on both sides first.
+
+### `peer_allow_plaintext_endpoints` — loopback and tests only
+
+```toml
+peer_allow_plaintext_endpoints = false   # the default, and the only production value
+```
+
+One top-level switch, default `false`. While it is off — which is every config that does not
+mention it — `ws://` and `http://` are a hard `PeerEndpointScheme` load error, exactly as they have
+always been.
+
+Turned on, `ws://` resolves onto the **BTP** carriage and `http://` onto the **ILP-over-HTTP** one:
+it widens which schemes resolve, never what they resolve to, and no other behaviour changes. It
+exists so a laptop-runnable end-to-end test can point one connector at another's loopback socket
+with no TLS terminator in between (`crates/connector-bin/tests/two_connectors_peer.rs` is the only
+config in this repo that sets it).
+
+**Never set it on a deployed node.** A peering carries the shared secret and every signed balance
+proof on it; in the clear, both are readable by anything on the path. A node that does set it logs a
+`WARN` naming every plaintext peering at startup, so a box that acquired one by accident says so on
+every restart. There is deliberately **no per-peer form** of this switch — a per-peer field reads as
+an ordinary property of that peering and gets copied into production one line at a time.
 
 `deploy/connector-rust/connector.toml` carries the same block, commented, with every field
 annotated.

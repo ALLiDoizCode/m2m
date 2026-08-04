@@ -182,6 +182,10 @@ mod tests {
             settlements: Vec::new(),
             btp_session_window: crate::DEFAULT_BTP_SESSION_WINDOW,
             session_registry: Arc::new(session_registry),
+            // A node that mounts no peer carriage (issue #678): every
+            // interaction on its listeners is a client's, which is the only
+            // audience session routing has.
+            peers: None,
         }
     }
 

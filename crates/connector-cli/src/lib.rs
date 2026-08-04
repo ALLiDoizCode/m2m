@@ -1,5 +1,6 @@
 //! CLI argument parsing and commands. See ADR 0001.
 
+mod peer_transport;
 mod runtime;
 
 use std::fmt;

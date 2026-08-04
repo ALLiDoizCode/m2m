@@ -55,16 +55,23 @@ pub fn reason_from_name(name: &str) -> Option<ClaimRejectReason> {
 /// [`ClaimAckOutcome::NotSent`]: there was no claim to acknowledge, and
 /// §6.2 forbids a `claim-ack` on a response answering a frame that carried
 /// none.
+/// **Field order is the specification's**, `result` first (§6.1). Written
+/// here rather than left to `serde_json::json!`, whose default object is a
+/// `BTreeMap` and therefore renders `reason` before `result` -- valid JSON
+/// that no reader can tell apart, and a byte string that does not match the
+/// two examples §6.1 pins or the ones this module's own header quotes.
+/// §10.2 vectors the ack, and a vector that disagreed with the prose it
+/// vectors would be a spec bug found the expensive way.
 pub fn encode(outcome: ClaimAckOutcome) -> Option<Vec<u8>> {
     let json = match outcome {
         ClaimAckOutcome::NotSent => return None,
-        ClaimAckOutcome::Accepted => serde_json::json!({ "result": "accepted" }),
-        ClaimAckOutcome::Rejected(reason) => serde_json::json!({
-            "result": "rejected",
-            "reason": reason_name(reason),
-        }),
+        ClaimAckOutcome::Accepted => r#"{"result":"accepted"}"#.to_string(),
+        ClaimAckOutcome::Rejected(reason) => format!(
+            r#"{{"result":"rejected","reason":"{}"}}"#,
+            reason_name(reason)
+        ),
     };
-    Some(serde_json::to_vec(&json).expect("a json! object always serializes"))
+    Some(json.into_bytes())
 }
 
 /// The `claim-ack` protocolData entry for a judged claim, or `None` when
