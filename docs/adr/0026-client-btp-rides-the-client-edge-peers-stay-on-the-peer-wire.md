@@ -124,3 +124,14 @@ payout or a job dispatch, and to which address, remains the next ticket's job, s
 #697/#699 already shipped their own foundations under. Claim watermarks are unaffected by any of
 this — they stay exactly where issue #699's update already confirmed they survive reconnect: per
 channel in `ClientClaimGate`, never per session.
+
+## Update (issue #722): the backstop TTL is now on the wire, not just in a Rust const
+
+`buzz#84`'s relay-side provider-freshness window "must never exceed" `SESSION_LEASE_BACKSTOP_TTL`
+was, until this update, an instruction no TypeScript consumer could actually follow — the constant
+is a Rust `pub const` with no import path from another language. The §1.4 x402 greeting (reused by
+both the HTTP and BTP carriages via `x402_terms_body`) now carries it as `extra.sessionLeaseTtlMs`,
+always present, derived directly from `SESSION_LEASE_BACKSTOP_TTL` at the point the greeting is
+built rather than typed a second time (`client-edge-spec.md` §1.4, §1.9). A same-crate test pins
+the two together. Wiring `buzz#84`'s `providerAvailability.ts` to read this field is left as a
+follow-up in the `buzz` repository.

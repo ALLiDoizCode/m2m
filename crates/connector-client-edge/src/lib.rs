@@ -95,6 +95,7 @@ pub use lookup_budget::{
     DEFAULT_UNRESOLVABLE_LOOKUP_WINDOW, MAX_UNRESOLVABLE_LOOKUP_WINDOW,
 };
 pub use outbound_ledger::ClientPayoutLedger;
+pub use session_registry::SESSION_LEASE_BACKSTOP_TTL;
 
 /// The BTP carriage's default per-session in-flight window (issue #688):
 /// how many of one session's frames may be past claim admission at once.
@@ -458,6 +459,17 @@ struct X402ChannelExtra {
         default
     )]
     required_transport: Option<String>,
+    /// The session lease backstop TTL this node's client session registry
+    /// actually enforces (issue #722, toon-meta#262 decision 12's
+    /// cross-plane invariant), in milliseconds -- always present, unlike
+    /// `settlement`/`settlements`/`requiredTransport`, since every node has
+    /// a session registry regardless of settlement backend. Always the same
+    /// value [`crate::session_registry::SESSION_LEASE_BACKSTOP_TTL`]
+    /// enforces, never a second literal typed nearby: a client (buzz#84's
+    /// relay-side freshness window among them) reads this instead of
+    /// hardcoding a guessed millisecond count.
+    #[serde(rename = "sessionLeaseTtlMs")]
+    session_lease_ttl_ms: u64,
 }
 
 /// What an unaffiliated buyer needs to OPEN a channel with this node,
@@ -641,6 +653,8 @@ fn x402_terms_body(
                 settlement: settlement.cloned(),
                 settlements: settlements.to_vec(),
                 required_transport: required_transport.map(str::to_string),
+                session_lease_ttl_ms: crate::session_registry::SESSION_LEASE_BACKSTOP_TTL
+                    .as_millis() as u64,
             },
         }],
     };
@@ -1671,6 +1685,42 @@ mod tests {
         assert!(
             extra.get("settlements").is_none(),
             "a settlement-less node's greeting must not carry a settlements key: {extra}"
+        );
+    }
+
+    /// Issue #722: the x402 greeting advertises the session lease backstop
+    /// TTL the client session registry actually enforces, so a TS (or any
+    /// other language) client can honour freshness <= lease without
+    /// duplicating a Rust `pub const`. This pins the advertised value
+    /// directly to `SESSION_LEASE_BACKSTOP_TTL` -- changing the constant
+    /// changes what is advertised, provably, because both sides of this
+    /// assertion read the same const.
+    #[tokio::test]
+    async fn the_x402_greeting_advertises_the_session_lease_ttl() {
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+        let connector = Arc::new(Connector::new(
+            vec![route],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router(connector, test_signer());
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(sample_prepare("g.example.app").encode()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let terms: X402PaymentRequired = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            terms.accepts[0].extra.session_lease_ttl_ms,
+            crate::session_registry::SESSION_LEASE_BACKSTOP_TTL.as_millis() as u64,
+            "the advertised lease must be exactly what the session registry enforces"
         );
     }
 
