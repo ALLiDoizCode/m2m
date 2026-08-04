@@ -27,6 +27,13 @@ tempfile = "3"
 # way to cover a leg no test can boot without reaching a public cluster.
 connector-config = { path = "../connector-config" }
 connector-domain = { path = "../connector-domain" }
+# `two_connectors_peer.rs` only (issue #734): a peer MESSAGE and the
+# RESPONSE that answers it are encoded by the one codec both carriages
+# share, never a second one hand-rolled in a test -- the drift
+# peer-carriage-spec.md §9 exists to prevent starts with a test that
+# reimplements a frame.
+connector-btp = { path = "../connector-btp" }
+hex = "0.4"
 connector-signer = { path = "../connector-signer" }
 connector-settlement = { path = "../connector-settlement" }
 connector-settlement-evm = { path = "../connector-settlement-evm", features = ["test-util"] }
