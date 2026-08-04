@@ -20,6 +20,10 @@ connector-runtime = { path = "../connector-runtime" }
 connector-signer = { path = "../connector-signer" }
 async-trait = "0.1"
 base64 = "0.22"
+# Solana peer-claim identities render as base58 (issue #742), the same
+# encoding `connector-runtime`'s `ClaimBook` already decodes channel
+# accounts and counterparty keys through.
+bs58 = "0.5"
 chrono = "0.4"
 hex = "0.4"
 serde_json = "1"

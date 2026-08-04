@@ -22,8 +22,8 @@ use connector_domain::{
     Watermark,
 };
 use connector_signer::{
-    evm_balance_proof_digest, verify_evm_balance_proof, verify_solana_balance_proof, Address,
-    EvmBalanceProof, Signature, Signer,
+    evm_balance_proof_digest, solana_balance_proof_message, verify_evm_balance_proof,
+    verify_solana_balance_proof, Address, Ed25519Signer, EvmBalanceProof, Signature, Signer,
 };
 use thiserror::Error;
 
@@ -418,6 +418,13 @@ struct OutboundLedger {
 /// domain, configured via [`ClaimBook::set_channel_domain`].
 pub struct ClaimBook {
     signer: Option<Arc<dyn Signer>>,
+    /// This connector's own ed25519 identity, used to sign an outbound
+    /// claim on a Solana peer channel (issue #742) -- the Solana
+    /// counterpart of `signer`, and deliberately a separate field rather
+    /// than a second case `signer` grows: an outbound claim is signed
+    /// through exactly one of the two, decided by which map its channel is
+    /// registered in, never by trying one then the other.
+    solana_signer: Option<Arc<dyn Ed25519Signer>>,
     /// `peer_id` -> the channel this connector claims against when it owes
     /// that peer.
     outbound_channels: HashMap<String, String>,
@@ -474,6 +481,7 @@ impl ClaimBook {
     ) -> ClaimBook {
         ClaimBook {
             signer,
+            solana_signer: None,
             outbound_channels,
             channel_domains: HashMap::new(),
             counterparties,
@@ -498,6 +506,15 @@ impl ClaimBook {
     /// like `Connector::with_settlement`.
     pub fn set_signer(&mut self, signer: Arc<dyn Signer>) {
         self.signer = Some(signer);
+    }
+
+    /// Configure this connector's own ed25519 identity, used to sign every
+    /// outbound claim on a channel registered through
+    /// [`ClaimBook::set_solana_channel`] (issue #742) -- the Solana
+    /// counterpart of [`ClaimBook::set_signer`], and under the same
+    /// builder-chain contract.
+    pub fn set_solana_signer(&mut self, signer: Arc<dyn Ed25519Signer>) {
+        self.solana_signer = Some(signer);
     }
 
     /// Configure the channel this connector claims against when it owes
@@ -620,8 +637,13 @@ impl ClaimBook {
         journal: Arc<dyn Journal>,
     ) -> Result<Vec<ProjectionDivergence>, JournalError> {
         let entries = journal.read_all()?;
-        let (outbound, inbound_watermarks, projection) =
-            Self::rebuild_from(&entries, self.signer.as_ref(), &self.channel_domains);
+        let (outbound, inbound_watermarks, projection) = Self::rebuild_from(
+            &entries,
+            self.signer.as_ref(),
+            &self.channel_domains,
+            self.solana_signer.as_ref(),
+            &self.solana_channels,
+        );
         let divergences = projection.divergences();
         for divergence in &divergences {
             tracing::error!(%divergence, "journal rebuild found a projection divergence");
@@ -637,19 +659,33 @@ impl ClaimBook {
     /// [`Projection`] -- the pure replay [`ClaimBook::set_journal`] drives.
     /// A peer left with `pending` unacknowledged is *always* re-armed with
     /// a freshly signed claim of the same nonce/cumulative amount when both
-    /// `signer` and that channel's domain (in `channel_domains`) are
-    /// available: resending an already-acknowledged claim costs nothing
-    /// (the peer's own `accept_inbound` simply rejects a nonce that does
-    /// not advance its watermark), so recovery needs no separate "was this
+    /// that chain's signer and that channel's binding are available:
+    /// resending an already-acknowledged claim costs nothing (the peer's
+    /// own `accept_inbound` simply rejects a nonce that does not advance
+    /// its watermark), so recovery needs no separate "was this
     /// acknowledged" record -- treating every rebuilt claim as pending is
     /// always safe, matching the acceptance criteria's "no manual repair".
-    /// A ledger whose channel has no domain configured is left with no
-    /// pending claim, exactly as [`ClaimBook::record_fulfillment`] would
-    /// have refused to sign one for it live.
+    /// A ledger whose channel has no binding configured on either chain is
+    /// left with no pending claim, exactly as
+    /// [`ClaimBook::record_fulfillment`] would have refused to sign one for
+    /// it live.
+    ///
+    /// Which chain a ledger's `channel_id` re-signs under is decided the
+    /// same way [`ClaimBook::record_fulfillment`] decides it live:
+    /// `channel_domains` is tried first, then `solana_channels` -- never
+    /// both, and never guessed from the journal entry itself.
+    /// `JournalEntry::OutboundClaimSigned` carries no chain discriminator
+    /// of its own, and does not need one: a channel is registered on
+    /// exactly one chain (`ClaimBook::set_solana_channel`'s own doc), and an
+    /// EVM `channel_id` (0x-hex or a decimal numeral) and a Solana one
+    /// (base58 of 32 bytes) can never collide, so `channel_id` alone is
+    /// already enough to tell the two apart on replay.
     fn rebuild_from(
         entries: &[JournalEntry],
         signer: Option<&Arc<dyn Signer>>,
         channel_domains: &HashMap<String, (OnChainChannelId, ChannelDomain)>,
+        solana_signer: Option<&Arc<dyn Ed25519Signer>>,
+        solana_channels: &HashMap<String, SolanaChannel>,
     ) -> (
         HashMap<String, OutboundLedger>,
         HashMap<String, Watermark>,
@@ -692,11 +728,10 @@ impl ClaimBook {
                 JournalEntry::InboundFulfillmentRecorded { .. } => {}
             }
         }
-        if let Some(signer) = signer {
-            for ledger in outbound.values_mut() {
-                let Some(&(on_chain_id, domain)) = channel_domains.get(&ledger.channel_id) else {
-                    continue;
-                };
+        for ledger in outbound.values_mut() {
+            if let (Some(signer), Some(&(on_chain_id, domain))) =
+                (signer, channel_domains.get(&ledger.channel_id))
+            {
                 let proof = evm_proof(on_chain_id, domain, ledger.nonce, ledger.cumulative_amount);
                 if let Ok(signature) = signer.sign(&evm_balance_proof_digest(&proof)) {
                     ledger.pending = Some(WireClaim {
@@ -706,6 +741,20 @@ impl ClaimBook {
                         signature: ClaimSignature::Evm(signature),
                     });
                 }
+            } else if let (Some(solana_signer), Some(&channel)) =
+                (solana_signer, solana_channels.get(&ledger.channel_id))
+            {
+                let message = solana_balance_proof_message(
+                    &channel.channel_account,
+                    ledger.nonce,
+                    ledger.cumulative_amount,
+                );
+                ledger.pending = Some(WireClaim {
+                    channel_id: ledger.channel_id.clone(),
+                    nonce: ledger.nonce,
+                    cumulative_amount: ledger.cumulative_amount,
+                    signature: ClaimSignature::Solana(solana_signer.sign(&message)),
+                });
             }
         }
         (outbound, inbound_watermarks, projection)
@@ -792,16 +841,21 @@ impl ClaimBook {
 
     /// Record that a packet forwarded to `peer_id` fulfilled, owing it
     /// `amount` more (ADR 0004 -- value moves on fulfilment). Signs a fresh
-    /// claim for the new cumulative total, over that channel's EIP-712
-    /// domain (issue #575), and arms it pending. Exactly one claim is
+    /// claim for the new cumulative total, over that channel's own binding
+    /// -- the EIP-712 domain for an EVM channel (issue #575), or the
+    /// ed25519 balance-proof message for a Solana one (issue #742) -- and
+    /// arms it pending. `channel_domains` is tried first and
+    /// `solana_channels` second, the same order and the same "exactly one,
+    /// never both" rule [`ClaimBook::rebuild_from`] and
+    /// [`ClaimBook::verify_signature`] hold to. Exactly one claim is
     /// produced per call -- never batched: a second fulfilment before the
     /// first claim has gone out simply supersedes it with a fresher nonce
     /// and a higher cumulative amount (peer-wire-spec.md §3.2). Does
     /// nothing -- and leaves this peer's ledger untouched -- for a peer
-    /// with no configured channel, a node with no signer configured, or a
-    /// channel with no domain configured (AC3): every one of those is a
-    /// reason a claim cannot be produced at all, not a reason to produce
-    /// one under a defaulted or wrong domain.
+    /// with no configured channel, or a channel whose chain has no signer
+    /// or no binding configured (AC3): every one of those is a reason a
+    /// claim cannot be produced at all, not a reason to produce one under a
+    /// defaulted or wrong domain.
     pub fn record_fulfillment(
         &self,
         peer_id: &str,
@@ -809,8 +863,21 @@ impl ClaimBook {
         now: DateTime<Utc>,
     ) -> Option<WireClaim> {
         let channel_id = self.outbound_channels.get(peer_id)?.clone();
-        let signer = self.signer.as_ref()?;
-        let &(on_chain_id, domain) = self.channel_domains.get(&channel_id)?;
+
+        enum Binding<'a> {
+            Evm(&'a Arc<dyn Signer>, OnChainChannelId, ChannelDomain),
+            Solana(&'a Arc<dyn Ed25519Signer>, SolanaChannel),
+        }
+        let binding = if let Some(&(on_chain_id, domain)) = self.channel_domains.get(&channel_id) {
+            let signer = self.signer.as_ref()?;
+            Binding::Evm(signer, on_chain_id, domain)
+        } else if let Some(&channel) = self.solana_channels.get(&channel_id) {
+            let solana_signer = self.solana_signer.as_ref()?;
+            Binding::Solana(solana_signer, channel)
+        } else {
+            return None;
+        };
+
         let mut outbound = self.outbound_mut();
         let ledger = outbound
             .entry(peer_id.to_string())
@@ -820,13 +887,26 @@ impl ClaimBook {
             });
         ledger.cumulative_amount += amount;
         ledger.nonce += 1;
-        let proof = evm_proof(on_chain_id, domain, ledger.nonce, ledger.cumulative_amount);
-        let signature = signer.sign(&evm_balance_proof_digest(&proof)).ok()?;
+        let signature = match binding {
+            Binding::Evm(signer, on_chain_id, domain) => {
+                let proof = evm_proof(on_chain_id, domain, ledger.nonce, ledger.cumulative_amount);
+                let signature = signer.sign(&evm_balance_proof_digest(&proof)).ok()?;
+                ClaimSignature::Evm(signature)
+            }
+            Binding::Solana(solana_signer, channel) => {
+                let message = solana_balance_proof_message(
+                    &channel.channel_account,
+                    ledger.nonce,
+                    ledger.cumulative_amount,
+                );
+                ClaimSignature::Solana(solana_signer.sign(&message))
+            }
+        };
         let claim = WireClaim {
             channel_id: ledger.channel_id.clone(),
             nonce: ledger.nonce,
             cumulative_amount: ledger.cumulative_amount,
-            signature: ClaimSignature::Evm(signature),
+            signature,
         };
         ledger.pending = Some(claim.clone());
         ledger.pending_since = Some(now);
@@ -1800,14 +1880,13 @@ mod tests {
         }
     }
 
-    /// Issue #732: the peer wire's Solana half. Every test here exercises
-    /// the *inbound* direction, which is the whole of what a Solana peer
-    /// claim can be today -- this connector signs through the secp256k1
-    /// `Signer` port, so it never owes one.
+    /// Issue #732: the peer wire's Solana half, both directions -- inbound
+    /// verification (#732/#738) and outbound signing (#742, added
+    /// alongside the `outbound` submodule below).
     mod solana {
         use super::*;
-        use connector_signer::solana_balance_proof_message;
-        use ed25519_dalek::{Keypair, PublicKey, SecretKey, Signer as Ed25519Signer};
+        use connector_signer::{solana_balance_proof_message, LocalEd25519Signer};
+        use ed25519_dalek::{Keypair, PublicKey, SecretKey, Signer as DalekSigner};
 
         /// A deterministic ed25519 keypair -- no RNG, so a failure here
         /// reproduces exactly.
@@ -2220,6 +2299,216 @@ mod tests {
                     book.accept_inbound(&genuine),
                     ClaimAckOutcome::Accepted
                 );
+            }
+        }
+
+        /// Issue #742: the other direction. `ClaimBook` could verify a
+        /// Solana peer claim since #732/#738 but never sign one --
+        /// `record_fulfillment` fell straight through to `evm_proof` and
+        /// refused (via `channel_domains.get(&channel_id)?`) any channel
+        /// that was only ever registered as Solana. These tests mirror the
+        /// outer `tests` module's EVM outbound fixture set (`sign_claim`,
+        /// `book_with_peer`, `no_claim_is_recorded_*`,
+        /// `an_outbound_claim_recovers_to_the_signers_own_address_*`, the
+        /// journal-replay regression) one for one.
+        mod outbound {
+            use super::*;
+
+            /// A book that signs outbound claims to `peer_id` on Solana
+            /// channel `n` with the identity derived from `seed` -- the
+            /// Solana counterpart of the outer module's `book_with_peer`.
+            /// Re-derives the signer from `seed` a second time to read back
+            /// its own public key, since [`LocalEd25519Signer`] holds its
+            /// key pair privately rather than exposing it for cloning.
+            fn book_with_solana_peer(peer_id: &str, n: u8, seed: [u8; 32]) -> ClaimBook {
+                let mut outbound_channels = HashMap::new();
+                outbound_channels.insert(peer_id.to_string(), base58(&account(n)));
+                let mut book = ClaimBook::new(None, outbound_channels, HashMap::new());
+                book.set_solana_signer(Arc::new(
+                    LocalEd25519Signer::from_secret_bytes(seed).expect("32 bytes is a valid seed"),
+                ));
+                let public_key = LocalEd25519Signer::from_secret_bytes(seed)
+                    .expect("32 bytes is a valid seed")
+                    .public_key();
+                book.set_solana_channel(base58(&account(n)), &base58(&public_key))
+                    .expect("a 32-byte base58 account and key");
+                book
+            }
+
+            #[test]
+            fn no_outbound_solana_claim_is_recorded_without_a_solana_signer() {
+                let mut outbound_channels = HashMap::new();
+                outbound_channels.insert("peer-b".to_string(), base58(&account(1)));
+                let mut book = ClaimBook::new(None, outbound_channels, HashMap::new());
+                book.set_solana_channel(
+                    base58(&account(1)),
+                    &base58(&keypair(1).public.to_bytes()),
+                )
+                .unwrap();
+
+                assert!(book.record_fulfillment("peer-b", 100, now()).is_none());
+            }
+
+            #[test]
+            fn no_outbound_solana_claim_is_recorded_for_a_channel_with_no_binding_configured() {
+                let mut outbound_channels = HashMap::new();
+                outbound_channels.insert("peer-b".to_string(), base58(&account(1)));
+                let mut book = ClaimBook::new(None, outbound_channels, HashMap::new());
+                book.set_solana_signer(Arc::new(LocalEd25519Signer::generate()));
+
+                assert!(book.record_fulfillment("peer-b", 100, now()).is_none());
+            }
+
+            #[test]
+            fn recording_a_fulfillment_arms_a_pending_solana_claim_with_nonce_one() {
+                let book = book_with_solana_peer("peer-b", 1, [5u8; 32]);
+
+                let claim = book.record_fulfillment("peer-b", 100, now()).unwrap();
+
+                assert_eq!(claim.channel_id, base58(&account(1)));
+                assert_eq!(claim.nonce, 1);
+                assert_eq!(claim.cumulative_amount, 100);
+                assert!(matches!(claim.signature, ClaimSignature::Solana(_)));
+                assert_eq!(book.pending_claim("peer-b"), Some(claim));
+            }
+
+            /// A second fulfilment before the first claim drains supersedes
+            /// it with a fresher nonce and a higher cumulative amount --
+            /// the same rule the EVM ledger is held to, since it is
+            /// `OutboundLedger`'s rule and not a per-chain one.
+            #[test]
+            fn a_second_fulfillment_supersedes_the_first_pending_solana_claim() {
+                let book = book_with_solana_peer("peer-b", 1, [5u8; 32]);
+
+                book.record_fulfillment("peer-b", 100, now()).unwrap();
+                let second = book.record_fulfillment("peer-b", 50, now()).unwrap();
+
+                assert_eq!((second.nonce, second.cumulative_amount), (2, 150));
+                assert_eq!(book.pending_claim("peer-b"), Some(second));
+            }
+
+            /// Issue #742's own acceptance criteria, mirroring #575's AC5
+            /// for EVM: a Solana claim this connector signs recovers,
+            /// through `connector_signer::verify_solana_balance_proof`, to
+            /// this connector's own ed25519 identity -- and not to a
+            /// different key, including the counterparty's own (a claim
+            /// this connector signs is never checked against the *peer's*
+            /// key, the same asymmetry `set_solana_channel`'s doc draws
+            /// between "who signs" and "who is accepted from").
+            #[test]
+            fn an_outbound_solana_claim_recovers_to_the_signers_own_public_key_and_not_a_different_one(
+            ) {
+                let seed = [9u8; 32];
+                let book = book_with_solana_peer("peer-b", 1, seed);
+                let own_public_key = LocalEd25519Signer::from_secret_bytes(seed)
+                    .unwrap()
+                    .public_key();
+                let counterparty = keypair(1);
+
+                let claim = book.record_fulfillment("peer-b", 100, now()).unwrap();
+
+                assert!(verify_solana_balance_proof(
+                    &account(1),
+                    claim.nonce,
+                    claim.cumulative_amount,
+                    &claim.signature.to_bytes(),
+                    &own_public_key,
+                ));
+                assert!(!verify_solana_balance_proof(
+                    &account(1),
+                    claim.nonce,
+                    claim.cumulative_amount,
+                    &claim.signature.to_bytes(),
+                    &counterparty.public.to_bytes(),
+                ));
+            }
+
+            /// The acceptance criteria's own restart scenario, ported from
+            /// the outer module's `a_node_restarted_against_the_same_journal_recovers_its_money_state`:
+            /// a pending outbound Solana claim survives a restart, re-armed
+            /// with a fresh signature over the same nonce/cumulative amount
+            /// from the same journal entry -- no chain discriminator was
+            /// added to `JournalEntry::OutboundClaimSigned` for this,
+            /// because the channel id alone (base58 of 32 bytes, disjoint
+            /// from every EVM shape `parse_channel_id` accepts) already
+            /// tells `rebuild_from` which map, and therefore which chain,
+            /// governs replay.
+            #[test]
+            fn an_outbound_solana_claim_survives_a_restart_and_is_resigned_from_the_journal() {
+                let seed = [3u8; 32];
+                let peer_id = "peer-b";
+                let journal = Arc::new(InMemoryJournal::new());
+
+                let mut book = book_with_solana_peer(peer_id, 1, seed);
+                book.set_journal(journal.clone()).unwrap();
+                book.record_fulfillment(peer_id, 100, now());
+                book.record_fulfillment(peer_id, 50, now());
+
+                let mut restarted = book_with_solana_peer(peer_id, 1, seed);
+                let divergences = restarted.set_journal(journal).unwrap();
+
+                assert!(divergences.is_empty());
+                let pending = restarted.pending_claim(peer_id).expect("still pending");
+                assert_eq!((pending.nonce, pending.cumulative_amount), (2, 150));
+                assert!(matches!(pending.signature, ClaimSignature::Solana(_)));
+                let own_public_key = LocalEd25519Signer::from_secret_bytes(seed)
+                    .unwrap()
+                    .public_key();
+                assert!(verify_solana_balance_proof(
+                    &account(1),
+                    pending.nonce,
+                    pending.cumulative_amount,
+                    &pending.signature.to_bytes(),
+                    &own_public_key,
+                ));
+            }
+
+            /// The mirror image of the outer module's
+            /// `an_evm_outbound_ledger_and_a_solana_inbound_watermark_do_not_disturb_each_other`:
+            /// a Solana outbound ledger and an EVM inbound watermark, on
+            /// the same book, must leave each other exactly where they
+            /// would have been alone -- #262's riskiest surface, now
+            /// exercised in both directions.
+            #[test]
+            fn a_solana_outbound_ledger_and_an_evm_inbound_watermark_do_not_disturb_each_other() {
+                let evm_peer_signer = LocalSigner::generate("peer-key");
+                let evm_key = derive_evm_address(&evm_peer_signer.public_key().unwrap());
+
+                let mut book = book_with_solana_peer("peer-b", 1, [6u8; 32]);
+                book.set_verification_key(channel_id(2), evm_key);
+                book.set_channel_domain(channel_id(2), test_domain())
+                    .unwrap();
+
+                let outbound = book.record_fulfillment("peer-b", 100, now()).unwrap();
+                assert_eq!(
+                    book.accept_inbound(&sign_claim(&evm_peer_signer, &channel_id(2), 1, 70)),
+                    ClaimAckOutcome::Accepted
+                );
+                let outbound2 = book.record_fulfillment("peer-b", 50, now()).unwrap();
+                assert_eq!(
+                    book.accept_inbound(&sign_claim(&evm_peer_signer, &channel_id(2), 2, 90)),
+                    ClaimAckOutcome::Accepted
+                );
+
+                // Outbound: still Solana-signed, still the running total.
+                assert_eq!(book.outbound_cumulative_amount("peer-b"), 150);
+                assert!(matches!(outbound2.signature, ClaimSignature::Solana(_)));
+                assert_eq!(book.pending_claim("peer-b"), Some(outbound2));
+                assert_eq!(outbound.channel_id, base58(&account(1)));
+
+                // Inbound: the EVM watermark is the EVM claims' own, and
+                // the Solana channel has no watermark -- no claim arrived
+                // on it.
+                assert_eq!(
+                    book.accept_inbound(&sign_claim(&evm_peer_signer, &channel_id(2), 2, 90)),
+                    ClaimAckOutcome::Rejected(ClaimRejectReason::NonceNotAdvancing)
+                );
+                assert!(book
+                    .views()
+                    .iter()
+                    .any(|view| view.channel_id == channel_id(2)
+                        && view.direction == crate::operator_view::ClaimDirection::Inbound
+                        && view.nonce == 2));
             }
         }
     }

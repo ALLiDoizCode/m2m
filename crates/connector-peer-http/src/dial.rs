@@ -227,6 +227,11 @@ pub struct HttpPeerTransport {
     /// every claim it emits (§4). One per node, because a claim's signer is
     /// `ClaimBook`'s signer.
     signer_address: [u8; 20],
+    /// This connector's own ed25519 public key -- the Solana counterpart of
+    /// `signer_address` (issue #742). See
+    /// `connector_peer_btp::dial::BtpPeerTransport`'s own field doc; this
+    /// carriage holds the identical contract.
+    solana_signer_public_key: Option<[u8; 32]>,
     clock: Arc<dyn Clock>,
     relations: HashMap<String, RelationState>,
 }
@@ -241,9 +246,17 @@ impl HttpPeerTransport {
         HttpPeerTransport {
             client,
             signer_address,
+            solana_signer_public_key: None,
             clock,
             relations: HashMap::new(),
         }
+    }
+
+    /// Configure this connector's own ed25519 identity for rendering an
+    /// outbound Solana peer claim (issue #742) -- the Solana counterpart of
+    /// the `signer_address` [`Self::new`] takes for EVM.
+    pub fn set_solana_signer_public_key(&mut self, public_key: [u8; 32]) {
+        self.solana_signer_public_key = Some(public_key);
     }
 
     /// Register a peering this connector dials over HTTP. Relations are
@@ -314,6 +327,7 @@ impl HttpPeerTransport {
         let json = claim_json::encode(
             claim,
             &self.signer_address,
+            self.solana_signer_public_key.as_ref(),
             domain,
             &format!("{channel_id}:{}", claim.nonce),
             &self

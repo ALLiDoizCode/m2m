@@ -601,6 +601,7 @@ fn claim_as_json(claim: &WireClaim, payer: &dyn Signer) -> String {
     connector_peer_btp::claim_json::encode(
         claim,
         &derive_evm_address(&payer.public_key().unwrap()),
+        None,
         Some(connector_peer_btp::PeerClaimDomain {
             chain_id: CHAIN_ID,
             token_network: TOKEN_NETWORK,
