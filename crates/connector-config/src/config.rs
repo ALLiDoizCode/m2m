@@ -709,7 +709,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::peer::PeerCarriage;
+    use crate::peer::{PeerCarriage, PeerCredential};
     use crate::route::TransportPolicy;
     use crate::settlement::SettlementChain;
     use std::io::Write;
@@ -1151,6 +1151,138 @@ price = 1000
             result,
             Err(ConfigError::PeerCredentialMissing { ref id }) if id == "store"
         ));
+    }
+
+    /// The literal in `peering_config`, rewritten as the `secret_file`
+    /// form a deployed node uses (issue #750) -- the whole peering comes
+    /// from a committed file, with only the secret on the box.
+    fn load_peering_with_secret_file(contents: &[u8]) -> Result<Config, ConfigError> {
+        let mut secret_file = tempfile::NamedTempFile::new().expect("temp secret file");
+        secret_file.write_all(contents).expect("write secret file");
+        secret_file.flush().expect("flush secret file");
+        let path = secret_file.path().to_path_buf();
+        load_peering(|text| {
+            text.replace(
+                "credential = { secret = \"shared-secret\" }",
+                &format!("credential = {{ secret_file = \"{}\" }}", path.display()),
+            )
+        })
+    }
+
+    /// The load-time equivalence #750 asks for: a peering whose secret
+    /// lives in a file loads into exactly the peering the literal
+    /// produced, and authenticates the same.
+    #[test]
+    fn loads_a_peer_credential_from_a_secret_file() {
+        let config = load_peering_with_secret_file(b"shared-secret\n").expect("load");
+
+        let peer = &config.peers()[0];
+        assert_eq!(peer.id(), "store");
+        assert!(peer.credential().matches("shared-secret"));
+        assert!(!peer.credential().matches("wrong"));
+        assert_eq!(peer.credential(), &PeerCredential::new("shared-secret"));
+
+        // And the whole config still redacts it, which is the property
+        // that made `PeerCredential`'s `Debug` hand-written in the first
+        // place -- a `Config` is logged whole at startup.
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains("shared-secret"), "got: {rendered}");
+    }
+
+    #[test]
+    fn rejects_a_peer_setting_both_secret_and_secret_file() {
+        let mut secret_file = tempfile::NamedTempFile::new().expect("temp secret file");
+        secret_file.write_all(b"from-the-file").expect("write");
+        secret_file.flush().expect("flush");
+        let path = secret_file.path().to_path_buf();
+        let result = load_peering(|text| {
+            text.replace(
+                "credential = { secret = \"shared-secret\" }",
+                &format!(
+                    "credential = {{ secret = \"shared-secret\", secret_file = \"{}\" }}",
+                    path.display()
+                ),
+            )
+        });
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::PeerCredentialAmbiguous { id } if id == "store"),
+        );
+        assert!(
+            message.contains("exactly one") && message.contains(BRINGUP_DOC),
+            "got: {message}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_peer_setting_neither_secret_nor_secret_file() {
+        let result = load_peering(|text| {
+            text.replace(
+                "credential = { secret = \"shared-secret\" }",
+                "credential = {}",
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::PeerCredentialMissing { ref id }) if id == "store"
+        ));
+    }
+
+    #[test]
+    fn rejects_a_secret_file_that_does_not_exist() {
+        let result = load_peering(|text| {
+            text.replace(
+                "credential = { secret = \"shared-secret\" }",
+                "credential = { secret_file = \"/nonexistent/store-peer.secret\" }",
+            )
+        });
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::PeerSecretFileNotFound { id, .. } if id == "store"),
+        );
+        assert!(
+            message.contains("store-peer.secret") && message.contains(BRINGUP_DOC),
+            "got: {message}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_secret_file_that_is_not_readable_as_text() {
+        let result = load_peering_with_secret_file(&[0xff, 0xfe, 0xfd]);
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::PeerSecretFileUnreadable { id, .. } if id == "store"),
+        );
+        assert!(message.contains(BRINGUP_DOC), "got: {message}");
+    }
+
+    #[test]
+    fn rejects_a_secret_file_that_is_empty() {
+        let result = load_peering_with_secret_file(b"\n   \n");
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::PeerSecretFileEmpty { id, .. } if id == "store"),
+        );
+        assert!(
+            message.contains("matches nothing") && message.contains(BRINGUP_DOC),
+            "got: {message}"
+        );
+    }
+
+    /// `deny_unknown_fields` still holds on the credential subtable: a
+    /// mistyped `secret_fle` is a peering that authenticates nobody while
+    /// reading as configured, so it fails parse rather than falling
+    /// through to "neither field set".
+    #[test]
+    fn rejects_a_mistyped_credential_field() {
+        let result = load_peering(|text| text.replace("secret =", "secert ="));
+
+        assert!(matches!(result, Err(ConfigError::Parse { .. })));
     }
 
     /// §11 `PeerChannelUnbound`: P2 of the role rule. This is the exact
