@@ -1669,7 +1669,7 @@ mod tests {
                     channel_id: channel_id.0.clone(),
                     nonce,
                     cumulative_amount: amount,
-                    signature,
+                    signature: connector_runtime::ClaimSignature::Evm(signature),
                 }
             };
             assert_eq!(

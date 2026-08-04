@@ -3219,9 +3219,11 @@ mod tests {
                 channel_id: channel_id.to_string(),
                 nonce,
                 cumulative_amount,
-                signature: signer
-                    .sign(&connector_signer::evm_balance_proof_digest(&proof))
-                    .unwrap(),
+                signature: crate::claim::ClaimSignature::Evm(
+                    signer
+                        .sign(&connector_signer::evm_balance_proof_digest(&proof))
+                        .unwrap(),
+                ),
             }
         }
 

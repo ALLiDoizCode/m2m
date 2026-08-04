@@ -22,7 +22,8 @@ use connector_domain::{
     Watermark,
 };
 use connector_signer::{
-    evm_balance_proof_digest, verify_evm_balance_proof, Address, EvmBalanceProof, Signature, Signer,
+    evm_balance_proof_digest, verify_evm_balance_proof, verify_solana_balance_proof, Address,
+    EvmBalanceProof, Signature, Signer,
 };
 use thiserror::Error;
 
@@ -44,28 +45,48 @@ pub struct WireClaim {
     pub channel_id: String,
     pub nonce: u64,
     pub cumulative_amount: u64,
-    pub signature: Signature,
+    pub signature: ClaimSignature,
 }
 
-const SIGNATURE_LEN: usize = 65; // r(32) + s(32) + recovery_id(1)
+const EVM_SIGNATURE_LEN: usize = 65; // r(32) + s(32) + recovery_id(1)
+const SOLANA_SIGNATURE_LEN: usize = 64; // ed25519 R(32) + S(32)
+
+/// The scheme discriminator [`WireClaim::encode`] writes ahead of a
+/// signature. Present so the in-process binary form stays decodable now
+/// that a signature has two lengths (issue #732); neither carriage puts
+/// these bytes on a wire (`connector_peer_btp::claim_json`'s own module
+/// doc), so no deployed peer ever parses them.
+const EVM_SCHEME: u8 = 0;
+const SOLANA_SCHEME: u8 = 1;
 
 impl WireClaim {
     /// Length-prefixed `channel_id` (so no two distinct tuples can ever
     /// collide on the same byte string) followed by `nonce`,
-    /// `cumulative_amount` and the raw signature -- the ad hoc encoding for
-    /// fields RFC-0027 has no concept of. ADR 0027 re-hosts this same byte
-    /// string as a `payment-channel-claim` BTP protocolData entry or a
-    /// `Payment-Channel-Claim` HTTP header; only the carriage moves.
+    /// `cumulative_amount`, a signature-scheme byte and the raw signature
+    /// -- the ad hoc encoding for fields RFC-0027 has no concept of. ADR
+    /// 0027 re-hosts this same byte string as a `payment-channel-claim`
+    /// BTP protocolData entry or a `Payment-Channel-Claim` HTTP header;
+    /// only the carriage moves.
     pub fn encode(&self) -> Vec<u8> {
         let channel_id_bytes = self.channel_id.as_bytes();
-        let mut out = Vec::with_capacity(2 + channel_id_bytes.len() + 8 + 8 + SIGNATURE_LEN);
+        let mut out =
+            Vec::with_capacity(2 + channel_id_bytes.len() + 8 + 8 + 1 + EVM_SIGNATURE_LEN);
         out.extend_from_slice(&(channel_id_bytes.len() as u16).to_be_bytes());
         out.extend_from_slice(channel_id_bytes);
         out.extend_from_slice(&self.nonce.to_be_bytes());
         out.extend_from_slice(&self.cumulative_amount.to_be_bytes());
-        out.extend_from_slice(&self.signature.r);
-        out.extend_from_slice(&self.signature.s);
-        out.push(self.signature.recovery_id);
+        match &self.signature {
+            ClaimSignature::Evm(signature) => {
+                out.push(EVM_SCHEME);
+                out.extend_from_slice(&signature.r);
+                out.extend_from_slice(&signature.s);
+                out.push(signature.recovery_id);
+            }
+            ClaimSignature::Solana(signature) => {
+                out.push(SOLANA_SCHEME);
+                out.extend_from_slice(signature);
+            }
+        }
         out
     }
 
@@ -83,20 +104,33 @@ impl WireClaim {
         offset += 8;
         let cumulative_amount = u64::from_be_bytes(bytes.get(offset..offset + 8)?.try_into().ok()?);
         offset += 8;
-        let mut r = [0u8; 32];
-        r.copy_from_slice(bytes.get(offset..offset + 32)?);
-        offset += 32;
-        let mut s = [0u8; 32];
-        s.copy_from_slice(bytes.get(offset..offset + 32)?);
-        offset += 32;
-        let recovery_id = *bytes.get(offset)?;
+        let scheme = *bytes.get(offset)?;
         offset += 1;
+        let signature = match scheme {
+            EVM_SCHEME => {
+                let raw: [u8; EVM_SIGNATURE_LEN] = bytes
+                    .get(offset..offset + EVM_SIGNATURE_LEN)?
+                    .try_into()
+                    .ok()?;
+                offset += EVM_SIGNATURE_LEN;
+                ClaimSignature::Evm(Signature::from_bytes(&raw)?)
+            }
+            SOLANA_SCHEME => {
+                let raw: [u8; SOLANA_SIGNATURE_LEN] = bytes
+                    .get(offset..offset + SOLANA_SIGNATURE_LEN)?
+                    .try_into()
+                    .ok()?;
+                offset += SOLANA_SIGNATURE_LEN;
+                ClaimSignature::Solana(raw)
+            }
+            _ => return None,
+        };
         Some((
             WireClaim {
                 channel_id,
                 nonce,
                 cumulative_amount,
-                signature: Signature { r, s, recovery_id },
+                signature,
             },
             offset,
         ))
@@ -669,7 +703,7 @@ impl ClaimBook {
                         channel_id: ledger.channel_id.clone(),
                         nonce: ledger.nonce,
                         cumulative_amount: ledger.cumulative_amount,
-                        signature,
+                        signature: ClaimSignature::Evm(signature),
                     });
                 }
             }
@@ -792,7 +826,7 @@ impl ClaimBook {
             channel_id: ledger.channel_id.clone(),
             nonce: ledger.nonce,
             cumulative_amount: ledger.cumulative_amount,
-            signature,
+            signature: ClaimSignature::Evm(signature),
         };
         ledger.pending = Some(claim.clone());
         ledger.pending_since = Some(now);
@@ -879,6 +913,61 @@ impl ClaimBook {
         }
     }
 
+    /// Whether `claim`'s signature is genuine, for the chain the signature
+    /// itself is in and against this connector's **own** record of that
+    /// channel (issue #732, `client-edge-spec.md` §1.3 step 4's rule that
+    /// a forger can declare anything).
+    ///
+    /// The claim's scheme selects which record is consulted, and each
+    /// scheme reads only its own map. An ed25519 signature naming a
+    /// channel registered as EVM therefore finds nothing and is
+    /// [`ClaimRejectReason::UnknownChannel`], and so is the mirror case --
+    /// neither is ever checked against the other chain's record, and
+    /// neither can be made to pass by relabelling. Both chains verify
+    /// through `connector_signer::claim_signature`, the same module the
+    /// client edge's own gate uses (`ClientClaimGate`), so there is one
+    /// EIP-712 digest and one ed25519 message definition in this
+    /// workspace, not two per edge.
+    ///
+    /// ADR 0002 keeps Mina out entirely: [`ClaimSignature`] has no Mina
+    /// variant, so a Mina claim is refused before it can reach here, at
+    /// the carriage's own `parse`.
+    fn verify_signature(&self, claim: &WireClaim) -> Result<(), ClaimRejectReason> {
+        match &claim.signature {
+            ClaimSignature::Evm(signature) => {
+                let Some(&(on_chain_id, domain)) = self.channel_domains.get(&claim.channel_id)
+                else {
+                    return Err(ClaimRejectReason::UnknownChannel);
+                };
+                let Some(counterparty) = self.counterparties.get(&claim.channel_id) else {
+                    return Err(ClaimRejectReason::UnknownChannel);
+                };
+                let proof = evm_proof(on_chain_id, domain, claim.nonce, claim.cumulative_amount);
+                if verify_evm_balance_proof(&proof, &signature.to_bytes(), counterparty) {
+                    Ok(())
+                } else {
+                    Err(ClaimRejectReason::SignatureInvalid)
+                }
+            }
+            ClaimSignature::Solana(signature) => {
+                let Some(channel) = self.solana_channels.get(&claim.channel_id) else {
+                    return Err(ClaimRejectReason::UnknownChannel);
+                };
+                if verify_solana_balance_proof(
+                    &channel.channel_account,
+                    claim.nonce,
+                    claim.cumulative_amount,
+                    signature,
+                    &channel.counterparty_public_key,
+                ) {
+                    Ok(())
+                } else {
+                    Err(ClaimRejectReason::SignatureInvalid)
+                }
+            }
+        }
+    }
+
     /// Verify and, if valid, accept an inbound `claim`, advancing the
     /// watermark on its `channel_id` (peer-wire-spec.md §3.4). Independent
     /// of whatever PREPARE the claim rode in on -- a rejected claim does
@@ -887,15 +976,9 @@ impl ClaimBook {
     /// [`ClaimRejectReason::UnknownChannel`] -- neither leaves anything
     /// this connector could verify a signature against.
     pub fn accept_inbound(&self, claim: &WireClaim) -> ClaimAckOutcome {
-        let Some(&(on_chain_id, domain)) = self.channel_domains.get(&claim.channel_id) else {
-            return ClaimAckOutcome::Rejected(ClaimRejectReason::UnknownChannel);
-        };
-        let Some(counterparty) = self.counterparties.get(&claim.channel_id) else {
-            return ClaimAckOutcome::Rejected(ClaimRejectReason::UnknownChannel);
-        };
-        let proof = evm_proof(on_chain_id, domain, claim.nonce, claim.cumulative_amount);
-        if !verify_evm_balance_proof(&proof, &claim.signature.to_bytes(), counterparty) {
-            return ClaimAckOutcome::Rejected(ClaimRejectReason::SignatureInvalid);
+        match self.verify_signature(claim) {
+            Ok(()) => {}
+            Err(reason) => return ClaimAckOutcome::Rejected(reason),
         }
 
         let mut watermarks = self
@@ -914,7 +997,7 @@ impl ClaimBook {
                     channel_id: claim.channel_id.clone(),
                     nonce: claim.nonce,
                     cumulative_amount: claim.cumulative_amount,
-                    signature: claim.signature.to_bytes().to_vec(),
+                    signature: claim.signature.to_bytes(),
                 });
                 ClaimAckOutcome::Accepted
             }
@@ -1042,9 +1125,11 @@ mod tests {
             channel_id: channel.to_string(),
             nonce,
             cumulative_amount: amount,
-            signature: signer
-                .sign(&evm_balance_proof_digest(&proof))
-                .expect("sign"),
+            signature: ClaimSignature::Evm(
+                signer
+                    .sign(&evm_balance_proof_digest(&proof))
+                    .expect("sign"),
+            ),
         }
     }
 
@@ -1070,11 +1155,11 @@ mod tests {
             channel_id: channel_id(1),
             nonce: 7,
             cumulative_amount: 900,
-            signature: Signature {
+            signature: ClaimSignature::Evm(Signature {
                 r: [1u8; 32],
                 s: [2u8; 32],
                 recovery_id: 1,
-            },
+            }),
         };
         let mut bytes = claim.encode();
         bytes.extend_from_slice(b"trailing");
@@ -1359,7 +1444,9 @@ mod tests {
             channel_id: channel_id(1),
             nonce: 1,
             cumulative_amount: 100,
-            signature: peer_signer.sign(&evm_balance_proof_digest(&proof)).unwrap(),
+            signature: ClaimSignature::Evm(
+                peer_signer.sign(&evm_balance_proof_digest(&proof)).unwrap(),
+            ),
         };
 
         let outcome = book.accept_inbound(&claim);

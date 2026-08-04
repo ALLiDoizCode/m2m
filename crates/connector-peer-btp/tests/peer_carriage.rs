@@ -29,8 +29,8 @@ use connector_peer_btp::accept::{PeerAcceptPolicy, PeerSession, SessionEnd};
 use connector_peer_btp::dial::{DialError, PeerDialer, PeerRelation};
 use connector_peer_btp::{ack, AcceptedClaims, BtpPeerTransport, PeerCarriageState};
 use connector_runtime::{
-    ChannelDomain, ClaimAckOutcome, ClaimRejectReason, Clock, Connector, FakeAppClient,
-    InProcessPeerTransport, PeerTransport, TestClock, WireClaim,
+    ChannelDomain, ClaimAckOutcome, ClaimRejectReason, ClaimSignature, Clock, Connector,
+    FakeAppClient, InProcessPeerTransport, PeerTransport, TestClock, WireClaim,
 };
 use connector_signer::{
     derive_evm_address, evm_balance_proof_digest, EvmBalanceProof, LocalSigner, Signature, Signer,
@@ -81,9 +81,11 @@ fn sign_claim(signer: &dyn Signer, nonce: u64, cumulative_amount: u64) -> WireCl
         channel_id: channel_id(),
         nonce,
         cumulative_amount,
-        signature: signer
-            .sign(&evm_balance_proof_digest(&proof))
-            .expect("sign"),
+        signature: ClaimSignature::Evm(
+            signer
+                .sign(&evm_balance_proof_digest(&proof))
+                .expect("sign"),
+        ),
     }
 }
 
@@ -1100,7 +1102,9 @@ async fn concurrent_forwards_share_one_dialed_session() {
 fn a_signed_claim_carries_a_65_byte_signature() {
     let payer_signer = LocalSigner::generate("payer");
     let claim = sign_claim(&payer_signer, 1, 500);
-    let Signature { recovery_id, .. } = claim.signature;
+    let ClaimSignature::Evm(Signature { recovery_id, .. }) = claim.signature else {
+        unreachable!("this connector signs peer claims on secp256k1 only")
+    };
 
     assert_eq!(claim.signature.to_bytes().len(), 65);
     assert!(

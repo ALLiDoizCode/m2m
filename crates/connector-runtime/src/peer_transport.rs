@@ -461,11 +461,11 @@ mod tests {
             channel_id: "channel-a".to_string(),
             nonce: 1,
             cumulative_amount: 50,
-            signature: connector_signer::Signature {
+            signature: crate::claim::ClaimSignature::Evm(connector_signer::Signature {
                 r: [0u8; 32],
                 s: [0u8; 32],
                 recovery_id: 0,
-            },
+            }),
         };
 
         let ack = transport.flush("nowhere", claim).await;
