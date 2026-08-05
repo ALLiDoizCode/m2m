@@ -333,7 +333,7 @@ async function main() {
     await sandbox.run({
       name: 'reviewer',
       maxIterations: 1,
-      agent: sandcastle.claudeCode('claude-sonnet-5'),
+      agent: sandcastle.claudeCode('claude-opus-5'),
       promptFile: './.sandcastle/review-prompt.md',
       promptArgs: { BRANCH: branch },
     });
@@ -345,7 +345,7 @@ async function main() {
       await sandbox.run({
         name: 'merger',
         maxIterations: 1,
-        agent: sandcastle.claudeCode('claude-opus-4-8'),
+        agent: sandcastle.claudeCode('claude-opus-5'),
         promptFile: './.sandcastle/merge-prompt.md',
         promptArgs: {
           BRANCHES: `- ${branch}`,

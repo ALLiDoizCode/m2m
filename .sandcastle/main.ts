@@ -124,7 +124,7 @@ async function main() {
       // not write code. (Structured output requires maxIterations: 1.)
       maxIterations: 1,
       // Opus for planning: dependency analysis benefits from deeper reasoning.
-      agent: sandcastle.claudeCode('claude-opus-4-8'),
+      agent: sandcastle.claudeCode('claude-opus-5'),
       promptFile: './.sandcastle/plan-prompt.md',
       // Extract and validate the <plan> JSON into a typed object. Throws
       // StructuredOutputError if the tag is missing, the JSON is malformed, or
@@ -182,7 +182,7 @@ async function main() {
             const review = await sandbox.run({
               name: 'reviewer',
               maxIterations: 1,
-              agent: sandcastle.claudeCode('claude-sonnet-5'),
+              agent: sandcastle.claudeCode('claude-opus-5'),
               promptFile: './.sandcastle/review-prompt.md',
               promptArgs: {
                 BRANCH: issue.branch,
@@ -247,7 +247,7 @@ async function main() {
       sandbox: docker({ env: sandboxEnv }),
       name: 'merger',
       maxIterations: 1,
-      agent: sandcastle.claudeCode('claude-opus-4-8'),
+      agent: sandcastle.claudeCode('claude-opus-5'),
       promptFile: './.sandcastle/merge-prompt.md',
       promptArgs: {
         // A markdown list of branch names, one per line.
