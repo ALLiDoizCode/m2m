@@ -139,6 +139,18 @@ problem. **Decision needed from the owner** — pick one:
 
 **This runbook assumes (1)** and records it as a deliberate, recorded loss.
 
+> **Resolved 2026-08-05 ([#753](https://github.com/toon-protocol/connector/issues/753)):** decision
+> (1), as assumed — but Edit 5 was not executed in the window, so the block stayed and has been
+> answering **502** rather than 404 since the cutover (the exact-match `location` outranks
+> `^~ /admin`, so the refusal below never applied to it). #753 deletes it on both boxes and settles
+> the question the runbook could only defer: **the Rust connector exposes no anonymous metrics, by
+> decision, not by omission.** ADR 0014 fixes the metrics surface behind the operator bearer token
+> and says so in as many words; ADR 0022's answering-is-not-announcing line covers configuration
+> facts, not operational history; and enabling `[operator]` on these boxes to open a gated path
+> would publish the write half through `location /` unless nginx also grew a deny list, since the
+> Rust operator paths carry no `/admin` prefix. The dashboard-side repair is
+> [#669](https://github.com/toon-protocol/connector/issues/669)'s same-origin authenticated proxy.
+
 ### 2.4 `X-TOON-Payer/Amount/Chain` — benign, confirmed
 
 #714's premise that the relay depends on these is false.
