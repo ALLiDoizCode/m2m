@@ -19,7 +19,12 @@ fn is_valid_label(label: &str) -> bool {
 
 /// An ILP address is one or more valid labels joined by dots -- no leading,
 /// trailing, or consecutive dots, and no characters outside the label set.
-fn is_valid_ilp_address(address: &str) -> bool {
+///
+/// `pub(crate)` so the `[announce]` section (issue #784) validates the
+/// addresses it broadcasts by the same rule a `[[routes]]` prefix is
+/// validated by, rather than growing a second, subtly different notion of
+/// what an ILP address is.
+pub(crate) fn is_valid_ilp_address(address: &str) -> bool {
     !address.is_empty()
         && address.len() <= MAX_ILP_ADDRESS_LEN
         && address.split('.').all(is_valid_label)

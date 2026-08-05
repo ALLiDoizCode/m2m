@@ -21,8 +21,16 @@ connector-settlement-solana = { path = "../connector-settlement-solana" }
 connector-signer = { path = "../connector-signer" }
 async-trait = "0.1"
 axum = "0.6"
+# `connector announce` (issue #784): the free, unauthenticated negotiation
+# against the through-URL (its x402 greeting and its `/ilp/identity`), and
+# the clock the PREPARE's expiry and the event's `created_at` are read from.
+chrono = "0.4"
 ethers = { version = "2", default-features = false, features = ["rustls"] }
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 solana-sdk = "=2.1.0"
+tokio = { version = "1", features = ["net", "time"] }
 tracing = "0.1"
 
 [dev-dependencies]

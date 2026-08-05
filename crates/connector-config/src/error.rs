@@ -545,4 +545,58 @@ pub enum ConfigError {
          rate limit, and the arithmetic over it stops fitting an instant (issue #613)"
     )]
     UnresolvableLookupWindowTooLong { window_secs: u64, max_secs: u64 },
+
+    // -- The `[announce]` section (issue #784) --
+    //
+    // Every one of these refuses a value that would otherwise be
+    // BROADCAST to the whole network in a kind:10032 event. That is what
+    // makes them load errors rather than warnings: an announce is read by
+    // strangers, cached, and acted on, and the node that published it has
+    // no way to take it back before its NIP-40 expiry.
+    #[error(
+        "[announce] names no addresses: an announce with no `addresses` describes no node at \
+         all. Set `addresses = [\"g.your.node\"]` (primary first) -- see \
+         docs/operators/announcing-a-node.md (issue #784)"
+    )]
+    AnnounceNoAddresses,
+
+    #[error(
+        "[announce] {field} is not set: a node behind TLS termination cannot learn its own \
+         public name, so this is an operator fact and there is deliberately no default. The \
+         retired sidecar DID default it, and its compiled-in fallback still names a `/rust/ilp` \
+         path that answers 410 Gone on both devnet boxes -- a default here is how a node ends up \
+         broadcasting a dead URL to the network (issue #784)"
+    )]
+    AnnounceMissingEndpoint { field: &'static str },
+
+    #[error("[announce] {field} '{value}' is not a URL: {source}")]
+    AnnounceInvalidUrl {
+        field: &'static str,
+        value: String,
+        #[source]
+        source: url::ParseError,
+    },
+
+    #[error(
+        "[announce] {field} '{value}' has scheme '{scheme}', but this field must name one of: \
+         {allowed}. The three URLs an announce carries are different things and conflating any \
+         two is the bug: `http_endpoint`/`btp_endpoint` are where clients PAY this node, and \
+         `relay_url` is where they READ it for FREE over a Nostr WebSocket. An `http(s)://` \
+         `relay_url` in particular is the relay's PRIVATE write ingress -- announcing it \
+         publishes an unauthenticated write door to every client on the network (issue #784)"
+    )]
+    AnnounceEndpointScheme {
+        field: &'static str,
+        value: String,
+        scheme: String,
+        allowed: String,
+    },
+
+    #[error(
+        "[announce] ttl_secs is 0: a NIP-40 `expiration` tag of `created_at + 0` is already \
+         expired when it is signed, so every relay honouring the tag drops the announce while \
+         this file reads as configured. Omit the field for the default, or set how many seconds \
+         the announce should stay live (issue #784)"
+    )]
+    AnnounceZeroTtl,
 }

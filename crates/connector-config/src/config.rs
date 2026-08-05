@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use url::Url;
 
+use crate::announce::{resolve_announce, AnnounceConfig, RawAnnounceConfig};
 use crate::client_channel::{resolve_client_channels, ClientChannelConfig, RawClientChannel};
 use crate::error::ConfigError;
 use crate::operator::{resolve_operator, OperatorConfig, RawOperatorConfig};
@@ -34,6 +35,15 @@ struct RawConfig {
     children: Vec<RawChild>,
     #[serde(default)]
     operator: Option<RawOperatorConfig>,
+    /// What `connector announce` (issue #784) puts in a kind:10032
+    /// `IlpPeerInfo` event: the short list of facts about this node that
+    /// no node can introspect about itself -- its own PUBLIC endpoints,
+    /// the addresses the announce covers, and the relay clients read it
+    /// on for free, if it fronts one. Absent means this node has nothing
+    /// configured to announce and the subcommand refuses by name; the
+    /// serving path never reads it.
+    #[serde(default)]
+    announce: Option<RawAnnounceConfig>,
     /// Removed with the raw-TCP peer wire (ADR 0027, issue #679). Still
     /// parsed, and only so that a stale config naming it fails at boot
     /// with [`ConfigError::PeerWireAddrRemoved`] rather than tripping the
@@ -221,6 +231,7 @@ pub struct Config {
     peer_allow_plaintext_endpoints: bool,
     peer_channels: Vec<PeerChannelConfig>,
     operator: Option<OperatorConfig>,
+    announce: Option<AnnounceConfig>,
     settlements: Vec<SettlementConfig>,
     client_channels: Vec<ClientChannelConfig>,
     state_dir: Option<PathBuf>,
@@ -317,6 +328,7 @@ impl Config {
             return Err(ConfigError::PeerWireAddrRemoved);
         }
         let operator = resolve_operator(raw.operator)?;
+        let announce = resolve_announce(raw.announce)?;
         let settlements = resolve_settlement(raw.settlement)?;
         let client_channels = resolve_client_channels(raw.client_channels)?;
         // Namespace disjointness (`peer-carriage-spec.md` §1.8). Peer and
@@ -509,6 +521,7 @@ impl Config {
             peer_allow_plaintext_endpoints,
             peer_channels,
             operator,
+            announce,
             settlements,
             client_channels,
             state_dir,
@@ -671,6 +684,16 @@ impl Config {
     /// a bearer token or a write-key allowlist.
     pub fn operator(&self) -> Option<&OperatorConfig> {
         self.operator.as_ref()
+    }
+
+    /// What this node announces about itself (issue #784), or `None` when
+    /// the `[announce]` section is absent -- in which case `connector
+    /// announce` refuses by name rather than announcing a node it can only
+    /// half describe. Read by the subcommand and by nothing on the serving
+    /// path: a node that never announces is unaffected by this section's
+    /// presence or absence.
+    pub fn announce(&self) -> Option<&AnnounceConfig> {
+        self.announce.as_ref()
     }
 
     /// Every settlement backend the `[settlement]` section configures (issue

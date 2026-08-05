@@ -32,6 +32,13 @@ been sharing one word.
 - **Announcing** is pushing facts about yourself into a network unprompted — `announcePrice`,
   kind:10032 self-announce. A connector never does this. Deciding to participate in a discovery
   network is the controller's business, and ADR 0006 stands unchanged.
+
+  > **Read alongside [ADR 0030](0030-an-operator-announces-a-node-the-node-still-does-not.md)
+  > (2026-08-05, issue #784):** the second sentence of this bullet is the operative one. A running
+  > connector still never announces — no timer, no startup broadcast, nothing on the packet path.
+  > An **operator** may, by running `connector announce` on the node itself: the controller
+  > deciding, once, with the identity key never leaving the box and the write paid for like any
+  > other. ADR 0030 does not weaken this rule about the process; it names who the verb belongs to.
 - **Answering** is telling whoever asks what your own configuration already says. It decides
   nothing, and reaches nobody who did not ask. `GET /identity` on the operator surface is already
   this, for a different audience.

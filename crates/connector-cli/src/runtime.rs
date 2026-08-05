@@ -206,7 +206,15 @@ fn decode_secret_key(bytes: &[u8]) -> Option<[u8; 32]> {
     None
 }
 
-fn build_signer(location: &SecretLocation) -> Result<Arc<dyn Signer>, RuntimeError> {
+/// The raw 32-byte identity secret `[signer]` points at.
+///
+/// Exposed to the crate (issue #784) because a kind:10032 announce is signed
+/// BIP-340 Schnorr over the event's own id, which needs the scalar itself
+/// rather than a [`Signer`]'s recoverable-ECDSA `sign` -- see
+/// `connector_signer::nostr`. Nothing outside this crate can call it: key
+/// material stays behind `connector-signer` and the one function here that
+/// already had to read it.
+pub(crate) fn read_signer_secret(location: &SecretLocation) -> Result<[u8; 32], RuntimeError> {
     match location {
         SecretLocation::File(path) => {
             let bytes =
@@ -214,13 +222,17 @@ fn build_signer(location: &SecretLocation) -> Result<Arc<dyn Signer>, RuntimeErr
                     path: path.clone(),
                     source,
                 })?;
-            let secret = decode_secret_key(&bytes)
-                .ok_or_else(|| RuntimeError::InvalidSignerKeyMaterial { path: path.clone() })?;
-            let signer = LocalSigner::from_secret_bytes("connector-signer", secret)?;
-            Ok(Arc::new(signer))
+            decode_secret_key(&bytes)
+                .ok_or_else(|| RuntimeError::InvalidSignerKeyMaterial { path: path.clone() })
         }
         SecretLocation::Kms { .. } => Err(RuntimeError::UnsupportedSignerLocation),
     }
+}
+
+fn build_signer(location: &SecretLocation) -> Result<Arc<dyn Signer>, RuntimeError> {
+    let secret = read_signer_secret(location)?;
+    let signer = LocalSigner::from_secret_bytes("connector-signer", secret)?;
+    Ok(Arc::new(signer))
 }
 
 /// Encode 32 raw bytes as 64 lowercase hex characters -- what
