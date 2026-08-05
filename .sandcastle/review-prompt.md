@@ -75,7 +75,7 @@ Once complete, output <promise>COMPLETE</promise>.
 ## Context budget
 
 Operate as if your context is capped at **~200k tokens**, whatever your model's actual window
-is (org policy: toon-meta's `CLAUDE.md` → *Context budget policy* — the cap is absolute, not a
+is (org policy: toon-meta's `CLAUDE.md` → _Context budget policy_ — the cap is absolute, not a
 percentage of the window). Treat ~200k as a hard ceiling, not a target.
 
 Start preparing a handoff at roughly **120k** tokens of context, and hand off no later than

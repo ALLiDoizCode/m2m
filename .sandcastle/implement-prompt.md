@@ -141,7 +141,7 @@ ONLY WORK ON A SINGLE TASK.
 ## Context budget
 
 Operate as if your context is capped at **~200k tokens**, whatever your model's actual window
-is (org policy: toon-meta's `CLAUDE.md` → *Context budget policy* — the cap is absolute, not a
+is (org policy: toon-meta's `CLAUDE.md` → _Context budget policy_ — the cap is absolute, not a
 percentage of the window, because a percentage means different things on different models).
 Treat ~200k as a hard ceiling, not a target, and do the real work well below it.
 
