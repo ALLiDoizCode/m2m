@@ -279,12 +279,12 @@ fn record_accepted_claim(
         .claim_gate
         .note_claim_time(&channel_key, crate::now_unix());
 
-    if let Some(address) = session_address {
-        if let Some(channel_id) = channel_key.strip_prefix(&format!("{EVM_NAMESPACE}:")) {
-            state
-                .claim_gate
-                .record_session_channel(address, channel_id.to_string());
-        }
+    if let (Some(address), Some((EVM_NAMESPACE, channel_id))) =
+        (session_address, channel_key.split_once(':'))
+    {
+        state
+            .claim_gate
+            .record_session_channel(address, channel_id.to_string());
     }
 }
 
