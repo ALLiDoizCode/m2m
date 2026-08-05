@@ -147,3 +147,39 @@ always present, derived directly from `SESSION_LEASE_BACKSTOP_TTL` at the point 
 built rather than typed a second time (`client-edge-spec.md` §1.4, §1.9). A same-crate test pins
 the two together. Wiring `buzz#84`'s `providerAvailability.ts` to read this field is left as a
 follow-up in the `buzz` repository.
+
+## Update (issue #770): a client session's own fulfilment now has a production caller
+
+`SessionRegistry::deliver` and `ClientPayoutLedger`/`payout_claim_protocol_data` (issues #698,
+#699, #700) were each proven end to end by their own tests and never wired together: nothing
+decided _when_ a fulfilled PREPARE should credit a channel, so `credited` — and therefore
+`available` — stayed structurally `0` in every deployed process, the same "green tests, no
+production caller" shape issue #736 already named once for the read side of session routing.
+
+`crate::session_route::route_prepare` is where that decision now lives, alongside the routing
+decision it already owns: once a client session's own answer is a genuine FULFILL (checked against
+`prepare`'s execution condition, same as any other candidate this arm accepts), it calls
+`ClientPayoutLedger::record_payout_once` — a new method, not `record_payout` itself, because
+`record_payout`/`ClaimBook::record_fulfillment` advance their nonce and cumulative amount
+unconditionally on every call and so cannot by themselves tell a genuine second job from a retried
+first one (issue #770's AC3). `record_payout_once` dedupes on `(channel_id, execution_condition)`
+instead: a packet's condition is deterministic per job (RFC-0022), so a retransmitted fulfilment of
+the same job always carries the identical condition, and a genuinely new job never does.
+
+The channel to credit needs no new lookup: `destination` — the address `SessionRegistry::resolve`
+found this session bound at — _is_ the channel id, per this ADR's `outbound_ledger.rs` update
+above ("a client-edge channel has no separate peer identity — the channel _is_ the identity").
+Once credited, `SessionRegistry::deliver_transfer` (new, `deliver`'s TRANSFER-originating sibling)
+carries the freshly signed claim to the same session as a payout TRANSFER, fenced against the same
+generation the original delivery used. Both steps are best-effort past this point and never hold
+up the packet's own already-decided answer: a session that has died by the time the TRANSFER would
+go out loses only that delivery attempt, not the credit — `pending_claim` carries it to whatever
+next reaches this channel.
+
+`connector-cli/src/runtime.rs`'s `client_claim_gate` now also builds a `ClientPayoutLedger` from
+every EVM `[[client_channels]]` entry (`client_payout_ledger`), signed by the same key
+`with_identity_signer` already uses for this connector's identity and its peer-wire outbound
+claims, and binds it with `with_payout_ledger` before the gate is returned — the configuration step
+every update above noted was still missing. A node with only chain-resolved (undeclared) client
+channels credits nothing yet: signing a payout claim needs a domain, and only a declared channel's
+config carries one.

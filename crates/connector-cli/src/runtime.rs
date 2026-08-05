@@ -14,7 +14,7 @@ use axum::Router;
 
 use connector_client_edge::{
     ChannelLivenessPolicy, ChannelLookupFailed, ClientChannelRegistry, ClientChannelSource,
-    ClientClaimGate, DepositFloor, EvmChannel, PeerCarriages, SolanaChannel,
+    ClientClaimGate, ClientPayoutLedger, DepositFloor, EvmChannel, PeerCarriages, SolanaChannel,
     UnresolvableLookupBudgetPolicy,
 };
 use connector_config::{
@@ -940,8 +940,15 @@ fn client_channels(
 /// channel from the chain and journals its watermark like any other, so
 /// the unaffiliated buyer's claims are exactly as replay-proof across a
 /// restart as a declared buyer's are.
+///
+/// Bound to [`client_payout_ledger`] (issue #770) before it is returned:
+/// without this, a node's own outbound crediting is netted against nothing
+/// (`ClientClaimGate::credited_evm`'s pre-#770 default), which is exactly
+/// the production gap issue #770 closes -- the gate and the ledger it nets
+/// against must never be assembled separately again.
 fn client_claim_gate(
     config: &Config,
+    signer: Arc<dyn Signer>,
     evm_source: Option<Arc<dyn ClientChannelSource>>,
     solana_source: Option<Arc<dyn ClientChannelSource>>,
 ) -> Result<ClientClaimGate, RuntimeError> {
@@ -955,8 +962,46 @@ fn client_claim_gate(
             PathBuf::from(CLIENT_EDGE_JOURNAL),
         ),
     };
-    ClientClaimGate::restore(client_channels(config, evm_source, solana_source), journal)
-        .map_err(|source| RuntimeError::JournalUnreplayable { path, source })
+    let gate =
+        ClientClaimGate::restore(client_channels(config, evm_source, solana_source), journal)
+            .map_err(|source| RuntimeError::JournalUnreplayable { path, source })?;
+    Ok(gate.with_payout_ledger(client_payout_ledger(config, signer)))
+}
+
+/// This connector's own outbound claim ledger for the client edge (issue
+/// #770): every EVM `[[client_channels]]` entry, registered under the same
+/// signer that already signs this connector's identity and its peer-wire
+/// outbound claims (`Connector::with_identity_signer`) -- one signing key
+/// for everything this connector owes, not a second one minted for this
+/// edge alone. A session earning against an undeclared (chain-resolved)
+/// channel is not covered here: crediting one requires knowing which
+/// domain to sign under, and only a declared `[[client_channels]]` entry
+/// carries that -- the same reason `client_channels` above resolves an
+/// *inbound* claim's channel from the chain but a payout ledger cannot
+/// mirror it for the outbound direction.
+///
+/// Solana channels are skipped: [`ClientPayoutLedger`] wraps
+/// `connector_runtime::ClaimBook`, which only ever signs an EVM balance
+/// proof (issue #742's own scope note) -- a Solana client channel nets
+/// nothing yet, matching `ClientClaimGate::credited`'s existing "Solana
+/// channel nets 0" rule.
+fn client_payout_ledger(config: &Config, signer: Arc<dyn Signer>) -> Arc<ClientPayoutLedger> {
+    let mut ledger = ClientPayoutLedger::new();
+    ledger.set_signer(signer);
+    for channel in config.client_channels() {
+        if let ClientChannelConfig::Evm(evm) = channel {
+            ledger
+                .set_channel_domain(
+                    evm.channel_id(),
+                    ChannelDomain {
+                        chain_id: evm.chain_id(),
+                        token_network_address: evm.token_network_address(),
+                    },
+                )
+                .expect("config load already validated every channel_id as a 32-byte identifier");
+        }
+    }
+    Arc::new(ledger)
 }
 
 /// Merge the client edge and (if `[operator]` is configured) the operator
@@ -977,6 +1022,7 @@ pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError
         None,
         client_claim_gate(
             config,
+            signer.clone(),
             runtime.client_channel_source_evm.clone(),
             runtime.client_channel_source_solana.clone(),
         )?,
@@ -1020,6 +1066,14 @@ mod tests {
         let mut config_file = tempfile::NamedTempFile::new().expect("temp config file");
         write!(config_file, "{text}").expect("write config file");
         Config::load(config_file.path()).expect("load config")
+    }
+
+    /// A throwaway signer for a [`client_claim_gate`] call whose test is
+    /// about channel resolution or journal behaviour, never about payout
+    /// signing (issue #770 gave the function a signer parameter it did not
+    /// have before).
+    fn test_signer() -> Arc<dyn Signer> {
+        Arc::new(LocalSigner::generate("connector-cli-runtime-test"))
     }
 
     /// Load a minimal config with `extra` spliced in at the top level, and
@@ -1627,7 +1681,8 @@ key_file = "{key_path}"
             )
         });
 
-        client_claim_gate(&config, None, None).expect("a writable state_dir produces a gate");
+        client_claim_gate(&config, test_signer(), None, None)
+            .expect("a writable state_dir produces a gate");
         assert!(
             state_dir.path().join(CLIENT_EDGE_JOURNAL).exists(),
             "the journal file is created at startup, not lazily at the first claim"
@@ -1658,7 +1713,7 @@ key_file = "{key_path}"
             )
         });
 
-        let Err(error) = client_claim_gate(&config, None, None) else {
+        let Err(error) = client_claim_gate(&config, test_signer(), None, None) else {
             panic!("an unusable state_dir must not produce a gate");
         };
         assert!(matches!(error, RuntimeError::StateDirUnusable { .. }));
@@ -1694,7 +1749,7 @@ key_file = "{key_path}"
             )
         });
 
-        let Err(error) = client_claim_gate(&config, None, None) else {
+        let Err(error) = client_claim_gate(&config, test_signer(), None, None) else {
             panic!("a corrupt journal must not produce a gate");
         };
         assert!(matches!(error, RuntimeError::JournalUnreplayable { .. }));
@@ -2648,6 +2703,7 @@ key_file = "{key_path}"
 
             let gate = client_claim_gate(
                 &config,
+                test_signer(),
                 None,
                 Some(Arc::new(SolanaChannelSource {
                     backend: Arc::new(node_backend),
@@ -2680,6 +2736,7 @@ key_file = "{key_path}"
             .expect("connect under the opener's identity, bound to the channel's own mint");
             let gate = client_claim_gate(
                 &config,
+                test_signer(),
                 None,
                 Some(Arc::new(SolanaChannelSource {
                     backend: Arc::new(matching_backend),
@@ -2796,6 +2853,7 @@ key_file = "{key_path}"
             ));
             let gate = client_claim_gate(
                 &config,
+                test_signer(),
                 Some(Arc::new(SettlementChannelSource {
                     backend: backend.clone(),
                 })),
@@ -2960,6 +3018,7 @@ key_file = "{key_path}"
             ));
             let gate = client_claim_gate(
                 &config,
+                test_signer(),
                 None,
                 Some(Arc::new(SolanaChannelSource {
                     backend: Arc::new(node_backend),

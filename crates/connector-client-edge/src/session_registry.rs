@@ -227,12 +227,7 @@ impl SessionRegistry {
         ilp_packet: &[u8],
         now: u64,
     ) -> Result<BtpFrame, Reject> {
-        let Some(lease) = self.resolve(address, now) else {
-            return Err(no_live_session_reject(address));
-        };
-        if expected_generation.is_some_and(|expected| expected != lease.generation) {
-            return Err(no_live_session_reject(address));
-        }
+        let lease = self.fenced_lease(address, expected_generation, now)?;
         lease
             .handle
             .send_message(protocol_data, ilp_packet)
@@ -242,6 +237,51 @@ impl SessionRegistry {
                     no_live_session_reject(address)
                 }
             })
+    }
+
+    /// As [`Self::deliver`], but originating a TRANSFER rather than a
+    /// MESSAGE (issue #770): how a payout claim reaches the client session
+    /// it is owed to (client-edge-spec.md §1.9 step 7). Same fencing, same
+    /// T-class-never-R00 answer on every failure path -- a session gone by
+    /// the time a payout would go out is not a reason to undo the credit
+    /// already recorded, only to fail this delivery attempt; the claim
+    /// stays pending for the next one.
+    pub(crate) async fn deliver_transfer(
+        &self,
+        address: &str,
+        expected_generation: Option<u64>,
+        amount: u64,
+        protocol_data: &[ProtocolData],
+        now: u64,
+    ) -> Result<BtpFrame, Reject> {
+        let lease = self.fenced_lease(address, expected_generation, now)?;
+        lease
+            .handle
+            .send_transfer(amount, protocol_data)
+            .await
+            .map_err(|error| match error {
+                OriginateError::SessionGone | OriginateError::Timeout => {
+                    no_live_session_reject(address)
+                }
+            })
+    }
+
+    /// The live, fencing-checked session for `address` -- [`Self::resolve`]
+    /// plus the same `expected_generation` check both [`Self::deliver`] and
+    /// [`Self::deliver_transfer`] apply before originating anything.
+    fn fenced_lease(
+        &self,
+        address: &str,
+        expected_generation: Option<u64>,
+        now: u64,
+    ) -> Result<SessionLease, Reject> {
+        let Some(lease) = self.resolve(address, now) else {
+            return Err(no_live_session_reject(address));
+        };
+        if expected_generation.is_some_and(|expected| expected != lease.generation) {
+            return Err(no_live_session_reject(address));
+        }
+        Ok(lease)
     }
 }
 
@@ -521,5 +561,82 @@ mod tests {
             .await;
         assert!(result.is_ok(), "the current generation is never fenced off");
         peer.await.expect("the peer task");
+    }
+
+    // ─── issue #770: deliver_transfer, deliver's payout-carrying sibling ───
+
+    #[tokio::test]
+    async fn deliver_transfer_to_an_unbound_address_fails_fast_with_a_t_class_reject() {
+        let registry = SessionRegistry::new();
+        let reject = registry
+            .deliver_transfer("g.proxy.agents.nobody", None, 500, &[], 0)
+            .await
+            .expect_err("no session exists to deliver a payout through");
+        assert_eq!(reject.code.as_str(), "T01");
+    }
+
+    #[tokio::test]
+    async fn deliver_transfer_through_a_dead_session_answers_a_t_class_reject() {
+        let registry = SessionRegistry::new();
+        registry.bind("g.proxy.agents.one", dead_handle(), 0);
+
+        let reject = registry
+            .deliver_transfer("g.proxy.agents.one", None, 500, &[], 0)
+            .await
+            .expect_err("the session's send half is gone");
+        assert_eq!(reject.code.as_str(), "T01");
+    }
+
+    #[tokio::test]
+    async fn deliver_transfer_succeeds_through_the_live_session_as_a_real_transfer_frame() {
+        use connector_btp::BTP_TRANSFER;
+
+        let registry = SessionRegistry::new();
+        let (handle, mut reply_rx, outbound) = test_handle();
+        registry.bind("g.proxy.agents.one", handle, 0);
+
+        let peer = tokio::spawn(async move {
+            let sent = reply_rx.recv().await.expect("the TRANSFER was written");
+            let decoded = decode_frame(&sent).expect("the connector's own encoder");
+            assert_eq!(decoded.frame_type, BTP_TRANSFER);
+            assert_eq!(decoded.amount, Some(500));
+            outbound.resolve(BtpFrame {
+                frame_type: 1, // BTP_RESPONSE
+                request_id: decoded.request_id,
+                amount: None,
+                protocol_data: Vec::new(),
+                ilp_packet: Vec::new(),
+            });
+        });
+
+        let answer = registry
+            .deliver_transfer("g.proxy.agents.one", None, 500, &[], 0)
+            .await
+            .expect("the session is live");
+        assert!(answer.ilp_packet.is_empty());
+        peer.await.expect("the peer task");
+    }
+
+    /// The same fencing law [`a_stale_generation_delivery_is_discarded_once_a_newer_session_is_bound`]
+    /// proves for `deliver`, applied to `deliver_transfer`: a payout must
+    /// never be discovered under way and then raced by a reconnect into
+    /// the wrong socket.
+    #[tokio::test]
+    async fn a_stale_generation_transfer_is_discarded_once_a_newer_session_is_bound() {
+        let registry = SessionRegistry::new();
+        let (handle_a, mut rx_a, _outbound_a) = test_handle();
+        let gen_a = registry.bind("g.proxy.agents.one", handle_a, 0);
+
+        let (handle_b, mut rx_b, _outbound_b) = test_handle();
+        let gen_b = registry.bind("g.proxy.agents.one", handle_b, 0);
+        assert!(gen_b > gen_a);
+
+        let reject = registry
+            .deliver_transfer("g.proxy.agents.one", Some(gen_a), 500, &[], 0)
+            .await
+            .expect_err("a caller holding the old generation must be fenced off");
+        assert_eq!(reject.code.as_str(), "T01");
+        assert!(rx_a.try_recv().is_err());
+        assert!(rx_b.try_recv().is_err());
     }
 }

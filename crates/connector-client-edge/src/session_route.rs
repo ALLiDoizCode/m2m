@@ -38,6 +38,7 @@ use connector_domain::{
     fulfillment_matches_condition, Fulfill, PacketResponse, Prepare, Reject, RejectCode,
 };
 
+use crate::btp::payout_claim_protocol_data;
 use crate::ClientEdgeState;
 
 /// Route `prepare` through `state`: a configured route (app/peer/leased)
@@ -47,6 +48,14 @@ use crate::ClientEdgeState;
 /// from `Connector::app_route` before admitting any claim; it is only
 /// consulted here to price a mismatched fulfilment the same way a
 /// terminated app route's own would be (issue #736's charging AC).
+///
+/// **Issue #770.** A genuine fulfilment from a client session means that
+/// client has just earned `prepare`'s own amount: this connector credits
+/// its payout ledger and hands it a fresh signed claim over the same
+/// session, so `credited` (and therefore `available`, `client-edge-spec.md`
+/// §1.10) actually rises instead of staying a figure only a unit test ever
+/// produces. See [`credit_session_earnings`] for both steps and why each is
+/// best-effort past the point the packet's own answer is already decided.
 pub(crate) async fn route_prepare(
     state: &ClientEdgeState,
     prepare: Prepare,
@@ -62,6 +71,7 @@ pub(crate) async fn route_prepare(
 
     let destination = prepare.destination.clone();
     let condition = prepare.execution_condition;
+    let amount = prepare.amount;
     let encoded = prepare.encode();
     let response = state.connector.handle_prepare(prepare, 0).await;
     if !is_unreachable(&response) {
@@ -70,14 +80,75 @@ pub(crate) async fn route_prepare(
         return response;
     }
 
-    match state
+    let response = match state
         .session_registry
         .deliver(&destination, Some(lease.generation), &[], &encoded, now)
         .await
     {
         Ok(frame) => session_answer(frame, &condition, price),
-        Err(reject) => PacketResponse::Reject(reject),
+        Err(reject) => return PacketResponse::Reject(reject),
+    };
+
+    if matches!(response, PacketResponse::Fulfill(_)) {
+        credit_session_earnings(
+            state,
+            &destination,
+            lease.generation,
+            &condition,
+            amount,
+            now,
+        )
+        .await;
     }
+
+    response
+}
+
+/// Issue #770's wiring point: `destination` (the address `prepare` was
+/// just genuinely fulfilled at) is a client session's own bound address,
+/// which -- per `outbound_ledger.rs`'s own module doc, "a client-edge
+/// channel has no separate peer identity" -- is also that channel's id.
+/// No separate lookup exists or is needed: the same string that routed
+/// this delivery names the channel to credit.
+///
+/// Both steps are best-effort once reached, and neither holds up
+/// `route_prepare`'s own answer (already decided by the time this runs):
+///
+/// 1. [`crate::outbound_ledger::ClientPayoutLedger::record_payout_once`]
+///    credits `amount`, deduped against `condition` (AC3) so a duplicate or
+///    retransmitted fulfilment of the same job cannot double-credit. A node
+///    with no payout ledger configured (`ClientClaimGate::payout_ledger`
+///    returns `None`) does nothing here -- exactly its pre-#770 behaviour.
+/// 2. The freshly signed claim is delivered as a payout TRANSFER over the
+///    same session, fenced against the generation this delivery already
+///    used. A session that has died in the meantime loses only this
+///    delivery attempt, never the credit: `pending_claim` carries it
+///    forward to whatever next reaches this channel.
+async fn credit_session_earnings(
+    state: &ClientEdgeState,
+    destination: &str,
+    generation: u64,
+    condition: &[u8; 32],
+    amount: u64,
+    now: u64,
+) {
+    let Some(ledger) = state.claim_gate.payout_ledger() else {
+        return;
+    };
+    let Some(claim) = ledger.record_payout_once(destination, condition, amount, chrono::Utc::now())
+    else {
+        return;
+    };
+    let _ = state
+        .session_registry
+        .deliver_transfer(
+            destination,
+            Some(generation),
+            amount,
+            &[payout_claim_protocol_data(&claim)],
+            now,
+        )
+        .await;
 }
 
 fn is_unreachable(response: &PacketResponse) -> bool {
@@ -143,17 +214,23 @@ fn undecodable_session_answer() -> Reject {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
-    use connector_btp::{decode_frame, BtpSessionHandle, OutboundRequests, BTP_RESPONSE};
+    use connector_btp::{
+        decode_frame, BtpSessionHandle, OutboundRequests, BTP_RESPONSE, BTP_TRANSFER,
+        PAYOUT_CLAIM_PROTOCOL,
+    };
     use connector_config::StaticRoute;
     use connector_domain::derive_condition;
     use connector_runtime::{
-        Connector, FakeAppClient, InMemoryJournal, InProcessPeerTransport, TestClock,
+        ChannelDomain, Connector, FakeAppClient, InMemoryJournal, InProcessPeerTransport, TestClock,
     };
-    use connector_signer::{LocalSigner, Signer};
+    use connector_signer::{
+        derive_evm_address, verify_evm_balance_proof, EvmBalanceProof, LocalSigner, Signer,
+    };
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
     use crate::claim_gate::ClientClaimGate;
+    use crate::outbound_ledger::ClientPayoutLedger;
     use crate::session_registry::SessionRegistry;
 
     const FULFILLMENT: [u8; 32] = [7u8; 32];
@@ -169,14 +246,28 @@ mod tests {
     }
 
     fn test_state(connector: Arc<Connector>, session_registry: SessionRegistry) -> ClientEdgeState {
+        test_state_with_gate(
+            connector,
+            session_registry,
+            ClientClaimGate::restore(Default::default(), Arc::new(InMemoryJournal::new()))
+                .expect("a fresh in-memory journal has nothing to replay"),
+        )
+    }
+
+    /// As [`test_state`], but with a caller-supplied [`ClientClaimGate`] --
+    /// issue #770's own tests need one carrying a real
+    /// [`crate::outbound_ledger::ClientPayoutLedger`], which [`test_state`]
+    /// deliberately never configures (every pre-#770 session-routing test
+    /// relies on that).
+    fn test_state_with_gate(
+        connector: Arc<Connector>,
+        session_registry: SessionRegistry,
+        claim_gate: ClientClaimGate,
+    ) -> ClientEdgeState {
         ClientEdgeState {
             connector,
             signer: test_signer(),
-            claim_gate: ClientClaimGate::restore(
-                Default::default(),
-                Arc::new(InMemoryJournal::new()),
-            )
-            .expect("a fresh in-memory journal has nothing to replay"),
+            claim_gate,
             wrap_receiver_secret: None,
             settlement_terms: None,
             settlements: Vec::new(),
@@ -455,6 +546,204 @@ mod tests {
         assert!(
             old_rx.try_recv().is_err(),
             "the superseded session never receives a delivery meant for the newer one"
+        );
+    }
+
+    // ─── issue #770: a fulfilled session delivery credits and pays out ───
+
+    /// The production wiring this issue adds: a real
+    /// [`crate::outbound_ledger::ClientPayoutLedger`], attached to the gate
+    /// through the exact same `with_payout_ledger` seam a real node's
+    /// startup uses, is credited by [`route_prepare`] itself -- not by a
+    /// test calling `record_payout` directly, per the issue's own AC4 ("a
+    /// test that fails if the production call site is deleted"). The
+    /// payout claim that follows is verified end to end: decoded off the
+    /// wire, parsed back to JSON, and checked against the connector's own
+    /// signing key, the same round trip `btp.rs`'s own payout test runs.
+    #[tokio::test]
+    async fn a_fulfilled_session_delivery_credits_the_payout_ledger_and_sends_a_signed_claim() {
+        let channel_id = format!("0x{:064x}", 9);
+        let payout_signer = Arc::new(LocalSigner::generate("payout-key"));
+        let connector_address = derive_evm_address(&payout_signer.public_key().unwrap());
+        let domain = ChannelDomain {
+            chain_id: 84_532,
+            token_network_address: [0x44; 20],
+        };
+        let mut ledger = ClientPayoutLedger::new();
+        ledger.set_signer(payout_signer);
+        ledger
+            .set_channel_domain(channel_id.clone(), domain)
+            .expect("valid channel id");
+        let ledger = Arc::new(ledger);
+
+        let gate = ClientClaimGate::restore(Default::default(), Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay")
+            .with_payout_ledger(Arc::clone(&ledger));
+
+        let registry = SessionRegistry::new();
+        let (handle, mut reply_rx, outbound) = test_handle();
+        registry.bind(channel_id.clone(), handle, crate::now_unix());
+        let state = test_state_with_gate(empty_connector(), registry, gate);
+
+        let condition = derive_condition(&FULFILLMENT);
+        let prepare = Prepare {
+            amount: 42_000,
+            ..sample_prepare(&channel_id, condition)
+        };
+
+        let expected_channel_id = channel_id.clone();
+        let peer = tokio::spawn(async move {
+            answer_next_message(
+                &mut reply_rx,
+                &outbound,
+                Fulfill {
+                    fulfillment: FULFILLMENT,
+                    data: Vec::new(),
+                }
+                .encode(),
+            )
+            .await;
+
+            let sent = reply_rx
+                .recv()
+                .await
+                .expect("the payout TRANSFER was written");
+            let decoded = decode_frame(&sent).expect("the connector's own encoder");
+            assert_eq!(decoded.frame_type, BTP_TRANSFER);
+            assert_eq!(decoded.amount, Some(42_000));
+
+            let pd = decoded
+                .protocol_data
+                .iter()
+                .find(|pd| pd.name == PAYOUT_CLAIM_PROTOCOL)
+                .expect("the payout claim rode the TRANSFER");
+            let json: serde_json::Value = serde_json::from_slice(&pd.data).expect("valid JSON");
+            assert_eq!(json["channelId"], expected_channel_id);
+            assert_eq!(json["cumulativeAmount"], 42_000);
+            let signature_hex = json["signature"].as_str().unwrap();
+            let signature_bytes = hex::decode(signature_hex.strip_prefix("0x").unwrap()).unwrap();
+
+            let mut on_chain_id = [0u8; 32];
+            on_chain_id[31] = 9;
+            let proof = EvmBalanceProof {
+                channel_id: on_chain_id,
+                nonce: json["nonce"].as_u64().unwrap(),
+                transferred_amount: u128::from(json["cumulativeAmount"].as_u64().unwrap()),
+                locked_amount: 0,
+                locks_root: [0u8; 32],
+                chain_id: domain.chain_id,
+                token_network_address: domain.token_network_address,
+            };
+            assert!(verify_evm_balance_proof(
+                &proof,
+                &signature_bytes,
+                &connector_address
+            ));
+
+            outbound.resolve(BtpFrame {
+                frame_type: BTP_RESPONSE,
+                request_id: decoded.request_id,
+                amount: None,
+                protocol_data: Vec::new(),
+                ilp_packet: Vec::new(),
+            });
+        });
+
+        let response = route_prepare(&state, prepare, 0).await;
+        peer.await.expect("the peer task");
+
+        assert!(
+            matches!(response, PacketResponse::Fulfill(fulfill) if fulfill.fulfillment == FULFILLMENT),
+            "the original packet still answers fulfilled -- crediting rides alongside it, never blocking it"
+        );
+        assert_eq!(
+            ledger.credited(&channel_id),
+            42_000,
+            "the earning session's own channel is credited exactly the delivered amount"
+        );
+    }
+
+    /// Issue #770's AC3, exercised at the real call site: a job delivered
+    /// twice to the same live session (the shape a sender's own retry
+    /// takes -- the same execution condition, and therefore the same
+    /// fulfilment, both times) must raise `credited` once, not twice, even
+    /// though the session answers both deliveries as genuine fulfilments.
+    #[tokio::test]
+    async fn a_retried_delivery_of_the_same_job_does_not_credit_twice() {
+        let channel_id = format!("0x{:064x}", 11);
+        let payout_signer = Arc::new(LocalSigner::generate("payout-key"));
+        let domain = ChannelDomain {
+            chain_id: 84_532,
+            token_network_address: [0x55; 20],
+        };
+        let mut ledger = ClientPayoutLedger::new();
+        ledger.set_signer(payout_signer);
+        ledger
+            .set_channel_domain(channel_id.clone(), domain)
+            .expect("valid channel id");
+        let ledger = Arc::new(ledger);
+
+        let gate = ClientClaimGate::restore(Default::default(), Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay")
+            .with_payout_ledger(Arc::clone(&ledger));
+
+        let registry = SessionRegistry::new();
+        let (handle, mut reply_rx, outbound) = test_handle();
+        registry.bind(channel_id.clone(), handle, crate::now_unix());
+        let state = test_state_with_gate(empty_connector(), registry, gate);
+
+        let condition = derive_condition(&FULFILLMENT);
+
+        // The session answers whatever it is sent -- a MESSAGE with a
+        // genuine FULFILL, a TRANSFER with an empty ack -- exactly as a
+        // real client's BTP session would for a job it has already done
+        // once and is now being asked about again.
+        let peer = tokio::spawn(async move {
+            for _ in 0..3 {
+                let sent = reply_rx.recv().await.expect("a frame was written");
+                let decoded = decode_frame(&sent).expect("the connector's own encoder");
+                let ilp_packet = if decoded.frame_type == BTP_TRANSFER {
+                    Vec::new()
+                } else {
+                    Fulfill {
+                        fulfillment: FULFILLMENT,
+                        data: Vec::new(),
+                    }
+                    .encode()
+                };
+                outbound.resolve(BtpFrame {
+                    frame_type: BTP_RESPONSE,
+                    request_id: decoded.request_id,
+                    amount: None,
+                    protocol_data: Vec::new(),
+                    ilp_packet,
+                });
+            }
+        });
+
+        let first = Prepare {
+            amount: 5_000,
+            ..sample_prepare(&channel_id, condition)
+        };
+        let response_first = route_prepare(&state, first, 0).await;
+
+        let retry = Prepare {
+            amount: 5_000,
+            ..sample_prepare(&channel_id, condition)
+        };
+        let response_retry = route_prepare(&state, retry, 0).await;
+
+        peer.await.expect("the peer task");
+
+        assert!(matches!(response_first, PacketResponse::Fulfill(_)));
+        assert!(
+            matches!(response_retry, PacketResponse::Fulfill(_)),
+            "the session itself still answers a retried job normally -- only crediting is deduped"
+        );
+        assert_eq!(
+            ledger.credited(&channel_id),
+            5_000,
+            "a retried delivery of the same job must not raise credited a second time"
         );
     }
 }
