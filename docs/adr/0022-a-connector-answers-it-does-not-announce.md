@@ -39,6 +39,7 @@ been sharing one word.
   > An **operator** may, by running `connector announce` on the node itself: the controller
   > deciding, once, with the identity key never leaving the box and the write paid for like any
   > other. ADR 0030 does not weaken this rule about the process; it names who the verb belongs to.
+
 - **Answering** is telling whoever asks what your own configuration already says. It decides
   nothing, and reaches nobody who did not ask. `GET /identity` on the operator surface is already
   this, for a different audience.
