@@ -246,8 +246,18 @@ selfAnnounce:
   refreshIntervalSecs: 300
   # Public-facing endpoints for the STORE box (TLS terminated by the env, so the
   # connector can't infer them).
-  btpEndpoint: wss://proxy.store.devnet.toonprotocol.dev/ilp/btp
-  httpEndpoint: https://proxy.store.devnet.toonprotocol.dev/ilp
+  # `proxy.ario`, not `proxy.store` — the box's paid edge was renamed on
+  # 2026-08-05 (#774) and the old name is a deprecated alias slated for removal.
+  #
+  # This block is the ONLY thing that ever published this box's kind:10032. The
+  # TypeScript connector that ran it (`linode-store-connector-1`) exited at
+  # 2026-08-04T19:24:29Z in the Rust cutover and the Rust connector has no
+  # self-announce feature, so the box has had NO announce publisher since. Its
+  # final announce — still in relay storage, NIP-40-expired since
+  # 2026-08-04T19:31Z — advertises the old name. These values are corrected so
+  # that resurrecting this config cannot resurrect the retired hostname.
+  btpEndpoint: wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp
+  httpEndpoint: https://proxy.ario.devnet.toonprotocol.dev/ilp
   relayUrl: wss://relay-ws.devnet.toonprotocol.dev
   assetCode: USDC
   assetScale: 6

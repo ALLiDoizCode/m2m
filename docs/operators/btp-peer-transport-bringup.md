@@ -22,6 +22,14 @@ Operator runbook for
 
 ## What is actually deployed today
 
+> **Superseded 2026-08-04/05 — this section is now history.** The bring-up succeeded and the Rust
+> cutover followed. Both boxes now run **only** the Rust connector at `/` (the TypeScript container
+> on the store box exited at 2026-08-04T19:24:29Z), the peering is live between them, and the store
+> box's edge was renamed `proxy.store.devnet` → `proxy.ario.devnet` (#774) to match the
+> `g.toon.ario` prefix it serves. `proxy.store` survives only as a deprecated alias — same
+> certificate, same upstream — and is slated for removal, so read every `proxy.store` URL below as
+> the name that host had at the time. The live shape is `infra/linode-node/connector-rust.toml`.
+
 Verify before touching anything — both boxes run hand-tuned **bind-mounted** configs that lead the
 repo copies.
 

@@ -72,7 +72,9 @@ services:
       # fee path is g.toon.relay.ario (separate). Settlement addrs are the store
       # connector's distinct identity (STORE_TOON_MNEMONIC acct 0).
       RELAY_PUBLISH_DEST: g.toon.relay
-      PUBLIC_BTP_ENDPOINT: wss://proxy.store.devnet.toonprotocol.dev:443
+      # `proxy.ario`, not `proxy.store` — this box's paid edge was renamed on
+      # 2026-08-05 (#774); the old name is a deprecated alias slated for removal.
+      PUBLIC_BTP_ENDPOINT: wss://proxy.ario.devnet.toonprotocol.dev:443
       SETTLE_EVM: '0x6B6c2DACf7Ac1F1273F72beF2E6084F9Ee6D3bff'
       SETTLE_SOL: 'W6yK72j365eK7t4Qj5An1AaYtUEJcJK7TBPvGeDk1LV'
       SETTLE_MINA: 'B62qkWSoKW4ewE2Wn7ibgtXz6TV72L22YVGoz2bL5x3yu4FsUipdQG8'

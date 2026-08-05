@@ -69,7 +69,11 @@ chainProviders:
 # can FORWARD store-bound writes (the apex earns the configured hop fee).
 peers:
   - id: store-box
-    url: wss://proxy.store.devnet.toonprotocol.dev:443
+    # `proxy.ario`, not `proxy.store` — the store box's paid edge was renamed on
+    # 2026-08-05 to match the `g.toon.ario` prefix it serves (#774). `proxy.store`
+    # is a deprecated alias on the same certificate and the same upstream; it is
+    # slated for removal, so nothing may be left dialing it.
+    url: wss://proxy.ario.devnet.toonprotocol.dev:443
     relation: peer
     authToken: ''
     # solana:devnet, NOT evm — the live apex has settled this leg on Solana
