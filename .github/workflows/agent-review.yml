@@ -266,4 +266,9 @@ jobs:
             .sandcastle/logs/
             .sandcastle/worktrees/*/.sandcastle/logs/
           if-no-files-found: warn
+          # Dot-dirs count as hidden for wildcard matches and upload-artifact
+          # v4.4+ default-excludes hidden files: without this the .sandcastle
+          # segment inside the worktrees glob is dropped and the handoff note
+          # never lands in the artifact (proven on the #278 mechanism run).
+          include-hidden-files: true
           retention-days: 14
