@@ -348,17 +348,22 @@ pub struct ClientClaimGate {
     /// #700.
     payout_ledger: Option<Arc<ClientPayoutLedger>>,
     /// A client session's bound ILP address -> the EVM channel id this
-    /// gate has seen it genuinely sign a claim for (issue #787). A BTP
-    /// session is keyed by ILP address (issue #736/toon-client#503), not
-    /// by channel id, so nothing previously joined "which session earned
-    /// this fulfilment" to "which channel to credit" -- this connector
-    /// observed the pair on every accepted inbound claim and discarded it.
-    /// [`Self::record_session_channel`] is the only writer, called once a
-    /// claim has already cleared [`Self::admit`]'s full verification, so
-    /// an entry here is never a session's own unverified say-so. Learning
-    /// is best-effort and non-durable: a restart forgets it, same as
-    /// [`Self::last_claim_seen`], and the very next accepted claim from
-    /// that session teaches it again before any payout depends on it.
+    /// gate has associated it with (issue #787). A BTP session is keyed by
+    /// ILP address (issue #736/toon-client#503), not by channel id, so
+    /// nothing previously joined "which session earned this fulfilment" to
+    /// "which channel to credit". [`Self::record_session_channel`] is the
+    /// only writer, and it has two callers, neither of which is a
+    /// session's own unverified say-so: `crate::btp::record_accepted_claim`
+    /// once a claim has already cleared [`Self::admit`]'s full
+    /// verification (issue #787's original path -- a session that both
+    /// pays and earns), and `crate::btp::verify_and_record_declared_channel`
+    /// once a session's declared channel-control proof at BTP auth has
+    /// verified against [`Self::channels`]'s registered counterparty (issue
+    /// #790 -- a session that only ever earns and so never presents a
+    /// claim of its own). Learning is best-effort and non-durable: a
+    /// restart forgets it, same as [`Self::last_claim_seen`], and the next
+    /// accepted claim or verified proof from that session teaches it again
+    /// before any payout depends on it.
     session_channels: RwLock<HashMap<String, String>>,
 }
 
@@ -484,15 +489,18 @@ impl ClientClaimGate {
     }
 
     /// Learn that `address` -- a client session's own bound ILP address --
-    /// has just presented a genuine, signature-verified claim naming
-    /// `channel_id` (issue #787). The only caller is `crate::btp`'s
-    /// `record_accepted_claim`, itself only reached once [`Self::admit`]
-    /// has fully verified the claim, so this is never a session's own
-    /// unverified say-so. Overwrites any previous association for
-    /// `address` -- this is a best-current-belief cache, not an
-    /// append-only ledger like a watermark, and a session that reconnects
-    /// or a channel that closes and reopens is still just taught its
-    /// current fact the next time it presents a claim.
+    /// speaks for `channel_id` (issue #787). Both callers verify this
+    /// before calling: `crate::btp::record_accepted_claim`, once
+    /// [`Self::admit`] has fully verified a genuine claim naming
+    /// `channel_id`, and `crate::btp::verify_and_record_declared_channel`,
+    /// once a session's own channel-control proof at BTP auth has verified
+    /// against [`Self::channels`]'s registered counterparty (issue #790) --
+    /// so this is never a session's own unverified say-so either way.
+    /// Overwrites any previous association for `address` -- this is a
+    /// best-current-belief cache, not an append-only ledger like a
+    /// watermark, and a session that reconnects or a channel that closes
+    /// and reopens is still just taught its current fact the next time it
+    /// proves or pays.
     pub(crate) fn record_session_channel(&self, address: &str, channel_id: String) {
         self.session_channels
             .write()

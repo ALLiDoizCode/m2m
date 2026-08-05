@@ -50,7 +50,9 @@ use connector_btp::{
 };
 use connector_domain::client_claim::{ClientClaim, EVM_NAMESPACE};
 use connector_domain::{PacketResponse, Prepare, Reject, RejectCode};
+use connector_signer::{verify_evm_claim_state_challenge, EvmClaimStateChallenge};
 
+use crate::channels::decode_hex_bytes;
 use crate::claim_gate::DurabilityTicket;
 use crate::peer::BtpAuthVerdict;
 use crate::{claim_rejection_reject, x402_terms_body, ClaimIngestRejection, ClientEdgeState};
@@ -306,6 +308,108 @@ fn auth_peer_id(auth_data: &[u8]) -> Option<String> {
     }
 }
 
+/// A client's declared claim to control a channel, carried on the same
+/// auth frame as its `peerId` binding (issue #790). This is the BTP twin
+/// of `/ilp/claim-state`'s own per-channel proof (`crate::claim_state`):
+/// reusing that endpoint's identical domain-separated challenge signature
+/// (`connector_signer::EvmClaimStateChallenge`) rather than inventing a
+/// second scheme, and rather than a claim's own balance-proof scheme --
+/// issue #558's own rule against letting one signature scheme stand in for
+/// another applies here too, or a captured claim-state proof and a
+/// captured claim could be replayed as each other. EVM only, matching
+/// [`crate::claim_gate::ClientClaimGate`]'s `session_channels` map's own
+/// reach.
+struct DeclaredChannelProof {
+    channel_id: String,
+    expires: u64,
+    signature: String,
+}
+
+/// Best-effort extraction of an auth frame's declared channel-control
+/// proof, alongside [`auth_peer_id`]'s extraction of the same frame's
+/// `peerId`. `None` for anything that is not JSON, or that omits any one
+/// of the three fields -- there is no partial declaration, since a
+/// signature with no channel to check it against (or vice versa) can never
+/// be verified.
+fn auth_channel_proof(auth_data: &[u8]) -> Option<DeclaredChannelProof> {
+    let json: serde_json::Value = serde_json::from_slice(auth_data).ok()?;
+    Some(DeclaredChannelProof {
+        channel_id: json.get("channelId")?.as_str()?.to_string(),
+        expires: json.get("expires")?.as_u64()?,
+        signature: json.get("signature")?.as_str()?.to_string(),
+    })
+}
+
+/// Verify a BTP session's declared channel-control proof (issue #790)
+/// against [`crate::channels::ClientChannelRegistry`]'s registered
+/// counterparty for the channel it names -- the identical check
+/// `/ilp/claim-state` runs for a read, reused here to teach
+/// [`crate::claim_gate::ClientClaimGate::record_session_channel`] a
+/// channel *before* this session has ever presented a claim. Without this,
+/// an agent that only ever earns -- opens a channel, serves paid work,
+/// sends no claim of its own -- is never creditable at all:
+/// `record_accepted_claim` only learns the association from a genuinely
+/// verified inbound claim, which such an agent never sends.
+///
+/// Best-effort and silent on any failure, same posture as the `peerId`
+/// bind it rides alongside: an expired, malformed, unresolvable or
+/// wrongly-signed proof simply leaves this session's channel association
+/// exactly where it was. `record_accepted_claim`'s own inbound-claim path
+/// is untouched and stays the fallback it always was; a session with
+/// neither a valid proof nor a claim yet is credited nothing, exactly as
+/// issue #787 already decided.
+async fn verify_and_record_declared_channel(
+    state: &ClientEdgeState,
+    address: &str,
+    proof: DeclaredChannelProof,
+) {
+    if proof.expires <= crate::now_unix() {
+        tracing::debug!(
+            address = %address,
+            "a BTP session's declared channel-control proof has already expired -- ignoring it"
+        );
+        return;
+    }
+    let Some(channel_id) = decode_hex_bytes::<32>(&proof.channel_id) else {
+        return;
+    };
+    let Some(signature) = decode_hex_bytes::<65>(&proof.signature) else {
+        return;
+    };
+    let requester = format!("btp-auth-channel-proof:{address}");
+    let Ok(Some(channel)) = state
+        .claim_gate
+        .channels()
+        .evm(&channel_id, &requester)
+        .await
+    else {
+        return;
+    };
+    let challenge = EvmClaimStateChallenge {
+        channel_id,
+        expires: proof.expires,
+        chain_id: channel.chain_id,
+        token_network_address: channel.token_network_address,
+    };
+    if !verify_evm_claim_state_challenge(&challenge, &signature, &channel.counterparty) {
+        tracing::debug!(
+            address = %address,
+            channel_id = %proof.channel_id,
+            "a BTP session's declared channel-control proof did not verify -- ignoring it"
+        );
+        return;
+    }
+    state
+        .claim_gate
+        .record_session_channel(address, format!("0x{}", hex::encode(channel_id)));
+    tracing::info!(
+        address = %address,
+        channel_id = %proof.channel_id,
+        "a BTP session proved control of a channel at auth -- it can now be credited without \
+         presenting a claim of its own first"
+    );
+}
+
 /// A REJECT as a RESPONSE frame: the OER body as the ILP packet, the
 /// running cost total as `toon-accumulated-cost` protocolData (§1.6's
 /// header, carried the only way a frame can), plus whatever `extra`
@@ -445,6 +549,9 @@ async fn handle_frame(
                 state
                     .session_registry
                     .bind(address.clone(), handle, crate::now_unix());
+            if let Some(proof) = auth_channel_proof(&entry.data) {
+                verify_and_record_declared_channel(state, &address, proof).await;
+            }
             *binding = Some((address, generation));
         }
         return reply(replies, encode_response(frame.request_id, &[], &[])).await;
@@ -937,5 +1044,282 @@ mod tests {
             .await
             .expect("the session's channel was just taught by the claim above");
         assert_eq!(payout.channel_id, channel_id);
+    }
+
+    /// A signed `ClaimStateChallenge` over `channel_id`/`expires`, matching
+    /// what `/ilp/claim-state`'s own tests produce for the identical
+    /// signature scheme this auth-time proof reuses (issue #790).
+    fn sign_channel_control_proof(
+        secret: &libsecp256k1::SecretKey,
+        challenge: &EvmClaimStateChallenge,
+    ) -> String {
+        let digest = connector_signer::evm_claim_state_challenge_digest(challenge);
+        let message = libsecp256k1::Message::parse(&digest);
+        let (signature, recovery_id) = libsecp256k1::sign(&message, secret);
+        let mut bytes = signature.serialize().to_vec();
+        let recovery_byte: u8 = recovery_id.into();
+        bytes.push(recovery_byte + 27);
+        format!("0x{}", hex::encode(bytes))
+    }
+
+    /// Builds a [`ClientEdgeState`] over one EVM channel, declared with a
+    /// known counterparty keypair and a payout ledger already bound to its
+    /// domain -- everything [`verify_and_record_declared_channel`] and
+    /// [`crate::claim_gate::ClientClaimGate::credit_session_payout`] need,
+    /// without a chain: a declared (`record_evm`) channel is resolved from
+    /// memory, exactly like a real node's `[[client_channels]]` config
+    /// row.
+    fn state_over_one_declared_channel(
+        channel_id: &str,
+        counterparty: connector_signer::Address,
+        chain_id: u64,
+        token_network_address: [u8; 20],
+    ) -> ClientEdgeState {
+        use crate::channels::{DepositFloor, EvmChannel};
+        use crate::claim_gate::ClientClaimGate;
+        use crate::outbound_ledger::ClientPayoutLedger;
+        use chrono::TimeZone;
+        use connector_runtime::{
+            ChannelDomain, Connector, FakeAppClient, InMemoryJournal, InProcessPeerTransport,
+            TestClock,
+        };
+        use connector_signer::LocalSigner;
+
+        let mut channels = crate::ClientChannelRegistry::new();
+        channels
+            .record_evm(
+                channel_id,
+                EvmChannel {
+                    counterparty,
+                    chain_id,
+                    token_network_address,
+                    deposit_floor: DepositFloor::Unknown,
+                },
+            )
+            .expect("a valid 32-byte channel id");
+
+        let mut ledger = ClientPayoutLedger::new();
+        ledger.set_signer(Arc::new(LocalSigner::generate("payout-key")));
+        ledger
+            .set_channel_domain(
+                channel_id.to_string(),
+                ChannelDomain {
+                    chain_id,
+                    token_network_address,
+                },
+            )
+            .expect("valid channel id");
+
+        let gate = ClientClaimGate::restore(channels, Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay")
+            .with_payout_ledger(Arc::new(ledger));
+
+        let clock = Arc::new(TestClock::new(
+            chrono::Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+        ));
+        let connector = Arc::new(Connector::new(
+            vec![],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            clock,
+        ));
+        ClientEdgeState {
+            connector,
+            signer: Arc::new(LocalSigner::generate("session-signer")),
+            claim_gate: gate,
+            wrap_receiver_secret: None,
+            settlement_terms: None,
+            settlements: Vec::new(),
+            btp_session_window: crate::DEFAULT_BTP_SESSION_WINDOW,
+            session_registry: Arc::new(crate::session_registry::SessionRegistry::new()),
+            peers: None,
+        }
+    }
+
+    /// A MESSAGE frame carrying an `auth` entry with `peerId` and,
+    /// optionally, a channel-control proof's three fields alongside it.
+    fn auth_message_frame(peer_id: &str, channel_proof: Option<serde_json::Value>) -> Vec<u8> {
+        let mut body = serde_json::json!({ "peerId": peer_id, "secret": "" });
+        if let Some(proof) = channel_proof {
+            body.as_object_mut()
+                .unwrap()
+                .extend(proof.as_object().unwrap().clone());
+        }
+        connector_btp::encode_message(
+            1,
+            &[ProtocolData {
+                name: AUTH_PROTOCOL.to_string(),
+                content_type: CONTENT_TYPE_TEXT,
+                data: body.to_string().into_bytes(),
+            }],
+            &[],
+        )
+    }
+
+    /// Drives one frame through [`handle_frame`] with a fresh session's
+    /// worth of plumbing, and returns the resulting `binding`.
+    async fn run_auth_frame(
+        state: &Arc<ClientEdgeState>,
+        frame_bytes: &[u8],
+    ) -> Option<(String, u64)> {
+        let (replies, _reply_rx) = mpsc::channel::<Vec<u8>>(REPLY_QUEUE_DEPTH);
+        let window = Arc::new(Semaphore::new(4));
+        let outbound = Arc::new(OutboundRequests::new());
+        let mut binding = None;
+        handle_frame(
+            frame_bytes,
+            state,
+            &window,
+            &replies,
+            &outbound,
+            &mut binding,
+        )
+        .await
+        .expect("the reply channel has a live receiver");
+        binding
+    }
+
+    /// Issue #790: an agent that only ever earns -- opens a channel, serves
+    /// paid work, sends no claim of its own -- must still be creditable.
+    /// This proves the BTP auth path end to end: a session's auth frame
+    /// carries a channel-control proof (the same domain-separated
+    /// challenge `/ilp/claim-state` verifies for a read, issue #558's rule
+    /// against reusing a claim's own signature scheme applied here too),
+    /// `handle_frame` verifies it against the channel's registered
+    /// counterparty and teaches `session_channels` *before* any claim has
+    /// ever been presented, and a later fulfilment is credited through
+    /// `credit_session_payout` exactly as it would be for a session that
+    /// had paid first (issue #787).
+    #[tokio::test]
+    async fn a_declared_channel_control_proof_at_auth_credits_a_session_that_never_paid() {
+        use libsecp256k1::{PublicKey, SecretKey};
+
+        let secret = SecretKey::parse(&[7u8; 32]).unwrap();
+        let public = PublicKey::from_secret_key(&secret);
+        let counterparty = connector_signer::derive_evm_address(&public.serialize());
+
+        let channel_id_bytes = [5u8; 32];
+        let channel_id = format!("0x{}", hex::encode(channel_id_bytes));
+        let chain_id = 84_532u64;
+        let token_network_address = [0x77u8; 20];
+
+        let state = Arc::new(state_over_one_declared_channel(
+            &channel_id,
+            counterparty,
+            chain_id,
+            token_network_address,
+        ));
+
+        let expires = crate::now_unix() + 3600;
+        let signature = sign_channel_control_proof(
+            &secret,
+            &EvmClaimStateChallenge {
+                channel_id: channel_id_bytes,
+                expires,
+                chain_id,
+                token_network_address,
+            },
+        );
+
+        let frame = auth_message_frame(
+            "g.toon.agent",
+            Some(serde_json::json!({
+                "channelId": channel_id,
+                "expires": expires,
+                "signature": signature,
+            })),
+        );
+        let binding = run_auth_frame(&state, &frame).await;
+        assert_eq!(
+            binding.map(|(address, _)| address),
+            Some("g.toon.agent".to_string())
+        );
+
+        let condition = [9u8; 32];
+        let payout = state
+            .claim_gate
+            .credit_session_payout("g.toon.agent", &condition, 500, chrono::Utc::now())
+            .await
+            .expect("the auth-time proof taught the session's channel with no claim ever sent");
+        assert_eq!(payout.channel_id, channel_id);
+    }
+
+    /// Issue #790's own enforcement half: a session cannot cause payouts to
+    /// be credited to a channel it does not control just by naming it --
+    /// the declared proof must actually verify against that channel's
+    /// registered counterparty. A wrong key's signature is silently
+    /// ignored, leaving the session exactly as uncreditable as it was
+    /// before #787: `credit_session_payout` finds no association.
+    #[tokio::test]
+    async fn a_channel_control_proof_signed_by_the_wrong_key_teaches_nothing() {
+        use libsecp256k1::{PublicKey, SecretKey};
+
+        let secret = SecretKey::parse(&[7u8; 32]).unwrap();
+        let public = PublicKey::from_secret_key(&secret);
+        let counterparty = connector_signer::derive_evm_address(&public.serialize());
+        let forger_secret = SecretKey::parse(&[42u8; 32]).unwrap();
+
+        let channel_id_bytes = [5u8; 32];
+        let channel_id = format!("0x{}", hex::encode(channel_id_bytes));
+        let chain_id = 84_532u64;
+        let token_network_address = [0x77u8; 20];
+
+        let state = Arc::new(state_over_one_declared_channel(
+            &channel_id,
+            counterparty,
+            chain_id,
+            token_network_address,
+        ));
+
+        let expires = crate::now_unix() + 3600;
+        let forged_signature = sign_channel_control_proof(
+            &forger_secret,
+            &EvmClaimStateChallenge {
+                channel_id: channel_id_bytes,
+                expires,
+                chain_id,
+                token_network_address,
+            },
+        );
+
+        let frame = auth_message_frame(
+            "g.toon.agent",
+            Some(serde_json::json!({
+                "channelId": channel_id,
+                "expires": expires,
+                "signature": forged_signature,
+            })),
+        );
+        run_auth_frame(&state, &frame).await;
+
+        let condition = [9u8; 32];
+        let payout = state
+            .claim_gate
+            .credit_session_payout("g.toon.agent", &condition, 500, chrono::Utc::now())
+            .await;
+        assert!(
+            payout.is_none(),
+            "a proof signed by the wrong key must not teach the session a channel"
+        );
+    }
+
+    /// [`auth_channel_proof`] requires all three fields; a partial
+    /// declaration -- missing a signature to check, or a channel to check
+    /// it against -- is not a declaration at all, per that function's own
+    /// doc.
+    #[test]
+    fn auth_channel_proof_requires_all_three_fields() {
+        assert!(auth_channel_proof(br#"{"peerId":"g.toon.agent"}"#).is_none());
+        assert!(auth_channel_proof(br#"{"channelId":"0xab","expires":1}"#).is_none());
+        assert!(auth_channel_proof(b"not json").is_none());
+
+        let proof = auth_channel_proof(
+            br#"{"peerId":"g.toon.agent","channelId":"0xab","expires":1,"signature":"0xcd"}"#,
+        )
+        .expect("all three fields present");
+        assert_eq!(proof.channel_id, "0xab");
+        assert_eq!(proof.expires, 1);
+        assert_eq!(proof.signature, "0xcd");
     }
 }
