@@ -183,3 +183,46 @@ claims, and binds it with `with_payout_ledger` before the gate is returned — t
 every update above noted was still missing. A node with only chain-resolved (undeclared) client
 channels credits nothing yet: signing a payout claim needs a domain, and only a declared channel's
 config carries one.
+
+## Update (issue #779): a stranded payout claim now gets resent
+
+Issue #770's own text already promised the fix: "a session that has died by the time the TRANSFER
+would go out loses only that delivery attempt, not the credit — `pending_claim` carries it to
+whatever next reaches this channel." Nothing carried it anywhere — `ClientPayoutLedger::pending_claim`
+and `::acknowledge` had no caller outside their own unit tests, so a claim stranded by one failed
+delivery stayed stranded forever: `credited` (and the spendable headroom issue #700 nets it into)
+kept the promise, but the client holding no claim to redeem it against never got a second chance.
+
+`session_route.rs` gains `deliver_pending_claim`, the one place that now originates a payout
+TRANSFER: it reads `ClientPayoutLedger::pending_claim` — not necessarily the claim
+`credit_session_earnings`'s own `record_payout_once` call just signed — and only
+`ClientPayoutLedger::acknowledge`s it (clearing `pending_claim`, per `outbound_ledger.rs`'s own
+`credited_survives_acknowledgement_unlike_pending_claim`) once `SessionRegistry::deliver_transfer`
+genuinely succeeds. Because a claim is cumulative (ADR 0024), the claim currently pending always
+already carries forward anything an earlier delivery on the same channel failed to hand off — there
+is no second, older claim to separately retry.
+
+Two production callers reach it, matching the issue's "next successful delivery or session
+re-establishment":
+
+- `credit_session_earnings` calls it unconditionally, whether or not this job's own
+  `record_payout_once` signed a fresh claim. A deduped retry (the same execution condition as an
+  earlier job) signs nothing new but still flushes whatever is pending — the case that
+  distinguishes this from simply delivering the claim `record_payout_once` just returned, and the
+  case `session_route.rs`'s own
+  `a_stranded_payout_claim_is_resent_on_the_next_successful_delivery_even_when_deduped` test is
+  built to fail without.
+- `btp::handle_frame`'s auth branch calls `session_route::resend_pending_claim` (new,
+  `deliver_pending_claim`'s thin wrapper for a caller with no `ClientPayoutLedger` reference of its
+  own) right after `SessionRegistry::bind` installs a session's fresh generation — a reconnect with
+  nothing new to earn still gets a chance to receive a claim an earlier session's death left
+  behind. Spawned (`tokio::spawn`), not awaited: `deliver_transfer` can wait up to
+  `OUTBOUND_ANSWER_TIMEOUT` (30s) for an answer, and the auth ack — and every frame this session
+  reads after it — must not stall behind that. `btp.rs`'s own
+  `a_reconnecting_session_is_resent_its_stranded_payout_claim` test drives the real auth path
+  rather than calling `resend_pending_claim` directly, so it fails if that `tokio::spawn` call
+  site is deleted.
+
+The sweep issue #779 also asked for (test-only-reachable `pub`/`pub(crate)` surfaces in
+`connector-client-edge`, beyond `pending_claim` itself) is reported on the issue rather than here;
+none of what it found shared this ticket's shape closely enough to fix in the same change.

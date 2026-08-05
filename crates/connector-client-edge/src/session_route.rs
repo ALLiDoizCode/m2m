@@ -37,8 +37,10 @@ use connector_btp::BtpFrame;
 use connector_domain::{
     fulfillment_matches_condition, Fulfill, PacketResponse, Prepare, Reject, RejectCode,
 };
+use connector_runtime::ClaimAckOutcome;
 
 use crate::btp::payout_claim_protocol_data;
+use crate::outbound_ledger::ClientPayoutLedger;
 use crate::ClientEdgeState;
 
 /// Route `prepare` through `state`: a configured route (app/peer/leased)
@@ -119,11 +121,19 @@ pub(crate) async fn route_prepare(
 ///    retransmitted fulfilment of the same job cannot double-credit. A node
 ///    with no payout ledger configured (`ClientClaimGate::payout_ledger`
 ///    returns `None`) does nothing here -- exactly its pre-#770 behaviour.
-/// 2. The freshly signed claim is delivered as a payout TRANSFER over the
-///    same session, fenced against the generation this delivery already
-///    used. A session that has died in the meantime loses only this
-///    delivery attempt, never the credit: `pending_claim` carries it
-///    forward to whatever next reaches this channel.
+/// 2. [`deliver_pending_claim`] delivers whatever claim is now pending on
+///    this channel as a payout TRANSFER over the same session, fenced
+///    against the generation this delivery already used. This is
+///    deliberately `pending_claim`, not just the claim `record_payout_once`
+///    may have signed above: since a claim is cumulative, the one currently
+///    pending already carries forward anything an earlier delivery on this
+///    channel failed to hand off (issue #779) -- a job that itself was
+///    deduped (no fresh claim signed) still gets a chance to flush a
+///    previously stranded one. A session that has died in the meantime
+///    loses only this delivery attempt, never the credit: `pending_claim`
+///    stays armed for whatever next reaches this channel, whether that is
+///    the next fulfilled job or a plain reconnect (see
+///    [`resend_pending_claim`]).
 async fn credit_session_earnings(
     state: &ClientEdgeState,
     destination: &str,
@@ -135,20 +145,67 @@ async fn credit_session_earnings(
     let Some(ledger) = state.claim_gate.payout_ledger() else {
         return;
     };
-    let Some(claim) = ledger.record_payout_once(destination, condition, amount, chrono::Utc::now())
-    else {
+    ledger.record_payout_once(destination, condition, amount, chrono::Utc::now());
+    deliver_pending_claim(state, ledger, destination, generation, now).await;
+}
+
+/// Issue #779: resend whatever payout claim is still owed to `destination`
+/// on a client session (re)establishing there -- the other half of
+/// `pending_claim`'s promise, alongside [`credit_session_earnings`]'s own
+/// retry on the next fulfilled job. A session can otherwise go quiet for a
+/// long time on a channel with nothing new to earn, and a claim stranded by
+/// one failed delivery would then sit unpaid until it happened to earn
+/// again. Production caller: `btp::handle_frame`'s auth branch, once
+/// `SessionRegistry::bind` has installed the fresh generation this delivery
+/// fences against.
+///
+/// A no-op with no payout ledger configured, or nothing pending -- the
+/// common case, since [`deliver_pending_claim`] already acknowledges (and
+/// therefore clears) every claim this connector knows it delivered.
+pub(crate) async fn resend_pending_claim(
+    state: &ClientEdgeState,
+    destination: &str,
+    generation: u64,
+    now: u64,
+) {
+    let Some(ledger) = state.claim_gate.payout_ledger() else {
         return;
     };
-    let _ = state
+    deliver_pending_claim(state, ledger, destination, generation, now).await;
+}
+
+/// Deliver `destination`'s current [`ClientPayoutLedger::pending_claim`], if
+/// any, as a payout TRANSFER over its live session, and
+/// [`ClientPayoutLedger::acknowledge`] it -- clearing `pending_claim` while
+/// leaving `credited` untouched (`outbound_ledger.rs`'s own
+/// `credited_survives_acknowledgement_unlike_pending_claim`) -- only once
+/// delivery genuinely succeeds. A delivery that fails (dead session,
+/// timeout, no session at all) leaves the claim pending exactly as it was,
+/// so the next caller -- another fulfilled job or a reconnect -- tries
+/// again with the same cumulative claim.
+async fn deliver_pending_claim(
+    state: &ClientEdgeState,
+    ledger: &ClientPayoutLedger,
+    destination: &str,
+    generation: u64,
+    now: u64,
+) {
+    let Some(claim) = ledger.pending_claim(destination) else {
+        return;
+    };
+    let delivered = state
         .session_registry
         .deliver_transfer(
             destination,
             Some(generation),
-            amount,
+            claim.cumulative_amount,
             &[payout_claim_protocol_data(&claim)],
             now,
         )
         .await;
+    if delivered.is_ok() {
+        ledger.acknowledge(destination, claim.nonce, ClaimAckOutcome::Accepted);
+    }
 }
 
 fn is_unreachable(response: &PacketResponse) -> bool {
@@ -744,6 +801,119 @@ mod tests {
             ledger.credited(&channel_id),
             5_000,
             "a retried delivery of the same job must not raise credited a second time"
+        );
+    }
+
+    // ─── issue #779: a stranded payout claim gets a second chance ───
+
+    /// The production call site this issue adds: `credit_session_earnings`
+    /// now flushes whatever `pending_claim` is currently owed on every
+    /// delivery, not only when this delivery itself signed a fresh one. A
+    /// prior delivery is simulated the way `outbound_ledger.rs`'s own tests
+    /// already model "credited but never acknowledged" -- `record_payout_once`
+    /// called directly, arming `pending_claim` with nothing to clear it --
+    /// standing in for a session that died between crediting and its own
+    /// TRANSFER landing.
+    ///
+    /// This test would pass under the pre-#779 code too if the retry
+    /// signed a fresh claim, since that claim IS what got delivered; it is
+    /// deliberately a *deduped* retry of the exact same job instead, so
+    /// `record_payout_once` signs nothing new and the only way this
+    /// delivery can carry anything is by consulting `pending_claim`
+    /// itself -- the call `deliver_pending_claim` (and therefore this
+    /// test) is built to prove exists.
+    #[tokio::test]
+    async fn a_stranded_payout_claim_is_resent_on_the_next_successful_delivery_even_when_deduped() {
+        let channel_id = format!("0x{:064x}", 33);
+        let payout_signer = Arc::new(LocalSigner::generate("payout-key"));
+        let domain = ChannelDomain {
+            chain_id: 84_532,
+            token_network_address: [0x77; 20],
+        };
+        let mut ledger = ClientPayoutLedger::new();
+        ledger.set_signer(payout_signer);
+        ledger
+            .set_channel_domain(channel_id.clone(), domain)
+            .expect("valid channel id");
+
+        let condition = derive_condition(&FULFILLMENT);
+        // Job 1 already credited this channel through the real production
+        // dedupe path; what never happened is the client seeing the claim
+        // it armed.
+        let stranded = ledger
+            .record_payout_once(
+                &channel_id,
+                &condition,
+                3_000,
+                Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+            )
+            .expect("first delivery of this job");
+        let ledger = Arc::new(ledger);
+
+        let gate = ClientClaimGate::restore(Default::default(), Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay")
+            .with_payout_ledger(Arc::clone(&ledger));
+
+        let registry = SessionRegistry::new();
+        let (handle, mut reply_rx, outbound) = test_handle();
+        registry.bind(channel_id.clone(), handle, crate::now_unix());
+        let state = test_state_with_gate(empty_connector(), registry, gate);
+
+        // Job 2 is a retry of job 1 (same execution condition) delivered
+        // through a live session -- `record_payout_once` dedupes it and
+        // signs no fresh claim, so the only claim this delivery can carry
+        // is the one job 1 left pending.
+        let peer = tokio::spawn(async move {
+            for _ in 0..2 {
+                let sent = reply_rx.recv().await.expect("a frame was written");
+                let decoded = decode_frame(&sent).expect("the connector's own encoder");
+                let ilp_packet = if decoded.frame_type == BTP_TRANSFER {
+                    let pd = decoded
+                        .protocol_data
+                        .iter()
+                        .find(|pd| pd.name == PAYOUT_CLAIM_PROTOCOL)
+                        .expect("the stranded claim rode this TRANSFER");
+                    let json: serde_json::Value =
+                        serde_json::from_slice(&pd.data).expect("valid JSON");
+                    assert_eq!(
+                        json["nonce"], stranded.nonce,
+                        "the same claim job 1 signed, not a new one"
+                    );
+                    assert_eq!(json["cumulativeAmount"], 3_000);
+                    Vec::new()
+                } else {
+                    Fulfill {
+                        fulfillment: FULFILLMENT,
+                        data: Vec::new(),
+                    }
+                    .encode()
+                };
+                outbound.resolve(BtpFrame {
+                    frame_type: BTP_RESPONSE,
+                    request_id: decoded.request_id,
+                    amount: None,
+                    protocol_data: Vec::new(),
+                    ilp_packet,
+                });
+            }
+        });
+
+        let retry = Prepare {
+            amount: 3_000,
+            ..sample_prepare(&channel_id, condition)
+        };
+        let response = route_prepare(&state, retry, 0).await;
+        peer.await.expect("the peer task");
+
+        assert!(matches!(response, PacketResponse::Fulfill(_)));
+        assert_eq!(
+            ledger.credited(&channel_id),
+            3_000,
+            "a deduped retry must not credit a second time"
+        );
+        assert!(
+            ledger.pending_claim(&channel_id).is_none(),
+            "the stranded claim was finally delivered and acknowledged"
         );
     }
 }

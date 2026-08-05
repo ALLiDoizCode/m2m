@@ -423,7 +423,24 @@ async fn handle_frame(
                 state
                     .session_registry
                     .bind(address.clone(), handle, crate::now_unix());
-            *binding = Some((address, generation));
+            *binding = Some((address.clone(), generation));
+            // Issue #779: a claim this connector owes `address` may have
+            // been stranded by an earlier session that died before its own
+            // TRANSFER landed -- resend it now that a session is live here
+            // again. Spawned rather than awaited: `deliver_transfer` can
+            // wait up to `OUTBOUND_ANSWER_TIMEOUT` (30s) for an answer, and
+            // this frame's own auth ack -- and every frame this session
+            // reads after it -- must not stall behind that.
+            let resend_state = Arc::clone(state);
+            tokio::spawn(async move {
+                crate::session_route::resend_pending_claim(
+                    &resend_state,
+                    &address,
+                    generation,
+                    crate::now_unix(),
+                )
+                .await;
+            });
         }
         return reply(replies, encode_response(frame.request_id, &[], &[])).await;
     }
@@ -817,5 +834,145 @@ mod tests {
             .await
             .expect("the peer answered before the timeout");
         peer.await.expect("the peer task");
+    }
+
+    /// Issue #779's other production call site: a session (re)establishing
+    /// -- `handle_frame`'s auth branch, right after
+    /// `SessionRegistry::bind` -- must give a claim stranded by an earlier
+    /// session's death a chance to reach this one, even with no new job in
+    /// sight. Drives the real `handle_frame` auth path rather than calling
+    /// `crate::session_route::resend_pending_claim` directly, so deleting
+    /// the `tokio::spawn` call site this ticket adds fails this test.
+    #[tokio::test]
+    async fn a_reconnecting_session_is_resent_its_stranded_payout_claim() {
+        use crate::claim_gate::ClientClaimGate;
+        use crate::outbound_ledger::ClientPayoutLedger;
+        use crate::session_registry::SessionRegistry;
+        use chrono::{TimeZone, Utc};
+        use connector_runtime::{
+            ChannelDomain, Connector, FakeAppClient, InMemoryJournal, InProcessPeerTransport,
+            TestClock,
+        };
+        use connector_signer::LocalSigner;
+
+        let channel_id = format!("0x{:064x}", 41);
+        let payout_signer = Arc::new(LocalSigner::generate("payout-key"));
+        let domain = ChannelDomain {
+            chain_id: 84_532,
+            token_network_address: [0x88; 20],
+        };
+        let mut ledger = ClientPayoutLedger::new();
+        ledger.set_signer(payout_signer);
+        ledger
+            .set_channel_domain(channel_id.clone(), domain)
+            .expect("valid channel id");
+        // A prior session earned this and died before its own TRANSFER
+        // could land -- `pending_claim` is what carries it forward.
+        let stranded = ledger
+            .record_payout_once(
+                &channel_id,
+                &[3u8; 32],
+                4_000,
+                Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+            )
+            .expect("signer and domain configured");
+        let ledger = Arc::new(ledger);
+
+        let gate = ClientClaimGate::restore(Default::default(), Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay")
+            .with_payout_ledger(Arc::clone(&ledger));
+
+        let connector = Arc::new(Connector::new(
+            vec![],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            Arc::new(TestClock::new(
+                Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+            )),
+        ));
+        let state = Arc::new(ClientEdgeState {
+            connector,
+            signer: Arc::new(LocalSigner::generate("session-signer")),
+            claim_gate: gate,
+            wrap_receiver_secret: None,
+            settlement_terms: None,
+            settlements: Vec::new(),
+            btp_session_window: crate::DEFAULT_BTP_SESSION_WINDOW,
+            session_registry: Arc::new(SessionRegistry::new()),
+            peers: None,
+        });
+
+        let (replies, mut reply_rx) = mpsc::channel::<Vec<u8>>(8);
+        let outbound = Arc::new(OutboundRequests::new());
+        let mut binding: Option<(String, u64)> = None;
+        let window = Arc::new(Semaphore::new(state.btp_session_window.get() as usize));
+
+        let auth_frame = connector_btp::encode_message(
+            7,
+            &[ProtocolData {
+                name: AUTH_PROTOCOL.to_string(),
+                content_type: CONTENT_TYPE_TEXT,
+                data: serde_json::json!({"peerId": channel_id, "secret": ""})
+                    .to_string()
+                    .into_bytes(),
+            }],
+            &[],
+        );
+
+        handle_frame(
+            &auth_frame,
+            &state,
+            &window,
+            &replies,
+            &outbound,
+            &mut binding,
+        )
+        .await
+        .expect("the auth ack was written");
+
+        let ack = reply_rx.recv().await.expect("the auth RESPONSE");
+        let decoded_ack = decode_frame(&ack).expect("the connector's own encoder");
+        assert_eq!(decoded_ack.frame_type, BTP_RESPONSE);
+        assert_eq!(decoded_ack.request_id, 7);
+
+        // The resend runs in a spawned background task so it never stalls
+        // the auth ack above -- wait for the TRANSFER it produces.
+        let sent = tokio::time::timeout(std::time::Duration::from_secs(5), reply_rx.recv())
+            .await
+            .expect("the resend did not hang")
+            .expect("the resent payout TRANSFER was written");
+        let decoded = decode_frame(&sent).expect("the connector's own encoder");
+        assert_eq!(decoded.frame_type, BTP_TRANSFER);
+        assert_eq!(decoded.amount, Some(4_000));
+        let pd = decoded
+            .protocol_data
+            .iter()
+            .find(|pd| pd.name == PAYOUT_CLAIM_PROTOCOL)
+            .expect("the stranded claim rode this TRANSFER");
+        let json: serde_json::Value = serde_json::from_slice(&pd.data).expect("valid JSON");
+        assert_eq!(json["nonce"], stranded.nonce);
+        assert_eq!(json["cumulativeAmount"], 4_000);
+
+        outbound.resolve(BtpFrame {
+            frame_type: BTP_RESPONSE,
+            request_id: decoded.request_id,
+            amount: None,
+            protocol_data: Vec::new(),
+            ilp_packet: Vec::new(),
+        });
+
+        // Give the spawned task a chance to observe the ack and clear
+        // `pending_claim`.
+        for _ in 0..200 {
+            if ledger.pending_claim(&channel_id).is_none() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            ledger.pending_claim(&channel_id).is_none(),
+            "the resend was acknowledged once the reconnected session answered it"
+        );
     }
 }
