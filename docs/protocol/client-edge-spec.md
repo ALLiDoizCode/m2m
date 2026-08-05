@@ -766,17 +766,19 @@ silently dropped exactly as it was before TRANSFER existed.
    client that only ever earns (opens a channel, serves paid work, sends no claim of its own)
    never sends — it would otherwise be structurally uncreditable. The signature is the identical
    domain-separated `ClaimStateChallenge` `POST /ilp/claim-state` (§1.10) already verifies for a
-   read — `keccak256("ClaimStateChallenge(bytes32 channelId,uint256 expires)")` over `channelId`
-   and `expires`, EIP-712-signed under the channel's own chain id and `TokenNetwork` address —
-   reused rather than a claim's own balance-proof scheme, so a captured claim-state proof and a
-   captured claim can never stand in for each other (issue #558's rule, applied to this new
+   read, reused rather than a claim's own balance-proof scheme, so a captured claim-state proof
+   and a captured claim can never stand in for each other (issue #558's rule, applied to this new
    surface too). Verified against `ClientChannelRegistry`'s already-registered counterparty for
    `channelId`, exactly as `/ilp/claim-state` verifies it, before this session is taught the
    association — a bare declaration is never trusted. Best-effort, like the `peerId` bind itself:
    an expired, malformed, unresolvable or wrongly-signed proof leaves the session exactly as
    uncreditable as it was, and `record_accepted_claim`'s inbound-claim path (issue #787) is
    untouched and stays the fallback for a session that pays before it ever declares. EVM only,
-   matching the payout ledger's own reach.
+   matching the payout ledger's own reach. `vectors/wire-vectors.json`'s
+   `channel_control_declaration` section is the reproducible bytes — the exact `channelId`/
+   `expires`/`signature` JSON, the EIP-712 digest they cover, and a wrong-key and an expired case
+   alongside the valid one — for all of the above; this paragraph is orientation, not the thing to
+   conform to (ADR 0021, issue #792).
 
 2. **Prepare + claim**: a MESSAGE with a non-empty `ilpPacket` is decoded as a PREPARE. A
    protocolData entry named `payment-channel-claim` carries the claim as **raw UTF-8 JSON**

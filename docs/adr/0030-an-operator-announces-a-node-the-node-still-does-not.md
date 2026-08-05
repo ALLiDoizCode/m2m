@@ -13,7 +13,7 @@ line:
 > kind:10032 self-announce. A connector never does this. Deciding to participate in a discovery
 > network is the controller's business, and ADR 0006 stands unchanged.
 
-Taken as a rule about the *process*, that sentence forbids a kind:10032 announce outright, and
+Taken as a rule about the _process_, that sentence forbids a kind:10032 announce outright, and
 issue #784 would contradict it. Taken as written — including its own second clause — it does not,
 because the clause names who the decision belongs to: **the controller**. What ADR 0022 refuses is a
 daemon that decides, on its own schedule, to broadcast. It says nothing about an operator deciding
@@ -37,7 +37,7 @@ the one it is easiest to give it is the key.
 
 - A serving connector announces nothing. There is no timer, no `selfAnnounce` config block, no
   startup broadcast, and nothing on the packet path reads the `[announce]` section. ADR 0022's rule
-  about the *process* is unchanged and unweakened.
+  about the _process_ is unchanged and unweakened.
 - `connector announce` is a **subcommand**: it runs, publishes one kind:10032 event, and exits. It
   is an operator action with an operator's intent behind it, in the same category as opening a
   channel.
@@ -58,15 +58,15 @@ Only one of them is configured, and that is the point — everything else has ex
 source, and choosing any other source is a bug that is invisible on a fleet where all nodes point at
 one deployment:
 
-| what | source | why |
-| --- | --- | --- |
-| signing key | `[settlement.evm]` | the channel's on-chain participant **is** this node's settlement address — the same key ADR 0024's peer claims use. **No second key is introduced.** |
-| EIP-712 domain | the **target's** x402 greeting | its gate recovers the signer under the domain **it** resolved for the channel |
-| nonce, cumulative | the target's `POST /ilp/claim-state` (issue #693) | the receiver is the authority on its own watermark; a guessed one replays (refused) or overpays (silent) |
-| channel id | `[announce] pay_channel` | the only fact neither side can derive |
+| what              | source                                            | why                                                                                                                                                  |
+| ----------------- | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| signing key       | `[settlement.evm]`                                | the channel's on-chain participant **is** this node's settlement address — the same key ADR 0024's peer claims use. **No second key is introduced.** |
+| EIP-712 domain    | the **target's** x402 greeting                    | its gate recovers the signer under the domain **it** resolved for the channel                                                                        |
+| nonce, cumulative | the target's `POST /ilp/claim-state` (issue #693) | the receiver is the authority on its own watermark; a guessed one replays (refused) or overpays (silent)                                             |
+| channel id        | `[announce] pay_channel`                          | the only fact neither side can derive                                                                                                                |
 
 `pay_channel` is deliberately not a `[[client_channels]]` row: that table is channels this node
-*receives* on, and this is one it *pays* from. One channel in two roles is the same collision
+_receives_ on, and this is one it _pays_ from. One channel in two roles is the same collision
 `Config::load` already refuses between the peer and client books.
 
 ### Routing it yourself stays available, behind a flag
@@ -74,8 +74,8 @@ one deployment:
 `--via-own-routing` originates through the node's own routing table instead, via
 `Connector::handle_prepare` — the same call `POST /packets` makes. It is coherent (it pays over an
 existing peering rather than a client channel) but it is not the default, because it makes the URL
-argument mean two things at once: who you *ask*, and — only if the local routing table happens to
-reach them — who you *pay*.
+argument mean two things at once: who you _ask_, and — only if the local routing table happens to
+reach them — who you _pay_.
 
 This also widens ADR 0001's "load configuration, construct the runtime, merge routers, serve — and
 nothing else", which is a real change and is made deliberately. The binary itself still branches on
@@ -117,10 +117,10 @@ peering is accept-only. Under `--via-own-routing` the old requirements return: a
 relay's connector, and the ability to originate over the peering it names.
 
 **The carriage is negotiated; the BTP URL is supplied.** Issue #701 lets a route require one
-transport, and `handle_ilp` checks transport *before* payment — so a route pinned to `btp` answers a
+transport, and `handle_ilp` checks transport _before_ payment — so a route pinned to `btp` answers a
 paid HTTP request with the same x402 terms it answers an unpaid one, however correct the claim. **The
 devnet apex pins `g.toon.relay` to `transport = "btp"`**, so this is the live case, not a
-hypothetical. The subcommand therefore reads the greeting's `extra.requiredTransport` and *picks* the
+hypothetical. The subcommand therefore reads the greeting's `extra.requiredTransport` and _picks_ the
 carriage — HTTP for an unrestricted route, BTP for a pinned one — rather than being told which to
 use.
 
@@ -148,11 +148,11 @@ This is why the client path is the default rather than merely an alternative. `-
 therefore refuses when all three of these hold: the config names a `state_dir`, the destination
 resolves to a `peer_id` route (so the announce would **forward**, which is the only thing that signs
 an outbound peer claim), and something is already listening on this config's client edge. An announce
-to a route this node *terminates* writes no journal entry and is not blocked; neither is `--dry-run`.
+to a route this node _terminates_ writes no journal entry and is not blocked; neither is `--dry-run`.
 A guard that refused more than the hazard would be a guard operators route around.
 
 **The default client path needs no such guard, and the reasoning is worth stating.** It signs a
-*client* claim by hand, not through `ClientPayoutLedger` — which is assembled in `router()`, and
+_client_ claim by hand, not through `ClientPayoutLedger` — which is assembled in `router()`, and
 `router()` is never called by this subcommand. Its watermark authority is the receiver, asked over
 `POST /ilp/claim-state` rather than remembered. So there is no local mutable money state for a second
 process to fork. (`build()` does open the peer journal to replay it, which is a read; nothing on this
@@ -169,7 +169,7 @@ event's own id, which needs the scalar itself rather than a `Signer`'s recoverab
 by name at the point of use, not discovered as a panic.
 
 **`relay_url` stays optional, and stays operator-supplied.** It is where clients **read** this node
-for free, which is neither the URL the announce was published *through* nor anything derivable from
+for free, which is neither the URL the announce was published _through_ nor anything derivable from
 `[[routes]]` — a relay route's `handler_url` is the relay's private write ingress on a container
 network. A node that fronts no relay omits the field. An `http(s)://` value is refused at config
 load: that spelling is the write ingress, and announcing it publishes an unauthenticated write door

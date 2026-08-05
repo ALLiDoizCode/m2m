@@ -20,8 +20,8 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use connector_btp::{
     decode_frame, encode_message, encode_response, encode_transfer, ProtocolData,
-    ACCUMULATED_COST_HEADER, CLAIM_ACK_HEADER, CLAIM_ACK_PROTOCOL, CLAIM_HEADER, CONTENT_TYPE_TEXT,
-    FLUSH_REQUESTED_HEADER, MINIMUM_DELIVERY_HEADER, MINIMUM_DELIVERY_PROTOCOL,
+    ACCUMULATED_COST_HEADER, AUTH_PROTOCOL, CLAIM_ACK_HEADER, CLAIM_ACK_PROTOCOL, CLAIM_HEADER,
+    CONTENT_TYPE_TEXT, FLUSH_REQUESTED_HEADER, MINIMUM_DELIVERY_HEADER, MINIMUM_DELIVERY_PROTOCOL,
 };
 use connector_domain::{
     derive_condition, fulfillment_matches_condition, EnvelopeError, EnvelopeRequest,
@@ -45,8 +45,9 @@ use connector_signer::giftwrap::{
     seal_response_with_randomness,
 };
 use connector_signer::{
-    derive_evm_address, evm_balance_proof_digest, verify_evm_balance_proof, Address,
-    EvmBalanceProof, LocalSigner, Signer,
+    derive_evm_address, evm_balance_proof_digest, evm_claim_state_challenge_digest,
+    verify_evm_balance_proof, verify_evm_claim_state_challenge, Address, EvmBalanceProof,
+    EvmClaimStateChallenge, LocalSigner, Signer,
 };
 use serde::Serialize;
 
@@ -75,6 +76,7 @@ pub struct WireVectors {
     pub fulfilment: FulfilmentVectors,
     pub claim: ClaimVectors,
     pub peer_carriage: PeerCarriageVectors,
+    pub channel_control_declaration: ChannelControlDeclarationVectors,
 }
 
 #[derive(Debug, Serialize)]
@@ -1552,6 +1554,230 @@ fn generate_peer_carriage_vectors(
     }
 }
 
+// ---------------------------------------------------------------------
+// Client channel-control declaration (issue #792,
+// `docs/protocol/client-edge-spec.md` §1.9 step 1, issue #790)
+// ---------------------------------------------------------------------
+//
+// The BTP auth entry's `channelId`/`expires`/`signature` fields, binding a
+// client session to a channel *before* it has ever presented a claim
+// (issue #790) -- the identical domain-separated `ClaimStateChallenge`
+// signature `POST /ilp/claim-state` already verifies for a read
+// (`connector_signer::claim_state_challenge`), reused rather than a
+// claim's own balance-proof scheme. Generated through the real digest and
+// verification functions, never a hand-rolled parallel signer, and
+// self-verified against them before being emitted -- exactly the
+// discipline `verify_and_record_declared_channel`
+// (`connector-client-edge::btp`) itself applies.
+
+/// One `auth` entry carrying a channel-control declaration, and the BTP
+/// MESSAGE frame it rides in -- the same `{peerId, secret, channelId,
+/// expires, signature}` shape `auth_channel_proof`
+/// (`connector-client-edge::btp`) extracts.
+#[derive(Debug, Serialize)]
+pub struct ChannelControlDeclarationCase {
+    pub name: &'static str,
+    pub peer_id: &'static str,
+    /// The EIP-712 domain's `chainId` -- the channel's own registered
+    /// domain, never a self-declared one (same rule as [`ClaimCase`]).
+    pub chain_id: u64,
+    pub token_network_address_hex: String,
+    pub channel_id_hex: String,
+    /// Unix seconds. Compared by the verifier as `expires <= now` ->
+    /// rejected -- a fact about wall-clock time at verification time, not
+    /// something this static vector can itself encode, which is why the
+    /// `channel_control_declaration_expired` case picks an `expires` far
+    /// enough in the past (`1`, 1970-01-01T00:00:01Z) to be expired against
+    /// any reasonable clock, and the valid cases pick one far enough in the
+    /// future (2030/2100) to still be valid against any reasonable clock.
+    pub expires: u64,
+    /// The channel's registered counterparty -- what `signature` must
+    /// recover to for [`signature_verifies`] to be `true`.
+    ///
+    /// [`signature_verifies`]: ChannelControlDeclarationCase::signature_verifies
+    pub counterparty_address_hex: String,
+    pub signer_secret_hex: String,
+    pub signer_address_hex: String,
+    /// `keccak256(0x1901 || domainSeparator || structHash)` for
+    /// `ClaimStateChallenge(bytes32 channelId,uint256 expires)` -- the
+    /// exact bytes `signature` covers.
+    pub digest_hex: String,
+    /// `r || s || recovery_id` (recovery_id `0`/`1`), `0x`-prefixed, 65
+    /// bytes -- matching `EvmSigner.signClaimStateChallenge`'s wire form.
+    pub signature_hex: String,
+    /// The auth entry's JSON body, byte-for-byte what rides as the BTP
+    /// `auth` protocolData entry's `data`.
+    pub auth_json: String,
+    pub btp_message_hex: String,
+    /// Whether `signature` recovers to `counterparty_address_hex` under
+    /// `connector_signer::verify_evm_claim_state_challenge` -- independent
+    /// of `expires`, which the verifier checks separately (see that
+    /// field's own doc). `false` only for the wrong-key case: the expired
+    /// case's signature is genuine and this is still `true` for it.
+    pub signature_verifies: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChannelControlDeclarationVectors {
+    pub cases: Vec<ChannelControlDeclarationCase>,
+}
+
+/// The fields shared by every [`ChannelControlDeclarationCase`] this module
+/// emits -- one channel, one registered counterparty, varied only by which
+/// key signs and what `expires` says.
+struct ChannelControlFixture {
+    channel_id: [u8; 32],
+    chain_id: u64,
+    token_network_address: Address,
+    peer_id: &'static str,
+    counterparty_address: Address,
+}
+
+/// Builds and self-verifies one [`ChannelControlDeclarationCase`]: signs the
+/// real EIP-712 digest, checks the resulting signature against
+/// `fixture.counterparty_address` through the real verifier (asserting the
+/// result matches `expect_verifies`, so this module cannot silently commit
+/// a case whose own verdict it got wrong), round-trips the JSON through
+/// `serde_json` the same way `auth_channel_proof` reads it, and round-trips
+/// the BTP frame through `encode_message`/`decode_frame`.
+fn channel_control_case(
+    fixture: &ChannelControlFixture,
+    name: &'static str,
+    expires: u64,
+    signer_secret: [u8; 32],
+    signer_label: &'static str,
+    expect_verifies: bool,
+) -> ChannelControlDeclarationCase {
+    let signer = LocalSigner::from_secret_bytes(signer_label, signer_secret)
+        .expect("fixture secret is a valid secp256k1 scalar");
+    let signer_address = derive_evm_address(&signer.public_key().expect("fixture has a key"));
+
+    let challenge = EvmClaimStateChallenge {
+        channel_id: fixture.channel_id,
+        expires,
+        chain_id: fixture.chain_id,
+        token_network_address: fixture.token_network_address,
+    };
+    let digest = evm_claim_state_challenge_digest(&challenge);
+    let signature = signer
+        .sign(&digest)
+        .expect("fixture signer signs its own digest");
+    let signature_bytes = signature.to_bytes();
+
+    let signature_verifies = verify_evm_claim_state_challenge(
+        &challenge,
+        &signature_bytes,
+        &fixture.counterparty_address,
+    );
+    assert_eq!(
+        signature_verifies, expect_verifies,
+        "vector {name} computed the wrong verification verdict"
+    );
+
+    let channel_id_hex = format!("0x{}", hex::encode(fixture.channel_id));
+    let signature_hex = format!("0x{}", hex::encode(signature_bytes));
+    let auth_json = serde_json::json!({
+        "peerId": fixture.peer_id,
+        "secret": "",
+        "channelId": channel_id_hex,
+        "expires": expires,
+        "signature": signature_hex,
+    })
+    .to_string();
+
+    // Same field access `auth_channel_proof` performs: this vector cannot
+    // commit a JSON shape that function would fail to parse.
+    let reparsed: serde_json::Value =
+        serde_json::from_str(&auth_json).expect("this module's own json! output parses");
+    assert_eq!(
+        reparsed["channelId"].as_str(),
+        Some(channel_id_hex.as_str())
+    );
+    assert_eq!(reparsed["expires"].as_u64(), Some(expires));
+    assert_eq!(reparsed["signature"].as_str(), Some(signature_hex.as_str()));
+
+    let entry = ProtocolData {
+        name: AUTH_PROTOCOL.to_string(),
+        content_type: CONTENT_TYPE_TEXT,
+        data: auth_json.clone().into_bytes(),
+    };
+    let btp_message = encode_message(9_500, &[entry], &[]);
+    let decoded = decode_frame(&btp_message).expect("self-generated frame decodes");
+    let decoded_entry = decoded
+        .protocol_data
+        .iter()
+        .find(|pd| pd.name == AUTH_PROTOCOL)
+        .expect("the auth entry rides the frame it was just encoded into");
+    assert_eq!(decoded_entry.data, auth_json.as_bytes());
+
+    ChannelControlDeclarationCase {
+        name,
+        peer_id: fixture.peer_id,
+        chain_id: fixture.chain_id,
+        token_network_address_hex: hex_of(&fixture.token_network_address),
+        channel_id_hex,
+        expires,
+        counterparty_address_hex: hex_of(&fixture.counterparty_address),
+        signer_secret_hex: hex_of(&signer_secret),
+        signer_address_hex: hex_of(&signer_address),
+        digest_hex: hex_of(&digest),
+        signature_hex,
+        auth_json,
+        btp_message_hex: hex_of(&btp_message),
+        signature_verifies,
+    }
+}
+
+fn generate_channel_control_declaration_vectors() -> ChannelControlDeclarationVectors {
+    let counterparty_secret = seq_bytes::<32>(0x91);
+    let counterparty_label = "vector-fixture-channel-control-counterparty";
+    let counterparty = LocalSigner::from_secret_bytes(counterparty_label, counterparty_secret)
+        .expect("fixture counterparty secret is a valid secp256k1 scalar");
+    let counterparty_address =
+        derive_evm_address(&counterparty.public_key().expect("fixture has a key"));
+
+    let fixture = ChannelControlFixture {
+        channel_id: seq_bytes::<32>(0xe5),
+        chain_id: 84_532, // Base Sepolia -- an example domain, as in `generate_claim_vectors`.
+        token_network_address: seq_bytes::<20>(0xe9),
+        peer_id: "g.toon.vector-agent",
+        counterparty_address,
+    };
+
+    let valid = channel_control_case(
+        &fixture,
+        "channel_control_declaration_valid",
+        4_102_444_800, // 2100-01-01T00:00:00Z
+        counterparty_secret,
+        counterparty_label,
+        true,
+    );
+
+    let wrong_key = channel_control_case(
+        &fixture,
+        "channel_control_declaration_wrong_key",
+        4_102_444_800, // 2100-01-01T00:00:00Z
+        seq_bytes::<32>(0x99),
+        "vector-fixture-channel-control-forger",
+        false,
+    );
+
+    let expired = channel_control_case(
+        &fixture,
+        "channel_control_declaration_expired",
+        1, // 1970-01-01T00:00:01Z -- the signature itself is genuine; only
+        // the caller's own wall-clock check (not this function) treats it
+        // as expired.
+        counterparty_secret,
+        counterparty_label,
+        true,
+    );
+
+    ChannelControlDeclarationVectors {
+        cases: vec![valid, wrong_key, expired],
+    }
+}
+
 /// Build the full committed vector set. See the module docs for what
 /// "generated from the properties" means here, and
 /// `docs/protocol/wire-vectors.md` for the invariant each section pins.
@@ -1561,6 +1787,7 @@ pub fn generate() -> WireVectors {
     let fulfilment = generate_fulfilment_vectors(shared_secret);
     let (claim, claim_fixture) = generate_claim_vectors();
     let peer_carriage = generate_peer_carriage_vectors(&claim_fixture, &giftwrap);
+    let channel_control_declaration = generate_channel_control_declaration_vectors();
 
     WireVectors {
         schema_version: SCHEMA_VERSION,
@@ -1569,6 +1796,7 @@ pub fn generate() -> WireVectors {
         fulfilment,
         claim,
         peer_carriage,
+        channel_control_declaration,
     }
 }
 

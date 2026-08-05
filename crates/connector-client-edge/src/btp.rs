@@ -1362,6 +1362,108 @@ mod tests {
         );
     }
 
+    /// Issue #792's "also worth adding while here": production's actual
+    /// sequence is authenticate bare, open a channel, *then*
+    /// re-authenticate to declare it -- not a single auth frame carrying
+    /// the proof from the very first connection. `handle_frame`'s auth
+    /// branch is shared by every auth frame on a session, so this drives
+    /// two frames through it with the same `binding` a real reconnect-free
+    /// session would share, proving the credit lands on the *second* auth
+    /// rather than only ever being exercised on the first.
+    #[tokio::test]
+    async fn a_second_auth_on_an_already_bound_session_still_teaches_its_channel() {
+        use libsecp256k1::{PublicKey, SecretKey};
+
+        let secret = SecretKey::parse(&[7u8; 32]).unwrap();
+        let public = PublicKey::from_secret_key(&secret);
+        let counterparty = connector_signer::derive_evm_address(&public.serialize());
+
+        let channel_id_bytes = [5u8; 32];
+        let channel_id = format!("0x{}", hex::encode(channel_id_bytes));
+        let chain_id = 84_532u64;
+        let token_network_address = [0x77u8; 20];
+
+        let state = Arc::new(state_over_one_declared_channel(
+            &channel_id,
+            counterparty,
+            chain_id,
+            token_network_address,
+        ));
+
+        let (replies, _reply_rx) = mpsc::channel::<Vec<u8>>(REPLY_QUEUE_DEPTH);
+        let window = Arc::new(Semaphore::new(4));
+        let outbound = Arc::new(OutboundRequests::new());
+        let mut binding = None;
+
+        // First auth: a bare bind, no declaration -- nothing to credit yet.
+        let bare_frame = auth_message_frame("g.toon.agent", None);
+        handle_frame(
+            &bare_frame,
+            &state,
+            &window,
+            &replies,
+            &outbound,
+            &mut binding,
+        )
+        .await
+        .expect("the reply channel has a live receiver");
+        assert_eq!(
+            binding.as_ref().map(|(address, _)| address.clone()),
+            Some("g.toon.agent".to_string())
+        );
+        let condition = [9u8; 32];
+        assert!(
+            state
+                .claim_gate
+                .credit_session_payout("g.toon.agent", &condition, 500, chrono::Utc::now())
+                .await
+                .is_none(),
+            "a bare bind with no declaration and no claim must not yet be creditable"
+        );
+
+        // Second auth on the SAME session (same `binding`, same replies /
+        // window / outbound): declares the channel.
+        let expires = crate::now_unix() + 3600;
+        let signature = sign_channel_control_proof(
+            &secret,
+            &EvmClaimStateChallenge {
+                channel_id: channel_id_bytes,
+                expires,
+                chain_id,
+                token_network_address,
+            },
+        );
+        let declare_frame = auth_message_frame(
+            "g.toon.agent",
+            Some(serde_json::json!({
+                "channelId": channel_id,
+                "expires": expires,
+                "signature": signature,
+            })),
+        );
+        handle_frame(
+            &declare_frame,
+            &state,
+            &window,
+            &replies,
+            &outbound,
+            &mut binding,
+        )
+        .await
+        .expect("the reply channel has a live receiver");
+        assert_eq!(
+            binding.as_ref().map(|(address, _)| address.clone()),
+            Some("g.toon.agent".to_string())
+        );
+
+        let payout = state
+            .claim_gate
+            .credit_session_payout("g.toon.agent", &condition, 500, chrono::Utc::now())
+            .await
+            .expect("the re-auth's declaration taught the session's channel");
+        assert_eq!(payout.channel_id, channel_id);
+    }
+
     /// [`auth_channel_proof`] requires all three fields; a partial
     /// declaration -- missing a signature to check, or a channel to check
     /// it against -- is not a declaration at all, per that function's own

@@ -12,15 +12,15 @@ belongs to you and not to the daemon.
 connector announce --config /app/config/connector.toml https://relay-op.example/ilp
 ```
 
-| argument | meaning |
-| --- | --- |
-| `--config <path>` | this node's config file. **Never positional here**, so a config file called `announce` can never be mistaken for the subcommand. |
+| argument                | meaning                                                                                                                                                                                                                                                                                                                        |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--config <path>`       | this node's config file. **Never positional here**, so a config file called `announce` can never be mistaken for the subcommand.                                                                                                                                                                                               |
 | `<relay-discovery-url>` | **the node you pay.** The client-edge ILP endpoint of the connector that fronts the relay you want to be discovered on. Its x402 greeting quotes the price and names the EIP-712 domain your claim is signed under; its `/ilp/identity` is the key the packet is sealed to; and the paid packet is POSTed straight back to it. |
-| `--to <ilp-address>` | the ILP address to publish to. Defaults to `[announce] publish_to`. |
-| `--btp-url <wss-url>` | the target's **BTP** endpoint, used when its route requires that carriage. Defaults to `[announce] publish_btp_url`. **Never derived** — see below. |
-| `--target <path>` | the write ingress's path **beneath** the route's own `handler_url`. Defaults to `""`, "the route's own handler path", which is right whenever that `handler_url` already ends at the ingress (`http://relay:3100/write`). |
-| `--via-own-routing` | send the packet through **your own routing table** instead of paying the URL. See "Routing it yourself" below. |
-| `--dry-run` | negotiate, build and sign, print, and stop. Nothing is paid and nothing is sent. Safe beside a running node. |
+| `--to <ilp-address>`    | the ILP address to publish to. Defaults to `[announce] publish_to`.                                                                                                                                                                                                                                                            |
+| `--btp-url <wss-url>`   | the target's **BTP** endpoint, used when its route requires that carriage. Defaults to `[announce] publish_btp_url`. **Never derived** — see below.                                                                                                                                                                            |
+| `--target <path>`       | the write ingress's path **beneath** the route's own `handler_url`. Defaults to `""`, "the route's own handler path", which is right whenever that `handler_url` already ends at the ingress (`http://relay:3100/write`).                                                                                                      |
+| `--via-own-routing`     | send the packet through **your own routing table** instead of paying the URL. See "Routing it yourself" below.                                                                                                                                                                                                                 |
+| `--dry-run`             | negotiate, build and sign, print, and stop. Nothing is paid and nothing is sent. Safe beside a running node.                                                                                                                                                                                                                   |
 
 ## The URL is where you pay
 
@@ -36,15 +36,15 @@ the devnet store box, whose peering is accept-only and which serves no `g.toon.r
 
 ### Where the claim comes from — and why there is no second key
 
-| what | where it comes from | why it cannot come from anywhere else |
-| --- | --- | --- |
-| signing key | `[settlement.evm]` | the channel's on-chain participant **is** this node's settlement address — the same key ADR 0024's outbound peer claims are signed with |
-| EIP-712 domain | the **target's** x402 greeting (`extra.settlement`) | its claim gate recovers the signer under the domain **it** resolved for the channel; signing under yours recovers a different address |
-| nonce, cumulative amount | the target's `POST /ilp/claim-state` | the **receiver** is the authority on its own watermark — a nonce that does not advance it is refused as a replay, and a guessed one either replays or silently overpays |
-| channel id | `[announce] pay_channel` | the only fact neither side can derive |
+| what                     | where it comes from                                 | why it cannot come from anywhere else                                                                                                                                   |
+| ------------------------ | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| signing key              | `[settlement.evm]`                                  | the channel's on-chain participant **is** this node's settlement address — the same key ADR 0024's outbound peer claims are signed with                                 |
+| EIP-712 domain           | the **target's** x402 greeting (`extra.settlement`) | its claim gate recovers the signer under the domain **it** resolved for the channel; signing under yours recovers a different address                                   |
+| nonce, cumulative amount | the target's `POST /ilp/claim-state`                | the **receiver** is the authority on its own watermark — a nonce that does not advance it is refused as a replay, and a guessed one either replays or silently overpays |
+| channel id               | `[announce] pay_channel`                            | the only fact neither side can derive                                                                                                                                   |
 
 `pay_channel` is deliberately **not** a `[[client_channels]]` row. That table is channels this node
-*receives* on ("whose signature I accept"); this is a channel it *pays* from. Putting one channel in
+_receives_ on ("whose signature I accept"); this is a channel it _pays_ from. Putting one channel in
 both roles is the same namespace collision `Config::load` already refuses between the peer and client
 books.
 
@@ -55,7 +55,7 @@ unaffiliated buyer's channel resolves from chain (issue #502).
 ### The carriage is negotiated, but the BTP URL is not
 
 A route may be pinned to one transport (issue #701), and `handle_ilp` checks transport **before** it
-checks payment — so a route pinned to `btp` answers a *paid* HTTP request with the same x402 terms it
+checks payment — so a route pinned to `btp` answers a _paid_ HTTP request with the same x402 terms it
 answers an unpaid one, however correct the claim.
 
 The greeting says which carriage a route needs (`extra.requiredTransport`), so the command negotiates
@@ -82,8 +82,8 @@ session open.
 `--via-own-routing` sends the packet through this node's own routing table instead — the same
 `Connector::handle_prepare` call `POST /packets` makes. It is a coherent thing to want (it pays over
 an existing peering rather than a client channel), but it is the opt-in rather than the default
-because it makes the URL argument mean two things at once: who you *ask* and, only if your routing
-table happens to reach them, who you *pay*.
+because it makes the URL argument mean two things at once: who you _ask_ and, only if your routing
+table happens to reach them, who you _pay_.
 
 It needs what the client path does not: a `[[routes]]` entry reaching the relay's connector, and — over
 a peering — the ability to originate on it. It also adds this hop's own `fee` to the amount, since
@@ -117,14 +117,14 @@ btp_endpoint  = "wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp"
 
 ### Three URLs, and conflating any two is the bug
 
-| | what it is | where it comes from |
-| --- | --- | --- |
-| **through** | the edge you publish **through** — pay here | the CLI argument |
-| **`http_endpoint` / `btp_endpoint`** | where clients **pay you** | this section |
-| **`relay_url`** | where clients **read you for free** | this section, and **optional** |
+|                                      | what it is                                  | where it comes from            |
+| ------------------------------------ | ------------------------------------------- | ------------------------------ |
+| **through**                          | the edge you publish **through** — pay here | the CLI argument               |
+| **`http_endpoint` / `btp_endpoint`** | where clients **pay you**                   | this section                   |
+| **`relay_url`**                      | where clients **read you for free**         | this section, and **optional** |
 
 `relay_url` is **not** derivable from the through-URL, and must not be inferred from it: the relay
-you publish *through* need not be the relay you advertise for *reads*. They coincide on the devnet
+you publish _through_ need not be the relay you advertise for _reads_. They coincide on the devnet
 apex, and that coincidence is exactly what would make an inferred value look correct until it wasn't.
 
 Nor is it derivable from `[[routes]]`. `g.toon.relay`'s `handler_url` is `http://relay:3100/write` —
@@ -176,10 +176,10 @@ this applies to `--via-own-routing` only, and refuses exactly when all three hol
 2. the destination resolves to a **`peer_id` route** — the announce would forward; and
 3. something is already listening on this config's `client_edge_addr`.
 
-The **default client path is never blocked**, and does not need to be: it signs a *client* claim by
+The **default client path is never blocked**, and does not need to be: it signs a _client_ claim by
 hand against a channel whose watermark authority is the receiver (asked over `POST /ilp/claim-state`,
 never remembered locally), and it never touches `ClientPayoutLedger` — so there is no local mutable
-money state to fork. Announcing to a route this node *terminates* is likewise unblocked, and so is
+money state to fork. Announcing to a route this node _terminates_ is likewise unblocked, and so is
 `--dry-run`.
 
 When it does refuse: stop the node, announce, start it again — or drop `--via-own-routing`.
@@ -192,16 +192,16 @@ When it does refuse: stop the node, announce, start it again — or drop `--via-
 
 ## Reading the failures
 
-| what you see | what to change |
-| --- | --- |
-| `requires the 'btp' transport … no BTP endpoint was given` | pass `--btp-url`, from the target's own kind:10032 `btpEndpoint`. |
-| `the BTP session with … failed` | the endpoint did not upgrade, or the session closed before answering. |
-| `no [announce] pay_channel` | open a funded channel with the node you are paying and name its on-chain id. |
-| `would not report this node's claim state` | that node cannot resolve the channel, or its counterparty is not this node's settlement address. |
-| `spendable headroom … but the announce costs` | fund the channel. Nothing was sent. |
-| `F02 no route to destination` | `--via-own-routing` only: this node has no `[[routes]]` entry reaching the destination. |
-| `F03` | the amount did not cover what the terminating side charges on arrival (ADR 0028's subtraction — this hop forwards `amount - fee`). Raise the forwarded route's `price`, or lower its `fee`. |
-| `F01 gift wrap could not be opened` | the through-URL **forwards** the destination onwards rather than terminating it, so the wrap was sealed to a hop. Point `--to` at a route that terminates where the through-URL is. |
-| `T01 peer unreachable` | the route's next hop is a peering this process cannot dial. |
-| `answered ... instead of 402 x402 terms` | that edge serves no route for the destination you asked about. |
-| `the packet FULFILLed ... but the relay's write ingress answered HTTP 4xx` | the money is spent; the relay refused the event. Check `--target`, and that the ingress wants `{"event": ...}`. |
+| what you see                                                               | what to change                                                                                                                                                                              |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `requires the 'btp' transport … no BTP endpoint was given`                 | pass `--btp-url`, from the target's own kind:10032 `btpEndpoint`.                                                                                                                           |
+| `the BTP session with … failed`                                            | the endpoint did not upgrade, or the session closed before answering.                                                                                                                       |
+| `no [announce] pay_channel`                                                | open a funded channel with the node you are paying and name its on-chain id.                                                                                                                |
+| `would not report this node's claim state`                                 | that node cannot resolve the channel, or its counterparty is not this node's settlement address.                                                                                            |
+| `spendable headroom … but the announce costs`                              | fund the channel. Nothing was sent.                                                                                                                                                         |
+| `F02 no route to destination`                                              | `--via-own-routing` only: this node has no `[[routes]]` entry reaching the destination.                                                                                                     |
+| `F03`                                                                      | the amount did not cover what the terminating side charges on arrival (ADR 0028's subtraction — this hop forwards `amount - fee`). Raise the forwarded route's `price`, or lower its `fee`. |
+| `F01 gift wrap could not be opened`                                        | the through-URL **forwards** the destination onwards rather than terminating it, so the wrap was sealed to a hop. Point `--to` at a route that terminates where the through-URL is.         |
+| `T01 peer unreachable`                                                     | the route's next hop is a peering this process cannot dial.                                                                                                                                 |
+| `answered ... instead of 402 x402 terms`                                   | that edge serves no route for the destination you asked about.                                                                                                                              |
+| `the packet FULFILLed ... but the relay's write ingress answered HTTP 4xx` | the money is spent; the relay refused the event. Check `--target`, and that the ingress wants `{"event": ...}`.                                                                             |
