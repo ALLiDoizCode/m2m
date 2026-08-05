@@ -40,7 +40,6 @@ use connector_domain::{
 use connector_runtime::ClaimAckOutcome;
 
 use crate::btp::payout_claim_protocol_data;
-use crate::outbound_ledger::ClientPayoutLedger;
 use crate::ClientEdgeState;
 
 /// Route `prepare` through `state`: a configured route (app/peer/leased)
@@ -146,7 +145,7 @@ async fn credit_session_earnings(
         return;
     };
     ledger.record_payout_once(destination, condition, amount, chrono::Utc::now());
-    deliver_pending_claim(state, ledger, destination, generation, now).await;
+    deliver_pending_claim(state, destination, generation, now).await;
 }
 
 /// Issue #779: resend whatever payout claim is still owed to `destination`
@@ -168,28 +167,29 @@ pub(crate) async fn resend_pending_claim(
     generation: u64,
     now: u64,
 ) {
-    let Some(ledger) = state.claim_gate.payout_ledger() else {
-        return;
-    };
-    deliver_pending_claim(state, ledger, destination, generation, now).await;
+    deliver_pending_claim(state, destination, generation, now).await;
 }
 
-/// Deliver `destination`'s current [`ClientPayoutLedger::pending_claim`], if
-/// any, as a payout TRANSFER over its live session, and
-/// [`ClientPayoutLedger::acknowledge`] it -- clearing `pending_claim` while
-/// leaving `credited` untouched (`outbound_ledger.rs`'s own
+/// Deliver `destination`'s current
+/// [`crate::outbound_ledger::ClientPayoutLedger::pending_claim`], if any, as
+/// a payout TRANSFER over its live session, and
+/// [`crate::outbound_ledger::ClientPayoutLedger::acknowledge`] it -- clearing
+/// `pending_claim` while leaving `credited` untouched (`outbound_ledger.rs`'s own
 /// `credited_survives_acknowledgement_unlike_pending_claim`) -- only once
 /// delivery genuinely succeeds. A delivery that fails (dead session,
 /// timeout, no session at all) leaves the claim pending exactly as it was,
 /// so the next caller -- another fulfilled job or a reconnect -- tries
-/// again with the same cumulative claim.
+/// again with the same cumulative claim. A no-op with no payout ledger
+/// configured at all, or nothing currently pending on it.
 async fn deliver_pending_claim(
     state: &ClientEdgeState,
-    ledger: &ClientPayoutLedger,
     destination: &str,
     generation: u64,
     now: u64,
 ) {
+    let Some(ledger) = state.claim_gate.payout_ledger() else {
+        return;
+    };
     let Some(claim) = ledger.pending_claim(destination) else {
         return;
     };
