@@ -16,6 +16,7 @@
 //! that silently never establishes, and neither it nor the raw config value it
 //! passed through renders in a [`std::fmt::Debug`].
 
+mod announce;
 mod client_channel;
 mod config;
 mod error;
@@ -26,6 +27,7 @@ mod route;
 mod secret;
 mod settlement;
 
+pub use announce::AnnounceConfig;
 pub use client_channel::{ClientChannelConfig, EvmClientChannelConfig, SolanaClientChannelConfig};
 pub use config::Config;
 pub use error::ConfigError;

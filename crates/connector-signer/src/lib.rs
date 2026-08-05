@@ -29,6 +29,7 @@ pub mod giftwrap;
 mod kms;
 mod local;
 pub mod nip59;
+pub mod nostr;
 mod signer;
 mod treasury;
 
@@ -47,6 +48,7 @@ pub use giftwrap::GiftWrapError;
 pub use kms::{InMemoryKmsBackend, KmsBackend, KmsSigner};
 pub use local::LocalSigner;
 pub use nip59::{unwrap_claim, wrap_claim, Nip59Error, WrappedClaim};
+pub use nostr::{sign_ilp_peer_info, NostrEvent, ILP_PEER_INFO_KIND};
 pub use signer::{verify, PublicKeyBytes, Signature, Signer};
 pub use treasury::{ChainClient, FundingReceipt, SignedTransfer, Treasury, TxHash};
 

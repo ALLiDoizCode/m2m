@@ -151,12 +151,18 @@ key_file = "{key_path}"
     )
     .expect("write config file");
 
-    let node = connector_cli::run(&[
+    let command = connector_cli::run(&[
         "connector".to_string(),
         config_file.path().display().to_string(),
     ])
     .await
     .expect("run: config-driven node with settlement configured");
+    // A bare config path is still `serve` (issue #784's subcommand
+    // boundary): the only other `Command` a run can produce is an announce
+    // that has already finished, which no path argument can select.
+    let connector_cli::Command::Serve(node) = command else {
+        panic!("a config path must produce a servable node");
+    };
     let app = node.router;
 
     // Open.
