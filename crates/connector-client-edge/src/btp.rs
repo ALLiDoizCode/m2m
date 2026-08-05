@@ -1304,6 +1304,64 @@ mod tests {
         );
     }
 
+    /// Issue #790's expiry guard, exercised the same way
+    /// `/ilp/claim-state`'s own `an_expired_challenge_is_refused_distinctly_from_an_unverified_one`
+    /// exercises the identical check on that sibling endpoint: an expired
+    /// proof is ignored before any decoding or channel lookup even runs, so
+    /// a captured proof cannot be replayed at auth after its `expires` has
+    /// passed.
+    #[tokio::test]
+    async fn an_expired_channel_control_proof_teaches_nothing() {
+        use libsecp256k1::{PublicKey, SecretKey};
+
+        let secret = SecretKey::parse(&[7u8; 32]).unwrap();
+        let public = PublicKey::from_secret_key(&secret);
+        let counterparty = connector_signer::derive_evm_address(&public.serialize());
+
+        let channel_id_bytes = [5u8; 32];
+        let channel_id = format!("0x{}", hex::encode(channel_id_bytes));
+        let chain_id = 84_532u64;
+        let token_network_address = [0x77u8; 20];
+
+        let state = Arc::new(state_over_one_declared_channel(
+            &channel_id,
+            counterparty,
+            chain_id,
+            token_network_address,
+        ));
+
+        let expires = crate::now_unix().saturating_sub(1);
+        let signature = sign_channel_control_proof(
+            &secret,
+            &EvmClaimStateChallenge {
+                channel_id: channel_id_bytes,
+                expires,
+                chain_id,
+                token_network_address,
+            },
+        );
+
+        let frame = auth_message_frame(
+            "g.toon.agent",
+            Some(serde_json::json!({
+                "channelId": channel_id,
+                "expires": expires,
+                "signature": signature,
+            })),
+        );
+        run_auth_frame(&state, &frame).await;
+
+        let condition = [9u8; 32];
+        let payout = state
+            .claim_gate
+            .credit_session_payout("g.toon.agent", &condition, 500, chrono::Utc::now())
+            .await;
+        assert!(
+            payout.is_none(),
+            "an expired proof must not teach the session a channel"
+        );
+    }
+
     /// [`auth_channel_proof`] requires all three fields; a partial
     /// declaration -- missing a signature to check, or a channel to check
     /// it against -- is not a declaration at all, per that function's own
