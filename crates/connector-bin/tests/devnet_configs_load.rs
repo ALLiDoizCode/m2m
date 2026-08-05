@@ -180,6 +180,20 @@ const EXPECTED_STORE_PRICE: u64 = 1000;
 /// edge this value simply becomes the devnet's relay price.
 const EXPECTED_RELAY_PRICE: u64 = 1;
 
+/// The `price` the apex charges its own client for `g.toon.ario`, which it
+/// FORWARDS across the peering rather than terminating.
+///
+/// A third literal rather than an expression over the other two, for the
+/// same reason they are literals: a value derived from the config would keep
+/// passing if the config drifted. What ties it to the others is the separate
+/// arithmetic assertion in
+/// [`the_forwarded_store_leg_delivers_exactly_the_far_ends_price`] below.
+const EXPECTED_APEX_FORWARD_PRICE: u64 = 1002;
+
+/// What the apex retains for carriage on that forward (ADR 0010/0028),
+/// matching the TypeScript fleet's own inter-node fee of 2.
+const EXPECTED_APEX_FORWARD_FEE: u64 = 2;
+
 /// `str::replace`, but a pattern that matches nothing is a test failure
 /// rather than a silent no-op -- otherwise renaming a line in a committed
 /// file would quietly turn one of the substitutions below into nothing at
@@ -208,10 +222,24 @@ fn replace_expecting_a_match(raw: &str, from: &str, to: &str) -> String {
 /// on restart (issue #605). `replace_expecting_a_match` is what makes that
 /// load-bearing -- deleting the line from either config fails this test
 /// rather than silently testing a node with no durable state.
+/// A temp file holding a peering secret, for the `secret_file` the committed
+/// configs name (issue #750). The bytes are arbitrary -- nothing in a boot
+/// test compares them against a counterparty -- but the file must EXIST,
+/// because a `secret_file` that cannot be read is a refuse-to-start.
+fn write_peer_secret() -> tempfile::NamedTempFile {
+    use std::io::Write;
+    let mut file = tempfile::NamedTempFile::new().expect("temp peer secret");
+    file.write_all(b"sandbox-peering-secret\n")
+        .expect("write peer secret");
+    file.flush().expect("flush peer secret");
+    file
+}
+
 fn with_sandbox_paths(
     raw: &str,
     key_path: &std::path::Path,
     state_dir: &std::path::Path,
+    peer_secret: &std::path::Path,
 ) -> String {
     let replaced = replace_expecting_a_match(
         raw,
@@ -223,10 +251,21 @@ fn with_sandbox_paths(
         "client_edge_addr = \"0.0.0.0:4000\"",
         "client_edge_addr = \"127.0.0.1:0\"",
     );
-    replace_expecting_a_match(
+    let replaced = replace_expecting_a_match(
         &replaced,
         "state_dir = \"/app/state\"",
         &format!("state_dir = \"{}\"", state_dir.display()),
+    );
+    // The peering's shared secret (issue #750), same substitution and same
+    // reason as the key files: the committed configs name a path on the box,
+    // never the bytes, and config load refuses a `secret_file` that is not
+    // there. `replace_expecting_a_match` makes it load-bearing -- deleting
+    // the peering from either config fails this test rather than silently
+    // testing a fleet with no inter-node link.
+    replace_expecting_a_match(
+        &replaced,
+        "secret_file = \"/app/data/apex-store.secret\"",
+        &format!("secret_file = \"{}\"", peer_secret.display()),
     )
 }
 
@@ -493,17 +532,22 @@ async fn x402_terms(client_edge_addr: &str, destination: &str) -> serde_json::Va
 #[tokio::test]
 async fn the_apex_relay_side_devnet_config_loads_and_serves_verbatim() {
     assert!(APEX_CONFIG.contains("g.toon.relay"));
-    assert!(APEX_CONFIG.contains("g.toon.store"));
     assert!(APEX_CONFIG.contains("g.toon.ario"));
+    // `g.toon.store` was retired on 2026-08-05 (owner decision): one name
+    // for one app. This asserts its ABSENCE, so re-adding the alias has to
+    // be a deliberate edit here too rather than drifting back in.
+    assert!(!APEX_CONFIG.contains("prefix = \"g.toon.store\""));
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
+    let peer_secret = write_peer_secret();
     // The live [settlement] tail is stripped for hermeticity (module
     // docs); the anvil-backed case below boots it.
     let connector = boot(&with_sandbox_paths(
         &without_live_settlement(APEX_CONFIG),
         key_file.path(),
         state_dir.path(),
+        peer_secret.path(),
     ));
 
     assert_answered_with_x402_greeting(
@@ -512,27 +556,21 @@ async fn the_apex_relay_side_devnet_config_loads_and_serves_verbatim() {
         EXPECTED_RELAY_PRICE,
     )
     .await;
-    // The store leg (#600): `g.toon.ario` -- the destination the TS fleet's
-    // kind:10032 announce names as `routes.store`, i.e. what rig actually
-    // dials -- and this fleet's own `g.toon.store` alias are BOTH priced,
-    // claim-gated terminated routes on this apex.
+    // The store leg (#600): `g.toon.ario` is the destination a shipped
+    // client actually dials (buzz pins it in compiled code), and since
+    // 2026-08-04 it is FORWARDED across the apex<->store peering rather than
+    // terminated here.
     //
-    // These greetings are the regression guard that the store leg stays on
-    // the paid path, and since ADR 0028 they are no longer a guard against
-    // repointing it at a peering: a `peer_id` route carries a `price` of
-    // its own now, is greeted from the same lookup, and cannot load
-    // without one. What this still catches is a route that loses its
-    // price, whichever kind it is.
+    // Greeted at [`EXPECTED_APEX_FORWARD_PRICE`], not the store's own price:
+    // ADR 0028 gives a forwarded route a client-edge `price` and a `fee` the
+    // hop retains, so what a client pays here is strictly more than what the
+    // far end charges. That a `peer_id` route is greeted AT ALL is the #620
+    // property -- before it, a peer route greeted nothing and charged
+    // nothing, which is a free-write path on `g.toon`.
     assert_answered_with_x402_greeting(
         &connector.client_edge_addr,
         "g.toon.ario",
-        EXPECTED_STORE_PRICE,
-    )
-    .await;
-    assert_answered_with_x402_greeting(
-        &connector.client_edge_addr,
-        "g.toon.store",
-        EXPECTED_STORE_PRICE,
+        EXPECTED_APEX_FORWARD_PRICE,
     )
     .await;
 }
@@ -542,11 +580,11 @@ async fn the_store_side_devnet_config_loads_and_serves_verbatim() {
     // All three prefixes the store box's TypeScript connector.yaml
     // terminates, now terminated by its Rust node at the same prices. The
     // alias set is the assertion: a store box that answered only
-    // `g.toon.store` could not take over from the TypeScript node, which is
+    // `g.toon.ario` could not take over from the TypeScript node, which is
     // the whole point of standing this config up.
     assert!(STORE_CONFIG.contains("g.toon.ario"));
     assert!(STORE_CONFIG.contains("g.toon.relay.ario"));
-    assert!(STORE_CONFIG.contains("g.toon.store"));
+    assert!(STORE_CONFIG.contains("g.toon.ario"));
 
     // No peer wire: this node accepts no inbound peer connection and dials
     // no peer, so only the client edge comes up. ADR 0003's raw-TCP wire
@@ -571,10 +609,12 @@ async fn the_store_side_devnet_config_loads_and_serves_verbatim() {
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
+    let peer_secret = write_peer_secret();
     let connector = boot(&with_sandbox_paths(
         &without_live_settlement(STORE_CONFIG),
         key_file.path(),
         state_dir.path(),
+        peer_secret.path(),
     ));
 
     assert_answered_with_x402_greeting(
@@ -589,31 +629,52 @@ async fn the_store_side_devnet_config_loads_and_serves_verbatim() {
         EXPECTED_STORE_PRICE,
     )
     .await;
-    assert_answered_with_x402_greeting(
-        &connector.client_edge_addr,
-        "g.toon.store",
-        EXPECTED_STORE_PRICE,
-    )
-    .await;
+    // `g.toon.store` was retired here too. `g.toon.relay.ario` above is NOT
+    // the same thing and stays: it is the relay-hop spelling of the same
+    // path, not a second name for the app.
+    assert!(!STORE_CONFIG.contains("prefix = \"g.toon.store\""));
 }
 
-/// The two boxes' Rust configs must price the same prefix the same. They
-/// front the same store app -- the apex over this box's public nginx, the
-/// store node over the container network -- so an unequal pair is an
-/// arbitrage between two doors into one handler, and the cheaper door takes
-/// every packet. This is a guard against exactly the class of edit that
-/// produced the live apex's undocumented `g.toon.relay` price of `1` on
-/// 2026-08-03: a hand change to one connector's price with no matching
-/// change to the other.
+/// ADR 0028's arithmetic, across the two committed files: what the apex
+/// forwards must be EXACTLY what the far end charges.
+///
+/// This replaces an equality test (`both configs price the prefix the same`)
+/// whose premise the peering retired. While the apex terminated the store leg
+/// at the store box's public nginx there genuinely were two doors into one
+/// handler, and an unequal pair was an arbitrage the cheaper door would win.
+/// Now there is one path: a client pays the apex `price`, the apex keeps
+/// `fee`, and `price - fee` arrives at a route the store box prices itself.
+///
+/// The relation is a stop-ship, not a tidiness check. Under-forwarding was
+/// survivable only while issue #752 was open -- a terminating connector did
+/// not charge its `price` for a peer-wire arrival, so the store box never
+/// checked. #754 landed that charge, so `price - fee` short of the far end's
+/// price is now an F03 on every forwarded write.
 #[test]
-fn the_two_fleets_price_the_shared_store_prefixes_identically() {
-    for prefix in ["g.toon.ario", "g.toon.store"] {
-        assert_eq!(
-            route_price(APEX_CONFIG, prefix),
-            route_price(STORE_CONFIG, prefix),
-            "`{prefix}` must cost the same at both doors into the store app"
-        );
-    }
+fn the_forwarded_store_leg_delivers_exactly_the_far_ends_price() {
+    let forwarded = EXPECTED_APEX_FORWARD_PRICE - EXPECTED_APEX_FORWARD_FEE;
+    assert_eq!(
+        forwarded, EXPECTED_STORE_PRICE,
+        "the apex charges {EXPECTED_APEX_FORWARD_PRICE} and keeps \
+         {EXPECTED_APEX_FORWARD_FEE}, so {forwarded} reaches the store box -- \
+         which prices the same prefix at {EXPECTED_STORE_PRICE}. Since #754 a \
+         short-forward is an F03, not a silent subsidy"
+    );
+
+    // And the literals above must still be what the files say.
+    assert_eq!(
+        route_price(APEX_CONFIG, "g.toon.ario"),
+        EXPECTED_APEX_FORWARD_PRICE
+    );
+    assert_eq!(
+        route_price(STORE_CONFIG, "g.toon.ario"),
+        EXPECTED_STORE_PRICE
+    );
+    assert_eq!(
+        route_price(STORE_CONFIG, "g.toon.relay.ario"),
+        EXPECTED_STORE_PRICE,
+        "the relay-hop spelling reaches the same app and must cost the same"
+    );
 }
 
 /// The `price` of the `[[routes]]` entry whose `prefix` matches, read from
@@ -656,10 +717,12 @@ async fn the_relay_route_is_btp_only_and_the_store_routes_accept_both() {
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
+    let peer_secret = write_peer_secret();
     let connector = boot(&with_sandbox_paths(
         &without_live_settlement(APEX_CONFIG),
         key_file.path(),
         state_dir.path(),
+        peer_secret.path(),
     ));
 
     let relay_terms = x402_terms(&connector.client_edge_addr, "g.toon.relay").await;
@@ -668,15 +731,13 @@ async fn the_relay_route_is_btp_only_and_the_store_routes_accept_both() {
         "the relay route must tell an HTTP client it needs BTP: {relay_terms}"
     );
 
-    for destination in ["g.toon.ario", "g.toon.store"] {
-        let store_terms = x402_terms(&connector.client_edge_addr, destination).await;
-        assert!(
-            store_terms["accepts"][0]["extra"]
-                .get("requiredTransport")
-                .is_none(),
-            "a store leg left at the default must not carry requiredTransport: {store_terms}"
-        );
-    }
+    let store_terms = x402_terms(&connector.client_edge_addr, "g.toon.ario").await;
+    assert!(
+        store_terms["accepts"][0]["extra"]
+            .get("requiredTransport")
+            .is_none(),
+        "the store leg left at the default must not carry requiredTransport: {store_terms}"
+    );
 }
 
 /// Deploy a fresh `TokenNetworkRegistry`, a `TokenNetwork` through it, and
@@ -711,6 +772,7 @@ async fn the_apex_devnet_settlement_section_boots_against_a_deployed_contract() 
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
+    let peer_secret = write_peer_secret();
     // The apex EVM section is LIVE as committed -- no template to
     // uncomment. Its [settlement.evm.key] names its own file
     // (/app/data/settlement.key, distinct from the signer's -- the live box
@@ -735,7 +797,7 @@ async fn the_apex_devnet_settlement_section_boots_against_a_deployed_contract() 
         "key_file = \"/app/data/settlement.key\"",
         &format!("key_file = \"{}\"", key_file.path().display()),
     );
-    let text = with_sandbox_paths(&text, key_file.path(), state_dir.path());
+    let text = with_sandbox_paths(&text, key_file.path(), state_dir.path(), peer_secret.path());
 
     drop(boot(&text));
 }
@@ -771,7 +833,13 @@ const EXPECTED_SETTLEMENT_DECIMALS: u8 = 6;
 fn the_apex_devnet_config_declares_both_committed_settlement_legs() {
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    let text = with_sandbox_paths(APEX_CONFIG, key_file.path(), state_dir.path());
+    let peer_secret = write_peer_secret();
+    let text = with_sandbox_paths(
+        APEX_CONFIG,
+        key_file.path(),
+        state_dir.path(),
+        peer_secret.path(),
+    );
     let text = with_sandbox_settlement_keys(&text, key_file.path());
     let config_file = write_config(&text);
 
@@ -841,6 +909,7 @@ async fn the_store_devnet_settlement_section_boots_against_a_deployed_contract()
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
+    let peer_secret = write_peer_secret();
     // Issue #648: the store config followed the apex onto issue #628's KEYED
     // shape. The legacy flat `[settlement]` + `chain = "evm"` still parses,
     // so nothing below would fail if it slid back -- it would just quietly
@@ -894,7 +963,7 @@ async fn the_store_devnet_settlement_section_boots_against_a_deployed_contract()
         "key_file = \"/app/data/settlement.key\"",
         &format!("key_file = \"{}\"", key_file.path().display()),
     );
-    let text = with_sandbox_paths(&text, key_file.path(), state_dir.path());
+    let text = with_sandbox_paths(&text, key_file.path(), state_dir.path(), peer_secret.path());
 
     drop(boot(&text));
 }

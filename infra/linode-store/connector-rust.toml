@@ -189,6 +189,54 @@ client_edge_addr = "0.0.0.0:4000"
 # constrains rolling BACK, not rolling forward.
 state_dir = "/app/state"
 
+# ── The apex<->store peering (ADR 0027, issues #678/#750) ────────────────
+# This box is the ACCEPTING half: it exposes a BTP listener and never dials.
+# The apex is the dialing half and carries the `endpoint`
+# (infra/linode-node/connector-rust.toml).
+#
+# `peer_expose` is a bare top-level key, so it lives up here with
+# `client_edge_addr` and `state_dir` rather than next to the [[peers]] table
+# it configures -- written after any table header it would be read as a key
+# OF that table and refused.
+peer_expose = "btp"
+
+# The peering lived on the boxes only until #750 gave `credential` a
+# `secret_file`: this file is committed to a PUBLIC repository, so a peering
+# written with a literal could not be committed at all.
+[[peers]]
+# ONE string both operators write: the apex puts this in its credential and
+# this node proves P1 by looking it up here. Same literal on both sides, or
+# nothing peers and there is no error anywhere.
+id = "apex-store"
+# The shared secret, as a FILE. `infra/linode-store/*.secret` is gitignored,
+# so the peering is tracked and only the bytes stay on the box. Missing,
+# unreadable or empty is a refuse-to-start by name (PeerSecretFileNotFound /
+# -Unreadable / -Empty), never a peering that silently never establishes.
+credential = { secret_file = "/app/data/apex-store.secret" }
+# No `endpoint`: this node accepts and never dials. That is exactly why
+# `ceiling` is REQUIRED rather than optional here -- an accept-only peering
+# cannot FLUSH on its own initiative, so the ceiling is its only bound on
+# unclaimed value, and a config omitting it is refused by name
+# (AcceptOnlyPeerWithoutCeiling). 1 USDC.
+ceiling = 1000000
+
+# Role is decided by authentication AND a channel binding (peer-carriage-spec
+# 1.2, ADR 0024). Without this row the apex authenticates fine, is admitted
+# only as an ordinary client, and every claim it sends is refused
+# `unknown_channel` -- which is exactly what happened before #678 wired this
+# table to `ClaimBook`.
+[[peer_channels]]
+peer_id = "apex-store"
+# The same live Base Sepolia channel the apex names; each side records the
+# OTHER as counterparty.
+channel_id = "0x5cbe106fa4b6c4274a07b7e28f05f6ff11d9a7931fbf7e075e9ac2d1c2c05e17"
+counterparty_key = "0xF29fD62C4848B9573C9b90adbF61b664F386d9CF"
+# The EIP-712 domain a claim on this channel is signed over
+# (EIP712("TokenNetwork","1"), ADR 0024). A claim signed under a different
+# domain recovers to a different address and is refused.
+chain_id = 84532
+token_network = "0x1E95493fEF46707E034b4a1945f25a8C76A1823D"
+
 [signer]
 key_file = "/app/data/signer.key"
 
@@ -204,10 +252,16 @@ prefix = "g.toon.relay.ario"
 handler_url = "http://store:3300/store"
 price = 1000
 
-[[routes]]
-prefix = "g.toon.store"
-handler_url = "http://store:3300/store"
-price = 1000
+# ── `g.toon.store` is GONE (owner decision, 2026-08-05) ──────────────────
+# This box used to terminate a third prefix at the SAME store app and the
+# SAME price -- an alias, kept so a client arriving directly at this edge was
+# priced identically to one arriving via the apex's `g.toon.store` forward.
+# The apex dropped that forward, so this alias has nothing left to mirror.
+# One name for one app; `g.toon.ario` is the survivor because it is the one
+# compiled into a shipped client.
+#
+# `g.toon.relay.ario` stays: it is the relay-hop spelling (client -> apex ->
+# here), a different PATH to the same app rather than a second NAME for it.
 
 # ── Settlement ─────────────────────────────────────────────────────────────
 

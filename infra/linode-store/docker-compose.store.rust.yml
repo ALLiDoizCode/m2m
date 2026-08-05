@@ -89,6 +89,13 @@ services:
       # and so is an unreachable settlement chain (ADR 0009).
       - ./signer-rust.key:/app/data/signer.key:ro
       - ./settlement-rust.key:/app/data/settlement.key:ro
+      # The apex<->store peering's shared secret (issue #750). Its `[[peers]]`
+      # entry names this path as `credential.secret_file`, so a missing or
+      # unreadable file here is a refuse-to-start, not a peering that quietly
+      # never establishes. Generated on the box (`openssl rand -hex 32`),
+      # gitignored as `*.secret`, and the SAME BYTES on both boxes -- the two
+      # sides authenticate against each other with it.
+      - ./apex-store.secret:/app/data/apex-store.secret:ro
       - ./settlement-solana-rust.key:/app/data/settlement-solana.key:ro
       # Durable claim watermarks (#605). Named, not bind-mounted: the replay
       # of this journal is what stops a restart from re-accepting a spent
