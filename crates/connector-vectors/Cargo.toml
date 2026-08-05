@@ -5,8 +5,16 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+connector-btp = { path = "../connector-btp" }
+connector-config = { path = "../connector-config" }
 connector-domain = { path = "../connector-domain" }
+connector-peer-auth = { path = "../connector-peer-auth" }
+connector-peer-btp = { path = "../connector-peer-btp" }
+connector-peer-http = { path = "../connector-peer-http" }
+connector-runtime = { path = "../connector-runtime" }
 connector-signer = { path = "../connector-signer", features = ["test-util"] }
+base64 = "0.22"
+chrono = "0.4"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

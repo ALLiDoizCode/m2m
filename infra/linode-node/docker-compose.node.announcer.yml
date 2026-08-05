@@ -38,8 +38,8 @@ services:
       # connector is the default edge. Pure env passthrough
       # (packages/announcer/src/config.ts → announce-builder.ts), so changing
       # them and running `up -d announcer` is the whole of that step.
-      ANNOUNCER_HTTP_ENDPOINT: https://proxy.devnet.toonprotocol.dev/rust/ilp
-      ANNOUNCER_BTP_ENDPOINT: wss://proxy.devnet.toonprotocol.dev/rust/ilp/btp
+      ANNOUNCER_HTTP_ENDPOINT: https://proxy.devnet.toonprotocol.dev/ilp
+      ANNOUNCER_BTP_ENDPOINT: wss://proxy.devnet.toonprotocol.dev/ilp/btp
       ANNOUNCER_IDENTITY_SECRET_KEY_FILE: /app/data/announce.key
       ANNOUNCER_SOLANA_CHAIN_ID: solana:devnet
     volumes:
