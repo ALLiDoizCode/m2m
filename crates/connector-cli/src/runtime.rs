@@ -248,7 +248,9 @@ fn hex_encode_32(bytes: [u8; 32]) -> String {
 /// are just secret-key pointers. `EvmSettlementBackend` wants that hex
 /// encoded ([`read_settlement_private_key`]); `SolanaSettlementBackend`
 /// wants it as an ed25519 seed, raw (issue #630).
-fn read_settlement_key_bytes(location: &SecretLocation) -> Result<[u8; 32], RuntimeError> {
+pub(crate) fn read_settlement_key_bytes(
+    location: &SecretLocation,
+) -> Result<[u8; 32], RuntimeError> {
     match location {
         SecretLocation::File(path) => {
             let bytes = std::fs::read(path).map_err(|source| {

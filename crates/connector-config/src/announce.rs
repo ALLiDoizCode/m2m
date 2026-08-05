@@ -62,6 +62,8 @@ pub(crate) struct RawAnnounceConfig {
     #[serde(default)]
     publish_to: Option<String>,
     #[serde(default)]
+    pay_channel: Option<String>,
+    #[serde(default)]
     route_publish: Option<String>,
     #[serde(default)]
     route_store: Option<String>,
@@ -109,6 +111,7 @@ pub struct AnnounceConfig {
     btp_endpoint: String,
     relay_url: Option<String>,
     publish_to: Option<String>,
+    pay_channel: Option<[u8; 32]>,
     route_publish: String,
     route_store: String,
     asset_code: String,
@@ -153,6 +156,31 @@ impl AnnounceConfig {
     /// this fleet), which is a fact about somebody else's node.
     pub fn publish_to(&self) -> Option<&str> {
         self.publish_to.as_deref()
+    }
+
+    /// The EVM payment channel this node PAYS the announce from, as an
+    /// ordinary client of the relay's connector.
+    ///
+    /// Deliberately not `[[client_channels]]`, and the difference is the
+    /// whole reason this field exists. A `[[client_channels]]` row is a
+    /// channel this node **receives** on -- "whose signature I accept on a
+    /// claim naming this channel". This is a channel this node **pays**
+    /// from, where it is the participant signing and somebody else's claim
+    /// gate is judging. Reusing that table would put one channel in two
+    /// roles, which is exactly the namespace collision `Config::load`
+    /// already refuses between the peer and client books.
+    ///
+    /// There is no second key: the claim is signed with the
+    /// `[settlement.evm]` key, because the channel's on-chain participant
+    /// IS this node's settlement address -- the same key ADR 0024's
+    /// outbound peer claims are signed with, and for the same reason.
+    /// Nothing else about the claim is configured either: the EIP-712
+    /// domain comes from the target's own x402 greeting (the domain its
+    /// gate will verify under), and the nonce and cumulative amount come
+    /// from the target's `POST /ilp/claim-state` -- the receiver is the
+    /// authority on its own watermark.
+    pub fn pay_channel(&self) -> Option<&[u8; 32]> {
+        self.pay_channel.as_ref()
     }
 
     /// The address a client should PUBLISH (Nostr writes) to at this node.
@@ -232,6 +260,21 @@ fn derive_route_hints(
         publish.unwrap_or_else(|| primary.clone()),
         store_addr.unwrap_or(primary),
     )
+}
+
+/// A `0x`-prefixed (or bare) 64-character hex string as 32 bytes -- an
+/// on-chain channel id, in the one spelling every other channel field in
+/// this crate is written in.
+fn decode_hex_32(value: &str) -> Option<[u8; 32]> {
+    let value = value.strip_prefix("0x").unwrap_or(value);
+    if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
 }
 
 /// Check one endpoint field's URL against the schemes that field can
@@ -327,6 +370,16 @@ pub(crate) fn resolve_announce(
         }
     }
 
+    let pay_channel = raw
+        .pay_channel
+        .as_deref()
+        .map(|value| {
+            decode_hex_32(value).ok_or_else(|| ConfigError::AnnounceInvalidPayChannel {
+                value: value.to_string(),
+            })
+        })
+        .transpose()?;
+
     let (route_publish, route_store) =
         derive_route_hints(&raw.addresses, raw.route_publish, raw.route_store);
 
@@ -348,6 +401,7 @@ pub(crate) fn resolve_announce(
         btp_endpoint,
         relay_url,
         publish_to: raw.publish_to,
+        pay_channel,
         route_publish,
         route_store,
         asset_code: raw.asset_code.unwrap_or_else(|| DEFAULT_ASSET_CODE.into()),
@@ -370,6 +424,7 @@ mod tests {
             btp_endpoint: Some("wss://proxy.ario.example/ilp/btp".to_string()),
             relay_url: relay_url.map(str::to_string),
             publish_to: None,
+            pay_channel: None,
             route_publish: None,
             route_store: None,
             asset_code: None,
@@ -484,6 +539,34 @@ mod tests {
             resolve_announce(Some(bad)),
             Err(ConfigError::InvalidAddress { field, .. }) if field == "announce.addresses"
         ));
+    }
+
+    /// The channel an announce is PAID FROM, in the one spelling every
+    /// other channel field in this crate uses -- and refused by name when
+    /// it is not a 32-byte id, since the alternative is a claim signed
+    /// against a channel nobody has.
+    #[test]
+    fn the_pay_channel_is_a_32_byte_id_in_either_hex_spelling() {
+        for written in [format!("0x{}", "ab".repeat(32)), "ab".repeat(32)] {
+            let mut with_channel = raw(None);
+            with_channel.pay_channel = Some(written.clone());
+            let announce = resolve_announce(Some(with_channel))
+                .expect("load")
+                .expect("present");
+            assert_eq!(announce.pay_channel(), Some(&[0xabu8; 32]), "{written}");
+        }
+
+        for written in ["0xdeadbeef", "not-hex", &"ab".repeat(31)] {
+            let mut bad = raw(None);
+            bad.pay_channel = Some(written.to_string());
+            assert!(
+                matches!(
+                    resolve_announce(Some(bad)),
+                    Err(ConfigError::AnnounceInvalidPayChannel { .. })
+                ),
+                "{written}"
+            );
+        }
     }
 
     #[test]

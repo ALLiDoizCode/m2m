@@ -107,7 +107,7 @@ const ANNOUNCE_VERB: &str = "announce";
 const USAGE: &str = "usage:\n  \
      connector <config-file>\n  \
      connector announce --config <config-file> <relay-discovery-url> \
-     [--to <ilp-address>] [--target <path>] [--dry-run]";
+     [--to <ilp-address>] [--target <path>] [--via-own-routing] [--dry-run]";
 
 /// What the process arguments asked for, before anything has been loaded.
 #[derive(Debug, PartialEq, Eq)]
@@ -153,6 +153,7 @@ fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Invocation, CliError> {
     let mut through_url: Option<String> = None;
     let mut publish_to: Option<String> = None;
     let mut target: Option<String> = None;
+    let mut via_own_routing = false;
     let mut dry_run = false;
     let mut index = 0;
     while index < rest.len() {
@@ -173,6 +174,7 @@ fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Invocation, CliError> {
         }
         match argument {
             "--dry-run" => dry_run = true,
+            "--via-own-routing" => via_own_routing = true,
             other if other.starts_with('-') => {
                 return Err(CliError::Usage(format!(
                     "unknown option '{other}'\n\n{USAGE}"
@@ -206,6 +208,7 @@ fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Invocation, CliError> {
             })?,
             publish_to,
             target,
+            via_own_routing,
             dry_run,
         },
     })
@@ -494,6 +497,29 @@ key_file = "{}"
         assert_eq!(options.publish_to.as_deref(), Some("g.toon.relay"));
         assert_eq!(options.target.as_deref(), Some("/write"));
         assert!(options.dry_run);
+        assert!(
+            !options.via_own_routing,
+            "paying the through-URL directly is the default; routing it yourself is the opt-in"
+        );
+    }
+
+    /// The opt-in that switches an announce from "pay the URL" to "route it
+    /// myself". Off unless written, because the two make the URL argument
+    /// mean different things and only one of them matches "paying like any
+    /// other client".
+    #[test]
+    fn routing_the_announce_yourself_is_an_explicit_opt_in() {
+        let Ok(Invocation::Announce { options, .. }) = parse(&[
+            "connector",
+            "announce",
+            "--config",
+            "/c.toml",
+            "--via-own-routing",
+            "https://relay-op.example/ilp",
+        ]) else {
+            panic!("parse");
+        };
+        assert!(options.via_own_routing);
     }
 
     /// Without `--config` there is no config path at all -- and crucially

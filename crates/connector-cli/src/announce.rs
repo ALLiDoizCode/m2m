@@ -82,16 +82,22 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use chrono::{Duration as ChronoDuration, Utc};
-use connector_config::{Config, SecretLocation};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
+use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
+use connector_config::{Config, SecretLocation, SettlementConfig};
 use connector_domain::{
     derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, PacketResponse, Prepare, Reject,
 };
 use connector_signer::giftwrap::{derive_fulfillment, open_response, seal_request};
-use connector_signer::{sign_ilp_peer_info, NostrEvent, PublicKeyBytes};
+use connector_signer::{
+    derive_evm_address, evm_balance_proof_digest, evm_claim_state_challenge_digest,
+    sign_ilp_peer_info, to_hex, EvmBalanceProof, EvmClaimStateChallenge, LocalSigner, NostrEvent,
+    PublicKeyBytes, Signer,
+};
 use serde::Serialize;
 
-use crate::runtime::{read_signer_secret, Runtime, RuntimeError};
+use crate::runtime::{read_settlement_key_bytes, read_signer_secret, Runtime, RuntimeError};
 
 /// How long the free, unauthenticated negotiation calls may take. Short on
 /// purpose: they are two small reads against one host, and an operator
@@ -118,6 +124,24 @@ pub struct AnnounceOptions {
     /// ends at the ingress, which is how every relay route on this fleet is
     /// written (`http://relay:3100/write`).
     pub target: Option<String>,
+    /// Send the packet through **this node's own routing table** instead of
+    /// paying the through-URL directly.
+    ///
+    /// Off by default, and the default is the point. An announce is "an
+    /// operator announces to a relay whose URL they provide, **paying like
+    /// any other client**" -- so the paid PREPARE goes TO that URL, over
+    /// its own connection, with a claim in the header. Nothing about the
+    /// announcing node's routing table enters into it: no `[[routes]]`
+    /// entry reaching the relay, no peering to originate over.
+    ///
+    /// The opt-in exists because originating through one's own routing is
+    /// a coherent thing to want -- it is what `POST /packets` does, and it
+    /// lets an operator pay over an existing peering rather than opening a
+    /// client channel. It is not the default because it makes the URL
+    /// argument mean two different things at once: "who I pay" and "who I
+    /// ask", with delivery quietly depending on the local routing table
+    /// happening to reach the second.
+    pub via_own_routing: bool,
     /// Build and print the announce without paying for it or sending it.
     pub dry_run: bool,
 }
@@ -166,6 +190,34 @@ pub enum AnnounceError {
     /// The packet FULFILLed but the sealed answer could not be read, or the
     /// relay refused the event it carried.
     RelayRefused { status: u16, body: String },
+    /// No `[announce] pay_channel`, so there is no channel to pay the
+    /// through-URL from as a client.
+    NoPayChannel,
+    /// No `[settlement.evm]` table, so there is no on-chain identity to
+    /// sign a client claim with.
+    NoSettlementIdentity,
+    /// The through-URL's greeting carries no EVM settlement terms, so the
+    /// EIP-712 domain its claim gate verifies under is unknown.
+    NoSettlementTerms { url: String },
+    /// The through-URL would not tell this node its own watermark on the
+    /// channel it is about to claim against.
+    ClaimStateUnavailable { channel: String, reason: String },
+    /// The channel has less spendable headroom than the announce costs, so
+    /// a claim would be refused on arrival -- said here rather than bought.
+    InsufficientHeadroom {
+        channel: String,
+        available: u128,
+        amount: u64,
+    },
+    /// The paid POST reached the through-URL but the answer was neither a
+    /// FULFILL nor a REJECT.
+    UnreadableAnswer { status: u16, body: String },
+    /// The target's route for this destination does not accept HTTP, so it
+    /// cannot be paid by the client path at all (issue #701).
+    WrongTransport {
+        destination: String,
+        required: String,
+    },
 }
 
 impl fmt::Display for AnnounceError {
@@ -245,6 +297,67 @@ impl fmt::Display for AnnounceError {
                 f,
                 "the packet FULFILLed -- so it WAS paid for -- but the relay's write ingress \
                  answered HTTP {status}: {body}"
+            ),
+            AnnounceError::NoPayChannel => write!(
+                f,
+                "no `[announce] pay_channel`: an announce is paid to the through-URL as an \
+                 ordinary client, which needs a funded payment channel WITH that node. Open one \
+                 (its `POST /channels`, or any client that opens channels) and name its 32-byte \
+                 on-chain id here. Deliberately not a [[client_channels]] row -- that table is \
+                 channels this node RECEIVES on. See docs/operators/announcing-a-node.md"
+            ),
+            AnnounceError::NoSettlementIdentity => write!(
+                f,
+                "no `[settlement.evm]` table: a client claim is an EIP-712 balance proof signed \
+                 by the channel's on-chain participant, which is this node's SETTLEMENT address \
+                 -- the same key ADR 0024's outbound peer claims use. There is no second key to \
+                 configure and none is invented; a node with no EVM settlement identity cannot \
+                 pay anyone"
+            ),
+            AnnounceError::NoSettlementTerms { url } => write!(
+                f,
+                "{url}'s x402 greeting carries no EVM settlement terms, so the EIP-712 domain \
+                 its claim gate verifies under is unknown and any claim signed for it would \
+                 recover to the wrong address. That node has no `[settlement.evm]` table, and a \
+                 node with no settlement backend cannot be paid by channel claim"
+            ),
+            AnnounceError::ClaimStateUnavailable { channel, reason } => write!(
+                f,
+                "the through-URL would not report this node's claim state on channel {channel}: \
+                 {reason}. The RECEIVER is the authority on its own watermark (a claim whose \
+                 nonce does not advance it is refused as a replay), so this is not guessed. The \
+                 usual causes are a channel that node cannot resolve on chain, or one whose \
+                 counterparty is not this node's settlement address"
+            ),
+            AnnounceError::InsufficientHeadroom {
+                channel,
+                available,
+                amount,
+            } => write!(
+                f,
+                "channel {channel} has {available} base units of spendable headroom but the \
+                 announce costs {amount}: a claim above what has actually been deposited could \
+                 never be redeemed on chain, so the far side refuses it (issue #646). Fund the \
+                 channel and try again -- nothing was sent and nothing was spent"
+            ),
+            AnnounceError::UnreadableAnswer { status, body } => write!(
+                f,
+                "the through-URL answered HTTP {status} with something that is neither a FULFILL \
+                 nor a REJECT: {body}"
+            ),
+            AnnounceError::WrongTransport {
+                destination,
+                required,
+            } => write!(
+                f,
+                "that node's route for '{destination}' requires the '{required}' transport, and \
+                 this path pays over HTTP -- so a paid POST would be answered with the same x402 \
+                 terms rather than served, however correct the claim (issue #701). The devnet \
+                 apex pins `g.toon.relay` to `transport = \"btp\"` for huddles' persistent \
+                 sessions, so this is the expected answer there today. Either the route's \
+                 transport policy has to widen, or the announce has to arrive over that \
+                 transport -- `--via-own-routing` over a peering is not subject to this check, \
+                 since the client-edge transport policy applies to clients"
             ),
         }
     }
@@ -416,28 +529,112 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0)
+}
+
 // ── negotiating with the through-URL, free and unauthenticated ───────────────
 
-/// The terms an edge answered an unpaid PREPARE with -- the price, and the
-/// destination it echoed back.
+/// The terms an edge answered an unpaid PREPARE with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Terms {
     pub price: u64,
+    /// The destination the greeting echoed back -- see the module header:
+    /// this confirms a destination, it never supplies one.
     pub pay_to: String,
+    /// The EIP-712 domain **that node's** claim gate will verify a claim
+    /// under, from `extra.settlement` (or the first EVM entry of
+    /// `extra.settlements`). `None` for a target with no EVM settlement
+    /// backend, which therefore cannot be paid by channel claim at all.
+    pub settlement: Option<EvmDomain>,
+    /// `extra.requiredTransport` (issue #701): present, and self-
+    /// diagnosing, exactly when the greeting answers a request that arrived
+    /// over a transport the route's policy does not accept.
+    ///
+    /// The probing PREPARE arrives over HTTP, so `Some("btp")` here means
+    /// this route cannot be paid over HTTP **at all**. That is not
+    /// hypothetical: the devnet apex pins `g.toon.relay` to
+    /// `transport = "btp"` for huddles' persistent sessions, which is
+    /// exactly the route an announce on that fleet publishes to. Read so
+    /// the client path can say so plainly instead of buying an answer it
+    /// cannot decode.
+    pub required_transport: Option<String>,
 }
 
-/// Parse the x402 v2 greeting body. Deliberately tolerant of fields it does
-/// not read (`extra.settlement*`, `extra.requiredTransport`,
-/// `sessionLeaseTtlMs`): the announce's own settlement facts come from this
-/// node, never from the edge it is publishing through, and a greeting that
-/// grows a field must not break an announce.
+/// The two facts a client claim's signature is bound to, taken from the
+/// RECEIVER's own greeting rather than from this node's settlement section.
+///
+/// This is not a convenience. `claim_state.rs`'s `resolve_evm` builds its
+/// challenge domain from the channel as **that node** resolved it, and its
+/// claim gate recovers a claim's signer under the same domain -- so a claim
+/// signed under this node's idea of the domain verifies to a different
+/// address and is refused. The greeting is the receiver saying which
+/// `TokenNetwork` it judges by, and it is the only correct source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvmDomain {
+    pub chain_id: u64,
+    pub token_network: [u8; 20],
+}
+
+/// Parse the x402 v2 greeting body. Tolerant of fields it does not read
+/// (`requiredTransport`, `sessionLeaseTtlMs`, the Solana settlement entry):
+/// a greeting that grows a field must not break an announce.
+///
+/// Note what is NOT taken from here: the settlement facts the announce
+/// itself advertises. Those are this node's own, read from its own
+/// `[settlement.*]` tables -- the greeting's are the *target's*, and on a
+/// fleet where every node points at one registry the two coincide, which is
+/// exactly the coincidence that would make a mix-up invisible.
 pub fn parse_terms(body: &str) -> Option<Terms> {
     let parsed: serde_json::Value = serde_json::from_str(body).ok()?;
     let option = parsed.get("accepts")?.get(0)?;
+    let extra = option.get("extra");
+    let settlement = extra
+        .and_then(|extra| extra.get("settlement"))
+        .and_then(parse_evm_domain)
+        .or_else(|| {
+            extra
+                .and_then(|extra| extra.get("settlements"))
+                .and_then(serde_json::Value::as_array)?
+                .iter()
+                .find_map(parse_evm_domain)
+        });
     Some(Terms {
         price: option.get("amount")?.as_str()?.parse().ok()?,
         pay_to: option.get("payTo")?.as_str()?.to_string(),
+        settlement,
+        required_transport: extra
+            .and_then(|extra| extra.get("requiredTransport"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
     })
+}
+
+/// One settlement entry as an [`EvmDomain`], or `None` when it is not an
+/// EVM one. `chain` is `evm:<chainId>` for EVM and a bare `solana` for
+/// Solana (which has no chain id to append), so the prefix alone tells them
+/// apart without needing the untagged enum's structural rules here.
+fn parse_evm_domain(terms: &serde_json::Value) -> Option<EvmDomain> {
+    let chain_id = terms.get("chain")?.as_str()?.strip_prefix("evm:")?;
+    Some(EvmDomain {
+        chain_id: chain_id.parse().ok()?,
+        token_network: decode_hex_20(terms.get("tokenNetwork")?.as_str()?)?,
+    })
+}
+
+fn decode_hex_20(value: &str) -> Option<[u8; 20]> {
+    let value = value.strip_prefix("0x").unwrap_or(value);
+    if value.len() != 40 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; 20];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
 }
 
 /// The URL a client-edge sub-path sits at, given the through-URL. The
@@ -535,6 +732,231 @@ async fn fetch_terms(
         status,
         body: body.chars().take(400).collect(),
     })
+}
+
+// ── paying like any other client ─────────────────────────────────────────────
+
+/// The header a client-edge claim rides in, base64 of the claim JSON.
+const CLAIM_HEADER: &str = "ilp-payment-channel-claim";
+
+/// How long a `POST /ilp/claim-state` challenge is valid for. Short: it is
+/// signed and used in the same round trip, and a challenge is a capability
+/// to read a channel's state.
+const CLAIM_STATE_CHALLENGE_TTL_SECS: u64 = 60;
+
+/// Where a channel's watermark stands, according to the node that judges it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimWatermark {
+    /// The last nonce this receiver accepted; the next claim must exceed it.
+    pub nonce: u64,
+    /// What this receiver has already accepted cumulatively on the channel.
+    pub cumulative: u128,
+    /// Spendable headroom (`deposit - claimed + credited`), or `None` for a
+    /// declared channel that names no amount.
+    pub available: Option<u128>,
+}
+
+/// Ask the through-URL where this node's own claims on `channel` stand.
+///
+/// **The receiver is the authority on its own watermark**, and this is why
+/// the client path needs no durable state here. A claim whose nonce does not
+/// advance the receiver's record is refused as a replay, and a cumulative
+/// amount below its record is refused too -- so a payer that remembered
+/// locally would still have to reconcile, and a payer that guessed would
+/// either replay or silently overpay (which is exactly why
+/// `devnet_store_leg_probe.rs` makes an operator type both numbers in by
+/// hand). `POST /ilp/claim-state` (issue #693) exists to answer this, and
+/// asking is strictly better than remembering.
+///
+/// Authenticated per channel by an EIP-712 challenge signed with the same
+/// settlement key the claim itself is signed with -- a *different* digest
+/// from a balance proof on purpose, so a captured challenge is not
+/// replayable as a payment.
+async fn fetch_claim_state(
+    client: &reqwest::Client,
+    through_url: &str,
+    channel: &[u8; 32],
+    domain: &EvmDomain,
+    signer: &LocalSigner,
+) -> Result<ClaimWatermark, AnnounceError> {
+    let channel_hex = format!("0x{}", hex_encode(channel));
+    let url = under(through_url, "claim-state");
+    let expires = now_secs() + CLAIM_STATE_CHALLENGE_TTL_SECS;
+    let digest = evm_claim_state_challenge_digest(&EvmClaimStateChallenge {
+        channel_id: *channel,
+        expires,
+        chain_id: domain.chain_id,
+        token_network_address: domain.token_network,
+    });
+    let signature = signer
+        .sign(&digest)
+        .map_err(|error| AnnounceError::ClaimStateUnavailable {
+            channel: channel_hex.clone(),
+            reason: error.to_string(),
+        })?
+        .to_bytes();
+
+    let request = serde_json::json!({
+        "channels": [{
+            "blockchain": "evm",
+            "channelId": channel_hex,
+            "expires": expires,
+            "signature": format!("0x{}", hex_encode(&signature)),
+        }]
+    });
+    let failed = |reason: String| AnnounceError::ClaimStateUnavailable {
+        channel: channel_hex.clone(),
+        reason,
+    };
+    let body: serde_json::Value = client
+        .post(&url)
+        .json(&request)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|error| failed(error.to_string()))?
+        .json()
+        .await
+        .map_err(|error| failed(error.to_string()))?;
+
+    let entry = body["channels"]
+        .get(0)
+        .ok_or_else(|| failed(format!("no answer for the channel asked about: {body}")))?;
+    if entry["ok"] != serde_json::Value::Bool(true) {
+        // The endpoint collapses every refusal to one generic reason on
+        // purpose (a caller must learn nothing about a channel it does not
+        // control), so there is nothing more specific to report here --
+        // hence the long "usual causes" in the error's own Display.
+        return Err(failed(format!(
+            "answered ok=false ({})",
+            entry["error"].as_str().unwrap_or("no reason given")
+        )));
+    }
+    Ok(ClaimWatermark {
+        nonce: entry["nonce"]
+            .as_u64()
+            .ok_or_else(|| failed(format!("no nonce in the answer: {entry}")))?,
+        cumulative: entry["cumulativeClaimed"]
+            .as_str()
+            .and_then(|value| value.parse().ok())
+            .ok_or_else(|| failed(format!("no cumulativeClaimed in the answer: {entry}")))?,
+        available: entry["available"]
+            .as_str()
+            .and_then(|value| value.parse().ok()),
+    })
+}
+
+/// The next claim on `channel`: the receiver's watermark advanced by
+/// exactly `amount`.
+///
+/// A monotonic function of what the receiver reported, deliberately -- the
+/// two failure modes of getting this wrong are a replay (refused, free) and
+/// an overpayment (accepted, silent), and only one of them is survivable.
+fn next_claim(watermark: &ClaimWatermark, amount: u64) -> (u64, u128) {
+    (
+        watermark.nonce + 1,
+        watermark.cumulative + u128::from(amount),
+    )
+}
+
+/// The client-edge claim JSON, signed through this workspace's PRODUCTION
+/// signing path (`Signer::sign` + `Signature::to_bytes`), whose byte 64 is
+/// libsecp256k1's raw recovery id in `{0,1}`. Deliberately no `+27`: issues
+/// #590/#591 moved that normalisation to the settlement boundary, and
+/// pre-shifting it here would be a second implementation of a rule that
+/// already has one.
+fn claim_json(
+    signer: &LocalSigner,
+    channel: &[u8; 32],
+    domain: &EvmDomain,
+    nonce: u64,
+    cumulative: u128,
+) -> Result<String, AnnounceError> {
+    let proof = EvmBalanceProof {
+        channel_id: *channel,
+        nonce,
+        transferred_amount: cumulative,
+        locked_amount: 0,
+        locks_root: [0u8; 32],
+        chain_id: domain.chain_id,
+        token_network_address: domain.token_network,
+    };
+    let signature = signer
+        .sign(&evm_balance_proof_digest(&proof))
+        .map_err(|error| AnnounceError::Signing(error.to_string()))?
+        .to_bytes();
+    let address = derive_evm_address(
+        &signer
+            .public_key()
+            .map_err(|error| AnnounceError::Signing(error.to_string()))?,
+    );
+    Ok(serde_json::json!({
+        "version": "1.0",
+        "blockchain": "evm",
+        "messageId": format!("connector-announce-{nonce}"),
+        // `Z`, not `+00:00`. The claim gate refuses a `+00:00` offset by
+        // name -- "'timestamp' must be ISO 8601 with a 'Z' timezone" -- and
+        // `chrono`'s plain `to_rfc3339()` produces exactly the spelling it
+        // rejects.
+        "timestamp": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        "senderId": to_hex(&address),
+        "channelId": format!("0x{}", hex_encode(channel)),
+        "nonce": nonce,
+        "transferredAmount": cumulative.to_string(),
+        "lockedAmount": "0",
+        "locksRoot": format!("0x{}", "0".repeat(64)),
+        "signature": format!("0x{}", hex_encode(&signature)),
+        "signerAddress": to_hex(&address),
+        "chainId": domain.chain_id,
+        "tokenNetworkAddress": to_hex(&domain.token_network),
+    })
+    .to_string())
+}
+
+/// POST the paid PREPARE to the through-URL, exactly as any other client of
+/// that node does: the encoded packet as the body, the claim base64'd into
+/// the `ilp-payment-channel-claim` header, and the answer read as an OER
+/// FULFILL or REJECT.
+///
+/// Nothing about this node's routing table is involved. That is the whole
+/// difference from [`AnnounceOptions::via_own_routing`], and it is what lets
+/// a node with no route to the relay -- and no peering it can originate
+/// over -- announce itself anyway.
+async fn send_as_client(
+    client: &reqwest::Client,
+    through_url: &str,
+    prepare: &Prepare,
+    claim: &str,
+) -> Result<Fulfill, AnnounceError> {
+    let response = client
+        .post(through_url)
+        .header(CLAIM_HEADER, BASE64.encode(claim.as_bytes()))
+        .body(prepare.encode())
+        .send()
+        .await
+        .map_err(|error| AnnounceError::Negotiation {
+            url: through_url.to_string(),
+            reason: error.to_string(),
+        })?;
+    let status = response.status().as_u16();
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| AnnounceError::Negotiation {
+            url: through_url.to_string(),
+            reason: error.to_string(),
+        })?;
+
+    if let Ok(fulfill) = Fulfill::decode(&bytes) {
+        return Ok(fulfill);
+    }
+    match Reject::decode(&bytes) {
+        Ok(reject) => Err(reject_error(&reject)),
+        Err(_) => Err(AnnounceError::UnreadableAnswer {
+            status,
+            body: String::from_utf8_lossy(&bytes).chars().take(400).collect(),
+        }),
+    }
 }
 
 // ── the arithmetic ───────────────────────────────────────────────────────────
@@ -696,10 +1118,18 @@ pub async fn announce(
                 })
         })?;
 
-    // A dry run signs nothing for the wire and sends nothing, so it is safe
-    // beside a running node whatever the destination is -- and it is what an
-    // operator wants on a live box, to see what would go out.
-    if !options.dry_run {
+    // The ledger guard applies to the ROUTING path only, and that is not a
+    // convenience -- it is the reason the client path is the default.
+    //
+    // An outbound PEER claim is signed by `forward_via_peer_route` and
+    // journaled under `state_dir`, which is the state two processes cannot
+    // share. The client path signs a CLIENT claim instead, by hand, against
+    // a channel whose watermark authority is the RECEIVER (asked over
+    // `POST /ilp/claim-state`, never remembered locally) -- and it never
+    // touches `ClientPayoutLedger`, which is assembled in `router()` and
+    // `router()` is never called here. So there is no local mutable money
+    // state to fork, and nothing to guard.
+    if !options.dry_run && options.via_own_routing {
         refuse_if_a_second_process_would_fork_the_ledger(config, &destination).await?;
     }
 
@@ -742,7 +1172,21 @@ pub async fn announce(
     let event = sign_ilp_peer_info(&secret, content, created_at, announce_config.ttl_secs())
         .map_err(|error| AnnounceError::Signing(error.to_string()))?;
 
-    let (amount, minimum_delivery) = amount_to_pay(config, &destination, terms.price);
+    // Two different arithmetics, because they are two different roles.
+    //
+    // As a CLIENT (the default) this node arrives at the through-URL's edge
+    // like any buyer and pays exactly what that edge quotes -- whatever it
+    // does downstream, and whatever it retains, is its business and is
+    // already inside the quoted price (ADR 0028).
+    //
+    // Originating through its OWN routing, it is the first hop: it forwards
+    // `amount - fee`, and since #754 the terminating side charges its own
+    // price on arrival -- so the amount must cover both.
+    let (amount, minimum_delivery) = if options.via_own_routing {
+        amount_to_pay(config, &destination, terms.price)
+    } else {
+        (terms.price, terms.price)
+    };
 
     // A dry run negotiates -- an operator asking "what will this say and
     // what will it cost" deserves both answers -- and stops one step short
@@ -767,33 +1211,130 @@ pub async fn announce(
         &identity,
     )?;
 
+    let fulfill = if options.via_own_routing {
+        tracing::info!(
+            destination = %destination,
+            through = %options.through_url,
+            amount,
+            minimum_delivery,
+            event_id = %event.id,
+            "originating the announce through this node's own routing"
+        );
+        // The same call `POST /packets` makes, with no operator surface in
+        // front of it (issue #753) and no second process holding a key.
+        match runtime
+            .connector
+            .handle_prepare(prepare, minimum_delivery)
+            .await
+        {
+            PacketResponse::Fulfill(fulfill) => fulfill,
+            PacketResponse::Reject(reject) => return Err(reject_error(&reject)),
+        }
+    } else {
+        pay_the_through_url(config, &client, options, &terms, &prepare, amount, &event).await?
+    };
+
+    read_relay_answer(&fulfill, &shared_secret)?;
+    Ok(AnnounceOutcome {
+        event,
+        destination,
+        amount,
+        sent: true,
+    })
+}
+
+/// The default send path: pay the through-URL directly, as an ordinary
+/// client of that node.
+///
+/// Everything a claim needs comes from somewhere that cannot be wrong:
+///
+///   * the **key** is `[settlement.evm]`'s -- the channel's on-chain
+///     participant IS this node's settlement address, which is why there is
+///     no second key here and none is invented;
+///   * the **domain** is the target's own greeting, because its gate
+///     recovers the signer under the domain IT resolved for the channel;
+///   * the **nonce and cumulative amount** are the target's own claim state,
+///     because the receiver is the authority on its own watermark.
+///
+/// Only the channel id is configured, because only the channel id is a fact
+/// about the world that nothing on either side can derive.
+#[allow(clippy::too_many_arguments)]
+async fn pay_the_through_url(
+    config: &Config,
+    client: &reqwest::Client,
+    options: &AnnounceOptions,
+    terms: &Terms,
+    prepare: &Prepare,
+    amount: u64,
+    event: &NostrEvent,
+) -> Result<Fulfill, AnnounceError> {
+    let announce_config = config
+        .announce()
+        .expect("caller checked the [announce] section is present");
+    // Refused before anything is signed. A route whose policy does not
+    // accept HTTP answers a PAID request with the same x402 greeting it
+    // answers an unpaid one (`handle_ilp` checks transport before it checks
+    // payment at all), so pressing on would spend nothing but would report
+    // an undecodable answer instead of the real reason.
+    if let Some(required) = terms
+        .required_transport
+        .as_deref()
+        .filter(|required| *required != "http")
+    {
+        return Err(AnnounceError::WrongTransport {
+            destination: prepare.destination.clone(),
+            required: required.to_string(),
+        });
+    }
+    let channel = *announce_config
+        .pay_channel()
+        .ok_or(AnnounceError::NoPayChannel)?;
+    let domain = terms
+        .settlement
+        .ok_or_else(|| AnnounceError::NoSettlementTerms {
+            url: options.through_url.clone(),
+        })?;
+
+    let evm = config
+        .settlements()
+        .iter()
+        .find_map(|settlement| match settlement {
+            SettlementConfig::Evm(evm) => Some(evm),
+            SettlementConfig::Solana(_) => None,
+        })
+        .ok_or(AnnounceError::NoSettlementIdentity)?;
+    let signer =
+        LocalSigner::from_secret_bytes("announce-claim", read_settlement_key_bytes(evm.key())?)
+            .map_err(|error| AnnounceError::Signing(error.to_string()))?;
+
+    let watermark =
+        fetch_claim_state(client, &options.through_url, &channel, &domain, &signer).await?;
+    // Refused here rather than bought: a claim above what has actually been
+    // deposited could never be redeemed on chain, so the far side declines
+    // it (issue #646) -- and this way the operator is told the number.
+    if let Some(available) = watermark.available {
+        if available < u128::from(amount) {
+            return Err(AnnounceError::InsufficientHeadroom {
+                channel: format!("0x{}", hex_encode(&channel)),
+                available,
+                amount,
+            });
+        }
+    }
+    let (nonce, cumulative) = next_claim(&watermark, amount);
+    let claim = claim_json(&signer, &channel, &domain, nonce, cumulative)?;
+
     tracing::info!(
-        destination = %destination,
+        destination = %prepare.destination,
         through = %options.through_url,
         amount,
-        minimum_delivery,
+        nonce,
+        cumulative = %cumulative,
         event_id = %event.id,
-        "originating the announce through this node's own routing"
+        "paying the through-URL directly, as an ordinary client"
     );
 
-    // The same call `POST /packets` makes, with no operator surface in
-    // front of it (issue #753) and no second process holding a key.
-    match runtime
-        .connector
-        .handle_prepare(prepare, minimum_delivery)
-        .await
-    {
-        PacketResponse::Fulfill(fulfill) => {
-            read_relay_answer(&fulfill, &shared_secret)?;
-            Ok(AnnounceOutcome {
-                event,
-                destination,
-                amount,
-                sent: true,
-            })
-        }
-        PacketResponse::Reject(reject) => Err(reject_error(&reject)),
-    }
+    send_as_client(client, &options.through_url, prepare, &claim).await
 }
 
 fn reject_error(reject: &Reject) -> AnnounceError {
@@ -868,9 +1409,10 @@ fn read_relay_answer(fulfill: &Fulfill, shared_secret: &[u8; 32]) -> Result<(), 
 mod tests {
     use super::*;
 
-    /// The greeting is read for its price and nothing else, and it must
-    /// survive fields this code does not know about -- `requiredTransport`
-    /// (issue #701) is on the devnet apex's own relay route today.
+    /// The devnet apex's own greeting shape, abridged: the price, the
+    /// echoed `payTo`, and the EIP-712 domain a claim must be signed under
+    /// -- plus fields this code deliberately does not read
+    /// (`requiredTransport` from issue #701 is live on that very route).
     #[test]
     fn terms_are_parsed_out_of_a_real_greeting_including_fields_we_ignore() {
         let body = r#"{"x402Version":2,"resource":{"url":"g.toon.relay"},
@@ -878,15 +1420,61 @@ mod tests {
             "payTo":"g.toon.relay","maxTimeoutSeconds":60,"httpEndpoint":"/ilp",
             "extra":{"ilpAddress":"g.toon.relay","endpoint":"/ilp","price":"1002",
             "requiredTransport":"btp","sessionLeaseTtlMs":300000,
-            "settlement":{"chain":"evm:84532","decimals":6}}}]}"#;
+            "settlement":{"chain":"evm:84532","settlementAddress":"0xf29f",
+              "tokenNetworkRegistry":"0xcc90",
+              "tokenNetwork":"0x1E95493fEF46707E034b4a1945f25a8C76A1823D",
+              "tokenAddress":"0x49be","decimals":6}}}]}"#;
 
+        let terms = parse_terms(body).expect("a real greeting parses");
+        assert_eq!(terms.price, 1002);
+        assert_eq!(terms.pay_to, "g.toon.relay");
+        // Issue #701, and not a hypothetical: the live devnet apex answers
+        // exactly this for `g.toon.relay`, which is the route an announce
+        // on that fleet publishes to. The client path pays over HTTP, so a
+        // `btp` requirement here means it cannot pay this route at all --
+        // detected here rather than discovered as an undecodable answer.
+        assert_eq!(terms.required_transport.as_deref(), Some("btp"));
+        let domain = terms.settlement.expect("the EIP-712 domain to sign under");
+        assert_eq!(domain.chain_id, 84_532);
         assert_eq!(
-            parse_terms(body),
-            Some(Terms {
-                price: 1002,
-                pay_to: "g.toon.relay".to_string()
-            })
+            to_hex(&domain.token_network),
+            "0x1e95493fef46707e034b4a1945f25a8c76a1823d"
         );
+    }
+
+    /// A two-chain node lists both legs in `extra.settlements` (issue
+    /// #632). Only the EVM one carries a domain a balance proof can be
+    /// signed under -- a bare `"solana"` chain has no chain id to sign
+    /// against -- so the EVM entry must be found past it.
+    #[test]
+    fn the_evm_domain_is_found_past_a_solana_entry_in_the_settlements_list() {
+        let body = r#"{"accepts":[{"amount":"1000","payTo":"g.toon.relay","extra":{
+            "settlements":[
+              {"chain":"solana","settlementAddress":"W6yK","programId":"2aEV",
+               "tokenAddress":"xyc5","decimals":6},
+              {"chain":"evm:31337","settlementAddress":"0x01",
+               "tokenNetworkRegistry":"0x02",
+               "tokenNetwork":"0x00000000000000000000000000000000000000bb",
+               "tokenAddress":"0x03","decimals":6}]}}]}"#;
+
+        let domain = parse_terms(body)
+            .expect("parse")
+            .settlement
+            .expect("the EVM leg");
+        assert_eq!(domain.chain_id, 31_337);
+        assert_eq!(
+            to_hex(&domain.token_network),
+            "0x00000000000000000000000000000000000000bb"
+        );
+    }
+
+    /// A target with no EVM settlement backend advertises no domain, so it
+    /// cannot be paid by channel claim -- reported rather than guessed at.
+    #[test]
+    fn a_settlement_less_target_advertises_no_domain() {
+        let body = r#"{"accepts":[{"amount":"1000","payTo":"g.toon.relay",
+            "extra":{"ilpAddress":"g.toon.relay","price":"1000"}}]}"#;
+        assert_eq!(parse_terms(body).expect("parse").settlement, None);
     }
 
     /// A 200, a 404 body, or anything that is not an x402 greeting yields
@@ -922,6 +1510,139 @@ mod tests {
         assert!(route_matches("g.toon.relay", "g.toon.relay.ario"));
         assert!(!route_matches("g.toon.relay", "g.toon.relayed"));
         assert!(!route_matches("g.toon.relay", "g.toon"));
+    }
+
+    // -- Paying like any other client (issue #784) --
+
+    const DOMAIN: EvmDomain = EvmDomain {
+        chain_id: 84_532,
+        token_network: [0x1eu8; 20],
+    };
+    const CHANNEL: [u8; 32] = [0x5cu8; 32];
+
+    fn claim_signer() -> LocalSigner {
+        LocalSigner::from_secret_bytes("announce-claim-test", [23u8; 32]).expect("signer")
+    }
+
+    /// The claim this node emits is verified here the way the RECEIVER
+    /// verifies it: recover the signer from the balance-proof digest and
+    /// check it is the channel participant this node's settlement key
+    /// derives. A claim that fails this is refused at the far gate with the
+    /// packet already formed, so it is worth proving locally.
+    #[test]
+    fn the_claim_verifies_as_the_settlement_address_the_channel_is_opened_with() {
+        let signer = claim_signer();
+        let json = claim_json(&signer, &CHANNEL, &DOMAIN, 7, 7_014).expect("sign a claim");
+        let claim: serde_json::Value = serde_json::from_str(&json).expect("claim JSON");
+
+        let expected = derive_evm_address(&signer.public_key().expect("public key"));
+        assert_eq!(claim["signerAddress"], to_hex(&expected));
+        assert_eq!(claim["senderId"], to_hex(&expected));
+        assert_eq!(claim["nonce"], 7);
+        assert_eq!(claim["transferredAmount"], "7014");
+        assert_eq!(claim["chainId"], 84_532);
+        assert_eq!(claim["tokenNetworkAddress"], to_hex(&DOMAIN.token_network));
+        assert_eq!(claim["blockchain"], "evm");
+
+        let signature = decode_hex_65(claim["signature"].as_str().expect("signature"));
+        assert!(
+            connector_signer::verify_evm_balance_proof(
+                &EvmBalanceProof {
+                    channel_id: CHANNEL,
+                    nonce: 7,
+                    transferred_amount: 7_014,
+                    locked_amount: 0,
+                    locks_root: [0u8; 32],
+                    chain_id: DOMAIN.chain_id,
+                    token_network_address: DOMAIN.token_network,
+                },
+                &signature,
+                &expected,
+            ),
+            "the receiving claim gate must recover this node's own settlement address"
+        );
+    }
+
+    /// `chrono`'s plain `to_rfc3339()` emits `+00:00`, which the claim gate
+    /// refuses by name ("'timestamp' must be ISO 8601 with a 'Z' timezone").
+    /// Cheap to hit, free to learn, and easy to reintroduce.
+    #[test]
+    fn the_claims_timestamp_ends_in_z_not_an_offset() {
+        let json = claim_json(&claim_signer(), &CHANNEL, &DOMAIN, 1, 1).expect("sign");
+        let claim: serde_json::Value = serde_json::from_str(&json).expect("claim JSON");
+        let timestamp = claim["timestamp"].as_str().expect("timestamp");
+
+        assert!(timestamp.ends_with('Z'), "{timestamp}");
+        assert!(!timestamp.contains("+00:00"), "{timestamp}");
+    }
+
+    /// The claim-state challenge is a DIFFERENT digest from a balance
+    /// proof, deliberately -- reusing the claim signature scheme would make
+    /// a captured read-challenge replayable as a payment. Verified through
+    /// the same function the receiving handler calls.
+    #[test]
+    fn the_claim_state_challenge_verifies_under_its_own_domain_separated_digest() {
+        let signer = claim_signer();
+        let challenge = EvmClaimStateChallenge {
+            channel_id: CHANNEL,
+            expires: 2_000_000_000,
+            chain_id: DOMAIN.chain_id,
+            token_network_address: DOMAIN.token_network,
+        };
+        let signature = signer
+            .sign(&evm_claim_state_challenge_digest(&challenge))
+            .expect("sign")
+            .to_bytes();
+        let address = derive_evm_address(&signer.public_key().expect("public key"));
+
+        assert!(connector_signer::verify_evm_claim_state_challenge(
+            &challenge, &signature, &address
+        ));
+        // ...and the two digests are genuinely different, so neither
+        // signature is usable as the other.
+        assert_ne!(
+            evm_claim_state_challenge_digest(&challenge),
+            evm_balance_proof_digest(&EvmBalanceProof {
+                channel_id: CHANNEL,
+                nonce: 0,
+                transferred_amount: 0,
+                locked_amount: 0,
+                locks_root: [0u8; 32],
+                chain_id: DOMAIN.chain_id,
+                token_network_address: DOMAIN.token_network,
+            })
+        );
+    }
+
+    /// The next claim advances the RECEIVER's watermark by exactly the
+    /// amount. A nonce that does not advance is refused as a replay; a
+    /// cumulative amount that overshoots is accepted silently and
+    /// overpays. Only one of those is survivable, so this is arithmetic
+    /// rather than a guess.
+    #[test]
+    fn the_next_claim_advances_the_receivers_watermark_by_exactly_the_amount() {
+        let fresh = ClaimWatermark {
+            nonce: 0,
+            cumulative: 0,
+            available: Some(10_000),
+        };
+        assert_eq!(next_claim(&fresh, 1_002), (1, 1_002));
+
+        let used = ClaimWatermark {
+            nonce: 41,
+            cumulative: 41_082,
+            available: Some(10_000),
+        };
+        assert_eq!(next_claim(&used, 1_002), (42, 42_084));
+    }
+
+    fn decode_hex_65(value: &str) -> [u8; 65] {
+        let value = value.strip_prefix("0x").unwrap_or(value);
+        let mut out = [0u8; 65];
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&value[i * 2..i * 2 + 2], 16).expect("hex");
+        }
+        out
     }
 
     #[test]

@@ -27,7 +27,33 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
+use chrono::Duration as ChronoDuration;
+use connector_settlement::SettlementBackend;
+use connector_settlement_evm::test_support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
+use connector_settlement_evm::EvmSettlementBackend;
+use connector_signer::{derive_evm_address, to_hex, Signer};
+
 mod support;
+
+/// `anvil`'s own default chain id (`Anvil::spawn --chain-id 31337`), and so
+/// the EIP-712 domain a claim against its deployed `TokenNetwork` is signed
+/// under.
+const ANVIL_CHAIN_ID: u64 = 31_337;
+
+/// This test binary's own base port for [`Anvil::spawn`], distinct from
+/// every other test binary's in this workspace (`paid_write_end_to_end.rs`
+/// uses `19_000`, `devnet_configs_load.rs` `18_500`, and so on) so
+/// concurrent binaries under `cargo test --workspace` do not contend.
+const ANVIL_BASE_PORT: u16 = 19_100;
+
+/// What the target connector charges for `g.test.relay`. A client pays
+/// exactly this, with no fee arithmetic of its own -- unlike the
+/// `--via-own-routing` path, where this hop's own fee is added.
+const RELAY_PRICE: u64 = 1000;
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
 
 /// A stand-in for a relay's payment-oblivious write ingress that RECORDS
 /// what it was handed.
@@ -181,6 +207,7 @@ fn an_announce_is_paid_through_the_nodes_own_routing_and_reaches_the_write_ingre
         "--config",
         &config.path().display().to_string(),
         &through,
+        "--via-own-routing",
     ]);
 
     assert!(ok, "announce failed:\nstdout: {stdout}\nstderr: {stderr}");
@@ -446,6 +473,7 @@ fn announcing_beside_a_serving_node_refuses_rather_than_forking_the_claim_journa
         "--config",
         &config.path().display().to_string(),
         "http://127.0.0.1:1/ilp",
+        "--via-own-routing",
     ]);
 
     assert!(!ok);
@@ -454,6 +482,252 @@ fn announcing_beside_a_serving_node_refuses_rather_than_forking_the_claim_journa
         stderr.contains("--dry-run"),
         "the message must name the escape that is safe beside a running node: {stderr}"
     );
+}
+
+/// The DEFAULT send path, against a real chain: this node pays the
+/// through-URL directly, as an ordinary client of it.
+///
+/// This is the shape #784's owner asked for twice -- "an operator announces
+/// to a relay whose URL they provide, **paying like any other client**" --
+/// and the whole point is what it does NOT need. The announcing config has:
+///
+///   * **no route to `g.test.relay`**, or to anything at all;
+///   * **no `[[peers]]`** and so nothing to originate over;
+///   * **no `[[client_channels]]`** -- that table is channels a node
+///     RECEIVES on, and this node is paying.
+///
+/// What it has is a funded channel with the target and a settlement
+/// identity, which is exactly what any buyer has. That is what makes this
+/// reachable from a node like the devnet store box, whose peering is
+/// accept-only and which has no `g.toon.relay` route.
+///
+/// Every value here is real: a real `anvil` chain, a real registry-resolved
+/// `TokenNetwork`, a real on-chain deposit, a real EIP-712 balance proof
+/// recovered by the far side's own claim gate, and a real
+/// `POST /ilp/claim-state` round trip for the watermark. Nothing is mocked
+/// and no real-money network is touched.
+#[tokio::test]
+async fn the_default_path_pays_the_through_url_as_a_client_with_no_route_and_no_peering() {
+    // Fail loudly in CI when the chain this needs is unavailable, never
+    // silently skip and report success (issue #471's policy).
+    if !require_anvil() {
+        return;
+    }
+    let anvil = Anvil::spawn(ANVIL_BASE_PORT).await;
+    let token =
+        EvmSettlementBackend::deploy_mock_token(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, 1_000_000)
+            .await
+            .expect("mint a fresh mock ERC-20");
+    let backend = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
+        .await
+        .expect("deploy a TokenNetwork through a fresh registry");
+    let registry = backend.registry_address();
+
+    // The announcing node's own settlement identity. Its EVM address is the
+    // channel participant -- there is no second key anywhere in this test,
+    // which is the property `[announce] pay_channel` is designed around.
+    let announcer_secret = [37u8; 32];
+    let announcer_address = derive_evm_address(
+        &libsecp256k1::PublicKey::from_secret_key(
+            &libsecp256k1::SecretKey::parse(&announcer_secret).expect("valid secret"),
+        )
+        .serialize(),
+    );
+
+    // A real channel, funded on chain with real value, whose counterparty
+    // the chain itself records as the announcing node.
+    let channel = backend
+        .open(announcer_address.to_vec(), ChronoDuration::hours(1))
+        .await
+        .expect("open a real channel");
+    let funded = backend
+        .fund(&channel, 10 * u128::from(RELAY_PRICE))
+        .await
+        .expect("fund it with real ERC-20 value");
+    assert_eq!(funded.deposited, 10 * u128::from(RELAY_PRICE));
+
+    // The TARGET: a connector fronting a relay write ingress, with a real
+    // settlement section against the same deployment -- so it can resolve
+    // the channel above from chain and judge a claim on it (issue #502's
+    // registration-free path: nothing in its config names this buyer).
+    let ingress = RecordingIngress::start();
+    let target_key = support::write_raw_key_file(41);
+    let target_settlement = write(DEPLOYER_PRIVATE_KEY);
+    let target_state = tempfile::tempdir().expect("temp state dir");
+    let target_config = write(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_file}"
+
+[settlement.evm]
+rpc_url = "{rpc_url}"
+contract_address = "{registry:?}"
+token_address = "{token:?}"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "{settlement_key}"
+
+[[routes]]
+prefix = "g.test.relay"
+handler_url = "http://{ingress}/write"
+price = {RELAY_PRICE}
+"#,
+        state_dir = target_state.path().display(),
+        key_file = target_key.path().display(),
+        settlement_key = target_settlement.path().display(),
+        rpc_url = anvil.rpc_url,
+        ingress = ingress.addr,
+    ));
+    let target = support::spawn_connector(target_config.path());
+
+    // The ANNOUNCING node. Note what is absent: no `[[routes]]`, no
+    // `[[peers]]`, no `[[client_channels]]`, no `state_dir`. It cannot
+    // route a packet anywhere -- and does not need to.
+    let announcer_key = support::write_raw_key_file(43);
+    let announcer_settlement = write(&hex_encode(&announcer_secret));
+    let announcer_config = write(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{key_file}"
+
+[settlement.evm]
+rpc_url = "{rpc_url}"
+contract_address = "{registry:?}"
+token_address = "{token:?}"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "{settlement_key}"
+
+[announce]
+addresses = ["g.test.ario"]
+http_endpoint = "https://ario.test.example/ilp"
+btp_endpoint = "wss://ario.test.example/ilp/btp"
+publish_to = "g.test.relay"
+pay_channel = "{channel_id}"
+"#,
+        key_file = announcer_key.path().display(),
+        settlement_key = announcer_settlement.path().display(),
+        rpc_url = anvil.rpc_url,
+        channel_id = channel.0,
+    ));
+
+    let (ok, stdout, stderr) = run_connector(&[
+        "announce",
+        "--config",
+        &announcer_config.path().display().to_string(),
+        &format!("http://{}/ilp", target.client_edge_addr),
+    ]);
+
+    assert!(
+        ok,
+        "the client send path failed:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains(&format!("({RELAY_PRICE} base units)")),
+        "a client pays exactly what the edge quotes, with no fee arithmetic of its own: {stdout}"
+    );
+
+    // The event reached the relay's write ingress, through a connector this
+    // node has no route to and no peering with.
+    let bodies = ingress.bodies();
+    assert_eq!(bodies.len(), 1, "exactly one write reached the ingress");
+    let written: serde_json::Value =
+        serde_json::from_slice(&bodies[0]).expect("the ingress was handed JSON");
+    assert_eq!(written["event"]["kind"], 10032);
+    let info: serde_json::Value = serde_json::from_str(
+        written["event"]["content"]
+            .as_str()
+            .expect("content is a string"),
+    )
+    .expect("the content is an IlpPeerInfo");
+    assert_eq!(info["ilpAddress"], "g.test.ario");
+    // The settlement facts announced are the ANNOUNCING node's own, read
+    // from its own verified `[settlement.evm]` table -- not the target's,
+    // even though both point at one deployment here and the addresses that
+    // differ are exactly the ones that matter.
+    assert_eq!(
+        info["settlementAddresses"][format!("evm:{ANVIL_CHAIN_ID}")],
+        to_hex(&announcer_address)
+    );
+
+    // And the value genuinely moved: the target's claim gate accepted a
+    // claim on the channel, so its own claim state now reports the
+    // watermark this announce advanced it to. Read back over the same
+    // public endpoint the announce used, signed by the same key.
+    let state = claim_state(
+        &format!("http://{}/ilp", target.client_edge_addr),
+        &channel.0,
+        &announcer_secret,
+        backend.address().to_fixed_bytes(),
+    )
+    .await;
+    assert_eq!(state["ok"], true, "{state}");
+    assert_eq!(
+        state["cumulativeClaimed"],
+        RELAY_PRICE.to_string(),
+        "the accepted claim advanced the channel by exactly the route's price: {state}"
+    );
+    assert_eq!(state["nonce"], 1, "{state}");
+}
+
+/// Read one channel's claim state off a live client edge, the way the
+/// announce path itself does -- an EIP-712 challenge signed by the channel
+/// participant, over a digest deliberately distinct from a balance proof's.
+async fn claim_state(
+    edge: &str,
+    channel_hex: &str,
+    secret: &[u8; 32],
+    token_network: [u8; 20],
+) -> serde_json::Value {
+    let signer =
+        connector_signer::LocalSigner::from_secret_bytes("readback", *secret).expect("signer");
+    let channel_id: [u8; 32] = {
+        let text = channel_hex.strip_prefix("0x").unwrap_or(channel_hex);
+        let mut out = [0u8; 32];
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).expect("hex");
+        }
+        out
+    };
+    let expires = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs()
+        + 60;
+    let signature = signer
+        .sign(&connector_signer::evm_claim_state_challenge_digest(
+            &connector_signer::EvmClaimStateChallenge {
+                channel_id,
+                expires,
+                chain_id: ANVIL_CHAIN_ID,
+                token_network_address: token_network,
+            },
+        ))
+        .expect("sign")
+        .to_bytes();
+
+    let body: serde_json::Value = reqwest::Client::new()
+        .post(format!("{edge}/claim-state"))
+        .json(&serde_json::json!({"channels": [{
+            "blockchain": "evm",
+            "channelId": format!("0x{}", hex_encode(&channel_id)),
+            "expires": expires,
+            "signature": format!("0x{}", hex_encode(&signature)),
+        }]}))
+        .send()
+        .await
+        .expect("POST /ilp/claim-state")
+        .json()
+        .await
+        .expect("claim-state JSON");
+    body["channels"][0].clone()
 }
 
 /// ...and the guard stops exactly there. An announce to a route this node
@@ -505,6 +779,7 @@ fn announcing_a_locally_terminated_route_is_allowed_beside_a_serving_node() {
         "--config",
         &announcing.path().display().to_string(),
         &format!("http://{}/ilp", node.client_edge_addr),
+        "--via-own-routing",
     ]);
 
     assert!(

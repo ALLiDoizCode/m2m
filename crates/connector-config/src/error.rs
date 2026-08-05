@@ -599,4 +599,12 @@ pub enum ConfigError {
          the announce should stay live (issue #784)"
     )]
     AnnounceZeroTtl,
+
+    #[error(
+        "[announce] pay_channel '{value}' is not a 32-byte on-chain channel id: it must be 64 \
+         hex characters, optionally `0x`-prefixed. This is the channel this node PAYS an \
+         announce from as an ordinary client of the relay's connector -- not a \
+         [[client_channels]] row, which is a channel this node RECEIVES on (issue #784)"
+    )]
+    AnnounceInvalidPayChannel { value: String },
 }
