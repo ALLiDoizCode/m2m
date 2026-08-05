@@ -70,6 +70,22 @@ impl Default for ClientPayoutLedger {
     }
 }
 
+/// Shared by [`ClientPayoutLedger::set_channel_domain`] and
+/// [`ClientPayoutLedger::ensure_channel_domain`]: register `channel_id`'s
+/// signing domain and, per the module doc, also its own outbound-channel
+/// identity (`set_outbound_channel(id, id)`) -- the two calls a client-edge
+/// channel always needs together, since it has no separate peer identity to
+/// register them under.
+fn register_channel_domain(
+    book: &mut ClaimBook,
+    channel_id: String,
+    domain: ChannelDomain,
+) -> Result<(), InvalidChannelId> {
+    book.set_channel_domain(channel_id.clone(), domain)?;
+    book.set_outbound_channel(channel_id.clone(), channel_id);
+    Ok(())
+}
+
 impl ClientPayoutLedger {
     pub fn new() -> ClientPayoutLedger {
         ClientPayoutLedger {
@@ -108,10 +124,11 @@ impl ClientPayoutLedger {
         domain: ChannelDomain,
     ) -> Result<(), InvalidChannelId> {
         let channel_id = channel_id.into();
-        let book = self.book.get_mut().expect("not poisoned");
-        book.set_channel_domain(channel_id.clone(), domain)?;
-        book.set_outbound_channel(channel_id.clone(), channel_id);
-        Ok(())
+        register_channel_domain(
+            self.book.get_mut().expect("not poisoned"),
+            channel_id,
+            domain,
+        )
     }
 
     /// Whether this ledger already has a payout domain for `channel_id` --
@@ -143,9 +160,7 @@ impl ClientPayoutLedger {
         if book.has_channel_domain(&channel_id) {
             return Ok(());
         }
-        book.set_channel_domain(channel_id.clone(), domain)?;
-        book.set_outbound_channel(channel_id.clone(), channel_id);
-        Ok(())
+        register_channel_domain(&mut book, channel_id, domain)
     }
 
     /// Record that a packet destined for the client on `channel_id`

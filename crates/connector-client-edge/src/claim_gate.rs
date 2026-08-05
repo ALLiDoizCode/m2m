@@ -440,20 +440,33 @@ impl ClientClaimGate {
     ) -> Option<WireClaim> {
         let ledger = self.payout_ledger()?;
         if !ledger.has_channel_domain(channel_id) {
-            if let Some(on_chain_id) = decode_hex_bytes::<32>(channel_id) {
-                let requester = format!("payout:{channel_id}");
-                if let Ok(Some(channel)) = self.channels.evm(&on_chain_id, &requester).await {
-                    let _ = ledger.ensure_channel_domain(
-                        channel_id,
-                        ChannelDomain {
-                            chain_id: channel.chain_id,
-                            token_network_address: channel.token_network_address,
-                        },
-                    );
-                }
-            }
+            self.resolve_payout_domain(ledger, channel_id).await;
         }
         ledger.record_payout_once(channel_id, condition, amount, now)
+    }
+
+    /// [`Self::credit_payout`]'s on-demand resolution step, split out so its
+    /// early-exit guards (not a 32-byte EVM channel id; the chain lookup
+    /// comes back empty or fails) read as a flat sequence rather than nested
+    /// `if let`s. Best-effort and silent either way: an id that cannot be
+    /// resolved, or a domain [`ClientPayoutLedger::ensure_channel_domain`]
+    /// itself declines, simply leaves `channel_id` unresolved for the
+    /// `record_payout_once` call that follows.
+    async fn resolve_payout_domain(&self, ledger: &ClientPayoutLedger, channel_id: &str) {
+        let Some(on_chain_id) = decode_hex_bytes::<32>(channel_id) else {
+            return;
+        };
+        let requester = format!("payout:{channel_id}");
+        let Ok(Some(channel)) = self.channels.evm(&on_chain_id, &requester).await else {
+            return;
+        };
+        let _ = ledger.ensure_channel_domain(
+            channel_id,
+            ChannelDomain {
+                chain_id: channel.chain_id,
+                token_network_address: channel.token_network_address,
+            },
+        );
     }
 
     /// The watermark this gate currently holds for `channel_key` (the
