@@ -24,7 +24,7 @@
 //! id)`. Callers of this type never see that indirection; every method
 //! here takes a `channel_id` and nothing else.
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use chrono::{DateTime, Utc};
 
@@ -34,8 +34,19 @@ use connector_signer::Signer;
 /// This connector's outbound claim state across every client-edge channel
 /// it has been configured to pay. See the module doc for why this wraps
 /// [`ClaimBook`] rather than reimplementing it.
+///
+/// `book` is a lock rather than a plain field so a channel discovered at
+/// payout time (issue #780 -- a self-opened agent channel carrying no
+/// `[[client_channels]]` row) can be registered through [`Self::ensure_channel_domain`]
+/// after this ledger is already shared as an `Arc`, the same way
+/// [`Self::set_channel_domain`] registers one before it is shared. Every
+/// `&self` method here still takes only a read lock: [`ClaimBook`]'s own
+/// mutating operations (`record_fulfillment`, `acknowledge_outbound`) are
+/// already safe under `&ClaimBook` via their own internal locking, so this
+/// outer lock is only ever write-held for the rare case of registering a
+/// new channel.
 pub struct ClientPayoutLedger {
-    book: ClaimBook,
+    book: RwLock<ClaimBook>,
     /// Which `(channel_id, execution_condition)` pairs
     /// [`Self::record_payout_once`] has already credited (issue #770's
     /// AC3) -- deliberately not the same mechanism as `book`'s own
@@ -62,11 +73,11 @@ impl Default for ClientPayoutLedger {
 impl ClientPayoutLedger {
     pub fn new() -> ClientPayoutLedger {
         ClientPayoutLedger {
-            book: ClaimBook::new(
+            book: RwLock::new(ClaimBook::new(
                 None,
                 std::collections::HashMap::new(),
                 std::collections::HashMap::new(),
-            ),
+            )),
             credited_conditions: Mutex::new(HashSet::new()),
         }
     }
@@ -76,22 +87,64 @@ impl ClientPayoutLedger {
     /// #699's AC4, matching [`ClaimBook`]'s own "a node with none
     /// configured simply never emits a claim").
     pub fn set_signer(&mut self, signer: Arc<dyn Signer>) {
-        self.book.set_signer(signer);
+        self.book
+            .get_mut()
+            .expect("not poisoned")
+            .set_signer(signer);
     }
 
     /// Register `channel_id` as one this connector may owe, and the
     /// EIP-712 domain (ADR 0024) a payout claim on it is signed under.
     /// Refuses `channel_id` outright, and registers nothing, if it is not
     /// already the channel's on-chain `bytes32` -- see [`InvalidChannelId`].
+    ///
+    /// Takes `&mut self` -- called only while this ledger is still being
+    /// built, exactly like [`ClaimBook::set_channel_domain`] itself.
+    /// [`Self::ensure_channel_domain`] is the `&self` counterpart used once
+    /// this ledger is shared.
     pub fn set_channel_domain(
         &mut self,
         channel_id: impl Into<String>,
         domain: ChannelDomain,
     ) -> Result<(), InvalidChannelId> {
         let channel_id = channel_id.into();
-        self.book.set_channel_domain(channel_id.clone(), domain)?;
+        let book = self.book.get_mut().expect("not poisoned");
+        book.set_channel_domain(channel_id.clone(), domain)?;
+        book.set_outbound_channel(channel_id.clone(), channel_id);
+        Ok(())
+    }
+
+    /// Whether this ledger already has a payout domain for `channel_id` --
+    /// from a `[[client_channels]]` pre-seed or a prior
+    /// [`Self::ensure_channel_domain`] call (issue #780). Lets a caller
+    /// skip a chain resolution entirely for a channel it has already
+    /// discovered, rather than resolving it fresh on every payout.
+    pub fn has_channel_domain(&self, channel_id: &str) -> bool {
         self.book
-            .set_outbound_channel(channel_id.clone(), channel_id);
+            .read()
+            .expect("not poisoned")
+            .has_channel_domain(channel_id)
+    }
+
+    /// As [`Self::set_channel_domain`], but through `&self` interior
+    /// mutability so a channel can be registered after this ledger is
+    /// already shared as an `Arc` (issue #780): a self-opened agent channel
+    /// is discovered at payout time, not at startup, so it cannot go
+    /// through the build-time-only setter above. A domain already
+    /// registered for `channel_id` -- by config or by an earlier
+    /// resolution -- is left untouched rather than overwritten.
+    pub fn ensure_channel_domain(
+        &self,
+        channel_id: impl Into<String>,
+        domain: ChannelDomain,
+    ) -> Result<(), InvalidChannelId> {
+        let channel_id = channel_id.into();
+        let mut book = self.book.write().expect("not poisoned");
+        if book.has_channel_domain(&channel_id) {
+            return Ok(());
+        }
+        book.set_channel_domain(channel_id.clone(), domain)?;
+        book.set_outbound_channel(channel_id.clone(), channel_id);
         Ok(())
     }
 
@@ -109,7 +162,10 @@ impl ClientPayoutLedger {
         amount: u64,
         now: DateTime<Utc>,
     ) -> Option<WireClaim> {
-        self.book.record_fulfillment(channel_id, amount, now)
+        self.book
+            .read()
+            .expect("not poisoned")
+            .record_fulfillment(channel_id, amount, now)
     }
 
     /// As [`Self::record_payout`], but a no-op -- credits nothing and
@@ -152,7 +208,10 @@ impl ClientPayoutLedger {
     /// The claim owed to the client on `channel_id`, if one is pending --
     /// what the next TRANSFER out to that client should carry.
     pub fn pending_claim(&self, channel_id: &str) -> Option<WireClaim> {
-        self.book.pending_claim(channel_id)
+        self.book
+            .read()
+            .expect("not poisoned")
+            .pending_claim(channel_id)
     }
 
     /// The total this connector has committed to pay the client on
@@ -166,14 +225,20 @@ impl ClientPayoutLedger {
     /// ledger has never paid out on, matching a channel with no signer or
     /// no domain configured.
     pub fn credited(&self, channel_id: &str) -> u64 {
-        self.book.outbound_cumulative_amount(channel_id)
+        self.book
+            .read()
+            .expect("not poisoned")
+            .outbound_cumulative_amount(channel_id)
     }
 
     /// Record the outcome of a payout claim of `nonce` sent on
     /// `channel_id`. See [`ClaimBook::acknowledge_outbound`] for the
     /// stale-nonce-safe semantics this delegates to.
     pub fn acknowledge(&self, channel_id: &str, nonce: u64, outcome: ClaimAckOutcome) {
-        self.book.acknowledge_outbound(channel_id, nonce, outcome);
+        self.book
+            .read()
+            .expect("not poisoned")
+            .acknowledge_outbound(channel_id, nonce, outcome);
     }
 }
 

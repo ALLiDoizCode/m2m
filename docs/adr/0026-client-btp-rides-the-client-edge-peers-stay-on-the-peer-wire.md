@@ -181,5 +181,40 @@ every EVM `[[client_channels]]` entry (`client_payout_ledger`), signed by the sa
 `with_identity_signer` already uses for this connector's identity and its peer-wire outbound
 claims, and binds it with `with_payout_ledger` before the gate is returned — the configuration step
 every update above noted was still missing. A node with only chain-resolved (undeclared) client
-channels credits nothing yet: signing a payout claim needs a domain, and only a declared channel's
-config carries one.
+channels credited nothing at this point: signing a payout claim needs a domain, and only a declared
+channel's config carried one. The next update closes that gap.
+
+## Update (issue #780): a self-opened channel with no config row is now credited too
+
+The previous update's last sentence was the bug: toon-meta#261's whole model is an agent deriving
+its own key and opening or resuming its own channel at runtime (ADR 0005/0006), so its channel id
+does not exist when the connector's config is written, and `client_payout_ledger`'s
+`[[client_channels]]` walk could never see it. Every self-opened agent channel was credited `0`
+in production regardless of how many jobs it fulfilled — confirmed live by re-running rig#59's
+proof after issue #773 shipped: `available` stayed `100000 -> 100000`, byte-identical to the
+pre-#773 run.
+
+The inbound claim path had already solved this shape: an unknown channel is resolved on chain
+through `ClientChannelRegistry::evm`, budgeted per issue #613 against `ClientClaim::signer_key` so
+a flood of fabricated ids cannot force unbounded lookups. The fix reuses that same resolver on the
+outbound side rather than inventing a second one.
+
+`ClientClaimGate::credit_payout` (new, `crates/connector-client-edge/src/claim_gate.rs`) is now
+`credit_session_earnings`'s call site instead of `ClientPayoutLedger::record_payout_once` directly:
+if the ledger has no domain yet for the channel being paid (`ClientPayoutLedger::has_channel_domain`,
+new), it asks the gate's own `ClientChannelRegistry::evm` — the same instance and the same budget
+the inbound path already spends against — and, on a genuine on-chain answer, registers the domain
+through `ClientPayoutLedger::ensure_channel_domain` (new, `outbound_ledger.rs`) before falling
+through to `record_payout_once` exactly as before. A channel that fails to resolve (never opened,
+or the chain endpoint is down) is left unresolved and `record_payout_once` then produces nothing,
+same as it always has — resolution failure never becomes a free credit (issue #780's AC3).
+`record_payout_once`'s own `(channel_id, execution_condition)` dedupe (issue #770's AC3) is
+unaffected: `ensure_channel_domain` only ever adds a domain, it never touches credited state.
+
+`ensure_channel_domain` takes `&self` where `set_channel_domain` takes `&mut self`, because a
+channel discovered at payout time arrives after this ledger is already shared as an `Arc` across
+every in-flight session — `outbound_ledger.rs`'s `book` field is now an `RwLock<ClaimBook>` for
+exactly this reason, held for a write only on the rare first-resolution path; every other method
+here still only ever takes a read lock, since `ClaimBook`'s own mutating operations are already
+safe under `&ClaimBook`. `[[client_channels]]` rows still work unchanged as a pre-seed — resolution
+is only ever consulted for a channel the ledger does not already know.

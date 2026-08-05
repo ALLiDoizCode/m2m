@@ -105,6 +105,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{mpsc, Arc, RwLock};
 
+use chrono::{DateTime, Utc};
+
 use connector_domain::client_claim::{
     canonical_channel_key, parse_client_claim, ClientClaim, ClientClaimError, EvmClientClaim,
     SolanaClientClaim,
@@ -112,7 +114,7 @@ use connector_domain::client_claim::{
 use connector_domain::{
     advance_watermark, validate_claim, validate_price, ClaimError, JournalEntry, Watermark,
 };
-use connector_runtime::{Journal, JournalError};
+use connector_runtime::{ChannelDomain, Journal, JournalError, WireClaim};
 use connector_signer::{verify_evm_balance_proof, verify_solana_balance_proof, EvmBalanceProof};
 
 use crate::channels::{
@@ -401,13 +403,57 @@ impl ClientClaimGate {
 
     /// This gate's own outbound payout ledger, if [`Self::with_payout_ledger`]
     /// configured one -- the same instance [`Self::credited_evm`] and the
-    /// claim-state endpoint already net against. Exposed so a caller that
-    /// has just delivered a fulfilled PREPARE to a client session (issue
-    /// #770, `crate::session_route::route_prepare`) can credit that
-    /// client's earnings through the exact same ledger, rather than
-    /// holding a second reference that could drift from it.
+    /// claim-state endpoint already net against.
     pub(crate) fn payout_ledger(&self) -> Option<&Arc<ClientPayoutLedger>> {
         self.payout_ledger.as_ref()
+    }
+
+    /// Credit `channel_id` `amount` against `condition` (issue #770), the
+    /// same as [`ClientPayoutLedger::record_payout_once`], except a channel
+    /// this gate's ledger has no domain for yet is first resolved through
+    /// this gate's own budgeted [`ClientChannelRegistry`] -- the one the
+    /// inbound claim path already uses (`verify_evm_claim_signature`) --
+    /// rather than being unpayable forever (issue #780). A self-opened
+    /// agent channel carries no `[[client_channels]]` row and so is never
+    /// in the ledger's pre-seeded set; without this it could never be
+    /// credited, no matter how many jobs it fulfilled.
+    ///
+    /// A channel the ledger already knows about (pre-seeded or previously
+    /// resolved) skips the lookup entirely. Resolution is EVM-only, same as
+    /// [`ClientPayoutLedger`]'s existing reach -- a `channel_id` that is not
+    /// a 32-byte hex channel id is left unresolved, and a resolution
+    /// failure (the channel does not exist, or the chain endpoint is down)
+    /// is likewise left unresolved rather than defaulted: the payout that
+    /// follows then simply produces nothing, exactly as it always has for
+    /// an unknown channel.
+    ///
+    /// Returns `None` if no payout ledger is configured at all, or under
+    /// any of the conditions [`ClientPayoutLedger::record_payout_once`]
+    /// itself already returns `None` for -- including its own dedupe, which
+    /// this does not affect.
+    pub(crate) async fn credit_payout(
+        &self,
+        channel_id: &str,
+        condition: &[u8; 32],
+        amount: u64,
+        now: DateTime<Utc>,
+    ) -> Option<WireClaim> {
+        let ledger = self.payout_ledger()?;
+        if !ledger.has_channel_domain(channel_id) {
+            if let Some(on_chain_id) = decode_hex_bytes::<32>(channel_id) {
+                let requester = format!("payout:{channel_id}");
+                if let Ok(Some(channel)) = self.channels.evm(&on_chain_id, &requester).await {
+                    let _ = ledger.ensure_channel_domain(
+                        channel_id,
+                        ChannelDomain {
+                            chain_id: channel.chain_id,
+                            token_network_address: channel.token_network_address,
+                        },
+                    );
+                }
+            }
+        }
+        ledger.record_payout_once(channel_id, condition, amount, now)
     }
 
     /// The watermark this gate currently holds for `channel_key` (the

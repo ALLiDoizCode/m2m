@@ -549,6 +549,15 @@ impl ClaimBook {
         self.counterparties.contains_key(channel_id)
     }
 
+    /// Whether `channel_id` already has a signing domain configured (issue
+    /// #780) -- lets a caller that discovers channels dynamically (a
+    /// client-edge payout resolved on demand rather than declared in
+    /// `[[client_channels]]`) decide whether it needs to resolve one at all,
+    /// without spending a payout attempt just to find out.
+    pub fn has_channel_domain(&self, channel_id: &str) -> bool {
+        self.channel_domains.contains_key(channel_id)
+    }
+
     /// Configure `channel_id`'s EIP-712 signing domain (issue #575/#566):
     /// the chain it is deployed on and the `TokenNetwork` contract that
     /// verifies a claim's signature on redemption. Required before this
