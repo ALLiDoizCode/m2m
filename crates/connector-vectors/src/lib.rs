@@ -840,6 +840,10 @@ fn generate_peer_claim_evm_case(fixture: &ClaimFixture) -> PeerClaimCase {
     let json = claim_json::encode(
         &claim,
         &fixture.signer_address,
+        // No Solana signer: which arm renders is decided by
+        // `claim.signature`'s discriminant, and this fixture's is
+        // `ClaimSignature::Evm`. Passing a key here would be inert.
+        None,
         Some(domain),
         "vector-fixture:evm:1",
         "2030-01-01T00:00:00.000Z",
@@ -1350,6 +1354,8 @@ fn generate_retransmit_cases() -> (PeerRetransmitCase, PeerRetransmitCase) {
         claim_json::encode(
             claim,
             &signer_address,
+            // EVM fixture, as above -- no Solana signer to render with.
+            None,
             Some(peer_domain),
             "vector-fixture:retransmit",
             "2030-01-01T00:00:00.000Z",
