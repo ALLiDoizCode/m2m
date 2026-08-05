@@ -142,13 +142,23 @@ handler_url = "http://relay:3100/write"
 # canonical unit across EVM/Solana/Mina, not a TypeScript-only asset
 # config). So `1000` is 0.001 USDC and `1` is 1 micro-USDC.
 #
-# KNOWN AND ACCEPTED: the TypeScript node on this same box still charges
-# `1000` for the same prefix and fronts the same `relay:3100`, so the two
-# doors differ 1000x. That is not reconciled because TypeScript is being
-# retired; on the day the Rust connector becomes the default edge this
-# value simply becomes the devnet's relay price. The store legs below stay
-# at `1000` and remain at parity across both fleets -- the config-load test
-# `the_two_fleets_price_the_shared_store_prefixes_identically` enforces it.
+# The TypeScript node's `connector.yaml` still names `1000` for this prefix,
+# but it no longer fronts traffic: Rust serves `location /` on both boxes
+# (nginx returns 410 for the transitional `/rust/` prefix), so there is no
+# live second door to arbitrage against. Retirement of those files is #714.
+#
+# CORRECTION (#785): an earlier revision of this comment claimed the store
+# legs' cross-fleet parity was enforced by a config-load test named
+# `the_two_fleets_price_the_shared_store_prefixes_identically`. **No such
+# test exists** -- the string appears nowhere in the repository, and the only
+# reference to the TypeScript yaml anywhere in test code is a doc comment in
+# `devnet_configs_load.rs`. The Rust prices ARE asserted, by
+# `EXPECTED_RELAY_PRICE` / `EXPECTED_STORE_PRICE` / `EXPECTED_APEX_FORWARD_*`
+# in that file; the cross-fleet comparison never was. Do not re-derive a
+# safety claim from that sentence.
+#
+# `docs/devnet-pricing.md` is the committed source of truth for every route's
+# price and rationale.
 #
 # #552 wired the x402 greeting behind this figure being non-zero; a
 # devnet box started from this file was still a free gateway until this
