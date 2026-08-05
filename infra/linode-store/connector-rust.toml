@@ -1,7 +1,16 @@
 # ═══════════════════════════════════════════════════════════════════════════
 # TOON devnet — Rust connector, STORE box (`toon-devnet-store`, 45.79.173.113,
-# DNS proxy.store.devnet.toonprotocol.dev)
+# DNS proxy.ario.devnet.toonprotocol.dev)
 # ═══════════════════════════════════════════════════════════════════════════
+#
+# > **Superseded 2026-08-04/05.** The header below describes the additive
+# > parallel-fleet era, when this file was an overlay beside a live TypeScript
+# > connector. Since then the cutover happened: the TypeScript connector on this
+# > box is stopped, THIS node serves the box's default public edge at `/`, and
+# > the edge was renamed `proxy.store.devnet` → `proxy.ario.devnet` (#774) to
+# > match the `g.toon.ario` prefix it serves. `proxy.store` survives only as a
+# > deprecated alias — same certificate, same upstream — and is slated for
+# > removal, so treat every `proxy.store` URL in the prose below as history.
 # Deployed by docker-compose.store.rust.yml as an ADDITIVE overlay beside the
 # TypeScript fleet in docker-compose.store.yml, mirroring how the apex box has
 # run both connectors side by side since #601. It is NOT a cutover: the

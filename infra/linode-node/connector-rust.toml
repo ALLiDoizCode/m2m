@@ -38,7 +38,8 @@
 # The store box is another TOON node on the network, reached the way any
 # peer on the open internet would be — so the inter-node link is public,
 # carried over https and TLS-terminated by the store box's own nginx
-# (proxy.store.devnet.toonprotocol.dev, certbot-managed like this box's
+# (proxy.ario.devnet.toonprotocol.dev — renamed from proxy.store on
+# 2026-08-05, #774 — certbot-managed like this box's
 # hosts), the same shape as the TypeScript fleet's connector↔connector
 # links (BTP over wss://…:443). Both store routes below terminate at that
 # public https URL; no private segment exists between the boxes and none
