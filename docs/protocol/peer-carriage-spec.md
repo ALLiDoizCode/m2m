@@ -900,25 +900,34 @@ Required surface:
   `ceiling`, plus this document's `claim_ack_timeout_ms` and `peer_answer_timeout_ms` (§6.3,
   default 30 000 each).
 - The accepting mirror: configured credentials map to peer ids and thence to their channels.
-- `[[peer_channels]]` — `peer_id`, `channel_id`, `counterparty_key`, `chain_id`, `token_network`.
-  This is the surface whose absence makes ADR 0024 inert (#620 gap 3); it MUST actually wire
-  `ClaimBook`'s signer, verification key and EIP-712 domain, with **no code-only setters left on
-  the config path**.
+- `[[peer_channels]]` — EVM shape: `peer_id`, `channel_id`, `counterparty_key`, `chain_id`,
+  `token_network`. Solana shape (issue #759): `peer_id`, `channel_account`, `counterparty_key`,
+  `program_id` — no `chain_id`/`token_network`, since a Solana channel has neither an EVM-style
+  numeric chain id nor a per-token verifying contract, and `program_id` is required (§4's claim
+  shape makes a Solana claim's `programId` a required field, `client-edge-spec.md` §1.3, unlike an
+  EVM claim's optional `chainId`/`tokenNetworkAddress`). The EVM shape is the surface whose absence makes ADR
+  0024 inert (#620 gap 3); it MUST actually wire `ClaimBook`'s signer, verification key and
+  EIP-712 domain, with **no code-only setters left on the config path**. The Solana shape's
+  `program_id` reaches claim rendering the same way; `ClaimBook`'s Solana verification key and
+  signer still have no `Connector` builder to wire from config (issue #742's own follow-up note),
+  so a Solana row does not yet make this connector able to accept or sign a claim on that channel.
 
 Named load-time errors this specification requires (spelling #677's, identity ours):
 
-| Error                          | Condition                                                                                                                                                                                                     | Source     |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
-| `PeerUndialable`               | `expose` is empty **and** a configured peer has no `endpoint` — a peering that can never establish                                                                                                            | §2.2       |
-| `PeerEndpointScheme`           | an `endpoint` whose scheme is neither `wss://` nor `https://`                                                                                                                                                 | §2.1       |
-| `PeerCredentialMissing`        | a `[[peers]]` entry with no credential — it could never satisfy P1                                                                                                                                            | §1.2       |
-| `PeerChannelUnbound`           | a `[[peers]]` entry with no `[[peer_channels]]` row — it could never satisfy P2                                                                                                                               | §1.2       |
-| `PeerChannelOrphaned`          | a `[[peer_channels]]` row naming an unknown `peer_id`                                                                                                                                                         | §1.2       |
-| `ChannelInBothNamespaces`      | a channel id present in both `[[peer_channels]]` and `[[client_channels]]`                                                                                                                                    | §1.8       |
-| `AcceptOnlyPeerWithoutCeiling` | a peering this connector cannot dial and that carries no explicit `ceiling`                                                                                                                                   | §6.4       |
-| `PeerRouteUndeliverable`       | a route naming as next hop a peer this connector can never originate to                                                                                                                                       | §2.2, §6.4 |
-| `DuplicatePeerId`              | two `[[peers]]` entries with the same `id`                                                                                                                                                                    | —          |
-| removed-field errors           | `peer_wire_addr`, or `addr` in its old `SocketAddr` shape — a **hard, named** error pointing at the bring-up doc, never a silent ignore, because the devnet boxes run bind-mounted configs that lead the repo | ADR 0027   |
+| Error                               | Condition                                                                                                                                                                                                     | Source     |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `PeerUndialable`                    | `expose` is empty **and** a configured peer has no `endpoint` — a peering that can never establish                                                                                                            | §2.2       |
+| `PeerEndpointScheme`                | an `endpoint` whose scheme is neither `wss://` nor `https://`                                                                                                                                                 | §2.1       |
+| `PeerCredentialMissing`             | a `[[peers]]` entry with no credential — it could never satisfy P1                                                                                                                                            | §1.2       |
+| `PeerChannelUnbound`                | a `[[peers]]` entry with no `[[peer_channels]]` row — it could never satisfy P2                                                                                                                               | §1.2       |
+| `PeerChannelOrphaned`               | a `[[peer_channels]]` row naming an unknown `peer_id`                                                                                                                                                         | §1.2       |
+| `ChannelInBothNamespaces`           | a channel id present in both `[[peer_channels]]` and `[[client_channels]]`                                                                                                                                    | §1.8       |
+| `PeerChannelMissingSolanaProgramId` | a Solana `[[peer_channels]]` row with no `program_id`                                                                                                                                                         | #759       |
+| `PeerChannelInvalidSolanaAccount`   | a Solana `[[peer_channels]]` row's `channel_account`/`counterparty_key`/`program_id` is not base58 of a 32-byte value                                                                                         | #759       |
+| `AcceptOnlyPeerWithoutCeiling`      | a peering this connector cannot dial and that carries no explicit `ceiling`                                                                                                                                   | §6.4       |
+| `PeerRouteUndeliverable`            | a route naming as next hop a peer this connector can never originate to                                                                                                                                       | §2.2, §6.4 |
+| `DuplicatePeerId`                   | two `[[peers]]` entries with the same `id`                                                                                                                                                                    | —          |
+| removed-field errors                | `peer_wire_addr`, or `addr` in its old `SocketAddr` shape — a **hard, named** error pointing at the bring-up doc, never a silent ignore, because the devnet boxes run bind-mounted configs that lead the repo | ADR 0027   |
 
 `claim_ack_timeout_ms > flush_interval_ms` SHOULD be a load-time warning (§6.3).
 

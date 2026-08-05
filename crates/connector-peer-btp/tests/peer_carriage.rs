@@ -214,6 +214,17 @@ impl PeerDialer for DeadDialer {
     }
 }
 
+/// The Solana channel account this relation's `[[peer_channels]]` row binds
+/// (issue #759) -- a real base58-encoded 32-byte account, reused only as a
+/// well-formed fixture.
+fn solana_channel_account() -> String {
+    "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin".to_string()
+}
+
+/// The program id that channel was opened under -- the deployed SPL Token
+/// program's, reused here only as a well-formed base58 32-byte fixture.
+const SOLANA_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+
 fn relation() -> PeerRelation {
     let mut domains = HashMap::new();
     domains.insert(
@@ -223,11 +234,14 @@ fn relation() -> PeerRelation {
             token_network: TOKEN_NETWORK,
         },
     );
+    let mut solana_program_ids = HashMap::new();
+    solana_program_ids.insert(solana_channel_account(), SOLANA_PROGRAM_ID.to_string());
     PeerRelation::new(
         PEER_ID,
         Url::parse("wss://peer.example:443/btp").unwrap(),
         PresentedCredential::new(PEER_ID, SECRET),
         domains,
+        solana_program_ids,
         Duration::from_millis(30_000),
         Duration::from_millis(30_000),
     )
@@ -353,6 +367,50 @@ async fn a_flush_is_a_transfer_whose_amount_is_the_claims_new_cumulative() {
         .protocol_data
         .iter()
         .any(|pd| pd.name == CLAIM_PROTOCOL));
+}
+
+/// Issue #759's AC, exercised on the real BTP wire: a Solana claim flushed
+/// over this carriage carries the `[[peer_channels]]`-configured
+/// `programId` -- never the deleted `PLACEHOLDER_SOLANA_PROGRAM_ID` -- and
+/// the same bytes round-trip through the client edge's own validator
+/// (`claim_json::parse`), the same proof
+/// `the_frames_a_dialed_peering_puts_on_the_wire_are_the_ones_section_3_names`
+/// gives the EVM shape.
+#[tokio::test]
+async fn a_flushed_solana_claim_carries_its_configured_program_id_on_the_wire() {
+    let payer_signer = LocalSigner::generate("payer");
+    let state = carriage(payee(&payer_signer), bound_policy());
+    let dialer = LoopbackDialer::new(state);
+    let mut transport = transport(Arc::clone(&dialer) as Arc<dyn PeerDialer>, &payer_signer);
+    transport.set_solana_signer_public_key([0x77; 32]);
+
+    let claim = WireClaim {
+        channel_id: solana_channel_account(),
+        nonce: 1,
+        cumulative_amount: 500,
+        signature: ClaimSignature::Solana([0x5a; 64]),
+    };
+
+    let _ = transport.flush(PEER_ID, claim.clone()).await;
+
+    let sent = dialer.sent.lock().expect("sent frames lock").clone();
+    let flush = sent
+        .iter()
+        .find(|frame| frame.frame_type == BTP_TRANSFER)
+        .expect("the flush rode a TRANSFER");
+    let entry = flush
+        .protocol_data
+        .iter()
+        .find(|pd| pd.name == CLAIM_PROTOCOL)
+        .expect("the claim rode as protocolData");
+    let claim_json: serde_json::Value =
+        serde_json::from_slice(&entry.data).expect("raw UTF-8 JSON");
+    assert_eq!(claim_json["blockchain"], "solana");
+    assert_eq!(claim_json["programId"], SOLANA_PROGRAM_ID);
+    assert_eq!(claim_json["channelAccount"], solana_channel_account());
+
+    let parsed = connector_peer_btp::claim_json::parse(&entry.data).expect("round trip");
+    assert_eq!(parsed, claim);
 }
 
 // ─── §6.3: the idempotent re-ack ───
@@ -601,6 +659,7 @@ fn claim_as_json(claim: &WireClaim, payer: &dyn Signer) -> String {
     connector_peer_btp::claim_json::encode(
         claim,
         &derive_evm_address(&payer.public_key().unwrap()),
+        None,
         None,
         Some(connector_peer_btp::PeerClaimDomain {
             chain_id: CHAIN_ID,

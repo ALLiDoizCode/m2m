@@ -173,7 +173,7 @@ pub(crate) fn to_hex(bytes: &[u8]) -> String {
 /// stores exactly the string the operator wrote (already validated),
 /// matching [`EvmClientChannelConfig::channel_id`]'s own "canonicalized
 /// string, not raw bytes" shape.
-fn is_base58_32_bytes(value: &str) -> bool {
+pub(crate) fn is_base58_32_bytes(value: &str) -> bool {
     matches!(bs58::decode(value).into_vec(), Ok(bytes) if bytes.len() == 32)
 }
 

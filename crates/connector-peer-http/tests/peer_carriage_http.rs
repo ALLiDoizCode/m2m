@@ -250,6 +250,17 @@ impl PeerHttpClient for Status {
     }
 }
 
+/// The Solana channel account this relation's `[[peer_channels]]` row binds
+/// (issue #759) -- a real base58-encoded 32-byte account, reused only as a
+/// well-formed fixture.
+fn solana_channel_account() -> String {
+    "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin".to_string()
+}
+
+/// The program id that channel was opened under -- the deployed SPL Token
+/// program's, reused here only as a well-formed base58 32-byte fixture.
+const SOLANA_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+
 fn relation() -> PeerRelation {
     let mut domains = HashMap::new();
     domains.insert(
@@ -259,11 +270,14 @@ fn relation() -> PeerRelation {
             token_network: TOKEN_NETWORK,
         },
     );
+    let mut solana_program_ids = HashMap::new();
+    solana_program_ids.insert(solana_channel_account(), SOLANA_PROGRAM_ID.to_string());
     PeerRelation::new(
         PEER_ID,
         Url::parse("https://peer.example:443/ilp").unwrap(),
         PresentedCredential::new(PEER_ID, SECRET),
         domains,
+        solana_program_ids,
         Duration::from_millis(30_000),
         Duration::from_millis(30_000),
     )
@@ -306,6 +320,7 @@ fn claim_as_json(claim: &WireClaim, payer: &dyn Signer) -> String {
     connector_peer_btp::claim_json::encode(
         claim,
         &derive_evm_address(&payer.public_key().unwrap()),
+        None,
         None,
         Some(connector_peer_btp::PeerClaimDomain {
             chain_id: CHAIN_ID,
@@ -439,6 +454,47 @@ async fn a_flush_is_a_post_with_an_empty_body_and_the_claim_header() {
             .cumulative_amount,
         claim.cumulative_amount
     );
+}
+
+/// Issue #759's AC, exercised on the real ILP-over-HTTP wire: a Solana
+/// claim flushed over this carriage carries the `[[peer_channels]]`-
+/// configured `programId` -- never the deleted
+/// `PLACEHOLDER_SOLANA_PROGRAM_ID` -- and the same bytes round-trip through
+/// the client edge's own validator (`claim_json::parse`), the HTTP
+/// counterpart of `connector-peer-btp`'s own
+/// `a_flushed_solana_claim_carries_its_configured_program_id_on_the_wire`
+/// (I4: one codec serves both carriages).
+#[tokio::test]
+async fn a_flushed_solana_claim_carries_its_configured_program_id_on_the_wire() {
+    let payer_signer = LocalSigner::generate("payer");
+    let peer = accepting(payee(&payer_signer), bound_policy());
+    let client = Loopback::new(peer);
+    let mut transport = transport(
+        Arc::clone(&client) as Arc<dyn PeerHttpClient>,
+        &payer_signer,
+    );
+    transport.set_solana_signer_public_key([0x77; 32]);
+
+    let claim = WireClaim {
+        channel_id: solana_channel_account(),
+        nonce: 1,
+        cumulative_amount: 500,
+        signature: ClaimSignature::Solana([0x5a; 64]),
+    };
+
+    let _ = transport.flush(PEER_ID, claim.clone()).await;
+
+    let sent = client.last();
+    assert!(sent.body.is_empty(), "a FLUSH carries no ILP packet");
+    let carried = base64_decode(sent.headers.get(CLAIM_HEADER).expect("the claim rode"));
+    let claim_json: serde_json::Value =
+        serde_json::from_slice(&carried).expect("raw UTF-8 JSON, base64 of it on this carriage");
+    assert_eq!(claim_json["blockchain"], "solana");
+    assert_eq!(claim_json["programId"], SOLANA_PROGRAM_ID);
+    assert_eq!(claim_json["channelAccount"], solana_channel_account());
+
+    let parsed = connector_peer_btp::claim_json::parse(&carried).expect("round trip");
+    assert_eq!(parsed, claim);
 }
 
 // ─── §6.3: retransmission, and the idempotent re-ack ───

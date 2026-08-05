@@ -129,9 +129,14 @@ pub struct PeerRelation {
     peer_id: String,
     endpoint: Url,
     credential: PresentedCredential,
-    /// Canonical channel id → the EIP-712 domain its claims are signed
-    /// under, from that peering's `[[peer_channels]]` rows.
+    /// Canonical EVM channel id → the EIP-712 domain its claims are signed
+    /// under, from that peering's EVM-shaped `[[peer_channels]]` rows.
     domains: HashMap<String, PeerClaimDomain>,
+    /// Solana channel account → the program id its claims render under
+    /// (issue #759), from that peering's Solana-shaped `[[peer_channels]]`
+    /// rows. See `connector_peer_btp::dial::PeerRelation`'s own field doc;
+    /// this carriage holds the identical contract.
+    solana_program_ids: HashMap<String, String>,
     peer_answer_timeout: Duration,
     claim_ack_timeout: Duration,
 }
@@ -146,17 +151,29 @@ impl PeerRelation {
             return None;
         }
         let endpoint = peer.endpoint()?.clone();
-        let domains = channels
+        let mine = channels
             .iter()
-            .filter(|channel| channel.peer_id() == peer.id())
-            .map(|channel| {
-                (
-                    claim_json::canonical_evm_channel_id(channel.channel_id()),
+            .filter(|channel| channel.peer_id() == peer.id());
+        let domains = mine
+            .clone()
+            .filter_map(|channel| match channel {
+                PeerChannelConfig::Evm(evm) => Some((
+                    claim_json::canonical_evm_channel_id(evm.channel_id()),
                     PeerClaimDomain {
-                        chain_id: channel.chain_id(),
-                        token_network: channel.token_network(),
+                        chain_id: evm.chain_id(),
+                        token_network: evm.token_network(),
                     },
-                )
+                )),
+                PeerChannelConfig::Solana(_) => None,
+            })
+            .collect();
+        let solana_program_ids = mine
+            .filter_map(|channel| match channel {
+                PeerChannelConfig::Solana(solana) => Some((
+                    solana.channel_account().to_string(),
+                    solana.program_id().to_string(),
+                )),
+                PeerChannelConfig::Evm(_) => None,
             })
             .collect();
         Some(PeerRelation {
@@ -164,6 +181,7 @@ impl PeerRelation {
             endpoint,
             credential: PresentedCredential::new(peer.id(), peer.credential().secret()),
             domains,
+            solana_program_ids,
             peer_answer_timeout: Duration::from_millis(peer.peer_answer_timeout_ms()),
             claim_ack_timeout: Duration::from_millis(peer.claim_ack_timeout_ms()),
         })
@@ -177,6 +195,7 @@ impl PeerRelation {
         endpoint: Url,
         credential: PresentedCredential,
         domains: HashMap<String, PeerClaimDomain>,
+        solana_program_ids: HashMap<String, String>,
         peer_answer_timeout: Duration,
         claim_ack_timeout: Duration,
     ) -> PeerRelation {
@@ -185,6 +204,7 @@ impl PeerRelation {
             endpoint,
             credential,
             domains,
+            solana_program_ids,
             peer_answer_timeout,
             claim_ack_timeout,
         }
@@ -324,10 +344,18 @@ impl HttpPeerTransport {
         // answers `unknown_channel`, which is the right answer to a channel
         // neither end has bound.
         let domain = state.relation.domains.get(&channel_id).copied();
+        // Unlike `domain`, a Solana channel with no matching row has no
+        // "ride without it" fallback -- `programId` is a required wire
+        // field (`claim_json::encode`'s own doc), so a Solana claim
+        // reaching here for an unconfigured channel is a caller bug
+        // `encode` panics on, exactly as it does for a missing signing
+        // identity.
+        let solana_program_id = state.relation.solana_program_ids.get(&channel_id);
         let json = claim_json::encode(
             claim,
             &self.signer_address,
             self.solana_signer_public_key.as_ref(),
+            solana_program_id.map(String::as_str),
             domain,
             &format!("{channel_id}:{}", claim.nonce),
             &self

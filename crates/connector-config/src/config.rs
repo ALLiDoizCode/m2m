@@ -323,19 +323,36 @@ impl Config {
         // client watermarks are separate records by design, which is only
         // safe while no channel is in both: two namespaces over one
         // channel would let the same claim be counted as credit twice.
-        // Both sides are canonicalized lowercase `0x` hex by their own
-        // resolvers, so this compares like with like.
+        // Compared within its own chain only -- an EVM `channel_id`
+        // against an EVM `channel_id` (both canonicalized lowercase `0x`
+        // hex), a Solana `channel_account` against a Solana
+        // `channel_account` (both base58) -- each side canonicalized by
+        // its own resolver, so this compares like with like.
         for peer_channel in &peer_channels {
-            let collides = client_channels.iter().any(|client_channel| {
-                matches!(
-                    client_channel,
-                    ClientChannelConfig::Evm(evm) if evm.channel_id() == peer_channel.channel_id()
-                )
-            });
+            let (collides, value) = match peer_channel {
+                PeerChannelConfig::Evm(evm_peer) => (
+                    client_channels.iter().any(|client_channel| {
+                        matches!(
+                            client_channel,
+                            ClientChannelConfig::Evm(evm_client)
+                                if evm_client.channel_id() == evm_peer.channel_id()
+                        )
+                    }),
+                    evm_peer.channel_id().to_string(),
+                ),
+                PeerChannelConfig::Solana(solana_peer) => (
+                    client_channels.iter().any(|client_channel| {
+                        matches!(
+                            client_channel,
+                            ClientChannelConfig::Solana(solana_client)
+                                if solana_client.channel_account() == solana_peer.channel_account()
+                        )
+                    }),
+                    solana_peer.channel_account().to_string(),
+                ),
+            };
             if collides {
-                return Err(ConfigError::ChannelInBothNamespaces {
-                    value: peer_channel.channel_id().to_string(),
-                });
+                return Err(ConfigError::ChannelInBothNamespaces { value });
             }
         }
         let state_dir = raw.state_dir.map(PathBuf::from);
@@ -694,6 +711,7 @@ mod tests {
     use super::*;
     use crate::peer::PeerCarriage;
     use crate::route::TransportPolicy;
+    use crate::settlement::SettlementChain;
     use std::io::Write;
     use std::path::PathBuf;
 
@@ -918,10 +936,13 @@ price = 1000
         assert_eq!(config.peer_channels().len(), 1);
         let channel = &config.peer_channels()[0];
         assert_eq!(channel.peer_id(), "store");
-        assert_eq!(channel.channel_id(), PEER_CHANNEL);
-        assert_eq!(channel.counterparty_key(), [0x22u8; 20]);
-        assert_eq!(channel.chain_id(), 31_337);
-        assert_eq!(channel.token_network(), [0x33u8; 20]);
+        let PeerChannelConfig::Evm(evm) = channel else {
+            panic!("expected an EVM peer channel");
+        };
+        assert_eq!(evm.channel_id(), PEER_CHANNEL);
+        assert_eq!(evm.counterparty_key(), [0x22u8; 20]);
+        assert_eq!(evm.chain_id(), 31_337);
+        assert_eq!(evm.token_network(), [0x33u8; 20]);
         assert_eq!(config.peer_channels_for("store").count(), 1);
         assert_eq!(config.peer_channels_for("nobody").count(), 0);
 
@@ -1170,6 +1191,116 @@ price = 1000
         );
         assert!(
             message.contains("no '[[peers]]' entry configures") && message.contains(BRINGUP_DOC),
+            "got: {message}"
+        );
+    }
+
+    const SOLANA_CHANNEL_ACCOUNT: &str = "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi";
+    const SOLANA_COUNTERPARTY_KEY: &str = "8pM1DN3RiT8vbom5u1sNryaNT1nyL8CTTW3b5PwWXRBH";
+    const SOLANA_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+
+    /// A `[[peers]]`/Solana-shaped `[[peer_channels]]` pair, the Solana
+    /// counterpart of `peering_config` (issue #759).
+    fn solana_peering_config(key_path: &Path, state_dir: &Path, program_id_line: &str) -> String {
+        format!(
+            r#"
+client_edge_addr = "127.0.0.1:3000"
+peer_expose = "btp"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_file}"
+
+[[peers]]
+id = "store"
+endpoint = "wss://store.example:443/btp"
+credential = {{ secret = "shared-secret" }}
+ceiling = 1000000
+
+[[peer_channels]]
+peer_id = "store"
+channel_account = "{SOLANA_CHANNEL_ACCOUNT}"
+counterparty_key = "{SOLANA_COUNTERPARTY_KEY}"
+{program_id_line}
+"#,
+            state_dir = state_dir.display(),
+            key_file = key_path.display(),
+        )
+    }
+
+    fn load_solana_peering(program_id_line: &str) -> Result<Config, ConfigError> {
+        let state_dir = tempfile::tempdir().expect("temp state dir");
+        let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
+        key_file
+            .write_all(b"not a real key")
+            .expect("write key file");
+        let text = solana_peering_config(key_file.path(), state_dir.path(), program_id_line);
+        Config::from_toml_str(&text, Path::new("test.toml"))
+    }
+
+    /// Issue #759's AC: a Solana `[[peer_channels]]` row loads and typed
+    /// distinctly from an EVM one, program id included.
+    #[test]
+    fn loads_a_solana_peer_channel_with_its_program_id() {
+        let config =
+            load_solana_peering(&format!(r#"program_id = "{SOLANA_PROGRAM_ID}""#)).expect("load");
+
+        assert_eq!(config.peer_channels().len(), 1);
+        let PeerChannelConfig::Solana(solana) = &config.peer_channels()[0] else {
+            panic!("expected a Solana peer channel");
+        };
+        assert_eq!(solana.peer_id(), "store");
+        assert_eq!(solana.channel_account(), SOLANA_CHANNEL_ACCOUNT);
+        assert_eq!(solana.counterparty_key(), SOLANA_COUNTERPARTY_KEY);
+        assert_eq!(solana.program_id(), SOLANA_PROGRAM_ID);
+        assert_eq!(config.peer_channels()[0].chain(), SettlementChain::Solana);
+    }
+
+    /// Issue #759's AC, at the full `Config::load` level (not just
+    /// `resolve_peer_channels`'s own unit test): a Solana row with no
+    /// `program_id` fails load with the named, actionable error rather than
+    /// the generic untagged-enum mismatch `#[serde(untagged)]` would
+    /// otherwise surface.
+    #[test]
+    fn rejects_a_solana_peer_channel_with_no_program_id() {
+        let result = load_solana_peering("");
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::PeerChannelMissingSolanaProgramId { peer_id } if peer_id == "store"),
+        );
+        assert!(
+            message.contains("program_id") && message.contains("required wire field"),
+            "got: {message}"
+        );
+    }
+
+    /// The Solana counterpart of `rejects_one_channel_configured_in_both_namespaces`:
+    /// the namespace-disjointness rule (§1.8) applies within the Solana
+    /// chain too, not just EVM.
+    #[test]
+    fn rejects_a_solana_channel_configured_in_both_namespaces() {
+        let state_dir = tempfile::tempdir().expect("temp state dir");
+        let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
+        key_file
+            .write_all(b"not a real key")
+            .expect("write key file");
+        let text = format!(
+            "{}\n[[client_channels]]\nchannel_account = \"{SOLANA_CHANNEL_ACCOUNT}\"\ncounterparty = \"{SOLANA_COUNTERPARTY_KEY}\"\n",
+            solana_peering_config(
+                key_file.path(),
+                state_dir.path(),
+                &format!(r#"program_id = "{SOLANA_PROGRAM_ID}""#),
+            ),
+        );
+        let result = Config::from_toml_str(&text, Path::new("test.toml"));
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::ChannelInBothNamespaces { value } if value == SOLANA_CHANNEL_ACCOUNT),
+        );
+        assert!(
+            message.contains("counted as credit twice"),
             "got: {message}"
         );
     }
