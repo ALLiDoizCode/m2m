@@ -127,6 +127,15 @@ infra/linode-node/*.key
 infra/linode-store/*.key
 deploy/connector-rust/*.key
 
+# Peering shared secrets (issue #750). A `[[peers]]` credential's
+# `secret_file` points at one of these; the config that points at it IS
+# committed, and this repo is public, so the file itself must never be. Same
+# wildcard rationale as the key rules above: a new peering must not need a new
+# ignore rule to stay out of the repo.
+infra/linode-node/*.secret
+infra/linode-store/*.secret
+deploy/connector-rust/*.secret
+
 # Store-box gas-station Solana fee-payer — real key material (128-char hex
 # Ed25519), never committed. Was tracked until the rotation that removed it;
 # the pre-rotation key remains in git history, so the ROTATION (not this
