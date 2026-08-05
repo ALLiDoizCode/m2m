@@ -31,7 +31,30 @@ services:
       ANNOUNCER_RUST_EDGE_URL: http://connector-rust:4000
       ANNOUNCER_RELAY_URLS: http://relay:3100
       ANNOUNCER_RELAY_PUBLIC_URL: wss://relay-ws.devnet.toonprotocol.dev
-      ANNOUNCER_ILP_ADDRESSES: g.toon,g.toon.relay
+      # `g.toon.ario` added 2026-08-05 — a STOPGAP for a live outage, see below.
+      #
+      # The store box has had NO kind:10032 publisher since its TypeScript
+      # connector exited at 2026-08-04T19:24:29Z. That connector's
+      # `selfAnnounce` block was the publisher; the Rust connector has no
+      # equivalent and will not get one. So `g.toon.ario` — the prefix a
+      # shipped client actually dials (buzz pins it in compiled code) — has
+      # been undiscoverable ever since.
+      #
+      # Announcing it HERE is honest rather than a fudge: since #772 the apex
+      # FORWARDS g.toon.ario across the apex<->store peering, so the endpoint
+      # this announce advertises really is where a client should send that
+      # traffic. It pays this edge 1002, this hop keeps 2, and 1000 reaches
+      # the store box (ADR 0028).
+      #
+      # What it does NOT restore: an announce under the STORE's own pubkey.
+      # A client discovering by that identity still finds nothing. Nothing was
+      # found that discovers that way, which is why this is judged sufficient
+      # as a stopgap.
+      #
+      # It is a stopgap. #784 is the real answer: a `connector announce`
+      # subcommand run FROM the node being announced, paying like any other
+      # client, identity key never moving. This whole sidecar retires with it.
+      ANNOUNCER_ILP_ADDRESSES: g.toon,g.toon.relay,g.toon.ario
       # NOTE: these two publish the `/rust/` path — the disposable artifact
       # ADR 0013 says "nothing durable should be published against". Phase 7
       # of the cutover plan repoints them at /ilp and /ilp/btp once the Rust
