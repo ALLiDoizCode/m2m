@@ -79,7 +79,7 @@ services:
     # re-pinned to an image built from #605 or later BEFORE (or in the same
     # `up -d` as) that file reaches a box. An older image reads `state_dir`
     # as an unknown top-level key and exits 1 on config load.
-    image: ghcr.io/toon-protocol/connector:rust-sha-f0be64f
+    image: ghcr.io/toon-protocol/connector:rust-sha-b31a7c9
     volumes:
       - ./connector-rust.toml:/app/config/connector.toml:ro
       - ./signer-rust.key:/app/data/signer.key:ro
