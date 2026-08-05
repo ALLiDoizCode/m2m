@@ -135,6 +135,9 @@ jobs:
     # cancelled at 91 minutes with the Anvil container still running. Raising this
     # is only safe now that the push credential is minted fresh at push time
     # (#462) — before that, extra minutes were spent and the push still failed.
+    # Forensics split (toon-meta#278): the runner step below gets
+    # timeout-minutes: 170 so a wall-clock kill is a step failure and the
+    # always() redact+upload steps still run inside the job budget.
     timeout-minutes: 180
     concurrency:
       group: agent-implement-issue-${{ github.event.issue.number }}
@@ -194,6 +197,9 @@ jobs:
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
       - name: Run sandcastle implement runner
+        # Step-level timeout (toon-meta#278): below the job's, so a wall-clock
+        # kill is a step failure and the always() forensics steps still run.
+        timeout-minutes: 170
         env:
           SANDCASTLE_ISSUE_NUMBER: ${{ github.event.issue.number }}
           # PR mode (default). To re-enable auto-merge later, uncomment:
@@ -217,27 +223,26 @@ jobs:
       # environment (`env`, `git config --list`, a verbose curl) would put a live
       # credential into the log we are about to publish.
       #
+      # This is the org-uniform pattern (toon-meta#278): connector's proven
+      # #462-sweep redaction plus buzz's nsec addition, extended to also sweep
+      # any worktree a killed run left behind.
+      #
       # Three passes, because no one of them is sufficient:
       #   1. Exact values of the secrets this job holds — reliable, catches any
       #      shape including ones we have not anticipated.
-      #   2. Known token shapes — catches credentials this job never held, e.g.
-      #      one the agent minted or read from somewhere else mid-run.
-      #   3. BIP-39 mnemonics and labelled private keys — kept as defence in
-      #      depth after the `chain`-gated E2E_DEV_MNEMONIC passthrough was
-      #      removed. No seed is forwarded any more, but settlement agents still
-      #      generate and handle key material against their local Anvil chain
-      #      (Anvil's dev keys are public, but an agent can mint its own), and
-      #      this catches anything that reaches the log by another route.
+      #   2. Known token/key shapes — catches credentials this job never held,
+      #      e.g. one the agent minted or read from somewhere else mid-run.
+      #   3. BIP-39 mnemonics and labelled private keys — defence in depth for
+      #      key material an agent generates or handles mid-run.
       # Secrets are passed via env and never echoed.
       #
       # RESIDUAL GAP, stated rather than hidden: a raw 32-byte private key is
-      # `0x` + 64 hex, which is indistinguishable in shape from a transaction or
-      # block hash. Redacting that shape unconditionally would strip the tx
-      # hashes that make a chain log worth reading, so pass 3 only redacts it when
-      # it appears against a key-ish label (`privateKey`, `--private-key`, ...).
-      # An unlabelled bare private key would survive. Do not treat these
-      # artifacts as safe to publish a seed through; the label gate above is the
-      # real control, and this is defence in depth.
+      # 64 hex chars, indistinguishable in shape from a hash or event id.
+      # Redacting that shape unconditionally would strip the hashes that make a
+      # log worth reading, so pass 3 only redacts it when it appears against a
+      # key-ish label (`privateKey`, `secret_key`, ...). An unlabelled bare hex
+      # key would survive. Do not treat these artifacts as safe to publish a
+      # secret through; this is defence in depth.
       - name: Redact credentials from agent logs
         if: always()
         env:
@@ -246,7 +251,7 @@ jobs:
           APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          [ -d .sandcastle/logs ] || { echo "No logs directory — nothing to redact."; exit 0; }
+          [ -d .sandcastle ] || { echo "No .sandcastle directory — nothing to redact."; exit 0; }
           python3 - <<'PY'
           import os, pathlib, re
 
@@ -262,16 +267,17 @@ jobs:
           # Passes 2 and 3, as (pattern, replacement) so a rule can keep the
           # context it matched on.
           patterns = [
-              # Pass 2 — token shapes, whether or not this job ever held them.
+              # Pass 2 — token/key shapes, whether or not this job ever held them.
               (re.compile(r"gh[pousr]_[A-Za-z0-9]{16,}"), "***REDACTED***"),
               (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "***REDACTED***"),
               (re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}"), "***REDACTED***"),
+              (re.compile(r"nsec1[a-z0-9]{20,}"), "***REDACTED***"),
               (re.compile(r"-----BEGIN[^-]*PRIVATE KEY-----.*?-----END[^-]*PRIVATE KEY-----",
                           re.DOTALL), "***REDACTED***"),
-              # Pass 3b — a raw private key is `0x` + 64 hex, the same shape as a
-              # tx or block hash, so it is redacted only next to a key-ish label,
-              # and the label is kept so the log still reads. See the residual gap
-              # noted on this step.
+              # Pass 3b — a raw private key is 64 hex chars, the same shape as a
+              # hash, so it is redacted only next to a key-ish label, and the
+              # label is kept so the log still reads. See the residual gap noted
+              # on this step.
               (re.compile(
                   r"((?:private[_\-]?key|secret[_\-]?key|signer[_\-]?key|priv[_\-]?key|keyId)"
                   r"[\"'\s:=]{0,6})(?:0x)?[0-9a-fA-F]{64}",
@@ -284,7 +290,7 @@ jobs:
           # this step dependency-free; the cost is that 12+ consecutive words of
           # ordinary lowercase prose are caught too. That trade is deliberate —
           # over-redacting a sentence in an agent log is cheap, publishing a seed
-          # that derives keys on every chain is not.
+          # is not.
           #
           # Longest first: with 12 tried first, a 24-word phrase would have its
           # leading 12 words consumed and the remaining 12 left in the clear.
@@ -295,34 +301,46 @@ jobs:
                   "***REDACTED***",
               ))
 
+          # Redact every log root the upload step publishes: the engine's own
+          # logs, plus any worktree left behind by a killed run — that is where
+          # a not-yet-pushed handoff note (.sandcastle/logs/handoff-<id>.md,
+          # per the ~200k context-budget policy) lives when the run died before
+          # its push.
+          roots = [pathlib.Path(".sandcastle/logs"),
+                   *pathlib.Path(".sandcastle/worktrees").glob("*/.sandcastle/logs")]
+
           hits = 0
-          for path in pathlib.Path(".sandcastle/logs").rglob("*"):
-              if not path.is_file():
+          for root in roots:
+              if not root.is_dir():
                   continue
-              raw = path.read_text(encoding="utf-8", errors="replace")
-              out = raw
-              for value in exact:
-                  for form in {value, value.strip(), value.replace("\n", "\\n")}:
-                      if form and form in out:
-                          out = out.replace(form, "***REDACTED***")
-              for pat, repl in patterns:
-                  out = pat.sub(repl, out)
-              if out != raw:
-                  hits += 1
-                  path.write_text(out, encoding="utf-8")
+              for path in root.rglob("*"):
+                  if not path.is_file():
+                      continue
+                  raw = path.read_text(encoding="utf-8", errors="replace")
+                  out = raw
+                  for value in exact:
+                      for form in {value, value.strip(), value.replace("\n", "\\n")}:
+                          if form and form in out:
+                              out = out.replace(form, "***REDACTED***")
+                  for pat, repl in patterns:
+                      out = pat.sub(repl, out)
+                  if out != raw:
+                      hits += 1
+                      path.write_text(out, encoding="utf-8")
           # Count only — never print what was found.
           print(f"Redaction complete. Files modified: {hits}")
           PY
 
-      # The agent's own reasoning is written to .sandcastle/logs/, NOT to the step
-      # output — the step log only says "Started on branch ..." and then, minutes
-      # later, the outcome. When a run ends with "Implementer produced no commits"
-      # (observed on #457) there is therefore NOTHING to diagnose from: the log
-      # dies with the runner. Upload it so a failed or empty run is explicable.
+      # The agent's own reasoning is written to .sandcastle/logs/, NOT to the
+      # step output — when a run fails, times out, or produces no commits there
+      # is otherwise NOTHING to diagnose from: the log dies with the runner.
+      # Upload it so a failed or empty run is explicable. The worktree glob
+      # additionally captures the committed-but-never-pushed handoff note a
+      # killed run leaves behind (toon-meta#278 acceptance: a deliberately
+      # killed run must leave a recoverable handoff note).
       #
       # `if: always()` because the interesting cases are exactly the ones where
-      # the previous step failed. Same motive as publishing the branch early
-      # (#462): a run that does not produce a PR must still leave something behind.
+      # the previous step failed.
       - name: Upload agent logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -330,5 +348,6 @@ jobs:
           name: sandcastle-implement-logs-issue-${{ github.event.issue.number }}
           path: |
             .sandcastle/logs/
+            .sandcastle/worktrees/*/.sandcastle/logs/
           if-no-files-found: warn
           retention-days: 14
