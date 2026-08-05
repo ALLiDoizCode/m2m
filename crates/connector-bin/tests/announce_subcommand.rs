@@ -575,6 +575,16 @@ key_file = "{settlement_key}"
 prefix = "g.test.relay"
 handler_url = "http://{ingress}/write"
 price = {RELAY_PRICE}
+
+# Issue #701: the same app behind a prefix pinned to ONE carriage -- the
+# shape the live devnet apex gives `g.toon.relay`. A paid HTTP request here
+# is answered with x402 terms rather than served, however correct the claim,
+# because `handle_ilp` checks transport before it checks payment.
+[[routes]]
+prefix = "g.test.btponly"
+handler_url = "http://{ingress}/write"
+price = {RELAY_PRICE}
+transport = "btp"
 "#,
         state_dir = target_state.path().display(),
         key_file = target_key.path().display(),
@@ -675,6 +685,166 @@ pay_channel = "{channel_id}"
         "the accepted claim advanced the channel by exactly the route's price: {state}"
     );
     assert_eq!(state["nonce"], 1, "{state}");
+
+    // ── and now the same thing over BTP ──────────────────────────────────
+    //
+    // `g.test.btponly` is pinned `transport = "btp"` (issue #701), the shape
+    // the live devnet apex gives `g.toon.relay`. Three things are under test
+    // here and each was a way to get this wrong:
+    //
+    //   1. the carriage is chosen by NEGOTIATION -- the greeting's
+    //      `requiredTransport` -- not by being told, so the same command
+    //      that just used HTTP now uses BTP without a mode flag;
+    //   2. the claim rides as `payment-channel-claim` protocolData as RAW
+    //      JSON, where the HTTP carriage base64s the identical bytes into a
+    //      header. Getting that backwards is a refused claim on a paid
+    //      packet;
+    //   3. the watermark is shared across carriages. This second announce
+    //      must advance the SAME channel to nonce 2 and 2x the price --
+    //      which also proves the first one really was accepted, since a
+    //      claim that did not advance would now collide.
+    let (ok, stdout, stderr) = run_connector(&[
+        "announce",
+        "--config",
+        &announcer_config.path().display().to_string(),
+        &format!("http://{}/ilp", target.client_edge_addr),
+        "--to",
+        "g.test.btponly",
+        "--btp-url",
+        &format!("ws://{}/ilp/btp", target.client_edge_addr),
+    ]);
+    assert!(
+        ok,
+        "the BTP carriage failed:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert_eq!(ingress.bodies().len(), 2, "a second write reached the app");
+
+    let state = claim_state(
+        &format!("http://{}/ilp", target.client_edge_addr),
+        &channel.0,
+        &announcer_secret,
+        backend.address().to_fixed_bytes(),
+    )
+    .await;
+    assert_eq!(
+        state["cumulativeClaimed"],
+        (2 * RELAY_PRICE).to_string(),
+        "the BTP claim advanced the same channel by exactly the price again: {state}"
+    );
+    assert_eq!(state["nonce"], 2, "{state}");
+}
+
+/// The BTP endpoint is explicit input, and the refusal has to say where an
+/// operator finds it -- because the one place it is NOT is the greeting.
+///
+/// Verified live against the devnet apex: `extra` carries exactly
+/// `endpoint` (the HTTP one), `ilpAddress`, `price`, `requiredTransport`,
+/// `sessionLeaseTtlMs`, `settlement` and `settlements`. Deriving the BTP URL
+/// by swapping the HTTP one's scheme and appending a path would be right on
+/// this fleet and wrong for any operator whose deployment does not mirror
+/// it -- the same class of guess `relay_url` and `payTo` already punished --
+/// so it is refused rather than invented.
+#[tokio::test]
+async fn a_btp_only_route_with_no_btp_url_refuses_and_says_where_to_find_one() {
+    if !require_anvil() {
+        return;
+    }
+    let anvil = Anvil::spawn(ANVIL_BASE_PORT).await;
+    let token =
+        EvmSettlementBackend::deploy_mock_token(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, 1_000_000)
+            .await
+            .expect("mint a mock ERC-20");
+    let backend = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
+        .await
+        .expect("deploy a TokenNetwork");
+
+    let ingress = RecordingIngress::start();
+    let target_key = support::write_raw_key_file(51);
+    let target_settlement = write(DEPLOYER_PRIVATE_KEY);
+    let target_state = tempfile::tempdir().expect("temp state dir");
+    let target_config = write(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_file}"
+
+[settlement.evm]
+rpc_url = "{rpc_url}"
+contract_address = "{registry:?}"
+token_address = "{token:?}"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "{settlement_key}"
+
+[[routes]]
+prefix = "g.test.btponly"
+handler_url = "http://{ingress}/write"
+price = {RELAY_PRICE}
+transport = "btp"
+"#,
+        state_dir = target_state.path().display(),
+        key_file = target_key.path().display(),
+        settlement_key = target_settlement.path().display(),
+        rpc_url = anvil.rpc_url,
+        registry = backend.registry_address(),
+        ingress = ingress.addr,
+    ));
+    let target = support::spawn_connector(target_config.path());
+
+    let announcer_key = support::write_raw_key_file(53);
+    let announcer_settlement = write(&hex_encode(&[59u8; 32]));
+    let announcer_config = write(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{key_file}"
+
+[settlement.evm]
+rpc_url = "{rpc_url}"
+contract_address = "{registry:?}"
+token_address = "{token:?}"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "{settlement_key}"
+
+[announce]
+addresses = ["g.test.ario"]
+http_endpoint = "https://ario.test.example/ilp"
+btp_endpoint = "wss://ario.test.example/ilp/btp"
+publish_to = "g.test.btponly"
+pay_channel = "0x{channel}"
+"#,
+        key_file = announcer_key.path().display(),
+        settlement_key = announcer_settlement.path().display(),
+        rpc_url = anvil.rpc_url,
+        registry = backend.registry_address(),
+        channel = "ab".repeat(32),
+    ));
+
+    let (ok, _stdout, stderr) = run_connector(&[
+        "announce",
+        "--config",
+        &announcer_config.path().display().to_string(),
+        &format!("http://{}/ilp", target.client_edge_addr),
+    ]);
+
+    assert!(!ok);
+    assert!(stderr.contains("requires the 'btp' transport"), "{stderr}");
+    assert!(
+        stderr.contains("CANNOT be derived"),
+        "the message must refuse to guess, not merely fail: {stderr}"
+    );
+    assert!(
+        stderr.contains("kind:10032") && stderr.contains("btpEndpoint"),
+        "the message must name where an operator actually finds it: {stderr}"
+    );
+    // Refused before anything was signed or sent: the app saw nothing.
+    assert!(ingress.bodies().is_empty());
 }
 
 /// Read one channel's claim state off a live client edge, the way the

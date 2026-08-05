@@ -1090,6 +1090,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chrono",
+ "connector-btp",
  "connector-client-edge",
  "connector-config",
  "connector-domain",
@@ -1103,6 +1104,7 @@ dependencies = [
  "connector-signer",
  "ed25519-dalek",
  "ethers",
+ "futures-util",
  "hyper",
  "libsecp256k1",
  "rand 0.7.3",
@@ -1113,6 +1115,7 @@ dependencies = [
  "solana-sdk",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "tower",
  "tracing",
 ]

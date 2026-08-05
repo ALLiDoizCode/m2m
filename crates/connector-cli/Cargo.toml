@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# The BTP frame codec, for the announce's BTP carriage (issue #784): the ONE
+# codec both roles share (ADR 0027, issue #713) and the one
+# `connector-vectors` pins -- never a second implementation of a frame.
+connector-btp = { path = "../connector-btp" }
 connector-config = { path = "../connector-config" }
 connector-client-edge = { path = "../connector-client-edge" }
 connector-domain = { path = "../connector-domain" }
@@ -34,6 +38,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 solana-sdk = "=2.1.0"
 tokio = { version = "1", features = ["net", "time"] }
+# The websocket under the announce's BTP carriage -- the same 0.20 the peer
+# carriage and the client edge's own BTP integration test already speak.
+tokio-tungstenite = { version = "0.20", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
 tracing = "0.1"
 
 [dev-dependencies]

@@ -62,6 +62,8 @@ pub(crate) struct RawAnnounceConfig {
     #[serde(default)]
     publish_to: Option<String>,
     #[serde(default)]
+    publish_btp_url: Option<String>,
+    #[serde(default)]
     pay_channel: Option<String>,
     #[serde(default)]
     route_publish: Option<String>,
@@ -111,6 +113,7 @@ pub struct AnnounceConfig {
     btp_endpoint: String,
     relay_url: Option<String>,
     publish_to: Option<String>,
+    publish_btp_url: Option<String>,
     pay_channel: Option<[u8; 32]>,
     route_publish: String,
     route_store: String,
@@ -179,6 +182,28 @@ impl AnnounceConfig {
     /// gate will verify under), and the nonce and cumulative amount come
     /// from the target's `POST /ilp/claim-state` -- the receiver is the
     /// authority on its own watermark.
+    /// The **target's** BTP endpoint, for a route whose transport policy
+    /// requires that carriage (issue #701).
+    ///
+    /// Read the name carefully: `btp_endpoint` above is where clients pay
+    /// **this** node; this is where **this node pays somebody else**. They
+    /// sit in one section because both are facts a node cannot introspect,
+    /// but they point in opposite directions, which is why this one is
+    /// spelled `publish_*` alongside `publish_to` rather than `*_endpoint`
+    /// alongside the two that describe this node.
+    ///
+    /// Explicit, never derived. The x402 greeting carries no BTP URL --
+    /// verified against the live devnet apex, whose `extra` keys are
+    /// exactly `endpoint` (the HTTP one), `ilpAddress`, `price`,
+    /// `requiredTransport`, `sessionLeaseTtlMs`, `settlement` and
+    /// `settlements` -- so there is nothing to negotiate it from, and
+    /// swapping the HTTP URL's scheme and appending a path is a guess that
+    /// is right only on deployments shaped like this fleet's. An operator
+    /// finds it in the target's own kind:10032 announce, as `btpEndpoint`.
+    pub fn publish_btp_url(&self) -> Option<&str> {
+        self.publish_btp_url.as_deref()
+    }
+
     pub fn pay_channel(&self) -> Option<&[u8; 32]> {
         self.pay_channel.as_ref()
     }
@@ -370,6 +395,13 @@ pub(crate) fn resolve_announce(
         }
     }
 
+    // `ws`/`wss` only, like `btp_endpoint` -- an `https://` here is the
+    // HTTP carriage, and a BTP session opened against it never upgrades.
+    let publish_btp_url = raw
+        .publish_btp_url
+        .map(|value| validate_endpoint("publish_btp_url", value, &["wss", "ws"]))
+        .transpose()?;
+
     let pay_channel = raw
         .pay_channel
         .as_deref()
@@ -401,6 +433,7 @@ pub(crate) fn resolve_announce(
         btp_endpoint,
         relay_url,
         publish_to: raw.publish_to,
+        publish_btp_url,
         pay_channel,
         route_publish,
         route_store,
@@ -424,6 +457,7 @@ mod tests {
             btp_endpoint: Some("wss://proxy.ario.example/ilp/btp".to_string()),
             relay_url: relay_url.map(str::to_string),
             publish_to: None,
+            publish_btp_url: None,
             pay_channel: None,
             route_publish: None,
             route_store: None,

@@ -1,8 +1,8 @@
 # Announcing a node
 
 `connector announce` publishes one kind:10032 `IlpPeerInfo` event describing this node, to a relay
-you choose, **from the node being announced**, paid for through that node's own routing like any
-other write.
+you choose, **from the node being announced**, **paying that relay's connector like any other
+client**.
 
 It is a one-shot operator action. A serving connector announces nothing on its own — see
 [ADR 0030](../adr/0030-an-operator-announces-a-node-the-node-still-does-not.md) for why the verb
@@ -17,6 +17,7 @@ connector announce --config /app/config/connector.toml https://relay-op.example/
 | `--config <path>` | this node's config file. **Never positional here**, so a config file called `announce` can never be mistaken for the subcommand. |
 | `<relay-discovery-url>` | **the node you pay.** The client-edge ILP endpoint of the connector that fronts the relay you want to be discovered on. Its x402 greeting quotes the price and names the EIP-712 domain your claim is signed under; its `/ilp/identity` is the key the packet is sealed to; and the paid packet is POSTed straight back to it. |
 | `--to <ilp-address>` | the ILP address to publish to. Defaults to `[announce] publish_to`. |
+| `--btp-url <wss-url>` | the target's **BTP** endpoint, used when its route requires that carriage. Defaults to `[announce] publish_btp_url`. **Never derived** — see below. |
 | `--target <path>` | the write ingress's path **beneath** the route's own `handler_url`. Defaults to `""`, "the route's own handler path", which is right whenever that `handler_url` already ends at the ingress (`http://relay:3100/write`). |
 | `--via-own-routing` | send the packet through **your own routing table** instead of paying the URL. See "Routing it yourself" below. |
 | `--dry-run` | negotiate, build and sign, print, and stop. Nothing is paid and nothing is sent. Safe beside a running node. |
@@ -51,6 +52,31 @@ Open the channel however you normally would — the target's `POST /channels`, o
 then name its 32-byte on-chain id here. The target does not need to have heard of you: an
 unaffiliated buyer's channel resolves from chain (issue #502).
 
+### The carriage is negotiated, but the BTP URL is not
+
+A route may be pinned to one transport (issue #701), and `handle_ilp` checks transport **before** it
+checks payment — so a route pinned to `btp` answers a *paid* HTTP request with the same x402 terms it
+answers an unpaid one, however correct the claim.
+
+The greeting says which carriage a route needs (`extra.requiredTransport`), so the command negotiates
+first and then picks: HTTP for a route with no restriction (`g.toon.ario` today), BTP for one pinned
+to it (`g.toon.relay` today). You do not tell it which to use.
+
+What it **cannot** negotiate is the BTP URL itself. The greeting carries no BTP endpoint — verified
+live, its `extra` keys are exactly `endpoint` (the HTTP one), `ilpAddress`, `price`,
+`requiredTransport`, `sessionLeaseTtlMs`, `settlement`, `settlements`. Deriving one by swapping the
+HTTP URL's scheme and appending `/btp` would be right on this fleet and wrong for any operator whose
+deployment does not mirror it — the same class of guess `relay_url` and `payTo` have already
+punished. So pass `--btp-url`, or set `[announce] publish_btp_url`, and if a BTP-only route comes
+back with neither, the command refuses and says where to find it: **the target's own kind:10032
+announce carries `btpEndpoint`.**
+
+On BTP the claim rides as a `payment-channel-claim` protocolData entry as **raw JSON**, where the
+HTTP carriage base64s the identical bytes into a header. Nothing about the announce changes
+otherwise, and the two carriages share one claim watermark on the channel. The command also reads
+`extra.sessionLeaseTtlMs` and will not wait for an answer longer than the far side will hold the
+session open.
+
 ## Routing it yourself
 
 `--via-own-routing` sends the packet through this node's own routing table instead — the same
@@ -80,6 +106,7 @@ http_endpoint = "https://proxy.ario.devnet.toonprotocol.dev/ilp"
 btp_endpoint  = "wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp"
 # relay_url   = "wss://relay.devnet.toonprotocol.dev"  # ONLY if this node fronts a relay
 # publish_to  = "g.toon.relay"           # default for `--to`
+# publish_btp_url = "wss://…/ilp/btp"    # the TARGET's BTP endpoint; default for `--btp-url`
 # pay_channel = "0x…"                    # the channel this node PAYS from (32-byte on-chain id)
 # route_publish / route_store            # override the `.relay`/`.store` suffix heuristic
 # asset_code = "USDC"                    # default
@@ -125,10 +152,10 @@ announce's own `routes.publish`.
    is this node's settlement identity. There is no second key.
 3. **A `key_file` identity.** A Nostr signature is BIP-340 Schnorr over the event's own id, which
    needs the scalar itself — a KMS-held `[signer]` cannot announce.
-4. **A target whose route accepts HTTP.** A route pinned to `transport = "btp"` (issue #701) answers
-   a *paid* request with the same x402 terms it answers an unpaid one, so the client path cannot pay
-   it. This is refused up front, before anything is signed. **The devnet apex pins `g.toon.relay` to
-   `transport = "btp"` today**, so announcing to it over HTTP needs that policy widened first.
+4. **A `--btp-url`, if the target's route is pinned to BTP** (issue #701). **The devnet apex pins
+   `g.toon.relay` to `transport = "btp"`**, so an announce there is paid over BTP and needs the
+   apex's `wss://…/ilp/btp` endpoint supplied. Without it the command refuses up front, before
+   anything is signed.
 
 With `--via-own-routing`, replace (1) and (2) with: a `[[routes]]` entry reaching the relay's
 connector, and a channel with whoever carries it (over a peering, the `[[peer_channels]]` row it
@@ -167,7 +194,8 @@ When it does refuse: stop the node, announce, start it again — or drop `--via-
 
 | what you see | what to change |
 | --- | --- |
-| `requires the 'btp' transport` | that route is pinned `transport = "btp"` (issue #701) and the client path pays over HTTP. Widen the route's policy, or use `--via-own-routing` over a peering. |
+| `requires the 'btp' transport … no BTP endpoint was given` | pass `--btp-url`, from the target's own kind:10032 `btpEndpoint`. |
+| `the BTP session with … failed` | the endpoint did not upgrade, or the session closed before answering. |
 | `no [announce] pay_channel` | open a funded channel with the node you are paying and name its on-chain id. |
 | `would not report this node's claim state` | that node cannot resolve the channel, or its counterparty is not this node's settlement address. |
 | `spendable headroom … but the announce costs` | fund the channel. Nothing was sent. |

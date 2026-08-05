@@ -107,7 +107,8 @@ const ANNOUNCE_VERB: &str = "announce";
 const USAGE: &str = "usage:\n  \
      connector <config-file>\n  \
      connector announce --config <config-file> <relay-discovery-url> \
-     [--to <ilp-address>] [--target <path>] [--via-own-routing] [--dry-run]";
+     [--to <ilp-address>] [--btp-url <wss-url>] [--target <path>] \
+     [--via-own-routing] [--dry-run]";
 
 /// What the process arguments asked for, before anything has been loaded.
 #[derive(Debug, PartialEq, Eq)]
@@ -153,6 +154,7 @@ fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Invocation, CliError> {
     let mut through_url: Option<String> = None;
     let mut publish_to: Option<String> = None;
     let mut target: Option<String> = None;
+    let mut btp_url: Option<String> = None;
     let mut via_own_routing = false;
     let mut dry_run = false;
     let mut index = 0;
@@ -162,6 +164,7 @@ fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Invocation, CliError> {
             "--config" => Some(&mut config_path),
             "--to" => Some(&mut publish_to),
             "--target" => Some(&mut target),
+            "--btp-url" => Some(&mut btp_url),
             _ => None,
         };
         if let Some(slot) = slot {
@@ -208,6 +211,7 @@ fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Invocation, CliError> {
             })?,
             publish_to,
             target,
+            btp_url,
             via_own_routing,
             dry_run,
         },
@@ -520,6 +524,41 @@ key_file = "{}"
             panic!("parse");
         };
         assert!(options.via_own_routing);
+    }
+
+    /// The target's BTP endpoint is explicit input, never derived from the
+    /// through-URL -- the greeting carries no BTP URL at all, so there is
+    /// nothing to negotiate it from.
+    #[test]
+    fn the_targets_btp_endpoint_is_supplied_rather_than_derived() {
+        let Ok(Invocation::Announce { options, .. }) = parse(&[
+            "connector",
+            "announce",
+            "--config",
+            "/c.toml",
+            "https://relay-op.example/ilp",
+            "--btp-url",
+            "wss://relay-op.example/ilp/btp",
+        ]) else {
+            panic!("parse");
+        };
+        assert_eq!(
+            options.btp_url.as_deref(),
+            Some("wss://relay-op.example/ilp/btp")
+        );
+
+        // And absent unless written: nothing infers it from the HTTP URL
+        // sitting right next to it.
+        let Ok(Invocation::Announce { options, .. }) = parse(&[
+            "connector",
+            "announce",
+            "--config",
+            "/c.toml",
+            "https://relay-op.example/ilp",
+        ]) else {
+            panic!("parse");
+        };
+        assert_eq!(options.btp_url, None);
     }
 
     /// Without `--config` there is no config path at all -- and crucially

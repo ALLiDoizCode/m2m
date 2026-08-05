@@ -116,13 +116,27 @@ route, no peering, no `[[routes]]` entry. That is what makes this reachable from
 peering is accept-only. Under `--via-own-routing` the old requirements return: a route reaching the
 relay's connector, and the ability to originate over the peering it names.
 
-**A route pinned to one transport cannot be paid by the client path.** Issue #701 lets a route
-require `btp`, and `handle_ilp` checks transport *before* payment — so such a route answers a paid
-HTTP request with the same x402 terms it answers an unpaid one, however correct the claim. The
-subcommand detects this from the greeting's `extra.requiredTransport` and refuses before signing
-anything. **The devnet apex pins `g.toon.relay` to `transport = "btp"`**, verified live, so
-announcing to it over HTTP needs that policy widened first — a one-line config change, not a
-redesign.
+**The carriage is negotiated; the BTP URL is supplied.** Issue #701 lets a route require one
+transport, and `handle_ilp` checks transport *before* payment — so a route pinned to `btp` answers a
+paid HTTP request with the same x402 terms it answers an unpaid one, however correct the claim. **The
+devnet apex pins `g.toon.relay` to `transport = "btp"`**, so this is the live case, not a
+hypothetical. The subcommand therefore reads the greeting's `extra.requiredTransport` and *picks* the
+carriage — HTTP for an unrestricted route, BTP for a pinned one — rather than being told which to
+use.
+
+What it cannot pick is the BTP endpoint. **The greeting carries no BTP URL**: its `extra` keys are
+exactly `endpoint` (the HTTP one), `ilpAddress`, `price`, `requiredTransport`, `sessionLeaseTtlMs`,
+`settlement`, `settlements`. So the BTP endpoint is explicit input (`--btp-url` /
+`[announce] publish_btp_url`), and a BTP-only route with neither supplied is refused by name, naming
+where an operator finds it: the target's own kind:10032 `btpEndpoint`. Deriving it from the HTTP URL
+by swapping scheme and appending a path is exactly the class of guess `relay_url` and `payTo` have
+already punished — right on this fleet, wrong for anyone whose deployment does not mirror it.
+
+On BTP the claim rides as a `payment-channel-claim` protocolData entry as **raw JSON**, where the
+HTTP carriage base64s the identical bytes into a header; the frame bytes come from `connector-btp`,
+the one codec both roles share. No `auth` frame is sent: the client edge trusts nothing from the
+handshake, and an `auth` MESSAGE only binds a session-registry entry so the connector can push to it
+later — which a one-shot buyer has no use for.
 
 **A second process must not share a serving node's `state_dir`.** A node's outbound peer-claim ledger
 is replayed from the journal at startup and held in memory, and the journal has no lock. Two

@@ -124,6 +124,20 @@ pub struct AnnounceOptions {
     /// ends at the ingress, which is how every relay route on this fleet is
     /// written (`http://relay:3100/write`).
     pub target: Option<String>,
+    /// The target's **BTP** endpoint, for a route whose policy requires that
+    /// carriage (issue #701). Overrides `[announce] publish_btp_url`.
+    ///
+    /// Explicit input, never derived. The x402 greeting carries no BTP URL
+    /// at all -- verified against the live devnet apex, whose `extra` keys
+    /// are exactly `endpoint` (the HTTP one), `ilpAddress`, `price`,
+    /// `requiredTransport`, `sessionLeaseTtlMs`, `settlement` and
+    /// `settlements` -- so there is nothing to negotiate it from. Deriving
+    /// it from the HTTP URL by swapping the scheme and appending `/btp` is
+    /// the same class of guess `relay_url` and `payTo` have already
+    /// punished: it would be right on this fleet and wrong for any operator
+    /// whose deployment does not mirror it. An operator who needs this
+    /// finds it in the target's own kind:10032 announce, as `btpEndpoint`.
+    pub btp_url: Option<String>,
     /// Send the packet through **this node's own routing table** instead of
     /// paying the through-URL directly.
     ///
@@ -212,12 +226,18 @@ pub enum AnnounceError {
     /// The paid POST reached the through-URL but the answer was neither a
     /// FULFILL nor a REJECT.
     UnreadableAnswer { status: u16, body: String },
-    /// The target's route for this destination does not accept HTTP, so it
-    /// cannot be paid by the client path at all (issue #701).
+    /// The target's route requires BTP and no BTP endpoint was supplied.
+    NoBtpEndpoint {
+        destination: String,
+        through_url: String,
+    },
+    /// The target's route requires a transport this command cannot speak.
     WrongTransport {
         destination: String,
         required: String,
     },
+    /// The BTP session itself failed.
+    Btp { url: String, reason: String },
 }
 
 impl fmt::Display for AnnounceError {
@@ -345,20 +365,34 @@ impl fmt::Display for AnnounceError {
                 "the through-URL answered HTTP {status} with something that is neither a FULFILL \
                  nor a REJECT: {body}"
             ),
+            AnnounceError::NoBtpEndpoint {
+                destination,
+                through_url,
+            } => write!(
+                f,
+                "that node's route for '{destination}' requires the 'btp' transport (issue #701), \
+                 and no BTP endpoint was given. It CANNOT be derived from {through_url}: the \
+                 x402 greeting carries no BTP URL -- its `extra` keys are exactly `endpoint` \
+                 (the HTTP one), `ilpAddress`, `price`, `requiredTransport`, \
+                 `sessionLeaseTtlMs`, `settlement` and `settlements` -- and swapping the scheme \
+                 and appending a path would be a guess that happens to work only on deployments \
+                 shaped like ours. Where an operator finds it: the target node's own kind:10032 \
+                 announce carries `btpEndpoint`. Pass it as `--btp-url wss://...`, or set \
+                 `[announce] publish_btp_url`"
+            ),
             AnnounceError::WrongTransport {
                 destination,
                 required,
             } => write!(
                 f,
-                "that node's route for '{destination}' requires the '{required}' transport, and \
-                 this path pays over HTTP -- so a paid POST would be answered with the same x402 \
-                 terms rather than served, however correct the claim (issue #701). The devnet \
-                 apex pins `g.toon.relay` to `transport = \"btp\"` for huddles' persistent \
-                 sessions, so this is the expected answer there today. Either the route's \
-                 transport policy has to widen, or the announce has to arrive over that \
-                 transport -- `--via-own-routing` over a peering is not subject to this check, \
-                 since the client-edge transport policy applies to clients"
+                "that node's route for '{destination}' requires the '{required}' transport, which \
+                 this command cannot speak -- it pays over HTTP, or over BTP when given a \
+                 `--btp-url`. A paid request over any other carriage is answered with the same \
+                 x402 terms rather than served, however correct the claim (issue #701)"
             ),
+            AnnounceError::Btp { url, reason } => {
+                write!(f, "the BTP session with {url} failed: {reason}")
+            }
         }
     }
 }
@@ -562,6 +596,12 @@ pub struct Terms {
     /// the client path can say so plainly instead of buying an answer it
     /// cannot decode.
     pub required_transport: Option<String>,
+    /// `extra.sessionLeaseTtlMs` -- the backstop TTL the target's own
+    /// client session registry enforces. Always present, unlike the fields
+    /// above. Read so a one-shot BTP announce waits for its answer inside
+    /// the window the far side will actually hold the session open for,
+    /// rather than assuming a session lives forever.
+    pub session_lease_ttl_ms: Option<u64>,
 }
 
 /// The two facts a client claim's signature is bound to, taken from the
@@ -610,6 +650,9 @@ pub fn parse_terms(body: &str) -> Option<Terms> {
             .and_then(|extra| extra.get("requiredTransport"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
+        session_lease_ttl_ms: extra
+            .and_then(|extra| extra.get("sessionLeaseTtlMs"))
+            .and_then(serde_json::Value::as_u64),
     })
 }
 
@@ -959,6 +1002,160 @@ async fn send_as_client(
     }
 }
 
+// ── the BTP carriage ─────────────────────────────────────────────────────────
+
+/// The BTP request id this one-shot announce uses. A session that sends
+/// exactly one MESSAGE and reads its answer needs no allocator -- correlation
+/// is by this id, and there is nothing else outstanding to collide with.
+const ANNOUNCE_REQUEST_ID: u32 = 1;
+
+/// The longest this command will hold a BTP session open waiting for its
+/// answer, before the far side's own `sessionLeaseTtlMs` is taken into
+/// account.
+const BTP_ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Pay `btp_url` over one BTP session, as a client (client-edge-spec.md
+/// §1.9, ADR 0026).
+///
+/// The shape is deliberately the *smallest* thing that is a real session,
+/// because a one-shot announce is not a huddle:
+///
+///   * **no `auth` frame.** The client edge trusts nothing from the
+///     handshake -- "authorization to write comes from each frame's claim,
+///     exactly as on HTTP" -- and an `auth` MESSAGE only binds a session
+///     registry entry so the connector can push to it later. A one-shot
+///     buyer has nothing to be pushed;
+///   * **one MESSAGE**, carrying the encoded PREPARE in the frame's own
+///     ILP-packet field and the claim as a `payment-channel-claim`
+///     protocolData entry. Note the claim is **raw JSON bytes here**, where
+///     the HTTP header is base64 of the same JSON -- the one real
+///     difference between the two carriages' claim carriage, and an easy
+///     hour to lose;
+///   * the answer is the RESPONSE bearing this request id, whose ILP-packet
+///     field is the FULFILL or REJECT. An ERROR frame, or a
+///     `payment-required` protocolData entry, is the same refusal the HTTP
+///     402 is and is reported as such.
+///
+/// The frame bytes come from [`connector_btp`], the one codec both roles
+/// share (ADR 0027, issue #713) and the one `connector-vectors` pins --
+/// never re-derived here.
+async fn send_over_btp(
+    btp_url: &str,
+    prepare: &Prepare,
+    claim: &str,
+    session_lease: Option<Duration>,
+) -> Result<Fulfill, AnnounceError> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let failed = |reason: String| AnnounceError::Btp {
+        url: btp_url.to_string(),
+        reason,
+    };
+
+    // A session the far side would drop mid-flight is not a longer wait, it
+    // is a wait that ends in silence -- so the answer window is the shorter
+    // of this command's own ceiling and the lease the greeting advertises.
+    let deadline = session_lease
+        .filter(|lease| *lease < BTP_ANSWER_TIMEOUT)
+        .unwrap_or(BTP_ANSWER_TIMEOUT);
+
+    let (mut socket, _response) = tokio::time::timeout(
+        NEGOTIATION_TIMEOUT,
+        tokio_tungstenite::connect_async(btp_url),
+    )
+    .await
+    .map_err(|_| failed("timed out opening the websocket".to_string()))?
+    .map_err(|error| failed(error.to_string()))?;
+
+    let frame = connector_btp::encode_message(
+        ANNOUNCE_REQUEST_ID,
+        &[connector_btp::ProtocolData {
+            name: connector_btp::CLAIM_PROTOCOL.to_string(),
+            content_type: connector_btp::CONTENT_TYPE_TEXT,
+            // Raw JSON, NOT base64 -- see this function's own docs.
+            data: claim.as_bytes().to_vec(),
+        }],
+        &prepare.encode(),
+    );
+    socket
+        .send(Message::Binary(frame))
+        .await
+        .map_err(|error| failed(error.to_string()))?;
+
+    let answer = tokio::time::timeout(deadline, async {
+        while let Some(message) = socket.next().await {
+            let bytes = match message.map_err(|error| failed(error.to_string()))? {
+                Message::Binary(bytes) => bytes,
+                // Text/ping/pong/close carry nothing this command asked
+                // for; the websocket layer answers ping itself.
+                Message::Close(_) => {
+                    return Err(failed("the session closed before answering".to_string()))
+                }
+                _ => continue,
+            };
+            let decoded = connector_btp::decode_frame(&bytes)
+                .map_err(|error| failed(format!("undecodable frame: {error:?}")))?;
+            if decoded.request_id != ANNOUNCE_REQUEST_ID {
+                continue;
+            }
+            return Ok(decoded);
+        }
+        Err(failed(
+            "the session ended without answering this request".to_string(),
+        ))
+    })
+    .await
+    .map_err(|_| {
+        failed(format!(
+            "no answer within {}s (the greeting's own session lease was {})",
+            deadline.as_secs(),
+            session_lease
+                .map(|lease| format!("{}ms", lease.as_millis()))
+                .unwrap_or_else(|| "not advertised".to_string())
+        ))
+    })??;
+
+    // Close politely rather than dropping the socket: this session exists
+    // for one packet and the far side has a registry entry to retire.
+    let _ = socket.close(None).await;
+
+    if answer.frame_type == connector_btp::BTP_ERROR {
+        return Err(failed(format!(
+            "the far side answered a BTP ERROR: {}",
+            String::from_utf8_lossy(&answer.ilp_packet)
+        )));
+    }
+    // The BTP twin of the HTTP 402: §1.9 carries the identical x402 terms
+    // bytes as `payment-required` protocolData on a REJECT.
+    if let Some(terms) = answer
+        .protocol_data
+        .iter()
+        .find(|pd| pd.name == connector_btp::PAYMENT_REQUIRED_PROTOCOL)
+    {
+        return Err(AnnounceError::UnreadableAnswer {
+            status: 402,
+            body: String::from_utf8_lossy(&terms.data)
+                .chars()
+                .take(400)
+                .collect(),
+        });
+    }
+    if let Ok(fulfill) = Fulfill::decode(&answer.ilp_packet) {
+        return Ok(fulfill);
+    }
+    match Reject::decode(&answer.ilp_packet) {
+        Ok(reject) => Err(reject_error(&reject)),
+        Err(_) => Err(AnnounceError::UnreadableAnswer {
+            status: 0,
+            body: format!(
+                "a BTP {} frame whose ILP packet is neither a FULFILL nor a REJECT",
+                answer.frame_type
+            ),
+        }),
+    }
+}
+
 // ── the arithmetic ───────────────────────────────────────────────────────────
 
 /// What this node must put on the PREPARE, and the minimum that must still
@@ -1271,21 +1468,35 @@ async fn pay_the_through_url(
     let announce_config = config
         .announce()
         .expect("caller checked the [announce] section is present");
-    // Refused before anything is signed. A route whose policy does not
-    // accept HTTP answers a PAID request with the same x402 greeting it
-    // answers an unpaid one (`handle_ilp` checks transport before it checks
-    // payment at all), so pressing on would spend nothing but would report
-    // an undecodable answer instead of the real reason.
-    if let Some(required) = terms
-        .required_transport
-        .as_deref()
-        .filter(|required| *required != "http")
-    {
-        return Err(AnnounceError::WrongTransport {
-            destination: prepare.destination.clone(),
-            required: required.to_string(),
-        });
-    }
+    // Which carriage, decided by NEGOTIATION rather than by being told.
+    //
+    // `handle_ilp` checks a route's transport policy BEFORE it checks
+    // payment, so a route pinned to one carriage answers a paid request on
+    // any other with the same x402 terms it answers an unpaid one, however
+    // correct the claim. The greeting says which (issue #701's
+    // self-diagnosing `requiredTransport`), so this picks rather than
+    // guesses -- and a route with no restriction, like `g.toon.ario` today,
+    // stays on HTTP.
+    let carriage = match terms.required_transport.as_deref() {
+        None | Some("http") => Carriage::Http,
+        Some("btp") => Carriage::Btp(
+            options
+                .btp_url
+                .clone()
+                .or_else(|| announce_config.publish_btp_url().map(str::to_string))
+                .ok_or_else(|| AnnounceError::NoBtpEndpoint {
+                    destination: prepare.destination.clone(),
+                    through_url: options.through_url.clone(),
+                })?,
+        ),
+        Some(required) => {
+            return Err(AnnounceError::WrongTransport {
+                destination: prepare.destination.clone(),
+                required: required.to_string(),
+            })
+        }
+    };
+
     let channel = *announce_config
         .pay_channel()
         .ok_or(AnnounceError::NoPayChannel)?;
@@ -1327,6 +1538,7 @@ async fn pay_the_through_url(
     tracing::info!(
         destination = %prepare.destination,
         through = %options.through_url,
+        carriage = carriage.name(),
         amount,
         nonce,
         cumulative = %cumulative,
@@ -1334,7 +1546,35 @@ async fn pay_the_through_url(
         "paying the through-URL directly, as an ordinary client"
     );
 
-    send_as_client(client, &options.through_url, prepare, &claim).await
+    match &carriage {
+        Carriage::Http => send_as_client(client, &options.through_url, prepare, &claim).await,
+        Carriage::Btp(btp_url) => {
+            send_over_btp(
+                btp_url,
+                prepare,
+                &claim,
+                terms.session_lease_ttl_ms.map(Duration::from_millis),
+            )
+            .await
+        }
+    }
+}
+
+/// Which carriage this announce pays over, chosen from the greeting.
+enum Carriage {
+    Http,
+    /// The target's BTP endpoint, which had to be supplied -- see
+    /// [`AnnounceOptions::btp_url`] for why it cannot be derived.
+    Btp(String),
+}
+
+impl Carriage {
+    fn name(&self) -> &'static str {
+        match self {
+            Carriage::Http => "http",
+            Carriage::Btp(_) => "btp",
+        }
+    }
 }
 
 fn reject_error(reject: &Reject) -> AnnounceError {
@@ -1434,6 +1674,34 @@ mod tests {
         // `btp` requirement here means it cannot pay this route at all --
         // detected here rather than discovered as an undecodable answer.
         assert_eq!(terms.required_transport.as_deref(), Some("btp"));
+        // Read so a one-shot BTP session waits inside the window the far
+        // side will actually hold it open for, rather than assuming a
+        // session lives forever.
+        assert_eq!(terms.session_lease_ttl_ms, Some(300_000));
+        // What the greeting does NOT carry, and the reason `--btp-url` is
+        // explicit input: there is no BTP endpoint anywhere in it. Asserted
+        // against the live apex's own `extra` key set, so a future greeting
+        // that gains one makes this fail and someone reconsiders.
+        let extra: serde_json::Value = serde_json::from_str(body).expect("greeting");
+        let mut keys: Vec<&str> = extra["accepts"][0]["extra"]
+            .as_object()
+            .expect("extra object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "endpoint",
+                "ilpAddress",
+                "price",
+                "requiredTransport",
+                "sessionLeaseTtlMs",
+                "settlement"
+            ],
+            "the greeting carries no BTP URL -- deriving one would be a guess"
+        );
         let domain = terms.settlement.expect("the EIP-712 domain to sign under");
         assert_eq!(domain.chain_id, 84_532);
         assert_eq!(
