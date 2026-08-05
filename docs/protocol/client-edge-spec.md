@@ -759,6 +759,25 @@ silently dropped exactly as it was before TRANSFER existed.
    is best-effort and never blocks the ack: a session with no usable `peerId` is simply never
    registered.
 
+   **Update (issue #790):** the same `auth` entry MAY carry three additional fields —
+   `channelId`, `expires` (unix seconds) and `signature` — a channel-control proof binding this
+   session's `peerId` to an EVM channel _before_ it has ever presented a claim. This exists
+   because issue #787's channel association is learned only from a genuine inbound claim, which a
+   client that only ever earns (opens a channel, serves paid work, sends no claim of its own)
+   never sends — it would otherwise be structurally uncreditable. The signature is the identical
+   domain-separated `ClaimStateChallenge` `POST /ilp/claim-state` (§1.10) already verifies for a
+   read — `keccak256("ClaimStateChallenge(bytes32 channelId,uint256 expires)")` over `channelId`
+   and `expires`, EIP-712-signed under the channel's own chain id and `TokenNetwork` address —
+   reused rather than a claim's own balance-proof scheme, so a captured claim-state proof and a
+   captured claim can never stand in for each other (issue #558's rule, applied to this new
+   surface too). Verified against `ClientChannelRegistry`'s already-registered counterparty for
+   `channelId`, exactly as `/ilp/claim-state` verifies it, before this session is taught the
+   association — a bare declaration is never trusted. Best-effort, like the `peerId` bind itself:
+   an expired, malformed, unresolvable or wrongly-signed proof leaves the session exactly as
+   uncreditable as it was, and `record_accepted_claim`'s inbound-claim path (issue #787) is
+   untouched and stays the fallback for a session that pays before it ever declares. EVM only,
+   matching the payout ledger's own reach.
+
 2. **Prepare + claim**: a MESSAGE with a non-empty `ilpPacket` is decoded as a PREPARE. A
    protocolData entry named `payment-channel-claim` carries the claim as **raw UTF-8 JSON**
    (`JSON.stringify(claim)` — no base64 layer; the base64 in §1.3's table is an HTTP-header
