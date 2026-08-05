@@ -1640,7 +1640,6 @@ struct ChannelControlFixture {
 /// a case whose own verdict it got wrong), round-trips the JSON through
 /// `serde_json` the same way `auth_channel_proof` reads it, and round-trips
 /// the BTP frame through `encode_message`/`decode_frame`.
-#[allow(clippy::too_many_arguments)]
 fn channel_control_case(
     fixture: &ChannelControlFixture,
     name: &'static str,
