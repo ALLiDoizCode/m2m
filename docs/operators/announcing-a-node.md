@@ -85,7 +85,7 @@ announce's own `routes.publish`.
 3. **A `key_file` identity.** A Nostr signature is BIP-340 Schnorr over the event's own id, which
    needs the scalar itself — a KMS-held `[signer]` cannot announce.
 
-## It refuses while the node is serving
+## When it refuses to run beside a serving node
 
 A node's outbound peer-claim ledger is replayed from `state_dir`'s journal at startup and held in
 memory, and the journal has no lock. Two processes over one `state_dir` both resume at nonce N, both
@@ -93,8 +93,18 @@ sign N+1 against different cumulative amounts, and the counterparty refuses one 
 which the serving node's claims never advance the far side's watermark again and the peering
 silently stops being paid.
 
-So `connector announce` refuses while this config's client edge is listening. Stop the node,
-announce, start it again — or use `--dry-run`, which signs nothing for the wire and sends nothing.
+An outbound claim is signed when a packet is **forwarded over a peering**, and nowhere else. So
+`connector announce` refuses exactly when all three hold:
+
+1. the config names a `state_dir`;
+2. the destination resolves to a **`peer_id` route** — the announce would forward; and
+3. something is already listening on this config's `client_edge_addr`.
+
+Announcing to a route this node **terminates** — the apex publishing to its own relay, which is the
+common case — writes no journal entry and is not blocked. Neither is `--dry-run`, which signs
+nothing for the wire and sends nothing.
+
+When it does refuse: stop the node, announce, start it again.
 
 > **Known gap (issue #784).** On a node whose only peering is **accept-only** — no `endpoint`, the
 > far side dials in, which is the devnet store box's shape — a second process cannot originate over

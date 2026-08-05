@@ -94,9 +94,15 @@ worth making knowingly.
 is replayed from the journal at startup and held in memory, and the journal has no lock. Two
 processes over one `state_dir` both resume at nonce N, both sign N+1 against different cumulative
 amounts, and the counterparty refuses one as a replay — after which the serving node's claims never
-advance the far side's watermark again and the peering silently stops being paid. `connector
-announce` therefore **refuses while this config's client edge is listening**, and says why.
-`--dry-run` is exempt: it signs nothing for the wire and sends nothing.
+advance the far side's watermark again and the peering silently stops being paid.
+
+`connector announce` therefore refuses when all three of these hold: the config names a `state_dir`,
+the destination resolves to a `peer_id` route (so the announce would **forward**, which is the only
+thing that signs an outbound claim), and something is already listening on this config's client
+edge. It says which of those it found and what to do instead. An announce to a route this node
+**terminates** — the apex publishing to its own relay — writes no journal entry and is not blocked;
+neither is `--dry-run`. A guard that refused more than the hazard would be a guard operators route
+around.
 
 That refusal has a sharp edge on exactly the node that motivated the issue. The devnet store box's
 peering is **accept-only** (no `endpoint`; the apex dials in), and an accept-only peering can only be

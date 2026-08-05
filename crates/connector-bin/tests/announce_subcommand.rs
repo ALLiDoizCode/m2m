@@ -368,6 +368,52 @@ fn announcing_with_no_destination_refuses_and_says_where_the_address_comes_from(
     );
 }
 
+/// A config whose `g.test.relay` is FORWARDED over a peering rather than
+/// terminated here -- the only shape in which an announce signs an outbound
+/// claim, and therefore the only shape the ledger guard is about.
+///
+/// `client_edge_addr` names `port` so the guard's "is a connector already
+/// serving this config" question has something to find.
+fn forwarding_config(key_path: &Path, secret_path: &Path, state_dir: &Path, port: u16) -> String {
+    format!(
+        r#"
+client_edge_addr = "127.0.0.1:{port}"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_file}"
+
+[[peers]]
+id = "carrier"
+endpoint = "wss://carrier.test.example/ilp/btp"
+credential = {{ secret_file = "{secret_file}" }}
+ceiling = 1000000
+
+[[peer_channels]]
+peer_id = "carrier"
+channel_id = "0xaaaabbbbccccddddeeeeffff00001111aaaabbbbccccddddeeeeffff00001111"
+counterparty_key = "0x00000000000000000000000000000000000000aa"
+chain_id = 84532
+token_network = "0x00000000000000000000000000000000000000bb"
+
+[[routes]]
+prefix = "g.test.relay"
+peer_id = "carrier"
+price = 1002
+fee = 2
+
+[announce]
+addresses = ["g.test.ario"]
+http_endpoint = "https://node.test.example/ilp"
+btp_endpoint = "wss://node.test.example/ilp/btp"
+publish_to = "g.test.relay"
+"#,
+        state_dir = state_dir.display(),
+        key_file = key_path.display(),
+        secret_file = secret_path.display(),
+    )
+}
+
 /// The guard that stops the worst thing this subcommand could do.
 ///
 /// A node's outbound peer-claim ledger is replayed from `state_dir`'s
@@ -375,8 +421,8 @@ fn announcing_with_no_destination_refuses_and_says_where_the_address_comes_from(
 /// processes over one `state_dir` both resume at nonce N, both sign N+1,
 /// and the counterparty refuses one as a replay -- after which the serving
 /// node's claims stop advancing the far side's watermark and the peering
-/// silently stops being paid. So an announce refuses while this config's
-/// client edge is listening.
+/// silently stops being paid. So an announce that would FORWARD over a
+/// peering refuses while this config's client edge is listening.
 ///
 /// Driven with a plain listener rather than a connector process because the
 /// guard's question is exactly "is anything listening there" -- which keeps
@@ -387,15 +433,13 @@ fn announcing_beside_a_serving_node_refuses_rather_than_forking_the_claim_journa
     let port = listener.local_addr().expect("addr").port();
     let state_dir = tempfile::tempdir().expect("temp state dir");
     let key_file = support::write_raw_key_file(19);
-    let config = write(
-        &relay_fronting_config(key_file.path(), "http://127.0.0.1:1/", "").replace(
-            "client_edge_addr = \"127.0.0.1:0\"",
-            &format!(
-                "client_edge_addr = \"127.0.0.1:{port}\"\nstate_dir = \"{}\"",
-                state_dir.path().display()
-            ),
-        ),
-    );
+    let secret = write("a-real-peering-secret");
+    let config = write(&forwarding_config(
+        key_file.path(),
+        secret.path(),
+        state_dir.path(),
+        port,
+    ));
 
     let (ok, _stdout, stderr) = run_connector(&[
         "announce",
@@ -410,4 +454,63 @@ fn announcing_beside_a_serving_node_refuses_rather_than_forking_the_claim_journa
         stderr.contains("--dry-run"),
         "the message must name the escape that is safe beside a running node: {stderr}"
     );
+}
+
+/// ...and the guard stops exactly there. An announce to a route this node
+/// TERMINATES signs no outbound claim -- `forward_via_peer_route` is the
+/// only thing that does -- so there is no ledger to fork and no reason to
+/// refuse, even with a `state_dir` and a listening client edge.
+///
+/// This is not a corner: it is the apex publishing to its own relay, which
+/// is the shape most nodes that front a relay will use. A guard that
+/// refused it would refuse the common case to prevent a hazard the common
+/// case does not have, and a guard like that is one operators route around.
+#[test]
+fn announcing_a_locally_terminated_route_is_allowed_beside_a_serving_node() {
+    let ingress = RecordingIngress::start();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let occupied = listener.local_addr().expect("addr").port();
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let key_file = support::write_raw_key_file(21);
+
+    // The node this announce actually negotiates with, on its own port.
+    let serving = write(&relay_fronting_config(
+        key_file.path(),
+        &format!("http://{}/write", ingress.addr),
+        "",
+    ));
+    let node = support::spawn_connector(serving.path());
+
+    // The announcing process reads a config that claims the OCCUPIED port
+    // as its own client edge and keeps durable state -- so the guard's
+    // first and third conditions both hold, and only "would this forward
+    // over a peering" is false.
+    let announcing = write(
+        &relay_fronting_config(
+            key_file.path(),
+            &format!("http://{}/write", ingress.addr),
+            "",
+        )
+        .replace(
+            "client_edge_addr = \"127.0.0.1:0\"",
+            &format!(
+                "client_edge_addr = \"127.0.0.1:{occupied}\"\nstate_dir = \"{}\"",
+                state_dir.path().display()
+            ),
+        ),
+    );
+
+    let (ok, stdout, stderr) = run_connector(&[
+        "announce",
+        "--config",
+        &announcing.path().display().to_string(),
+        &format!("http://{}/ilp", node.client_edge_addr),
+    ]);
+
+    assert!(
+        ok,
+        "a terminated-route announce must not be blocked:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(stdout.contains("announced "), "{stdout}");
+    assert_eq!(ingress.bodies().len(), 1);
 }

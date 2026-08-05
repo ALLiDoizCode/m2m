@@ -189,13 +189,15 @@ impl fmt::Display for AnnounceError {
             ),
             AnnounceError::AlreadyServing { addr } => write!(
                 f,
-                "a connector is already serving this config's client edge at {addr}, and an \
-                 announce from a SECOND process sharing its `state_dir` would corrupt the \
-                 peering's outbound claim ledger: both processes replay the same journal, both \
-                 sign the next nonce, and the far side refuses one of them as a replay -- after \
-                 which the serving node's claims are permanently out of step. Stop the node, \
-                 announce, and start it again; or use `--dry-run`, which signs nothing and sends \
-                 nothing (issue #784)"
+                "a connector is already serving this config's client edge at {addr}, and this \
+                 announce FORWARDS over a peering -- so it would sign an outbound claim from a \
+                 SECOND process sharing that node's `state_dir`. Both replay the same journal, \
+                 both sign the next nonce against different cumulative amounts, and the far side \
+                 refuses one of them as a replay -- after which the serving node's claims never \
+                 advance the far side's watermark again and the peering silently stops being \
+                 paid. Stop the node, announce, and start it again; or use `--dry-run`, which \
+                 signs nothing for the wire and sends nothing. (An announce to a route this node \
+                 TERMINATES signs no claim and is not blocked.) See issue #784"
             ),
             AnnounceError::InvalidThroughUrl { value, reason } => write!(
                 f,
@@ -552,14 +554,26 @@ async fn fetch_terms(
 /// it is this node's own app -- so the amount is simply the price, which is
 /// what its own edge would have quoted anyway.
 pub fn amount_to_pay(config: &Config, destination: &str, terminus_price: u64) -> (u64, u64) {
-    let fee = config
+    let fee = forwarding_fee(config, destination).unwrap_or(0);
+    (terminus_price.saturating_add(fee), terminus_price)
+}
+
+/// The `fee` of the `[[routes]]` entry that would FORWARD `destination` over
+/// a peering, or `None` when no peer route matches -- i.e. when this node
+/// either terminates the destination itself or cannot route it at all.
+///
+/// Two callers, and the second is why this is its own function rather than
+/// an expression inside [`amount_to_pay`]: forwarding over a peering is
+/// exactly the condition under which an announce would sign an outbound
+/// claim, and so exactly the condition [`refuse_if_a_second_process_would_fork_the_ledger`]
+/// has to check.
+fn forwarding_fee(config: &Config, destination: &str) -> Option<u64> {
+    config
         .peer_routes()
         .iter()
         .filter(|route| route_matches(route.prefix(), destination))
         .max_by_key(|route| route.prefix().len())
         .map(|route| route.fee())
-        .unwrap_or(0);
-    (terminus_price.saturating_add(fee), terminus_price)
 }
 
 /// ILP longest-prefix matching's own rule: a prefix matches a destination
@@ -573,7 +587,8 @@ fn route_matches(prefix: &str, destination: &str) -> bool {
 
 // ── the guard ────────────────────────────────────────────────────────────────
 
-/// Refuse to announce while a connector is already serving this config.
+/// Refuse to announce when doing so would make this process a **second
+/// writer** on a serving node's outbound claim ledger.
 ///
 /// This is the sharpest hazard in the whole subcommand and it is invisible
 /// until it has already happened. A node's outbound peer-claim ledger lives
@@ -585,17 +600,28 @@ fn route_matches(prefix: &str, destination: &str) -> bool {
 /// the far side's watermark again and the peering silently stops being paid
 /// until somebody restarts it.
 ///
-/// Detected by dialing this node's own client edge rather than by taking a
-/// lock, deliberately: a lock would have to be taken on the SERVING path
-/// too, and a serving path that can refuse to start is a new way to lose a
-/// deploy. A listening client edge is proof enough that a connector is up,
-/// and it is exactly the case a `docker exec` into a running container hits.
+/// Three things must all hold before that can happen, and all three are
+/// checked, because a guard that refuses more than the hazard is a guard
+/// operators route around:
 ///
-/// A node with no `state_dir` has no journal to corrupt (config load
-/// already refuses to pair channels with no `state_dir`), so it is not
-/// checked at all.
-async fn refuse_if_already_serving(config: &Config) -> Result<(), AnnounceError> {
-    if config.state_dir().is_none() {
+///   1. the node keeps durable money state at all (`state_dir`);
+///   2. the announce would **forward over a peering** -- an outbound claim
+///      is signed by `forward_via_peer_route` and nowhere else, so an
+///      announce to a route this node TERMINATES writes no journal entry
+///      and is perfectly safe beside a running node. That is the apex
+///      publishing to its own relay, which is the common case;
+///   3. something is actually listening on this config's client edge.
+///
+/// The third is detected by dialing rather than by taking a lock,
+/// deliberately: a lock would have to be taken on the SERVING path too, and
+/// a serving path that can refuse to start is a new way to lose a deploy. A
+/// listening client edge is proof enough that a connector is up, and it is
+/// exactly the case a `docker exec` into a running container hits.
+async fn refuse_if_a_second_process_would_fork_the_ledger(
+    config: &Config,
+    destination: &str,
+) -> Result<(), AnnounceError> {
+    if config.state_dir().is_none() || forwarding_fee(config, destination).is_none() {
         return Ok(());
     }
     let configured = config.client_edge_addr();
@@ -670,11 +696,11 @@ pub async fn announce(
                 })
         })?;
 
-    // A dry run signs nothing and sends nothing, so it is the one shape
-    // that is safe beside a running node -- and it is what an operator
-    // wants on a live box, to see what would go out.
+    // A dry run signs nothing for the wire and sends nothing, so it is safe
+    // beside a running node whatever the destination is -- and it is what an
+    // operator wants on a live box, to see what would go out.
     if !options.dry_run {
-        refuse_if_already_serving(config).await?;
+        refuse_if_a_second_process_would_fork_the_ledger(config, &destination).await?;
     }
 
     // The identity key, read the same way `build_signer` reads it. A Nostr
