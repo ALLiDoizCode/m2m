@@ -722,6 +722,18 @@ pub async fn announce(
             reason: error.to_string(),
         })?;
     let terms = fetch_terms(&client, &options.through_url, &destination).await?;
+    // The greeting's `payTo` echoes the destination it was asked about (see
+    // this module's header), so it can only ever confirm -- but a
+    // disagreement means the far end is not the client edge this code
+    // thinks it is, which is worth saying before money moves rather than
+    // after.
+    if terms.pay_to != destination {
+        tracing::warn!(
+            asked = %destination,
+            answered = %terms.pay_to,
+            "the through-URL's terms name a different destination than the one asked about"
+        );
+    }
     let identity = fetch_identity(&client, &options.through_url).await?;
 
     let info = build_announcement(config, &runtime);
