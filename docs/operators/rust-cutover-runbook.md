@@ -464,6 +464,14 @@ regression check on the nginx reload, not on the cutover.
 **g. Store writes still land** (after §4): publish to `g.toon.ario` and confirm
 `docker logs linode-store-store-1` shows the job, and the Arweave tx id comes back.
 
+`crates/connector-bin/tests/devnet_store_leg_probe.rs` does this end to end and checks the half a
+log line cannot — that the bytes fetched back off a public Arweave gateway are the bytes that were
+paid to store. Its free checks (identity, price arithmetic across the hop, unpaid refusal) cost
+nothing; the paid round trip stays inert until a funded channel is supplied, and spends one
+packet's price when it is. Read its module docs before hand-rolling a packet: the traps it
+documents (seal to the TERMINATING node, the derived condition, the `Z`-suffixed claim timestamp,
+the 1002/1000 subtraction) are each an afternoon.
+
 **h. Dashboard:** `curl -sS -o /dev/null -w '%{http_code}\n' "$E/dash/"` → 200 (static, unaffected).
 `curl -sS -o /dev/null -w '%{http_code}\n' "$E/admin/metrics.json"` → 404 is the expected new
 result under §2.3 decision (1). The flow strip on `/dash` will be empty — that is the recorded
@@ -529,7 +537,8 @@ announces self-expire in 600s.
 - [ ] `GET $E/ilp/btp` upgrades with 101; `/rust/ilp/btp` still does too.
 - [ ] `$E/health` returns 200 and the body matches `connector-rust:4000/ilp/identity`.
 - [ ] A paid write to `g.toon.relay` lands in the relay and is readable on the public WS.
-- [ ] A paid write to `g.toon.ario` reaches the store and returns an Arweave tx id.
+- [ ] A paid write to `g.toon.ario` reaches the store and returns an Arweave tx id, and the tx
+      serves back the bytes that were sent (`cargo test -p connector --test devnet_store_leg_probe`).
 - [ ] Faucet endpoints unchanged.
 - [ ] `GET $E/rust/ilp/*` and a bare `$E/rust` still resolve (rig's `OFFICIAL_PROXY_URL` and buzz's
       `connectorUrl` depend on them).
