@@ -114,11 +114,13 @@ pub(crate) async fn route_prepare(
 /// Both steps are best-effort once reached, and neither holds up
 /// `route_prepare`'s own answer (already decided by the time this runs):
 ///
-/// 1. [`crate::outbound_ledger::ClientPayoutLedger::record_payout_once`]
-///    credits `amount`, deduped against `condition` (AC3) so a duplicate or
-///    retransmitted fulfilment of the same job cannot double-credit. A node
-///    with no payout ledger configured (`ClientClaimGate::payout_ledger`
-///    returns `None`) does nothing here -- exactly its pre-#770 behaviour.
+/// 1. [`crate::claim_gate::ClientClaimGate::credit_payout`] credits
+///    `amount`, deduped against `condition` (AC3) so a duplicate or
+///    retransmitted fulfilment of the same job cannot double-credit --
+///    resolving `destination`'s payout domain on demand first if this is a
+///    self-opened channel this connector has not seen before (issue #780).
+///    A node with no payout ledger configured does nothing here -- exactly
+///    its pre-#770 behaviour.
 /// 2. The freshly signed claim is delivered as a payout TRANSFER over the
 ///    same session, fenced against the generation this delivery already
 ///    used. A session that has died in the meantime loses only this
@@ -132,10 +134,10 @@ async fn credit_session_earnings(
     amount: u64,
     now: u64,
 ) {
-    let Some(ledger) = state.claim_gate.payout_ledger() else {
-        return;
-    };
-    let Some(claim) = ledger.record_payout_once(destination, condition, amount, chrono::Utc::now())
+    let Some(claim) = state
+        .claim_gate
+        .credit_payout(destination, condition, amount, chrono::Utc::now())
+        .await
     else {
         return;
     };
@@ -229,6 +231,8 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
+    use crate::channels::test_source::FakeChannelSource;
+    use crate::channels::{decode_hex_bytes, ClientChannelRegistry, DepositFloor, EvmChannel};
     use crate::claim_gate::ClientClaimGate;
     use crate::outbound_ledger::ClientPayoutLedger;
     use crate::session_registry::SessionRegistry;
@@ -744,6 +748,202 @@ mod tests {
             ledger.credited(&channel_id),
             5_000,
             "a retried delivery of the same job must not raise credited a second time"
+        );
+    }
+
+    // ─── issue #780: a self-opened channel with no config row is still credited ───
+
+    /// Issue #780's AC1, exercised at the real call site exactly as #770's
+    /// own tests are: a channel this connector never declared in
+    /// `[[client_channels]]` -- the shape a self-opened agent channel takes
+    /// (toon-meta#261, ADR 0005/0006) -- is still credited when a PREPARE
+    /// it served is FULFILLed. Before this issue's fix, this is exactly
+    /// `outbound_ledger.rs`'s own `a_payout_on_an_unregistered_channel_produces_nothing`
+    /// shape: the ledger has a signer but was never told this channel's
+    /// domain, so `record_payout_once` always answered `None`. The only
+    /// thing this test tells the connector about the channel at all is
+    /// through the `ClientChannelRegistry`'s chain source -- the same
+    /// budgeted resolver `verify_evm_claim_signature` already uses on the
+    /// inbound side -- proving `credit_payout` reaches it rather than
+    /// stopping at the ledger's own pre-seeded set.
+    #[tokio::test]
+    async fn a_self_opened_channel_with_no_config_row_is_credited_via_chain_resolution() {
+        let channel_id = format!("0x{:064x}", 42);
+        let on_chain_id = decode_hex_bytes::<32>(&channel_id).expect("valid test channel id");
+
+        let payout_signer = Arc::new(LocalSigner::generate("payout-key"));
+        let connector_address = derive_evm_address(&payout_signer.public_key().unwrap());
+        let domain = ChannelDomain {
+            chain_id: 84_532,
+            token_network_address: [0x66; 20],
+        };
+
+        // No `set_channel_domain` call: this ledger has never heard of the
+        // channel, only who it signs as.
+        let mut ledger = ClientPayoutLedger::new();
+        ledger.set_signer(payout_signer);
+        let ledger = Arc::new(ledger);
+
+        let source = Arc::new(FakeChannelSource::knowing(vec![(
+            on_chain_id,
+            EvmChannel {
+                counterparty: [0x11; 20],
+                chain_id: domain.chain_id,
+                token_network_address: domain.token_network_address,
+                deposit_floor: DepositFloor::AtLeast(1_000_000),
+            },
+        )]));
+        let channel_registry = ClientChannelRegistry::new().with_source(source);
+
+        let gate = ClientClaimGate::restore(channel_registry, Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay")
+            .with_payout_ledger(Arc::clone(&ledger));
+
+        let session_registry = SessionRegistry::new();
+        let (handle, mut reply_rx, outbound) = test_handle();
+        session_registry.bind(channel_id.clone(), handle, crate::now_unix());
+        let state = test_state_with_gate(empty_connector(), session_registry, gate);
+
+        let condition = derive_condition(&FULFILLMENT);
+        let prepare = Prepare {
+            amount: 7_000,
+            ..sample_prepare(&channel_id, condition)
+        };
+
+        let expected_channel_id = channel_id.clone();
+        let peer = tokio::spawn(async move {
+            answer_next_message(
+                &mut reply_rx,
+                &outbound,
+                Fulfill {
+                    fulfillment: FULFILLMENT,
+                    data: Vec::new(),
+                }
+                .encode(),
+            )
+            .await;
+
+            let sent = reply_rx
+                .recv()
+                .await
+                .expect("the payout TRANSFER was written");
+            let decoded = decode_frame(&sent).expect("the connector's own encoder");
+            assert_eq!(decoded.frame_type, BTP_TRANSFER);
+            assert_eq!(decoded.amount, Some(7_000));
+
+            let pd = decoded
+                .protocol_data
+                .iter()
+                .find(|pd| pd.name == PAYOUT_CLAIM_PROTOCOL)
+                .expect("the payout claim rode the TRANSFER");
+            let json: serde_json::Value = serde_json::from_slice(&pd.data).expect("valid JSON");
+            assert_eq!(json["channelId"], expected_channel_id);
+            assert_eq!(json["cumulativeAmount"], 7_000);
+            let signature_hex = json["signature"].as_str().unwrap();
+            let signature_bytes = hex::decode(signature_hex.strip_prefix("0x").unwrap()).unwrap();
+
+            let proof = EvmBalanceProof {
+                channel_id: on_chain_id,
+                nonce: json["nonce"].as_u64().unwrap(),
+                transferred_amount: u128::from(json["cumulativeAmount"].as_u64().unwrap()),
+                locked_amount: 0,
+                locks_root: [0u8; 32],
+                chain_id: domain.chain_id,
+                token_network_address: domain.token_network_address,
+            };
+            assert!(
+                verify_evm_balance_proof(&proof, &signature_bytes, &connector_address),
+                "the claim is signed under the chain-resolved domain, not a defaulted one"
+            );
+
+            outbound.resolve(BtpFrame {
+                frame_type: BTP_RESPONSE,
+                request_id: decoded.request_id,
+                amount: None,
+                protocol_data: Vec::new(),
+                ilp_packet: Vec::new(),
+            });
+        });
+
+        let response = route_prepare(&state, prepare, 0).await;
+        peer.await.expect("the peer task");
+
+        assert!(
+            matches!(response, PacketResponse::Fulfill(fulfill) if fulfill.fulfillment == FULFILLMENT),
+            "the original packet still answers fulfilled -- resolution rides alongside it"
+        );
+        assert_eq!(
+            ledger.credited(&channel_id),
+            7_000,
+            "a channel with no [[client_channels]] row is still credited once its domain resolves on chain"
+        );
+    }
+
+    /// Issue #780's AC3: a channel that genuinely does not exist -- the
+    /// chain source answers `Ok(None)` for it, same as a settled or never-opened
+    /// channel -- still produces no claim and no credit. Resolution failure
+    /// must never become a free credit.
+    #[tokio::test]
+    async fn a_channel_that_does_not_resolve_on_chain_is_not_credited() {
+        let channel_id = format!("0x{:064x}", 43);
+
+        let mut ledger = ClientPayoutLedger::new();
+        ledger.set_signer(Arc::new(LocalSigner::generate("payout-key")));
+        let ledger = Arc::new(ledger);
+
+        // A source that knows about no channels at all -- the chain's own
+        // honest answer for one that was never opened.
+        let source = Arc::new(FakeChannelSource::knowing(vec![]));
+        let channel_registry = ClientChannelRegistry::new().with_source(source);
+
+        let gate = ClientClaimGate::restore(channel_registry, Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay")
+            .with_payout_ledger(Arc::clone(&ledger));
+
+        let session_registry = SessionRegistry::new();
+        let (handle, mut reply_rx, outbound) = test_handle();
+        session_registry.bind(channel_id.clone(), handle, crate::now_unix());
+        let state = test_state_with_gate(empty_connector(), session_registry, gate);
+
+        let condition = derive_condition(&FULFILLMENT);
+        let prepare = Prepare {
+            amount: 3_000,
+            ..sample_prepare(&channel_id, condition)
+        };
+
+        let peer = tokio::spawn(async move {
+            answer_next_message(
+                &mut reply_rx,
+                &outbound,
+                Fulfill {
+                    fulfillment: FULFILLMENT,
+                    data: Vec::new(),
+                }
+                .encode(),
+            )
+            .await;
+            reply_rx
+        });
+
+        let response = route_prepare(&state, prepare, 0).await;
+        // `route_prepare` only returns once `credit_session_earnings` (and
+        // therefore any payout TRANSFER it would send) has already been
+        // awaited to completion -- so if nothing was queued by now, nothing
+        // ever will be for this delivery.
+        let mut reply_rx = peer.await.expect("the peer task");
+        assert!(
+            reply_rx.try_recv().is_err(),
+            "a channel that never resolves must never receive a payout TRANSFER"
+        );
+
+        assert!(
+            matches!(response, PacketResponse::Fulfill(fulfill) if fulfill.fulfillment == FULFILLMENT),
+            "the original packet still answers fulfilled even though nothing could be credited"
+        );
+        assert_eq!(
+            ledger.credited(&channel_id),
+            0,
+            "a channel that fails to resolve must never be credited"
         );
     }
 }
