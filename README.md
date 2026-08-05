@@ -241,7 +241,15 @@ no second port. The split is read from write
   `/channels/:id/close`, `/channels/:id/cooperative-close`. Channel operations answer `503` when
   no `[settlement]` backend is configured.
 
-There is **no health endpoint** on either surface.
+There is **no health endpoint** on either surface, and **no unauthenticated metrics path** on
+either. `[operator]` is how a node opts into metrics at all: absent, `/metrics` is not mounted and
+answers 404 rather than 401 ([ADR 0014](docs/adr/0014-metrics-surface-and-packet-correlated-logs.md)
+— metrics are one more bearer-gated read, not a second differently-authenticated surface). The
+client edge's two free `GET`s answer what this node's _configuration_ says (`/ilp/identity`,
+`/ilp/routes/price`, [ADR 0022](docs/adr/0022-a-connector-answers-it-does-not-announce.md)); a
+counter is operational history and does not follow them onto the free side of that line. A public
+dashboard therefore needs a server-side holder for the token, never a token in the browser and
+never an open endpoint — see issue #669.
 
 ## The peer wire
 

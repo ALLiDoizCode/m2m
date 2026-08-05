@@ -1222,12 +1222,29 @@ key_file = "{}"
         // No `[operator]` section: `/routes` (an operator-surface path)
         // 404s -- it was never merged in, rather than merged in and
         // rejecting for lack of a bearer token.
-        let request = Request::builder()
-            .uri("/routes")
-            .body(Body::empty())
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        //
+        // `/metrics` and `/admin/metrics.json` are asserted alongside it for
+        // a reason `/routes` does not carry (issue #753). When the devnet cut
+        // over to this connector the public demo dashboard lost the
+        // TypeScript `/admin/metrics.json` it polled, and the obvious repair
+        // -- serve a counter snapshot from the always-mounted client edge, so
+        // no `[operator]` section is needed -- is exactly what ADR 0014
+        // refused: the metrics surface is five decided names, in Prometheus
+        // text, behind the operator surface's bearer token, "avoid[ing]
+        // introducing a second, differently-authenticated (or
+        // unauthenticated) HTTP surface". A node that configures no operator
+        // therefore exposes no metrics AT ALL, which is the property this
+        // asserts. `/admin/metrics.json` is named literally because that is
+        // the path a future shim would be tempted to reintroduce.
+        for path in ["/routes", "/metrics", "/admin/metrics.json"] {
+            let request = Request::builder().uri(path).body(Body::empty()).unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{path} must not be served without an [operator] section"
+            );
+        }
     }
 
     /// The one narrowing in this crate that guards a false-accept boundary
