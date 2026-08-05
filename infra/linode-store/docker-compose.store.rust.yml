@@ -73,7 +73,7 @@ services:
     # FRESH named volume below. Both are ancestors of this tag. It is a
     # constraint on rolling BACK — do not roll this service to a tag older than
     # `rust-sha-63b8188`.
-    image: ghcr.io/toon-protocol/connector:rust-sha-f60c800
+    image: ghcr.io/toon-protocol/connector:rust-sha-f0be64f
     volumes:
       - ./connector-rust.toml:/app/config/connector.toml:ro
       # Three raw key files, provisioned two different ways — see
