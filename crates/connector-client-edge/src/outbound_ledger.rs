@@ -23,7 +23,8 @@
 //! registers each channel as its own "peer": `set_outbound_channel(id,
 //! id)`. Callers of this type never see that indirection; every method
 //! here takes a `channel_id` and nothing else.
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 
@@ -35,6 +36,21 @@ use connector_signer::Signer;
 /// [`ClaimBook`] rather than reimplementing it.
 pub struct ClientPayoutLedger {
     book: ClaimBook,
+    /// Which `(channel_id, execution_condition)` pairs
+    /// [`Self::record_payout_once`] has already credited (issue #770's
+    /// AC3) -- deliberately not the same mechanism as `book`'s own
+    /// nonce/cumulative-amount tracking, which advances unconditionally on
+    /// every call and so cannot by itself tell a genuine second job from a
+    /// retried first one. A packet's execution condition is deterministic
+    /// per job (RFC-0022: the fulfilment that satisfies it can never
+    /// differ between the original delivery and a retry of the same job),
+    /// so it is the right identity to dedupe a credit against -- unlike an
+    /// amount or a timestamp, which a caller could vary between attempts.
+    /// In-memory only: a restart forgets it, same as every other
+    /// non-durable memo this crate keeps (e.g. `ClientClaimGate`'s own
+    /// `last_claim_seen`) -- the durable, money-bearing fact is `book`'s
+    /// watermark, never this set.
+    credited_conditions: Mutex<HashSet<(String, [u8; 32])>>,
 }
 
 impl Default for ClientPayoutLedger {
@@ -51,6 +67,7 @@ impl ClientPayoutLedger {
                 std::collections::HashMap::new(),
                 std::collections::HashMap::new(),
             ),
+            credited_conditions: Mutex::new(HashSet::new()),
         }
     }
 
@@ -93,6 +110,43 @@ impl ClientPayoutLedger {
         now: DateTime<Utc>,
     ) -> Option<WireClaim> {
         self.book.record_fulfillment(channel_id, amount, now)
+    }
+
+    /// As [`Self::record_payout`], but a no-op -- credits nothing and
+    /// returns `None` -- if this exact `(channel_id, condition)` pair has
+    /// already been credited (issue #770's AC3: a duplicate or
+    /// retransmitted FULFILL for the same job must not raise `credited`
+    /// twice). See the `credited_conditions` field doc for why the
+    /// execution condition is the dedupe key.
+    ///
+    /// The check-and-mark is atomic under one lock, so two concurrent
+    /// calls for the same pair can never both pass it. If `record_payout`
+    /// itself produces nothing (no signer or no domain configured for
+    /// `channel_id`), the mark is released again -- nothing was credited,
+    /// so a later call, once configured, must not find this pair falsely
+    /// "already done".
+    pub fn record_payout_once(
+        &self,
+        channel_id: &str,
+        condition: &[u8; 32],
+        amount: u64,
+        now: DateTime<Utc>,
+    ) -> Option<WireClaim> {
+        let key = (channel_id.to_string(), *condition);
+        {
+            let mut seen = self.credited_conditions.lock().expect("not poisoned");
+            if !seen.insert(key.clone()) {
+                return None;
+            }
+        }
+        let claim = self.record_payout(channel_id, amount, now);
+        if claim.is_none() {
+            self.credited_conditions
+                .lock()
+                .expect("not poisoned")
+                .remove(&key);
+        }
+        claim
     }
 
     /// The claim owed to the client on `channel_id`, if one is pending --
@@ -295,5 +349,82 @@ mod tests {
 
         assert!(ledger.pending_claim(&channel_id(1)).is_none());
         assert_eq!(ledger.credited(&channel_id(1)), 500);
+    }
+
+    #[test]
+    fn record_payout_once_credits_a_fresh_condition() {
+        let signer = Arc::new(LocalSigner::generate("payout-key"));
+        let ledger = ledger_with_signer(signer);
+
+        let claim = ledger
+            .record_payout_once(&channel_id(1), &[7u8; 32], 500, now())
+            .expect("first delivery of this job");
+
+        assert_eq!(claim.cumulative_amount, 500);
+        assert_eq!(ledger.credited(&channel_id(1)), 500);
+    }
+
+    #[test]
+    fn record_payout_once_refuses_a_second_credit_for_the_same_condition() {
+        let signer = Arc::new(LocalSigner::generate("payout-key"));
+        let ledger = ledger_with_signer(signer);
+        let condition = [7u8; 32];
+
+        ledger
+            .record_payout_once(&channel_id(1), &condition, 500, now())
+            .expect("first delivery of this job");
+        let retry = ledger.record_payout_once(&channel_id(1), &condition, 500, now());
+
+        assert!(
+            retry.is_none(),
+            "a duplicate/retransmitted fulfilment of the same job must not credit twice"
+        );
+        assert_eq!(
+            ledger.credited(&channel_id(1)),
+            500,
+            "the running total must reflect exactly one credit, not two"
+        );
+    }
+
+    #[test]
+    fn record_payout_once_credits_a_different_condition_on_the_same_channel_independently() {
+        let signer = Arc::new(LocalSigner::generate("payout-key"));
+        let ledger = ledger_with_signer(signer);
+
+        ledger
+            .record_payout_once(&channel_id(1), &[7u8; 32], 500, now())
+            .expect("first job");
+        ledger
+            .record_payout_once(&channel_id(1), &[8u8; 32], 250, now())
+            .expect("a different job on the same channel is not deduped against the first");
+
+        assert_eq!(ledger.credited(&channel_id(1)), 750);
+    }
+
+    #[test]
+    fn record_payout_once_releases_its_mark_when_nothing_was_credited() {
+        // No signer configured yet, so `record_payout` itself produces
+        // nothing for this channel+condition -- the dedupe mark must not
+        // stick around and block a legitimate credit once the ledger is
+        // configured.
+        let mut ledger = ClientPayoutLedger::new();
+        ledger
+            .set_channel_domain(channel_id(1), test_domain())
+            .expect("valid channel id");
+        let condition = [7u8; 32];
+        assert!(
+            ledger
+                .record_payout_once(&channel_id(1), &condition, 100, now())
+                .is_none(),
+            "no signer configured yet"
+        );
+
+        ledger.set_signer(Arc::new(LocalSigner::generate("payout-key")));
+
+        let claim = ledger.record_payout_once(&channel_id(1), &condition, 100, now());
+        assert!(
+            claim.is_some(),
+            "a prior no-op call must not permanently block this condition"
+        );
     }
 }

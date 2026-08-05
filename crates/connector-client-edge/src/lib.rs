@@ -370,11 +370,12 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Wall-clock unix seconds, for [`ClientClaimGate::note_claim_time`] -- the
-/// one place any handler in this crate reads the clock outside a test. Not
-/// consulted by admission itself (`ingest`/`admit` take no time input at
-/// all), only by carriers noting a claim's acceptance *after* it has
-/// already happened.
+/// Wall-clock unix seconds, for [`ClientClaimGate::note_claim_time`] -- a
+/// carrier noting a claim's acceptance *after* it has already happened.
+/// Not consulted by admission itself (`ingest`/`admit` take no time input
+/// at all). The other production wall-clock read in this crate is
+/// `crate::session_route::credit_session_earnings`'s `chrono::Utc::now()`,
+/// which needs a `DateTime<Utc>` this function does not produce.
 pub(crate) fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

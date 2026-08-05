@@ -321,10 +321,9 @@ fn reject_response(request_id: u32, reject: Reject, extra: Vec<ProtocolData>) ->
 /// (issue #713): the codec owns the entry's name and the bytes that carry
 /// it, and deliberately cannot see a claim type.
 ///
-/// `#[allow(dead_code)]`: no production caller until the session-registry
-/// ticket (`toon-meta#262`) exists; proven by this module's own tests
-/// against the real production types in the meantime.
-#[allow(dead_code)]
+/// Production caller: `crate::session_route::route_prepare` (issue #770),
+/// once a client session's own PREPARE genuinely fulfills -- see that
+/// module for when a payout TRANSFER goes out.
 pub(crate) fn payout_claim_protocol_data(claim: &connector_runtime::WireClaim) -> ProtocolData {
     let json = serde_json::json!({
         "channelId": claim.channel_id,
@@ -737,8 +736,8 @@ mod tests {
     /// back out, and verifies its signature against the connector's own
     /// public key. Nothing here is a fake shortcut: the ledger, the frame
     /// codec and the origination path are exactly what a real session
-    /// would run once a caller (the session-registry ticket, `toon-meta#262`)
-    /// decides when to push a payout.
+    /// runs today, driven by `crate::session_route::route_prepare` (issue
+    /// #770).
     #[tokio::test]
     async fn a_signed_payout_claim_is_delivered_over_transfer_and_verifies() {
         use crate::outbound_ledger::ClientPayoutLedger;

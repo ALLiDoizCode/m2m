@@ -399,6 +399,17 @@ impl ClientClaimGate {
         self
     }
 
+    /// This gate's own outbound payout ledger, if [`Self::with_payout_ledger`]
+    /// configured one -- the same instance [`Self::credited_evm`] and the
+    /// claim-state endpoint already net against. Exposed so a caller that
+    /// has just delivered a fulfilled PREPARE to a client session (issue
+    /// #770, `crate::session_route::route_prepare`) can credit that
+    /// client's earnings through the exact same ledger, rather than
+    /// holding a second reference that could drift from it.
+    pub(crate) fn payout_ledger(&self) -> Option<&Arc<ClientPayoutLedger>> {
+        self.payout_ledger.as_ref()
+    }
+
     /// The watermark this gate currently holds for `channel_key` (the
     /// chain-namespaced key `ClientClaim::channel_key` produces), or `None`
     /// if it has never accepted a claim on that channel. Read-only: the
