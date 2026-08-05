@@ -147,9 +147,10 @@ that dies with the container is the same defect one indirection down. The image 
 `10001`, so a named volume (chowned automatically) is simpler than a host bind mount (`chown
 10001:10001` it first).
 
-> The `*.yaml` files under `config/`, `deploy/node-quickstart/`, `deploy/pay-edge/` and
-> `infra/linode-node/` are the **retired TypeScript connector's** configuration
-> (`nodeId`, `btpServerPort`, `adminApi`). Only `*.toml` describes this binary.
+> The `*.yaml` files under `config/` and `infra/linode-node/` are the **retired TypeScript
+> connector's** configuration (`nodeId`, `btpServerPort`, `adminApi`). Only `*.toml` describes
+> this binary. The `deploy/pay-edge/` and `deploy/node-quickstart/` bundles that used to be
+> listed here are gone — see [`deploy/README.md`](deploy/README.md).
 
 ## Run
 

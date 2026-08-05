@@ -6,10 +6,11 @@
 # There is no environment-variable override layer -- every value comes from
 # right here.
 #
-# The [operator] section below is configured, not commented out. Contrast
-# config/connector.prod.yaml (the TypeScript connector's production
-# template), which ships its admin protection as a TODO with the API key
-# commented out -- ADR 0008 makes that impossible here: an [operator]
+# The [operator] section below is configured, not commented out. The
+# TypeScript connector's production template (config/connector.prod.yaml,
+# deleted 2026-08-05 with the rest of that lineage) shipped its admin
+# protection as a TODO with the API key commented out -- ADR 0008 makes that
+# impossible here: an [operator]
 # section with an empty bearer_token or no write_keys is a refuse-to-start
 # error (ConfigError::OperatorMissingBearerToken /
 # ConfigError::OperatorNoWriteKeys), not a silently-open surface.

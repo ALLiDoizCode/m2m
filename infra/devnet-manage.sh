@@ -276,6 +276,12 @@ up)
   update_dns "relay-ws.devnet"      "$TOON_IP"
   update_dns "proxy.devnet"         "$TOON_IP"
   update_dns "faucet.devnet"        "$TOON_IP"
+  # `proxy.ario` is the CANONICAL name for the store box's paid edge since
+  # 2026-08-05, matching the g.toon.ario prefix it serves. `proxy.store` is
+  # kept as a deprecated alias -- both resolve here and both are on the box's
+  # certificate, so a rebuild that dropped it would break callers that have
+  # not moved.
+  update_dns "proxy.ario.devnet"    "$STORE_IP"
   update_dns "proxy.store.devnet"   "$STORE_IP"
   update_dns "dvm.devnet"           "$STORE_IP"
 
@@ -321,6 +327,7 @@ store)
   wait_box_running "${NODE_LABELS[store]}"
   STORE_IP=$(get_box_ip toon-devnet-store)
   echo "==> [2/3] Update DNS"
+  update_dns "proxy.ario.devnet"  "$STORE_IP"
   update_dns "proxy.store.devnet" "$STORE_IP"
   update_dns "dvm.devnet"         "$STORE_IP"
   echo "==> [3/3] Deploy store node"
@@ -419,7 +426,8 @@ dns)
   [ -n "$TOON_IP" ] && update_dns "relay-ws.devnet" "$TOON_IP"     || echo "  toon not found"
   [ -n "$TOON_IP" ] && update_dns "proxy.devnet" "$TOON_IP"        || true
   [ -n "$TOON_IP" ] && update_dns "faucet.devnet" "$TOON_IP"       || true
-  [ -n "$STORE_IP" ] && update_dns "proxy.store.devnet" "$STORE_IP" || echo "  toon-devnet-store not found"
+  [ -n "$STORE_IP" ] && update_dns "proxy.ario.devnet" "$STORE_IP"  || echo "  toon-devnet-store not found"
+  [ -n "$STORE_IP" ] && update_dns "proxy.store.devnet" "$STORE_IP" || true
   [ -n "$STORE_IP" ] && update_dns "dvm.devnet" "$STORE_IP"        || true
   echo "Done."
   ;;
