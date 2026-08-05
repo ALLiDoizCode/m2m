@@ -276,13 +276,13 @@ up)
   update_dns "relay-ws.devnet"      "$TOON_IP"
   update_dns "proxy.devnet"         "$TOON_IP"
   update_dns "faucet.devnet"        "$TOON_IP"
-  # `proxy.ario` is the CANONICAL name for the store box's paid edge since
-  # 2026-08-05, matching the g.toon.ario prefix it serves. `proxy.store` is
-  # kept as a deprecated alias -- both resolve here and both are on the box's
-  # certificate, so a rebuild that dropped it would break callers that have
-  # not moved.
+  # `proxy.ario` is the store box's paid edge, matching the g.toon.ario
+  # prefix it serves. It replaced `proxy.store.devnet` on 2026-08-05; that
+  # name is RETIRED -- record deleted, dropped from the certificate and from
+  # nginx's server_name. Do not re-add it here: recreating the record would
+  # resurrect a name nothing serves, and the next `certbot renew` would still
+  # not cover it.
   update_dns "proxy.ario.devnet"    "$STORE_IP"
-  update_dns "proxy.store.devnet"   "$STORE_IP"
   update_dns "dvm.devnet"           "$STORE_IP"
 
   echo "==> [3/4] Deploy all nodes (parallel)"
@@ -328,7 +328,6 @@ store)
   STORE_IP=$(get_box_ip toon-devnet-store)
   echo "==> [2/3] Update DNS"
   update_dns "proxy.ario.devnet"  "$STORE_IP"
-  update_dns "proxy.store.devnet" "$STORE_IP"
   update_dns "dvm.devnet"         "$STORE_IP"
   echo "==> [3/3] Deploy store node"
   deploy_store_node "$STORE_IP" "$TOON_MNEMONIC"
@@ -442,7 +441,6 @@ dns)
   [ -n "$TOON_IP" ] && update_dns "proxy.devnet" "$TOON_IP"        || true
   [ -n "$TOON_IP" ] && update_dns "faucet.devnet" "$TOON_IP"       || true
   [ -n "$STORE_IP" ] && update_dns "proxy.ario.devnet" "$STORE_IP"  || echo "  toon-devnet-store not found"
-  [ -n "$STORE_IP" ] && update_dns "proxy.store.devnet" "$STORE_IP" || true
   [ -n "$STORE_IP" ] && update_dns "dvm.devnet" "$STORE_IP"        || true
   echo "Done."
   ;;
