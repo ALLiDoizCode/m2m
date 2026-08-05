@@ -222,11 +222,16 @@ id = "apex-store"
 # OWN [[peers]] table. A peering only establishes when both files carry the
 # same literal.
 #
+# `proxy.ario`, not `proxy.store` -- the box's paid edge was renamed on
+# 2026-08-05 to match the `g.toon.ario` prefix it serves. The old name still
+# resolves, is on the same certificate and reaches the same upstream, so this
+# is a rename of the canonical name rather than a cutover with a gap.
+#
 # `/ilp/btp`, the canonical client-edge path, NOT the `/rust/ilp/btp` this
 # dialed until 2026-08-05. That prefix was the parallel-fleet alias; it is
 # retired everywhere else on both boxes and this was the last thing keeping
 # an exception alive for it in the store box's nginx.
-endpoint = "wss://proxy.store.devnet.toonprotocol.dev/ilp/btp"
+endpoint = "wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp"
 # The shared secret, as a FILE. `infra/linode-*/*.secret` is gitignored, so
 # the peering itself is tracked and only the bytes stay on the box. Both
 # operators must end up with the same bytes; they are shared out of band.

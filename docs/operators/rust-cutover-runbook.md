@@ -248,6 +248,14 @@ price = 1000
 entirely. So under the Rust apex there is already no inter-node peering, and the store box's TS
 connector is not on the `g.toon.ario` write path.
 
+> **Superseded 2026-08-04/05.** The block above is what the apex ran when this was written; it is
+> kept because the argument that follows depends on it. Since then Shape A was built: both store
+> routes were repointed at `peer_id = "apex-store"` across a real BTP peering, `g.toon.store` was
+> retired entirely (one name for one app), and the store box's edge was renamed
+> `proxy.store.devnet` → `proxy.ario.devnet`. The live shape is
+> `infra/linode-node/connector-rust.toml`, which is now the peering's source of truth rather than
+> a copy of it.
+
 If Shape B is accepted, **#732 / #620 / #678 are not on the critical path for retiring
 TypeScript** — they are on the critical path for having a peer link, a different goal. What Shape B
 costs, stated honestly:
@@ -373,10 +381,12 @@ The public edge is down only for the duration of an `nginx -s reload`.
 14. **Keep the `/rust/ilp` alias.** File follow-up tickets against `rig` and `buzz` to move
     `OFFICIAL_PROXY_URL` / `toonTransportConfig` to `/ilp` (including buzz's bare `/rust`
     `connectorUrl`). Removing the alias is gated on those shipping — its own later ticket.
-15. Repo PR: box↔repo nginx reconciliation (#668 — note the `location = /rust/ilp/btp` block exists
-    only on the box), announcer defaults + tests, compose files, `deploy/node-quickstart`,
-    `deploy/pay-edge` (`connector:3.44.0` pins), and
-    `.github/workflows/publish-{relay,store}-connector-image.yml` (#714 steps 2 and 5).
+15. Repo PR: box↔repo nginx reconciliation (#668), announcer defaults + tests, compose files, and
+    `.github/workflows/publish-{relay,store}-connector-image.yml` (#714 steps 2 and 5). **Done.**
+    The `deploy/node-quickstart` and `deploy/pay-edge` bundles named here were not repinned —
+    they were DELETED (2026-08-05). Their `connector:3.44.0` base had itself been purged from
+    GHCR and was not among the archived digests, so neither bundle could be brought up at all;
+    see `deploy/README.md`. The `location = /rust/ilp/btp` block is gone too, on both boxes.
 
 ## 7. Verification checklist
 
