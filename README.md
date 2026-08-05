@@ -102,7 +102,9 @@ because it is never silently free. A forwarding route may carry a `fee` (default
 A `[[peers]]` entry's `endpoint` is a URL whose **scheme** selects the carriage — `wss://` for BTP,
 `https://` for ILP-over-HTTP (ADR 0027); the old `SocketAddr`-shaped `addr` and the top-level
 `peer_wire_addr` are refused by name. Every peering needs a `credential` and at least one
-`[[peer_channels]]` row, because role is decided by authentication _and_ a channel binding. See
+`[[peer_channels]]` row, because role is decided by authentication _and_ a channel binding. A
+`credential` sets **exactly one** of `secret_file` (a path to the secret — what a deployed node
+uses, so the peering can live in a committed config) or `secret` (the literal). See
 [`docs/operators/btp-peer-transport-bringup.md`](docs/operators/btp-peer-transport-bringup.md).
 
 `[settlement]` takes `chain` (only `"evm"` is accepted today — Mina is out of scope per

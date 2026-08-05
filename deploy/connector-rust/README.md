@@ -135,6 +135,27 @@ deleted the raw-TCP peer wire that preceded this (issue #679), along with
 `peer_wire_addr` and the `SocketAddr`-shaped `[[peers]].addr`; a config
 still setting either now fails config load by name.
 
+Write the credential as a **`secret_file`**, not a literal:
+
+```toml
+credential = { secret_file = "/app/data/store-peer.secret" }
+```
+
+```sh
+openssl rand -hex 32 > /app/data/store-peer.secret   # both sides need the same bytes
+chmod 600 /app/data/store-peer.secret
+```
+
+That keeps the peering itself in a config you can commit while the secret
+stays on the box — the same shape `[signer] key_file` and the settlement
+keys already use, and `deploy/connector-rust/*.secret` is gitignored for it.
+The path is resolved the way `key_file` is, so make it absolute and make it
+a path _inside_ the container. It is read at startup and trimmed of trailing
+whitespace; missing, unreadable or empty stops the node by name
+(`PeerSecretFileNotFound` / `PeerSecretFileUnreadable` /
+`PeerSecretFileEmpty`). A literal `secret` still works and is fine for a
+config nobody commits; setting both is `PeerCredentialAmbiguous`.
+
 Two things to get right, both of which fail silently rather than loudly:
 
 - **`[[peers]].id` is one string both operators write.** It is the `peerId`

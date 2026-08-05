@@ -137,13 +137,28 @@ write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STE
 # # peering that dials IN to this node instead.
 # endpoint = "wss://store.example.net:443/ilp/btp"
 #
-# # The shared secret this peering is authenticated by. Role is decided by
-# # authentication and by nothing else: not the port, not the source
-# # address, not the carriage. An interaction that does not present this
-# # secret is a CLIENT, whatever else it looks like -- and an empty secret
-# # matches nothing, so writing `secret = ""` here is refused at load
-# # rather than becoming a peering anyone can claim.
-# credential = { secret = "CHANGE-ME-generate-with-openssl-rand-hex-32" }
+# # Where the shared secret this peering is authenticated by comes from.
+# # Role is decided by authentication and by nothing else: not the port,
+# # not the source address, not the carriage. An interaction that does not
+# # present this secret is a CLIENT, whatever else it looks like -- and an
+# # empty secret matches nothing, so an empty one is refused at load rather
+# # than becoming a peering anyone can claim.
+# #
+# # Exactly one of `secret_file` and `secret`; both, or neither, is refused
+# # at load by name. Use `secret_file` on any node whose config is
+# # committed -- the file stays off the repo (`*.secret` here is
+# # gitignored) while the peering itself gets tracked, the same way
+# # `[signer] key_file` and the settlement keys already work. It is read at
+# # startup, trimmed of trailing whitespace, and a missing, unreadable or
+# # empty file stops the node.
+# #
+# #   openssl rand -hex 32 > /app/data/store-peer.secret
+# #   chmod 600 /app/data/store-peer.secret
+# #
+# # Both operators must end up with the SAME bytes; share them out of band.
+# credential = { secret_file = "/app/data/store-peer.secret" }
+# # ...or, only for a config that is never committed, the literal:
+# # credential = { secret = "CHANGE-ME-generate-with-openssl-rand-hex-32" }
 #
 # # The most unclaimed value this node will carry for this peering before
 # # refusing, in the settlement asset's smallest unit. Optional for a peer

@@ -181,7 +181,7 @@ state_dir = "/app/state"
 [[peers]]
 id = "store"
 endpoint = "wss://store.example.net:443/btp"
-credential = { secret = "…" }
+credential = { secret_file = "/app/data/store-peer.secret" }
 ceiling = 1000000
 flush_interval_ms = 5000
 # claim_ack_timeout_ms and peer_answer_timeout_ms default to 30000 each
@@ -216,6 +216,64 @@ a Solana claim's `programId` is a required wire field, so there is no "render wi
 This row's `program_id` reaches claim rendering; `ClaimBook`'s Solana verification key and signer
 still have no config wiring (a later issue's job), so this alone does not yet make the peering able
 to accept or sign a claim on that channel.
+
+### `credential` — `secret_file` on a deployed node, `secret` only when the config is private
+
+The `credential` subtable says **where this peering's shared secret comes from**, as exactly one of
+two fields:
+
+| Field         | What it is                       | When to use it                                           |
+| ------------- | -------------------------------- | -------------------------------------------------------- |
+| `secret_file` | a path to a file holding it      | **any deployed node** — the file stays off the box's git |
+| `secret`      | the literal, inline in this file | a test fixture, or a config nobody ever commits          |
+
+Setting both is `PeerCredentialAmbiguous`; setting neither is `PeerCredentialMissing`. Both are
+refuse-to-start, like every other schema error here.
+
+```toml
+[[peers]]
+id = "apex-store"
+endpoint = "wss://store.example.net:443/ilp/btp"
+credential = { secret_file = "/app/data/store-peer.secret" }
+```
+
+```sh
+# on the box, once per peering — both operators need the SAME bytes
+openssl rand -hex 32 > /app/data/store-peer.secret
+chmod 600 /app/data/store-peer.secret
+```
+
+**Why the file form, and why it is not just tidiness.** `infra/linode-node/connector-rust.toml` and
+`infra/linode-store/connector-rust.toml` are committed, and **this repository is public**. A peering
+written with a literal therefore cannot be committed at all — which is what happened to the live
+apex↔store peering: it was configured on the boxes only, so a redeploy from a clean checkout would
+silently drop it, which is exactly the untracked-config drift the reconciliation closed. With
+`secret_file`, the committed config carries the whole peering and only the secret lives on the box.
+It also makes the peering secret the same shape as every other secret in those same files —
+`[signer] key_file`, `[settlement.evm.key] key_file`, `[settlement.solana.key] key_file` are all
+gitignored file references already.
+
+`*.secret` under `infra/linode-node/`, `infra/linode-store/` and `deploy/connector-rust/` is
+gitignored, so use that suffix.
+
+**How the file is read.** The path is resolved exactly the way `[signer] key_file` is — by the OS,
+against the process's working directory — so **write an absolute path**, and remember it is the path
+_inside the container_, which means the file must be on a mounted volume. It is read **at config
+load**, not on first use, so:
+
+| What is wrong with the file | Error                      |
+| --------------------------- | -------------------------- |
+| missing, or not a file      | `PeerSecretFileNotFound`   |
+| unreadable, or not text     | `PeerSecretFileUnreadable` |
+| empty once trimmed          | `PeerSecretFileEmpty`      |
+
+Leading and trailing whitespace is **trimmed**, because `echo` and `openssl rand -hex 32 >` both
+append a newline and a peering that failed over one invisible byte is a `P1` mismatch with nothing
+to look at. The literal `secret` form is deliberately not trimmed — it is byte-for-byte what you
+wrote.
+
+The secret does not appear in any `Debug` rendering, whichever form it was written as: a `Config` is
+logged whole at startup, so both `PeerCredential` and the raw parsed credential redact it.
 
 ### The peering id is one string both operators write
 
@@ -329,7 +387,11 @@ this document.
 | ----------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
 | `PeerUndialable`                    | `peer_expose = "neither"` and a peer has no `endpoint` — nothing dials, nothing accepts | give the peer an endpoint, or expose a carriage              |
 | `PeerEndpointScheme`                | an `endpoint` whose scheme selects no carriage (`ws://`, `http://`, `tcp://`, …)        | use `wss://` for BTP or `https://` for ILP-over-HTTP         |
-| `PeerCredentialMissing`             | a `[[peers]]` entry with no credential, or an empty secret                              | add `credential = { secret = "…" }` with a real secret       |
+| `PeerCredentialMissing`             | a `[[peers]]` entry with no credential, or an empty secret                              | add `credential = { secret_file = "…" }` (or `secret`)       |
+| `PeerCredentialAmbiguous`           | a `credential` setting both `secret` and `secret_file`                                  | keep `secret_file`, delete the literal                       |
+| `PeerSecretFileNotFound`            | a `secret_file` path that does not exist, or is not a file                              | absolute path, inside the container, on a mounted volume     |
+| `PeerSecretFileUnreadable`          | a `secret_file` that could not be read as text                                          | check mode/ownership for the uid the connector runs as       |
+| `PeerSecretFileEmpty`               | a `secret_file` that is empty once trimmed                                              | regenerate it: `openssl rand -hex 32 > …`                    |
 | `PeerChannelUnbound`                | a `[[peers]]` entry with no `[[peer_channels]]` row                                     | add the channel binding, or remove the peering               |
 | `PeerChannelOrphaned`               | a `[[peer_channels]]` row naming a `peer_id` no `[[peers]]` entry configures            | fix the `peer_id` typo, or add the peer                      |
 | `ChannelInBothNamespaces`           | one channel id in both `[[peer_channels]]` and `[[client_channels]]`                    | keep the namespaces disjoint — pick one                      |
@@ -350,7 +412,9 @@ one of the four).
 1. Delete `peer_wire_addr`. Decide what this node should expose and write `peer_expose`.
 2. Replace each `[[peers]].addr` with an `endpoint` URL, or delete it for an accept-only peering
    and give that peering an explicit `ceiling`.
-3. Add a `credential` to every peering, and share the secret with the counterparty out of band.
+3. Add a `credential` to every peering, and share the secret with the counterparty out of band. On
+   a deployed node write it as `secret_file` and put the file on the box, so the peering itself can
+   be committed.
 4. Add a `[[peer_channels]]` row per peering, and make sure `state_dir` is set and mounted.
 5. Check that no channel id appears in both `[[peer_channels]]` and `[[client_channels]]`.
 
