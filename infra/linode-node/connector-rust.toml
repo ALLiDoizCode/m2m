@@ -164,31 +164,101 @@ transport = "btp"
 
 [[routes]]
 prefix = "g.toon.ario"
-# `/store`, not the bare origin — the same shape as g.toon.relay's `/write`
-# above, for the same reason: the store app serves only `POST /store` and
-# `GET /health`. The URL is the store box's own public TLS front (see the
-# header): its nginx `location /store` proxies to the store app
-# (infra/linode-store/nginx/conf.d/node.conf), and `HttpAppClient`'s
-# reqwest is built with rustls-tls (the runtime image ships
-# ca-certificates for exactly this). An envelope's own `target` cannot
-# override the path (issue #596, ADR 0025) — though since #621 it may
-# literally restate it, which is how published rig's uploads
-# (`proxyPath: '/store'`) address this route.
-handler_url = "https://proxy.store.devnet.toonprotocol.dev/store"
-# Parity with the TS fleet's announced os.store capability for this same
-# destination (`price: '1000'` — 0.001 six-decimal USDC, ADR 0010), which is
-# the flat per-object figure rig quotes for git-object uploads. Same
-# claim-gate semantics as g.toon.relay's price above (#520, #557).
-price = 1000
+# ── FORWARDED ACROSS THE apex<->store PEERING (ADR 0028, issues #620/#678) ──
+# Was `handler_url = "https://proxy.store.devnet.toonprotocol.dev/store"`.
+# That reached the store box's nginx `location /store` and went STRAIGHT to
+# store:3300, bypassing the store box's own connector entirely: this node
+# charged, the store node earned nothing, and no claim was written. Retiring
+# the TypeScript fleet on that topology would have moved the store leg from
+# "paid and settled between two nodes" to "one node keeps the money".
+#
+# Now the packet crosses the peering below and the store box is paid for it
+# with a real signed peer claim against the Base Sepolia channel in
+# [[peer_channels]].
+#
+# This is the prefix that matters: buzz pins `storeDestination:
+# "g.toon.ario"` in COMPILED code (desktop/src/shared/api/toonTransportConfig.ts),
+# so it is the name a real client actually addresses.
+peer_id = "apex-store"
+# ADR 0028's arithmetic is `amount == price`: this hop collects `price` from
+# the client, forwards `price - fee`, and so earns exactly `fee`.
+#
+# 1002, not 1000, DELIBERATELY. The store box terminates this prefix at its
+# own committed `price = 1000`, so it must RECEIVE 1000; at 1000/fee 2 it
+# would receive 998 -- under its own price. That was survivable only while
+# issue #752 was open; #754 landed it, so a terminating connector now DOES
+# charge its price for a peer-wire arrival and 998 would be refused. 1002 is
+# correct now and stays correct. It raises the client's cost for this prefix
+# from 1000 to 1002.
+price = 1002
+# What this hop retains for carriage (ADR 0010), matching the TypeScript
+# fleet's own inter-node fee of 2 (visible live as 2000 -> 1998).
+fee = 2
 
-[[routes]]
-prefix = "g.toon.store"
-# This fleet's own name for the same store leg — an alias, terminated at the
-# SAME handler_url. `insert_consistent_handler_price` requires the price to
-# match the g.toon.ario route's exactly (route.rs: a shared handler must not
-# be reachable at two prices, or the cheaper one always wins).
-handler_url = "https://proxy.store.devnet.toonprotocol.dev/store"
-price = 1000
+# ── `g.toon.store` is GONE (owner decision, 2026-08-05) ──────────────────
+# This fleet used to carry a second prefix for the same store app, aliased at
+# the same price so `insert_consistent_handler_price` would accept it. One
+# name for one app is the decision; `g.toon.ario` is the survivor because it
+# is the one compiled into a shipped client.
+#
+# A client that still addresses `g.toon.store` now gets F02 "no route to
+# destination". Nothing advertised it: the announcer publishes
+# `ANNOUNCER_ILP_ADDRESSES: g.toon,g.toon.relay` and never named it, so this
+# removes a name no discovery path hands out.
+
+# ── The apex<->store peering (ADR 0027, issues #678/#750) ────────────────
+# The fleet's only inter-node link, and what every g.toon.ario packet above
+# rides. It lived on the boxes only until #750 gave `credential` a
+# `secret_file`: this file is committed to a PUBLIC repository, so a peering
+# written with a literal could not be committed at all.
+#
+# No `peer_expose` on this node, deliberately: the apex DIALS and never
+# accepts. The store box is the accepting half (`peer_expose = "btp"` in
+# infra/linode-store/connector-rust.toml) and has no `endpoint` of its own.
+[[peers]]
+id = "apex-store"
+# ONE string both operators write -- it is the `peerId` the dialing side puts
+# in its credential, and the accepting side proves P1 by looking it up in its
+# OWN [[peers]] table. A peering only establishes when both files carry the
+# same literal.
+#
+# `/ilp/btp`, the canonical client-edge path, NOT the `/rust/ilp/btp` this
+# dialed until 2026-08-05. That prefix was the parallel-fleet alias; it is
+# retired everywhere else on both boxes and this was the last thing keeping
+# an exception alive for it in the store box's nginx.
+endpoint = "wss://proxy.store.devnet.toonprotocol.dev/ilp/btp"
+# The shared secret, as a FILE. `infra/linode-*/*.secret` is gitignored, so
+# the peering itself is tracked and only the bytes stay on the box. Both
+# operators must end up with the same bytes; they are shared out of band.
+# Missing, unreadable or empty is a refuse-to-start by name
+# (PeerSecretFileNotFound / -Unreadable / -Empty), never a peering that
+# silently never establishes.
+credential = { secret_file = "/app/data/apex-store.secret" }
+# The most unclaimed value this node will carry for this peering before
+# refusing. 1 USDC.
+ceiling = 1000000
+# Send an unacknowledged claim after 5s of quiet, so value does not sit
+# unclaimed across an idle period.
+flush_interval_ms = 5000
+
+# Role is decided by authentication AND a channel binding -- a peering with a
+# credential but no channel can only ever admit its counterparty as an
+# ordinary client (peer-carriage-spec.md 1.2, ADR 0024). This row is what
+# makes ClaimBook able to sign for this peer at all: before #678 wired it,
+# every peer claim was refused `unknown_channel` and none was ever signed.
+[[peer_channels]]
+peer_id = "apex-store"
+# The live Base Sepolia channel between this node's settlement identity and
+# the store box's. Both boxes name the SAME channel and each names the OTHER
+# as counterparty.
+channel_id = "0x5cbe106fa4b6c4274a07b7e28f05f6ff11d9a7931fbf7e075e9ac2d1c2c05e17"
+counterparty_key = "0x6B6c2DACf7Ac1F1273F72beF2E6084F9Ee6D3bff"
+# The EIP-712 domain a claim on this channel is signed over
+# (EIP712("TokenNetwork","1"), ADR 0024). Not a global default: a claim
+# signed under the wrong domain recovers to a different address and is
+# refused.
+chain_id = 84532
+token_network = "0x1E95493fEF46707E034b4a1945f25a8C76A1823D"
 
 # ── Operator surface (optional) ─────────────────────────────────────────
 # Omitted here deliberately: enabling it means committing (or securely
