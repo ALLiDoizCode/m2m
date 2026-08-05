@@ -347,6 +347,19 @@ pub struct ClientClaimGate {
     /// exactly [`DepositFloor::covers`], this gate's behaviour before issue
     /// #700.
     payout_ledger: Option<Arc<ClientPayoutLedger>>,
+    /// A client session's bound ILP address -> the EVM channel id this
+    /// gate has seen it genuinely sign a claim for (issue #787). A BTP
+    /// session is keyed by ILP address (issue #736/toon-client#503), not
+    /// by channel id, so nothing previously joined "which session earned
+    /// this fulfilment" to "which channel to credit" -- this connector
+    /// observed the pair on every accepted inbound claim and discarded it.
+    /// [`Self::record_session_channel`] is the only writer, called once a
+    /// claim has already cleared [`Self::admit`]'s full verification, so
+    /// an entry here is never a session's own unverified say-so. Learning
+    /// is best-effort and non-durable: a restart forgets it, same as
+    /// [`Self::last_claim_seen`], and the very next accepted claim from
+    /// that session teaches it again before any payout depends on it.
+    session_channels: RwLock<HashMap<String, String>>,
 }
 
 impl ClientClaimGate {
@@ -382,6 +395,7 @@ impl ClientClaimGate {
             committer,
             last_claim_seen: RwLock::new(HashMap::new()),
             payout_ledger: None,
+            session_channels: RwLock::new(HashMap::new()),
         })
     }
 
@@ -467,6 +481,67 @@ impl ClientClaimGate {
                 token_network_address: channel.token_network_address,
             },
         );
+    }
+
+    /// Learn that `address` -- a client session's own bound ILP address --
+    /// has just presented a genuine, signature-verified claim naming
+    /// `channel_id` (issue #787). The only caller is `crate::btp`'s
+    /// `record_accepted_claim`, itself only reached once [`Self::admit`]
+    /// has fully verified the claim, so this is never a session's own
+    /// unverified say-so. Overwrites any previous association for
+    /// `address` -- this is a best-current-belief cache, not an
+    /// append-only ledger like a watermark, and a session that reconnects
+    /// or a channel that closes and reopens is still just taught its
+    /// current fact the next time it presents a claim.
+    pub(crate) fn record_session_channel(&self, address: &str, channel_id: String) {
+        self.session_channels
+            .write()
+            .expect("session channel map lock poisoned")
+            .insert(address.to_string(), channel_id);
+    }
+
+    /// The channel id [`Self::record_session_channel`] has associated with
+    /// `address`, if any.
+    fn session_channel(&self, address: &str) -> Option<String> {
+        self.session_channels
+            .read()
+            .expect("session channel map lock poisoned")
+            .get(address)
+            .cloned()
+    }
+
+    /// [`Self::credit_payout`], resolving `destination` -- a client
+    /// session's own bound ILP address, exactly what
+    /// `crate::session_route::route_prepare` delivers a fulfilled PREPARE
+    /// through -- to a channel id via [`Self::record_session_channel`]'s
+    /// own map first (issue #787). Production binds a session under its
+    /// ILP address, never under a channel id (issue #736/toon-client#503),
+    /// so `destination` itself is never a payable key: without this
+    /// resolution step every credit attempt silently found nothing, on
+    /// every deployed connector.
+    ///
+    /// `None`, logged rather than left silent (this issue's own AC), for a
+    /// destination this gate has never learned a channel for -- an earning
+    /// agent that has never itself presented a claim on this session has
+    /// no association yet, and crediting nothing is the explicit decision
+    /// for that case, not an oversight indistinguishable from any of
+    /// [`Self::credit_payout`]'s own reasons to decline.
+    pub(crate) async fn credit_session_payout(
+        &self,
+        destination: &str,
+        condition: &[u8; 32],
+        amount: u64,
+        now: DateTime<Utc>,
+    ) -> Option<WireClaim> {
+        let Some(channel_id) = self.session_channel(destination) else {
+            tracing::info!(
+                destination = %destination,
+                "no channel is associated with this session yet -- crediting nothing"
+            );
+            return None;
+        };
+        self.credit_payout(&channel_id, condition, amount, now)
+            .await
     }
 
     /// The watermark this gate currently holds for `channel_key` (the
@@ -3142,6 +3217,77 @@ mod tests {
                     deposited: 1_000,
                 })
             );
+        }
+    }
+
+    // -- Issue #787: a session bound under its ILP address resolves to
+    // the channel id an earlier inbound claim taught this gate --
+    mod session_channel_association {
+        use super::*;
+        use connector_runtime::ChannelDomain;
+        use connector_signer::LocalSigner;
+
+        fn payout_domain() -> ChannelDomain {
+            ChannelDomain {
+                chain_id: EVM_CHAIN_ID,
+                token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+            }
+        }
+
+        /// The bug this issue fixes, reproduced directly at the gate: a
+        /// session is bound under its ILP address, never under a channel
+        /// id (issue #736/toon-client#503), so `credit_session_payout`
+        /// must resolve the one from the other rather than being handed a
+        /// channel id already. Before the fix there was no resolution
+        /// step at all -- `credit_payout` was called with the address
+        /// itself, which never decodes as a channel id, so nothing was
+        /// ever credited on any real deployment.
+        #[tokio::test]
+        async fn a_session_taught_its_channel_is_credited_by_its_address() {
+            let address = "g.toon.provider";
+            let channel_id = format!("0x{:064x}", 1);
+
+            let mut ledger = ClientPayoutLedger::new();
+            ledger.set_signer(Arc::new(LocalSigner::generate("payout-key")));
+            ledger
+                .set_channel_domain(channel_id.clone(), payout_domain())
+                .expect("valid channel id");
+            let ledger = Arc::new(ledger);
+
+            let gate = gate().with_payout_ledger(Arc::clone(&ledger));
+            gate.record_session_channel(address, channel_id.clone());
+
+            let condition = [3u8; 32];
+            let claim = gate
+                .credit_session_payout(address, &condition, 5_000, now())
+                .await
+                .expect("the session's channel was known, and is payable");
+            assert_eq!(claim.channel_id, channel_id);
+            assert_eq!(ledger.credited(&channel_id), 5_000);
+        }
+
+        /// The issue's own AC3: a destination this gate has never learned a
+        /// channel for -- an earning agent that has never itself presented
+        /// a claim on this session -- must credit nothing, decided
+        /// explicitly rather than by some other path silently finding
+        /// nothing.
+        #[tokio::test]
+        async fn a_destination_with_no_known_channel_credits_nothing() {
+            let ledger = Arc::new(ClientPayoutLedger::new());
+            let gate = gate().with_payout_ledger(ledger);
+
+            let condition = [4u8; 32];
+            let claim = gate
+                .credit_session_payout("g.toon.unpaid", &condition, 5_000, now())
+                .await;
+            assert!(
+                claim.is_none(),
+                "no association was ever taught for this address"
+            );
+        }
+
+        fn now() -> DateTime<Utc> {
+            "2030-01-01T00:00:00Z".parse().unwrap()
         }
     }
 

@@ -105,22 +105,30 @@ pub(crate) async fn route_prepare(
 }
 
 /// Issue #770's wiring point: `destination` (the address `prepare` was
-/// just genuinely fulfilled at) is a client session's own bound address,
-/// which -- per `outbound_ledger.rs`'s own module doc, "a client-edge
-/// channel has no separate peer identity" -- is also that channel's id.
-/// No separate lookup exists or is needed: the same string that routed
-/// this delivery names the channel to credit.
+/// just genuinely fulfilled at) is a client session's own bound *ILP
+/// address* (issue #736/toon-client#503) -- never a channel id, in any
+/// production deployment. Issue #787 found that #770's and #780's own
+/// tests bound a session under a channel id instead, which made
+/// `destination == channel id` look like a free equivalence when it never
+/// held in production: a real session's bound address cannot be decoded as
+/// one. [`crate::claim_gate::ClientClaimGate::credit_session_payout`]
+/// resolves the one from the other, through whatever channel id an
+/// earlier inbound claim on this same session already taught this gate.
 ///
 /// Both steps are best-effort once reached, and neither holds up
 /// `route_prepare`'s own answer (already decided by the time this runs):
 ///
-/// 1. [`crate::claim_gate::ClientClaimGate::credit_payout`] credits
-///    `amount`, deduped against `condition` (AC3) so a duplicate or
-///    retransmitted fulfilment of the same job cannot double-credit --
-///    resolving `destination`'s payout domain on demand first if this is a
-///    self-opened channel this connector has not seen before (issue #780).
-///    A node with no payout ledger configured does nothing here -- exactly
-///    its pre-#770 behaviour.
+/// 1. [`crate::claim_gate::ClientClaimGate::credit_session_payout`] resolves
+///    `destination` -- this session's own bound ILP address -- to the
+///    channel id an earlier inbound claim on this same session taught this
+///    gate (issue #787), then credits `amount` through
+///    [`crate::claim_gate::ClientClaimGate::credit_payout`], deduped
+///    against `condition` (AC3) so a duplicate or retransmitted fulfilment
+///    of the same job cannot double-credit -- resolving the channel's
+///    payout domain on demand first if this is a self-opened channel this
+///    connector has not seen before (issue #780). A node with no payout
+///    ledger configured, or a destination with no known channel yet, does
+///    nothing here.
 /// 2. The freshly signed claim is delivered as a payout TRANSFER over the
 ///    same session, fenced against the generation this delivery already
 ///    used. A session that has died in the meantime loses only this
@@ -136,7 +144,7 @@ async fn credit_session_earnings(
 ) {
     let Some(claim) = state
         .claim_gate
-        .credit_payout(destination, condition, amount, chrono::Utc::now())
+        .credit_session_payout(destination, condition, amount, chrono::Utc::now())
         .await
     else {
         return;
@@ -564,8 +572,19 @@ mod tests {
     /// payout claim that follows is verified end to end: decoded off the
     /// wire, parsed back to JSON, and checked against the connector's own
     /// signing key, the same round trip `btp.rs`'s own payout test runs.
+    ///
+    /// **Issue #787.** The session is bound under an ILP address
+    /// (`g.provider.nine`), never under `channel_id` itself -- the shape
+    /// production actually reaches (issue #736/toon-client#503). The
+    /// address-to-channel association is taught via
+    /// `ClientClaimGate::record_session_channel`, exactly what
+    /// `crate::btp::record_accepted_claim` does once a genuine inbound
+    /// claim on this same session has cleared `admit`. Before #787's fix,
+    /// this shape credited nothing at all: `credit_payout` was called with
+    /// the ILP address itself, which does not decode as a channel id.
     #[tokio::test]
     async fn a_fulfilled_session_delivery_credits_the_payout_ledger_and_sends_a_signed_claim() {
+        let address = "g.provider.nine";
         let channel_id = format!("0x{:064x}", 9);
         let payout_signer = Arc::new(LocalSigner::generate("payout-key"));
         let connector_address = derive_evm_address(&payout_signer.public_key().unwrap());
@@ -583,16 +602,17 @@ mod tests {
         let gate = ClientClaimGate::restore(Default::default(), Arc::new(InMemoryJournal::new()))
             .expect("a fresh in-memory journal has nothing to replay")
             .with_payout_ledger(Arc::clone(&ledger));
+        gate.record_session_channel(address, channel_id.clone());
 
         let registry = SessionRegistry::new();
         let (handle, mut reply_rx, outbound) = test_handle();
-        registry.bind(channel_id.clone(), handle, crate::now_unix());
+        registry.bind(address, handle, crate::now_unix());
         let state = test_state_with_gate(empty_connector(), registry, gate);
 
         let condition = derive_condition(&FULFILLMENT);
         let prepare = Prepare {
             amount: 42_000,
-            ..sample_prepare(&channel_id, condition)
+            ..sample_prepare(address, condition)
         };
 
         let expected_channel_id = channel_id.clone();
@@ -672,8 +692,12 @@ mod tests {
     /// takes -- the same execution condition, and therefore the same
     /// fulfilment, both times) must raise `credited` once, not twice, even
     /// though the session answers both deliveries as genuine fulfilments.
+    ///
+    /// Issue #787: the session is bound under an ILP address, not
+    /// `channel_id`, per that issue's own test requirement.
     #[tokio::test]
     async fn a_retried_delivery_of_the_same_job_does_not_credit_twice() {
+        let address = "g.provider.eleven";
         let channel_id = format!("0x{:064x}", 11);
         let payout_signer = Arc::new(LocalSigner::generate("payout-key"));
         let domain = ChannelDomain {
@@ -690,10 +714,11 @@ mod tests {
         let gate = ClientClaimGate::restore(Default::default(), Arc::new(InMemoryJournal::new()))
             .expect("a fresh in-memory journal has nothing to replay")
             .with_payout_ledger(Arc::clone(&ledger));
+        gate.record_session_channel(address, channel_id.clone());
 
         let registry = SessionRegistry::new();
         let (handle, mut reply_rx, outbound) = test_handle();
-        registry.bind(channel_id.clone(), handle, crate::now_unix());
+        registry.bind(address, handle, crate::now_unix());
         let state = test_state_with_gate(empty_connector(), registry, gate);
 
         let condition = derive_condition(&FULFILLMENT);
@@ -727,13 +752,13 @@ mod tests {
 
         let first = Prepare {
             amount: 5_000,
-            ..sample_prepare(&channel_id, condition)
+            ..sample_prepare(address, condition)
         };
         let response_first = route_prepare(&state, first, 0).await;
 
         let retry = Prepare {
             amount: 5_000,
-            ..sample_prepare(&channel_id, condition)
+            ..sample_prepare(address, condition)
         };
         let response_retry = route_prepare(&state, retry, 0).await;
 
@@ -766,8 +791,14 @@ mod tests {
     /// budgeted resolver `verify_evm_claim_signature` already uses on the
     /// inbound side -- proving `credit_payout` reaches it rather than
     /// stopping at the ledger's own pre-seeded set.
+    ///
+    /// Issue #787: the session is bound under an ILP address, and the
+    /// address-to-channel association is taught via
+    /// `record_session_channel`, the same as every other test in this
+    /// module now does.
     #[tokio::test]
     async fn a_self_opened_channel_with_no_config_row_is_credited_via_chain_resolution() {
+        let address = "g.provider.forty-two";
         let channel_id = format!("0x{:064x}", 42);
         let on_chain_id = decode_hex_bytes::<32>(&channel_id).expect("valid test channel id");
 
@@ -798,16 +829,17 @@ mod tests {
         let gate = ClientClaimGate::restore(channel_registry, Arc::new(InMemoryJournal::new()))
             .expect("a fresh in-memory journal has nothing to replay")
             .with_payout_ledger(Arc::clone(&ledger));
+        gate.record_session_channel(address, channel_id.clone());
 
         let session_registry = SessionRegistry::new();
         let (handle, mut reply_rx, outbound) = test_handle();
-        session_registry.bind(channel_id.clone(), handle, crate::now_unix());
+        session_registry.bind(address, handle, crate::now_unix());
         let state = test_state_with_gate(empty_connector(), session_registry, gate);
 
         let condition = derive_condition(&FULFILLMENT);
         let prepare = Prepare {
             amount: 7_000,
-            ..sample_prepare(&channel_id, condition)
+            ..sample_prepare(address, condition)
         };
 
         let expected_channel_id = channel_id.clone();
@@ -883,8 +915,15 @@ mod tests {
     /// chain source answers `Ok(None)` for it, same as a settled or never-opened
     /// channel -- still produces no claim and no credit. Resolution failure
     /// must never become a free credit.
+    ///
+    /// Issue #787: session bound under an ILP address, with the
+    /// association to `channel_id` already taught, exactly as the two
+    /// tests above -- this test is about chain resolution failing, not
+    /// about the address/channel join, which is covered separately by
+    /// `a_destination_with_no_known_channel_is_not_credited`.
     #[tokio::test]
     async fn a_channel_that_does_not_resolve_on_chain_is_not_credited() {
+        let address = "g.provider.forty-three";
         let channel_id = format!("0x{:064x}", 43);
 
         let mut ledger = ClientPayoutLedger::new();
@@ -899,16 +938,17 @@ mod tests {
         let gate = ClientClaimGate::restore(channel_registry, Arc::new(InMemoryJournal::new()))
             .expect("a fresh in-memory journal has nothing to replay")
             .with_payout_ledger(Arc::clone(&ledger));
+        gate.record_session_channel(address, channel_id.clone());
 
         let session_registry = SessionRegistry::new();
         let (handle, mut reply_rx, outbound) = test_handle();
-        session_registry.bind(channel_id.clone(), handle, crate::now_unix());
+        session_registry.bind(address, handle, crate::now_unix());
         let state = test_state_with_gate(empty_connector(), session_registry, gate);
 
         let condition = derive_condition(&FULFILLMENT);
         let prepare = Prepare {
             amount: 3_000,
-            ..sample_prepare(&channel_id, condition)
+            ..sample_prepare(address, condition)
         };
 
         let peer = tokio::spawn(async move {
@@ -944,6 +984,75 @@ mod tests {
             ledger.credited(&channel_id),
             0,
             "a channel that fails to resolve must never be credited"
+        );
+    }
+
+    /// Issue #787's own scenario, reproduced directly: a session bound
+    /// under its ILP address that has never itself presented a claim on
+    /// this connector -- an earning agent whose counterparty has not yet
+    /// paid it anything -- has no `record_session_channel` association at
+    /// all. `credit_session_payout` must decide that case explicitly
+    /// rather than by omission (the issue's own wording): no credit, and
+    /// no payout TRANSFER, but the original packet still answers
+    /// fulfilled. This is the exact production shape the issue's rig#59
+    /// failure reproduced: before this fix, `credit_payout` was called
+    /// with the ILP address itself, silently found nothing, and the very
+    /// same "no credit, no claim, silently" outcome resulted -- for every
+    /// session, not just an unassociated one. This test is what tells the
+    /// two apart: this case is *supposed* to answer `None`.
+    #[tokio::test]
+    async fn a_destination_with_no_known_channel_is_not_credited() {
+        let address = "g.provider.unpaid";
+
+        let mut ledger = ClientPayoutLedger::new();
+        ledger.set_signer(Arc::new(LocalSigner::generate("payout-key")));
+        let ledger = Arc::new(ledger);
+
+        let gate = ClientClaimGate::restore(Default::default(), Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay")
+            .with_payout_ledger(Arc::clone(&ledger));
+        // Deliberately no `record_session_channel` call: this session has
+        // never presented a claim this connector could learn a channel
+        // from.
+
+        let registry = SessionRegistry::new();
+        let (handle, mut reply_rx, outbound) = test_handle();
+        registry.bind(address, handle, crate::now_unix());
+        let state = test_state_with_gate(empty_connector(), registry, gate);
+
+        let condition = derive_condition(&FULFILLMENT);
+        let prepare = Prepare {
+            amount: 3_000,
+            ..sample_prepare(address, condition)
+        };
+
+        let peer = tokio::spawn(async move {
+            answer_next_message(
+                &mut reply_rx,
+                &outbound,
+                Fulfill {
+                    fulfillment: FULFILLMENT,
+                    data: Vec::new(),
+                }
+                .encode(),
+            )
+            .await;
+            reply_rx
+        });
+
+        let response = route_prepare(&state, prepare, 0).await;
+        // As `a_channel_that_does_not_resolve_on_chain_is_not_credited`:
+        // `route_prepare` only returns once crediting has already been
+        // awaited to completion.
+        let mut reply_rx = peer.await.expect("the peer task");
+        assert!(
+            reply_rx.try_recv().is_err(),
+            "a session with no known channel must never receive a payout TRANSFER"
+        );
+
+        assert!(
+            matches!(response, PacketResponse::Fulfill(fulfill) if fulfill.fulfillment == FULFILLMENT),
+            "the original packet still answers fulfilled even though nothing could be credited"
         );
     }
 }

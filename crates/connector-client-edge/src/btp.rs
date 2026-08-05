@@ -48,7 +48,7 @@ use connector_btp::{
     BTP_ERROR, BTP_MESSAGE, BTP_RESPONSE, BTP_TRANSFER, CLAIM_PROTOCOL, CONTENT_TYPE_TEXT,
     PAYMENT_REQUIRED_PROTOCOL, PAYOUT_CLAIM_PROTOCOL,
 };
-use connector_domain::client_claim::ClientClaim;
+use connector_domain::client_claim::{ClientClaim, EVM_NAMESPACE};
 use connector_domain::{PacketResponse, Prepare, Reject, RejectCode};
 
 use crate::claim_gate::DurabilityTicket;
@@ -258,12 +258,34 @@ async fn window_slot(window: &Arc<Semaphore>) -> OwnedSemaphorePermit {
 /// `handle_ilp`'s HTTP carriage. Shared by both places a BTP claim can
 /// finish durable -- a standalone claim message and a claim riding a
 /// packet -- so the two stay in lockstep.
-fn record_accepted_claim(state: &ClientEdgeState, claim: &ClientClaim) {
+///
+/// `session_address` is this socket's own binding in
+/// [`crate::session_registry::SessionRegistry`] (`None` if this session
+/// never sent a usable auth frame). When present, this claim -- already
+/// fully verified by [`crate::claim_gate::ClientClaimGate::admit`] by the
+/// time this runs -- teaches the gate which channel this session speaks
+/// for (issue #787): the missing join between a session bound under its
+/// ILP address and a payout ledger keyed by channel id. EVM only, matching
+/// [`crate::outbound_ledger::ClientPayoutLedger`]'s own reach -- there is
+/// no Solana payout to resolve towards yet.
+fn record_accepted_claim(
+    state: &ClientEdgeState,
+    claim: &ClientClaim,
+    session_address: Option<&str>,
+) {
     let channel_key = claim.channel_key();
     state.connector.recognize_channel(&channel_key);
     state
         .claim_gate
         .note_claim_time(&channel_key, crate::now_unix());
+
+    if let Some(address) = session_address {
+        if let Some(channel_id) = channel_key.strip_prefix(&format!("{EVM_NAMESPACE}:")) {
+            state
+                .claim_gate
+                .record_session_channel(address, channel_id.to_string());
+        }
+    }
 }
 
 /// Best-effort extraction of an auth frame's declared identity (issue
@@ -466,10 +488,13 @@ async fn handle_frame(
                 Ok((claim, durability)) => {
                     let permit = window_slot(window).await;
                     let state = Arc::clone(state);
+                    let session_address = binding.as_ref().map(|(address, _)| address.clone());
                     tokio::spawn(async move {
                         let _slot = permit;
                         match durability.durable().await {
-                            Ok(()) => record_accepted_claim(&state, &claim),
+                            Ok(()) => {
+                                record_accepted_claim(&state, &claim, session_address.as_deref())
+                            }
                             Err(rejection) => tracing::debug!(
                                 rejection = %rejection.message(),
                                 "standalone BTP claim accepted but not durably recorded"
@@ -629,6 +654,7 @@ async fn handle_frame(
         None => None,
     };
 
+    let session_address = binding.as_ref().map(|(address, _)| address.clone());
     let permit = window_slot(window).await;
     let task = finish_frame(
         Arc::clone(state),
@@ -637,6 +663,7 @@ async fn handle_frame(
         price,
         frame.request_id,
         replies.clone(),
+        session_address,
     );
     tokio::spawn(async move {
         let _slot = permit;
@@ -659,13 +686,14 @@ async fn finish_frame(
     price: u64,
     request_id: u32,
     replies: mpsc::Sender<Vec<u8>>,
+    session_address: Option<String>,
 ) {
     if let Some((claim, durability)) = admitted {
         match durability.durable().await {
             // A claim that cleared the gate makes the sender eligible to
             // probe and notes the claim-state endpoint's liveness
             // timestamp -- see `record_accepted_claim`.
-            Ok(()) => record_accepted_claim(&state, &claim),
+            Ok(()) => record_accepted_claim(&state, &claim, session_address.as_deref()),
             Err(rejection) => {
                 let _ = reply(
                     &replies,
@@ -817,5 +845,97 @@ mod tests {
             .await
             .expect("the peer answered before the timeout");
         peer.await.expect("the peer task");
+    }
+
+    /// Issue #787's production wiring, proven directly: once a claim has
+    /// cleared `ClientClaimGate::admit` on a session bound at `address`,
+    /// [`record_accepted_claim`] -- the shared call site both a standalone
+    /// claim message and a claim riding a packet finish through -- teaches
+    /// the gate that `address` speaks for this claim's channel. A later
+    /// fulfilment credited through
+    /// `ClientClaimGate::credit_session_payout` (`crate::session_route`'s
+    /// own caller) then finds it, rather than crediting nothing -- which
+    /// is exactly what happened on every real deployment before this fix,
+    /// since production binds a session under its ILP address, never a
+    /// channel id (issue #736/toon-client#503).
+    #[tokio::test]
+    async fn record_accepted_claim_teaches_the_session_channel_association() {
+        use crate::claim_gate::ClientClaimGate;
+        use crate::outbound_ledger::ClientPayoutLedger;
+        use chrono::TimeZone;
+        use connector_domain::client_claim::{ClientClaimCommon, EvmClientClaim};
+        use connector_runtime::{
+            ChannelDomain, Connector, FakeAppClient, InMemoryJournal, InProcessPeerTransport,
+            TestClock,
+        };
+        use connector_signer::LocalSigner;
+
+        let channel_id = format!("0x{:064x}", 5);
+        let mut ledger = ClientPayoutLedger::new();
+        ledger.set_signer(Arc::new(LocalSigner::generate("payout-key")));
+        ledger
+            .set_channel_domain(
+                channel_id.clone(),
+                ChannelDomain {
+                    chain_id: 84_532,
+                    token_network_address: [0x77; 20],
+                },
+            )
+            .expect("valid channel id");
+        let ledger = Arc::new(ledger);
+
+        let gate = ClientClaimGate::restore(Default::default(), Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay")
+            .with_payout_ledger(Arc::clone(&ledger));
+
+        let clock = Arc::new(TestClock::new(
+            chrono::Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+        ));
+        let connector = Arc::new(Connector::new(
+            vec![],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            clock,
+        ));
+        let state = ClientEdgeState {
+            connector,
+            signer: Arc::new(LocalSigner::generate("session-signer")),
+            claim_gate: gate,
+            wrap_receiver_secret: None,
+            settlement_terms: None,
+            settlements: Vec::new(),
+            btp_session_window: crate::DEFAULT_BTP_SESSION_WINDOW,
+            session_registry: Arc::new(crate::session_registry::SessionRegistry::new()),
+            peers: None,
+        };
+
+        let claim = ClientClaim::Evm(EvmClientClaim {
+            common: ClientClaimCommon {
+                message_id: "m1".to_string(),
+                timestamp: "2030-01-01T00:00:00Z".to_string(),
+                sender_id: "sender".to_string(),
+            },
+            channel_id: channel_id.clone(),
+            nonce: 1,
+            transferred_amount: 500,
+            locked_amount: "0".to_string(),
+            locks_root: format!("0x{}", "00".repeat(32)),
+            signature: format!("0x{}", "11".repeat(65)),
+            signer_address: format!("0x{}", "22".repeat(20)),
+            chain_id: None,
+            token_network_address: None,
+            token_address: None,
+        });
+
+        record_accepted_claim(&state, &claim, Some("g.toon.agent"));
+
+        let condition = [9u8; 32];
+        let payout = state
+            .claim_gate
+            .credit_session_payout("g.toon.agent", &condition, 500, chrono::Utc::now())
+            .await
+            .expect("the session's channel was just taught by the claim above");
+        assert_eq!(payout.channel_id, channel_id);
     }
 }
