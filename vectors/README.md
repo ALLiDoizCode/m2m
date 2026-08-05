@@ -265,3 +265,58 @@ http_body_hex }`: one sealed request wrap from this file's own `giftwrap` sectio
   as a PREPARE's `data` on both carriages. `sealed_data_hex` must appear byte-for-byte inside both
   `btp_ilp_packet_prepare_hex`'s OER PREPARE and `http_body_hex` -- a forwarding hop never
   re-encodes, re-wraps or truncates a payload it holds no key for.
+
+### `channel_control_declaration`
+
+Issue #792, `client-edge-spec.md` §1.9 step 1 (issue #790): the BTP auth entry's
+`channelId`/`expires`/`signature` fields, which bind a client session to a channel it controls
+_before_ that session has ever presented a claim. The signature scheme is the identical
+domain-separated `ClaimStateChallenge` `POST /ilp/claim-state` verifies for a read
+(`connector_signer::claim_state_challenge`), reused rather than a claim's own `BalanceProof`
+scheme (this file's `claim` section above) -- deliberately a different EIP-712 typehash, so a
+captured claim-state proof and a captured claim can never stand in for each other.
+
+**Unlike every other section in this file, three fields here (`channel_id_hex`, `signature_hex`,
+and the corresponding values embedded in `auth_json`) carry a `0x` prefix.** This is deliberate:
+these are the literal strings that ride on the wire inside the auth entry's JSON body (matching
+`peer_carriage.claim_evm.wire_channel_id`'s same convention for the same reason), not this file's
+usual internal byte encoding.
+
+- `cases[]`: `{ name, peer_id, chain_id, token_network_address_hex, channel_id_hex, expires,
+counterparty_address_hex, signer_secret_hex, signer_address_hex, digest_hex, signature_hex,
+auth_json, btp_message_hex, signature_verifies }`.
+- `chain_id` / `token_network_address_hex` are the channel's own registered EIP-712 domain --
+  same rule as the `claim` section: configured per channel, never a node-wide default.
+- `digest_hex` is `keccak256(0x1901 || domainSeparator || structHash)`, where `domainSeparator` is
+  the identical `EIP712Domain(name: "TokenNetwork", version: "1", chainId, verifyingContract)`
+  construction the `claim` section's `BalanceProof` digest uses (see that section for the exact
+  ABI encoding), and
+
+  ```text
+  structHash = keccak256(abi.encode(
+                   keccak256("ClaimStateChallenge(bytes32 channelId,uint256 expires)"),
+                   channelId, expires))
+  ```
+
+  -- a distinct type hash and a distinct field set from `BalanceProof`, so the two digests can
+  never collide for any input.
+
+- `counterparty_address_hex` is the channel's registered counterparty -- what `signature_hex` must
+  recover to for `signature_verifies` to be `true`. `signer_secret_hex`/`signer_address_hex` are
+  the keypair that actually produced `signature_hex`: for `channel_control_declaration_valid` and
+  `channel_control_declaration_expired`, this is the same keypair as `counterparty_address_hex`
+  (a genuine proof); for `channel_control_declaration_wrong_key`, it is a different, unrelated
+  keypair, and `signature_verifies` is `false`.
+- `expires` is unix seconds, compared by the verifier as `expires <= now` -> rejected -- a
+  wall-clock fact at verification time that this static file cannot itself encode. Instead,
+  `channel_control_declaration_valid`/`_wrong_key` use an `expires` far enough in the future
+  (2100-01-01T00:00:00Z) to still be valid against any reasonable clock, and
+  `channel_control_declaration_expired` uses `1` (1970-01-01T00:00:01Z) to be expired against any
+  reasonable clock. `signature_verifies` is about the signature alone (`true` for
+  `channel_control_declaration_expired` too, since its signature is genuine) -- a replaying SDK
+  must apply the `expires` check itself, separately, exactly as
+  `verify_and_record_declared_channel` (`connector-client-edge::btp`) does.
+- `auth_json` is the auth entry's full JSON body -- `{peerId, secret, channelId, expires,
+signature}` -- byte-for-byte what rides as the BTP `auth` protocolData entry's `data`.
+  `btp_message_hex` is the complete BTP MESSAGE frame carrying it (no `ilpPacket`), decoded and
+  re-checked against `auth_json` by the generator before being emitted.
