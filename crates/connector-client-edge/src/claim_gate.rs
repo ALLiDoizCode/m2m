@@ -518,6 +518,22 @@ impl ClientClaimGate {
             .cloned()
     }
 
+    /// `destination`'s associated channel id together with this gate's own
+    /// payout ledger (issue #779) -- what `session_route::deliver_pending_claim`
+    /// needs to look up `ClientPayoutLedger::pending_claim` and, once a
+    /// resend succeeds, acknowledge it. `None` if this gate has no payout
+    /// ledger configured at all, or if `destination` has no channel
+    /// association yet ([`Self::record_session_channel`]) -- both are
+    /// reasons there is nothing to resend, not an error.
+    pub(crate) fn payout_channel_for_session(
+        &self,
+        destination: &str,
+    ) -> Option<(String, Arc<ClientPayoutLedger>)> {
+        let channel_id = self.session_channel(destination)?;
+        let ledger = Arc::clone(self.payout_ledger()?);
+        Some((channel_id, ledger))
+    }
+
     /// [`Self::credit_payout`], resolving `destination` -- a client
     /// session's own bound ILP address, exactly what
     /// `crate::session_route::route_prepare` delivers a fulfilled PREPARE
