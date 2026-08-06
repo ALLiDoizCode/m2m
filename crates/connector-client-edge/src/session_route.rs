@@ -33,7 +33,7 @@
 //! every real deployment today, and a `T01` this arm answers keeps nothing,
 //! exactly like `Connector::deliver_to_app`'s own `AppOutcome::Unreachable`.
 
-use connector_btp::BtpFrame;
+use connector_btp::{BtpFrame, BTP_RESPONSE};
 use connector_domain::{
     fulfillment_matches_condition, Fulfill, PacketResponse, Prepare, Reject, RejectCode,
 };
@@ -174,13 +174,19 @@ async fn credit_session_earnings(
 /// no payout ledger configured, or nothing currently pending all leave
 /// `pending_claim` exactly where it was for the next caller to find.
 /// Acknowledgement -- which alone clears `pending_claim`, never `credited`
-/// -- happens only once [`crate::session_registry::SessionRegistry::deliver_transfer`]
-/// genuinely succeeds.
+/// -- happens only once the client answers the TRANSFER with a RESPONSE,
+/// so every other outcome (no session, a write that never lands, a timeout,
+/// or the client's own ERROR) leaves the claim armed to be resent.
 ///
 /// Two production call sites: [`credit_session_earnings`] above (every
 /// fulfilled delivery, deduped or not) and `crate::btp::handle_frame`'s auth
 /// branch, once a session (re)establishes -- so a stranded claim need not
-/// wait for the next job to land on the very same channel.
+/// wait for the next job to land on the very same channel. The two can run
+/// at once (the auth-branch call is spawned), which costs at worst one
+/// duplicate TRANSFER of the *same* nonce: a claim is cumulative, so a
+/// client that sees it twice redeems the same figure either way, and the
+/// second acknowledgement is a no-op once the first has cleared the claim
+/// that nonce named.
 pub(crate) async fn deliver_pending_claim(
     state: &ClientEdgeState,
     destination: &str,
@@ -194,7 +200,7 @@ pub(crate) async fn deliver_pending_claim(
     let Some(claim) = ledger.pending_claim(&channel_id) else {
         return;
     };
-    let delivered = state
+    let answer = state
         .session_registry
         .deliver_transfer(
             destination,
@@ -204,7 +210,11 @@ pub(crate) async fn deliver_pending_claim(
             now,
         )
         .await;
-    if delivered.is_ok() {
+    // Only a RESPONSE is an acknowledgement. `deliver_transfer` answers
+    // `Ok` with whatever frame the client correlated back, and RFC-0023's
+    // ERROR is "could not accept this request" -- clearing `pending_claim`
+    // on one would strand the very claim this function exists to resend.
+    if answer.is_ok_and(|frame| frame.frame_type == BTP_RESPONSE) {
         ledger.acknowledge(&channel_id, claim.nonce, ClaimAckOutcome::Accepted);
     }
 }
@@ -273,7 +283,7 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
     use connector_btp::{
-        decode_frame, BtpSessionHandle, OutboundRequests, BTP_RESPONSE, BTP_TRANSFER,
+        decode_frame, BtpSessionHandle, OutboundRequests, BTP_ERROR, BTP_RESPONSE, BTP_TRANSFER,
         PAYOUT_CLAIM_PROTOCOL,
     };
     use connector_config::StaticRoute;
@@ -1251,6 +1261,73 @@ mod tests {
         assert!(
             reply_rx2.try_recv().is_err(),
             "only one payout TRANSFER goes out -- no double send"
+        );
+    }
+
+    /// The other half of "acknowledged only when the client actually took
+    /// it": a client that answers the payout TRANSFER with an ERROR frame
+    /// (RFC-0023's "could not accept this request") never received the
+    /// claim, so it must stay pending for the next delivery or reconnect to
+    /// resend. `deliver_transfer` answers `Ok` for an ERROR exactly as it
+    /// does for a RESPONSE -- both correlate back against the originated
+    /// requestId -- so treating "answered at all" as acceptance would
+    /// strand precisely the claim this wiring exists to rescue.
+    #[tokio::test]
+    async fn a_payout_transfer_the_client_answers_with_an_error_leaves_the_claim_pending() {
+        let address = "g.provider.refuses";
+        let channel_id = format!("0x{:064x}", 77);
+
+        let mut ledger = ClientPayoutLedger::new();
+        ledger.set_signer(Arc::new(LocalSigner::generate("payout-key")));
+        ledger
+            .set_channel_domain(
+                channel_id.clone(),
+                ChannelDomain {
+                    chain_id: 84_532,
+                    token_network_address: [0x88; 20],
+                },
+            )
+            .expect("valid channel id");
+        let stranded = ledger
+            .record_payout(&channel_id, 4_000, "2030-01-01T00:00:00Z".parse().unwrap())
+            .expect("signer and domain configured");
+        let ledger = Arc::new(ledger);
+
+        let gate = ClientClaimGate::restore(Default::default(), Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay")
+            .with_payout_ledger(Arc::clone(&ledger));
+        gate.record_session_channel(address, channel_id.clone());
+
+        let registry = SessionRegistry::new();
+        let (handle, mut reply_rx, outbound) = test_handle();
+        registry.bind(address, handle, crate::now_unix());
+        let state = test_state_with_gate(empty_connector(), registry, gate);
+
+        let peer = tokio::spawn(async move {
+            let sent = reply_rx.recv().await.expect("the TRANSFER was written");
+            let decoded = decode_frame(&sent).expect("the connector's own encoder");
+            assert_eq!(decoded.frame_type, BTP_TRANSFER);
+            outbound.resolve(BtpFrame {
+                frame_type: BTP_ERROR,
+                request_id: decoded.request_id,
+                amount: None,
+                protocol_data: Vec::new(),
+                ilp_packet: Vec::new(),
+            });
+        });
+
+        deliver_pending_claim(&state, address, None, crate::now_unix()).await;
+        peer.await.expect("the peer task");
+
+        assert_eq!(
+            ledger.pending_claim(&channel_id).map(|claim| claim.nonce),
+            Some(stranded.nonce),
+            "a refused TRANSFER leaves the same claim armed for the next attempt"
+        );
+        assert_eq!(
+            ledger.credited(&channel_id),
+            4_000,
+            "a refused TRANSFER disturbs credited no more than an accepted one does"
         );
     }
 }
