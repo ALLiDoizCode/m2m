@@ -3,11 +3,11 @@
 # Serves: proxy.relay.DOMAIN (connector ILP edge)  relay-ws.DOMAIN (relay app)
 #
 # Written to point directly at connector-rust:4000 — NOT at a TypeScript
-# connector. infra/linode-store/nginx/node.conf.template still names
-# "http://connector:3000" (the retired TypeScript node) because it predates
-# that box's own cutover and was never updated; its rendered
-# nginx/conf.d/node.conf is what actually reflects the live box. This box has
-# no TypeScript connector at all, so there is no stale value to carry over.
+# connector. infra/linode-store/nginx/node.conf.template used to name
+# "http://connector:3000" (the retired TypeScript node), predating that
+# box's own cutover; fixed in issue #819 to match its rendered
+# nginx/conf.d/node.conf. This box has no TypeScript connector at all, so
+# there was never a stale value to carry over here.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 limit_req_zone $binary_remote_addr zone=relay:10m rate=30r/s;
@@ -76,7 +76,7 @@ server {
     # connector's public signing key, but every other path here stays
     # same-origin-only.
     location = /ilp/identity {
-        add_header Access-Control-Allow-Origin "https://proxy.devnet.toonprotocol.dev" always;
+        add_header Access-Control-Allow-Origin "https://proxy.${DOMAIN}" always;
         add_header Vary "Origin" always;
         limit_req zone=relay burst=400 nodelay;
         proxy_pass http://connector-rust:4000/ilp/identity;
