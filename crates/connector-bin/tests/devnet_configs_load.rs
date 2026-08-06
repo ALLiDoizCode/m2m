@@ -761,7 +761,7 @@ async fn deploy_settlement_on_anvil() -> (Anvil, ethers::types::Address, ethers:
 /// the deployed Base Sepolia `TokenNetworkRegistry` (#576, #577). The anvil
 /// case replaces exactly this committed value, so it doubles as the guard
 /// that the committed section keeps naming it.
-const APEX_LIVE_REGISTRY: &str = "0xcC9079adE929b168B54145f6d25262b64FAB9D5b";
+const APEX_LIVE_REGISTRY: &str = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1";
 
 #[tokio::test]
 async fn the_apex_devnet_settlement_section_boots_against_a_deployed_contract() {
