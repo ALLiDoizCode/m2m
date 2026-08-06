@@ -71,6 +71,10 @@ jobs:
     needs: guard
     if: needs.guard.outputs.proceed == 'true'
     runs-on: ubuntu-latest
+    # Forensics split (toon-meta#278): the runner step below gets
+    # timeout-minutes: 40 so the always() redact+upload steps keep job
+    # budget even on a wall-clock kill. (The reviewer is maxIterations: 1 —
+    # 45 minutes is ample.)
     timeout-minutes: 45
     concurrency:
       group: agent-review-pr-${{ github.event.pull_request.number }}
@@ -118,8 +122,153 @@ jobs:
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
       - name: Run sandcastle review runner
+        # Step-level timeout (toon-meta#278): below the job's, so a wall-clock
+        # kill is a step failure and the always() forensics steps still run.
+        timeout-minutes: 40
         env:
           SANDCASTLE_PR_NUMBER: ${{ github.event.pull_request.number }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: npm run sandcastle:review
+
+      # REDACT BEFORE UPLOAD — this repository is PUBLIC.
+      #
+      # Actions masks registered secrets in STEP LOGS, but it does NOT mask
+      # ARTIFACT CONTENTS, and artifacts on a public repo are downloadable by
+      # anyone. The agent runs with GH_TOKEN and CLAUDE_CODE_OAUTH_TOKEN in its
+      # container environment, so any command it happens to run that echoes the
+      # environment (`env`, `git config --list`, a verbose curl) would put a live
+      # credential into the log we are about to publish.
+      #
+      # This is the org-uniform pattern (toon-meta#278): connector's proven
+      # #462-sweep redaction plus buzz's nsec addition, extended to also sweep
+      # any worktree a killed run left behind.
+      #
+      # Three passes, because no one of them is sufficient:
+      #   1. Exact values of the secrets this job holds — reliable, catches any
+      #      shape including ones we have not anticipated.
+      #   2. Known token/key shapes — catches credentials this job never held,
+      #      e.g. one the agent minted or read from somewhere else mid-run.
+      #   3. BIP-39 mnemonics and labelled private keys — defence in depth for
+      #      key material an agent generates or handles mid-run.
+      # Secrets are passed via env and never echoed.
+      #
+      # RESIDUAL GAP, stated rather than hidden: a raw 32-byte private key is
+      # 64 hex chars, indistinguishable in shape from a hash or event id.
+      # Redacting that shape unconditionally would strip the hashes that make a
+      # log worth reading, so pass 3 only redacts it when it appears against a
+      # key-ish label (`privateKey`, `secret_key`, ...). An unlabelled bare hex
+      # key would survive. Do not treat these artifacts as safe to publish a
+      # secret through; this is defence in depth.
+      - name: Redact credentials from agent logs
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [ -d .sandcastle ] || { echo "No .sandcastle directory — nothing to redact."; exit 0; }
+          python3 - <<'PY'
+          import os, pathlib, re
+
+          # Pass 1: exact secret values held by this job (longest first, so a
+          # secret that contains another is not partially replaced).
+          exact = sorted(
+              (v for v in (os.environ.get(k, "") for k in
+                           ("GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "APP_PRIVATE_KEY"))
+               if v and len(v.strip()) >= 8),
+              key=len, reverse=True,
+          )
+
+          # Passes 2 and 3, as (pattern, replacement) so a rule can keep the
+          # context it matched on.
+          patterns = [
+              # Pass 2 — token/key shapes, whether or not this job ever held them.
+              (re.compile(r"gh[pousr]_[A-Za-z0-9]{16,}"), "***REDACTED***"),
+              (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "***REDACTED***"),
+              (re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}"), "***REDACTED***"),
+              (re.compile(r"nsec1[a-z0-9]{20,}"), "***REDACTED***"),
+              (re.compile(r"-----BEGIN[^-]*PRIVATE KEY-----.*?-----END[^-]*PRIVATE KEY-----",
+                          re.DOTALL), "***REDACTED***"),
+              # Pass 3b — a raw private key is 64 hex chars, the same shape as a
+              # hash, so it is redacted only next to a key-ish label, and the
+              # label is kept so the log still reads. See the residual gap noted
+              # on this step.
+              (re.compile(
+                  r"((?:private[_\-]?key|secret[_\-]?key|signer[_\-]?key|priv[_\-]?key|keyId)"
+                  r"[\"'\s:=]{0,6})(?:0x)?[0-9a-fA-F]{64}",
+                  re.IGNORECASE,
+               ), r"\1***REDACTED***"),
+          ]
+
+          # Pass 3a — BIP-39 mnemonics: a run of exactly 12/15/18/21/24 lowercase
+          # words. Matching on structure rather than on the 2048-word list keeps
+          # this step dependency-free; the cost is that 12+ consecutive words of
+          # ordinary lowercase prose are caught too. That trade is deliberate —
+          # over-redacting a sentence in an agent log is cheap, publishing a seed
+          # is not.
+          #
+          # Longest first: with 12 tried first, a 24-word phrase would have its
+          # leading 12 words consumed and the remaining 12 left in the clear.
+          for n in (24, 21, 18, 15, 12):
+              patterns.append((
+                  re.compile(r"(?<![A-Za-z0-9'\-])(?:[a-z]{3,8}[ \n]+){%d}[a-z]{3,8}(?![A-Za-z0-9'\-])"
+                             % (n - 1)),
+                  "***REDACTED***",
+              ))
+
+          # Redact every log root the upload step publishes: the engine's own
+          # logs, plus any worktree left behind by a killed run — that is where
+          # a not-yet-pushed handoff note (.sandcastle/logs/handoff-<id>.md,
+          # per the ~200k context-budget policy) lives when the run died before
+          # its push.
+          roots = [pathlib.Path(".sandcastle/logs"),
+                   *pathlib.Path(".sandcastle/worktrees").glob("*/.sandcastle/logs")]
+
+          hits = 0
+          for root in roots:
+              if not root.is_dir():
+                  continue
+              for path in root.rglob("*"):
+                  if not path.is_file():
+                      continue
+                  raw = path.read_text(encoding="utf-8", errors="replace")
+                  out = raw
+                  for value in exact:
+                      for form in {value, value.strip(), value.replace("\n", "\\n")}:
+                          if form and form in out:
+                              out = out.replace(form, "***REDACTED***")
+                  for pat, repl in patterns:
+                      out = pat.sub(repl, out)
+                  if out != raw:
+                      hits += 1
+                      path.write_text(out, encoding="utf-8")
+          # Count only — never print what was found.
+          print(f"Redaction complete. Files modified: {hits}")
+          PY
+
+      # The reviewer's reasoning is written to .sandcastle/logs/, NOT to the
+      # step output — when a review run fails or pushes nothing there is
+      # otherwise NOTHING to diagnose from: the log dies with the runner.
+      # Upload it so a failed or empty review is explicable. The worktree glob
+      # additionally captures anything a killed run left behind, including a
+      # not-yet-pushed handoff note (toon-meta#278).
+      #
+      # `if: always()` because the interesting cases are exactly the ones where
+      # the previous step failed.
+      - name: Upload agent logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandcastle-review-logs-pr-${{ github.event.pull_request.number }}
+          path: |
+            .sandcastle/logs/
+            .sandcastle/worktrees/*/.sandcastle/logs/
+          if-no-files-found: warn
+          # Dot-dirs count as hidden for wildcard matches and upload-artifact
+          # v4.4+ default-excludes hidden files: without this the .sandcastle
+          # segment inside the worktrees glob is dropped and the handoff note
+          # never lands in the artifact (proven on the #278 mechanism run).
+          include-hidden-files: true
+          retention-days: 14
