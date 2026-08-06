@@ -4,37 +4,40 @@
 //
 // This is the single-pass replacement for the old 4-round `review-round:*`
 // reviewer loop (pr-reviewer.yml). It runs the reviewer role (review-prompt.md
-// — refactor for clarity while preserving behavior, enforce
-// @.sandcastle/CODING_STANDARDS.md) against the PR's head branch, and pushes any
-// refinement commits back to the PR. It NEVER merges the PR and NEVER closes
-// anything — a human still merges.
+// — two axes: Standards refinement + Spec review against the PR's target
+// issue) against the PR's head branch, pushes any refinement commits back to
+// the PR, and REQUIRES a structured verdict (toon-meta#275):
+//   - the reviewer must emit <review>{"verdict":"clean"|"blocking",
+//     "blockingFindings":[{file,line,summary,why}]}</review>; a malformed
+//     verdict fails the run (one engine-style resume retry, then non-zero exit)
+//   - on "blocking", the findings are posted as a PR review and the
+//     `needs:human` label is applied
+// It NEVER merges the PR and NEVER closes anything — a human still merges.
 //
 // DIFF SIZE: this runner shares review-prompt.md with ./main.ts, so it inherits
 // the bounded diff expansion (`.sandcastle/review-diff.ts`, connector#468) —
 // there is no separate diff inlining here to guard. The prompt can no longer be
 // blown up by a large PR; a reduced view says so in the prompt itself.
 //
-// STANDALONE-REVIEW: FIRST-LIVE-RUN OUTCOME (2026-07-30, PR #634)
-// ---------------------------------------------------------------
-// Sandcastle 0.12.0 exercises the reviewer only INSIDE the parallel loop's
-// Phase 2, on a fresh `sandcastle/issue-*` branch it just created. Driving the
-// same reviewer standalone against an already-existing PR head branch is our
-// interpretation, not a documented engine feature. What the first live run
-// established:
-//   1. createSandbox({ branch: <existing PR head> }) DOES check out the
-//      existing branch — but in its own worktree under .sandcastle/worktrees/,
-//      so the HOST working tree must NOT have that branch checked out (git
-//      refuses one branch in two worktrees). The workflow therefore checks out
-//      `main`, never the PR head.
-//   2. Still unconfirmed: the built-in {{TARGET_BRANCH}} inside
-//      review-prompt.md resolves to `main` for a standalone sandbox. If the
-//      diff comes back empty, the base may be resolving wrong — check the
-//      reviewer's logged `git diff` command.
+// STANDALONE-REVIEW MECHANICS (proven live on this repo's first run, PR #634):
+//   Sandcastle checks the PR head branch out in its OWN worktree under
+//   .sandcastle/worktrees/, and git refuses one branch in two worktrees — so
+//   the workflow checks out MAIN, never the PR head. Because the local clone
+//   is then on main, this runner materialises the PR head as a LOCAL branch
+//   (git fetch origin +head:head) before createSandbox(): without it the
+//   engine's `worktree add` falls back to `-b <branch> HEAD`, silently
+//   reviewing an EMPTY diff off main. review-prompt.md's {{TARGET_BRANCH}}
+//   resolves to the checked-out branch (main), so the diff base is right.
+//
+// The target issue for the Spec axis is resolved from the PR body's
+// `Closes #n` (the implement runner writes one into every factory PR body).
+// PRs without a closing reference get a Standards-only review.
 //
 // Required env:
 //   SANDCASTLE_PR_NUMBER      the PR to review (github.event.pull_request.number)
 //   CLAUDE_CODE_OAUTH_TOKEN   Claude Max-plan credential (org secret)
-//   GH_TOKEN                  token with contents:write + pull-requests:write
+//   GH_TOKEN                  token with contents:write + pull-requests:write +
+//                             issues:write (labels)
 //
 // Usage:
 //   SANDCASTLE_PR_NUMBER=42 npx tsx .sandcastle/agent-review-pr.ts
@@ -51,6 +54,12 @@ import { execFileSync } from 'node:child_process';
 import * as sandcastle from '@ai-hero/sandcastle';
 import { docker } from '@ai-hero/sandcastle/sandboxes/docker';
 import { sandboxSecrets } from './sandbox-secrets.ts';
+import {
+  postBlockingVerdict,
+  resolveIssueFromPrBody,
+  runReviewerWithVerdict,
+  type ReviewVerdict,
+} from './review-verdict.ts';
 
 const prNumber = process.env.SANDCASTLE_PR_NUMBER?.trim();
 if (!prNumber || !/^\d+$/.test(prNumber)) {
@@ -70,6 +79,21 @@ const headRef = execFileSync(
 if (!headRef) {
   throw new Error(`Could not resolve head branch for PR #${prNumber}.`);
 }
+
+// Materialise the PR head as a local branch at origin's tip (the host clone is
+// on main — see the standalone-review mechanics note above). Forced so a
+// re-labeled PR re-reviews the CURRENT head even after a force-push.
+execFileSync('git', ['fetch', 'origin', `+${headRef}:${headRef}`], {
+  stdio: 'inherit',
+});
+
+// Resolve the Spec-axis target issue from the PR body's `Closes #n`.
+const targetIssue = resolveIssueFromPrBody(prNumber);
+console.log(
+  targetIssue
+    ? `Spec axis target: issue #${targetIssue.number} — ${targetIssue.title}`
+    : 'No `Closes #n` in the PR body — Standards-only review.'
+);
 
 // connector is an npm-workspaces monorepo — install with the committed
 // package-lock.json (`npm ci`). Mirrors main.ts / agent-implement-issue.ts.
@@ -106,19 +130,19 @@ async function main() {
     branch: headRef,
     // Forward CLAUDE_CODE_OAUTH_TOKEN + GH_TOKEN into the container (the engine's
     // env resolver does not — see ./sandbox-secrets.ts). GH_TOKEN is what the
-    // review-push step's in-sandbox `git push` to the PR branch authenticates with.
+    // review-push step's in-sandbox `git push` to the PR branch authenticates
+    // with, and what the reviewer's in-sandbox `gh issue view` (Spec axis) reads.
     sandbox: docker({ env: sandboxSecrets() }),
     hooks,
   });
 
+  let verdict: ReviewVerdict;
   try {
-    const review = await sandbox.run({
-      name: 'reviewer',
-      maxIterations: 1,
-      agent: sandcastle.claudeCode('claude-opus-5'),
-      promptFile: './.sandcastle/review-prompt.md',
-      promptArgs: { BRANCH: headRef },
+    const review = await runReviewerWithVerdict(sandbox, {
+      branch: headRef,
+      issue: targetIssue,
     });
+    verdict = review.verdict;
 
     if (review.commits.length > 0) {
       // Push the reviewer's refinement commits back onto the PR branch. No merge,
@@ -170,10 +194,19 @@ async function main() {
           `deliberately so this is not mistaken for success.`;
       }
     } else {
-      console.log('\nReviewer made no changes — the code was already clean. Nothing to push.');
+      console.log('\nReviewer made no changes — nothing to push.');
     }
   } finally {
     await sandbox.close();
+  }
+
+  // The verdict's side effects run AFTER the sandbox is closed, from the
+  // authenticated host: findings must land on the PR even if the push
+  // verification below is about to fail the job.
+  if (verdict.verdict === 'blocking') {
+    postBlockingVerdict(prNumber, verdict, targetIssue);
+  } else {
+    console.log('\nVerdict clean — no blocking findings.');
   }
 
   // Fail loud AFTER the sandbox is closed: a silently-failed push must turn the

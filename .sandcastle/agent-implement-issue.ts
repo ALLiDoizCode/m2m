@@ -61,6 +61,7 @@ import { docker } from '@ai-hero/sandcastle/sandboxes/docker';
 import { sandboxSecrets } from './sandbox-secrets.ts';
 import { mintAppToken } from './mint-app-token.ts';
 import { fixPrompt, runGate, selectSteps } from './run-gate.ts';
+import { postBlockingVerdict, runReviewerWithVerdict } from './review-verdict.ts';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -327,18 +328,30 @@ async function main() {
       );
     }
 
-    // Review (opus, 1 iteration) on the SAME branch. The engine supplies the
-    // built-in {{TARGET_BRANCH}} used inside review-prompt.md, so we pass only
-    // BRANCH (mirrors main.ts).
-    await sandbox.run({
-      name: 'reviewer',
-      maxIterations: 1,
-      agent: sandcastle.claudeCode('claude-opus-5'),
-      promptFile: './.sandcastle/review-prompt.md',
-      promptArgs: { BRANCH: branch },
+    // Review (opus, 1 iteration) on the SAME branch, with the structured
+    // verdict REQUIRED (toon-meta#275): the reviewer receives the issue via
+    // promptArgs (Spec axis — it reviews against the issue's acceptance
+    // criteria, not just the diff) and must emit
+    // <review>{"verdict":"clean"|"blocking","blockingFindings":[...]}</review>.
+    // A malformed verdict fails the run (one engine-style resume retry, then
+    // non-zero exit) — see ./review-verdict.ts. The engine supplies the
+    // built-in {{TARGET_BRANCH}} used inside review-prompt.md.
+    const review = await runReviewerWithVerdict(sandbox, {
+      branch,
+      issue: { number: issueNumber, title: issueTitle },
     });
+    const blocking = review.verdict.verdict === 'blocking';
 
-    if (autoMerge) {
+    if (autoMerge && blocking) {
+      // A blocking verdict must never be auto-merged: fall through to PR mode
+      // so the findings land on a PR for a human instead (toon-meta#275).
+      console.log(
+        '\nAuto-merge requested, but the reviewer verdict is BLOCKING — ' +
+          'falling back to PR mode so a human decides.'
+      );
+    }
+
+    if (autoMerge && !blocking) {
       // RE-ENABLE path: merge this one branch into the checked-out base and close
       // the issue, using the stock merge prompt scoped to the single branch.
       console.log('\nAuto-merge enabled — merging branch and closing issue.');
@@ -419,6 +432,14 @@ async function main() {
       if (openPrs.length > 0) {
         const pr = openPrs[0]!;
         console.log(`\nVerified: PR #${pr.number} is open — ${pr.url}`);
+        // A blocking verdict lands on the PR now that it exists: findings as a
+        // PR review, plus the `needs:human` label (toon-meta#275).
+        if (blocking) {
+          postBlockingVerdict(String(pr.number), review.verdict, {
+            number: issueNumber,
+            title: issueTitle,
+          });
+        }
         console.log('Awaiting human review.');
       } else {
         // No open PR. Gather diagnostics (all via the authenticated host `gh`).
