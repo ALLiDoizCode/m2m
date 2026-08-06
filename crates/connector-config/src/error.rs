@@ -607,4 +607,7 @@ pub enum ConfigError {
          [[client_channels]] row, which is a channel this node RECEIVES on (issue #784)"
     )]
     AnnounceInvalidPayChannel { value: String },
+
+    #[error("[announce] identity_key_file does not exist or is not a file: {0}")]
+    AnnounceIdentityKeyFileNotFound(PathBuf),
 }

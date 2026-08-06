@@ -85,7 +85,7 @@ use std::time::Duration;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
-use connector_config::{Config, SecretLocation, SettlementConfig};
+use connector_config::{AnnounceConfig, Config, SecretLocation, SettlementConfig};
 use connector_domain::{
     derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, PacketResponse, Prepare, Reject,
 };
@@ -97,7 +97,10 @@ use connector_signer::{
 };
 use serde::Serialize;
 
-use crate::runtime::{read_settlement_key_bytes, read_signer_secret, Runtime, RuntimeError};
+use crate::runtime::{
+    read_announce_identity_secret, read_settlement_key_bytes, read_signer_secret, Runtime,
+    RuntimeError,
+};
 
 /// How long the free, unauthenticated negotiation calls may take. Short on
 /// purpose: they are two small reads against one host, and an operator
@@ -1268,6 +1271,30 @@ async fn refuse_if_a_second_process_would_fork_the_ledger(
     Ok(())
 }
 
+/// The 32-byte secret this announce signs its Nostr event with (issue
+/// #799): `[announce] identity_key_file` when the operator has carried one
+/// over, or this node's own `[signer]` identity otherwise -- the same
+/// default this command had before the field existed. A Nostr signature
+/// needs the scalar itself (see `connector_signer::nostr`), so a KMS-held
+/// `[signer]` identity cannot announce unless `identity_key_file` supplies
+/// one -- said plainly rather than discovered as a panic.
+///
+/// Split out of [`announce`] so this resolution -- and therefore the exact
+/// pubkey a given key file produces -- is testable on its own, without the
+/// network calls the rest of the command makes.
+fn resolve_announce_identity(
+    config: &Config,
+    announce_config: &AnnounceConfig,
+) -> Result<[u8; 32], AnnounceError> {
+    if let Some(path) = announce_config.identity_key_file() {
+        return Ok(read_announce_identity_secret(path)?);
+    }
+    match config.signer_key() {
+        location @ SecretLocation::File(_) => Ok(read_signer_secret(location)?),
+        SecretLocation::Kms { .. } => Err(AnnounceError::UnsignableIdentity),
+    }
+}
+
 // ── the whole thing ──────────────────────────────────────────────────────────
 
 /// What an announce produced, for the caller to print.
@@ -1330,14 +1357,7 @@ pub async fn announce(
         refuse_if_a_second_process_would_fork_the_ledger(config, &destination).await?;
     }
 
-    // The identity key, read the same way `build_signer` reads it. A Nostr
-    // signature needs the scalar (see `connector_signer::nostr`), so a
-    // KMS-held identity cannot announce -- said plainly rather than
-    // discovered as a panic.
-    let secret = match config.signer_key() {
-        SecretLocation::File(_) => read_signer_secret(config.signer_key())?,
-        SecretLocation::Kms { .. } => return Err(AnnounceError::UnsignableIdentity),
-    };
+    let secret = resolve_announce_identity(config, &announce_config)?;
 
     let runtime = crate::build(config).await?;
 
@@ -1648,6 +1668,110 @@ fn read_relay_answer(fulfill: &Fulfill, shared_secret: &[u8; 32]) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::path::Path;
+
+    /// Write `secret` to a fresh temp file, as an operator's key file holds
+    /// it: 32 raw bytes. Held by the caller, since dropping it deletes it.
+    fn key_file(secret: &[u8; 32]) -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new().expect("temp key file");
+        file.write_all(secret).expect("write key file");
+        file
+    }
+
+    /// The BIP-340 x-only pubkey `secret` announces under, derived through
+    /// `k256::schnorr` DIRECTLY rather than through
+    /// `connector_signer::nostr` -- see
+    /// [`identity_key_file_overrides_the_signer_and_the_announced_pubkey_is_pinned`]
+    /// for why the independence matters.
+    fn announced_pubkey_of(secret: &[u8; 32]) -> String {
+        let signing_key = k256::schnorr::SigningKey::from_bytes(secret).expect("valid scalar");
+        hex_encode(&signing_key.verifying_key().to_bytes())
+    }
+
+    /// Load a minimal config with `[signer]` pointed at `signer_key` and,
+    /// when given, an `[announce]` section pointed at `identity_key`.
+    fn config_with_identity(signer_key: &Path, identity_key: Option<&Path>) -> Config {
+        let mut config_file = tempfile::NamedTempFile::new().expect("temp config file");
+        write!(
+            config_file,
+            r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{signer}"
+
+[announce]
+addresses = ["g.toon.ario"]
+http_endpoint = "https://proxy.ario.example/ilp"
+btp_endpoint = "wss://proxy.ario.example/ilp/btp"
+{identity_line}
+"#,
+            signer = signer_key.display(),
+            identity_line = identity_key
+                .map(|path| format!(r#"identity_key_file = "{}""#, path.display()))
+                .unwrap_or_default(),
+        )
+        .expect("write config file");
+        Config::load(config_file.path()).expect("load config")
+    }
+
+    /// The whole point of `[announce] identity_key_file` (issue #799): the
+    /// retired sidecar's Nostr identity survives the cutover to this
+    /// subcommand byte for byte, so a genesis peer seed pinning its pubkey
+    /// does not go stale the day the sidecar is switched off.
+    ///
+    /// Pinned against an INDEPENDENT BIP-340 derivation (`k256::schnorr`
+    /// directly) rather than a second call into
+    /// `connector_signer::nostr::sign_ilp_peer_info` -- a bug in that
+    /// module's own derivation could not make this test agree with it by
+    /// construction, mirroring how `nostr.rs`'s own tests verify the way a
+    /// relay verifies rather than by re-deriving through the same code path.
+    #[test]
+    fn identity_key_file_overrides_the_signer_and_the_announced_pubkey_is_pinned() {
+        let signer_secret = [7u8; 32];
+        let identity_secret = [9u8; 32];
+        let signer_key_file = key_file(&signer_secret);
+        let identity_key_file = key_file(&identity_secret);
+
+        let config = config_with_identity(signer_key_file.path(), Some(identity_key_file.path()));
+        let announce_config = config.announce().expect("announce section present");
+
+        let secret = resolve_announce_identity(&config, announce_config).expect("resolve");
+        assert_eq!(
+            secret, identity_secret,
+            "identity_key_file must win over [signer]'s own key"
+        );
+
+        let event = sign_ilp_peer_info(&secret, "{}".to_string(), 1_700, 600).expect("sign");
+        assert_eq!(
+            event.pubkey,
+            announced_pubkey_of(&identity_secret),
+            "the announced pubkey must be the carried-over identity's, never the connector's \
+             own [signer] pubkey"
+        );
+        assert_ne!(
+            event.pubkey,
+            announced_pubkey_of(&signer_secret),
+            "sanity: the signer's own key must produce a DIFFERENT pubkey, or this test would \
+             pass even if identity_key_file were silently ignored"
+        );
+    }
+
+    /// With no `identity_key_file` configured, resolution is unchanged from
+    /// before issue #799: the connector's own `[signer]` identity signs the
+    /// announce.
+    #[test]
+    fn with_no_identity_key_file_the_signers_own_key_still_signs() {
+        let signer_secret = [7u8; 32];
+        let signer_key_file = key_file(&signer_secret);
+
+        let config = config_with_identity(signer_key_file.path(), None);
+        let announce_config = config.announce().expect("announce section present");
+
+        let secret = resolve_announce_identity(&config, announce_config).expect("resolve");
+        assert_eq!(secret, signer_secret);
+    }
 
     /// The devnet apex's own greeting shape, abridged: the price, the
     /// echoed `payTo`, and the EIP-712 domain a claim must be signed under

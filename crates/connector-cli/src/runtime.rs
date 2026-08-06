@@ -100,6 +100,15 @@ pub enum RuntimeError {
     /// widening of the config shape refuses to start instead of panicking
     /// on the first peer claim.
     PeerChannelUnusable { channel_id: String },
+    /// `[announce] identity_key_file`'s path exists (config load already
+    /// checked that) but could not be read.
+    AnnounceIdentityKeyFileUnreadable {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    /// `[announce] identity_key_file`'s contents are neither 32 raw bytes
+    /// nor 64 hex characters encoding 32 bytes.
+    InvalidAnnounceIdentityKeyMaterial { path: PathBuf },
 }
 
 impl fmt::Display for RuntimeError {
@@ -165,6 +174,17 @@ impl fmt::Display for RuntimeError {
                  refuses to start rather than resume from watermarks it cannot vouch for",
                 path.display()
             ),
+            RuntimeError::AnnounceIdentityKeyFileUnreadable { path, source } => write!(
+                f,
+                "failed to read [announce] identity_key_file at {}: {source}",
+                path.display()
+            ),
+            RuntimeError::InvalidAnnounceIdentityKeyMaterial { path } => write!(
+                f,
+                "[announce] identity_key_file at {} must contain either 32 raw bytes or \
+                 64 hex characters encoding a 32-byte secret key",
+                path.display()
+            ),
         }
     }
 }
@@ -227,6 +247,30 @@ pub(crate) fn read_signer_secret(location: &SecretLocation) -> Result<[u8; 32], 
         }
         SecretLocation::Kms { .. } => Err(RuntimeError::UnsupportedSignerLocation),
     }
+}
+
+/// The raw 32-byte secret `[announce] identity_key_file` points at (issue
+/// #799): a durable Nostr identity carried over from wherever an operator
+/// previously announced this node from -- typically the retired sidecar's
+/// own `ANNOUNCER_IDENTITY_SECRET_KEY_FILE` -- so a genesis peer seed that
+/// already pins that pubkey does not go stale the day the sidecar is
+/// switched off in favour of `connector announce`.
+///
+/// Not `[signer]`'s own key, and read through this sibling function rather
+/// than [`read_signer_secret`] on purpose: the two locations answer
+/// different questions ("what does this node sign gift wraps and
+/// `GET /ilp/identity` with" versus "what did the last publisher of this
+/// node's announce sign with"), and an unreadable-file or bad-material
+/// error must name the field that is actually misconfigured.
+pub(crate) fn read_announce_identity_secret(path: &Path) -> Result<[u8; 32], RuntimeError> {
+    let bytes =
+        std::fs::read(path).map_err(|source| RuntimeError::AnnounceIdentityKeyFileUnreadable {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    decode_secret_key(&bytes).ok_or_else(|| RuntimeError::InvalidAnnounceIdentityKeyMaterial {
+        path: path.to_path_buf(),
+    })
 }
 
 fn build_signer(location: &SecretLocation) -> Result<Arc<dyn Signer>, RuntimeError> {

@@ -1106,6 +1106,7 @@ dependencies = [
  "ethers",
  "futures-util",
  "hyper",
+ "k256",
  "libsecp256k1",
  "rand 0.7.3",
  "reqwest",

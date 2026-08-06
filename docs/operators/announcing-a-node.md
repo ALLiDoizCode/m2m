@@ -113,7 +113,33 @@ btp_endpoint  = "wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp"
 # asset_scale = 6                        # default
 # solana_chain_id = "solana:devnet"      # default; qualifies the greeting's bare "solana"
 # ttl_secs = 600                         # default; NIP-40 expiration
+# identity_key_file = "/root/keys/announce.key"  # carry over a durable Nostr identity; see below
 ```
+
+### The Nostr identity: `[signer]` by default, `identity_key_file` to carry one over
+
+The event this command publishes is signed with this node's own `[signer]` identity by default —
+the same key that opens gift wraps and answers `GET /ilp/identity`. That is correct for a node
+announcing itself for the first time.
+
+It is **not** correct for a node that is **taking over announcing from something else that already
+published under a different key** — most concretely, the `announcer` sidecar this subcommand
+replaces (issue #784), which loads its own identity from `ANNOUNCER_IDENTITY_SECRET_KEY_FILE`
+independently of any connector's `[signer]`. If a genesis peer seed (or any client's cache) already
+pins the sidecar's pubkey, switching to `connector announce` with no `identity_key_file` signs every
+future announce under a **different** pubkey — the seed goes stale, and every client relying on it
+fails to bootstrap with `EOSE, found 0 events`, silently, until someone re-publishes the seed and
+every already-shipped client is re-pointed at it.
+
+**When retiring the sidecar, set `[announce] identity_key_file` to the exact path the sidecar's
+`ANNOUNCER_IDENTITY_SECRET_KEY_FILE` named** (e.g. `/root/keys/announce.key` on the apex box) before
+turning the sidecar off. This node then signs under the identical pubkey the sidecar always did, and
+the cutover is invisible to every client already discovering by that identity. Skipping this step is
+not a config rollback: the seed is baked into published `@toon-protocol/core`, so recovering from a
+silent pubkey change is a republish chain plus re-pointing every client already in the wild.
+
+A `key_file` identity is required either way (see below) — `identity_key_file` only changes _which_
+key file that identity comes from.
 
 ### Three URLs, and conflating any two is the bug
 
@@ -151,7 +177,9 @@ announce's own `routes.publish`.
 2. **A `[settlement.evm]` table** — the claim is signed by the channel's on-chain participant, which
    is this node's settlement identity. There is no second key.
 3. **A `key_file` identity.** A Nostr signature is BIP-340 Schnorr over the event's own id, which
-   needs the scalar itself — a KMS-held `[signer]` cannot announce.
+   needs the scalar itself — a KMS-held `[signer]` cannot announce, unless
+   `[announce] identity_key_file` supplies a file-based one instead (see above — this is the
+   field that matters when retiring the sidecar).
 4. **A `--btp-url`, if the target's route is pinned to BTP** (issue #701). **The devnet apex pins
    `g.toon.relay` to `transport = "btp"`**, so an announce there is paid over BTP and needs the
    apex's `wss://…/ilp/btp` endpoint supplied. Without it the command refuses up front, before
