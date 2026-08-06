@@ -37,6 +37,7 @@ use connector_btp::BtpFrame;
 use connector_domain::{
     fulfillment_matches_condition, Fulfill, PacketResponse, Prepare, Reject, RejectCode,
 };
+use connector_runtime::ClaimAckOutcome;
 
 use crate::btp::payout_claim_protocol_data;
 use crate::ClientEdgeState;
@@ -129,11 +130,14 @@ pub(crate) async fn route_prepare(
 ///    connector has not seen before (issue #780). A node with no payout
 ///    ledger configured, or a destination with no known channel yet, does
 ///    nothing here.
-/// 2. The freshly signed claim is delivered as a payout TRANSFER over the
-///    same session, fenced against the generation this delivery already
-///    used. A session that has died in the meantime loses only this
-///    delivery attempt, never the credit: `pending_claim` carries it
-///    forward to whatever next reaches this channel.
+/// 2. [`deliver_pending_claim`] flushes whatever `pending_claim` currently
+///    owes this channel -- called unconditionally, whether or not step 1
+///    itself produced a fresh claim (issue #779). A deduped retry (the same
+///    execution condition as an earlier delivery) still reaches this line,
+///    and a claim is cumulative (ADR 0024), so the latest pending one
+///    already carries forward anything an earlier delivery on this channel
+///    failed to hand off -- this is how a payout claim whose delivery
+///    failed gets resent rather than stranded forever.
 async fn credit_session_earnings(
     state: &ClientEdgeState,
     destination: &str,
@@ -142,23 +146,67 @@ async fn credit_session_earnings(
     amount: u64,
     now: u64,
 ) {
-    let Some(claim) = state
+    let _ = state
         .claim_gate
         .credit_session_payout(destination, condition, amount, chrono::Utc::now())
-        .await
+        .await;
+    deliver_pending_claim(state, destination, Some(generation), now).await;
+}
+
+/// Issue #779: `pending_claim` had signing and delivery logic but no
+/// production caller at all -- a client whose BTP session dropped between
+/// the credit and the TRANSFER was left able to spend (`credited` had
+/// risen) but unable to redeem (it held no signed claim for the increment).
+/// This is the resend: whatever [`crate::outbound_ledger::ClientPayoutLedger::pending_claim`]
+/// currently owes `destination`'s associated channel is (re)sent over its
+/// currently bound session, fenced against `expected_generation` exactly
+/// like every other delivery this module makes.
+///
+/// The TRANSFER's own `amount` field carries the claim's cumulative amount
+/// rather than any one job's increment: this call has no specific job to
+/// attach to (a stranded claim from an earlier failed delivery, or a bare
+/// reconnect with no job in sight at all), and the claim itself -- not this
+/// field, which `client-edge-spec.md` §1.9 step 7 leaves without netting
+/// meaning of its own -- is what a client actually redeems.
+///
+/// Best-effort like every step this module takes past a packet's own
+/// answer: no live session for `destination`, no channel association yet,
+/// no payout ledger configured, or nothing currently pending all leave
+/// `pending_claim` exactly where it was for the next caller to find.
+/// Acknowledgement -- which alone clears `pending_claim`, never `credited`
+/// -- happens only once [`crate::session_registry::SessionRegistry::deliver_transfer`]
+/// genuinely succeeds.
+///
+/// Two production call sites: [`credit_session_earnings`] above (every
+/// fulfilled delivery, deduped or not) and `crate::btp::handle_frame`'s auth
+/// branch, once a session (re)establishes -- so a stranded claim need not
+/// wait for the next job to land on the very same channel.
+pub(crate) async fn deliver_pending_claim(
+    state: &ClientEdgeState,
+    destination: &str,
+    expected_generation: Option<u64>,
+    now: u64,
+) {
+    let Some((channel_id, ledger)) = state.claim_gate.payout_channel_for_session(destination)
     else {
         return;
     };
-    let _ = state
+    let Some(claim) = ledger.pending_claim(&channel_id) else {
+        return;
+    };
+    let delivered = state
         .session_registry
         .deliver_transfer(
             destination,
-            Some(generation),
-            amount,
+            expected_generation,
+            claim.cumulative_amount,
             &[payout_claim_protocol_data(&claim)],
             now,
         )
         .await;
+    if delivered.is_ok() {
+        ledger.acknowledge(&channel_id, claim.nonce, ClaimAckOutcome::Accepted);
+    }
 }
 
 fn is_unreachable(response: &PacketResponse) -> bool {
@@ -1053,6 +1101,156 @@ mod tests {
         assert!(
             matches!(response, PacketResponse::Fulfill(fulfill) if fulfill.fulfillment == FULFILLMENT),
             "the original packet still answers fulfilled even though nothing could be credited"
+        );
+    }
+
+    // ─── issue #779: a payout claim whose delivery fails is resent ───
+
+    /// The production wiring this issue adds, exercised through the real
+    /// call site (`credit_session_earnings`), not by calling
+    /// `deliver_pending_claim` directly -- per the issue's own AC4, this
+    /// fails if that call site is deleted. A first delivery credits the
+    /// ledger and then loses its payout TRANSFER (the session's reply
+    /// channel is dropped right after it answers the FULFILL, simulating a
+    /// socket that dies in exactly the window #779 describes): `credited`
+    /// still rose and `pending_claim` still holds the stranded claim. A
+    /// second delivery of the *same job* -- a retry, deduped by
+    /// `credit_session_payout`'s own `record_payout_once` so it produces no
+    /// fresh claim at all -- must still flush that stranded claim, proving
+    /// the resend runs unconditionally rather than only alongside a fresh
+    /// credit.
+    #[tokio::test]
+    async fn a_stranded_payout_claim_is_resent_on_the_next_successful_delivery_even_when_deduped() {
+        let address = "g.provider.stranded";
+        let channel_id = format!("0x{:064x}", 99);
+        let payout_signer = Arc::new(LocalSigner::generate("payout-key"));
+        let domain = ChannelDomain {
+            chain_id: 84_532,
+            token_network_address: [0x88; 20],
+        };
+        let mut ledger = ClientPayoutLedger::new();
+        ledger.set_signer(payout_signer);
+        ledger
+            .set_channel_domain(channel_id.clone(), domain)
+            .expect("valid channel id");
+        let ledger = Arc::new(ledger);
+
+        let gate = ClientClaimGate::restore(Default::default(), Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay")
+            .with_payout_ledger(Arc::clone(&ledger));
+        gate.record_session_channel(address, channel_id.clone());
+
+        let registry = SessionRegistry::new();
+        let (handle, mut reply_rx, outbound) = test_handle();
+        registry.bind(address, handle, crate::now_unix());
+        let state = test_state_with_gate(empty_connector(), registry, gate);
+
+        let condition = derive_condition(&FULFILLMENT);
+        let first = Prepare {
+            amount: 5_000,
+            ..sample_prepare(address, condition)
+        };
+
+        // Answer the FULFILL MESSAGE, then drop the reply channel before
+        // the payout TRANSFER can even be written -- the credit must not
+        // depend on this socket still being alive.
+        let peer = tokio::spawn(async move {
+            answer_next_message(
+                &mut reply_rx,
+                &outbound,
+                Fulfill {
+                    fulfillment: FULFILLMENT,
+                    data: Vec::new(),
+                }
+                .encode(),
+            )
+            .await;
+            drop(reply_rx);
+        });
+
+        let response_first = route_prepare(&state, first, 0).await;
+        peer.await.expect("the peer task");
+
+        assert!(matches!(response_first, PacketResponse::Fulfill(_)));
+        assert_eq!(
+            ledger.credited(&channel_id),
+            5_000,
+            "the credit must not depend on the payout TRANSFER's own delivery succeeding"
+        );
+        assert!(
+            ledger.pending_claim(&channel_id).is_some(),
+            "a failed delivery leaves the claim pending for the next caller to find"
+        );
+
+        // A fresh session reaches the same address (a reconnect, or simply
+        // the next delivery landing on a working socket) and is sent a
+        // RETRY of the exact same job.
+        let (handle2, mut reply_rx2, outbound2) = test_handle();
+        state
+            .session_registry
+            .bind(address, handle2, crate::now_unix());
+
+        let retry = Prepare {
+            amount: 5_000,
+            ..sample_prepare(address, condition)
+        };
+        let expected_channel_id = channel_id.clone();
+        let peer2 = tokio::spawn(async move {
+            answer_next_message(
+                &mut reply_rx2,
+                &outbound2,
+                Fulfill {
+                    fulfillment: FULFILLMENT,
+                    data: Vec::new(),
+                }
+                .encode(),
+            )
+            .await;
+
+            let sent = reply_rx2
+                .recv()
+                .await
+                .expect("the stranded payout TRANSFER was resent");
+            let decoded = decode_frame(&sent).expect("the connector's own encoder");
+            assert_eq!(decoded.frame_type, BTP_TRANSFER);
+            let pd = decoded
+                .protocol_data
+                .iter()
+                .find(|pd| pd.name == PAYOUT_CLAIM_PROTOCOL)
+                .expect("the stranded claim rode this TRANSFER");
+            let json: serde_json::Value = serde_json::from_slice(&pd.data).expect("valid JSON");
+            assert_eq!(json["channelId"], expected_channel_id);
+            assert_eq!(json["cumulativeAmount"], 5_000);
+
+            outbound2.resolve(BtpFrame {
+                frame_type: BTP_RESPONSE,
+                request_id: decoded.request_id,
+                amount: None,
+                protocol_data: Vec::new(),
+                ilp_packet: Vec::new(),
+            });
+            reply_rx2
+        });
+
+        let response_retry = route_prepare(&state, retry, 0).await;
+        let mut reply_rx2 = peer2.await.expect("the peer task");
+
+        assert!(
+            matches!(response_retry, PacketResponse::Fulfill(_)),
+            "the session itself still answers a retried job normally"
+        );
+        assert_eq!(
+            ledger.credited(&channel_id),
+            5_000,
+            "a deduped retry must not credit a second time"
+        );
+        assert!(
+            ledger.pending_claim(&channel_id).is_none(),
+            "the successful resend acknowledged the claim, clearing pending_claim"
+        );
+        assert!(
+            reply_rx2.try_recv().is_err(),
+            "only one payout TRANSFER goes out -- no double send"
         );
     }
 }
