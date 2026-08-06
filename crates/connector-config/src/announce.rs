@@ -214,14 +214,19 @@ impl AnnounceConfig {
     /// spelled `publish_*` alongside `publish_to` rather than `*_endpoint`
     /// alongside the two that describe this node.
     ///
-    /// Explicit, never derived. The x402 greeting carries no BTP URL --
-    /// verified against the live devnet apex, whose `extra` keys are
-    /// exactly `endpoint` (the HTTP one), `ilpAddress`, `price`,
-    /// `requiredTransport`, `sessionLeaseTtlMs`, `settlement` and
-    /// `settlements` -- so there is nothing to negotiate it from, and
-    /// swapping the HTTP URL's scheme and appending a path is a guess that
-    /// is right only on deployments shaped like this fleet's. An operator
-    /// finds it in the target's own kind:10032 announce, as `btpEndpoint`.
+    /// Explicit, never derived. Before issue #807 the x402 greeting carried
+    /// no BTP URL at all -- verified against the live devnet apex, whose
+    /// `extra` keys were exactly `endpoint` (the HTTP one), `ilpAddress`,
+    /// `price`, `requiredTransport`, `sessionLeaseTtlMs`, `settlement` and
+    /// `settlements` -- so there was nothing to negotiate it from. #807
+    /// added `extra.btpEndpoint`, but only when the *target* configures its
+    /// own `[announce]`; a target that does not still leaves nothing to
+    /// negotiate from, and swapping the HTTP URL's scheme and appending a
+    /// path remains a guess that is right only on deployments shaped like
+    /// this fleet's. This field stays explicit rather than falling back to
+    /// the greeting for that reason. An operator finds the value either in
+    /// the target's own x402 greeting (`extra.btpEndpoint`, issue #807) or
+    /// its kind:10032 announce, both spelled `btpEndpoint`.
     pub fn publish_btp_url(&self) -> Option<&str> {
         self.publish_btp_url.as_deref()
     }
