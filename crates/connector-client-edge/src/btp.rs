@@ -49,7 +49,7 @@ use connector_btp::{
     PAYMENT_REQUIRED_PROTOCOL, PAYOUT_CLAIM_PROTOCOL,
 };
 use connector_domain::client_claim::{ClientClaim, EVM_NAMESPACE};
-use connector_domain::{PacketResponse, Prepare, Reject, RejectCode};
+use connector_domain::{condition_is_present, PacketResponse, Prepare, Reject, RejectCode};
 use connector_signer::{verify_evm_claim_state_challenge, EvmClaimStateChallenge};
 
 use crate::channels::decode_hex_bytes;
@@ -671,6 +671,10 @@ async fn handle_frame(
     // `handle_ilp`'s mirror of this on the HTTP carriage.
     let client_route = state.connector.client_route(&prepare.destination);
     let price = client_route.map_or(0, |route| route.price);
+    // Issue #807: see `handle_ilp`'s mirror of this on the HTTP carriage --
+    // a condition-less PREPARE is structurally a bootstrap/greeting probe,
+    // never a real payment attempt, regardless of destination.
+    let condition_present = condition_is_present(&prepare.execution_condition);
 
     // Transport policy (issue #701, toon-meta#262 decision 11), BTP-shaped:
     // checked before payment is considered at all, exactly like the HTTP
@@ -689,6 +693,7 @@ async fn handle_frame(
                 price,
                 state.settlement_terms.as_ref(),
                 &state.settlements,
+                state.bootstrap_identity.as_ref(),
                 Some(policy.name()),
             );
             let reject = Reject {
@@ -721,13 +726,15 @@ async fn handle_frame(
     // The §1.4 greeting, BTP-shaped (§1.9 step 3): BTP cannot answer HTTP
     // 402, so the same terms JSON rides as protocolData on an F06 REJECT.
     // A claimless PREPARE to an unpriced route falls through unchanged,
-    // exactly as on HTTP.
-    if claim_json.is_none() && price > 0 {
+    // exactly as on HTTP -- unless the PREPARE itself carries no execution
+    // condition (issue #807), the same broadening `handle_ilp` applies.
+    if claim_json.is_none() && (price > 0 || !condition_present) {
         let terms = x402_terms_body(
             &prepare.destination,
             price,
             state.settlement_terms.as_ref(),
             &state.settlements,
+            state.bootstrap_identity.as_ref(),
             None,
         );
         let reject = Reject {
@@ -1096,6 +1103,7 @@ mod tests {
             btp_session_window: crate::DEFAULT_BTP_SESSION_WINDOW,
             session_registry: Arc::new(crate::session_registry::SessionRegistry::new()),
             peers: None,
+            bootstrap_identity: None,
         }
     }
 
@@ -1608,5 +1616,64 @@ mod tests {
             12_345,
             "acknowledging a resend must never disturb credited"
         );
+    }
+
+    /// Issue #807's BTP mirror of `handle_ilp`'s HTTP-side broadening: a
+    /// PREPARE whose execution condition is all-zero is structurally a
+    /// bootstrap/greeting probe, never a real payment attempt (issue #417
+    /// refuses to route one regardless of destination), so it must be
+    /// answered with the §1.4 greeting even when -- as here -- `destination`
+    /// matches no configured route at all. Before this fix the session saw
+    /// `F01 prepare carries no execution condition` (`reject_ineligible`)
+    /// for exactly this shape, which is `edge-client.ts`'s `fetchGreeting`
+    /// probe and is what left a client with a stale or missing genesis peer
+    /// seed unable to bootstrap.
+    #[tokio::test]
+    async fn a_zero_condition_prepare_over_btp_is_answered_with_the_greeting_not_f01() {
+        use crate::claim_gate::ClientClaimGate;
+        use crate::X402PaymentRequired;
+        use chrono::TimeZone;
+        use connector_runtime::InMemoryJournal;
+
+        let gate = ClientClaimGate::restore(Default::default(), Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay");
+        let state = Arc::new(test_state(gate));
+
+        let prepare = Prepare {
+            amount: 0,
+            expires_at: chrono::Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
+            execution_condition: [0u8; 32],
+            destination: "g.nowhere".to_string(),
+            data: Vec::new(),
+        };
+        let frame = connector_btp::encode_message(1, &[], &prepare.encode());
+
+        let (replies, mut reply_rx) = mpsc::channel::<Vec<u8>>(REPLY_QUEUE_DEPTH);
+        let window = Arc::new(Semaphore::new(4));
+        let outbound = Arc::new(OutboundRequests::new());
+        let mut binding = None;
+        handle_frame(&frame, &state, &window, &replies, &outbound, &mut binding)
+            .await
+            .expect("the reply channel has a live receiver");
+
+        let sent = reply_rx.recv().await.expect("a reply was sent");
+        let decoded = decode_frame(&sent).expect("the connector's own encoder");
+        let reject = Reject::decode(&decoded.ilp_packet).expect("a REJECT carries the terms");
+        assert_eq!(
+            reject.code.as_str(),
+            "F06",
+            "a zero-condition PREPARE to an unmatched destination must be greeted, not F01'd"
+        );
+
+        let terms_bytes = decoded
+            .protocol_data
+            .iter()
+            .find(|pd| pd.name == PAYMENT_REQUIRED_PROTOCOL)
+            .expect("the greeting's terms ride as payment-required protocolData")
+            .data
+            .clone();
+        let terms: X402PaymentRequired =
+            serde_json::from_slice(&terms_bytes).expect("valid x402 terms JSON");
+        assert_eq!(terms.accepts[0].amount, "0");
     }
 }
