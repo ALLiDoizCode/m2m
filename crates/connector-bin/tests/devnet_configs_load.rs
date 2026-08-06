@@ -52,7 +52,7 @@
 //! looked for a literal `"\n[settlement]\n"` that no longer existed, and
 //! the anvil case knew nothing of the second key file, so both apex cases
 //! failed against the committed config. They are keyed off the section
-//! HEADERS now ([`APEX_LIVE_SETTLEMENT_SECTIONS`]) rather than one literal
+//! HEADERS now ([`LIVE_SETTLEMENT_SECTIONS`]) rather than one literal
 //! marker, and stripping still panics when a named section is not there
 //! live -- a config that quietly loses its settlement must break this
 //! module, never coast through it.
@@ -117,6 +117,7 @@ use support::{parse_json_log_addr, write_config, write_raw_key_file};
 
 const APEX_CONFIG: &str = include_str!("../../../infra/linode-node/connector-rust.toml");
 const STORE_CONFIG: &str = include_str!("../../../infra/linode-store/connector-rust.toml");
+const RELAY_CONFIG: &str = include_str!("../../../infra/linode-relay/connector-rust.toml");
 
 /// This test binary's own base port for [`Anvil::spawn`] -- distinct from
 /// other test binaries' bases (`connector-settlement-evm`'s own tests use
@@ -125,9 +126,13 @@ const STORE_CONFIG: &str = include_str!("../../../infra/linode-store/connector-r
 /// port range.
 const ANVIL_BASE_PORT: u16 = 18_500;
 
-/// Every LIVE (uncommented) settlement section the apex file commits, in
-/// issue #628's keyed per-chain shape as of #645 -- the sections
-/// [`without_live_settlement`] strips for the hermetic verbatim boot.
+/// Every LIVE (uncommented) settlement section any of the fleet's three
+/// files (apex, store, relay -- issue #817) commits, in issue #628's keyed
+/// per-chain shape as of #645 -- the sections [`without_live_settlement`]
+/// strips for the hermetic verbatim boot. All three name the exact same
+/// four headers, so one list covers all of them; a file that ever needs a
+/// different set is a reason to split this constant, not to widen it
+/// silently.
 ///
 /// Named exhaustively rather than matched by a `[settlement` prefix so that
 /// the list itself is the claim about what the committed file contains:
@@ -136,18 +141,17 @@ const ANVIL_BASE_PORT: u16 = 18_500;
 /// not named here. Between them, neither losing a leg nor adding one can
 /// pass silently -- which is exactly what #645's migration off the flat
 /// `[settlement]` did to the string-literal marker this replaced.
-const APEX_LIVE_SETTLEMENT_SECTIONS: &[&str] = &[
+const LIVE_SETTLEMENT_SECTIONS: &[&str] = &[
     "[settlement.evm]",
     "[settlement.evm.key]",
     "[settlement.solana]",
     "[settlement.solana.key]",
 ];
 
-/// The apex file's Solana leg alone -- stripped by the anvil-backed case,
-/// which retargets the EVM leg at a local chain and has no local stand-in
+/// Any fleet file's Solana leg alone -- stripped by the anvil-backed cases,
+/// which retarget the EVM leg at a local chain and have no local stand-in
 /// for this one. See the module docs for why it is not booted.
-const APEX_SOLANA_SETTLEMENT_SECTIONS: &[&str] =
-    &["[settlement.solana]", "[settlement.solana.key]"];
+const SOLANA_SETTLEMENT_SECTIONS: &[&str] = &["[settlement.solana]", "[settlement.solana.key]"];
 
 /// The `price` the committed files put on their **store** routes, and so
 /// the amount the x402 greeting must quote for them. Deliberately a literal
@@ -159,7 +163,11 @@ const APEX_SOLANA_SETTLEMENT_SECTIONS: &[&str] =
 const EXPECTED_STORE_PRICE: u64 = 1000;
 
 /// The `price` the apex file puts on `g.toon.relay`, which is **not** the
-/// store price and is deliberately not folded into one constant.
+/// store price and is deliberately not folded into one constant. Shared
+/// with the relay box's own file (`infra/linode-relay/connector-rust.toml`,
+/// issue #816/#817): its terminating route names the same literal, since
+/// it is deliberately the same per-frame price quoted for the same prefix,
+/// today just answered on a different box.
 ///
 /// The apex box served `1` from 2026-08-03; the repo said `1000` while the
 /// comment above the value asserted parity with the TypeScript route on the
@@ -239,7 +247,7 @@ fn with_sandbox_paths(
     raw: &str,
     key_path: &std::path::Path,
     state_dir: &std::path::Path,
-    peer_secret: &std::path::Path,
+    peer_secret: Option<&std::path::Path>,
 ) -> String {
     let replaced = replace_expecting_a_match(
         raw,
@@ -262,11 +270,29 @@ fn with_sandbox_paths(
     // there. `replace_expecting_a_match` makes it load-bearing -- deleting
     // the peering from either config fails this test rather than silently
     // testing a fleet with no inter-node link.
-    replace_expecting_a_match(
-        &replaced,
-        "secret_file = \"/app/data/apex-store.secret\"",
-        &format!("secret_file = \"{}\"", peer_secret.display()),
-    )
+    //
+    // `None` for a client-edge-only file with no `[[peers]]` table of its
+    // own -- the relay box, issue #817, until #820 gives it one.
+    // `replace_expecting_a_match` would panic on a pattern that is not
+    // there, so this substitution is skipped rather than forced; the `None`
+    // arm instead asserts the pattern is genuinely absent, so a config that
+    // grows a peering without its caller here being taught `Some` fails
+    // loudly instead of silently booting with a foreign secret path.
+    match peer_secret {
+        Some(peer_secret) => replace_expecting_a_match(
+            &replaced,
+            "secret_file = \"/app/data/apex-store.secret\"",
+            &format!("secret_file = \"{}\"", peer_secret.display()),
+        ),
+        None => {
+            assert!(
+                !replaced.contains("secret_file ="),
+                "this config carries a `secret_file` but was booted with no \
+                 peer secret -- pass `Some(..)` to `with_sandbox_paths` for it"
+            );
+            replaced
+        }
+    }
 }
 
 /// The apex file's two settlement key files, each pointed at a real file
@@ -341,18 +367,19 @@ fn without_sections(raw: &str, headers: &[&str]) -> String {
     out
 }
 
-/// Strip ALL of the apex file's live settlement sections
-/// ([`APEX_LIVE_SETTLEMENT_SECTIONS`]) for the verbatim boot -- see the
-/// module docs: a committed live section is a startup-blocking chain
-/// dependency by design (ADR 0009), and the sections themselves are proven
-/// by the anvil-backed and parse cases below.
+/// Strip ALL of a fleet file's live settlement sections
+/// ([`LIVE_SETTLEMENT_SECTIONS`]) for the verbatim boot -- see the module
+/// docs: a committed live section is a startup-blocking chain dependency by
+/// design (ADR 0009), and the sections themselves are proven by the
+/// anvil-backed and parse cases below. Shared by all three fleet files
+/// (apex, store, relay), which all commit the same four headers.
 ///
 /// Panics when a named section is not there live, and again when a live
 /// settlement section survives that this module has not been taught about
 /// -- so neither losing settlement nor adding a chain leg can weaken the
 /// verbatim case unnoticed.
 fn without_live_settlement(raw: &str) -> String {
-    let stripped = without_sections(raw, APEX_LIVE_SETTLEMENT_SECTIONS);
+    let stripped = without_sections(raw, LIVE_SETTLEMENT_SECTIONS);
     let survivor = stripped
         .lines()
         .map(str::trim_end)
@@ -362,7 +389,7 @@ fn without_live_settlement(raw: &str) -> String {
         "the committed config has a live settlement section this test does \
          not know about ({}) -- every leg must be stripped for the hermetic \
          verbatim boot and covered by a case below; add it to \
-         `APEX_LIVE_SETTLEMENT_SECTIONS`",
+         `LIVE_SETTLEMENT_SECTIONS`",
         survivor.unwrap_or_default()
     );
     stripped
@@ -547,7 +574,7 @@ async fn the_apex_relay_side_devnet_config_loads_and_serves_verbatim() {
         &without_live_settlement(APEX_CONFIG),
         key_file.path(),
         state_dir.path(),
-        peer_secret.path(),
+        Some(peer_secret.path()),
     ));
 
     assert_answered_with_x402_greeting(
@@ -614,7 +641,7 @@ async fn the_store_side_devnet_config_loads_and_serves_verbatim() {
         &without_live_settlement(STORE_CONFIG),
         key_file.path(),
         state_dir.path(),
-        peer_secret.path(),
+        Some(peer_secret.path()),
     ));
 
     assert_answered_with_x402_greeting(
@@ -633,6 +660,47 @@ async fn the_store_side_devnet_config_loads_and_serves_verbatim() {
     // the same thing and stays: it is the relay-hop spelling of the same
     // path, not a second name for the app.
     assert!(!STORE_CONFIG.contains("prefix = \"g.toon.store\""));
+}
+
+/// The relay box's own file (issue #816/#817), modelled on the store's case
+/// above: a client-edge-only connector that terminates `g.toon.relay`
+/// against the relay app now co-located with it, in place of the apex's
+/// former local `handler_url` route to the same app.
+#[tokio::test]
+async fn the_relay_side_devnet_config_loads_and_serves_verbatim() {
+    assert!(RELAY_CONFIG.contains("g.toon.relay"));
+
+    // #815 constraint: this box has no peering yet -- opening the on-chain
+    // channel and wiring it is #820. Line-anchored because the file's own
+    // header prose names both tables (in backticks) while explaining their
+    // absence, and a substring match would trip on that prose rather than
+    // an actual table.
+    assert!(
+        !RELAY_CONFIG
+            .lines()
+            .any(|line| line.trim() == "[[peers]]" || line.trim() == "[[peer_channels]]"),
+        "the relay box has no peering yet (issue #820) -- a live \
+         [[peers]]/[[peer_channels]] table here means `with_sandbox_paths` \
+         must be taught a peer secret for this file too"
+    );
+
+    let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    // No peer secret to substitute (see the assertion above) -- unlike the
+    // apex and store cases, this file carries no `[[peers]]` table.
+    let connector = boot(&with_sandbox_paths(
+        &without_live_settlement(RELAY_CONFIG),
+        key_file.path(),
+        state_dir.path(),
+        None,
+    ));
+
+    assert_answered_with_x402_greeting(
+        &connector.client_edge_addr,
+        "g.toon.relay",
+        EXPECTED_RELAY_PRICE,
+    )
+    .await;
 }
 
 /// ADR 0028's arithmetic, across the two committed files: what the apex
@@ -708,11 +776,22 @@ fn route_price(raw: &str, prefix: &str) -> u64 {
 /// first-class path, not a fallback". An HTTP request to the relay is
 /// refused with terms naming `"btp"`; the store legs' greetings carry no
 /// `requiredTransport` at all.
+///
+/// The relay box's own file (issue #817) pins the identical `transport =
+/// "btp"` on its own terminating `g.toon.relay` route, and is asserted here
+/// too -- the apex still terminates the route itself until #820 flips it to
+/// a forward, so until then BOTH files price and pin the same prefix and
+/// both must agree.
 #[tokio::test]
 async fn the_relay_route_is_btp_only_and_the_store_routes_accept_both() {
     assert!(
         APEX_CONFIG.contains("transport = \"btp\""),
         "the apex file must restrict a route to btp -- the relay leg, per issue #701"
+    );
+    assert!(
+        RELAY_CONFIG.contains("transport = \"btp\""),
+        "the relay box's own file must restrict its terminating route to \
+         btp too, per issue #701 -- see the apex assertion above"
     );
 
     let key_file = write_raw_key_file(9);
@@ -722,7 +801,7 @@ async fn the_relay_route_is_btp_only_and_the_store_routes_accept_both() {
         &without_live_settlement(APEX_CONFIG),
         key_file.path(),
         state_dir.path(),
-        peer_secret.path(),
+        Some(peer_secret.path()),
     ));
 
     let relay_terms = x402_terms(&connector.client_edge_addr, "g.toon.relay").await;
@@ -737,6 +816,21 @@ async fn the_relay_route_is_btp_only_and_the_store_routes_accept_both() {
             .get("requiredTransport")
             .is_none(),
         "the store leg left at the default must not carry requiredTransport: {store_terms}"
+    );
+
+    let relay_key_file = write_raw_key_file(10);
+    let relay_state_dir = tempfile::tempdir().expect("temp state dir");
+    let relay_connector = boot(&with_sandbox_paths(
+        &without_live_settlement(RELAY_CONFIG),
+        relay_key_file.path(),
+        relay_state_dir.path(),
+        None,
+    ));
+    let relay_own_terms = x402_terms(&relay_connector.client_edge_addr, "g.toon.relay").await;
+    assert_eq!(
+        relay_own_terms["accepts"][0]["extra"]["requiredTransport"], "btp",
+        "the relay box's own file must require BTP on its own terminating \
+         route too: {relay_own_terms}"
     );
 }
 
@@ -784,7 +878,7 @@ async fn the_apex_devnet_settlement_section_boots_against_a_deployed_contract() 
     // booting the committed leg as-is would reach public devnet and spend
     // from an account this sandbox has no key for. The parse case below is
     // what covers it. See the module docs.
-    let text = without_sections(APEX_CONFIG, APEX_SOLANA_SETTLEMENT_SECTIONS);
+    let text = without_sections(APEX_CONFIG, SOLANA_SETTLEMENT_SECTIONS);
     let text = with_anvil_settlement(
         &text,
         &anvil.rpc_url,
@@ -797,7 +891,12 @@ async fn the_apex_devnet_settlement_section_boots_against_a_deployed_contract() 
         "key_file = \"/app/data/settlement.key\"",
         &format!("key_file = \"{}\"", key_file.path().display()),
     );
-    let text = with_sandbox_paths(&text, key_file.path(), state_dir.path(), peer_secret.path());
+    let text = with_sandbox_paths(
+        &text,
+        key_file.path(),
+        state_dir.path(),
+        Some(peer_secret.path()),
+    );
 
     drop(boot(&text));
 }
@@ -838,7 +937,7 @@ fn the_apex_devnet_config_declares_both_committed_settlement_legs() {
         APEX_CONFIG,
         key_file.path(),
         state_dir.path(),
-        peer_secret.path(),
+        Some(peer_secret.path()),
     );
     let text = with_sandbox_settlement_keys(&text, key_file.path());
     let config_file = write_config(&text);
@@ -950,7 +1049,7 @@ async fn the_store_devnet_settlement_section_boots_against_a_deployed_contract()
 
     // Anvil stands in for Base Sepolia; the Solana leg is stripped for the
     // same reason the apex's is -- there is no local validator in this test.
-    let text = without_sections(STORE_CONFIG, APEX_SOLANA_SETTLEMENT_SECTIONS);
+    let text = without_sections(STORE_CONFIG, SOLANA_SETTLEMENT_SECTIONS);
     let text = with_anvil_settlement(
         &text,
         &anvil.rpc_url,
@@ -963,7 +1062,74 @@ async fn the_store_devnet_settlement_section_boots_against_a_deployed_contract()
         "key_file = \"/app/data/settlement.key\"",
         &format!("key_file = \"{}\"", key_file.path().display()),
     );
-    let text = with_sandbox_paths(&text, key_file.path(), state_dir.path(), peer_secret.path());
+    let text = with_sandbox_paths(
+        &text,
+        key_file.path(),
+        state_dir.path(),
+        Some(peer_secret.path()),
+    );
+
+    drop(boot(&text));
+}
+
+/// The relay box's own live `[settlement.evm]` leg (issue #816/#817), boots
+/// against a freshly deployed local chain exactly like the apex's and
+/// store's cases above. It names the SAME registry the other two fleet
+/// files name: this box has no peering yet (#820), but its client edge
+/// already accepts an unaffiliated buyer's own on-chain channel (the
+/// relay file's own header, issue #556/#611), and that buyer's channel
+/// lives on the one shared deployment.
+#[tokio::test]
+async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract() {
+    if !require_anvil() {
+        return;
+    }
+    let (anvil, contract_address, token) = deploy_settlement_on_anvil().await;
+
+    let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+
+    assert!(
+        RELAY_CONFIG.contains("[settlement.evm]")
+            && RELAY_CONFIG.contains("[settlement.evm.key]")
+            && RELAY_CONFIG.contains("[settlement.solana]")
+            && RELAY_CONFIG.contains("[settlement.solana.key]"),
+        "the relay config must carry both legs on the keyed \
+         `[settlement.<chain>]` shape (issue #628), like the apex and store"
+    );
+    assert!(
+        RELAY_CONFIG.contains(APEX_LIVE_REGISTRY),
+        "the relay leg must name the same deployed TokenNetworkRegistry as \
+         the apex and store ({APEX_LIVE_REGISTRY}) -- a buyer's channel \
+         lives on one deployment, and a node pointed elsewhere cannot \
+         resolve it"
+    );
+    assert!(
+        RELAY_CONFIG.contains(APEX_SOLANA_PROGRAM_ID)
+            && RELAY_CONFIG.contains(APEX_SOLANA_USDC_MINT),
+        "the relay leg must name the same Solana payment-channel program and \
+         mint as the apex and store, for the same reason"
+    );
+
+    // Anvil stands in for Base Sepolia; the Solana leg is stripped for the
+    // same reason the apex's and store's are -- there is no local validator
+    // in this test.
+    let text = without_sections(RELAY_CONFIG, SOLANA_SETTLEMENT_SECTIONS);
+    let text = with_anvil_settlement(
+        &text,
+        &anvil.rpc_url,
+        APEX_LIVE_REGISTRY,
+        contract_address,
+        token,
+    );
+    let text = replace_expecting_a_match(
+        &text,
+        "key_file = \"/app/data/settlement.key\"",
+        &format!("key_file = \"{}\"", key_file.path().display()),
+    );
+    // No peer secret to substitute: unlike the apex and store, this file
+    // carries no `[[peers]]` table (issue #820 has not landed yet).
+    let text = with_sandbox_paths(&text, key_file.path(), state_dir.path(), None);
 
     drop(boot(&text));
 }
