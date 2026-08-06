@@ -1846,11 +1846,12 @@ mod tests {
     /// being routed at all" (§1.4), so the condition on a PREPARE that never
     /// gets routed is never inspected. This is what makes
     /// `packages/announcer`'s x402 probe (`edge-client.ts`'s
-    /// `ZERO_CONDITION`) work correctly today; #803's actual F01 came from a
-    /// different client sending an unconditioned PREPARE somewhere this
-    /// shortcut does not apply (peer-carriage-spec.md §3.1: a peer-role
-    /// PREPARE is never greeted at all, and falls straight through to
-    /// `reject_ineligible`) -- see the message-content assertion added to
+    /// `ZERO_CONDITION`) work correctly today; #803's actual F01 came from
+    /// an unconditioned PREPARE sent somewhere this shortcut does not
+    /// apply -- either an unpriced or unmatched destination, which §1.4
+    /// leaves falling through unchanged, or a peer-role PREPARE, which is
+    /// never greeted at all (peer-carriage-spec.md §3.1). Both land in
+    /// `reject_ineligible` -- see the message-content assertion added to
     /// `connector-runtime`'s `rejects_a_packet_with_no_execution_condition`.
     #[tokio::test]
     async fn an_unpaid_request_with_an_all_zero_condition_to_a_priced_route_is_still_greeted() {
@@ -1879,7 +1880,7 @@ mod tests {
         assert!(response.headers().get(PAYMENT_REQUIRED_HEADER).is_some());
         assert!(
             app_client.deliveries().is_empty(),
-            "the app must never be asked to do work an unpaid request didn't pay for"
+            "the app must never be asked to do the work an unpaid request didn't pay for"
         );
     }
 
