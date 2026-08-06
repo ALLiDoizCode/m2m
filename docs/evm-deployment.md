@@ -107,6 +107,13 @@ that specific peering to the new contract (closing it and opening a fresh one) i
 operational decision -- new channel funding and coordination between both box operators -- not part
 of this repoint.
 
+**Update (issue #822):** that migration is no longer deferred -- it is the standing split-brain
+issue #822 exists to close. The repo-side diff (new `token_network`, placeholder `channel_id`/
+`counterparty_key`) and the live open/fund/close/settle runbook now live at
+[`docs/operators/peer-channel-migration.md`](operators/peer-channel-migration.md); the paragraph
+above is kept as written because it correctly describes this document's own scope (#695's repoint),
+not because the peer channel is still unmigrated.
+
 ### Bookkeeping that must be updated alongside the repoint
 
 - **`crates/connector-bin/tests/devnet_configs_load.rs`** -- `APEX_LIVE_REGISTRY` asserts the live
