@@ -3,10 +3,13 @@
 //! compiled binary -- the first acceptance criterion, and per the issue's
 //! own scope boundary, the only one this sandbox (no Docker, no
 //! infrastructure credentials) can verify. Reachability of the peer or the
-//! apps behind either route is explicitly NOT proven here.
+//! apps behind any of these routes is explicitly NOT proven here.
 //!
-//! There are two cases per file (three for the apex), and they prove
-//! different things.
+//! The fleet is THREE files as of issue #817: the apex
+//! (`infra/linode-node/`), the store (`infra/linode-store/`) and the relay
+//! (`infra/linode-relay/`, added by #816 -- client-edge-only, with no
+//! peering of its own until #820 opens the channel). There are two cases
+//! per file (three for the apex), and they prove different things.
 //!
 //! **Verbatim** (`*_devnet_config_loads_and_serves_verbatim`) boots the file
 //! exactly as committed, substituting only what this sandbox physically
@@ -28,10 +31,11 @@
 //! One more substitution joined that list when the apex file's
 //! `[settlement]` section went LIVE against Base Sepolia (#577), and the
 //! store file followed it live when the store box grew a Rust connector of
-//! its own: a committed live section means the node cannot start without
+//! its own (the relay file was committed live from day one, #816): a
+//! committed live section means the node cannot start without
 //! reaching that chain -- the fail-closed behaviour ADR 0009 asks for, and
-//! exactly the network dependency a test must not have. So BOTH verbatim
-//! cases now boot with their live settlement sections STRIPPED
+//! exactly the network dependency a test must not have. So ALL THREE
+//! verbatim cases now boot with their live settlement sections STRIPPED
 //! ([`without_live_settlement`]), and those sections are proven by the
 //! cases described below. This was module-doc'd here as "a decision to
 //! revisit deliberately" before #577 shipped; this is that decision.
@@ -63,15 +67,15 @@
 //! Both files priced that route at `0` while the greeting had already
 //! landed, so a deployed box was still an open free gateway (issue #557);
 //! because the price is read off the committed text like everything else
-//! here, this fails again if either file ever silently returns to zero.
+//! here, this fails again if any file ever silently returns to zero.
 //!
 //! **Section** (`*_devnet_settlement_section_boots_against_a_deployed_contract`)
 //! points each file's live `[settlement.evm]`, as committed, at a freshly
-//! deployed contract on a disposable local `anvil`, and boots that. Both are
-//! on issue #628's keyed shape, and both cases assert it rather than trusting
-//! a reader's eye, because the legacy flat table they left behind still
-//! parses and so a slide back would otherwise be silent. Committed config
-//! shapes rot; this keeps them demonstrably working and keeps
+//! deployed contract on a disposable local `anvil`, and boots that. All
+//! three are on issue #628's keyed shape, and all three cases assert it
+//! rather than trusting a reader's eye, because the legacy flat table they
+//! left behind still parses and so a slide back would otherwise be silent.
+//! Committed config shapes rot; this keeps them demonstrably working and keeps
 //! `runtime::build`'s settlement construction path covered end to end by the
 //! real binary. It is skipped when no `anvil` is on `PATH`.
 //!
@@ -216,20 +220,6 @@ fn replace_expecting_a_match(raw: &str, from: &str, to: &str) -> String {
     raw.replace(from, to)
 }
 
-/// Substitute only what this sandbox physically cannot supply: the signer
-/// key file (real key material is never committed), the bind addresses
-/// (fixed ports collide across parallel test runs) and `state_dir` (the
-/// committed value is a container path, `/app/state`, which no test host
-/// can create). Every other line -- prefixes, handler URLs, peer id/addr,
-/// `price`, and every `[settlement]` value -- stays the literal committed
-/// content.
-///
-/// The `state_dir` substitution is a path swap, not a removal: the
-/// committed files must keep naming one, since a devnet box without it
-/// would hold its claim watermarks in memory and forget every spent claim
-/// on restart (issue #605). `replace_expecting_a_match` is what makes that
-/// load-bearing -- deleting the line from either config fails this test
-/// rather than silently testing a node with no durable state.
 /// A temp file holding a peering secret, for the `secret_file` the committed
 /// configs name (issue #750). The bytes are arbitrary -- nothing in a boot
 /// test compares them against a counterparty -- but the file must EXIST,
@@ -243,6 +233,23 @@ fn write_peer_secret() -> tempfile::NamedTempFile {
     file
 }
 
+/// Substitute only what this sandbox physically cannot supply: the signer
+/// key file (real key material is never committed), the bind addresses
+/// (fixed ports collide across parallel test runs) and `state_dir` (the
+/// committed value is a container path, `/app/state`, which no test host
+/// can create). Every other line -- prefixes, handler URLs, peer id/addr,
+/// `price`, and every `[settlement]` value -- stays the literal committed
+/// content.
+///
+/// The `state_dir` substitution is a path swap, not a removal: the
+/// committed files must keep naming one, since a devnet box without it
+/// would hold its claim watermarks in memory and forget every spent claim
+/// on restart (issue #605). `replace_expecting_a_match` is what makes that
+/// load-bearing -- deleting the line from any of the fleet's files fails
+/// this test rather than silently testing a node with no durable state.
+///
+/// `peer_secret` is `Some` for a file that carries a peering and `None` for
+/// one that does not -- see the `match` at the end.
 fn with_sandbox_paths(
     raw: &str,
     key_path: &std::path::Path,
