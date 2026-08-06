@@ -14,8 +14,8 @@ peering to it before trusting it with paid traffic.
   `nginx/node.conf.template`, `.env.example`. Mirrors `infra/linode-store/` file-for-file, per
   #815's own instruction to copy the store's shape rather than invent a new one.
 - **#818 (this document's sibling deliverable)** decided the price/fee split in
-  [`docs/devnet-pricing.md`](../devnet-pricing.md): apex forwards `g.toon.relay` at `price = 1,
-fee = 0`; the relay box terminates it at `price = 1`. `transport = "btp"` moves down to the
+  [`docs/devnet-pricing.md`](../devnet-pricing.md): apex forwards `g.toon.relay` at
+  `price = 1, fee = 0`; the relay box terminates it at `price = 1`. `transport = "btp"` moves to the
   relay's own terminating route — already committed there — because it is illegal on the apex's
   `peer_id` forward (`ConfigError::PeerRouteHasTransport`).
 - `.gitignore` already covers `infra/linode-relay/*.key` and `*.secret` (#816), so key material
@@ -57,7 +57,10 @@ every other infra-touching ticket in this repo's history records when it applies
   (`infra/linode-relay/connector-rust.toml`'s own header note), so its keys are new material, not
   a mnemonic-index reproduction.
 - The apex's `[operator]` surface (ADR 0008, issue #459) is enabled with a bearer token, so step 7
-  can open and fund a channel without hand-crafting a raw settlement transaction.
+  can open and fund a channel without hand-crafting a raw settlement transaction. Not a given
+  today: `infra/linode-node/connector-rust.toml` omits the section deliberately ("Operator surface
+  (optional)"), so enabling it per `deploy/connector-rust/README.md` steps 2–3 is itself work this
+  precondition asks for.
 
 ## Order — provision through peering, in order
 
@@ -70,18 +73,23 @@ every other infra-touching ticket in this repo's history records when it applies
    propagated yet, but step 3 blocks until it has.
 
 3. **Certs.** `cd infra/linode-relay && cp .env.example .env && $EDITOR .env` (set `DOMAIN`,
-   `LETSENCRYPT_EMAIL`, and leave `LETSENCRYPT_STAGING=1` until DNS is confirmed), then
-   `./bootstrap.sh` — it pulls images, opens the firewall (22/80/443 only, `firewall.sh`), starts
-   the compose stack, and runs `init-letsencrypt.sh`, which seeds a self-signed cert, then requests
-   a real one for both names once nginx can answer the ACME challenge. If issuance fails it logs a
-   warning and falls back to the self-signed cert rather than leaving nginx down — re-run once DNS
-   resolves, with `LETSENCRYPT_STAGING=0` for the production cert.
+   `LETSENCRYPT_EMAIL`, and `LETSENCRYPT_STAGING=1` until DNS is confirmed — `.env.example` ships
+   `0`), then `./bootstrap.sh` — it opens the firewall (22/80/443 only, `firewall.sh`), pulls
+   images, renders `nginx/conf.d/node.conf` from the template for `${DOMAIN}`, starts the compose
+   stack, and runs `init-letsencrypt.sh`, which seeds a self-signed cert, then requests a real one
+   for both names once nginx can answer the ACME challenge. If issuance fails it logs a warning and
+   falls back to the self-signed cert rather than leaving nginx down — re-run once DNS resolves,
+   with `LETSENCRYPT_STAGING=0` for the production cert.
 
 4. **Key generation and derivation.** Three key files, all fresh material from this box's own
-   `TOON_MNEMONIC` in `.env` (`signer.key`, `settlement.key`, `settlement-solana.key`), generated
-   per `deploy/connector-rust/README.md` step 1 (`openssl rand -hex 32 > …` for a raw signer key,
-   or the mnemonic-derivation path for the settlement keys) and written where
-   `docker-compose.relay.rust.yml` bind-mounts them read-only. **`chown 10001:10001`** each file —
+   `TOON_MNEMONIC` in `.env`, generated per `deploy/connector-rust/README.md` step 1
+   (`openssl rand -hex 32 > …` for a raw signer key, or the mnemonic-derivation path for the
+   settlement keys). Write them under `infra/linode-relay/` at the **host** names
+   `docker-compose.relay.rust.yml` bind-mounts read-only — `signer-rust.key`,
+   `settlement-rust.key`, `settlement-solana-rust.key`, mounted at `/app/data/signer.key`,
+   `/app/data/settlement.key` and `/app/data/settlement-solana.key` respectively, which are the
+   names `connector-rust.toml` reads and are not the names on disk. **`chown 10001:10001`** each
+   file —
    the container runs as uid 10001, and a root-owned `:ro` mount is unreadable to it, which is
    exactly the restart loop #492 hit on the apex's first deploy
    (`failed to read signer key_file …: Permission denied`). Record which derivation path was used
@@ -89,7 +97,7 @@ every other infra-touching ticket in this repo's history records when it applies
    the box is lost — there is no legacy identity to fall back to here.
 
 5. **Funding.** Fund the settlement identities derived in step 4 — the EVM address from
-   `settlement.key` and the Solana pubkey from `settlement-solana.key` — from the devnet faucet,
+   `settlement-rust.key` and the Solana pubkey from `settlement-solana-rust.key` — from the faucet,
    with enough margin to open and fund a channel in step 7 plus headroom for gas. Human-only;
    nothing repo-side verifies a balance before step 7 is attempted, so under-funding surfaces there
    as an ordinary settlement error, not a load-time one.
@@ -131,9 +139,9 @@ every other infra-touching ticket in this repo's history records when it applies
      from step 7 to `infra/linode-relay/connector-rust.toml`.
    - **Apex box.** Add `[[peers]]` (the relay's `wss://proxy.relay.${DOMAIN}/ilp/btp` endpoint +
      credential) and the matching `[[peer_channels]]` row to
-     `infra/linode-node/connector-rust.toml`. Change the existing `[[routes]] prefix =
-"g.toon.relay"` entry from `handler_url = "http://relay:3100/write"` to `peer_id =
-"apex-relay"` (or whatever id both files agree on), keep `price = 1`, add `fee = 0`
+     `infra/linode-node/connector-rust.toml`. Change the existing
+     `[[routes]] prefix = "g.toon.relay"` entry from `handler_url = "http://relay:3100/write"` to
+     `peer_id = "apex-relay"` (or whatever id both files agree on), keep `price = 1`, add `fee = 0`
      (`docs/devnet-pricing.md`'s decided split), and **delete** `transport = "btp"` from this
      entry — it is already present on the relay's own terminating route and is a load-time error
      (`PeerRouteHasTransport`) if left on a `peer_id` route.
@@ -158,9 +166,9 @@ pair of boxes:
 
 - **(a) Link up.** BTP auth between apex and relay succeeds both directions; the session survives a
   relay-container restart and reconnects without operator action.
-- **(b) Routing intact.** The apex still answers a price for `g.toon.relay` (`GET
-/ilp/routes/price?destination=g.toon.relay` → `1`); a probe of the prefix returns the priced
-  reject carrying `toon-accumulated-cost`.
+- **(b) Routing intact.** The apex still answers a price for `g.toon.relay`
+  (`GET /ilp/routes/price?destination=g.toon.relay` → `1`); a probe of the prefix returns the
+  priced reject carrying `toon-accumulated-cost`.
 - **(c) Paid write end to end with NO free-write path.** A publish to `g.toon.relay` is charged at
   the apex client edge, forwarded with a peer claim as `payment-channel-claim`, fulfilled by the
   relay box's own `relay:3100`, and the relay-side claim watermark advances. A **claimless** peer
@@ -171,8 +179,8 @@ pair of boxes:
   `{"result":"rejected","reason":"nonce_not_advancing"}` **without** rejecting the PREPARE it rode
   on. The journaled claim verifies against the configured counterparty and is redeemable.
 - **(e) Discovery.** If and when discovery is repointed at the relay box directly (out of this
-  runbook's scope — nothing in step 8 changes what `kind:10032` advertises), `EOSE` still resolves
-  to a reachable endpoint for existing clients.
+  runbook's scope — nothing in step 8 changes what `kind:10032` advertises), a `kind:10032` announce
+  still resolves to a reachable endpoint for existing clients.
 
 If (c) cannot be demonstrated, stop at step 8 and roll back with step 9 — exactly the posture
 `btp-peer-transport-bringup.md` takes for the apex↔store link.
