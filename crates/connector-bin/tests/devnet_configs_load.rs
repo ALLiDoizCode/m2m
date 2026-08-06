@@ -700,6 +700,75 @@ fn route_price(raw: &str, prefix: &str) -> u64 {
     panic!("no priced `{prefix}` route in the committed config text");
 }
 
+/// The new ERC-2771 `TokenNetwork` (#695/#811) the apex<->store
+/// `[[peer_channels]]` row must settle on -- the same address
+/// [`APEX_LIVE_REGISTRY`] resolves for client settlement, since the
+/// cutover created exactly one new `TokenNetwork` for the fleet's mock USDC
+/// (issue #822: the peer channel was deliberately left on the OLD
+/// TokenNetwork at cutover time, AC4, and this is the follow-up migration).
+const PEER_CHANNEL_LIVE_TOKEN_NETWORK: &str = "0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478";
+
+/// The OLD TokenNetwork the apex<->store channel settled on before issue
+/// #822 -- still the correct address for every _historical_ record
+/// (`BYTECODE-PROVENANCE.md`, `packages/contracts/deployments*`), but a
+/// live `[[peer_channels]]` row naming it is exactly the split-brain #822
+/// exists to end.
+const PEER_CHANNEL_OLD_TOKEN_NETWORK: &str = "0x1E95493fEF46707E034b4a1945f25a8C76A1823D";
+
+/// Sentinel `channel_id`/`counterparty_key` values (issue #822): the
+/// pre-cutover channel was closed and settled so its collateral could move,
+/// so there is no real channel_id to commit yet -- opening the replacement
+/// channel and filling these in is a live, human, both-boxes-together step
+/// (`docs/operators/peer-channel-migration.md`), not something this repo
+/// diff can do. `0xdead...` rather than the zero address so a reader
+/// cannot mistake it for a real, merely-unfunded value.
+const PEER_CHANNEL_ID_PLACEHOLDER: &str =
+    "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead";
+const PEER_CHANNEL_COUNTERPARTY_KEY_PLACEHOLDER: &str =
+    "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead";
+
+/// Issue #822's repo-side AC: both boxes' `[[peer_channels]]` rows for
+/// `apex-store` name the new TokenNetwork, never the old one, and carry the
+/// placeholder `channel_id`/`counterparty_key` rather than the retired
+/// channel's real values -- a config that quietly kept the old domain, or
+/// reused the closed channel's id under the new one, must fail this rather
+/// than silently ship a claim the other box cannot resolve or a channel
+/// that was never actually opened against this domain.
+#[test]
+fn the_apex_store_peer_channel_names_the_new_token_network_with_placeholder_fields() {
+    for (label, raw) in [("apex", APEX_CONFIG), ("store", STORE_CONFIG)] {
+        assert!(
+            raw.contains(&format!(
+                "token_network = \"{PEER_CHANNEL_LIVE_TOKEN_NETWORK}\""
+            )),
+            "the {label} config's apex-store [[peer_channels]] row must settle on the new \
+             ERC-2771 TokenNetwork ({PEER_CHANNEL_LIVE_TOKEN_NETWORK}) -- both boxes must agree \
+             or a claim one accepts is unresolvable by the other"
+        );
+        assert!(
+            !raw.contains(&format!(
+                "token_network = \"{PEER_CHANNEL_OLD_TOKEN_NETWORK}\""
+            )),
+            "the {label} config must not still bind [[peer_channels]] to the OLD TokenNetwork \
+             ({PEER_CHANNEL_OLD_TOKEN_NETWORK}) -- that standing two-contract split-brain is \
+             exactly what issue #822 ends"
+        );
+        assert!(
+            raw.contains(&format!("channel_id = \"{PEER_CHANNEL_ID_PLACEHOLDER}\"")),
+            "the {label} config's apex-store channel_id must be the clearly-marked placeholder \
+             until the live migration opens a real channel against the new TokenNetwork -- the \
+             retired channel's id must never be reused under a different signing domain"
+        );
+        assert!(
+            raw.contains(&format!(
+                "counterparty_key = \"{PEER_CHANNEL_COUNTERPARTY_KEY_PLACEHOLDER}\""
+            )),
+            "the {label} config's apex-store counterparty_key must be the clearly-marked \
+             placeholder until the live migration step fills in the real value"
+        );
+    }
+}
+
 /// Issue #701 (toon-meta#262 decision 11): the committed apex file
 /// restricts `g.toon.relay` to BTP -- a high-frequency, always-connected
 /// carriage where a persistent session pays off -- while the store legs on
