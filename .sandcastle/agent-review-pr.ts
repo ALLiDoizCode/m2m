@@ -10,9 +10,17 @@
 //   - the reviewer must emit <review>{"verdict":"clean"|"blocking",
 //     "blockingFindings":[{file,line,summary,why}]}</review>; a malformed
 //     verdict fails the run (one engine-style resume retry, then non-zero exit)
-//   - on "blocking", the findings are posted as a PR review and the
-//     `needs:human` label is applied
-// It NEVER merges the PR and NEVER closes anything — a human still merges.
+// The verdict is then submitted FORMALLY as the factory-ops identity
+// (toon-meta#282, FACTORY_OPS_TOKEN):
+//   - "clean"    → a real APPROVE review (a machine verdict — see toon-meta's
+//     FACTORY.md, "What a factory-ops approval attests")
+//   - "blocking" → a REQUEST_CHANGES review carrying the findings, plus the
+//     `needs:human` label
+// The approver must never be the PR author: the identity is resolved and
+// compared against the author BEFORE the reviewer runs (fail fast) and again
+// at submission; a missing/expired/wrong-identity token FAILS the job loudly
+// rather than degrading to a COMMENTED review.
+// It NEVER merges the PR and NEVER closes anything.
 //
 // DIFF SIZE: this runner shares review-prompt.md with ./main.ts, so it inherits
 // the bounded diff expansion (`.sandcastle/review-diff.ts`, connector#468) —
@@ -55,9 +63,12 @@ import * as sandcastle from '@ai-hero/sandcastle';
 import { docker } from '@ai-hero/sandcastle/sandboxes/docker';
 import { sandboxSecrets } from './sandbox-secrets.ts';
 import {
-  postBlockingVerdict,
+  assertApproverIsNotAuthor,
+  getPrAuthorLogin,
+  resolveFactoryOpsIdentity,
   resolveIssueFromPrBody,
   runReviewerWithVerdict,
+  submitFactoryOpsVerdict,
   type ReviewVerdict,
 } from './review-verdict.ts';
 
@@ -86,6 +97,17 @@ if (!headRef) {
 execFileSync('git', ['fetch', 'origin', `+${headRef}:${headRef}`], {
   stdio: 'inherit',
 });
+
+// PREFLIGHT the factory-ops approver identity (toon-meta#282) BEFORE the
+// expensive reviewer pass: a missing/expired FACTORY_OPS_TOKEN, or one that
+// authenticates as the PR's own author, fails the job here in seconds instead
+// of after a full opus review. The submission path re-asserts the same guard.
+const prAuthor = getPrAuthorLogin(prNumber);
+const factoryOps = resolveFactoryOpsIdentity();
+assertApproverIsNotAuthor(factoryOps, prAuthor);
+console.log(
+  `Approver preflight OK: factory-ops is '${factoryOps.login}', PR author is '${prAuthor}'.`
+);
 
 // Resolve the Spec-axis target issue from the PR body's `Closes #n`.
 const targetIssue = resolveIssueFromPrBody(prNumber);
@@ -201,12 +223,20 @@ async function main() {
   }
 
   // The verdict's side effects run AFTER the sandbox is closed, from the
-  // authenticated host: findings must land on the PR even if the push
-  // verification below is about to fail the job.
+  // authenticated host. Blocking findings must land on the PR even if the push
+  // verification below is about to fail the job; a clean APPROVAL must NOT be
+  // submitted on a failing run — an approval green-lights a merge, and
+  // approving from a red job would let auto-merge proceed past the failure.
   if (verdict.verdict === 'blocking') {
-    postBlockingVerdict(prNumber, verdict, targetIssue);
+    submitFactoryOpsVerdict(prNumber, verdict, targetIssue);
+  } else if (reviewPushVerificationError) {
+    console.error(
+      '\nVerdict clean, but the review-push verification failed — NOT ' +
+        'submitting the factory-ops approval on a failing run.'
+    );
   } else {
-    console.log('\nVerdict clean — no blocking findings.');
+    console.log('\nVerdict clean — submitting the factory-ops approval.');
+    submitFactoryOpsVerdict(prNumber, verdict, targetIssue);
   }
 
   // Fail loud AFTER the sandbox is closed: a silently-failed push must turn the
