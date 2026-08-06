@@ -179,6 +179,13 @@ async function main() {
 
           // Only review if the implementer produced commits
           if (implement.commits.length > 0) {
+            // review-prompt.md now requires ISSUE_NUMBER/ISSUE_TITLE (the Spec
+            // axis, toon-meta#275) — an unresolved {{...}} placeholder fails the
+            // run, so pass them here too. This reserved autonomous loop does not
+            // yet CONSUME the reviewer's <review> verdict; the label runners
+            // (agent-implement-issue.ts / agent-review-pr.ts) enforce it via
+            // ./review-verdict.ts, and wiring it into this merge phase is part
+            // of the auto-merge work (toon-meta#270).
             const review = await sandbox.run({
               name: 'reviewer',
               maxIterations: 1,
@@ -186,6 +193,8 @@ async function main() {
               promptFile: './.sandcastle/review-prompt.md',
               promptArgs: {
                 BRANCH: issue.branch,
+                ISSUE_NUMBER: issue.id,
+                ISSUE_TITLE: issue.title,
               },
             });
 
