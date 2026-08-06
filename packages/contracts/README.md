@@ -148,6 +148,56 @@ This promotion step, and the broadcast above, are both **human-only** -- see iss
 "Out of scope" section of issue `#405` for the full list of things this repo's automation must never
 do (broadcast, generate/hold a private key, or edit the cross-repo preset).
 
+## Devnet ERC-2771 cutover runbook (Base Sepolia) -- HUMAN ONLY
+
+`script/DeployTestnetCutover.s.sol` deploys the meta-tx-aware `TokenNetwork` cutover (issue #695,
+the deploy half of #694's ERC-2771 contract support): a fresh `ERC2771Forwarder`, a fresh
+`TokenNetworkRegistry` wired to trust it, and a `TokenNetwork` created through that registry for
+the **same** live devnet mock USDC (`0x49beE1Bca5d15Fb0963117923403F9498119a9Ce`) devnet already
+uses -- no new token, so every existing balance and faucet distribution keeps working. The live
+registry (`0xcC9079adE929b168B54145f6d25262b64FAB9D5b`) already has a `TokenNetwork` registered for
+that USDC (`TokenNetwork` is not upgradeable, so it can never be swapped in place -- see
+`docs/evm-deployment.md`), which is why this script deploys a new registry rather than reusing the
+live one.
+
+It compiles and is proven against a live Base-Sepolia fork in CI (`.github/workflows/contracts.yml`,
+`testnet-cutover-fork-test` job, `test/DeployTestnetCutover.fork.t.sol`) with **no broadcast and no
+secrets** -- including an end-to-end gasless open/deposit/close lifecycle funded by impersonating
+the real, already-funded devnet USDC distributor on the fork. Nothing in this repo ever runs
+`--broadcast` against Base Sepolia or holds a funded deployer key; the actual broadcast below is a
+manual, human-only step.
+
+To run the fork test locally:
+
+```shell
+cd packages/contracts
+forge build
+forge test --match-path 'test/DeployTestnetCutover.fork.t.sol' --fork-url https://sepolia.base.org -vvv
+```
+
+### Required environment variables
+
+| Variable                | Required                   | Notes                                                                                                                 |
+| ----------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `PRIVATE_KEY`           | Yes (for a real broadcast) | Funded Base-Sepolia deployer key, without `0x` prefix. If unset, the script only _simulates_ -- nothing is broadcast. |
+| `EXISTING_USDC_ADDRESS` | No                         | The devnet mock USDC to bind the new `TokenNetwork` to. Defaults to the live devnet USDC above.                       |
+| `BASE_SEPOLIA_RPC_URL`  | Yes                        | Base Sepolia RPC endpoint behind the `--rpc-url base_sepolia` alias (see `foundry.toml` and `.env.example`).          |
+
+### One-command broadcast
+
+```shell
+cd packages/contracts
+PRIVATE_KEY=<funded-deployer-key-no-0x-prefix> \
+  forge script script/DeployTestnetCutover.s.sol \
+    --rpc-url base_sepolia \
+    --broadcast
+```
+
+The script logs the new forwarder/registry/TokenNetwork addresses and the repoint steps that
+follow. **The full runbook -- exactly which files to repoint after a real broadcast, and the
+one-step rollback -- lives in `docs/evm-deployment.md`; this section only covers the broadcast
+itself.**
+
 ### Help
 
 ```shell
