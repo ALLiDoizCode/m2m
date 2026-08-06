@@ -28,6 +28,31 @@
           "deployTxHash": "0x21f5c28235d435d7cea9a7e41d633297e41c14d4960315a815613888d52bb174",
           "deployedAt": "2026-01-31",
           "token": "0x39eaF99Cd4965A28DFe8B1455DD42aB49D0836B9"
+        },
+        "ERC2771Forwarder": {
+          "address": "0xf1b0B8BA9CA90A0779C382Fe4212a3D4C5646Ee9",
+          "deployer": "0xF29fD62C4848B9573C9b90adbF61b664F386d9CF",
+          "deployTxHash": "0xcac52ad5e1d4e7ee1f5e167c5364c7c1611a1058a80a8d3ee250578f85c61b13",
+          "blockNumber": 45126069,
+          "deployedAt": "2026-08-06",
+          "note": "ERC-2771 cutover (#695). Trusted forwarder baked into TokenNetwork_USDC_ERC2771's bytecode."
+        },
+        "TokenNetworkRegistry_ERC2771": {
+          "address": "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1",
+          "deployer": "0xF29fD62C4848B9573C9b90adbF61b664F386d9CF",
+          "deployTxHash": "0x060b57dbed552193081817602d8b1d814b6ab5362a8c04d01afddd2f9152273d",
+          "blockNumber": 45126069,
+          "deployedAt": "2026-08-06",
+          "note": "LIVE registry the devnet fleet's [settlement.evm] contract_address points at as of 2026-08-06."
+        },
+        "TokenNetwork_USDC_ERC2771": {
+          "address": "0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478",
+          "deployer": "0xF29fD62C4848B9573C9b90adbF61b664F386d9CF",
+          "deployTxHash": "0xa7769bf1c2835d5de2a0d5631fa9abed98b7701caa0aacbe8b8c045253d63748",
+          "blockNumber": 45126069,
+          "deployedAt": "2026-08-06",
+          "token": "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce",
+          "note": "Same mock USDC as the pre-cutover TokenNetwork; created via registry.createTokenNetwork."
         }
       }
     },

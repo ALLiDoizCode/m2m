@@ -6,14 +6,30 @@ this before touching any of the files it names; `docs/devnet-pricing.md` exists 
 on the pricing side (connector#785) -- a hand-edit on one box or one file, unreconciled with the
 rest, is exactly the failure mode both documents exist to prevent.
 
-## Status: cutover NOT yet broadcast
+## Status: BROADCAST 2026-08-06 — the cutover is live
 
 Everything on the **code** side is done and proven against a real Base-Sepolia fork (this repo's
 CI, `testnet-cutover-fork-test` job -- no broadcast, no secrets). The **broadcast** itself, and the
 box repoint that follows it, are human-only steps that need a funded Base-Sepolia deployer key and
 SSH/deploy access to the two devnet boxes -- neither of which this repo's automation holds (same
 posture as the mainnet runbook in `packages/contracts/README.md`). This document is the runbook an
-operator with that access follows; nothing below has been run for real yet.
+operator with that access follows.
+
+**It has now been run.** Broadcast 2026-08-06 from deployer
+`0xF29fD62C4848B9573C9b90adbF61b664F386d9CF` at block 45126069; both boxes were repointed and
+restarted, and the live kind:10032 announce advertises the new `TokenNetwork` as of
+2026-08-06T12:49:42Z. The deployed addresses are:
+
+| Contract             | Address                                      |
+| -------------------- | -------------------------------------------- |
+| ERC2771Forwarder     | `0xf1b0B8BA9CA90A0779C382Fe4212a3D4C5646Ee9` |
+| TokenNetworkRegistry | `0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1` |
+| TokenNetwork (USDC)  | `0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478` |
+
+Full record, transaction hashes and post-broadcast on-chain verification:
+`packages/contracts/deployments/base-sepolia.md`. The tables below describing the
+_pre-cutover_ deployment and the rollback target are kept as written -- the old registry is
+deliberately untouched and is exactly what a rollback points back at.
 
 ## Why a fresh deployment at all
 

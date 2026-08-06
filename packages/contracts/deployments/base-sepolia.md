@@ -68,3 +68,42 @@ is a placeholder.
 ```
 
 > Testnet only. No mainnet, no real funds.
+
+---
+
+## ERC-2771 cutover deployment (2026-08-06) — CURRENT LIVE
+
+Issue #695. Broadcast of `packages/contracts/script/DeployTestnetCutover.s.sol`; the runbook is
+`docs/evm-deployment.md`. `TokenNetwork` is not upgradeable, so meta-tx support (#694) shipped as a
+fresh registry + forwarder. The **same** mock USDC above is reused, so no balance or faucet
+distribution was disturbed.
+
+- **Network:** Base Sepolia (`chainId 84532`)
+- **RPC:** https://base-sepolia-rpc.publicnode.com
+- **Deployed:** 2026-08-06
+- **Deployer:** `0xF29fD62C4848B9573C9b90adbF61b664F386d9CF`
+- **Block:** 45126069
+- **Script:** `packages/contracts/script/DeployTestnetCutover.s.sol`
+
+| Contract               | Address                                      | Deploy tx                                                            |
+| ---------------------- | -------------------------------------------- | -------------------------------------------------------------------- |
+| ERC2771Forwarder       | `0xf1b0B8BA9CA90A0779C382Fe4212a3D4C5646Ee9` | `0xcac52ad5e1d4e7ee1f5e167c5364c7c1611a1058a80a8d3ee250578f85c61b13` |
+| TokenNetworkRegistry   | `0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1` | `0x060b57dbed552193081817602d8b1d814b6ab5362a8c04d01afddd2f9152273d` |
+| TokenNetwork (USDC)    | `0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478` | `0xa7769bf1c2835d5de2a0d5631fa9abed98b7701caa0aacbe8b8c045253d63748` |
+| Mock USDC (6 decimals) | `0x49beE1Bca5d15Fb0963117923403F9498119a9Ce` | unchanged — reused from the 2026-07-18 deployment                    |
+
+`registry.setTrustedForwarder(forwarder)` was tx
+`0x30ecdd34e9afd74b8e9ef8b7036b12267a3ce61694e3ddd4082857ed6dcea760`.
+
+Verified on-chain after broadcast:
+
+- `registry.getTokenNetwork(0x49beE1…) == 0xa79C3b1d…`
+- `registry.trustedForwarder() == 0xf1b0B8BA…`
+- `tokenNetwork.isTrustedForwarder(0xf1b0B8BA…) == true`
+- `tokenNetwork.token() == 0x49beE1Bca5…` (same USDC)
+- The **old** registry `0xcC9079ad…` still resolves `0x1E95493f…` — untouched, per AC4. Channels
+  opened before the cutover keep settling there, including the apex↔store peer channel, whose
+  `[[peer_channels]] token_network` literal is deliberately left on the old address.
+
+The live kind:10032 announce advertises the new `TokenNetwork` (`tokenNetworks["evm:84532"]`) as of
+2026-08-06T12:49:42Z.

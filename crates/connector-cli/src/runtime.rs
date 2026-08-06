@@ -1074,7 +1074,7 @@ fn client_payout_ledger(config: &Config, signer: Arc<dyn Signer>) -> Arc<ClientP
 pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError> {
     let connector = runtime.connector.clone();
     let signer = runtime.signer.clone();
-    let app = connector_client_edge::router_with_peer_carriages(
+    let app = connector_client_edge::router_with_bootstrap_identity(
         connector.clone(),
         signer.clone(),
         None,
@@ -1100,6 +1100,18 @@ pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError
             config.peer_channels(),
             config.peer_expose(),
         ),
+        // Issue #807: `[announce]` is the one config section that already
+        // holds this node's own ILP address(es) and BTP endpoint (they
+        // cannot be introspected -- `connector_config::announce`'s own
+        // module doc explains why). `None` for a node that does not
+        // configure it, in which case the greeting still broadens (issue
+        // #807's core fix) but carries no `ilpAddresses`/`btpEndpoint`.
+        config
+            .announce()
+            .map(|announce| connector_client_edge::BootstrapIdentity {
+                ilp_addresses: announce.addresses().to_vec(),
+                btp_endpoint: announce.btp_endpoint().to_string(),
+            }),
     );
     Ok(match config.operator() {
         Some(operator) => app.merge(connector_operator::router(
@@ -1357,6 +1369,64 @@ key_file = "{}"
                 "{path} must not be served without an [operator] section"
             );
         }
+    }
+
+    /// Issue #807, wired end to end: `router` reads `[announce]` off the
+    /// same [`Config`] `build` validated and threads it into the client
+    /// edge's [`connector_client_edge::BootstrapIdentity`], so a
+    /// zero-condition PREPARE -- `packages/announcer/src/edge-client.ts`'s
+    /// `fetchGreeting` probe shape -- answered by the router this crate
+    /// actually serves carries this node's own `ilpAddresses`/`btpEndpoint`,
+    /// not just the library-level unit tests in `connector-client-edge`
+    /// that construct a [`connector_client_edge::BootstrapIdentity`] by
+    /// hand.
+    #[tokio::test]
+    async fn router_answers_a_zero_condition_greeting_with_the_announce_configured_bootstrap_identity(
+    ) {
+        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+
+[announce]
+addresses = ["g.toon.apex"]
+http_endpoint = "https://apex.example/ilp"
+btp_endpoint = "wss://apex.example/ilp/btp"
+"#,
+                key_path.display()
+            )
+        });
+        let runtime = build(&config).await.expect("build");
+        let app = router(&runtime, &config).expect("router");
+
+        // A well-formed, zero-amount PREPARE with an all-zero execution
+        // condition, addressed to this node's own configured address --
+        // exactly the shape a client with no other way to learn
+        // `ilpAddresses`/`btpEndpoint` sends when probing the edge it can
+        // reach but has never bootstrapped against.
+        let prepare = connector_domain::Prepare {
+            amount: 0,
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(30),
+            execution_condition: [0u8; 32],
+            destination: "g.toon.apex".to_string(),
+            data: Vec::new(),
+        };
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(prepare.encode()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let terms: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let extra = &terms["accepts"][0]["extra"];
+        assert_eq!(extra["ilpAddresses"], serde_json::json!(["g.toon.apex"]));
+        assert_eq!(extra["btpEndpoint"], "wss://apex.example/ilp/btp");
     }
 
     /// The one narrowing in this crate that guards a false-accept boundary

@@ -276,7 +276,7 @@ price = 1000
 
 [settlement.evm]
 rpc_url = "https://base-sepolia-rpc.publicnode.com"
-contract_address = "0xcC9079adE929b168B54145f6d25262b64FAB9D5b"
+contract_address = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1"
 token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
 decimals = 6
 
