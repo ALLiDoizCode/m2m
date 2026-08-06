@@ -527,8 +527,9 @@ key_file = "{}"
     }
 
     /// The target's BTP endpoint is explicit input, never derived from the
-    /// through-URL -- the greeting carries no BTP URL at all, so there is
-    /// nothing to negotiate it from.
+    /// through-URL -- a target's greeting carries one only when that target
+    /// configures its own `[announce]` (issue #807), so there is nothing
+    /// this command can count on negotiating it from.
     #[test]
     fn the_targets_btp_endpoint_is_supplied_rather_than_derived() {
         let Ok(Invocation::Announce { options, .. }) = parse(&[

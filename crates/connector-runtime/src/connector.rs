@@ -582,7 +582,15 @@ impl Connector {
             return Some(Reject {
                 code: RejectCode::f01_invalid_packet(),
                 triggered_by: String::new(),
-                message: "prepare carries no execution condition".to_string(),
+                // Issue #803: name the fix, not just the defect -- a missing
+                // condition is the exact shape a naive "unconditional
+                // announce" packet takes, and this connector has no such
+                // packet type to fall back to (ADR 0004, ADR 0022,
+                // peer-wire-spec.md §3.1): attach a real condition instead.
+                message: "prepare carries no execution condition -- every prepare must carry \
+                    a real, non-zero 32-byte execution condition chosen by the sender; retry \
+                    with one attached rather than an unconditional/announce-style packet"
+                    .to_string(),
                 data: Vec::new(),
                 accumulated_cost: 0,
             });
@@ -1702,7 +1710,24 @@ mod tests {
         let response = connector.handle_prepare(without_condition, 0).await;
 
         match response {
-            PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "F01"),
+            PacketResponse::Reject(reject) => {
+                assert_eq!(reject.code.as_str(), "F01");
+                // Issue #803: the caller must be told what to do, not just
+                // that the packet was invalid -- a sender treating this as
+                // an unconditional "announce" packet needs to learn there is
+                // no such thing on this connector, and that attaching a real
+                // condition is the fix.
+                assert!(
+                    reject.message.contains("execution condition"),
+                    "message should name the missing field: {}",
+                    reject.message
+                );
+                assert!(
+                    reject.message.contains("attach") || reject.message.contains("retry"),
+                    "message should say what the caller should do next: {}",
+                    reject.message
+                );
+            }
             other => panic!("expected a reject, got {other:?}"),
         }
         assert!(app_client.deliveries().is_empty());

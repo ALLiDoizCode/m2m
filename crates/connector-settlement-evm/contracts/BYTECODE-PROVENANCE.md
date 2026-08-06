@@ -86,3 +86,27 @@ cast code 0xcC9079adE929b168B54145f6d25262b64FAB9D5b --rpc-url https://base-sepo
 Compare each against the corresponding `out/<Contract>.sol/<Contract>.json`'s
 `.deployedBytecode.object`, masking any byte ranges listed in that same file's
 `.deployedBytecode.immutableReferences` before comparing.
+
+---
+
+## ERC-2771 cutover redeployment (2026-08-06)
+
+This file's own rule — _"If either contract is ever redeployed, this file must be redone against
+the new address"_ — is triggered by the #695 cutover. The record above still describes the
+**pre-cutover** deployment, which is untouched and still settles pre-cutover channels.
+
+For the new deployment the provenance question the original check existed to answer does not
+arise the same way: these contracts were compiled and broadcast **from this repository's own
+`packages/contracts/src`** in a single `forge script script/DeployTestnetCutover.s.sol --broadcast`
+run, rather than being found already on chain with unknown origin.
+
+| Contract             | Address                                      | Runtime bytecode |
+| -------------------- | -------------------------------------------- | ---------------- |
+| ERC2771Forwarder     | `0xf1b0B8BA9CA90A0779C382Fe4212a3D4C5646Ee9` | 3564 bytes       |
+| TokenNetworkRegistry | `0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1` | 10436 bytes      |
+| TokenNetwork (USDC)  | `0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478` | 6859 bytes       |
+
+Sizes differ from the pre-cutover deployment because both contracts gained `ERC2771Context`
+(#694). A byte-for-byte `cast code` vs local-compile comparison in the style of the section above
+has **not** been redone; if that exact form of evidence is wanted for the new addresses, redo it
+the same way and record it here.

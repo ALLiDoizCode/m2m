@@ -35,9 +35,14 @@ the one it is easiest to give it is the key.
 
 **The verb belongs to the operator, and the binary is how they say it.**
 
-- A serving connector announces nothing. There is no timer, no `selfAnnounce` config block, no
-  startup broadcast, and nothing on the packet path reads the `[announce]` section. ADR 0022's rule
-  about the _process_ is unchanged and unweakened.
+- A serving connector announces nothing. There is no timer, no `selfAnnounce` config block, and no
+  startup broadcast. ADR 0022's rule about the _process_ is unchanged and unweakened.
+  (Amended by [issue #807](https://github.com/toon-protocol/connector/issues/807): the packet path
+  now reads two fields of the `[announce]` section — `addresses` and `btp_endpoint` — to _answer_
+  with, carrying them in the x402 greeting so a client with a stale or missing genesis seed can
+  bootstrap against an edge it can reach. That is a reply to a request that asked, over the
+  connection that asked it, never an unprompted push: the rule this bullet states is untouched,
+  only the sentence that said no serving code path reads the section at all.)
 - `connector announce` is a **subcommand**: it runs, publishes one kind:10032 event, and exits. It
   is an operator action with an operator's intent behind it, in the same category as opening a
   channel.
@@ -124,11 +129,14 @@ hypothetical. The subcommand therefore reads the greeting's `extra.requiredTrans
 carriage — HTTP for an unrestricted route, BTP for a pinned one — rather than being told which to
 use.
 
-What it cannot pick is the BTP endpoint. **The greeting carries no BTP URL**: its `extra` keys are
-exactly `endpoint` (the HTTP one), `ilpAddress`, `price`, `requiredTransport`, `sessionLeaseTtlMs`,
-`settlement`, `settlements`. So the BTP endpoint is explicit input (`--btp-url` /
+What it cannot pick is the BTP endpoint. **A target's greeting need not carry a BTP URL**: before
+[issue #807](https://github.com/toon-protocol/connector/issues/807) none did — `extra` keys exactly
+`endpoint` (the HTTP one), `ilpAddress`, `price`, `requiredTransport`, `sessionLeaseTtlMs`,
+`settlement`, `settlements` — and since #807 only a target that configures its own `[announce]`
+carries `extra.btpEndpoint` there. So the BTP endpoint is explicit input (`--btp-url` /
 `[announce] publish_btp_url`), and a BTP-only route with neither supplied is refused by name, naming
-where an operator finds it: the target's own kind:10032 `btpEndpoint`. Deriving it from the HTTP URL
+where an operator finds it: the target's own greeting or kind:10032 announce, both spelled
+`btpEndpoint`. Deriving it from the HTTP URL
 by swapping scheme and appending a path is exactly the class of guess `relay_url` and `payTo` have
 already punished — right on this fleet, wrong for anyone whose deployment does not mirror it.
 
