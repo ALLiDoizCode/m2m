@@ -16,8 +16,8 @@
 # wiring the peering is #820, once the channel facts are real. Until then this
 # is exactly the shape `infra/linode-store/connector-rust.toml` carried before
 # #678 gave it a peering: a legitimately deployable intermediate that answers
-# its own client edge and nothing else. Mirrored file-for-file from that file;
-# do not invent a new shape here.
+# its own client edge and nothing else. `infra/linode-store/` is mirrored
+# file for file into this directory; do not invent a new shape here.
 #
 # When #820 lands, the apex's `g.toon.relay` route (currently a local
 # `handler_url` route with `transport = "btp"` pinned on it, per issue #815

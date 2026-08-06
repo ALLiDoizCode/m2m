@@ -24,10 +24,11 @@ services:
       TOON_BLS_PORT: '3100'
       TOON_RELAY_PORT: '7100'
       TOON_CHAIN: 'none'
-      # Carried over byte-identical from the apex box (issue #815 constraint
-      # 3): this is the relay app's own Nostr identity, distinct from the
-      # connector's `[signer]` key above. Changing it on the move would
-      # change what the relay announces under and break existing discovery.
+      # Carried over byte-identical from the apex box (issue #816's
+      # `.env.example` deliverable): this is the relay APP's own Nostr
+      # identity, unrelated to the connector's `[signer]` key in
+      # ./connector-rust.toml. Changing it on the move would change what the
+      # relay announces under and break existing discovery.
       NOSTR_SECRET_KEY: ${RELAY_NOSTR_SECRET_KEY:-0000000000000000000000000000000000000000000000000000000000000002}
       TOON_DEV_MODE: ${RELAY_DEV_MODE:-false}
     restart: unless-stopped
