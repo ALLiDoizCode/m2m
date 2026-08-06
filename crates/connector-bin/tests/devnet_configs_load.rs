@@ -716,12 +716,16 @@ const PEER_CHANNEL_LIVE_TOKEN_NETWORK: &str = "0xa79C3b1dbcEA00a6d84735a134395D8
 const PEER_CHANNEL_OLD_TOKEN_NETWORK: &str = "0x1E95493fEF46707E034b4a1945f25a8C76A1823D";
 
 /// Sentinel `channel_id`/`counterparty_key` values (issue #822): the
-/// pre-cutover channel was closed and settled so its collateral could move,
-/// so there is no real channel_id to commit yet -- opening the replacement
-/// channel and filling these in is a live, human, both-boxes-together step
+/// replacement channel does not exist yet, so there is no real channel_id to
+/// commit -- opening and funding it against the new `TokenNetwork`, then
+/// filling these in on both boxes at once, is a live, human step
 /// (`docs/operators/peer-channel-migration.md`), not something this repo
-/// diff can do. `0xdead...` rather than the zero address so a reader
-/// cannot mistake it for a real, merely-unfunded value.
+/// diff can do. The pre-cutover channel is deliberately left OPEN on the old
+/// contract until that replacement is proven end to end, so its real
+/// channel_id must not be carried over here either -- it names a channel
+/// whose signing domain this row no longer describes. `0xdead...` rather
+/// than the zero address so a reader cannot mistake it for a real,
+/// merely-unfunded value.
 const PEER_CHANNEL_ID_PLACEHOLDER: &str =
     "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead";
 const PEER_CHANNEL_COUNTERPARTY_KEY_PLACEHOLDER: &str =
