@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════════════════════
-# TOON devnet — Rust connector, apex/relay side (issue #490, ADR 0013's
+# TOON devnet — Rust connector, g.toon proxy/relay side (issue #490, ADR 0013's
 # parallel fleet)
 # ═══════════════════════════════════════════════════════════════════════════
 # Runs ALONGSIDE ./connector.yaml's TypeScript node on this SAME box, under
@@ -124,7 +124,7 @@ prefix = "g.toon.relay"
 handler_url = "http://relay:3100/write"
 # 1 micro-USDC per relay write. OWNER DECISION, 2026-08-04.
 #
-# The live apex box has served `1` since 2026-08-03. The edit was
+# The live g.toon proxy box has served `1` since 2026-08-03. The edit was
 # undocumented -- no commit, no patch file, no shell history -- and this
 # comment used to assert parity with the TypeScript route at `1000`
 # directly above the value `1`, which is how a 1000x cut sat unnoticed for
@@ -175,7 +175,7 @@ transport = "btp"
 
 [[routes]]
 prefix = "g.toon.ario"
-# ── FORWARDED ACROSS THE apex<->store PEERING (ADR 0028, issues #620/#678) ──
+# ── FORWARDED ACROSS THE G.TOON PROXY<->STORE PEERING (ADR 0028, issues #620/#678) ──
 # Was `handler_url = "https://proxy.store.devnet.toonprotocol.dev/store"`.
 # That reached the store box's nginx `location /store` and went STRAIGHT to
 # store:3300, bypassing the store box's own connector entirely: this node
@@ -217,13 +217,13 @@ fee = 2
 # `ANNOUNCER_ILP_ADDRESSES: g.toon,g.toon.relay` and never named it, so this
 # removes a name no discovery path hands out.
 
-# ── The apex<->store peering (ADR 0027, issues #678/#750) ────────────────
+# ── The g.toon proxy<->store peering (ADR 0027, issues #678/#750) ────────────────
 # The fleet's only inter-node link, and what every g.toon.ario packet above
 # rides. It lived on the boxes only until #750 gave `credential` a
 # `secret_file`: this file is committed to a PUBLIC repository, so a peering
 # written with a literal could not be committed at all.
 #
-# No `peer_expose` on this node, deliberately: the apex DIALS and never
+# No `peer_expose` on this node, deliberately: the g.toon proxy DIALS and never
 # accepts. The store box is the accepting half (`peer_expose = "btp"` in
 # infra/linode-store/connector-rust.toml) and has no `endpoint` of its own.
 [[peers]]

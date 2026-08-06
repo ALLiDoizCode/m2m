@@ -86,7 +86,7 @@ services:
       # The funded settlement account ([settlement.key] in the config) --
       # separate material from the per-box signer key, same handling.
       - ./settlement-rust.key:/app/data/settlement.key:ro
-      # The apex<->store peering's shared secret (issue #750). Its `[[peers]]`
+      # The g.toon proxy<->store peering's shared secret (issue #750). Its `[[peers]]`
       # entry names this path as `credential.secret_file`, so a missing or
       # unreadable file here is a refuse-to-start, not a peering that quietly
       # never establishes. Generated on the box (`openssl rand -hex 32`),

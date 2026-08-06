@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Provision a fresh Linode (Ubuntu/Debian) into the TOON store (Arweave DVM) box.
-# Runs: connector (apex g.proxy.store) + store (DVM) + nginx/TLS.
+# Runs: connector (the g.toon proxy, g.proxy.store) + store (DVM) + nginx/TLS.
 # No relay, no faucet, no Mina lightnet — this box settles against the existing
 # devnet chain boxes (see connector.yaml chainProviders).
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -49,5 +49,5 @@ chmod +x "$HERE/init-letsencrypt.sh"
 
 echo
 echo "✅ TOON store node up."
-echo "   ILP edge : https://proxy.store.${DOMAIN}/ilp   (apex g.proxy.store)"
+echo "   ILP edge : https://proxy.store.${DOMAIN}/ilp   (g.toon proxy g.proxy.store)"
 echo "   DVM      : https://dvm.${DOMAIN}/health"

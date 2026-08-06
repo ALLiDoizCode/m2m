@@ -1,8 +1,8 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# TOON store (Arweave DVM) node — connector apex + DVM + TLS.
+# TOON store (Arweave DVM) node — connector g.toon proxy + DVM + TLS.
 # Mirrors infra/linode-node/docker-compose.node.yml but for a store-only box:
 # no relay, no faucet, no Mina lightnet (this box settles against the existing
-# devnet chain boxes). The connector apex serves g.toon.ario -> store:3300.
+# devnet chain boxes). The connector's g.toon proxy serves g.toon.ario -> store:3300.
 # Run from the CONNECTOR REPO ROOT:
 #   docker compose -f infra/linode-store/docker-compose.store.yml up -d
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -13,7 +13,7 @@ services:
     # deliberately so: it was built from the #381 branch head (c449a66e) on
     # 2026-07-20 to put "open the channel on the peer's chain + adopt the
     # existing per-pair Solana channel" onto this box, and rolled out in the
-    # same edit that moved the apex peer above to `chain: solana:devnet`. The
+    # same edit that moved the router peer above to `chain: solana:devnet`. The
     # box has run it ever since. That fix later shipped stable in v3.40.1+, so
     # this pin can be promoted to a release tag — but promoting it means
     # restarting the store leg, which is a deployment decision, not a
@@ -61,8 +61,6 @@ services:
       # NODE_NOSTR_SECRET_KEY, not TOON_MNEMONIC). Deterministic devnet key,
       # distinct from the relay's (…0002).
       NODE_NOSTR_SECRET_KEY: ${STORE_NOSTR_SECRET_KEY:-0000000000000000000000000000000000000000000000000000000000000003}
-      # Standalone-mode connector this DVM announces through + receives jobs from.
-      CONNECTOR_URL: http://connector:3000
       # Advertised kind:10032 ILP address — MUST equal the connector route's
       # ilpAddress (g.toon.ario) or discovery and routing disagree.
       ILP_ADDRESS: g.toon.ario
