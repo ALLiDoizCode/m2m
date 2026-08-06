@@ -410,6 +410,30 @@ async fn verify_and_record_declared_channel(
     );
 }
 
+/// Issue #779: give a session that has just bound at `address` under
+/// `generation` a chance to receive a payout claim stranded by an earlier
+/// failed delivery, even with no new job in sight -- see
+/// [`crate::session_route::deliver_pending_claim`] for what "stranded"
+/// means and why there is nothing to do in the ordinary case.
+///
+/// Spawned rather than awaited: `deliver_pending_claim` waits out the
+/// client's own answer to the TRANSFER it sends, and a slow or dead client
+/// must never stall this session's auth ack -- nor any frame read after it,
+/// since the read loop is what would eventually carry that answer.
+fn spawn_stranded_claim_resend(state: &Arc<ClientEdgeState>, address: &str, generation: u64) {
+    let state = Arc::clone(state);
+    let address = address.to_string();
+    tokio::spawn(async move {
+        crate::session_route::deliver_pending_claim(
+            &state,
+            &address,
+            Some(generation),
+            crate::now_unix(),
+        )
+        .await;
+    });
+}
+
 /// A REJECT as a RESPONSE frame: the OER body as the ILP packet, the
 /// running cost total as `toon-accumulated-cost` protocolData (§1.6's
 /// header, carried the only way a frame can), plus whatever `extra`
@@ -552,6 +576,11 @@ async fn handle_frame(
             if let Some(proof) = auth_channel_proof(&entry.data) {
                 verify_and_record_declared_channel(state, &address, proof).await;
             }
+            // After the channel proof above, never before it: a session
+            // whose channel this connector first learns at auth (issue
+            // #790) has nothing to resend on until that proof has been
+            // recorded.
+            spawn_stranded_claim_resend(state, &address, generation);
             *binding = Some((address, generation));
         }
         return reply(replies, encode_response(frame.request_id, &[], &[])).await;
@@ -969,12 +998,8 @@ mod tests {
     async fn record_accepted_claim_teaches_the_session_channel_association() {
         use crate::claim_gate::ClientClaimGate;
         use crate::outbound_ledger::ClientPayoutLedger;
-        use chrono::TimeZone;
         use connector_domain::client_claim::{ClientClaimCommon, EvmClientClaim};
-        use connector_runtime::{
-            ChannelDomain, Connector, FakeAppClient, InMemoryJournal, InProcessPeerTransport,
-            TestClock,
-        };
+        use connector_runtime::{ChannelDomain, InMemoryJournal};
         use connector_signer::LocalSigner;
 
         let channel_id = format!("0x{:064x}", 5);
@@ -994,28 +1019,7 @@ mod tests {
         let gate = ClientClaimGate::restore(Default::default(), Arc::new(InMemoryJournal::new()))
             .expect("a fresh in-memory journal has nothing to replay")
             .with_payout_ledger(Arc::clone(&ledger));
-
-        let clock = Arc::new(TestClock::new(
-            chrono::Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
-        ));
-        let connector = Arc::new(Connector::new(
-            vec![],
-            vec![],
-            Arc::new(FakeAppClient::new()),
-            Arc::new(InProcessPeerTransport::new()),
-            clock,
-        ));
-        let state = ClientEdgeState {
-            connector,
-            signer: Arc::new(LocalSigner::generate("session-signer")),
-            claim_gate: gate,
-            wrap_receiver_secret: None,
-            settlement_terms: None,
-            settlements: Vec::new(),
-            btp_session_window: crate::DEFAULT_BTP_SESSION_WINDOW,
-            session_registry: Arc::new(crate::session_registry::SessionRegistry::new()),
-            peers: None,
-        };
+        let state = test_state(gate);
 
         let claim = ClientClaim::Evm(EvmClientClaim {
             common: ClientClaimCommon {
@@ -1062,6 +1066,39 @@ mod tests {
         format!("0x{}", hex::encode(bytes))
     }
 
+    /// A [`ClientEdgeState`] around `claim_gate` and nothing else a BTP
+    /// session test needs to vary: a connector with no routes, no app and
+    /// no peer transport, a fresh session registry, and every optional
+    /// field at the shape a client-only node has. Spelled out once here so
+    /// a new `ClientEdgeState` field costs one edit rather than one per
+    /// test.
+    fn test_state(claim_gate: crate::claim_gate::ClientClaimGate) -> ClientEdgeState {
+        use chrono::TimeZone;
+        use connector_runtime::{Connector, FakeAppClient, InProcessPeerTransport, TestClock};
+        use connector_signer::LocalSigner;
+
+        let clock = Arc::new(TestClock::new(
+            chrono::Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+        ));
+        ClientEdgeState {
+            connector: Arc::new(Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                clock,
+            )),
+            signer: Arc::new(LocalSigner::generate("session-signer")),
+            claim_gate,
+            wrap_receiver_secret: None,
+            settlement_terms: None,
+            settlements: Vec::new(),
+            btp_session_window: crate::DEFAULT_BTP_SESSION_WINDOW,
+            session_registry: Arc::new(crate::session_registry::SessionRegistry::new()),
+            peers: None,
+        }
+    }
+
     /// Builds a [`ClientEdgeState`] over one EVM channel, declared with a
     /// known counterparty keypair and a payout ledger already bound to its
     /// domain -- everything [`verify_and_record_declared_channel`] and
@@ -1078,11 +1115,7 @@ mod tests {
         use crate::channels::{DepositFloor, EvmChannel};
         use crate::claim_gate::ClientClaimGate;
         use crate::outbound_ledger::ClientPayoutLedger;
-        use chrono::TimeZone;
-        use connector_runtime::{
-            ChannelDomain, Connector, FakeAppClient, InMemoryJournal, InProcessPeerTransport,
-            TestClock,
-        };
+        use connector_runtime::{ChannelDomain, InMemoryJournal};
         use connector_signer::LocalSigner;
 
         let mut channels = crate::ClientChannelRegistry::new();
@@ -1114,27 +1147,7 @@ mod tests {
             .expect("a fresh in-memory journal has nothing to replay")
             .with_payout_ledger(Arc::new(ledger));
 
-        let clock = Arc::new(TestClock::new(
-            chrono::Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
-        ));
-        let connector = Arc::new(Connector::new(
-            vec![],
-            vec![],
-            Arc::new(FakeAppClient::new()),
-            Arc::new(InProcessPeerTransport::new()),
-            clock,
-        ));
-        ClientEdgeState {
-            connector,
-            signer: Arc::new(LocalSigner::generate("session-signer")),
-            claim_gate: gate,
-            wrap_receiver_secret: None,
-            settlement_terms: None,
-            settlements: Vec::new(),
-            btp_session_window: crate::DEFAULT_BTP_SESSION_WINDOW,
-            session_registry: Arc::new(crate::session_registry::SessionRegistry::new()),
-            peers: None,
-        }
+        test_state(gate)
     }
 
     /// A MESSAGE frame carrying an `auth` entry with `peerId` and,
@@ -1481,5 +1494,119 @@ mod tests {
         assert_eq!(proof.channel_id, "0xab");
         assert_eq!(proof.expires, 1);
         assert_eq!(proof.signature, "0xcd");
+    }
+
+    /// Issue #779: a session (re)establishing is resent a payout claim
+    /// stranded by an earlier failed delivery, with no new job in sight --
+    /// driven through the real `handle_frame` auth/bind path (not
+    /// `deliver_pending_claim` called directly), so this fails if the auth
+    /// branch's [`spawn_stranded_claim_resend`] call is deleted, per the
+    /// issue's own AC4.
+    ///
+    /// `record_session_channel` is called up front to stand in for "this
+    /// gate already learned this session's channel before" -- exactly what
+    /// a genuine prior claim or channel-control proof on an earlier
+    /// connection would have taught it (issues #787/#790); this test is
+    /// about the resend, not that association.
+    #[tokio::test]
+    async fn a_reconnecting_session_is_resent_its_stranded_payout_claim() {
+        use crate::claim_gate::ClientClaimGate;
+        use crate::outbound_ledger::ClientPayoutLedger;
+        use connector_runtime::{ChannelDomain, InMemoryJournal};
+        use connector_signer::LocalSigner;
+
+        let address = "g.toon.stranded";
+        let channel_id = format!("0x{:064x}", 21);
+
+        let mut ledger = ClientPayoutLedger::new();
+        ledger.set_signer(Arc::new(LocalSigner::generate("payout-key")));
+        ledger
+            .set_channel_domain(
+                channel_id.clone(),
+                ChannelDomain {
+                    chain_id: 84_532,
+                    token_network_address: [0x99; 20],
+                },
+            )
+            .expect("valid channel id");
+        let stranded = ledger
+            .record_payout(&channel_id, 12_345, "2030-01-01T00:00:00Z".parse().unwrap())
+            .expect("signer and domain configured");
+        let ledger = Arc::new(ledger);
+
+        let gate = ClientClaimGate::restore(Default::default(), Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay")
+            .with_payout_ledger(Arc::clone(&ledger));
+        gate.record_session_channel(address, channel_id.clone());
+        let state = Arc::new(test_state(gate));
+
+        let (replies, mut reply_rx) = mpsc::channel::<Vec<u8>>(REPLY_QUEUE_DEPTH);
+        let window = Arc::new(Semaphore::new(4));
+        let outbound = Arc::new(OutboundRequests::new());
+        let mut binding = None;
+
+        let frame = auth_message_frame(address, None);
+        handle_frame(&frame, &state, &window, &replies, &outbound, &mut binding)
+            .await
+            .expect("the reply channel has a live receiver");
+        assert_eq!(
+            binding.as_ref().map(|(a, _)| a.clone()),
+            Some(address.to_string())
+        );
+
+        // This socket sees two frames: the auth ack and the resent
+        // stranded TRANSFER -- the resend is a spawned task racing the
+        // ack write, so only the *content* seen across both, not their
+        // order, is this test's contract.
+        let mut saw_transfer = false;
+        for _ in 0..2 {
+            let sent = reply_rx.recv().await.expect("both frames are written");
+            let decoded = decode_frame(&sent).expect("the connector's own encoder");
+            if decoded.frame_type == BTP_TRANSFER {
+                saw_transfer = true;
+                let pd = decoded
+                    .protocol_data
+                    .iter()
+                    .find(|pd| pd.name == PAYOUT_CLAIM_PROTOCOL)
+                    .expect("the stranded claim rode this TRANSFER");
+                let json: serde_json::Value = serde_json::from_slice(&pd.data).expect("valid JSON");
+                assert_eq!(json["channelId"], channel_id);
+                assert_eq!(json["nonce"], stranded.nonce);
+                assert_eq!(json["cumulativeAmount"], 12_345);
+
+                outbound.resolve(BtpFrame {
+                    frame_type: BTP_RESPONSE,
+                    request_id: decoded.request_id,
+                    amount: None,
+                    protocol_data: Vec::new(),
+                    ilp_packet: Vec::new(),
+                });
+            }
+        }
+        assert!(
+            saw_transfer,
+            "a session that reconnects with a known channel must be resent its stranded claim"
+        );
+
+        // The resend's acknowledgement runs in the spawned task, after the
+        // RESPONSE above wakes its `send_transfer` await -- give the
+        // executor a chance to poll it to completion.
+        let mut cleared = false;
+        for _ in 0..1000 {
+            if ledger.pending_claim(&channel_id).is_none() {
+                cleared = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            cleared,
+            "a successfully delivered resend must acknowledge and clear pending_claim"
+        );
+        assert_eq!(
+            ledger.credited(&channel_id),
+            12_345,
+            "acknowledging a resend must never disturb credited"
+        );
     }
 }
