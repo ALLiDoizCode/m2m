@@ -76,7 +76,7 @@ else. Live, from inside the nginx container against `connector-rust:4000`: `/hea
 - **Lost.** The body shape changes: today
   `{"status":"healthy","nodeId":"toon-devnet-proxy","version":"3.36.3-solchan.0",...}`, after
   `{"keyId":…,"publicKey":…}`. An org-wide sweep found exactly one consumer of the apex `/health`,
-  and it does not read the body: `infra/devnet-manage.sh:375` — `probe "https://proxy.$DOMAIN/health" "proxy/connector"`
+  and it does not read the body: `infra/devnet-manage.sh:417` — `probe "https://proxy.$DOMAIN/health" "proxy/connector"`
   checks reachability only, and is operator-invoked, not scheduled. No CI workflow, dashboard,
   faucet UI or client polls it, so the body-shape change costs nothing measurable.
 - **The real `/health` hazard is the compose healthcheck, not the body.**
@@ -366,7 +366,7 @@ The public edge is down only for the duration of an `nginx -s reload`.
 
 1. Settle §2.3 (`/admin/metrics.json`) and §4 (Shape A vs B) with the owner.
 2. Sweep for `/health` body consumers — **done, in §2.1**. The only consumer is
-   `infra/devnet-manage.sh:375`, and it checks reachability, not body.
+   `infra/devnet-manage.sh:417`, and it checks reachability, not body.
 3. `cp node.conf node.conf.bak.$(date -u +%Y%m%dT%H%M%SZ)` on both boxes; same for both compose
    files. Record the exact TS image digest:
    `docker inspect --format '{{index .RepoDigests 0}}' linode-node-connector-1`.

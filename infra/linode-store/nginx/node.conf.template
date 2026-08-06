@@ -1,9 +1,18 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TOON store (Arweave DVM) box nginx config.
-# Serves: proxy.store.DOMAIN (connector ILP edge)  dvm.DOMAIN (DVM health)
+# Serves: proxy.ario.DOMAIN (connector-rust ILP edge)  dvm.DOMAIN (DVM health)
+#
+# Fixed by issue #819: this template previously pointed proxy.store.${DOMAIN}
+# at http://connector:3000 (the retired TypeScript connector) and used the
+# pre-2026-08-05 `proxy.store` name — the live rendered
+# nginx/conf.d/node.conf had already moved on to connector-rust:4000 and
+# proxy.ario, so a fresh `bootstrap.sh` run from this file would have
+# deployed a broken box. This is now a DOMAIN-parameterized copy of that live
+# config's shape; see its own history there for the full story behind each
+# guard below.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-limit_req_zone $binary_remote_addr zone=store:10m rate=30r/s;
+limit_req_zone $binary_remote_addr zone=store:10m rate=200r/s;
 
 map $http_upgrade $connection_upgrade {
     default upgrade;
@@ -12,14 +21,14 @@ map $http_upgrade $connection_upgrade {
 
 map $host $backend {
     default                   "";
-    proxy.store.${DOMAIN}     "http://connector:3000";
+    proxy.ario.${DOMAIN}      "http://connector-rust:4000";
     dvm.${DOMAIN}             "http://store:3400";
 }
 
 server {
     listen 80;
     listen [::]:80;
-    server_name proxy.store.${DOMAIN} dvm.${DOMAIN};
+    server_name proxy.ario.${DOMAIN} dvm.${DOMAIN};
 
     location /.well-known/acme-challenge/ {
         root /var/www/certbot;
@@ -33,17 +42,58 @@ server {
     listen 443 ssl;
     listen [::]:443 ssl;
     http2 on;
-    server_name proxy.store.${DOMAIN} dvm.${DOMAIN};
+    server_name proxy.ario.${DOMAIN} dvm.${DOMAIN};
 
-    ssl_certificate     /etc/letsencrypt/live/proxy.store.${DOMAIN}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/proxy.store.${DOMAIN}/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/proxy.ario.${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/proxy.ario.${DOMAIN}/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
 
     resolver 127.0.0.11 valid=10s ipv6=off;
 
+    # No anonymous connector telemetry (ADR 0008/0014, issue #665/#753) — the
+    # Rust connector's operator surface is bearer-token-gated and this box
+    # runs no `[operator]` section, so it exposes none at all. 404 rather
+    # than 401/403 so the refusal doesn't even advertise an admin surface.
+    # `^~` outranks any regex location.
+    location ^~ /admin { return 404; }
+
+    # The retired /rust/ prefix (ADR 0013) — the parallel-fleet second door
+    # to the Rust connector while TypeScript still held `/`. 410, not 404 and
+    # not a redirect: a straggler hitting /rust/ilp should see "permanently
+    # gone", not a connector 404 that reads like it's broken, and a redirect
+    # to /ilp would silently re-point a payer's POST at a route it didn't
+    # address.
+    location ^~ /rust/ { return 410; }
+
+    # `location /store` (payment-oblivious proxy straight to store:3300) is
+    # deliberately ABSENT — it was a free door (#778/#777): anyone who found
+    # the URL uploaded to Arweave, paid for out of this box's own funded
+    # wallet, for nothing, bypassing the connector's g.toon.ario charge
+    # entirely. Do not re-add it. The app is reachable over the container
+    # network by this box's own connector (its route's handler_url) and by
+    # the apex across the peering — never directly from the internet.
+
+    # ── CORS for the liveness read, and ONLY the liveness read ─────────────
+    # The public dashboard (served from the apex origin) derives each node's
+    # up/down dot from a cross-origin `GET /ilp/identity`; without this
+    # header the browser can't read the response (toon-meta#267). Scoped to
+    # an exact-match location and to ONE origin: /ilp/identity is already
+    # public and unauthenticated and returns only this connector's public
+    # signing key, but every other path here stays same-origin-only.
+    location = /ilp/identity {
+        add_header Access-Control-Allow-Origin "https://proxy.${DOMAIN}" always;
+        add_header Vary "Origin" always;
+        limit_req zone=store burst=400 nodelay;
+        proxy_pass http://connector-rust:4000/ilp/identity;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
     location / {
         if ($backend = "") { return 404; }
-        limit_req zone=store burst=60 nodelay;
+        limit_req zone=store burst=400 nodelay;
 
         proxy_pass $backend;
         proxy_http_version 1.1;
