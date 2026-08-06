@@ -130,16 +130,21 @@ pub struct AnnounceOptions {
     /// The target's **BTP** endpoint, for a route whose policy requires that
     /// carriage (issue #701). Overrides `[announce] publish_btp_url`.
     ///
-    /// Explicit input, never derived. The x402 greeting carries no BTP URL
-    /// at all -- verified against the live devnet apex, whose `extra` keys
-    /// are exactly `endpoint` (the HTTP one), `ilpAddress`, `price`,
-    /// `requiredTransport`, `sessionLeaseTtlMs`, `settlement` and
-    /// `settlements` -- so there is nothing to negotiate it from. Deriving
-    /// it from the HTTP URL by swapping the scheme and appending `/btp` is
-    /// the same class of guess `relay_url` and `payTo` have already
-    /// punished: it would be right on this fleet and wrong for any operator
-    /// whose deployment does not mirror it. An operator who needs this
-    /// finds it in the target's own kind:10032 announce, as `btpEndpoint`.
+    /// Explicit input, never derived. Before issue #807 the x402 greeting
+    /// carried no BTP URL at all -- verified against the live devnet apex,
+    /// whose `extra` keys were exactly `endpoint` (the HTTP one),
+    /// `ilpAddress`, `price`, `requiredTransport`, `sessionLeaseTtlMs`,
+    /// `settlement` and `settlements`. #807 added `extra.btpEndpoint`, but
+    /// only for a target that configures its own `[announce]`; a target
+    /// that does not still leaves nothing to negotiate from, which is why
+    /// this stays input rather than something this command reads back.
+    /// Deriving it from the HTTP URL by swapping the scheme and appending
+    /// `/btp` is the same class of guess `relay_url` and `payTo` have
+    /// already punished: it would be right on this fleet and wrong for any
+    /// operator whose deployment does not mirror it. An operator who needs
+    /// this finds it in the target's own x402 greeting
+    /// (`extra.btpEndpoint`, issue #807) or its kind:10032 announce, both
+    /// spelled `btpEndpoint`.
     pub btp_url: Option<String>,
     /// Send the packet through **this node's own routing table** instead of
     /// paying the through-URL directly.
@@ -374,13 +379,13 @@ impl fmt::Display for AnnounceError {
             } => write!(
                 f,
                 "that node's route for '{destination}' requires the 'btp' transport (issue #701), \
-                 and no BTP endpoint was given. It CANNOT be derived from {through_url}: the \
-                 x402 greeting carries no BTP URL -- its `extra` keys are exactly `endpoint` \
-                 (the HTTP one), `ilpAddress`, `price`, `requiredTransport`, \
-                 `sessionLeaseTtlMs`, `settlement` and `settlements` -- and swapping the scheme \
-                 and appending a path would be a guess that happens to work only on deployments \
-                 shaped like ours. Where an operator finds it: the target node's own kind:10032 \
-                 announce carries `btpEndpoint`. Pass it as `--btp-url wss://...`, or set \
+                 and no BTP endpoint was given. It CANNOT be derived from {through_url}: \
+                 swapping the scheme and appending a path would be a guess that happens to work \
+                 only on deployments shaped like ours, and a target's x402 greeting carries \
+                 `extra.btpEndpoint` only when that target configures its own `[announce]` \
+                 (issue #807), which it need not. Where an operator finds it: the target node's \
+                 own greeting (`extra.btpEndpoint`) or its kind:10032 announce, both spelled \
+                 `btpEndpoint`. Pass it as `--btp-url wss://...`, or set \
                  `[announce] publish_btp_url`"
             ),
             AnnounceError::WrongTransport {
@@ -1802,10 +1807,13 @@ btp_endpoint = "wss://proxy.ario.example/ilp/btp"
         // side will actually hold it open for, rather than assuming a
         // session lives forever.
         assert_eq!(terms.session_lease_ttl_ms, Some(300_000));
-        // What the greeting does NOT carry, and the reason `--btp-url` is
-        // explicit input: there is no BTP endpoint anywhere in it. Asserted
-        // against the live apex's own `extra` key set, so a future greeting
-        // that gains one makes this fail and someone reconsiders.
+        // What this recorded apex body does NOT carry, and the reason
+        // `--btp-url` is explicit input: there is no BTP endpoint anywhere
+        // in it. Issue #807 has since added `extra.btpEndpoint` to the
+        // greeting, but only for a target that configures its own
+        // `[announce]` -- a target that does not still answers the shape
+        // pinned here, which is the one this command must keep working
+        // against.
         let extra: serde_json::Value = serde_json::from_str(body).expect("greeting");
         let mut keys: Vec<&str> = extra["accepts"][0]["extra"]
             .as_object()
@@ -1824,7 +1832,7 @@ btp_endpoint = "wss://proxy.ario.example/ilp/btp"
                 "sessionLeaseTtlMs",
                 "settlement"
             ],
-            "the greeting carries no BTP URL -- deriving one would be a guess"
+            "this greeting carries no BTP URL -- deriving one would be a guess"
         );
         let domain = terms.settlement.expect("the EIP-712 domain to sign under");
         assert_eq!(domain.chain_id, 84_532);

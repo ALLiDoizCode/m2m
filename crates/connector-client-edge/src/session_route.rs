@@ -347,6 +347,7 @@ mod tests {
             // interaction on its listeners is a client's, which is the only
             // audience session routing has.
             peers: None,
+            bootstrap_identity: None,
         }
     }
 

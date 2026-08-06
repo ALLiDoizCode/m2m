@@ -70,7 +70,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use connector_config::TransportPolicy;
-use connector_domain::{PacketResponse, Prepare, Reject, RejectCode};
+use connector_domain::{condition_is_present, PacketResponse, Prepare, Reject, RejectCode};
 use connector_runtime::{ClientRouteKind, Connector, ProbeDenied};
 use connector_signer::nip59::{unwrap_claim, WrappedClaim};
 use connector_signer::{PublicKeyBytes, Signer};
@@ -168,6 +168,12 @@ struct ClientEdgeState {
     /// forbids the listener itself deciding which, and it does not --
     /// `peer::PeerCarriages` decides by credential alone.
     peers: Option<Arc<PeerCarriages>>,
+    /// This node's own bootstrap-time facts (issue #807), carried in every
+    /// x402 greeting exactly like `settlement_terms`/`settlements` are.
+    /// `None` on a node with no `[announce]` section configured -- a
+    /// zero-condition greeting still fires (see [`handle_ilp`]) but omits
+    /// `ilpAddresses`/`btpEndpoint`, same shape as before this existed.
+    bootstrap_identity: Option<BootstrapIdentity>,
 }
 
 /// Mount the client edge at `connector`, signing/answering identity with
@@ -322,6 +328,38 @@ pub fn router_with_peer_carriages(
     btp_session_window: NonZeroU32,
     peers: Option<Arc<PeerCarriages>>,
 ) -> Router {
+    router_with_bootstrap_identity(
+        connector,
+        signer,
+        wrap_receiver_secret,
+        claim_gate,
+        settlement_terms,
+        settlements,
+        btp_session_window,
+        peers,
+        None,
+    )
+}
+
+/// As [`router_with_peer_carriages`], but also carrying this node's own
+/// ILP address(es) and BTP endpoint (issue #807) into every x402 greeting,
+/// so a client whose genesis peer seed is stale or missing can bootstrap
+/// against a reachable edge without knowing either in advance. Sourced from
+/// `[announce]` -- the config section that already holds exactly these
+/// facts for `connector announce` (issue #784) -- `None` for a node that
+/// does not configure it.
+#[allow(clippy::too_many_arguments)]
+pub fn router_with_bootstrap_identity(
+    connector: Arc<Connector>,
+    signer: Arc<dyn Signer>,
+    wrap_receiver_secret: Option<[u8; 32]>,
+    claim_gate: ClientClaimGate,
+    settlement_terms: Option<X402SettlementTerms>,
+    settlements: Vec<X402ChainSettlementTerms>,
+    btp_session_window: NonZeroU32,
+    peers: Option<Arc<PeerCarriages>>,
+    bootstrap_identity: Option<BootstrapIdentity>,
+) -> Router {
     let state = Arc::new(ClientEdgeState {
         connector,
         signer,
@@ -332,6 +370,7 @@ pub fn router_with_peer_carriages(
         btp_session_window,
         session_registry: Arc::new(session_registry::SessionRegistry::new()),
         peers,
+        bootstrap_identity,
     });
     Router::new()
         .route("/ilp", post(handle_ilp))
@@ -493,6 +532,28 @@ struct X402ChannelExtra {
     ilp_address: String,
     endpoint: String,
     price: String,
+    /// This node's own ILP address(es) (issue #807) -- the authoritative
+    /// list from `[announce]`, never an echo of the probed `destination`
+    /// the way `ilp_address` above is. Present exactly when
+    /// [`BootstrapIdentity`] is configured; empty (and absent on the wire)
+    /// otherwise, so a parser written before this field existed is
+    /// unaffected.
+    #[serde(
+        rename = "ilpAddresses",
+        skip_serializing_if = "Vec::is_empty",
+        default
+    )]
+    ilp_addresses: Vec<String>,
+    /// Where clients pay this node over BTP (issue #807) -- the same fact
+    /// a kind:10032 announce carries as `btpEndpoint`. Present exactly when
+    /// [`BootstrapIdentity`] is configured; `None` (and absent on the wire)
+    /// otherwise, same treatment as `settlement`/`settlements` below.
+    #[serde(
+        rename = "btpEndpoint",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    btp_endpoint: Option<String>,
     /// The channel-opening facts (issue #617), present exactly when this
     /// node has a settlement backend. `None` (and absent on the wire) on a
     /// settlement-less node -- the terms shape is otherwise unchanged, so
@@ -613,28 +674,63 @@ pub struct X402SolanaSettlementTerms {
     pub decimals: u8,
 }
 
+/// This node's own ILP address(es) and BTP endpoint (issue #807): the
+/// facts a client needs to bootstrap against this edge directly when it
+/// has no other way to learn them -- a stale or missing genesis peer seed,
+/// the exact gap
+/// [toon#155](https://github.com/toon-protocol/toon/issues/155) republished
+/// its way out of for one seed rotation but not for the general case.
+/// Sourced from `[announce]`, the config section that already holds
+/// exactly these facts for `connector announce` (issue #784) -- never
+/// derived, for the same reason `AnnounceConfig::btp_endpoint` documents:
+/// a node behind TLS termination cannot introspect its own public name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootstrapIdentity {
+    /// Every ILP address this node answers to, primary first -- mirrors
+    /// `AnnounceConfig::addresses`.
+    pub ilp_addresses: Vec<String>,
+    /// Where clients pay this node over BTP -- mirrors
+    /// `AnnounceConfig::btp_endpoint`.
+    pub btp_endpoint: String,
+}
+
 const X402_VERSION: u32 = 2;
 const X402_MAX_TIMEOUT_SECONDS: u64 = 60;
 
-/// Answer an unpaid request to `destination`, a route this connector serves
-/// and prices at `price`, with its terms instead of doing the work
-/// (client-edge-spec.md §1.4, ADR 0022) -- this changes no state and is
-/// only ever a reply to the request that asked. "Serves" spans both kinds
-/// of configured route since ADR 0028: a route that terminates here, whose
-/// price buys the app's work, and one that forwards over a peering, whose
-/// price buys the carriage. The terms are byte-identical either way --
-/// nothing in this shape names a route kind, and a client cannot tell (and
-/// has no reason to care) which one it is paying. `settlement` is the
-/// node's legacy EVM-shaped channel-opening facts (issue #617),
-/// `settlements` is the additive per-chain list (issue #632); both are
-/// included exactly when the node has the relevant backend(s).
+/// Answer an unpaid request to `destination` with terms instead of doing
+/// the work (client-edge-spec.md §1.4, ADR 0022) -- this changes no state
+/// and is only ever a reply to the request that asked. Two shapes of
+/// request reach this: `destination` names a route this connector serves
+/// and prices at `price` ("Serves" spans both kinds of configured route
+/// since ADR 0028: a route that terminates here, whose price buys the
+/// app's work, and one that forwards over a peering, whose price buys the
+/// carriage); or the request carries no execution condition at all (issue
+/// #807) -- structurally not a real payment attempt, since issue #417
+/// refuses to route one regardless of destination, so it is answered the
+/// same way regardless of whether `destination` matches anything this node
+/// prices. The terms are byte-identical either way -- nothing in this
+/// shape names a route kind, and a client cannot tell, and has no reason
+/// to care, which case it hit. `settlement` is the node's legacy
+/// EVM-shaped channel-opening facts (issue #617), `settlements` is the
+/// additive per-chain list (issue #632); both are included exactly when
+/// the node has the relevant backend(s). `bootstrap_identity` is this
+/// node's own address(es)/BTP endpoint (issue #807), included exactly when
+/// `[announce]` configures them.
 fn payment_required(
     destination: &str,
     price: u64,
     settlement: Option<&X402SettlementTerms>,
     settlements: &[X402ChainSettlementTerms],
+    bootstrap_identity: Option<&BootstrapIdentity>,
 ) -> Response {
-    x402_response(destination, price, settlement, settlements, None)
+    x402_response(
+        destination,
+        price,
+        settlement,
+        settlements,
+        bootstrap_identity,
+        None,
+    )
 }
 
 /// Answer a request to `destination` that arrived over a transport its
@@ -653,12 +749,14 @@ fn wrong_transport_required(
     required: TransportPolicy,
     settlement: Option<&X402SettlementTerms>,
     settlements: &[X402ChainSettlementTerms],
+    bootstrap_identity: Option<&BootstrapIdentity>,
 ) -> Response {
     x402_response(
         destination,
         price,
         settlement,
         settlements,
+        bootstrap_identity,
         Some(required.name()),
     )
 }
@@ -668,6 +766,7 @@ fn x402_response(
     price: u64,
     settlement: Option<&X402SettlementTerms>,
     settlements: &[X402ChainSettlementTerms],
+    bootstrap_identity: Option<&BootstrapIdentity>,
     required_transport: Option<&str>,
 ) -> Response {
     let body = x402_terms_body(
@@ -675,6 +774,7 @@ fn x402_response(
         price,
         settlement,
         settlements,
+        bootstrap_identity,
         required_transport,
     );
     let header_value = BASE64.encode(&body);
@@ -699,6 +799,7 @@ fn x402_terms_body(
     price: u64,
     settlement: Option<&X402SettlementTerms>,
     settlements: &[X402ChainSettlementTerms],
+    bootstrap_identity: Option<&BootstrapIdentity>,
     required_transport: Option<&str>,
 ) -> Vec<u8> {
     let terms = X402PaymentRequired {
@@ -717,6 +818,10 @@ fn x402_terms_body(
                 ilp_address: destination.to_string(),
                 endpoint: "/ilp".to_string(),
                 price: price.to_string(),
+                ilp_addresses: bootstrap_identity
+                    .map(|identity| identity.ilp_addresses.clone())
+                    .unwrap_or_default(),
+                btp_endpoint: bootstrap_identity.map(|identity| identity.btp_endpoint.clone()),
                 settlement: settlement.cloned(),
                 settlements: settlements.to_vec(),
                 required_transport: required_transport.map(str::to_string),
@@ -1012,9 +1117,22 @@ async fn handle_ilp(
     // suppresses the greeting unconditionally (its validation, including
     // underpayment, is §1.3's job below); an unpriced or unmatched
     // destination is unaffected and falls through unchanged, exactly as it
-    // always has.
+    // always has -- unless the PREPARE itself carries no execution
+    // condition (issue #807), checked below.
     let has_claim_header =
         headers.contains_key(CLAIM_HEADER) || headers.contains_key(CLAIM_WRAPPED_HEADER);
+    // Issue #807: a condition-less PREPARE can never be routed regardless
+    // of destination -- issue #417's `reject_ineligible` refuses it before
+    // any route is even selected (`connector_runtime::connector::
+    // reject_ineligible`, F01) -- so it is structurally a bootstrap/
+    // greeting probe, not a real payment attempt, and `packages/announcer/
+    // src/edge-client.ts`'s `fetchGreeting` builds exactly this shape. A
+    // client whose genesis peer seed is stale or missing has no `[[routes]]`-
+    // matching destination to probe with either, so gating the greeting on
+    // a route match at all (the pre-#807 behaviour, still required for a
+    // real, conditioned PREPARE just below) left it with nothing but an F01
+    // it cannot act on.
+    let condition_present = condition_is_present(&prepare.execution_condition);
     // No matching configured route means nothing here is priced -- routing
     // itself (not this gate) is what refuses an unroutable destination,
     // with F02. One lookup serves every fact (issue #701, ADR 0028): the
@@ -1040,16 +1158,18 @@ async fn handle_ilp(
                 policy,
                 state.settlement_terms.as_ref(),
                 &state.settlements,
+                state.bootstrap_identity.as_ref(),
             );
         }
     }
 
-    if !has_claim_header && price > 0 {
+    if !has_claim_header && (price > 0 || !condition_present) {
         return payment_required(
             &prepare.destination,
             price,
             state.settlement_terms.as_ref(),
             &state.settlements,
+            state.bootstrap_identity.as_ref(),
         );
     }
 
@@ -1836,6 +1956,54 @@ mod tests {
         );
     }
 
+    /// Issue #803: an all-zero `executionCondition` addressed at a priced
+    /// route is greeted (`402`), not `F01`-rejected -- the opposite of what
+    /// issue #417's blanket "every PREPARE needs a real condition" rule
+    /// might suggest. `handle_ilp`'s greeting branch (client-edge-spec.md
+    /// §1.4) runs entirely before `Connector::handle_prepare`/
+    /// `reject_ineligible` are ever reached: an unpaid request to a route
+    /// this connector serves and prices is answered with terms "instead of
+    /// being routed at all" (§1.4), so the condition on a PREPARE that never
+    /// gets routed is never inspected. This is what makes
+    /// `packages/announcer`'s x402 probe (`edge-client.ts`'s
+    /// `ZERO_CONDITION`) work correctly today; #803's actual F01 came from
+    /// an unconditioned PREPARE sent somewhere this shortcut does not
+    /// apply -- either an unpriced or unmatched destination, which §1.4
+    /// leaves falling through unchanged, or a peer-role PREPARE, which is
+    /// never greeted at all (peer-carriage-spec.md §3.1). Both land in
+    /// `reject_ineligible` -- see the message-content assertion added to
+    /// `connector-runtime`'s `rejects_a_packet_with_no_execution_condition`.
+    #[tokio::test]
+    async fn an_unpaid_request_with_an_all_zero_condition_to_a_priced_route_is_still_greeted() {
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+        let app_client = Arc::new(FakeAppClient::new());
+        let connector = Arc::new(Connector::new(
+            vec![route],
+            vec![],
+            app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router(connector, test_signer());
+
+        let mut zero_condition_prepare = sample_prepare("g.example.app");
+        zero_condition_prepare.execution_condition = [0u8; 32];
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(zero_condition_prepare.encode()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        assert!(response.headers().get(PAYMENT_REQUIRED_HEADER).is_some());
+        assert!(
+            app_client.deliveries().is_empty(),
+            "the app must never be asked to do the work an unpaid request didn't pay for"
+        );
+    }
+
     /// Issue #722: the x402 greeting advertises the session lease backstop
     /// TTL the client session registry actually enforces, so a TS (or any
     /// other language) client can honour freshness <= lease without
@@ -2129,7 +2297,10 @@ mod tests {
     /// An unpaid request to an explicitly free (`price == 0`) route is
     /// unaffected -- it still reaches the app exactly as it always has,
     /// since there is nothing to charge and so nothing to answer with
-    /// terms instead of.
+    /// terms instead of. This holds because `sealed_sample_prepare` carries
+    /// a real, non-zero condition; see the `a_zero_condition_prepare_*`
+    /// tests below (issue #807) for the different case where the PREPARE
+    /// itself carries none.
     #[tokio::test]
     async fn an_unpaid_request_to_a_free_route_still_reaches_the_app() {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
@@ -2161,6 +2332,243 @@ mod tests {
         let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
         Fulfill::decode(&bytes).expect("decode fulfill");
         assert_eq!(app_client.deliveries().len(), 1);
+    }
+
+    /// A PREPARE with an all-zero `execution_condition` and no claim
+    /// header. Never expected to reach a route or be fulfilled -- issue
+    /// #417's `reject_ineligible` refuses to route one regardless of
+    /// destination -- so every zero-condition test below uses this rather
+    /// than [`sample_prepare`], whose condition is real.
+    fn zero_condition_prepare(destination: &str) -> Prepare {
+        Prepare {
+            execution_condition: [0u8; 32],
+            ..sample_prepare(destination)
+        }
+    }
+
+    /// The core fix for issue #807: `packages/announcer/src/edge-client.ts`'s
+    /// `fetchGreeting` probe builds exactly this shape -- a well-formed,
+    /// zero-amount PREPARE with an all-zero condition -- and expects `402`
+    /// back. Before this fix, a destination matching no configured route
+    /// fell through the old `price > 0`-gated greeting straight into
+    /// `Connector::handle_prepare`, which issue #417's `reject_ineligible`
+    /// refuses with `F01 prepare carries no execution condition` before any
+    /// route is even selected -- an opaque packet-level reject a
+    /// bootstrapping client (whose genesis peer seed is exactly what it is
+    /// missing, so it has no destination to probe with that this connector
+    /// prices) cannot act on. A zero-condition PREPARE can never be routed
+    /// at all regardless of destination, so it is structurally a bootstrap
+    /// probe and is answered the same way a priced route's unpaid request
+    /// is -- with terms, never performed.
+    #[tokio::test]
+    async fn a_zero_condition_prepare_to_an_unmatched_destination_is_answered_with_the_greeting_not_f01(
+    ) {
+        let app_client = Arc::new(FakeAppClient::new());
+        let connector = Arc::new(Connector::new(
+            vec![],
+            vec![],
+            app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router(connector, test_signer());
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(zero_condition_prepare("g.nowhere").encode()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::PAYMENT_REQUIRED,
+            "a zero-condition PREPARE must be greeted even when its destination matches \
+             no configured route, not F01'd or F02'd"
+        );
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let terms: X402PaymentRequired = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(terms.accepts[0].amount, "0");
+        assert!(
+            app_client.deliveries().is_empty(),
+            "a bootstrap probe must never reach an app"
+        );
+    }
+
+    /// The same probe shape, but addressing a route this connector matches
+    /// and explicitly prices at 0 (free) -- distinguishing "the destination
+    /// happens to be free" from "there is no destination at all" above.
+    /// Both fall under the same rule: a zero-condition PREPARE is a probe
+    /// regardless of what -- if anything -- it addresses.
+    #[tokio::test]
+    async fn a_zero_condition_prepare_to_a_free_route_is_also_answered_with_the_greeting() {
+        let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+        let app_client = Arc::new(FakeAppClient::new());
+        app_client.respond(route.handler_url(), answered(b"free work"));
+        let connector = Arc::new(Connector::new(
+            vec![route],
+            vec![],
+            app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router(connector, test_signer());
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(zero_condition_prepare("g.example.app").encode()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        assert!(
+            app_client.deliveries().is_empty(),
+            "a zero-condition probe must never reach the app, priced or not"
+        );
+    }
+
+    /// The one case issue #807 deliberately leaves alone: a present claim
+    /// header suppresses the greeting unconditionally (client-edge-spec.md
+    /// §1.4, unchanged by this issue), so a zero-condition PREPARE that
+    /// also carries a claim header still falls through to
+    /// `Connector::handle_prepare` and is F01'd there. This is the
+    /// remaining gap between this fix and issue #803: a client whose
+    /// zero-condition announce carries no claim header is now greeted
+    /// (actionable terms, replacing an opaque F01); one that pairs a claim
+    /// header with a zero condition -- an inherently inconsistent shape,
+    /// since ADR/issue #417 never treats a condition as optional -- is not.
+    #[tokio::test]
+    async fn a_zero_condition_prepare_with_a_claim_header_still_falls_through_to_f01() {
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+        let app_client = Arc::new(FakeAppClient::new());
+        let connector = Arc::new(Connector::new(
+            vec![route],
+            vec![],
+            app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router_with_gate(
+            connector,
+            test_signer(),
+            None,
+            test_gate(claim_headers::test_channels()),
+        );
+
+        let claim_json = claim_headers::evm_claim_json(1, 100);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .header(CLAIM_HEADER, BASE64.encode(claim_json.as_bytes()))
+            .body(Body::from(zero_condition_prepare("g.example.app").encode()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        // An ILP-level outcome, even a reject, is always HTTP 200 (client-edge-spec.md §1.1).
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let reject = Reject::decode(&bytes).expect("decode reject");
+        assert_eq!(reject.code.as_str(), "F01");
+        assert!(
+            app_client.deliveries().is_empty(),
+            "a claim-bearing zero-condition PREPARE must not reach the app either"
+        );
+    }
+
+    /// Issue #807's second half: the greeting carries this node's own
+    /// ILP address(es) and BTP endpoint -- the same facts a kind:10032
+    /// announce carries as `ilpAddresses`/`btpEndpoint` -- when
+    /// [`BootstrapIdentity`] is configured, so a client whose genesis peer
+    /// seed is stale or missing can bootstrap from the answer alone. Unlike
+    /// the legacy `extra.ilpAddress`, which echoes back whatever
+    /// `destination` the probing PREPARE named, these are the node's own
+    /// authoritative facts regardless of what was probed.
+    #[tokio::test]
+    async fn the_greeting_carries_this_nodes_own_bootstrap_identity_when_configured() {
+        let connector = Arc::new(Connector::new(
+            vec![],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router_with_bootstrap_identity(
+            connector,
+            test_signer(),
+            None,
+            test_gate(ClientChannelRegistry::new()),
+            None,
+            Vec::new(),
+            DEFAULT_BTP_SESSION_WINDOW,
+            None,
+            Some(BootstrapIdentity {
+                ilp_addresses: vec!["g.toon.apex".to_string(), "g.toon.apex.alt".to_string()],
+                btp_endpoint: "wss://apex.example/ilp/btp".to_string(),
+            }),
+        );
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(zero_condition_prepare("g.whatever").encode()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let terms: X402PaymentRequired = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            terms.accepts[0].extra.ilp_addresses,
+            vec!["g.toon.apex".to_string(), "g.toon.apex.alt".to_string()],
+            "ilpAddresses must be this node's own configured addresses, not an echo"
+        );
+        assert_eq!(
+            terms.accepts[0].extra.btp_endpoint.as_deref(),
+            Some("wss://apex.example/ilp/btp")
+        );
+        // The legacy field is untouched: still an echo of the probed destination.
+        assert_eq!(terms.accepts[0].extra.ilp_address, "g.whatever");
+    }
+
+    /// The absence half of the test above: a node with no `[announce]`
+    /// section configured (`BootstrapIdentity: None`, [`router`]'s default)
+    /// keeps the pre-#807 shape exactly -- no `ilpAddresses`/`btpEndpoint`
+    /// key at all, not empty/null ones, so a parser written before this
+    /// field existed is unaffected.
+    #[tokio::test]
+    async fn the_greeting_omits_bootstrap_identity_when_not_configured() {
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+        let connector = Arc::new(Connector::new(
+            vec![route],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router(connector, test_signer());
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(sample_prepare("g.example.app").encode()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let terms: X402PaymentRequired = serde_json::from_slice(&bytes).unwrap();
+        assert!(terms.accepts[0].extra.ilp_addresses.is_empty());
+        assert!(terms.accepts[0].extra.btp_endpoint.is_none());
+
+        let extra = serde_json::to_value(&terms.accepts[0].extra).unwrap();
+        assert!(
+            extra.get("ilpAddresses").is_none(),
+            "a node with no [announce] must not carry an ilpAddresses key: {extra}"
+        );
+        assert!(
+            extra.get("btpEndpoint").is_none(),
+            "a node with no [announce] must not carry a btpEndpoint key: {extra}"
+        );
     }
 
     /// End-to-end claim ingest (issue #504, #506/#544): a claim presented in
