@@ -52,6 +52,11 @@ connector-settlement-solana = { path = "../connector-settlement-solana", feature
 chrono = "0.4"
 ed25519-dalek = "1"
 hyper = { version = "0.14", features = ["full"] }
+# Derives an announced pubkey INDEPENDENTLY of `connector_signer::nostr`
+# (issue #799's `identity_key_file` pubkey-pinning test), so a bug in that
+# module's own BIP-340 derivation could not make the test agree with it by
+# construction. Same version `connector-signer` itself uses.
+k256 = { version = "0.13", features = ["schnorr"] }
 libsecp256k1 = "0.6"
 rand = "0.7"
 serde_json = "1"

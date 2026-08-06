@@ -54,6 +54,15 @@ services:
       # It is a stopgap. #784 is the real answer: a `connector announce`
       # subcommand run FROM the node being announced, paying like any other
       # client, identity key never moving. This whole sidecar retires with it.
+      #
+      # RETIRING THIS SIDECAR (issue #799): the genesis peer seed pins the
+      # pubkey ANNOUNCER_IDENTITY_SECRET_KEY_FILE below produces, so before
+      # turning this service off, point the announcing node's own
+      # `[announce] identity_key_file` at this exact file
+      # (/root/keys/announce.key) and run `connector announce` from there.
+      # Skipping that carries the announce over under a NEW pubkey instead,
+      # the seed goes stale, and every client bootstrapping from it fails
+      # with `EOSE, found 0 events` -- see docs/operators/announcing-a-node.md.
       ANNOUNCER_ILP_ADDRESSES: g.toon,g.toon.relay,g.toon.ario
       # NOTE: these two publish the `/rust/` path — the disposable artifact
       # ADR 0013 says "nothing durable should be published against". Phase 7

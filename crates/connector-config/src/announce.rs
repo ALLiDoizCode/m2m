@@ -38,6 +38,25 @@
 //! relay's private write ingress (`packages/announcer/src/publisher.ts`
 //! documents the two surfaces), and advertising it for free reads publishes
 //! an unauthenticated write door to the whole network.
+//!
+//! # `identity_key_file` is not one of those facts, and belongs here anyway
+//!
+//! Every other field in this section is a fact a node cannot introspect.
+//! `identity_key_file` (issue #799) is different: this node *can* always
+//! sign an announce with its own `[signer]` identity, and does so by
+//! default. What it cannot introspect is which identity a *previous*
+//! publisher already announced under -- and if that publisher was the
+//! retired sidecar (`ANNOUNCER_IDENTITY_SECRET_KEY_FILE`), a genesis peer
+//! seed may already pin its pubkey. Switching `connector announce` in
+//! without carrying that key file over would sign every future announce
+//! under a *different* pubkey, and the seed would go stale silently --
+//! exactly the failure this issue exists to prevent. So this field is a
+//! pointer to the sidecar's own key file, kept in `[announce]` rather than
+//! `[signer]` because it overrides the SIGNATURE on one event, not this
+//! node's identity generally: `GET /ilp/identity` and every gift wrap this
+//! node opens still use `[signer]`.
+
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -77,6 +96,8 @@ pub(crate) struct RawAnnounceConfig {
     solana_chain_id: Option<String>,
     #[serde(default)]
     ttl_secs: Option<u64>,
+    #[serde(default)]
+    identity_key_file: Option<PathBuf>,
 }
 
 /// `USDC` at 6 decimals is what every route on this fleet is priced in, and
@@ -121,6 +142,7 @@ pub struct AnnounceConfig {
     asset_scale: u8,
     solana_chain_id: String,
     ttl_secs: u64,
+    identity_key_file: Option<PathBuf>,
 }
 
 impl AnnounceConfig {
@@ -237,6 +259,18 @@ impl AnnounceConfig {
     /// relay that ever saw it, long after the node it describes is gone.
     pub fn ttl_secs(&self) -> u64 {
         self.ttl_secs
+    }
+
+    /// A durable Nostr identity to sign the announce with, overriding
+    /// `[signer]`'s own key (issue #799). `None` -- the default, and
+    /// unchanged from before this field existed -- means the announce is
+    /// signed with this node's own `[signer]` identity. `Some` is how an
+    /// operator carries the retired sidecar's
+    /// `ANNOUNCER_IDENTITY_SECRET_KEY_FILE` over, so the pubkey a genesis
+    /// peer seed already pins does not go stale the day the sidecar is
+    /// switched off.
+    pub fn identity_key_file(&self) -> Option<&Path> {
+        self.identity_key_file.as_deref()
     }
 }
 
@@ -427,6 +461,20 @@ pub(crate) fn resolve_announce(
         None => DEFAULT_TTL_SECS,
     };
 
+    // Checked the same way `SecretLocation::resolve` checks `[signer]
+    // key_file` -- a path that does not exist yet is refused at load,
+    // rather than surfacing as an unreadable-file error the one time an
+    // operator actually runs `connector announce`.
+    let identity_key_file = raw
+        .identity_key_file
+        .map(|path| {
+            if !path.is_file() {
+                return Err(ConfigError::AnnounceIdentityKeyFileNotFound(path));
+            }
+            Ok(path)
+        })
+        .transpose()?;
+
     Ok(Some(AnnounceConfig {
         addresses: raw.addresses,
         http_endpoint,
@@ -443,6 +491,7 @@ pub(crate) fn resolve_announce(
             .solana_chain_id
             .unwrap_or_else(|| DEFAULT_SOLANA_CHAIN_ID.into()),
         ttl_secs,
+        identity_key_file,
     }))
 }
 
@@ -465,6 +514,7 @@ mod tests {
             asset_scale: None,
             solana_chain_id: None,
             ttl_secs: None,
+            identity_key_file: None,
         }
     }
 
@@ -652,5 +702,50 @@ mod tests {
 
         assert_eq!(announce.route_publish(), "g.elsewhere.relay");
         assert_eq!(announce.route_store(), "g.elsewhere.store");
+    }
+
+    /// With no `identity_key_file` written, resolution behaves exactly as
+    /// it did before this field existed (issue #799) -- `None`, and the
+    /// announce signs with `[signer]`'s own key.
+    #[test]
+    fn with_no_identity_key_file_resolution_is_unchanged() {
+        let announce = resolve_announce(Some(raw(None)))
+            .expect("load")
+            .expect("present");
+        assert_eq!(announce.identity_key_file(), None);
+    }
+
+    /// A carried-over identity key file that exists loads and is exposed
+    /// verbatim, so `connector announce` can sign under it instead of
+    /// `[signer]`'s key -- the whole point being to keep the sidecar's
+    /// pubkey stable across its retirement.
+    #[test]
+    fn an_existing_identity_key_file_loads() {
+        let mut key_file = tempfile::NamedTempFile::new().expect("temp file");
+        std::io::Write::write_all(&mut key_file, &[9u8; 32]).expect("write");
+        let mut with_identity = raw(None);
+        with_identity.identity_key_file = Some(key_file.path().to_path_buf());
+
+        let announce = resolve_announce(Some(with_identity))
+            .expect("load")
+            .expect("present");
+
+        assert_eq!(announce.identity_key_file(), Some(key_file.path()));
+    }
+
+    /// A configured `identity_key_file` that does not exist is refused by
+    /// name at load, the same way a `[signer] key_file` is -- rather than
+    /// surfacing as an unreadable-file error the one time an operator
+    /// actually runs `connector announce`.
+    #[test]
+    fn a_missing_identity_key_file_is_refused_at_load() {
+        let mut missing = raw(None);
+        missing.identity_key_file = Some(PathBuf::from("/nonexistent/announce.key"));
+
+        assert!(matches!(
+            resolve_announce(Some(missing)),
+            Err(ConfigError::AnnounceIdentityKeyFileNotFound(path))
+                if path.as_path() == std::path::Path::new("/nonexistent/announce.key")
+        ));
     }
 }
