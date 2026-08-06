@@ -1,0 +1,106 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# TOON devnet — Rust connector, RELAY box (issue #816, Shape A: one connector
+# per box, each fronting its own app — decided on #714, tracked as #815)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# ── What this file is, and is not, yet ──────────────────────────────────────
+# Today the relay app (`relay:3100`) sits on the apex box, fronted by the
+# apex's own connector as a LOCAL app route — not a peer of its own. This file
+# is step 1 of moving it to its own box: a CLIENT-EDGE-ONLY connector that
+# terminates `g.toon.relay` against the SAME relay app, now co-located with it
+# instead of reached across the apex's container network.
+#
+# **No `[[peers]]` and no `[[peer_channels]]` here, deliberately.** Peering
+# this box to the apex needs a live on-chain payment channel between the two
+# boxes' settlement identities, which does not exist yet — opening it and
+# wiring the peering is #820, once the channel facts are real. Until then this
+# is exactly the shape `infra/linode-store/connector-rust.toml` carried before
+# #678 gave it a peering: a legitimately deployable intermediate that answers
+# its own client edge and nothing else. `infra/linode-store/` is mirrored
+# file for file into this directory; do not invent a new shape here.
+#
+# When #820 lands, the apex's `g.toon.relay` route (currently a local
+# `handler_url` route with `transport = "btp"` pinned on it, per issue #815
+# constraint 1) becomes a `peer_id` forward to this box, and `transport`
+# moves down here — a `peer_id` route cannot carry `transport`
+# (`ConfigError::PeerRouteHasTransport`); the terminating route is where a
+# persistent BTP session actually terminates.
+#
+# ── Settlement ─────────────────────────────────────────────────────────────
+# Deliberately identical to both other boxes' (infra/linode-node/,
+# infra/linode-store/): the same Base Sepolia `TokenNetworkRegistry` and USDC,
+# the same Solana payment-channel program and mint, both at 6 decimals. A
+# claim resolves against one deployment, so every node that might ever accept
+# one has to agree on which. This node has no counterparty channel yet (no
+# `[[peer_channels]]` — see above), but its client edge already accepts
+# unaffiliated buyers' own on-chain channels (issue #556/#611), and those
+# buyers pick the deployment by what the fleet advertises, not by which box
+# answers — so this section is live from day one, not a template to fill in
+# when the peering lands.
+#
+# `decimals = 6` is checked against the token's own on-chain `decimals()` at
+# startup and a disagreement refuses the boot (#564), so a stale value here is
+# a loud failure rather than a mispriced route.
+#
+# ── Key provisioning ────────────────────────────────────────────────────────
+# Three key files, all this box's own, mounted read-only by the overlay
+# (docker-compose.relay.rust.yml). Unlike the store box, this is a genuinely
+# NEW box with no pre-existing TypeScript settlement identity to reproduce —
+# there is no legacy `connector.yaml` on this box to match addresses with —
+# so all three are FRESH material, provisioned per
+# deploy/connector-rust/README.md step 1 (`openssl rand -hex 32`) from this
+# box's own TOON_MNEMONIC, and funded once generated (#821, human: SSH, new
+# identity, funds, DNS, certs).
+# ═══════════════════════════════════════════════════════════════════════════
+
+client_edge_addr = "0.0.0.0:4000"
+
+# Durable claim watermarks (#605): the journals whose replay is what makes a
+# claim watermark survive a restart. Backed by the `connector_rust_state`
+# named volume in docker-compose.relay.rust.yml.
+state_dir = "/app/state"
+
+[signer]
+key_file = "/app/data/signer.key"
+
+# ── Routes ─────────────────────────────────────────────────────────────────
+
+[[routes]]
+prefix = "g.toon.relay"
+# `/write`, not the bare origin: `HttpAppClient::deliver` POSTs here, and the
+# relay app serves only `POST /write` and `GET /health`. A bare
+# `http://relay:3100` comes back F99 "app declined the delivery with HTTP
+# 404" — the same gap the apex's own route hit on first deploy (#492).
+handler_url = "http://relay:3100/write"
+# 1 micro-USDC per relay write, matching the apex's live price for this
+# prefix (infra/linode-node/connector-rust.toml, owner decision 2026-08-04).
+# The relay carries the buzz huddles workload — per-audio-frame at 49 fps —
+# and 1 micro-USDC is the coherent per-frame price; a general-write price is
+# the wrong frame for this route. `docs/devnet-pricing.md` is the committed
+# source of truth for every route's price and rationale.
+price = 1
+# Issue #701 (toon-meta#262 decision 11): the relay is high-frequency and
+# latency-sensitive with an always-connected client — huddles already run
+# 49 fps over BTP, and a persistent session amortizes the handshake and claim
+# round trip an HTTP one-shot would pay on every write.
+transport = "btp"
+
+# ── Settlement ─────────────────────────────────────────────────────────────
+
+[settlement.evm]
+rpc_url = "https://base-sepolia-rpc.publicnode.com"
+contract_address = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1"
+token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "/app/data/settlement.key"
+
+[settlement.solana]
+rpc_url = "https://api.devnet.solana.com"
+program_id = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
+token_address = "xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "/app/data/settlement-solana.key"

@@ -1,0 +1,59 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# TOON devnet — Rust connector overlay, RELAY side
+# ═══════════════════════════════════════════════════════════════════════════
+# Copy of infra/linode-store/docker-compose.store.rust.yml: same pinned
+# image, the same read-only key bind mounts, the same `connector_rust_state`
+# named volume, the same loopback-only `127.0.0.1:4000:4000` publish. The one
+# difference is what it does NOT mount: no `apex-store.secret`-shaped peering
+# credential, because this box has no `[[peers]]` entry yet (issue #816 scope
+# — the peering is #820).
+#
+# Run alongside the base stack (never on its own — it has no relay service of
+# its own to front):
+#
+#   docker compose -f infra/linode-relay/docker-compose.relay.yml \
+#                  -f infra/linode-relay/docker-compose.relay.rust.yml up -d
+#
+# Joining the same compose project puts `connector-rust` on the default
+# network beside `relay` and `nginx`, so ./connector-rust.toml's
+# `handler_url = "http://relay:3100/write"` and nginx's
+# `http://connector-rust:4000` both resolve by container-name DNS.
+#
+# ── Why 4000 is bound to loopback ─────────────────────────────────────────
+# A Docker `ports:` publish is reachable from the internet regardless of what
+# ufw says — Docker's iptables chain runs ahead of it. Binding the publish to
+# 127.0.0.1 means the only public path to this connector is through this
+# box's nginx, under the routes ./nginx/conf.d/node.conf defines and
+# rate-limits. Identical to both other boxes' overlays, and for the same
+# reason: every route into the process should be one nginx can see, log and
+# throttle.
+# ═══════════════════════════════════════════════════════════════════════════
+
+services:
+  connector-rust:
+    # Same pinned tag both other boxes run — see
+    # infra/linode-store/docker-compose.store.rust.yml for the ordering
+    # constraints (#605/#614) this tag already satisfies.
+    image: ghcr.io/toon-protocol/connector:rust-sha-b31a7c9
+    volumes:
+      - ./connector-rust.toml:/app/config/connector.toml:ro
+      # Three raw key files, FRESH RANDOM (`openssl rand -hex 32`) per
+      # deploy/connector-rust/README.md step 1 — see ./connector-rust.toml's
+      # header for why this box has no legacy identity to reproduce. All
+      # three must exist and be readable by uid 10001 before the first
+      # `up -d` (`chown 10001:10001`); a missing key file is a refuse-to-start,
+      # and so is an unreachable settlement chain (ADR 0009).
+      - ./signer-rust.key:/app/data/signer.key:ro
+      - ./settlement-rust.key:/app/data/settlement.key:ro
+      - ./settlement-solana-rust.key:/app/data/settlement-solana.key:ro
+      # Durable claim watermarks (#605). Named, not bind-mounted: the replay
+      # of this journal is what stops a restart from re-accepting a spent
+      # claim, so it must outlive the container.
+      - connector_rust_state:/app/state
+    ports:
+      # Loopback-only, deliberately — see the header. Not '4000:4000'.
+      - '127.0.0.1:4000:4000'
+    restart: unless-stopped
+
+volumes:
+  connector_rust_state:
