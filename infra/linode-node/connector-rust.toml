@@ -175,7 +175,7 @@ transport = "btp"
 
 [[routes]]
 prefix = "g.toon.ario"
-# ── FORWARDED ACROSS THE G.TOON PROXY<->STORE PEERING (ADR 0028, issues #620/#678) ──
+# ── FORWARDED ACROSS THE g.toon proxy<->store PEERING (ADR 0028, #620/#678) ──
 # Was `handler_url = "https://proxy.store.devnet.toonprotocol.dev/store"`.
 # That reached the store box's nginx `location /store` and went STRAIGHT to
 # store:3300, bypassing the store box's own connector entirely: this node
@@ -217,7 +217,7 @@ fee = 2
 # `ANNOUNCER_ILP_ADDRESSES: g.toon,g.toon.relay` and never named it, so this
 # removes a name no discovery path hands out.
 
-# ── The g.toon proxy<->store peering (ADR 0027, issues #678/#750) ────────────────
+# ── The g.toon proxy<->store peering (ADR 0027, issues #678/#750) ─────────
 # The fleet's only inter-node link, and what every g.toon.ario packet above
 # rides. It lived on the boxes only until #750 gave `credential` a
 # `secret_file`: this file is committed to a PUBLIC repository, so a peering

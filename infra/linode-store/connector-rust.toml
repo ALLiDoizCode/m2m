@@ -12,15 +12,15 @@
 # > deprecated alias — same certificate, same upstream — and is slated for
 # > removal, so treat every `proxy.store` URL in the prose below as history.
 # Deployed by docker-compose.store.rust.yml as an ADDITIVE overlay beside the
-# TypeScript fleet in docker-compose.store.yml, mirroring how the g.toon proxy box has
-# run both connectors side by side since #601. It is NOT a cutover: the
+# TypeScript fleet in docker-compose.store.yml, mirroring how the g.toon proxy
+# box has run both connectors side by side since #601. It is NOT a cutover: the
 # TypeScript connector keeps serving the default public edge
-# (https://proxy.store.devnet.toonprotocol.dev/ → connector:3000, including
-# its half of the live BTP peering to the g.toon proxy), and this node is reachable
+# (https://proxy.store.devnet.toonprotocol.dev/ → connector:3000, including its
+# half of the live BTP peering to the g.toon proxy), and this node is reachable
 # only under /rust/ilp and /rust/ilp/btp on this box's own nginx.
 #
-# Why this file grew from a stub into a deployable config: the g.toon proxy box has
-# run a Rust connector for weeks, the store box has never run one, and that
+# Why this file grew from a stub into a deployable config: the g.toon proxy box
+# has run a Rust connector for weeks, the store box has never run one, and that
 # asymmetry is the hard blocker on retiring TypeScript — the store leg cannot
 # move to Rust while there is no Rust process on the store box to move it to.
 # Standing this up is step 1 of the cutover runbook, and on its own it changes
@@ -31,8 +31,8 @@
 # the same prices, against the same payment-oblivious store app on :3300:
 #
 #   g.toon.ario         this box's own advertised prefix
-#   g.toon.relay.ario   the relay-hop form (client → router → store)
-#   g.toon.store        the alias the router's own g.toon.store route forwards
+#   g.toon.relay.ario   the relay-hop form (client → g.toon proxy → store)
+#   g.toon.store        the alias the proxy's own g.toon.store route forwards
 #                       to, kept here so a client arriving at this edge
 #                       directly is priced identically
 #
@@ -48,13 +48,13 @@
 # infra/linode-store/connector.yaml's `price: '1000'` on all three routes.
 # They MUST stay equal to the TypeScript values for as long as both connectors
 # front the same app: an unequal pair is an arbitrage between two doors into
-# one handler, and the cheaper door takes every packet. When the router's
+# one handler, and the cheaper door takes every packet. When the g.toon proxy's
 # g.toon.relay price was hand-cut on the box from 1000 to 1 (2026-08-03 02:01,
 # undocumented) it created exactly that hazard on the other box; do not repeat
 # it here without changing both connectors in one edit.
 #
 # Transport is left at the default (`both`): a store write is a one-shot
-# request from an arbitrary buyer, so unlike the router's relay leg — pinned
+# request from an arbitrary buyer, so unlike the proxy's relay leg — pinned
 # `transport = "btp"` for huddles' persistent 49fps sessions (#701) — there is
 # nothing here to amortize a handshake against.
 #
@@ -75,22 +75,23 @@
 #     written (#620): a peer route was neither priced at the client edge nor
 #     charged on arrival at the terminating side, so a peer-forwarded
 #     `g.toon.store` would have served this store app FOR FREE, beside the
-#     g.toon proxy's paid door. ADR 0028 closed the first half -- a `peer_id` route
-#     now carries a `price` its client edge greets and charges, and cannot
-#     load without one -- so what remains open is arrival-side charging.
+#     g.toon proxy's paid door. ADR 0028 closed the first half -- a `peer_id`
+#     route now carries a `price` its client edge greets and charges, and
+#     cannot load without one -- so what remains open is arrival-side charging.
 #
 # Binding an unauthenticated plaintext listener on a box with no private
 # segment is a hazard with no upside while all three hold, so this node
 # accepts no inbound peer connection and dials no peer. It is a
-# client-edge-only connector — which is exactly what the g.toon proxy's Rust node
-# already is, and why the two are comparable.
+# client-edge-only connector — which is exactly what the g.toon proxy's Rust
+# node already is, and why the two are comparable.
 #
 # THE PEERING GOES HERE. When the inter-connector transport decision lands
 # (BTP over wss, or ILP-over-HTTP — not this file's call), the store leg gains
-# a peer entry below plus a route with a `peer_id` next hop, and the router's
-# `g.toon.ario` / `g.toon.store` routes stop being plain outbound HTTPS POSTs
-# to this box's nginx and become forwards over that peering. Until then the
-# router reaches the store app the way any client on the open internet does.
+# a peer entry below plus a route with a `peer_id` next hop, and the g.toon
+# proxy's `g.toon.ario` / `g.toon.store` routes stop being plain outbound
+# HTTPS POSTs to this box's nginx and become forwards over that peering. Until
+# then the proxy reaches the store app the way any client on the open internet
+# does.
 #
 # ── Settlement ─────────────────────────────────────────────────────────────
 # Live, and deliberately identical to the g.toon proxy's
@@ -106,7 +107,7 @@
 # Stating that plainly because it REVERSES the argument this same header used
 # to make. The old text argued for an EVM-only template on the grounds that a
 # store box is "the other end" of a payment and never a counterparty. That
-# held only while #600's topology did — the router terminated the store leg and
+# held only while #600's topology did — the proxy terminated the store leg and
 # this box had no Rust node at all. It stopped being true the moment this file
 # gained a priced client edge: a node that accepts claims IS a counterparty,
 # on whichever chain the buyer chose, and the live fleet's peering already
@@ -134,8 +135,8 @@
 #                                 deploy/connector-rust/README.md step 1.
 #                                 This is the connector's own ILP signing
 #                                 identity (ADR 0012) and must NOT collide
-#                                 with the TypeScript node's. The g.toon proxy does
-#                                 the same: its Rust signer resolves to
+#                                 with the TypeScript node's. The g.toon proxy
+#                                 does the same: its Rust signer resolves to
 #                                 0x8b0cb539f6b58d9fa1266faaec18555c4f8e598e,
 #                                 which is not any TypeScript settlement
 #                                 identity on that box.
@@ -198,7 +199,7 @@ client_edge_addr = "0.0.0.0:4000"
 # constrains rolling BACK, not rolling forward.
 state_dir = "/app/state"
 
-# ── The g.toon proxy<->store peering (ADR 0027, issues #678/#750) ────────────────
+# ── The g.toon proxy<->store peering (ADR 0027, issues #678/#750) ─────────
 # This box is the ACCEPTING half: it exposes a BTP listener and never dials.
 # The g.toon proxy is the dialing half and carries the `endpoint`
 # (infra/linode-node/connector-rust.toml).
@@ -213,8 +214,8 @@ peer_expose = "btp"
 # `secret_file`: this file is committed to a PUBLIC repository, so a peering
 # written with a literal could not be committed at all.
 [[peers]]
-# ONE string both operators write: the g.toon proxy puts this in its credential and
-# this node proves P1 by looking it up here. Same literal on both sides, or
+# ONE string both operators write: the g.toon proxy puts this in its credential
+# and this node proves P1 by looking it up here. Same literal on both sides, or
 # nothing peers and there is no error anywhere.
 id = "apex-store"
 # The shared secret, as a FILE. `infra/linode-store/*.secret` is gitignored,
@@ -230,14 +231,14 @@ credential = { secret_file = "/app/data/apex-store.secret" }
 ceiling = 1000000
 
 # Role is decided by authentication AND a channel binding (peer-carriage-spec
-# 1.2, ADR 0024). Without this row the g.toon proxy authenticates fine, is admitted
-# only as an ordinary client, and every claim it sends is refused
+# 1.2, ADR 0024). Without this row the g.toon proxy authenticates fine, is
+# admitted only as an ordinary client, and every claim it sends is refused
 # `unknown_channel` -- which is exactly what happened before #678 wired this
 # table to `ClaimBook`.
 [[peer_channels]]
 peer_id = "apex-store"
-# The same live Base Sepolia channel the g.toon proxy names; each side records the
-# OTHER as counterparty.
+# The same live Base Sepolia channel the g.toon proxy names; each side records
+# the OTHER as counterparty.
 channel_id = "0x5cbe106fa4b6c4274a07b7e28f05f6ff11d9a7931fbf7e075e9ac2d1c2c05e17"
 counterparty_key = "0xF29fD62C4848B9573C9b90adbF61b664F386d9CF"
 # The EIP-712 domain a claim on this channel is signed over
@@ -264,13 +265,14 @@ price = 1000
 # ── `g.toon.store` is GONE (owner decision, 2026-08-05) ──────────────────
 # This box used to terminate a third prefix at the SAME store app and the
 # SAME price -- an alias, kept so a client arriving directly at this edge was
-# priced identically to one arriving via the router's `g.toon.store` forward.
-# The g.toon proxy dropped that forward, so this alias has nothing left to mirror.
-# One name for one app; `g.toon.ario` is the survivor because it is the one
-# compiled into a shipped client.
+# priced identically to one arriving via the g.toon proxy's `g.toon.store`
+# forward. The proxy dropped that forward, so this alias has nothing left to
+# mirror. One name for one app; `g.toon.ario` is the survivor because it is the
+# one compiled into a shipped client.
 #
-# `g.toon.relay.ario` stays: it is the relay-hop spelling (client -> router ->
-# here), a different PATH to the same app rather than a second NAME for it.
+# `g.toon.relay.ario` stays: it is the relay-hop spelling (client -> g.toon
+# proxy -> here), a different PATH to the same app rather than a second NAME
+# for it.
 
 # ── Settlement ─────────────────────────────────────────────────────────────
 

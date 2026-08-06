@@ -65,8 +65,8 @@ chainProviders:
     keyId: 'placeholder-overwritten-by-mnemonic'
     txFeeNanomina: '100000000'
 
-# The Arweave store runs on its own box. The router peers with it over BTP so it
-# can FORWARD store-bound writes (the router earns the configured hop fee).
+# The Arweave store runs on its own box. The g.toon proxy peers with it over BTP
+# so it can FORWARD store-bound writes (the proxy earns the configured hop fee).
 peers:
   - id: store-box
     # `proxy.ario`, not `proxy.store` — the store box's paid edge was renamed on
@@ -132,8 +132,8 @@ routes:
       mina: 'B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq'
 
 # ── Self-announce (kind:10032 IlpPeerInfo) — relay#37 / store#22 / toon-meta#69 ──
-# The router publishes its own IlpPeerInfo THROUGH its own routing: announceTo is its
-# OWN terminated route (g.toon.relay → relay:3100), so the write is delivered
+# The g.toon proxy publishes its own IlpPeerInfo THROUGH its own routing: announceTo
+# is its OWN terminated route (g.toon.relay → relay:3100), so the write is delivered
 # LOCALLY = free. Lands in the relay event store → served on the free read WS, so a
 # genesis-seed-only client discovers the publish + store routes out of band.
 # Requires connector >= 3.28.0 (the relay-connector:latest image was rebuilt on it).

@@ -1,8 +1,8 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# TOON store (Arweave DVM) node — connector g.toon proxy + DVM + TLS.
+# TOON store (Arweave DVM) node — connector (the g.toon proxy) + DVM + TLS.
 # Mirrors infra/linode-node/docker-compose.node.yml but for a store-only box:
 # no relay, no faucet, no Mina lightnet (this box settles against the existing
-# devnet chain boxes). The connector's g.toon proxy serves g.toon.ario -> store:3300.
+# devnet chain boxes). The connector proxies g.toon.ario -> store:3300.
 # Run from the CONNECTOR REPO ROOT:
 #   docker compose -f infra/linode-store/docker-compose.store.yml up -d
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -13,11 +13,12 @@ services:
     # deliberately so: it was built from the #381 branch head (c449a66e) on
     # 2026-07-20 to put "open the channel on the peer's chain + adopt the
     # existing per-pair Solana channel" onto this box, and rolled out in the
-    # same edit that moved the router peer above to `chain: solana:devnet`. The
-    # box has run it ever since. That fix later shipped stable in v3.40.1+, so
-    # this pin can be promoted to a release tag — but promoting it means
-    # restarting the store leg, which is a deployment decision, not a
-    # drift-reconciliation one. Until someone makes it, this is what runs.
+    # same edit that moved the g.toon proxy peer above to
+    # `chain: solana:devnet`. The box has run it ever since. That fix later
+    # shipped stable in v3.40.1+, so this pin can be promoted to a release tag
+    # — but promoting it means restarting the store leg, which is a deployment
+    # decision, not a drift-reconciliation one. Until someone makes it, this is
+    # what runs.
     image: ghcr.io/toon-protocol/connector:3.36.3-solchan.0
     environment:
       CONFIG_FILE: /app/config/connector.yaml

@@ -49,5 +49,5 @@ chmod +x "$HERE/init-letsencrypt.sh"
 
 echo
 echo "✅ TOON store node up."
-echo "   ILP edge : https://proxy.store.${DOMAIN}/ilp   (g.toon proxy g.proxy.store)"
+echo "   ILP edge : https://proxy.store.${DOMAIN}/ilp   (g.toon proxy, g.proxy.store)"
 echo "   DVM      : https://dvm.${DOMAIN}/health"
