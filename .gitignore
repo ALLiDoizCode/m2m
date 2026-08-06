@@ -125,6 +125,7 @@ deploy/connector-rust/operator.pem
 # reintroduce the gap by being named slightly differently.
 infra/linode-node/*.key
 infra/linode-store/*.key
+infra/linode-relay/*.key
 deploy/connector-rust/*.key
 
 # Peering shared secrets (issue #750). A `[[peers]]` credential's
@@ -134,6 +135,7 @@ deploy/connector-rust/*.key
 # ignore rule to stay out of the repo.
 infra/linode-node/*.secret
 infra/linode-store/*.secret
+infra/linode-relay/*.secret
 deploy/connector-rust/*.secret
 
 # Store-box gas-station Solana fee-payer — real key material (128-char hex
