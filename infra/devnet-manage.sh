@@ -18,6 +18,7 @@
 #   ./devnet-manage.sh redeploy  Pull latest images + restart containers
 #   ./devnet-manage.sh verify-routes  Assert apex forwards g.proxy.relay.store + g.proxy.store → store-box
 #   ./devnet-manage.sh ips       Print current box IPs
+#   ./devnet-manage.sh dns       Sync Porkbun A-records to current box IPs
 #   ./devnet-manage.sh endpoints Generate endpoints.json from live nodes
 set -euo pipefail
 
@@ -566,7 +567,11 @@ JSON
   ;;
 
 help|*)
-  sed -n '2,10p' "$0"
+  # Selected by pattern, not by line number: the header above grows, and a
+  # fixed `sed -n '2,10p'` range starts printing prose instead of commands the
+  # moment it does.
+  echo "TOON devnet lifecycle manager. Usage:"
+  grep -E '^#   \./devnet-manage\.sh ' "$0" | sed 's/^#//'
   exit 1
   ;;
 esac

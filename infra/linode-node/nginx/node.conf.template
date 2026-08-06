@@ -78,6 +78,13 @@ server {
     # at a route it didn't address.
     location ^~ /rust/ { return 410; }
 
+    # The live config's `/dash` pair (302 + alias into
+    # /etc/nginx/conf.d/dashsite/) is the ONE thing deliberately not copied
+    # here: that SPA is built in toon-meta and rsync'd onto the box, not
+    # tracked in this repo, so a box bootstrapped from this template has no
+    # dashsite/ to alias. Re-add both locations by hand once the site is on
+    # the box.
+
     location = /health {
         if ($health_backend != "") {
             proxy_pass $health_backend;

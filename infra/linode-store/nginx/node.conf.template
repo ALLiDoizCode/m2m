@@ -81,7 +81,7 @@ server {
     # public and unauthenticated and returns only this connector's public
     # signing key, but every other path here stays same-origin-only.
     location = /ilp/identity {
-        add_header Access-Control-Allow-Origin "https://proxy.devnet.toonprotocol.dev" always;
+        add_header Access-Control-Allow-Origin "https://proxy.${DOMAIN}" always;
         add_header Vary "Origin" always;
         limit_req zone=store burst=400 nodelay;
         proxy_pass http://connector-rust:4000/ilp/identity;
