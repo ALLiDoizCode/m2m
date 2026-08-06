@@ -440,7 +440,7 @@ not) suppresses this response unconditionally — its validation is §1.3's job,
 — and an unpaid request to an unpriced or unmatched destination falls through unchanged, exactly
 as it always has, **unless the PREPARE itself carries no execution condition at all**.
 
-**A condition-less PREPARE is always answered this way, regardless of destination** ([issue
+**A claimless, condition-less PREPARE is answered this way regardless of destination** ([issue
 #807](https://github.com/toon-protocol/connector/issues/807)). Issue #417's rule (enforced by
 `Connector::reject_ineligible`, `crates/connector-runtime/src/connector.rs`) refuses to route one
 at all — `F01_INVALID_PACKET`, "prepare carries no execution condition" — before any route is even
@@ -511,9 +511,9 @@ payment channel claim, presented back over this same `POST /ilp`. There is no pe
 scheme entry naming a settlement `asset`/`payTo` address, for EVM, Solana or any other chain,
 because no settlement address is configured anywhere in this connector yet — answering terms
 (issue #526) is a smaller, different thing from adding that configuration. `extra` is limited to
-what the code actually sets — `ilpAddress`, `endpoint`, `price`, plus whichever of
-`ilpAddresses`/`btpEndpoint`/`settlement`/`settlements`/`requiredTransport` this node has
-configured (below) — and carries nothing else.
+what the code actually sets — `ilpAddress`, `endpoint`, `price` and `sessionLeaseTtlMs` on every
+greeting, plus whichever of `ilpAddresses`/`btpEndpoint`/`settlement`/`settlements`/
+`requiredTransport` this node has configured (below) — and carries nothing else.
 
 **`extra.ilpAddresses`/`extra.btpEndpoint`** ([issue
 #807](https://github.com/toon-protocol/connector/issues/807)): this node's own ILP address(es) and

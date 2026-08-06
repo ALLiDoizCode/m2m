@@ -62,9 +62,12 @@ The greeting says which carriage a route needs (`extra.requiredTransport`), so t
 first and then picks: HTTP for a route with no restriction (`g.toon.ario` today), BTP for one pinned
 to it (`g.toon.relay` today). You do not tell it which to use.
 
-What it **cannot** negotiate is the BTP URL itself. The greeting carries no BTP endpoint — verified
-live, its `extra` keys are exactly `endpoint` (the HTTP one), `ilpAddress`, `price`,
-`requiredTransport`, `sessionLeaseTtlMs`, `settlement`, `settlements`. Deriving one by swapping the
+What it **cannot** negotiate is the BTP URL itself. A target that configures its own `[announce]`
+section now carries one in the greeting as `extra.btpEndpoint` ([issue
+#807](https://github.com/toon-protocol/connector/issues/807)), but a target that does not carries
+no BTP endpoint at all — before #807 none did, verified live, its `extra` keys being exactly
+`endpoint` (the HTTP one), `ilpAddress`, `price`, `requiredTransport`, `sessionLeaseTtlMs`,
+`settlement`, `settlements`. So this stays a value you supply. Deriving one by swapping the
 HTTP URL's scheme and appending `/btp` would be right on this fleet and wrong for any operator whose
 deployment does not mirror it — the same class of guess `relay_url` and `payTo` have already
 punished. So pass `--btp-url`, or set `[announce] publish_btp_url`, and if a BTP-only route comes
