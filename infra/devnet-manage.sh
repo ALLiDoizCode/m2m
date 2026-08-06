@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TOON devnet lifecycle manager — provision, deploy, tear down, or probe the
-# five-node devnet (EVM / Solana / Mina / TOON connector / Store-DVM).
+# devnet fleet: TOON connector (apex) / Store-DVM / Relay.
+#
+# The self-hosted EVM/Solana/Mina chain boxes this script once managed were
+# deleted 2026-07-19 — the devnet settles on PUBLIC chains now (Base Sepolia,
+# public Solana devnet, public Mina devnet); see infra/linode/endpoints.json's
+# own note. Recreating them here would be a live footgun (issue #819), not a
+# restoration, so they are gone from this file too.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #   ./devnet-manage.sh up        Provision boxes + deploy all nodes
 #   ./devnet-manage.sh store     Provision + deploy ONLY the store (DVM) box
+#   ./devnet-manage.sh relay     Provision + deploy ONLY the relay box
 #   ./devnet-manage.sh down      Stop containers (boxes stay, restart is fast)
 #   ./devnet-manage.sh destroy   Delete all Linode boxes (loses chain state)
 #   ./devnet-manage.sh status    Probe every public HTTPS endpoint
@@ -29,16 +36,29 @@ done
 : "${PORKBUN_SECRET:?Need PORKBUN_SECRET in ~/.bashrc}"
 
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_rsa}"
+# DOMAIN is the devnet subdomain suffix — baked into nginx server_names, TLS
+# cert names and each box's .env for envsubst. It is NOT the Porkbun-registered
+# zone: Porkbun's `dns/editByNameType/<domain>/...` needs the bare registered
+# domain, and `devnet.toonprotocol.dev` isn't one ("ERROR Invalid domain").
+# PORKBUN_DOMAIN is that zone; update_dns() uses it, never DOMAIN (issue #819 —
+# as written against DOMAIN, every update_dns call failed).
 DOMAIN="${DOMAIN:-devnet.toonprotocol.dev}"
+PORKBUN_DOMAIN="${PORKBUN_DOMAIN:-toonprotocol.dev}"
 BRANCH="${BRANCH:-feat/devnet-multi-node}"
 REPO_URL="https://github.com/toon-protocol/connector.git"
 LINODE_API="https://api.linode.com/v4"
 PORKBUN_API="https://api.porkbun.com/api/json/v3"
 
-# Node definitions: label | type | profile | boot-script-path | subdomains
-declare -A NODE_LABELS=( [evm]=toon-devnet-evm [sol]=toon-devnet-sol [mina]=toon-devnet-mina [toon]=toon [store]=toon-devnet-store )
-declare -A NODE_TYPES=(  [evm]=g6-standard-1   [sol]=g6-standard-2  [mina]=g6-standard-4   [toon]=g6-standard-1 [store]=g6-standard-1 )
-declare -A NODE_PASSWORDS=( [evm]="T00nDevN3t!EVM2026" [sol]="T00nDevN3t!SOL2026" [mina]="T00nDevN3t!MINA2026" [toon]="T00nDevN3t!N0DE2026" [store]="T00nDevN3t!ST0RE2026" )
+# Node definitions: label | type | root password.
+# Live-verified 2026-08-06 against the Linode API (issue #819 comment): the
+# fleet is `toon` (apex, label "toon") + `ario` (store, label "ario") + the
+# new `relay` box (label "relay") — all g6-standard-2. The `store` key's
+# label used to read "toon-devnet-store", which does not match the live
+# "ario" label; get_box_ip would find nothing and `create_box` would stand up
+# a SECOND store box.
+declare -A NODE_LABELS=( [toon]=toon [store]=ario [relay]=relay )
+declare -A NODE_TYPES=(  [toon]=g6-standard-2 [store]=g6-standard-2 [relay]=g6-standard-2 )
+declare -A NODE_PASSWORDS=( [toon]="T00nDevN3t!N0DE2026" [store]="T00nDevN3t!ST0RE2026" [relay]="T00nDevN3t!RELAY2026" )
 
 # ── Linode helpers ─────────────────────────────────────────────────────────
 linode_get() { curl -sf -H "Authorization: Bearer $LINODE_CLI_TOKEN" "$LINODE_API/$1"; }
@@ -66,7 +86,7 @@ wait_box_running() {
   echo "ERROR: $label never reached running status" >&2; return 1
 }
 
-create_box() {  # key: evm|sol|mina|toon
+create_box() {  # key: toon|store|relay
   local key=$1 label="${NODE_LABELS[$1]}" type="${NODE_TYPES[$1]}"
   existing_ip="$(get_box_ip "$label")"
   if [ -n "$existing_ip" ]; then
@@ -86,9 +106,9 @@ update_dns() {  # subdomain → ip
   local sub=$1 ip=$2
   local auth="{\"apikey\":\"$PORKBUN_API_KEY\",\"secretapikey\":\"$PORKBUN_SECRET\"}"
   local body; body=$(printf '%s' "$auth" | jq ". + {\"name\": \"$sub\", \"type\": \"A\", \"content\": \"$ip\", \"ttl\": \"600\"}")
-  local r; r=$(porkbun "dns/editByNameType/$DOMAIN/A/$sub" "$body")
+  local r; r=$(porkbun "dns/editByNameType/$PORKBUN_DOMAIN/A/$sub" "$body")
   if printf '%s' "$r" | grep -q '"SUCCESS"'; then echo "  DNS $sub → $ip"; return; fi
-  porkbun "dns/create/$DOMAIN" "$body" | jq -r '"  DNS \(.status) \("'"$sub"'") → '"$ip"'"'
+  porkbun "dns/create/$PORKBUN_DOMAIN" "$body" | jq -r '"  DNS \(.status) \("'"$sub"'") → '"$ip"'"'
 }
 
 ssh_run() {   # ip, command
@@ -102,29 +122,6 @@ wait_ssh() {
     sleep 5
   done
   echo "ERROR: can't SSH to $ip" >&2; return 1
-}
-
-deploy_chains_box() {  # ip, profile, nginx_template, cert_primary, cert_domains
-  local ip=$1 profile=$2 tmpl=$3 primary=$4 domains=$5
-  wait_ssh "$ip"
-  ssh_run "$ip" "
-    set -e
-    command -v git >/dev/null || apt-get install -y git curl
-    [ -d /root/connector ] || git clone -b '$BRANCH' '$REPO_URL' /root/connector
-    cd /root/connector && git pull --ff-only origin '$BRANCH' 2>/dev/null || true
-    cat > infra/linode/.env <<'ENV'
-DOMAIN=$DOMAIN
-COMPOSE_PROFILES=$profile
-NGINX_TEMPLATE=$tmpl
-CERT_PRIMARY=$primary
-CERT_DOMAINS="$domains"
-LETSENCRYPT_EMAIL=dev.jonathan.green@gmail.com
-LETSENCRYPT_STAGING=0
-PUBLIC_IFACE=eth0
-ENV
-    chmod +x infra/linode/bootstrap.sh infra/linode/init-letsencrypt.sh infra/linode/firewall.sh
-    cd infra/linode && ./bootstrap.sh
-  "
 }
 
 deploy_toon_node() {  # ip, toon_mnemonic
@@ -169,6 +166,32 @@ ENV
   "
 }
 
+deploy_relay_node() {  # ip, toon_mnemonic
+  # Modeled on deploy_store_node — infra/linode-relay/ mirrors infra/linode-store/
+  # file for file (issue #816). RELAY_NOSTR_SECRET_KEY must carry over
+  # byte-identical from deploy_toon_node's heredoc above: it is the relay
+  # app's own Nostr identity, and clients already discovered it under this
+  # pubkey (infra/linode-relay/.env.example).
+  local ip=$1 mnemonic=$2
+  wait_ssh "$ip"
+  ssh_run "$ip" "
+    set -e
+    command -v git >/dev/null || apt-get install -y git curl
+    [ -d /root/connector ] || git clone -b '$BRANCH' '$REPO_URL' /root/connector
+    cd /root/connector && git pull --ff-only origin '$BRANCH' 2>/dev/null || true
+    cat > infra/linode-relay/.env <<'ENV'
+DOMAIN=$DOMAIN
+LETSENCRYPT_STAGING=0
+LETSENCRYPT_EMAIL=dev.jonathan.green@gmail.com
+TOON_MNEMONIC=$mnemonic
+RELAY_NOSTR_SECRET_KEY=0000000000000000000000000000000000000000000000000000000000000002
+LOG_LEVEL=info
+ENV
+    chmod +x infra/linode-relay/bootstrap.sh infra/linode-relay/init-letsencrypt.sh infra/linode-relay/firewall.sh
+    ./infra/linode-relay/bootstrap.sh
+  "
+}
+
 probe() {  # url, label
   if curl -fsS -m 10 -o /dev/null "$1" 2>/dev/null; then
     printf "  ✅  %-40s %s\n" "$2" "$1"
@@ -178,7 +201,7 @@ probe() {  # url, label
 }
 
 print_ips() {
-  for key in evm sol mina toon store; do
+  for key in toon store relay; do
     local label="${NODE_LABELS[$key]}"
     local ip; ip=$(get_box_ip "$label")
     printf "  %-20s %s\n" "$label" "${ip:-not-found}"
@@ -258,21 +281,14 @@ case "${1:-help}" in
 up)
   TOON_MNEMONIC="${TOON_MNEMONIC:-giant goat guide develop boy wolf target embody leave sunny paddle neutral}"
   echo "==> [1/4] Provision boxes"
-  for key in evm sol mina toon store; do create_box "$key"; done
-  for key in evm sol mina toon store; do wait_box_running "${NODE_LABELS[$key]}"; done
+  for key in toon store relay; do create_box "$key"; done
+  for key in toon store relay; do wait_box_running "${NODE_LABELS[$key]}"; done
 
-  EVM_IP=$(get_box_ip toon-devnet-evm)
-  SOL_IP=$(get_box_ip toon-devnet-sol)
-  MINA_IP=$(get_box_ip toon-devnet-mina)
-  TOON_IP=$(get_box_ip toon)
-  STORE_IP=$(get_box_ip toon-devnet-store)
+  TOON_IP=$(get_box_ip "${NODE_LABELS[toon]}")
+  STORE_IP=$(get_box_ip "${NODE_LABELS[store]}")
+  RELAY_IP=$(get_box_ip "${NODE_LABELS[relay]}")
 
   echo "==> [2/4] Update DNS"
-  update_dns "evm-rpc.devnet"       "$EVM_IP"
-  update_dns "solana-rpc.devnet"    "$SOL_IP"
-  update_dns "solana-ws.devnet"     "$SOL_IP"
-  update_dns "mina.devnet"          "$MINA_IP"
-  update_dns "mina-accounts.devnet" "$MINA_IP"
   update_dns "relay-ws.devnet"      "$TOON_IP"
   update_dns "proxy.devnet"         "$TOON_IP"
   update_dns "faucet.devnet"        "$TOON_IP"
@@ -284,31 +300,35 @@ up)
   # not cover it.
   update_dns "proxy.ario.devnet"    "$STORE_IP"
   update_dns "dvm.devnet"           "$STORE_IP"
+  update_dns "proxy.relay.devnet"   "$RELAY_IP"
+  # `relay-ws.devnet` stays pointed at the apex above, deliberately, even
+  # though the relay app already answers it on its own box too. The apex's
+  # TLS cert LINEAGE is still named relay-ws.devnet.toonprotocol.dev
+  # (infra/linode-node/nginx/conf.d/node.conf:66-67) and also covers
+  # proxy.devnet + faucet.devnet on that same lineage — moving the record
+  # before the SAN is dropped fails renewal for all three, sixty days later.
+  # The apex still terminates g.toon.relay over HTTP itself until #820 flips
+  # it to forward over the new peering, so reads keep working either way.
+  # Set MOVE_RELAY_WS=1 to move it anyway, once #820 has landed and the SAN
+  # has been dropped from the apex's cert lineage.
+  if [ "${MOVE_RELAY_WS:-0}" = "1" ]; then
+    echo "  MOVE_RELAY_WS=1 — moving relay-ws.devnet off the apex onto the relay box"
+    update_dns "relay-ws.devnet"    "$RELAY_IP"
+  fi
 
   echo "==> [3/4] Deploy all nodes (parallel)"
-  deploy_chains_box "$EVM_IP"  "evm"    "evm.conf.template" \
-    "evm-rpc.$DOMAIN" "evm-rpc.$DOMAIN" &
-  PID_EVM=$!
-
-  deploy_chains_box "$SOL_IP"  "solana" "sol.conf.template" \
-    "solana-rpc.$DOMAIN" "solana-rpc.$DOMAIN solana-ws.$DOMAIN" &
-  PID_SOL=$!
-
-  deploy_chains_box "$MINA_IP" "mina"   "mina.conf.template" \
-    "mina.$DOMAIN" "mina.$DOMAIN mina-accounts.$DOMAIN" &
-  PID_MINA=$!
-
   deploy_toon_node "$TOON_IP" "$TOON_MNEMONIC" &
   PID_TOON=$!
 
   deploy_store_node "$STORE_IP" "$TOON_MNEMONIC" &
   PID_STORE=$!
 
-  wait $PID_EVM   && echo "  ✅ EVM done"   || echo "  ❌ EVM failed"
-  wait $PID_SOL   && echo "  ✅ Sol done"   || echo "  ❌ Sol failed"
-  wait $PID_MINA  && echo "  ✅ Mina done"  || echo "  ❌ Mina failed"
+  deploy_relay_node "$RELAY_IP" "$TOON_MNEMONIC" &
+  PID_RELAY=$!
+
   wait $PID_TOON  && echo "  ✅ TOON done"  || echo "  ❌ TOON failed"
   wait $PID_STORE && echo "  ✅ Store done" || echo "  ❌ Store failed"
+  wait $PID_RELAY && echo "  ✅ Relay done" || echo "  ❌ Relay failed"
 
   echo "==> [4/4] Status check"
   "$0" status
@@ -325,7 +345,7 @@ store)
   echo "==> [1/3] Provision store box"
   create_box store
   wait_box_running "${NODE_LABELS[store]}"
-  STORE_IP=$(get_box_ip toon-devnet-store)
+  STORE_IP=$(get_box_ip "${NODE_LABELS[store]}")
   echo "==> [2/3] Update DNS"
   update_dns "proxy.ario.devnet"  "$STORE_IP"
   update_dns "dvm.devnet"         "$STORE_IP"
@@ -334,9 +354,30 @@ store)
   "$0" status
   ;;
 
+relay)
+  # Targeted: provision + deploy ONLY the relay box, modeled on `store` above.
+  TOON_MNEMONIC="${TOON_MNEMONIC:-giant goat guide develop boy wolf target embody leave sunny paddle neutral}"
+  echo "==> [1/3] Provision relay box"
+  create_box relay
+  wait_box_running "${NODE_LABELS[relay]}"
+  RELAY_IP=$(get_box_ip "${NODE_LABELS[relay]}")
+  echo "==> [2/3] Update DNS"
+  update_dns "proxy.relay.devnet" "$RELAY_IP"
+  # relay-ws.devnet is NOT moved here — see the `up)` case's comment; it stays
+  # on the apex until #820 flips the peering and the apex cert's SAN is
+  # dropped. Use MOVE_RELAY_WS=1 ./devnet-manage.sh relay to move it anyway.
+  if [ "${MOVE_RELAY_WS:-0}" = "1" ]; then
+    echo "  MOVE_RELAY_WS=1 — moving relay-ws.devnet off the apex onto the relay box"
+    update_dns "relay-ws.devnet"  "$RELAY_IP"
+  fi
+  echo "==> [3/3] Deploy relay node"
+  deploy_relay_node "$RELAY_IP" "$TOON_MNEMONIC"
+  "$0" status
+  ;;
+
 down)
   echo "==> Stopping containers on all nodes"
-  for key in evm sol mina toon store; do
+  for key in toon store relay; do
     local_label="${NODE_LABELS[$key]}"
     ip=$(get_box_ip "$local_label") || continue
     [ -z "$ip" ] && echo "  $local_label: not found" && continue
@@ -348,9 +389,7 @@ down)
       elif [ '$key' = 'store' ]; then
         docker compose -f infra/linode-store/docker-compose.store.yml down 2>/dev/null || true
       else
-        . infra/linode/.env 2>/dev/null || true
-        docker compose -f docker-compose.yml -f infra/linode/docker-compose.linode.yml \
-          --profile \$COMPOSE_PROFILES down 2>/dev/null || true
+        docker compose -f infra/linode-relay/docker-compose.relay.yml down 2>/dev/null || true
       fi
     " && echo "  $local_label stopped" || echo "  $local_label: could not stop"
   done
@@ -360,7 +399,7 @@ destroy)
   echo "==> Deleting all devnet boxes (irreversible)"
   read -r -p "Are you sure? [y/N] " ans
   [[ "$ans" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 1; }
-  for key in evm sol mina toon store; do
+  for key in toon store relay; do
     local_label="${NODE_LABELS[$key]}"
     id=$(get_box_id "$local_label") || continue
     [ -z "$id" ] && echo "  $local_label: not found" && continue
@@ -373,20 +412,21 @@ status)
   print_ips
   echo
   echo "Public endpoints:"
-  probe "https://evm-rpc.$DOMAIN"               "evm-rpc"
-  probe "https://solana-rpc.$DOMAIN/health"      "solana-rpc"
-  probe "https://mina.$DOMAIN/graphql"           "mina-graphql"
-  probe "https://mina-accounts.$DOMAIN/list-acquired-accounts" "mina-accounts"
   probe "https://faucet.$DOMAIN/health"          "faucet"
   probe "https://proxy.$DOMAIN/health"           "proxy/connector"
   probe "https://relay-ws.$DOMAIN"               "relay-ws"
-  probe "https://proxy.store.$DOMAIN/health"     "store proxy/connector"
-  probe "https://dvm.$DOMAIN/health"             "store dvm"
+  # store/relay nginx has no `/health` location (only the apex's does, mapped
+  # to /ilp/identity server-side) -- probing /health on either 404s even when
+  # the box is healthy. /ilp/identity is the same unauthenticated liveness
+  # read the operator runbook and both boxes' own CORS location use.
+  probe "https://proxy.ario.$DOMAIN/ilp/identity"  "store (ario) proxy/connector"
+  probe "https://dvm.$DOMAIN/health"               "store dvm"
+  probe "https://proxy.relay.$DOMAIN/ilp/identity" "relay proxy/connector"
   ;;
 
 redeploy)
   echo "==> Redeploying containers on all nodes (pulls latest images)"
-  for key in evm sol mina toon store; do
+  for key in toon store relay; do
     local_label="${NODE_LABELS[$key]}"
     ip=$(get_box_ip "$local_label") || continue
     [ -z "$ip" ] && echo "  $local_label: not found" && continue
@@ -411,7 +451,10 @@ redeploy)
     elif [ "$key" = "store" ]; then
       ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && docker compose -f infra/linode-store/docker-compose.store.yml pull && docker compose -f infra/linode-store/docker-compose.store.yml up -d" &
     else
-      ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && source infra/linode/.env && docker compose -f docker-compose.yml -f infra/linode/docker-compose.linode.yml --profile \$COMPOSE_PROFILES pull && docker compose -f docker-compose.yml -f infra/linode/docker-compose.linode.yml --profile \$COMPOSE_PROFILES up -d" &
+      # relay has no TypeScript compose file at all (issue #816) -- always
+      # both files together, since the connector-rust service is only
+      # defined in the overlay.
+      ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && docker compose -f infra/linode-relay/docker-compose.relay.yml -f infra/linode-relay/docker-compose.relay.rust.yml pull && docker compose -f infra/linode-relay/docker-compose.relay.yml -f infra/linode-relay/docker-compose.relay.rust.yml up -d" &
     fi
   done
   wait
@@ -427,21 +470,20 @@ ips) print_ips ;;
 
 dns)
   echo "==> Syncing Porkbun DNS to current box IPs"
-  EVM_IP=$(get_box_ip toon-devnet-evm)
-  SOL_IP=$(get_box_ip toon-devnet-sol)
-  MINA_IP=$(get_box_ip toon-devnet-mina)
-  TOON_IP=$(get_box_ip toon)
-  STORE_IP=$(get_box_ip toon-devnet-store)
-  [ -n "$EVM_IP" ]  && update_dns "evm-rpc.devnet" "$EVM_IP"       || echo "  toon-devnet-evm not found"
-  [ -n "$SOL_IP" ]  && update_dns "solana-rpc.devnet" "$SOL_IP"    || echo "  toon-devnet-sol not found"
-  [ -n "$SOL_IP" ]  && update_dns "solana-ws.devnet" "$SOL_IP"     || true
-  [ -n "$MINA_IP" ] && update_dns "mina.devnet" "$MINA_IP"         || echo "  toon-devnet-mina not found"
-  [ -n "$MINA_IP" ] && update_dns "mina-accounts.devnet" "$MINA_IP"|| true
-  [ -n "$TOON_IP" ] && update_dns "relay-ws.devnet" "$TOON_IP"     || echo "  toon not found"
+  TOON_IP=$(get_box_ip "${NODE_LABELS[toon]}")
+  STORE_IP=$(get_box_ip "${NODE_LABELS[store]}")
+  RELAY_IP=$(get_box_ip "${NODE_LABELS[relay]}")
+  [ -n "$TOON_IP" ] && update_dns "relay-ws.devnet" "$TOON_IP"     || echo "  ${NODE_LABELS[toon]} not found"
   [ -n "$TOON_IP" ] && update_dns "proxy.devnet" "$TOON_IP"        || true
   [ -n "$TOON_IP" ] && update_dns "faucet.devnet" "$TOON_IP"       || true
-  [ -n "$STORE_IP" ] && update_dns "proxy.ario.devnet" "$STORE_IP"  || echo "  toon-devnet-store not found"
+  [ -n "$STORE_IP" ] && update_dns "proxy.ario.devnet" "$STORE_IP"  || echo "  ${NODE_LABELS[store]} not found"
   [ -n "$STORE_IP" ] && update_dns "dvm.devnet" "$STORE_IP"        || true
+  [ -n "$RELAY_IP" ] && update_dns "proxy.relay.devnet" "$RELAY_IP" || echo "  ${NODE_LABELS[relay]} not found"
+  # relay-ws.devnet is deliberately not synced here — see the `up)`/`relay)`
+  # cases' comment; it stays on the apex until #820. MOVE_RELAY_WS=1 opts in.
+  if [ "${MOVE_RELAY_WS:-0}" = "1" ] && [ -n "$RELAY_IP" ]; then
+    update_dns "relay-ws.devnet" "$RELAY_IP"
+  fi
   echo "Done."
   ;;
 
