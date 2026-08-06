@@ -273,19 +273,127 @@ export function resolveIssueFromPrBody(prNumber: string): TargetIssue | null {
 
 const NEEDS_HUMAN_LABEL = 'needs:human';
 
-/**
- * Post a blocking verdict's findings as a PR review (event COMMENT) and apply
- * the `needs:human` label. Pure REST via `gh api` — porcelain `gh pr edit` is
- * broken in repos with a classic Project attached (projectCards GraphQL
- * deprecation), so label writes must not go through it.
- */
-export function postBlockingVerdict(
-  prNumber: string,
-  verdict: ReviewVerdict,
-  issue: TargetIssue | null
-): void {
-  const nwo = repoNwo();
+// ---------------------------------------------------------------------------
+// factory-ops formal verdict (toon-meta#282)
+//
+// The factory App (toon-backlog-bot) opens agent PRs, and GitHub forbids a
+// PR's author from approving it — so the formal review verdict is submitted by
+// a SECOND identity: factory-ops, authenticating via the FACTORY_OPS_TOKEN
+// org secret (provisioned + monitored under toon-meta#271,
+// .github/workflows/factory-ops-credential.yml).
+//
+//   clean    → a real APPROVE review (satisfies required-review protection)
+//   blocking → a REQUEST_CHANGES review carrying the findings, + needs:human
+//
+// The approval is a MACHINE verdict: it attests that the gate passed and the
+// reviewer found nothing blocking — not human judgement. See FACTORY.md,
+// "What a factory-ops approval attests".
+//
+// FAIL LOUDLY, NEVER DEGRADE: if the token is missing (an unshared org secret
+// is an EMPTY STRING at runtime, not an error), does not authenticate
+// (expired/revoked/pending org approval), or authenticates AS the PR author,
+// every function here THROWS so the job goes red. The retired loops' reviewer
+// rotted precisely because REVIEWER_TOKEN expired and reviews silently
+// degraded to a COMMENTED verdict that satisfied nothing — that degradation
+// path must not exist here, so the submitted review's state is also read back
+// and verified.
+// ---------------------------------------------------------------------------
 
+export interface FactoryOpsIdentity {
+  /** The FACTORY_OPS_TOKEN value, used as GH_TOKEN for verdict submission. */
+  token: string;
+  /** The login the token authenticates as, e.g. "ALLiDoizCode". */
+  login: string;
+}
+
+/**
+ * Normalize an actor login for identity comparison. The same App author
+ * renders as `app/toon-backlog-bot` via GraphQL (`gh pr view --json author`)
+ * and `toon-backlog-bot[bot]` via REST — strip both decorations and casing so
+ * the self-approval guard cannot be dodged by a representation mismatch.
+ */
+export function normalizeLogin(login: string): string {
+  return login
+    .trim()
+    .toLowerCase()
+    .replace(/^app\//, '')
+    .replace(/\[bot\]$/, '');
+}
+
+/**
+ * Resolve the factory-ops approver identity, or THROW (fail the job) when the
+ * credential is missing or does not authenticate. Call this as early as
+ * possible — a rotten credential should fail the run before an expensive
+ * reviewer pass, not after it.
+ */
+export function resolveFactoryOpsIdentity(): FactoryOpsIdentity {
+  const token = process.env.FACTORY_OPS_TOKEN?.trim();
+  if (!token) {
+    throw new Error(
+      `FACTORY_OPS_TOKEN is missing or empty. The formal review verdict ` +
+        `(toon-meta#282) cannot be submitted without the factory-ops identity. ` +
+        `An org secret that is not shared with this repository is an empty ` +
+        `string at runtime, not an error — check org Settings -> Secrets and ` +
+        `variables -> Actions -> FACTORY_OPS_TOKEN -> Repository access, and ` +
+        `the workflow step's env wiring. Failing loudly instead of degrading ` +
+        `to a COMMENTED verdict (that silent degradation is how the retired ` +
+        `loops' reviewer rotted when REVIEWER_TOKEN expired).`
+    );
+  }
+  let login = '';
+  try {
+    login = execFileSync('gh', ['api', 'user', '--jq', '.login'], {
+      encoding: 'utf8',
+      env: { ...process.env, GH_TOKEN: token },
+    }).trim();
+  } catch {
+    login = '';
+  }
+  if (!login) {
+    throw new Error(
+      `FACTORY_OPS_TOKEN did not authenticate. It may be revoked, expired, or ` +
+        `still pending org approval (a fine-grained PAT against an org sits ` +
+        `unusable until an org owner approves it). The credential monitor ` +
+        `(.github/workflows/factory-ops-credential.yml, toon-meta#271) should ` +
+        `have warned about this. Failing loudly — the formal review verdict ` +
+        `must never silently degrade.`
+    );
+  }
+  return { token, login };
+}
+
+/** The PR's author login (GraphQL shape, e.g. `app/toon-backlog-bot`). */
+export function getPrAuthorLogin(prNumber: string): string {
+  const author = gh(['pr', 'view', prNumber, '--json', 'author', '--jq', '.author.login']).trim();
+  if (!author) {
+    throw new Error(`Could not resolve the author of PR #${prNumber}.`);
+  }
+  return author;
+}
+
+/**
+ * The self-approval guard: the approver must never be the PR author. GitHub
+ * would reject the APPROVE/REQUEST_CHANGES with a 422 anyway — this asserts
+ * the invariant BEFORE submitting, with a diagnosis instead of an API error.
+ */
+export function assertApproverIsNotAuthor(
+  approver: FactoryOpsIdentity,
+  prAuthorLogin: string
+): void {
+  if (normalizeLogin(approver.login) === normalizeLogin(prAuthorLogin)) {
+    throw new Error(
+      `Self-approval guard: FACTORY_OPS_TOKEN authenticates as ` +
+        `'${approver.login}', which IS the PR author ('${prAuthorLogin}'). ` +
+        `GitHub forbids a PR's author from approving it, so submitting this ` +
+        `verdict could only produce a worthless COMMENTED review or a 422. ` +
+        `Failing the job loudly instead. Fix: point FACTORY_OPS_TOKEN at an ` +
+        `identity distinct from whatever opens agent PRs (the factory App), ` +
+        `or investigate why this PR was not opened by the App.`
+    );
+  }
+}
+
+function factoryOpsFindingsBody(verdict: ReviewVerdict, issue: TargetIssue | null): string {
   const findings = verdict.blockingFindings
     .map(
       (f, i) =>
@@ -294,7 +402,7 @@ export function postBlockingVerdict(
     )
     .join('\n');
 
-  const body =
+  return (
     `## Reviewer verdict: BLOCKING\n\n` +
     (issue
       ? `Reviewed against issue #${issue.number} ("${issue.title}") and its acceptance criteria.\n\n`
@@ -302,41 +410,111 @@ export function postBlockingVerdict(
     `The sandcastle reviewer found ${verdict.blockingFindings.length} blocking finding(s):\n\n` +
     `${findings}\n\n` +
     `Applied \`${NEEDS_HUMAN_LABEL}\` — a human must resolve these findings before merge. ` +
-    `(Structured reviewer verdict, toon-protocol/toon-meta#275.)`;
-
-  execFileSync(
-    'gh',
-    ['api', `repos/${nwo}/pulls/${prNumber}/reviews`, '-f', 'event=COMMENT', '-f', `body=${body}`],
-    { stdio: ['ignore', 'ignore', 'inherit'] }
+    `(Machine verdict submitted by factory-ops; toon-protocol/toon-meta#275, #282.)`
   );
+}
 
-  // Ensure the label exists (ignore "already exists"), then add it. Both are
-  // plain REST so a pre-existing label or a re-run stays idempotent.
-  try {
-    execFileSync(
-      'gh',
-      [
-        'api',
-        `repos/${nwo}/labels`,
-        '-f',
-        `name=${NEEDS_HUMAN_LABEL}`,
-        '-f',
-        'color=B60205',
-        '-f',
-        'description=Factory reviewer found blocking defects - a human must decide',
-      ],
-      { stdio: 'pipe' }
-    );
-  } catch {
-    // Label already exists — the normal case.
-  }
-  execFileSync(
-    'gh',
-    ['api', `repos/${nwo}/issues/${prNumber}/labels`, '-f', `labels[]=${NEEDS_HUMAN_LABEL}`],
-    { stdio: ['ignore', 'ignore', 'inherit'] }
+function factoryOpsApprovalBody(issue: TargetIssue | null): string {
+  return (
+    `## Reviewer verdict: CLEAN — approved by factory-ops\n\n` +
+    `This approval is a **machine verdict**: it attests that the gate passed ` +
+    `and the sandcastle reviewer found nothing blocking` +
+    (issue
+      ? ` (reviewed against issue #${issue.number}, "${issue.title}", and its acceptance criteria)`
+      : ` (Standards-only review — no target issue resolved from the PR body)`) +
+    `. It is not human judgement. ` +
+    `See FACTORY.md, "What a factory-ops approval attests" ` +
+    `(toon-protocol/toon-meta#282).`
   );
+}
+
+/**
+ * Submit the formal review verdict on a PR AS FACTORY-OPS:
+ *   clean    → APPROVE
+ *   blocking → REQUEST_CHANGES with the findings, plus the `needs:human` label
+ *
+ * Resolves the approver identity and re-asserts the self-approval guard
+ * itself, so no caller can reach the submission without the guard. After
+ * submission the created review's state is verified from the API response —
+ * anything other than the expected APPROVED/CHANGES_REQUESTED state (i.e. a
+ * degraded COMMENTED review) throws.
+ *
+ * Label writes are pure REST via `gh api` — porcelain `gh pr edit` is broken
+ * in repos with a classic Project attached (projectCards GraphQL deprecation).
+ * The `needs:human` label logic lives HERE and only here (toon-meta#282 seam:
+ * the pre-#282 COMMENT-review path applied it too; that path is gone).
+ */
+export function submitFactoryOpsVerdict(
+  prNumber: string,
+  verdict: ReviewVerdict,
+  issue: TargetIssue | null
+): void {
+  const approver = resolveFactoryOpsIdentity();
+  const prAuthor = getPrAuthorLogin(prNumber);
+  assertApproverIsNotAuthor(approver, prAuthor);
+
+  const nwo = repoNwo();
+  const blocking = verdict.verdict === 'blocking';
+  const event = blocking ? 'REQUEST_CHANGES' : 'APPROVE';
+  const expectedState = blocking ? 'CHANGES_REQUESTED' : 'APPROVED';
+  const body = blocking ? factoryOpsFindingsBody(verdict, issue) : factoryOpsApprovalBody(issue);
 
   console.log(
-    `Posted blocking findings as a PR review and applied '${NEEDS_HUMAN_LABEL}' on PR #${prNumber}.`
+    `Submitting formal ${event} review as factory-ops ('${approver.login}') ` +
+      `on PR #${prNumber} (author: '${prAuthor}').`
   );
+
+  const response = execFileSync(
+    'gh',
+    ['api', `repos/${nwo}/pulls/${prNumber}/reviews`, '-f', `event=${event}`, '-f', `body=${body}`],
+    { encoding: 'utf8', env: { ...process.env, GH_TOKEN: approver.token } }
+  );
+
+  // NEVER DEGRADE: verify the review GitHub actually created is in the state
+  // we asked for. A COMMENTED review here would be exactly the old
+  // REVIEWER_TOKEN rot, reborn — fail instead.
+  const created = JSON.parse(response) as { state?: string; id?: number };
+  if (created.state !== expectedState) {
+    throw new Error(
+      `Formal verdict DEGRADED: asked GitHub for ${event} but the created ` +
+        `review (id ${created.id ?? '?'}) has state ` +
+        `'${created.state ?? 'unknown'}' instead of '${expectedState}'. ` +
+        `Refusing to treat this as success.`
+    );
+  }
+  console.log(`Verified: review ${created.id} on PR #${prNumber} is ${created.state}.`);
+
+  if (blocking) {
+    // Ensure the label exists (ignore "already exists"), then add it. Both are
+    // plain REST so a pre-existing label or a re-run stays idempotent.
+    try {
+      execFileSync(
+        'gh',
+        [
+          'api',
+          `repos/${nwo}/labels`,
+          '-f',
+          `name=${NEEDS_HUMAN_LABEL}`,
+          '-f',
+          'color=B60205',
+          '-f',
+          'description=Factory reviewer found blocking defects - a human must decide',
+        ],
+        { stdio: 'pipe', env: { ...process.env, GH_TOKEN: approver.token } }
+      );
+    } catch {
+      // Label already exists — the normal case.
+    }
+    execFileSync(
+      'gh',
+      ['api', `repos/${nwo}/issues/${prNumber}/labels`, '-f', `labels[]=${NEEDS_HUMAN_LABEL}`],
+      {
+        stdio: ['ignore', 'ignore', 'inherit'],
+        env: { ...process.env, GH_TOKEN: approver.token },
+      }
+    );
+    console.log(
+      `Requested changes with the findings and applied '${NEEDS_HUMAN_LABEL}' on PR #${prNumber}.`
+    );
+  }
 }
