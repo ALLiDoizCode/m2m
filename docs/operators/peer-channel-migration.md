@@ -61,11 +61,11 @@ It is tempting to read "close the old channel, settle it, fund the new one, open
 sequence. Doing it in that order is the wrong shape: `closeChannel` starts the old
 `TokenNetwork`'s challenge period (`settlementTimeout`, minimum 1 hour, whatever value the channel
 was actually opened with — read it back on-chain per Order step 4 rather than assuming the
-minimum), and
-once closed the channel can never reopen. If the new channel then failed to fund, failed to open,
-or failed its own verification, there would be **no live apex↔store channel of any kind** for the
-length of that window, and no config edit could roll that back — the old contract would still
-resolve (AC5 of the original cutover), but the specific channel that config named would not.
+minimum), and once closed the channel can never reopen. If the new channel then failed to fund,
+failed to open, or failed its own verification, there would be **no live apex↔store channel of any
+kind** for the length of that window, and no config edit could roll that back — the old contract
+would still resolve (AC5 of the original cutover), but the specific channel that config named would
+not.
 
 So the new channel is opened and funded with **fresh collateral**, fully independent of the old
 channel's state, proven end to end while the old channel is still live and untouched, and only
