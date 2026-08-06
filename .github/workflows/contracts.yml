@@ -48,12 +48,12 @@ jobs:
         working-directory: packages/contracts
         # *.fork.t.sol suites hit a live RPC and run in their own fork-test jobs below, so this
         # hermetic job doesn't depend on network access.
-        run: forge test --no-match-test "testGas_" --no-match-path "*fork.t.sol"
+        run: forge test --no-match-test "testGas_" --no-match-path "*.fork.t.sol"
         continue-on-error: false
 
       - name: Generate coverage report
         working-directory: packages/contracts
-        run: forge coverage --ir-minimum --report summary --no-match-test "testGas_" --no-match-path "*fork.t.sol" > coverage-report.txt 2>&1 || true
+        run: forge coverage --ir-minimum --report summary --no-match-test "testGas_" --no-match-path "*.fork.t.sol" > coverage-report.txt 2>&1 || true
 
       - name: Check coverage threshold
         working-directory: packages/contracts

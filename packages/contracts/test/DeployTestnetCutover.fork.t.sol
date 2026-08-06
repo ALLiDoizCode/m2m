@@ -36,13 +36,22 @@ contract DeployTestnetCutoverForkTest is Test {
     ///         story a real agent wallet would have post-cutover.
     address internal constant USDC_DISTRIBUTOR = 0x6bafedaF18FF62f0a63dd0148bafa163204627F6;
 
+    /// @notice Runs the cutover script exactly as `forge script ... --fork-url` would: keyless,
+    ///         unbroadcast, against real forked chain state. Every test below starts here, so all
+    ///         of them exercise the same entrypoint a human broadcast will.
+    function _runCutover()
+        internal
+        returns (ERC2771Forwarder forwarder, TokenNetworkRegistry registry, TokenNetwork tokenNetwork)
+    {
+        return new DeployTestnetCutoverScript().run();
+    }
+
     /// @notice run() must not hard-require PRIVATE_KEY -- this whole fork test runs with no key,
     ///         no --broadcast, and no secrets, exactly as CI needs it to.
     function testFork_Cutover_RunsKeylessWithNoBroadcast() public {
         assertEq(vm.envOr("PRIVATE_KEY", uint256(0)), 0, "this test must not have a PRIVATE_KEY available");
 
-        DeployTestnetCutoverScript script = new DeployTestnetCutoverScript();
-        (ERC2771Forwarder forwarder, TokenNetworkRegistry registry, TokenNetwork tokenNetwork) = script.run();
+        (ERC2771Forwarder forwarder, TokenNetworkRegistry registry, TokenNetwork tokenNetwork) = _runCutover();
 
         assertGt(address(forwarder).code.length, 0);
         assertGt(address(registry).code.length, 0);
@@ -52,8 +61,7 @@ contract DeployTestnetCutoverForkTest is Test {
     /// @notice The cutover must produce addresses genuinely distinct from the live pre-cutover
     ///         deployment -- a fresh registry and a fresh TokenNetwork, not a no-op.
     function testFork_Cutover_ProducesFreshAddressesDistinctFromLiveDeployment() public {
-        DeployTestnetCutoverScript script = new DeployTestnetCutoverScript();
-        (, TokenNetworkRegistry registry, TokenNetwork tokenNetwork) = script.run();
+        (, TokenNetworkRegistry registry, TokenNetwork tokenNetwork) = _runCutover();
 
         assertTrue(address(registry) != OLD_REGISTRY, "cutover must deploy a NEW registry, not reuse the live one");
         assertTrue(
@@ -65,8 +73,7 @@ contract DeployTestnetCutoverForkTest is Test {
     ///         existing balance and faucet distribution on the live mock USDC must keep working
     ///         after cutover, unchanged.
     function testFork_Cutover_ReusesTheExistingLiveUsdcToken() public {
-        DeployTestnetCutoverScript script = new DeployTestnetCutoverScript();
-        (,, TokenNetwork tokenNetwork) = script.run();
+        (,, TokenNetwork tokenNetwork) = _runCutover();
 
         assertEq(tokenNetwork.token(), EXISTING_USDC, "the new TokenNetwork must bind the SAME live devnet USDC");
         assertGt(EXISTING_USDC.code.length, 0, "the existing USDC must have real code on the fork");
@@ -76,12 +83,31 @@ contract DeployTestnetCutoverForkTest is Test {
         assertEq(usdc.decimals(), 6, "devnet USDC is 6 decimals (ADR 0010)");
     }
 
+    /// @notice An EXISTING_USDC_ADDRESS override (as vm.envOr resolves it) must flow through to the
+    ///         TokenNetwork the fresh registry creates, and the unset default must be the live
+    ///         devnet USDC this suite pins.
+    /// @dev Exercises the parameterized deploy() overload directly rather than vm.setEnv, since
+    ///      vm.setEnv mutates the actual process environment and is not safe to use in a fork test
+    ///      suite that Foundry may run in parallel with other tests in this file.
+    function testFork_Cutover_RespectsExistingUsdcOverride() public {
+        address overrideToken = makeAddr("overrideToken");
+
+        DeployTestnetCutoverScript script = new DeployTestnetCutoverScript();
+        assertEq(script.DEFAULT_EXISTING_USDC(), EXISTING_USDC, "the unset default must be the live devnet USDC");
+
+        (ERC2771Forwarder forwarder, TokenNetworkRegistry registry, TokenNetwork tokenNetwork) =
+            script.deploy(overrideToken);
+
+        assertEq(tokenNetwork.token(), overrideToken, "the override must reach the TokenNetwork's constructor");
+        assertEq(registry.getTokenNetwork(overrideToken), address(tokenNetwork));
+        assertTrue(tokenNetwork.isTrustedForwarder(address(forwarder)), "an overridden token is wired the same way");
+    }
+
     /// @notice The new registry resolves the new TokenNetwork for the reused token, and trusts
     ///         the freshly deployed forwarder -- the two facts EvmSettlementBackend::connect and
     ///         a relayer each depend on.
     function testFork_Cutover_RegistryResolvesAndForwarderIsTrusted() public {
-        DeployTestnetCutoverScript script = new DeployTestnetCutoverScript();
-        (ERC2771Forwarder forwarder, TokenNetworkRegistry registry, TokenNetwork tokenNetwork) = script.run();
+        (ERC2771Forwarder forwarder, TokenNetworkRegistry registry, TokenNetwork tokenNetwork) = _runCutover();
 
         assertEq(registry.getTokenNetwork(EXISTING_USDC), address(tokenNetwork));
         assertTrue(tokenNetwork.isTrustedForwarder(address(forwarder)), "TokenNetwork must trust the new forwarder");
@@ -91,8 +117,7 @@ contract DeployTestnetCutoverForkTest is Test {
     ///         still have code and the old registry still resolves the old TokenNetwork, so a
     ///         channel opened before cutover keeps settling exactly where it always did.
     function testFork_Cutover_DoesNotDisturbTheOldLiveDeployment() public {
-        DeployTestnetCutoverScript script = new DeployTestnetCutoverScript();
-        script.run();
+        _runCutover();
 
         assertGt(OLD_REGISTRY.code.length, 0, "the old registry must still be live");
         assertGt(OLD_TOKEN_NETWORK.code.length, 0, "the old TokenNetwork must still be live");
@@ -103,12 +128,12 @@ contract DeployTestnetCutoverForkTest is Test {
         );
     }
 
-    // Shared lifecycle-test context, held in storage rather than as locals -- via_ir hits a
-    // Yul "variable N too deep in the stack" limit when this many values (2 keys, 2 signer
-    // addresses, a relayer, a channel id, a forwarder/registry/network) are all live as locals
-    // across one test function plus its call graph. Storage reads/writes don't consume stack
-    // slots the same way, so the lifecycle helpers below read/write these instead of taking
-    // long parameter lists.
+    // Shared context for the gasless-lifecycle test below, held in storage rather than as locals
+    // -- via_ir hits a Yul "variable N too deep in the stack" limit when this many values (2 keys,
+    // 2 signer addresses, a relayer, a channel id, a forwarder/registry/network) are all live as
+    // locals across one test function plus its call graph. Storage reads/writes don't consume
+    // stack slots the same way, so the lifecycle helpers below read these instead of taking long
+    // parameter lists. Only that one test uses them.
     ERC2771Forwarder internal lifecycleForwarder;
     TokenNetwork internal lifecycleTokenNetwork;
     address internal lifecycleRelayer;
@@ -124,9 +149,8 @@ contract DeployTestnetCutoverForkTest is Test {
     ///         closes a channel on the NEW post-cutover TokenNetwork entirely through the
     ///         forwarder -- a relayer pays gas, the signer never does.
     function testFork_Cutover_GaslessChannelLifecycleOnRealForkedUsdc() public {
-        DeployTestnetCutoverScript script = new DeployTestnetCutoverScript();
         TokenNetworkRegistry registry;
-        (lifecycleForwarder, registry, lifecycleTokenNetwork) = script.run();
+        (lifecycleForwarder, registry, lifecycleTokenNetwork) = _runCutover();
 
         lifecycleAlicePrivateKey = 0xA11CE695;
         lifecycleBobPrivateKey = 0xB0B695;
@@ -140,7 +164,14 @@ contract DeployTestnetCutoverForkTest is Test {
         assertEq(lifecycleBob.balance, 0, "bob must hold zero native gas throughout");
 
         // Fund alice with REAL forked USDC by impersonating the real, known-funded distributor --
-        // no minting, proving this works against genuine chain state.
+        // no minting, proving this works against genuine chain state. Asserting the distributor's
+        // balance first turns "devnet's distributor ran dry on chain" into a self-explaining
+        // failure rather than a bare ERC20InsufficientBalance revert from the transfer below.
+        assertGe(
+            IERC20Metadata(EXISTING_USDC).balanceOf(USDC_DISTRIBUTOR),
+            depositAmount,
+            "the live devnet USDC distributor must still hold enough to fund this test -- top it up"
+        );
         vm.prank(USDC_DISTRIBUTOR);
         IERC20Metadata(EXISTING_USDC).transfer(lifecycleAlice, depositAmount);
         assertEq(IERC20Metadata(EXISTING_USDC).balanceOf(lifecycleAlice), depositAmount);
@@ -159,14 +190,7 @@ contract DeployTestnetCutoverForkTest is Test {
 
     function _openForwarded() internal {
         bytes memory openData = abi.encodeCall(TokenNetwork.openChannel, (lifecycleBob, 1 hours));
-        _executeForwarded(
-            lifecycleForwarder,
-            lifecycleRelayer,
-            lifecycleAlicePrivateKey,
-            lifecycleAlice,
-            address(lifecycleTokenNetwork),
-            openData
-        );
+        _executeForwarded(lifecycleAlicePrivateKey, lifecycleAlice, openData);
 
         (address p1, address p2) =
             lifecycleAlice < lifecycleBob ? (lifecycleAlice, lifecycleBob) : (lifecycleBob, lifecycleAlice);
@@ -190,14 +214,7 @@ contract DeployTestnetCutoverForkTest is Test {
 
         bytes memory depositData =
             abi.encodeCall(TokenNetwork.setTotalDeposit, (lifecycleChannelId, lifecycleAlice, depositAmount));
-        _executeForwarded(
-            lifecycleForwarder,
-            lifecycleRelayer,
-            lifecycleAlicePrivateKey,
-            lifecycleAlice,
-            address(lifecycleTokenNetwork),
-            depositData
-        );
+        _executeForwarded(lifecycleAlicePrivateKey, lifecycleAlice, depositData);
 
         (uint256 recordedDeposit,,) = lifecycleTokenNetwork.participants(lifecycleChannelId, lifecycleAlice);
         assertEq(recordedDeposit, depositAmount, "alice's real forked USDC deposit must be recorded");
@@ -205,20 +222,18 @@ contract DeployTestnetCutoverForkTest is Test {
 
     function _closeForwarded() internal {
         bytes memory closeData = abi.encodeCall(TokenNetwork.closeChannel, (lifecycleChannelId));
-        _executeForwarded(
-            lifecycleForwarder,
-            lifecycleRelayer,
-            lifecycleBobPrivateKey,
-            lifecycleBob,
-            address(lifecycleTokenNetwork),
-            closeData
-        );
+        _executeForwarded(lifecycleBobPrivateKey, lifecycleBob, closeData);
 
         (, TokenNetwork.ChannelState closedState,,,,) = lifecycleTokenNetwork.channels(lifecycleChannelId);
         assertEq(uint256(closedState), uint256(TokenNetwork.ChannelState.Closed));
     }
 
     // ===== Helpers (mirrors test/TokenNetworkERC2771.t.sol's own signing helpers) =====
+
+    /// @notice The EIP-712 domain name signatures must be issued under. Must stay in step with
+    ///         DeployTestnetCutoverScript.FORWARDER_NAME -- if it ever drifts, every forwarded
+    ///         call in the lifecycle test below reverts with an invalid signer.
+    string internal constant FORWARDER_NAME = "TokenNetworkForwarder";
 
     bytes32 internal constant FORWARD_REQUEST_TYPEHASH = keccak256(
         "ForwardRequest(address from,address to,uint256 value,uint256 gas,uint256 nonce,uint48 deadline,bytes data)"
@@ -230,24 +245,28 @@ contract DeployTestnetCutoverForkTest is Test {
         return keccak256(abi.encode(typeHash, keccak256(bytes(name)), keccak256("1"), block.chainid, verifyingContract));
     }
 
-    function _executeForwarded(
-        ERC2771Forwarder forwarder,
-        address relayer,
-        uint256 signerKey,
-        address from,
-        address to,
-        bytes memory data
-    ) internal {
+    /// @dev Signs `data` as `from` and has the relayer submit it through the cutover's forwarder to
+    ///      the cutover's TokenNetwork. Forwarder, relayer and target come from the lifecycle
+    ///      storage context above rather than parameters -- see the stack-depth note there.
+    function _executeForwarded(uint256 signerKey, address from, bytes memory data) internal {
+        address to = address(lifecycleTokenNetwork);
         uint48 deadline = uint48(block.timestamp + 1 hours);
         uint256 gas = 500_000;
 
         bytes32 structHash = keccak256(
             abi.encode(
-                FORWARD_REQUEST_TYPEHASH, from, to, uint256(0), gas, forwarder.nonces(from), deadline, keccak256(data)
+                FORWARD_REQUEST_TYPEHASH,
+                from,
+                to,
+                uint256(0),
+                gas,
+                lifecycleForwarder.nonces(from),
+                deadline,
+                keccak256(data)
             )
         );
         bytes32 digest = keccak256(
-            abi.encodePacked("\x19\x01", _domainSeparator("TokenNetworkForwarder", address(forwarder)), structHash)
+            abi.encodePacked("\x19\x01", _domainSeparator(FORWARDER_NAME, address(lifecycleForwarder)), structHash)
         );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, digest);
 
@@ -256,7 +275,7 @@ contract DeployTestnetCutoverForkTest is Test {
         });
 
         // The relayer pays gas; the signer's native balance never moves.
-        vm.prank(relayer);
-        forwarder.execute(request);
+        vm.prank(lifecycleRelayer);
+        lifecycleForwarder.execute(request);
     }
 }

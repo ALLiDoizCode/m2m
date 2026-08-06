@@ -51,6 +51,9 @@ PRIVATE_KEY=<funded-deployer-key-no-0x-prefix> \
   forge script script/DeployTestnetCutover.s.sol --rpc-url base_sepolia --broadcast
 ```
 
+(`base_sepolia` is a `foundry.toml` alias for `$BASE_SEPOLIA_RPC_URL`, so that variable must be set
+too -- see `packages/contracts/.env.example`.)
+
 Deploys, in order: an `ERC2771Forwarder("TokenNetworkForwarder")`, a fresh
 `TokenNetworkRegistry`, `registry.setTrustedForwarder(forwarder)`, then
 `registry.createTokenNetwork(0x49beE1…)` -- the same mock USDC as above, now behind a

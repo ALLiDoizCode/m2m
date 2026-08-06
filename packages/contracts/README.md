@@ -181,6 +181,7 @@ forge test --match-path 'test/DeployTestnetCutover.fork.t.sol' --fork-url https:
 | ----------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | `PRIVATE_KEY`           | Yes (for a real broadcast) | Funded Base-Sepolia deployer key, without `0x` prefix. If unset, the script only _simulates_ -- nothing is broadcast. |
 | `EXISTING_USDC_ADDRESS` | No                         | The devnet mock USDC to bind the new `TokenNetwork` to. Defaults to the live devnet USDC above.                       |
+| `BASE_SEPOLIA_RPC_URL`  | Yes                        | Base Sepolia RPC endpoint behind the `--rpc-url base_sepolia` alias (see `foundry.toml` and `.env.example`).          |
 
 ### One-command broadcast
 
