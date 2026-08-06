@@ -1836,6 +1836,53 @@ mod tests {
         );
     }
 
+    /// Issue #803: an all-zero `executionCondition` addressed at a priced
+    /// route is greeted (`402`), not `F01`-rejected -- the opposite of what
+    /// issue #417's blanket "every PREPARE needs a real condition" rule
+    /// might suggest. `handle_ilp`'s greeting branch (client-edge-spec.md
+    /// §1.4) runs entirely before `Connector::handle_prepare`/
+    /// `reject_ineligible` are ever reached: an unpaid request to a route
+    /// this connector serves and prices is answered with terms "instead of
+    /// being routed at all" (§1.4), so the condition on a PREPARE that never
+    /// gets routed is never inspected. This is what makes
+    /// `packages/announcer`'s x402 probe (`edge-client.ts`'s
+    /// `ZERO_CONDITION`) work correctly today; #803's actual F01 came from a
+    /// different client sending an unconditioned PREPARE somewhere this
+    /// shortcut does not apply (peer-carriage-spec.md §3.1: a peer-role
+    /// PREPARE is never greeted at all, and falls straight through to
+    /// `reject_ineligible`) -- see the message-content assertion added to
+    /// `connector-runtime`'s `rejects_a_packet_with_no_execution_condition`.
+    #[tokio::test]
+    async fn an_unpaid_request_with_an_all_zero_condition_to_a_priced_route_is_still_greeted() {
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+        let app_client = Arc::new(FakeAppClient::new());
+        let connector = Arc::new(Connector::new(
+            vec![route],
+            vec![],
+            app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router(connector, test_signer());
+
+        let mut zero_condition_prepare = sample_prepare("g.example.app");
+        zero_condition_prepare.execution_condition = [0u8; 32];
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(zero_condition_prepare.encode()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        assert!(response.headers().get(PAYMENT_REQUIRED_HEADER).is_some());
+        assert!(
+            app_client.deliveries().is_empty(),
+            "the app must never be asked to do work an unpaid request didn't pay for"
+        );
+    }
+
     /// Issue #722: the x402 greeting advertises the session lease backstop
     /// TTL the client session registry actually enforces, so a TS (or any
     /// other language) client can honour freshness <= lease without
