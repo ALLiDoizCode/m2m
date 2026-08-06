@@ -3,6 +3,12 @@
 Public testnet deployment of the TOON payment-channel contracts + a 6-decimal
 mock USDC, for the devnet nodes' EVM settlement to point at.
 
+> **This deployment has no ERC-2771 trusted forwarder** and predates #694/#695. The devnet cutover
+> to a meta-tx-aware `TokenNetwork` (deployed alongside a fresh registry + forwarder, reusing this
+> same mock USDC) is tracked in `docs/evm-deployment.md` -- read that first if you are looking for
+> the CURRENT live addresses; this file is the historical record of the deployment below and gets a
+> new section once the cutover actually broadcasts.
+
 - **Network:** Base Sepolia (`chainId 84532`)
 - **RPC:** https://sepolia.base.org
 - **Deployed:** 2026-07-18
