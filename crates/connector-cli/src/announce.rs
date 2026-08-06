@@ -85,7 +85,7 @@ use std::time::Duration;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
-use connector_config::{Config, SecretLocation, SettlementConfig};
+use connector_config::{AnnounceConfig, Config, SecretLocation, SettlementConfig};
 use connector_domain::{
     derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, PacketResponse, Prepare, Reject,
 };
@@ -1284,14 +1284,14 @@ async fn refuse_if_a_second_process_would_fork_the_ledger(
 /// network calls the rest of the command makes.
 fn resolve_announce_identity(
     config: &Config,
-    announce_config: &connector_config::AnnounceConfig,
+    announce_config: &AnnounceConfig,
 ) -> Result<[u8; 32], AnnounceError> {
-    match announce_config.identity_key_file() {
-        Some(path) => Ok(read_announce_identity_secret(path)?),
-        None => match config.signer_key() {
-            SecretLocation::File(_) => Ok(read_signer_secret(config.signer_key())?),
-            SecretLocation::Kms { .. } => Err(AnnounceError::UnsignableIdentity),
-        },
+    if let Some(path) = announce_config.identity_key_file() {
+        return Ok(read_announce_identity_secret(path)?);
+    }
+    match config.signer_key() {
+        location @ SecretLocation::File(_) => Ok(read_signer_secret(location)?),
+        SecretLocation::Kms { .. } => Err(AnnounceError::UnsignableIdentity),
     }
 }
 
@@ -1669,13 +1669,29 @@ fn read_relay_answer(fulfill: &Fulfill, shared_secret: &[u8; 32]) -> Result<(), 
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::Path;
+
+    /// Write `secret` to a fresh temp file, as an operator's key file holds
+    /// it: 32 raw bytes. Held by the caller, since dropping it deletes it.
+    fn key_file(secret: &[u8; 32]) -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new().expect("temp key file");
+        file.write_all(secret).expect("write key file");
+        file
+    }
+
+    /// The BIP-340 x-only pubkey `secret` announces under, derived through
+    /// `k256::schnorr` DIRECTLY rather than through
+    /// `connector_signer::nostr` -- see
+    /// [`identity_key_file_overrides_the_signer_and_the_announced_pubkey_is_pinned`]
+    /// for why the independence matters.
+    fn announced_pubkey_of(secret: &[u8; 32]) -> String {
+        let signing_key = k256::schnorr::SigningKey::from_bytes(secret).expect("valid scalar");
+        hex_encode(&signing_key.verifying_key().to_bytes())
+    }
 
     /// Load a minimal config with `[signer]` pointed at `signer_key` and,
     /// when given, an `[announce]` section pointed at `identity_key`.
-    fn config_with_identity(
-        signer_key: &std::path::Path,
-        identity_key: Option<&std::path::Path>,
-    ) -> Config {
+    fn config_with_identity(signer_key: &Path, identity_key: Option<&Path>) -> Config {
         let mut config_file = tempfile::NamedTempFile::new().expect("temp config file");
         write!(
             config_file,
@@ -1713,14 +1729,10 @@ btp_endpoint = "wss://proxy.ario.example/ilp/btp"
     /// relay verifies rather than by re-deriving through the same code path.
     #[test]
     fn identity_key_file_overrides_the_signer_and_the_announced_pubkey_is_pinned() {
-        let mut signer_key_file = tempfile::NamedTempFile::new().expect("temp file");
-        signer_key_file.write_all(&[7u8; 32]).expect("write");
-
+        let signer_secret = [7u8; 32];
         let identity_secret = [9u8; 32];
-        let mut identity_key_file = tempfile::NamedTempFile::new().expect("temp file");
-        identity_key_file
-            .write_all(&identity_secret)
-            .expect("write");
+        let signer_key_file = key_file(&signer_secret);
+        let identity_key_file = key_file(&identity_secret);
 
         let config = config_with_identity(signer_key_file.path(), Some(identity_key_file.path()));
         let announce_config = config.announce().expect("announce section present");
@@ -1731,24 +1743,16 @@ btp_endpoint = "wss://proxy.ario.example/ilp/btp"
             "identity_key_file must win over [signer]'s own key"
         );
 
-        let expected_pubkey = {
-            let signing_key =
-                k256::schnorr::SigningKey::from_bytes(&identity_secret).expect("valid scalar");
-            hex_encode(&signing_key.verifying_key().to_bytes())
-        };
         let event = sign_ilp_peer_info(&secret, "{}".to_string(), 1_700, 600).expect("sign");
         assert_eq!(
-            event.pubkey, expected_pubkey,
+            event.pubkey,
+            announced_pubkey_of(&identity_secret),
             "the announced pubkey must be the carried-over identity's, never the connector's \
              own [signer] pubkey"
         );
         assert_ne!(
             event.pubkey,
-            {
-                let signing_key =
-                    k256::schnorr::SigningKey::from_bytes(&[7u8; 32]).expect("valid scalar");
-                hex_encode(&signing_key.verifying_key().to_bytes())
-            },
+            announced_pubkey_of(&signer_secret),
             "sanity: the signer's own key must produce a DIFFERENT pubkey, or this test would \
              pass even if identity_key_file were silently ignored"
         );
@@ -1759,15 +1763,14 @@ btp_endpoint = "wss://proxy.ario.example/ilp/btp"
     /// announce.
     #[test]
     fn with_no_identity_key_file_the_signers_own_key_still_signs() {
-        let secret_bytes = [7u8; 32];
-        let mut signer_key_file = tempfile::NamedTempFile::new().expect("temp file");
-        signer_key_file.write_all(&secret_bytes).expect("write");
+        let signer_secret = [7u8; 32];
+        let signer_key_file = key_file(&signer_secret);
 
         let config = config_with_identity(signer_key_file.path(), None);
         let announce_config = config.announce().expect("announce section present");
 
         let secret = resolve_announce_identity(&config, announce_config).expect("resolve");
-        assert_eq!(secret, secret_bytes);
+        assert_eq!(secret, signer_secret);
     }
 
     /// The devnet apex's own greeting shape, abridged: the price, the

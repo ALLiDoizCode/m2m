@@ -468,10 +468,11 @@ pub(crate) fn resolve_announce(
     let identity_key_file = raw
         .identity_key_file
         .map(|path| {
-            if !path.is_file() {
-                return Err(ConfigError::AnnounceIdentityKeyFileNotFound(path));
+            if path.is_file() {
+                Ok(path)
+            } else {
+                Err(ConfigError::AnnounceIdentityKeyFileNotFound(path))
             }
-            Ok(path)
         })
         .transpose()?;
 

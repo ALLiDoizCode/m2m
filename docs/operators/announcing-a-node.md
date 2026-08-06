@@ -177,9 +177,9 @@ announce's own `routes.publish`.
 2. **A `[settlement.evm]` table** — the claim is signed by the channel's on-chain participant, which
    is this node's settlement identity. There is no second key.
 3. **A `key_file` identity.** A Nostr signature is BIP-340 Schnorr over the event's own id, which
-   needs the scalar itself — a KMS-held `[signer]` cannot announce, unless `[announce]
-identity_key_file` supplies a file-based one instead (see above — this is the field that
-   matters when retiring the sidecar).
+   needs the scalar itself — a KMS-held `[signer]` cannot announce, unless
+   `[announce] identity_key_file` supplies a file-based one instead (see above — this is the
+   field that matters when retiring the sidecar).
 4. **A `--btp-url`, if the target's route is pinned to BTP** (issue #701). **The devnet apex pins
    `g.toon.relay` to `transport = "btp"`**, so an announce there is paid over BTP and needs the
    apex's `wss://…/ilp/btp` endpoint supplied. Without it the command refuses up front, before
