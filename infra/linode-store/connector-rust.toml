@@ -237,15 +237,25 @@ ceiling = 1000000
 # table to `ClaimBook`.
 [[peer_channels]]
 peer_id = "apex-store"
-# The same live Base Sepolia channel the g.toon proxy names; each side records
-# the OTHER as counterparty.
-channel_id = "0x5cbe106fa4b6c4274a07b7e28f05f6ff11d9a7931fbf7e075e9ac2d1c2c05e17"
-counterparty_key = "0xF29fD62C4848B9573C9b90adbF61b664F386d9CF"
+# PLACEHOLDER (issue #822) -- these two values are NOT a real channel and
+# must not be used as one. The retired channel (the real values this
+# replaced) still lives, unclosed, on the OLD TokenNetwork
+# (0x1E95493fEF46707E034b4a1945f25a8C76A1823D) until the live migration
+# proves a replacement against the new TokenNetwork below works end to
+# end; only then is the retired channel closed and settled, per
+# docs/operators/peer-channel-migration.md. That runbook opens the
+# replacement channel and overwrites both placeholders with its real
+# channel_id and the apex box's settlement address, on BOTH boxes
+# together.
+channel_id = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead"
+counterparty_key = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead"
 # The EIP-712 domain a claim on this channel is signed over
 # (EIP712("TokenNetwork","1"), ADR 0024). A claim signed under a different
-# domain recovers to a different address and is refused.
+# domain recovers to a different address and is refused. Repointed to the
+# new ERC-2771 TokenNetwork (issue #822, #695/#811) -- both boxes must
+# agree, or a claim one accepts is unresolvable by the other.
 chain_id = 84532
-token_network = "0x1E95493fEF46707E034b4a1945f25a8C76A1823D"
+token_network = "0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478"
 
 [signer]
 key_file = "/app/data/signer.key"
