@@ -306,7 +306,7 @@ rpc_url = "https://base-sepolia-rpc.publicnode.com"
 # channel contract. On this deployment `getTokenNetwork(token_address)`
 # resolves to 0x1E95493fEF46707E034b4a1945f25a8C76A1823D, the TokenNetwork
 # the TypeScript fleet settles through today.
-contract_address = "0xcC9079adE929b168B54145f6d25262b64FAB9D5b"
+contract_address = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1"
 # 6-decimal devnet USDC — the fleet-wide settlement asset (ADR 0010).
 token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
 # The scale the deployed token itself reports. Startup reads the token's
