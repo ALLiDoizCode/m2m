@@ -31,6 +31,26 @@ services:
       # relay announces under and break existing discovery.
       NOSTR_SECRET_KEY: ${RELAY_NOSTR_SECRET_KEY:-0000000000000000000000000000000000000000000000000000000000000002}
       TOON_DEV_MODE: ${RELAY_DEV_MODE:-false}
+      # Made explicit rather than relied on as an image default (issue #831):
+      # `docker inspect` on the apex box's live relay showed the image already
+      # sets this to /data and declares /data as a VOLUME, but neither fact is
+      # visible from this file, and an image change could move the default
+      # without anyone noticing here.
+      TOON_DATA_DIR: /data
+    volumes:
+      # events.db (NIP-01 event store). Named, not bind-mounted, same
+      # rationale as `connector_rust_state` in ./docker-compose.relay.rust.yml
+      # (issue #831): without it, the image's own anonymous VOLUME
+      # declaration still makes the data survive a plain restart, but it has
+      # no name an operator can find, isn't declared anywhere in this file,
+      # and a stray `docker volume prune` — which by default reaps exactly
+      # the unused ANONYMOUS volumes — deletes it with no warning. (Naming it
+      # does not make it survive `docker compose down -v`; nothing declared
+      # here does.) This box
+      # starts with an EMPTY relay_data — whether/how the apex box's existing
+      # corpus is carried over is #820's cutover decision to make and record,
+      # not this file's.
+      - relay_data:/data
     restart: unless-stopped
     healthcheck:
       test: ['CMD-SHELL', 'wget -q --spider http://localhost:3100/health || exit 1']
@@ -71,5 +91,6 @@ services:
       sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"
 
 volumes:
+  relay_data:
   relay_certbot_conf:
   relay_certbot_www:
