@@ -34,7 +34,7 @@ services:
     # Same pinned tag both other boxes run — see
     # infra/linode-store/docker-compose.store.rust.yml for the ordering
     # constraints (#605/#614) this tag already satisfies.
-    image: ghcr.io/toon-protocol/connector:rust-sha-b31a7c9
+    image: ghcr.io/toon-protocol/connector:rust-sha-33f10e2
     volumes:
       - ./connector-rust.toml:/app/config/connector.toml:ro
       # Three raw key files, FRESH RANDOM (`openssl rand -hex 32`) per
