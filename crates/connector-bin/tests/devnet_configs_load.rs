@@ -873,6 +873,64 @@ fn the_apex_announcer_never_advertises_a_prefix_it_forwards() {
     }
 }
 
+/// The `ANNOUNCER_ROUTE_STORE` value the apex's announcer sidecar overlay
+/// commits, parsed the same way as [`announcer_ilp_addresses`].
+fn announcer_route_store(raw: &str) -> String {
+    raw.lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("ANNOUNCER_ROUTE_STORE:"))
+        .expect("the announcer overlay must set ANNOUNCER_ROUTE_STORE")
+        .trim()
+        .to_string()
+}
+
+/// Issue #841: `routes.store` in the kind:10032 announce is how a client
+/// finds where to upload -- it must name a prefix this node actually has a
+/// route for (terminated or forwarded), or every client that trusts it gets
+/// `F02 no route`. `routes.store` is DERIVED when `ANNOUNCER_ROUTE_STORE` is
+/// unset (`deriveRouteHints`, `packages/announcer/src/config.ts`): #833
+/// removed `g.toon.ario` from `ANNOUNCER_ILP_ADDRESSES`, which silently fired
+/// that derivation's fallback guess (`g.toon.relay` -> `g.toon.store`)
+/// instead of the pinned override this test now requires -- `g.toon.store`
+/// was retired from the apex's own route table entirely (2026-08-05), so the
+/// guess named a prefix nobody serves.
+///
+/// Asserted as a property over the apex's own committed route table rather
+/// than a literal `"g.toon.ario"` on both sides -- a test that hardcodes the
+/// same string twice passes even if both are wrong together, which is
+/// exactly the shape #839's test missed this in.
+#[test]
+fn the_announced_route_store_names_a_prefix_the_apex_actually_routes() {
+    let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let peer_secret = write_peer_secret();
+    let text = with_sandbox_paths(
+        &without_live_settlement(APEX_CONFIG),
+        key_file.path(),
+        state_dir.path(),
+        Some(peer_secret.path()),
+    );
+    let config_file = write_config(&text);
+    let config = Config::load(config_file.path()).expect("the committed apex config must parse");
+
+    let routed: Vec<&str> = config
+        .routes()
+        .iter()
+        .map(|r| r.prefix())
+        .chain(config.peer_routes().iter().map(|r| r.prefix()))
+        .collect();
+
+    let route_store = announcer_route_store(ANNOUNCER_OVERLAY);
+    assert!(
+        routed.iter().any(|prefix| *prefix == route_store),
+        "the announcer overlay's ANNOUNCER_ROUTE_STORE names `{route_store}`, \
+         which is not a prefix the apex's own committed connector-rust.toml \
+         routes at all (routed prefixes: {routed:?}) -- a client reading \
+         `routes.store` off the kind:10032 announce to find where to upload \
+         would get F02 no route. See issue #841"
+    );
+}
+
 /// Issue #833's fix, terminating side: the store box announces
 /// `g.toon.ario` under its OWN `[signer]` identity -- the key that answers
 /// this node's `/ilp/identity` and opens every gift wrap it terminates
