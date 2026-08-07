@@ -442,15 +442,25 @@ redeploy)
     #
     # Every leg composes its base file with its Rust overlay, mirroring what
     # the relay leg already did (issue #816: it never had a TypeScript
-    # service). `toon` and `store` additionally name services explicitly to
-    # skip the base file's now-dead `connector` service -- the Rust overlays
-    # add `connector-rust` alongside it, they don't replace it, so an
-    # unqualified `up -d` would still try to (re)create the purged image's
-    # container.
+    # service). On `toon` and `store` the Rust overlays ADD `connector-rust`
+    # alongside the dead `connector`, they don't replace it, so those two legs
+    # must also keep it out of the run.
+    #
+    # Naming services is NOT enough to do that: `nginx` declares
+    # `depends_on: connector` in both base files
+    # (docker-compose.node.yml:142-145, docker-compose.store.yml:98-101), and
+    # `up` pulls a named service's dependencies into the graph anyway.
+    # `required: false` does not help -- it only tolerates an UNHEALTHY
+    # dependency, it does not stop compose from trying to create one, so the
+    # purged image is still fetched and the whole `up` aborts on
+    # `manifest unknown`, taking nginx and connector-rust down with it.
+    # `--no-deps` is what actually excludes it. (`pull` needs no such flag:
+    # it ignores dependencies already.) The relay leg deliberately has neither
+    # -- it deploys every service in its file set.
     if [ "$key" = "toon" ]; then
-      ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && docker compose -f infra/linode-node/docker-compose.node.yml -f infra/linode-node/docker-compose.node.rust.yml pull relay faucet nginx certbot connector-rust && docker compose -f infra/linode-node/docker-compose.node.yml -f infra/linode-node/docker-compose.node.rust.yml up --build -d relay faucet nginx certbot connector-rust" &
+      ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && docker compose -f infra/linode-node/docker-compose.node.yml -f infra/linode-node/docker-compose.node.rust.yml pull relay faucet nginx certbot connector-rust && docker compose -f infra/linode-node/docker-compose.node.yml -f infra/linode-node/docker-compose.node.rust.yml up --build -d --no-deps relay faucet nginx certbot connector-rust" &
     elif [ "$key" = "store" ]; then
-      ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && docker compose -f infra/linode-store/docker-compose.store.yml -f infra/linode-store/docker-compose.store.rust.yml pull store nginx certbot connector-rust && docker compose -f infra/linode-store/docker-compose.store.yml -f infra/linode-store/docker-compose.store.rust.yml up -d store nginx certbot connector-rust" &
+      ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && docker compose -f infra/linode-store/docker-compose.store.yml -f infra/linode-store/docker-compose.store.rust.yml pull store nginx certbot connector-rust && docker compose -f infra/linode-store/docker-compose.store.yml -f infra/linode-store/docker-compose.store.rust.yml up -d --no-deps store nginx certbot connector-rust" &
     else
       # relay has no TypeScript compose file at all (issue #816) -- always
       # both files together, since the connector-rust service is only
