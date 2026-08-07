@@ -84,12 +84,12 @@ services:
     # fleet's pin of record -- the live boxes follow them, not the reverse.
     # Bumped from `rust-sha-33f10e2` (what all three boxes still run as of
     # this change) to `rust-sha-440eab7` because 33f10e2 predates the
-    # announce-identity fixes (#833/#839) that #848 requires the pin of
-    # record to carry; 440eab7 is their own merge commit, so it is the
-    # earliest tag that qualifies (`git merge-base --is-ancestor
-    # 440eab7b9ff610fb4914d65bb5cbbacb84f2a7ae <this-tag's-sha>`). This is a
-    # forward move on every box, not a rollback -- the boxes have not moved
-    # yet; that cutover is a separate, human-gated ticket. See
+    # announce-identity fix (issue #833, PR #839) that #848 requires the pin
+    # of record to carry. `rust-sha-440eab7` IS that fix's commit
+    # (440eab7b9ff610fb4914d65bb5cbbacb84f2a7ae), so it carries it by
+    # construction and no earlier tag can -- the earliest that qualifies.
+    # This is a forward move on every box, not a rollback -- the boxes have
+    # not moved yet; that cutover is a separate, human-gated ticket. See
     # `crates/connector-bin/tests/devnet_configs_load.rs`'s
     # `EXPECTED_CONNECTOR_TAG` for the single place this decision is recorded.
     image: ghcr.io/toon-protocol/connector:rust-sha-440eab7

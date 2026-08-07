@@ -1699,10 +1699,13 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
 
 /// The fleet's **pin of record** (issue #848). This repo's infra compose
 /// files decide which `connector` image the fleet runs -- the boxes follow
-/// them, not the reverse -- and before #848 they did not agree with each
-/// other: the apex/relay overlays pinned `rust-sha-b31a7c9`, the store's
-/// pinned whatever it was last hand-edited to, and none of that matched what
-/// the live boxes were actually running by hand (`rust-sha-33f10e2`).
+/// them, not the reverse. #848 was filed while three artifacts named three
+/// different tags: the overlays here (`rust-sha-b31a7c9`), the live boxes
+/// (`rust-sha-33f10e2`, set by hand) and the store/relay deploy bundles
+/// (`rust-sha-bc9749b`). The overlays had since been reconciled to the
+/// boxes' `rust-sha-33f10e2` (#837), but nothing asserted that agreement
+/// and the tag predates the announce-identity fix. This constant moves
+/// them forward off it and makes the agreement a gate.
 ///
 /// The value is a literal, not something derived from `git`, for the same
 /// reason every other `EXPECTED_*` constant in this module is: `cargo test`
@@ -1713,16 +1716,27 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
 /// diff:
 ///
 /// - `rust-sha-440eab7` is `440eab7b9ff610fb4914d65bb5cbbacb84f2a7ae`, the
-///   merge commit for issue #839 (which folds in #833's revised
-///   deliverable) -- so it trivially carries both fixes; it is its own
-///   evidence.
-/// - It is the EARLIEST tag that qualifies: the fleet's prior floor,
-///   `rust-sha-33f10e2`, predates both (`git merge-base --is-ancestor
-///   33f10e2... 440eab7b...` -- 33f10e2 is an ancestor of, and strictly
-///   before, 440eab7b).
+///   squash-merge of PR #839, which closes issue #833 -- the
+///   announce-identity fix #848 requires the pin of record to carry. The
+///   tag IS that commit, so it carries the fix by construction; it is its
+///   own evidence.
+/// - It is therefore also the EARLIEST tag that qualifies -- no tag built
+///   before the fix landed can contain it. The fleet's prior floor,
+///   `rust-sha-33f10e2`, is a strict ancestor (`git merge-base
+///   --is-ancestor 33f10e2 440eab7b` succeeds), so this is a forward move,
+///   not a rollback.
 /// - `git merge-base --is-ancestor 440eab7b9ff610fb4914d65bb5cbbacb84f2a7ae
 ///   HEAD` succeeds as of this change, confirming the tag's commit is on
 ///   `main`.
+///
+/// Scope: the legacy TypeScript `connector` services in
+/// `docker-compose.node.yml` and `docker-compose.store.yml` pin
+/// `3.36.3-solchan.0` and are deliberately NOT converged onto this tag.
+/// That is a different binary on its own release-tag scheme, reading a
+/// different config file (`connector.yaml`, not `connector-rust.toml`) --
+/// pointing it at a `rust-sha-` tag would not start. #848's drift is the
+/// `rust-sha-` pins only; retiring those two services is the cutover
+/// runbook's job (`docs/operators/rust-cutover-runbook.md`).
 ///
 /// This is a forward move on every box, not yet deployed anywhere -- see
 /// each overlay's own "PIN OF RECORD (issue #848)" comment. Re-pin here
@@ -1758,7 +1772,7 @@ fn every_fleet_overlay_pins_the_connector_repos_pin_of_record() {
         assert_eq!(
             pins[0], EXPECTED_CONNECTOR_TAG,
             "{name} pins `{}`, expected the fleet's pin of record \
-             `{EXPECTED_CONNECTOR_TAG}` (issue #848) -- every connector \
+             `{EXPECTED_CONNECTOR_TAG}` (issue #848) -- every Rust connector \
              image reference under infra/ must name the same tag",
             pins[0]
         );
