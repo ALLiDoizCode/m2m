@@ -25,10 +25,11 @@ services:
       TOON_RELAY_PORT: '7100'
       TOON_CHAIN: 'none'
       # This is the relay APP's own Nostr identity, unrelated to the
-      # connector's `[signer]` key in ./connector-rust.toml. Whether it
-      # should be carried over byte-identical from the apex box or generated
-      # fresh here is a trade-off #820 decides, not this file — see
-      # ./.env.example's RELAY_NOSTR_SECRET_KEY comment.
+      # connector's `[signer]` key in ./connector-rust.toml. DECIDED on
+      # issue #820: generate fresh here, do not carry the apex's over — see
+      # ./.env.example's RELAY_NOSTR_SECRET_KEY comment for the full
+      # argument (it is cosmetic, not functional, and #821's live bring-up
+      # already did this).
       NOSTR_SECRET_KEY: ${RELAY_NOSTR_SECRET_KEY:-0000000000000000000000000000000000000000000000000000000000000002}
       TOON_DEV_MODE: ${RELAY_DEV_MODE:-false}
       # Made explicit rather than relied on as an image default (issue #831):

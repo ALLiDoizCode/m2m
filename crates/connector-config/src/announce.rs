@@ -287,6 +287,41 @@ impl AnnounceConfig {
 /// the network already reads, and a node whose `routes` differ from what the
 /// sidecar published for the same addresses would look like a different node
 /// to a client that cached the old answer.
+///
+/// **Verdict (issue #845, same question #841 raised and left open on the
+/// TypeScript sidecar's identical heuristic): keep the silent-guess fallback
+/// here, do not make it fail loudly.** The suffix surgery below is
+/// unavoidably ambiguous -- for an address list with no `.store`/`.ario`
+/// entry, there is no naming convention strong enough to derive the right
+/// answer, only a plausible one, which is exactly how `g.toon.relay` alone
+/// produced `g.toon.store`, a prefix nothing routes. Turning that guess into
+/// a load error would be the more defensible failure mode in isolation, but:
+///
+/// - This function has legitimate non-devnet callers -- any operator whose
+///   addresses genuinely follow the `.relay`/`.store` convention gets a
+///   correct answer from it today (see `route_hints_follow_the_sidecars_
+///   suffix_heuristic` below), and a hard error there would refuse a config
+///   that was never wrong.
+/// - The actual defect this issue found was not "the fallback ran" -- it
+///   was that a *guessed* value reached a *committed, reviewed* devnet
+///   config with no signal distinguishing it from a deliberate one. That is
+///   a property of this repo's own committed files, not of every caller of
+///   this library function.
+/// - `every_committed_announce_without_a_store_or_ario_address_pins_route_
+///   store` (`crates/connector-bin/tests/devnet_configs_load.rs`) closes
+///   that gap structurally and generally: any devnet `[announce]` section
+///   added to this repo whose addresses would hit this fallback now fails
+///   CI unless `route_store` is pinned explicitly. That is the loud failure
+///   the issue asks for, scoped to where the money actually is (this
+///   fleet's committed config) rather than to this function's general
+///   contract.
+///
+/// If a third party ever embeds this crate against addresses outside this
+/// fleet's naming convention, the guess it gets today is the same one the
+/// retired sidecar always gave them -- not a regression this ticket needs
+/// to fix. A `--strict-route-hints` opt-in that turns the guess into a CLI
+/// error would be the natural next step if that ever becomes a real
+/// caller, but there is no such caller today to design it against.
 fn derive_route_hints(
     addresses: &[String],
     override_publish: Option<String>,
