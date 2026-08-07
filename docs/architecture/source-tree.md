@@ -55,7 +55,15 @@ connector-runtime                the packet plane and its ports
   ├─ route.rs                    leased routes; the swapped snapshot (ADR 0015)
   └─ metrics.rs, operator_view.rs
 
-connector-client-edge            axum Router: POST /ilp, /ilp/identity, /ilp/routes/price
+connector-btp                    the BTP frame codec and session framing (RFC-0023); transport-
+                                  and role-neutral, knows nothing of claims, routes or prices
+connector-peer-auth              role-by-authentication: peer vs. client, decided from
+                                  credential and config alone (ADR 0027's stop-ship invariant)
+connector-peer-btp               the BTP peer carriage: dial/accept a peering over wss://
+connector-peer-http              the ILP-over-HTTP peer carriage: dial/accept over https://
+
+connector-client-edge            axum Router: POST /ilp, POST /ilp/probe, POST /ilp/claim-state,
+                                  GET /ilp/btp, GET /ilp/identity, GET /ilp/routes/price
 connector-operator               axum Router: bearer-gated reads, RFC 9421-signed writes
 connector-cli                    config → runtime → merged routers → bound listeners
 connector-bin                    bin/connector, bin/stub-app
@@ -71,6 +79,7 @@ connector-vectors                bin/generate-vectors → vectors/wire-vectors.j
 | `faucet`               | Devnet faucet service (plain JavaScript).                                                                                                                   |
 | `mina-zkapp`           | Mina zkApp (TypeScript, o1js).                                                                                                                              |
 | `mina-usdc-faucet-web` | Faucet browser dApp (TypeScript, Vite).                                                                                                                     |
+| `announcer`            | Standalone `kind:10032` announcer sidecar for the client edge (TypeScript). Never links against connector crates or touches connector config (ADR 0022).    |
 
 ## Test layout
 
