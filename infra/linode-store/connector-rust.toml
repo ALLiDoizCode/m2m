@@ -330,13 +330,23 @@ publish_to = "g.toon.relay"
 # `ANNOUNCER_BTP_ENDPOINT` (infra/linode-node/docker-compose.node.
 # announcer.yml) -- it is that node's public BTP door, not a new fact.
 publish_btp_url = "wss://proxy.devnet.toonprotocol.dev/ilp/btp"
-# `pay_channel` is NOT set here. It names a funded EVM channel this box PAYS
-# the g.toon proxy from, as an ordinary client -- opening and funding one is a
-# live, human step (docs/operators/announcing-a-node.md's "What the node
-# needs before this can work"), not something a repo diff can supply. Without
-# it `connector announce` refuses by name (`NoPayChannel`) rather than
-# silently sending an unsigned claim; see
-# docker-compose.store.announce.yml for the scheduled command this fills in.
+# `pay_channel` names a funded EVM channel this box PAYS the g.toon proxy
+# from, as an ordinary client -- it is the OPPOSITE direction from a
+# `[[client_channels]]` row (a channel this node RECEIVES on); the two
+# namespaces are already kept disjoint for `[[peer_channels]]` vs
+# `[[client_channels]]` (`ConfigError::ChannelInBothNamespaces`), and this
+# field is conceptually the same "channel this node pays from" side of that
+# split, just for the announce path rather than a peering.
+#
+# Opening and funding the real channel is a live, human step
+# (docs/operators/announcing-a-node.md's "What the node needs before this
+# can work"), not something a repo diff can supply, so -- per the same #822
+# placeholder policy already used for `[[peer_channels]]` channel ids below
+# -- this commits a clearly-marked placeholder rather than either the live
+# value or an absent field. The real id lives only on the box (issue #853);
+# see docker-compose.store.announce.yml for the scheduled command this
+# fills in.
+pay_channel = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeadc0de"
 
 # ── Routes ─────────────────────────────────────────────────────────────────
 
