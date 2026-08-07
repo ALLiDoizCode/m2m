@@ -12,13 +12,13 @@ across EVM/Solana/Mina, not a TypeScript-only asset config). So `1000` is
 
 ## The table
 
-| Route                                    | Price    | Fee   | Where                                    | Guarded by                             |
-| ---------------------------------------- | -------- | ----- | ---------------------------------------- | -------------------------------------- |
-| apex `g.toon.relay` — forward to relay\* | **1**    | **0** | `infra/linode-node/connector-rust.toml`  | —                                      |
-| relay `g.toon.relay` — terminate         | **1**    | —     | `infra/linode-relay/connector-rust.toml` | —                                      |
-| apex `g.toon.ario` — forward to store    | **1002** | 2     | `infra/linode-node/connector-rust.toml`  | `EXPECTED_APEX_FORWARD_PRICE` / `_FEE` |
-| store `g.toon.ario` — terminate          | **1000** | —     | `infra/linode-store/connector-rust.toml` | `EXPECTED_STORE_PRICE`                 |
-| store `announcePrice`                    | **2000** | —     | `infra/linode-store/connector.yaml`      | —                                      |
+| Route                                                  | Price    | Fee   | Where                                    | Guarded by                             |
+| ------------------------------------------------------ | -------- | ----- | ---------------------------------------- | -------------------------------------- |
+| apex `g.toon.relay` — forward to relay\*               | **1**    | **0** | `infra/linode-node/connector-rust.toml`  | —                                      |
+| relay `g.toon.relay` — terminate                       | **1**    | —     | `infra/linode-relay/connector-rust.toml` | —                                      |
+| apex `g.toon.ario` — forward to store                  | **1002** | 2     | `infra/linode-node/connector-rust.toml`  | `EXPECTED_APEX_FORWARD_PRICE` / `_FEE` |
+| store `g.toon.ario` — terminate                        | **1000** | —     | `infra/linode-store/connector-rust.toml` | `EXPECTED_STORE_PRICE`                 |
+| store `announcePrice` (retired TypeScript concept)\*\* | **2000** | —     | `infra/linode-store/connector.yaml`      | —                                      |
 
 \* **Repo change landed in #820, live boxes NOT cut over yet.** `infra/linode-node/
 connector-rust.toml`'s `g.toon.relay` route is now a `peer_id` forward to `apex-relay` (the row that
@@ -29,6 +29,12 @@ restarts are a separate live/human step (#820's own "Live steps" section), not d
 repo change. Until that step runs, the live apex box still answers as a terminate route, per the last
 live verification below (also pre-#820: `g.toon.relay.ario` was still live at the time, on the store
 box's own terminating route retired by #820's repo change — see "Retired names" below).
+
+\*\* `infra/linode-store/connector.yaml` is the retired TypeScript config — it no longer fronts
+traffic (see "The TypeScript fleet" below) and is not a current source of truth for anything. The
+row survives only as the historical origin of the `2000` figure: the Rust `connector announce` that
+replaced `selfAnnounce` configures no announce price at all, so there is no committed literal to
+repoint this citation at. See "`announcePrice` 2000" below.
 
 Last verified live (pre-#820) against both boxes via the unauthenticated
 `GET /ilp/routes/price?destination=…` (ADR 0022 puts configuration answers on the free side of the
@@ -95,9 +101,19 @@ deliberate consequence of the flip, not an oversight.
 
 ## `announcePrice` 2000
 
-The store's self-announce must cover the apex's `g.toon.relay` terminate price
-plus this box's own forward fee, with headroom. It is not a route price and is
-not comparable to the figures above.
+This was the retired TypeScript connector's fixed figure for what the store's
+self-announce had to cover: the apex's `g.toon.relay` terminate price plus this
+box's own forward fee, with headroom. It was never a route price and was never
+comparable to the figures above.
+
+The Rust `connector announce` mechanism that replaced `selfAnnounce`
+(`crates/connector-cli/src/announce.rs`) does not configure this figure at
+all — there is nothing to repoint the citation at. Each announce run asks the
+publish target's own x402 greeting for its live price and pays that; only when
+it originates through its own routing (`--via-own-routing`) does it add this
+box's own `[[routes]]` forwarding fee on top, ADR 0028's arithmetic from the
+originating side (`amount_to_pay`). Either way the amount tracks the target's
+live price instead of needing a hand-maintained buffer like `2000`.
 
 ## Retired names
 
@@ -137,5 +153,11 @@ exists only in `crates/connector-domain/src/error.rs`), and by nginx returning
 
 The TypeScript `connector.yaml` files remain in the repo but no longer front
 traffic. They are not a second source of pricing truth, and the retirement is
-tracked in #714. Note `infra/devnet-manage.sh` still deploys the TypeScript
-compose files, so running it would resurrect them — see that ticket.
+tracked in #714.
+
+`infra/devnet-manage.sh redeploy` no longer resurrects them (#851): every leg
+now composes its box's base file with the matching Rust overlay and names only
+the services that should run, so the base files' TypeScript `connector` service
+— pinned to an image purged from GHCR — is never started. The provisioning
+paths (`up`, `store`) are a separate matter: they still run each box's
+`bootstrap.sh`, which brings up the base file alone, `connector` included.

@@ -724,7 +724,10 @@ so every BTP session was a client session by construction (ADR 0026). ADR 0027 r
 raw-TCP peer wire is deleted and connectors peer over BTP on the same codec. A session is a **peer**
 session only if it presented a credential configured in `[[peers]]` _and_ has a `[[peer_channels]]`
 binding; anything else is a client session, with no fallthrough, and everything below in this section
-describes client sessions exactly as before. The peer sub-protocol entries — `claim-ack` and
+describes client sessions exactly as before. That credential admits nothing on its own: opening this
+transport is permissionless, a session presenting no credential at all is accepted and stays a
+client, and the credential only ever _upgrades_ an already-admitted session to peer role (see step 1
+below for what a client's `auth` entry is and is not). The peer sub-protocol entries — `claim-ack` and
 `toon-minimum-delivery` beside the `payment-channel-claim` and `toon-accumulated-cost` entries this
 section already defines — are specified for the peer direction, not here.
 
