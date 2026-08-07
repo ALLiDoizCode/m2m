@@ -331,21 +331,21 @@ publish_to = "g.toon.relay"
 # announcer.yml) -- it is that node's public BTP door, not a new fact.
 publish_btp_url = "wss://proxy.devnet.toonprotocol.dev/ilp/btp"
 # `pay_channel` names a funded EVM channel this box PAYS the g.toon proxy
-# from, as an ordinary client -- it is the OPPOSITE direction from a
-# `[[client_channels]]` row (a channel this node RECEIVES on); the two
-# namespaces are already kept disjoint for `[[peer_channels]]` vs
-# `[[client_channels]]` (`ConfigError::ChannelInBothNamespaces`), and this
-# field is conceptually the same "channel this node pays from" side of that
-# split, just for the announce path rather than a peering.
+# from, as an ordinary client. It is deliberately NOT a
+# `[[client_channels]]` row: that table is channels this node RECEIVES on,
+# and one channel in both roles is the same collision `Config::load`
+# already refuses between the peer and client books
+# (`ConfigError::ChannelInBothNamespaces`). See ADR 0030.
 #
 # Opening and funding the real channel is a live, human step
 # (docs/operators/announcing-a-node.md's "What the node needs before this
 # can work"), not something a repo diff can supply, so -- per the same #822
-# placeholder policy already used for `[[peer_channels]]` channel ids below
-# -- this commits a clearly-marked placeholder rather than either the live
-# value or an absent field. The real id lives only on the box (issue #853);
-# see docker-compose.store.announce.yml for the scheduled command this
-# fills in.
+# placeholder policy the `[[peer_channels]]` channel id above already
+# follows -- this commits a clearly-marked placeholder rather than either
+# the live value or an absent field. The real id lives only on the box
+# (issue #853); the scheduled `connector announce` in
+# docker-compose.store.announce.yml reads whichever value the box's own
+# copy of this file carries.
 pay_channel = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeadc0de"
 
 # ── Routes ─────────────────────────────────────────────────────────────────
