@@ -35,11 +35,18 @@
 # keeps between its own `refreshIntervalSecs` and `ttlSeconds` (a factor of
 # ~2).
 #
-# `|| true` after the announce command: a failed run (channel not yet funded,
-# the g.toon proxy briefly unreachable, ...) must not kill the loop -- the
-# NEXT scheduled attempt is the retry, and a container that exits on the
-# first failure needs an operator to notice and restart it by hand, which is
-# exactly the silent-gap failure mode issue #833 is about in the first place.
+# A failed run (channel not yet funded, the g.toon proxy briefly
+# unreachable, ...) must not kill the loop -- the NEXT scheduled attempt is
+# the retry, and a container that exits on the first failure needs an
+# operator to notice and restart it by hand, which is exactly the silent-gap
+# failure mode issue #833 is about in the first place. But surviving a
+# failure and HIDING it are different things: this loop was first written
+# with a bare `|| true`, which discards the reason and the exit status and
+# leaves `docker logs` showing nothing but a cheerful "publishing..." every
+# four minutes forever. This epic's whole history is defects that looked
+# green, so the failure branch prints an explicit, greppable
+# `[announce] FAILED rc=<n> -- g.toon.ario NOT published`, and the success
+# branch says so too -- "publishing..." alone never meant "published".
 #
 # ── What this needs before it can do anything (live/operator, issue #833's
 #    own scope boundary -- NOT provided by this file) ──────────────────────
@@ -60,6 +67,17 @@
 #                  -f infra/linode-store/docker-compose.store.announce.yml \
 #                  up -d announce
 #
+# ── ORDER MATTERS ACROSS THE TWO BOXES ─────────────────────────────────────
+# The apex sidecar's stopgap announce of this same prefix retires in the same
+# change as this file, but they are separate deployments on separate
+# machines, so "same change" is not "same moment": fund the channel, bring
+# THIS up, VERIFY a real kind:10032 under the store's own pubkey carrying
+# `g.toon.ario` is on the relay, and only then redeploy and restart the
+# apex's announcer without it. Retiring the apex's first leaves the prefix
+# announced by NOBODY. The full ordered runbook, with the verification step
+# spelled out, is docs/operators/announcing-a-node.md, "Cutting a prefix over
+# from one publisher to another".
+#
 # ── Its OWN state volume, deliberately not `connector_rust_state` ──────────
 # `connector announce` loads the SAME `./connector-rust.toml` the serving
 # `connector-rust` service does, and `Config::load` requires every key file
@@ -78,7 +96,31 @@
 
 services:
   announce:
-    image: ghcr.io/toon-protocol/connector:rust-sha-b31a7c9
+    # PIN: the SAME tag `docker-compose.store.rust.yml` pins, and that is a
+    # requirement rather than tidiness. Both services bind-mount the SAME
+    # `./connector-rust.toml`, and `RawConfig` is `deny_unknown_fields`
+    # (connector-config/src/config.rs, issue #542): a tag whose binary
+    # predates the `[announce]` section below cannot merely ignore it, it
+    # exits 1 with `unknown field 'announce'`. So a stale pin here does not
+    # just break THIS service -- `docker compose up` recreating the SERVING
+    # `connector-rust` from a repo where the two disagree takes the store's
+    # client edge down with it.
+    #
+    # `rust-sha-33f10e2` is the floor AND the tag both devnet boxes run.
+    # `[announce]` and the `connector announce` verb itself
+    # (`ANNOUNCE_VERB`, connector-cli/src/lib.rs) both arrived in 09bc2299
+    # (#784, 2026-08-05 16:54); 33f10e2 (18:26) is its descendant. Anything
+    # older -- notably `rust-sha-b31a7c9` (13:04), which this file was first
+    # authored against -- has neither: the config refuses to load, and the
+    # command line below is misparsed as `connector <config-file>` against a
+    # file literally named `announce`.
+    #
+    # `devnet_configs_load.rs`'s
+    # `store_overlays_sharing_one_config_pin_one_image` asserts the agreement
+    # between the two overlays, so they cannot drift apart again unnoticed --
+    # nothing in that suite had any notion of an image tag before, which is
+    # why `rust-sha-b31a7c9` sailed through a green gate.
+    image: ghcr.io/toon-protocol/connector:rust-sha-33f10e2
     # `$$` throughout: compose interpolates a bare `$VAR`/`${VAR}` in this
     # file's own text against the HOST's environment at `up` time, same as
     # the nginx/certbot reload loops elsewhere in this fleet
@@ -91,9 +133,13 @@ services:
         REFRESH_SECS="$${STORE_ANNOUNCE_REFRESH_SECS:-240}"
         while true; do
           echo "[announce] publishing g.toon.ario via g.toon.relay..."
-          /usr/local/bin/connector announce \
+          if /usr/local/bin/connector announce \
             --config /app/config/connector.toml \
-            https://proxy.devnet.toonprotocol.dev/ilp || true
+            https://proxy.devnet.toonprotocol.dev/ilp; then
+            echo "[announce] OK -- g.toon.ario published"
+          else
+            echo "[announce] FAILED rc=$$? -- g.toon.ario NOT published; retrying in $${REFRESH_SECS}s"
+          fi
           sleep "$$REFRESH_SECS"
         done
     environment:

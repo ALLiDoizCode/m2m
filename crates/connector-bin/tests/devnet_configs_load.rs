@@ -111,7 +111,7 @@ use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 
 use chrono::{Duration as ChronoDuration, Utc};
-use connector_config::{Config, SettlementConfig};
+use connector_config::{Config, SettlementConfig, TransportPolicy};
 use connector_domain::{derive_condition, EnvelopeRequest, Prepare};
 use connector_settlement_evm::test_support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
 use connector_settlement_evm::EvmSettlementBackend;
@@ -130,6 +130,15 @@ const RELAY_CONFIG: &str = include_str!("../../../infra/linode-relay/connector-r
 /// together: [`the_apex_announcer_never_advertises_a_prefix_it_forwards`].
 const ANNOUNCER_OVERLAY: &str =
     include_str!("../../../infra/linode-node/docker-compose.node.announcer.yml");
+
+/// The store box's two overlays, read here for one property they must share
+/// and which nothing else in this suite could see: they bind-mount the SAME
+/// `connector-rust.toml`, so they must pin the same image tag. See
+/// [`store_overlays_sharing_one_config_pin_one_image`].
+const STORE_RUST_OVERLAY: &str =
+    include_str!("../../../infra/linode-store/docker-compose.store.rust.yml");
+const STORE_ANNOUNCE_OVERLAY: &str =
+    include_str!("../../../infra/linode-store/docker-compose.store.announce.yml");
 
 /// This test binary's own base port for [`Anvil::spawn`] -- distinct from
 /// other test binaries' bases (`connector-settlement-evm`'s own tests use
@@ -913,6 +922,150 @@ fn the_store_devnet_config_announces_g_toon_ario_under_its_own_identity() {
         None,
         "the store fronts no relay and must not advertise reads it does not serve"
     );
+}
+
+/// The `image:` tag every service in a compose overlay pins, read off the
+/// committed text -- [`route_price`]'s precedent again, and for the same
+/// reason: one line, no YAML dependency.
+fn pinned_connector_images(raw: &str) -> Vec<String> {
+    raw.lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix("image: ghcr.io/toon-protocol/connector:"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The store box's two overlays bind-mount the SAME `connector-rust.toml`,
+/// so they must pin the SAME image: the config file and the binary that
+/// reads it are one agreement, and `RawConfig` is `deny_unknown_fields`
+/// (issue #542). A binary older than a section the file carries does not
+/// ignore that section, it exits 1 -- so a stale pin in the announce
+/// overlay is not a broken sidecar, it is `docker compose up` recreating
+/// the SERVING `connector-rust` from a repo where the two disagree and
+/// taking the store's client edge down.
+///
+/// This is the gate that was missing. `docker-compose.store.announce.yml`
+/// was first committed pinning `rust-sha-b31a7c9`, a tag published three
+/// hours BEFORE `[announce]` and the `connector announce` verb existed
+/// (09bc2299, issue #784) -- a config the binary refuses to load and a
+/// subcommand it does not have -- and every existing test passed, because
+/// nothing in this suite had any notion of an image tag. Asserted as
+/// agreement between the two files rather than against a literal tag so it
+/// does not need editing on every routine bump; what it refuses is the two
+/// DRIFTING, which is the only shape this failure comes in.
+#[test]
+fn store_overlays_sharing_one_config_pin_one_image() {
+    const CONFIG_MOUNT: &str = "./connector-rust.toml:/app/config/connector.toml";
+
+    for overlay in [STORE_RUST_OVERLAY, STORE_ANNOUNCE_OVERLAY] {
+        assert!(
+            overlay.contains(CONFIG_MOUNT),
+            "this test's premise is that both store overlays mount the SAME \
+             `{CONFIG_MOUNT}` -- one of them no longer does, so the \
+             agreement it asserts needs rethinking rather than silently \
+             holding"
+        );
+    }
+
+    let serving = pinned_connector_images(STORE_RUST_OVERLAY);
+    let announcing = pinned_connector_images(STORE_ANNOUNCE_OVERLAY);
+    assert_eq!(
+        serving.len(),
+        1,
+        "docker-compose.store.rust.yml is expected to pin exactly one connector image"
+    );
+    assert_eq!(
+        announcing.len(),
+        1,
+        "docker-compose.store.announce.yml is expected to pin exactly one connector image"
+    );
+    assert_eq!(
+        announcing[0], serving[0],
+        "docker-compose.store.announce.yml pins `{}` while \
+         docker-compose.store.rust.yml pins `{}`, and both mount the same \
+         connector-rust.toml. The older of the two decides what that file \
+         may contain: `deny_unknown_fields` makes an unrecognized section a \
+         refuse-to-start, not a warning. Bump the stale one -- do not add a \
+         second config",
+        announcing[0], serving[0]
+    );
+    assert!(
+        serving[0].starts_with("rust-sha-"),
+        "the store overlays must pin an immutable `rust-sha-` tag, never a \
+         floating one (`rust-main`): a floating tag makes the agreement \
+         above unfalsifiable"
+    );
+}
+
+/// Issue #701's carriage negotiation, read across the two boxes: the store
+/// announces THROUGH an address the apex owns, and if the apex pins that
+/// route to `transport = "btp"` then the store's `[announce]` must carry a
+/// `publish_btp_url` -- `pay_the_through_url` takes the carriage from the
+/// greeting's `requiredTransport` and, for `btp` with neither `--btp-url`
+/// nor `publish_btp_url`, refuses with `NoBtpEndpoint` before anything is
+/// signed. The scheduled command in `docker-compose.store.announce.yml`
+/// passes no `--btp-url`, so the config is the only place it can come from.
+///
+/// A property over the apex's committed route table rather than a literal,
+/// for the same reason as the announcer test above: the day somebody pins
+/// another route to BTP, or unpins this one, the assertion follows the
+/// config instead of having to be re-taught.
+#[test]
+fn the_store_announce_carries_a_btp_endpoint_when_its_target_route_demands_one() {
+    let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let peer_secret = write_peer_secret();
+
+    let store_text = with_sandbox_settlement_keys(
+        &with_sandbox_paths(
+            STORE_CONFIG,
+            key_file.path(),
+            state_dir.path(),
+            Some(peer_secret.path()),
+        ),
+        key_file.path(),
+    );
+    let store_file = write_config(&store_text);
+    let store = Config::load(store_file.path()).expect("the committed store config must parse");
+    let announce = store
+        .announce()
+        .expect("the store config's [announce] section must parse");
+    let publish_to = announce
+        .publish_to()
+        .expect("the store's [announce] must name a publish_to -- the destination is not guessed");
+
+    let apex_state = tempfile::tempdir().expect("temp state dir");
+    let apex_text = with_sandbox_paths(
+        &without_live_settlement(APEX_CONFIG),
+        key_file.path(),
+        apex_state.path(),
+        Some(peer_secret.path()),
+    );
+    let apex_file = write_config(&apex_text);
+    let apex = Config::load(apex_file.path()).expect("the committed apex config must parse");
+
+    let target = apex
+        .routes()
+        .iter()
+        .find(|route| route.prefix() == publish_to)
+        .unwrap_or_else(|| {
+            panic!(
+                "the store announces through `{publish_to}`, which the apex's \
+                 committed route table does not terminate -- one of the two \
+                 files moved without the other"
+            )
+        });
+
+    if target.transport_policy() == TransportPolicy::Btp {
+        assert!(
+            announce.publish_btp_url().is_some(),
+            "the apex pins `{publish_to}` to `transport = \"btp\"`, so an \
+             announce paid through it is refused `NoBtpEndpoint` up front \
+             unless a BTP endpoint is supplied -- and the scheduled command \
+             in docker-compose.store.announce.yml passes no `--btp-url`. Set \
+             `publish_btp_url` in the store's [announce] section"
+        );
+    }
 }
 
 /// The new ERC-2771 `TokenNetwork` (#695/#811) the apex<->store

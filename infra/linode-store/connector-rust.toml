@@ -299,6 +299,25 @@ btp_endpoint  = "wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp"
 # to publish there, exactly as docs/operators/announcing-a-node.md's own
 # worked example for this box describes.
 publish_to = "g.toon.relay"
+# The TARGET's BTP endpoint -- where THIS node pays the g.toon proxy, not
+# where clients pay this node (`btp_endpoint` above is that one; the two
+# point in opposite directions, which is why this one is spelled `publish_*`
+# alongside `publish_to`).
+#
+# Required, not optional, for this particular target: the apex pins its
+# `g.toon.relay` route to `transport = "btp"` (infra/linode-node/
+# connector-rust.toml, issue #701, because the relay is high-frequency with
+# an always-connected client). `pay_the_through_url` reads the carriage off
+# the greeting's `requiredTransport` rather than guessing
+# (connector-cli/src/announce.rs), so an announce to that address needs a
+# BTP endpoint from either `--btp-url` or this key -- and with neither it
+# fails `NoBtpEndpoint` up front, before anything is signed, however well
+# funded `pay_channel` is. The scheduled command in
+# docker-compose.store.announce.yml passes no `--btp-url`, so this is where
+# it comes from. Same literal the apex's own announcer sidecar advertises as
+# `ANNOUNCER_BTP_ENDPOINT` (infra/linode-node/docker-compose.node.
+# announcer.yml) -- it is that node's public BTP door, not a new fact.
+publish_btp_url = "wss://proxy.devnet.toonprotocol.dev/ilp/btp"
 # `pay_channel` is NOT set here. It names a funded EVM channel this box PAYS
 # the g.toon proxy from, as an ordinary client -- opening and funding one is a
 # live, human step (docs/operators/announcing-a-node.md's "What the node
