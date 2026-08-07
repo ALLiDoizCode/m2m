@@ -290,10 +290,24 @@ to a peer after a fulfilment, not the PREPARE that caused it, and is signed as a
 `BalanceProof` ([ADR 0024](docs/adr/0024-peer-wire-claims-sign-the-eip-712-balance-proof.md)).
 
 "Role is decided by authentication" says **which role you get**, not **whether you are let in**. An
-interaction presenting no credential — every ordinary client — is admitted as a `client`; so is one
-whose credential fails either requirement, which is logged as `peer_auth_refused` and never refused
-on the wire, because refusing would make the check an oracle for the peer ids this node configures
-([`peer-carriage-spec.md`](docs/protocol/peer-carriage-spec.md) §1.6).
+interaction presenting no credential — every ordinary client — is admitted as a `client`, and so is
+one whose credential does not satisfy both requirements. Neither is refused on the wire, because
+refusing would make the check an oracle for the peer ids this node configures. What an operator
+sees, though, depends on _which_ mistake was made:
+
+- A credential naming a **configured** peer id that then fails P1 (wrong secret) or P2 (no
+  `[[peer_channels]]` row) emits the rate-limited `peer_auth_refused` event
+  ([`peer-carriage-spec.md`](docs/protocol/peer-carriage-spec.md) §1.6).
+- A credential naming a peer id **no `[[peers]]` entry configures** emits **nothing at all**
+  ([`decide_role`](crates/connector-peer-auth/src/decision.rs)'s branch table). Every ordinary
+  client declares a `peerId` of its own on the same `auth` entry, so emitting there would fire on
+  essentially every client session and hand any anonymous caller a log-volume lever.
+
+The trap that falls out of it is worth memorising before you debug a peering: **a peer that
+mistypes its `id` presents as an ordinary client with nothing logged, while a peer that mistypes
+its `secret` is loud.** If the event you expect is missing entirely, check the id spelling on both
+sides — see
+[`docs/operators/btp-peer-transport-bringup.md`](docs/operators/btp-peer-transport-bringup.md).
 
 The carriage mapping is specified in
 [`docs/protocol/peer-carriage-spec.md`](docs/protocol/peer-carriage-spec.md). The semantics it
