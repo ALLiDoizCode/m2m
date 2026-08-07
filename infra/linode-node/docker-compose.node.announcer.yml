@@ -75,6 +75,20 @@ services:
       # the seed goes stale, and every client bootstrapping from it fails
       # with `EOSE, found 0 events` -- see docs/operators/announcing-a-node.md.
       ANNOUNCER_ILP_ADDRESSES: g.toon,g.toon.relay
+      # `routes.store` in the kind:10032 announce is DERIVED when this is
+      # unset (`deriveRouteHints`, packages/announcer/src/config.ts): it
+      # falls back to whatever `.store`/`.ario` entry is in
+      # ANNOUNCER_ILP_ADDRESSES above, and failing that, guesses
+      # `<publish-prefix-minus-.relay>.store`. Removing `g.toon.ario` from
+      # that list (issue #833) silently fired that guess -- `g.toon.relay`
+      # -> `g.toon.store`, a prefix this node has no route for at all
+      # (`g.toon.store` was retired 2026-08-05, see
+      # infra/linode-node/connector-rust.toml) -- so every client reading
+      # `routes.store` to find the store app got F02 no route. Pin it
+      # explicitly instead of leaving it to the derivation: the next person
+      # to edit ANNOUNCER_ILP_ADDRESSES must not be able to re-break this by
+      # editing an unrelated-looking list. See issue #841.
+      ANNOUNCER_ROUTE_STORE: g.toon.ario
       # NOTE: these two publish the `/rust/` path — the disposable artifact
       # ADR 0013 says "nothing durable should be published against". Phase 7
       # of the cutover plan repoints them at /ilp and /ilp/btp once the Rust
