@@ -894,6 +894,21 @@ impl ClaimBook {
                 channel_id: channel_id.clone(),
                 ..Default::default()
             });
+        if ledger.channel_id != channel_id {
+            // Config now names a different channel for this peer than the
+            // one this ledger's nonce/cumulative sequence was built against
+            // (a peer-channel migration, issue #832) -- a new channel starts
+            // its own nonce/amount sequence by definition, so carrying the
+            // old watermark across it is never correct. `record_fulfillment`
+            // below re-signs and re-journals from nonce 1, which is exactly
+            // what a restart replaying this fresh entry through
+            // `rebuild_from` will also land on, so the rebind needs no
+            // journal entry of its own.
+            *ledger = OutboundLedger {
+                channel_id: channel_id.clone(),
+                ..Default::default()
+            };
+        }
         ledger.cumulative_amount += amount;
         ledger.nonce += 1;
         let signature = match binding {
@@ -990,6 +1005,12 @@ impl ClaimBook {
     /// acknowledging the stale nonce must not clear that newer claim
     /// (peer-wire-spec.md §3.2).
     pub fn acknowledge_outbound(&self, peer_id: &str, nonce: u64, outcome: ClaimAckOutcome) {
+        if let ClaimAckOutcome::Rejected(reason) = outcome {
+            // Same rationale as `accept_inbound`'s warn (issue #832): a peer
+            // rejecting a claim this connector signed is revenue-affecting
+            // and must not be silent.
+            tracing::warn!(peer_id, nonce, reason = ?reason, "peer rejected outbound claim");
+        }
         if outcome != ClaimAckOutcome::Accepted {
             return;
         }
@@ -1065,6 +1086,24 @@ impl ClaimBook {
     /// [`ClaimRejectReason::UnknownChannel`] -- neither leaves anything
     /// this connector could verify a signature against.
     pub fn accept_inbound(&self, claim: &WireClaim) -> ClaimAckOutcome {
+        let outcome = self.accept_inbound_inner(claim);
+        if let ClaimAckOutcome::Rejected(reason) = outcome {
+            // A claim that fails to verify is a revenue-affecting event
+            // (issue #832: previously silent on every path -- no log line at
+            // any level and no journal entry -- which is what let a
+            // peer-channel migration silently un-pay the peering).
+            tracing::warn!(
+                channel_id = %claim.channel_id,
+                nonce = claim.nonce,
+                cumulative_amount = claim.cumulative_amount,
+                reason = ?reason,
+                "rejected inbound claim"
+            );
+        }
+        outcome
+    }
+
+    fn accept_inbound_inner(&self, claim: &WireClaim) -> ClaimAckOutcome {
         match self.verify_signature(claim) {
             Ok(()) => {}
             Err(reason) => return ClaimAckOutcome::Rejected(reason),
@@ -1381,6 +1420,32 @@ mod tests {
         assert_eq!(second.nonce, 2);
         assert_eq!(second.cumulative_amount, 150);
         assert_eq!(book.pending_claim("peer-b"), Some(second));
+    }
+
+    #[test]
+    fn a_channel_change_rebinds_the_ledger_instead_of_carrying_the_old_watermark() {
+        let key = derive_evm_address(&LocalSigner::generate("k").public_key().unwrap());
+        let mut book = book_with_peer("peer-b", &channel_id(1), key);
+        book.record_fulfillment("peer-b", 100, now()).unwrap();
+        book.record_fulfillment("peer-b", 50, now()).unwrap();
+        assert_eq!(book.outbound_cumulative_amount("peer-b"), 150);
+
+        // Config now names a different channel for the same peer -- a
+        // peer-channel migration (issue #832). Reach in and repoint
+        // `outbound_channels` the way `Connector` reconfiguring
+        // `[[peer_channels]]` and restarting would.
+        book.set_channel_domain(channel_id(2), test_domain())
+            .unwrap();
+        book.set_outbound_channel("peer-b", channel_id(2));
+
+        let claim = book.record_fulfillment("peer-b", 10, now()).unwrap();
+
+        // A fresh nonce/amount sequence on the new channel, not nonce 3 /
+        // cumulative 160 carried over from the old one.
+        assert_eq!(claim.channel_id, channel_id(2));
+        assert_eq!(claim.nonce, 1);
+        assert_eq!(claim.cumulative_amount, 10);
+        assert_eq!(book.outbound_cumulative_amount("peer-b"), 10);
     }
 
     #[test]
@@ -1848,6 +1913,72 @@ mod tests {
             // The inbound watermark and remaining exposure on channel-in
             // survived too: 70 delivered, 40 claimed, 30 still exposed.
             assert_eq!(restarted.exposure(&in_channel), 30);
+        }
+
+        /// Issue #832's own regression scenario: a journal that names
+        /// channel A for `peer_id`, replayed against config that now names
+        /// channel B for the same peer (a peer-channel migration's config
+        /// edit, applied exactly as the runbook prescribes). The next claim
+        /// signed must bind to B at a fresh nonce/amount, not silently carry
+        /// A's watermark forward into a claim signed under B's domain --
+        /// asserted against the journal itself, since that is what a
+        /// restart actually replays, not just the returned `WireClaim`.
+        #[test]
+        fn a_peer_channel_migration_rebinds_from_config_not_the_replayed_journal() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("journal.log");
+            let signer = Arc::new(LocalSigner::generate("claim-key"));
+            let channel_a = channel_id(1);
+            let channel_b = channel_id(2);
+
+            {
+                let mut book = ClaimBook::new(
+                    Some(signer.clone() as Arc<dyn Signer>),
+                    HashMap::new(),
+                    HashMap::new(),
+                );
+                book.set_outbound_channel("peer-b", channel_a.clone());
+                book.set_channel_domain(channel_a.clone(), test_domain())
+                    .unwrap();
+                book.set_journal(Arc::new(FileJournal::open(&path).unwrap()))
+                    .unwrap();
+
+                book.record_fulfillment("peer-b", 100, now());
+                book.record_fulfillment("peer-b", 50, now());
+            }
+
+            // A fresh process, standing in for the restart the migration
+            // runbook's step 6 performs: config now names channel B for
+            // peer-b, the journal on disk still ends on channel A.
+            let mut migrated = ClaimBook::new(
+                Some(signer as Arc<dyn Signer>),
+                HashMap::new(),
+                HashMap::new(),
+            );
+            migrated.set_outbound_channel("peer-b", channel_b.clone());
+            migrated
+                .set_channel_domain(channel_b.clone(), test_domain())
+                .unwrap();
+            migrated
+                .set_journal(Arc::new(FileJournal::open(&path).unwrap()))
+                .unwrap();
+
+            let claim = migrated.record_fulfillment("peer-b", 10, now()).unwrap();
+
+            assert_eq!(claim.channel_id, channel_b);
+            assert_eq!(claim.nonce, 1);
+            assert_eq!(claim.cumulative_amount, 10);
+
+            let entries = migrated.journal.read_all().unwrap();
+            assert_eq!(
+                entries.last(),
+                Some(&JournalEntry::OutboundClaimSigned {
+                    peer_id: "peer-b".to_string(),
+                    channel_id: channel_b,
+                    nonce: 1,
+                    cumulative_amount: 10,
+                })
+            );
         }
 
         #[test]
