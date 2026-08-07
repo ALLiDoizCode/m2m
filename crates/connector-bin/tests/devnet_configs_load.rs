@@ -496,10 +496,15 @@ fn without_live_settlement(raw: &str) -> String {
 /// Point an uncommented `[settlement.evm]` block at a real, disposable,
 /// freshly deployed local chain. `decimals` and the key location stay the
 /// literal committed content.
+///
+/// The committed values it looks for are the same [`APEX_LIVE_REGISTRY`] and
+/// [`EXPECTED_SETTLEMENT_TOKEN_ADDRESS`] constants the identity test asserts,
+/// rather than per-call arguments: every fleet file names that one pair, and
+/// reading both off one constant apiece is what keeps the substitution and
+/// the identity check from drifting apart.
 fn with_anvil_settlement(
     raw: &str,
     anvil_rpc_url: &str,
-    committed_contract_address: &str,
     contract_address: ethers::types::Address,
     token_address: ethers::types::Address,
 ) -> String {
@@ -510,7 +515,7 @@ fn with_anvil_settlement(
     );
     let replaced = replace_expecting_a_match(
         &replaced,
-        &format!("contract_address = \"{committed_contract_address}\""),
+        &format!("contract_address = \"{APEX_LIVE_REGISTRY}\""),
         &format!("contract_address = \"{contract_address:?}\""),
     );
     replace_expecting_a_match(
@@ -1748,13 +1753,7 @@ async fn the_apex_devnet_settlement_section_boots_against_a_deployed_contract() 
     // from an account this sandbox has no key for. The parse case below is
     // what covers it. See the module docs.
     let text = without_sections(APEX_CONFIG, SOLANA_SETTLEMENT_SECTIONS);
-    let text = with_anvil_settlement(
-        &text,
-        &anvil.rpc_url,
-        APEX_LIVE_REGISTRY,
-        contract_address,
-        token,
-    );
+    let text = with_anvil_settlement(&text, &anvil.rpc_url, contract_address, token);
     let text = replace_expecting_a_match(
         &text,
         "key_file = \"/app/data/settlement.key\"",
@@ -1888,11 +1887,12 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// pass on different whitespace, a different case, or a longer address that
 /// happens to contain the expected one as a substring.
 ///
-/// Reads no chain and boots nothing, so it runs even where `anvil` is not on
-/// `PATH` (unlike the three `*_devnet_settlement_section_boots_against_a_
-/// deployed_contract` cases, which are skipped there) -- the same
-/// no-network proof [`the_apex_devnet_config_declares_both_committed_
-/// settlement_legs`] already relies on for the apex's own Solana leg.
+/// Reads no chain and boots nothing, so it runs even where `anvil` is not
+/// on `PATH` -- unlike the three
+/// `*_devnet_settlement_section_boots_against_a_deployed_contract` cases,
+/// which are skipped there. That is the same no-network proof
+/// [`the_apex_devnet_config_declares_both_committed_settlement_legs`]
+/// already relies on for the apex's own Solana leg.
 ///
 /// Failure messages name both the expected literal and the value actually
 /// found, per issue #852 -- including calling out
@@ -2015,13 +2015,7 @@ async fn the_store_devnet_settlement_section_boots_against_a_deployed_contract()
     // Anvil stands in for Base Sepolia; the Solana leg is stripped for the
     // same reason the apex's is -- there is no local validator in this test.
     let text = without_sections(STORE_CONFIG, SOLANA_SETTLEMENT_SECTIONS);
-    let text = with_anvil_settlement(
-        &text,
-        &anvil.rpc_url,
-        APEX_LIVE_REGISTRY,
-        contract_address,
-        token,
-    );
+    let text = with_anvil_settlement(&text, &anvil.rpc_url, contract_address, token);
     let text = replace_expecting_a_match(
         &text,
         "key_file = \"/app/data/settlement.key\"",
@@ -2081,13 +2075,7 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
     // same reason the apex's and store's are -- there is no local validator
     // in this test.
     let text = without_sections(RELAY_CONFIG, SOLANA_SETTLEMENT_SECTIONS);
-    let text = with_anvil_settlement(
-        &text,
-        &anvil.rpc_url,
-        APEX_LIVE_REGISTRY,
-        contract_address,
-        token,
-    );
+    let text = with_anvil_settlement(&text, &anvil.rpc_url, contract_address, token);
     let text = replace_expecting_a_match(
         &text,
         "key_file = \"/app/data/settlement.key\"",
