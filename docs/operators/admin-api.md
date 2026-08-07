@@ -1,9 +1,10 @@
 # Connector Admin API Reference
 
 > **Historical — this is the retired TypeScript connector's admin API**
-> ([ADR 0017](../adr/0017-the-typescript-connector-is-a-prototype.md)), still accurate for the
-> published `ghcr.io/toon-protocol/connector` image the devnet fleet runs, and describing nothing
-> in `crates/`.
+> ([ADR 0017](../adr/0017-the-typescript-connector-is-a-prototype.md)). The TypeScript image
+> (`ghcr.io/toon-protocol/connector`, semver-tagged) it describes has been purged from the
+> registry; the devnet fleet runs the Rust connector (`ghcr.io/toon-protocol/connector`,
+> `rust-sha-*`-tagged) on every box. This document describes nothing in `crates/`.
 >
 > The Rust connector's equivalent is the **operator surface**
 > ([ADR 0008](../adr/0008-operator-surface-splits-read-from-write.md)), and it is a different

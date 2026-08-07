@@ -20,13 +20,21 @@ across EVM/Solana/Mina, not a TypeScript-only asset config). So `1000` is
 | apex `g.toon.ario` — forward to store                   | **1002** | 2     | `infra/linode-node/connector-rust.toml`  | `EXPECTED_APEX_FORWARD_PRICE` / `_FEE` |
 | store `g.toon.ario` — terminate                         | **1000** | —     | `infra/linode-store/connector-rust.toml` | `EXPECTED_STORE_PRICE`                 |
 | store `g.toon.relay.ario` — terminate                   | **1000** | —     | `infra/linode-store/connector-rust.toml` | `EXPECTED_STORE_PRICE`                 |
-| store `announcePrice`                                   | **2000** | —     | `infra/linode-store/connector.yaml`      | —                                      |
+| store `announcePrice` (retired TypeScript concept)\*\*  | **2000** | —     | `infra/linode-store/connector.yaml`      | —                                      |
 
 \* Not yet live. `infra/linode-node/connector-rust.toml` still carries the terminate row above it
 today — a local `handler_url` route to `relay:3100` — because #820 (the actual peering + config
 flip) has not landed. This row is the target #820 must write; it is pinned here first because #818
 (this document) is a precondition #820 cannot be executed without. Once #820 lands, this row
 replaces the terminate row above it, and the `relay` row becomes what actually answers the write.
+
+\*\* `infra/linode-store/connector.yaml` is the retired TypeScript config — it no longer fronts
+traffic (see "The TypeScript fleet" below) and is not a current source of truth for anything. It is
+cited here only as the historical origin of the `2000` figure. The Rust `connector announce`
+mechanism that replaces `selfAnnounce` carries no configured price at all: it derives the amount to
+pay live from the target's own x402 greeting plus this box's own `[[routes]]` forwarding fee
+(`amount_to_pay`, `crates/connector-cli/src/announce.rs`), so there is no committed literal to cite
+in its place. See "`announcePrice` 2000" below.
 
 Verified live against both boxes via the unauthenticated
 `GET /ilp/routes/price?destination=…` (ADR 0022 puts configuration answers on
@@ -88,9 +96,18 @@ the apex, that refuses it for the wrong transport.
 
 ## `announcePrice` 2000
 
-The store's self-announce must cover the apex's `g.toon.relay` terminate price
-plus this box's own forward fee, with headroom. It is not a route price and is
-not comparable to the figures above.
+This was the retired TypeScript connector's fixed figure for what the store's
+self-announce had to cover: the apex's `g.toon.relay` terminate price plus this
+box's own forward fee, with headroom. It was never a route price and was never
+comparable to the figures above.
+
+The Rust `connector announce` mechanism that replaced `selfAnnounce`
+(`crates/connector-cli/src/announce.rs`) does not configure this figure at
+all — there is nothing to repoint the citation at. Each announce run asks the
+publish target's own x402 greeting for its live price and adds this box's own
+`[[routes]]` forwarding fee (`amount_to_pay`), so the amount paid tracks the
+target's price automatically instead of needing a hand-maintained buffer like
+`2000`.
 
 ## Retired names
 
