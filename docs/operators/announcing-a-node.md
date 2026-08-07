@@ -229,7 +229,10 @@ Run it in this order, on the boxes named:
    address list actually carries `g.toon.ario`. A published event under the right key is the only
    evidence that counts.
 4. **ONLY THEN, APEX box — retire the stopgap**: deploy the announcer overlay with `g.toon.ario`
-   dropped from `ANNOUNCER_ILP_ADDRESSES` and restart the sidecar so the new value is read.
+   dropped from `ANNOUNCER_ILP_ADDRESSES` and restart the sidecar so the new value is read. Keep
+   `ANNOUNCER_ROUTE_STORE` pinned while doing so: `routes.store` is **derived** from the address
+   list when that variable is unset, so dropping the address also silently repoints the announce's
+   store hint at a guessed `<publish-prefix-minus-.relay>.store` no node routes (issue #841).
 
 **Doing step 4 before step 3 leaves the prefix announced by nobody.** The old publisher's event is
 gone (or expires with its NIP-40 `ttl_secs`) and no replacement exists, so a client bootstrapping in

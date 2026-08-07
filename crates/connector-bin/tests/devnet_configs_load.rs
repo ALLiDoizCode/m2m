@@ -792,10 +792,22 @@ fn route_price(raw: &str, prefix: &str) -> u64 {
     panic!("no priced `{prefix}` route in the committed config text");
 }
 
+/// The value `key` is set to in the apex's announcer sidecar overlay, read
+/// straight off the committed line -- matching [`route_price`]'s precedent
+/// of reading a config-shape assertion off the committed text rather than
+/// pulling in a YAML parser for one env var.
+fn announcer_env(raw: &str, key: &str) -> String {
+    let needle = format!("{key}:");
+    raw.lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix(&needle))
+        .unwrap_or_else(|| panic!("the announcer overlay must set {key}"))
+        .trim()
+        .to_string()
+}
+
 /// The `ANNOUNCER_ILP_ADDRESSES` CSV value the apex's announcer sidecar
-/// overlay commits, parsed from its own text -- matching [`route_price`]'s
-/// precedent of reading a config-shape assertion straight off the committed
-/// line rather than pulling in a YAML parser for one env var.
+/// overlay commits, split into its entries.
 ///
 /// Each entry is trimmed individually, not just the value as a whole: YAML
 /// accepts `g.toon, g.toon.relay` for the same list, and an untrimmed
@@ -803,12 +815,8 @@ fn route_price(raw: &str, prefix: &str) -> u64 {
 /// which would let the property test below pass over exactly the announce
 /// it exists to refuse.
 fn announcer_ilp_addresses(raw: &str) -> Vec<String> {
-    let line = raw
-        .lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix("ANNOUNCER_ILP_ADDRESSES:"))
-        .expect("the announcer overlay must set ANNOUNCER_ILP_ADDRESSES");
-    line.split(',')
+    announcer_env(raw, "ANNOUNCER_ILP_ADDRESSES")
+        .split(',')
         .map(|address| address.trim().to_string())
         .collect()
 }
@@ -873,17 +881,6 @@ fn the_apex_announcer_never_advertises_a_prefix_it_forwards() {
     }
 }
 
-/// The `ANNOUNCER_ROUTE_STORE` value the apex's announcer sidecar overlay
-/// commits, parsed the same way as [`announcer_ilp_addresses`].
-fn announcer_route_store(raw: &str) -> String {
-    raw.lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix("ANNOUNCER_ROUTE_STORE:"))
-        .expect("the announcer overlay must set ANNOUNCER_ROUTE_STORE")
-        .trim()
-        .to_string()
-}
-
 /// Issue #841: `routes.store` in the kind:10032 announce is how a client
 /// finds where to upload -- it must name a prefix this node actually has a
 /// route for (terminated or forwarded), or every client that trusts it gets
@@ -920,7 +917,7 @@ fn the_announced_route_store_names_a_prefix_the_apex_actually_routes() {
         .chain(config.peer_routes().iter().map(|r| r.prefix()))
         .collect();
 
-    let route_store = announcer_route_store(ANNOUNCER_OVERLAY);
+    let route_store = announcer_env(ANNOUNCER_OVERLAY, "ANNOUNCER_ROUTE_STORE");
     assert!(
         routed.iter().any(|prefix| *prefix == route_store),
         "the announcer overlay's ANNOUNCER_ROUTE_STORE names `{route_store}`, \
