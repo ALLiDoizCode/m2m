@@ -41,6 +41,8 @@ its source is only in git history, and nothing in this repository implements its
   ([ADR 0004](docs/adr/0004-value-moves-on-fulfilment.md),
   [ADR 0005](docs/adr/0005-claims-are-truth-balances-are-a-projection.md)); the latest claim is
   redeemed on chain against a deployed `TokenNetwork`, reached through a registry.
+  [`docs/protocol/money-model.md`](docs/protocol/money-model.md) walks one write end to end —
+  client edge to terminating app — with a diagram.
 
 ## Build
 

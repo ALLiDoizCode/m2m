@@ -131,7 +131,9 @@ The highest nonce a payee has accepted on a channel.
 
 **Exposure**:
 Value a payee has delivered but does not yet hold a claim for. One packet under normal flow;
-more only when a payer has fulfilled packets and stopped claiming.
+more only when a payer has fulfilled packets and stopped claiming. Why it exists at all — it is
+what makes pay-in-arrears work across a hop — is in
+[`docs/protocol/money-model.md`](docs/protocol/money-model.md).
 
 **Ceiling**:
 The exposure a peering relation tolerates before the connector stops forwarding for that
