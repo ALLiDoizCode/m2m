@@ -787,13 +787,21 @@ fn route_price(raw: &str, prefix: &str) -> u64 {
 /// overlay commits, parsed from its own text -- matching [`route_price`]'s
 /// precedent of reading a config-shape assertion straight off the committed
 /// line rather than pulling in a YAML parser for one env var.
+///
+/// Each entry is trimmed individually, not just the value as a whole: YAML
+/// accepts `g.toon, g.toon.relay` for the same list, and an untrimmed
+/// ` g.toon.relay` would compare unequal to the route prefix it names --
+/// which would let the property test below pass over exactly the announce
+/// it exists to refuse.
 fn announcer_ilp_addresses(raw: &str) -> Vec<String> {
     let line = raw
         .lines()
         .map(str::trim)
         .find_map(|line| line.strip_prefix("ANNOUNCER_ILP_ADDRESSES:"))
         .expect("the announcer overlay must set ANNOUNCER_ILP_ADDRESSES");
-    line.trim().split(',').map(str::to_string).collect()
+    line.split(',')
+        .map(|address| address.trim().to_string())
+        .collect()
 }
 
 /// Issue #833's core property: this node must never advertise, under its
