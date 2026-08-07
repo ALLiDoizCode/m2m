@@ -9,15 +9,31 @@ cd "$ROOT"
 set -a; . "$HERE/.env"; set +a
 
 DC=(docker compose -f infra/linode-relay/docker-compose.relay.yml)
-PRIMARY="proxy.relay.${DOMAIN}"
-# relay-ws.${DOMAIN} is NOT requested here: certbot's SAN request is
-# all-or-nothing, and relay-ws.${DOMAIN} still resolves to the apex box
-# until #820 moves it — an ACME challenge for it can only fail and would
-# take proxy.relay's own cert down with it. #820 adds it back once the DNS
-# record (and the apex's own TLS lineage naming it) actually move.
-DOMAINS=("proxy.relay.${DOMAIN}")
-CERT_PATH="/etc/letsencrypt/live/${PRIMARY}"
+
+# ONE CERTIFICATE PER NAME — two independent certbot requests, deliberately
+# NOT one two-SAN request (#830). Certbot's SAN request is all-or-nothing: a
+# single bundled cert means whichever name fails validation takes the other
+# name's certificate down with it, which is precisely why this box could not
+# obtain any certificate at all before #830 (relay-ws.${DOMAIN} still pointed
+# at the apex then, so its challenge could only fail).
+#
+# Both names resolve HERE now: #820 dropped relay-ws from the apex's nginx and
+# from its cert lineage, and infra/devnet-manage.sh points the record at this
+# box. Each name gets its own lineage, its own `server` block in
+# nginx/conf.d/node.conf, and its own independent renewal.
+CERT_NAMES=("proxy.relay.${DOMAIN}" "relay-ws.${DOMAIN}")
 RENEW_WINDOW_DAYS="${RENEW_WINDOW_DAYS:-30}"
+
+# Set per lineage by the loops below; seed_dummy/existing_cert_ok read them.
+PRIMARY=""
+DOMAINS=()
+CERT_PATH=""
+
+use_cert() {
+  PRIMARY="$1"
+  DOMAINS=("$1")
+  CERT_PATH="/etc/letsencrypt/live/${PRIMARY}"
+}
 
 seed_dummy() {
   "${DC[@]}" run --rm --entrypoint sh certbot -c "
@@ -57,40 +73,61 @@ SANS
   ' 2>/dev/null | tr -d '[:space:]'
 }
 
-echo "==> Checking for existing valid cert"
-if [ "$(existing_cert_ok)" = "ok" ]; then
-  echo "==> Valid cert found — reusing (no re-issue)."
-  "${DC[@]}" up -d nginx
+# Pass 1: work out which lineages need issuing, and make sure EVERY lineage has
+# at least a self-signed cert on disk BEFORE nginx starts. nginx refuses to
+# start at all if any `ssl_certificate` file named in the config is missing, and
+# relay-ws.${DOMAIN} now names a lineage of its own — so the dummies have to be
+# seeded for both names up front, not one at a time inside the issuing loop.
+NEEDS_ISSUE=()
+for name in "${CERT_NAMES[@]}"; do
+  use_cert "$name"
+  echo "==> Checking for existing valid cert: ${PRIMARY}"
+  if [ "$(existing_cert_ok)" = "ok" ]; then
+    echo "  valid cert found — reusing (no re-issue)."
+    continue
+  fi
+  echo "  seeding self-signed cert"
+  seed_dummy
+  NEEDS_ISSUE+=("$name")
+done
+
+echo "==> Starting nginx"
+"${DC[@]}" up -d nginx
+
+if [ "${#NEEDS_ISSUE[@]}" -eq 0 ]; then
   "${DC[@]}" exec nginx nginx -s reload 2>/dev/null || true
+  echo "Done."
   exit 0
 fi
 
-echo "==> Seeding self-signed cert"
-seed_dummy
-
-echo "==> Starting nginx for ACME challenge"
-"${DC[@]}" up -d nginx
-
-"${DC[@]}" run --rm --entrypoint sh certbot -c "rm -rf /etc/letsencrypt/live/${PRIMARY} /etc/letsencrypt/archive/${PRIMARY} /etc/letsencrypt/renewal/${PRIMARY}.conf"
-
-d_args=()
-for d in "${DOMAINS[@]}"; do d_args+=(-d "$d"); done
 staging_arg=""
 [ "${LETSENCRYPT_STAGING:-1}" = "1" ] && staging_arg="--staging"
 
-echo "==> Requesting cert (${staging_arg:-production})"
-if "${DC[@]}" run --rm --entrypoint certbot certbot \
-  certonly --webroot -w /var/www/certbot \
-  $staging_arg \
-  --cert-name "${PRIMARY}" \
-  "${d_args[@]}" \
-  --email "${LETSENCRYPT_EMAIL}" \
-  --rsa-key-size 2048 --agree-tos --no-eff-email --keep-until-expiring; then
-  "${DC[@]}" exec nginx nginx -s reload
-  echo "Done.${staging_arg:+ STAGING cert — re-run with LETSENCRYPT_STAGING=0 once DNS resolves.}"
-else
-  echo "::warning:: Cert issuance failed (DNS may not have propagated yet)."
-  echo "  Point DNS A-records to this box, then re-run with LETSENCRYPT_STAGING=0."
-  seed_dummy
-  "${DC[@]}" exec nginx nginx -s reload 2>/dev/null || true
-fi
+# Pass 2: issue each lineage on its own. A failure here is reported and moved
+# past rather than fatal — one name failing must not abort the other's request,
+# which is the whole point of not bundling them into one SAN.
+for name in "${NEEDS_ISSUE[@]}"; do
+  use_cert "$name"
+
+  "${DC[@]}" run --rm --entrypoint sh certbot -c "rm -rf /etc/letsencrypt/live/${PRIMARY} /etc/letsencrypt/archive/${PRIMARY} /etc/letsencrypt/renewal/${PRIMARY}.conf"
+
+  d_args=()
+  for d in "${DOMAINS[@]}"; do d_args+=(-d "$d"); done
+
+  echo "==> Requesting cert for ${PRIMARY} (${staging_arg:-production})"
+  if "${DC[@]}" run --rm --entrypoint certbot certbot \
+    certonly --webroot -w /var/www/certbot \
+    $staging_arg \
+    --cert-name "${PRIMARY}" \
+    "${d_args[@]}" \
+    --email "${LETSENCRYPT_EMAIL}" \
+    --rsa-key-size 2048 --agree-tos --no-eff-email --keep-until-expiring; then
+    "${DC[@]}" exec nginx nginx -s reload
+    echo "  ${PRIMARY}: done.${staging_arg:+ STAGING cert — re-run with LETSENCRYPT_STAGING=0 once DNS resolves.}"
+  else
+    echo "::warning:: Cert issuance failed for ${PRIMARY} (DNS may not have propagated yet)."
+    echo "  Point the ${PRIMARY} A-record at this box, then re-run with LETSENCRYPT_STAGING=0."
+    seed_dummy
+    "${DC[@]}" exec nginx nginx -s reload 2>/dev/null || true
+  fi
+done
