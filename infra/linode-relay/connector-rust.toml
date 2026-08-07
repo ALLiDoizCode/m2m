@@ -3,12 +3,12 @@
 # per box, each fronting its own app — decided on #714, tracked as #815)
 # ═══════════════════════════════════════════════════════════════════════════
 #
-# ── What this file is, and is not, yet ──────────────────────────────────────
-# Today the relay app (`relay:3100`) sits on the apex box, fronted by the
-# apex's own connector as a LOCAL app route — not a peer of its own. This file
-# is step 1 of moving it to its own box: a CLIENT-EDGE-ONLY connector that
-# terminates `g.toon.relay` against the SAME relay app, now co-located with it
-# instead of reached across the apex's container network.
+# ── What this file is ───────────────────────────────────────────────────────
+# The relay app (`relay:3100`) used to sit on the apex box, fronted by the
+# apex's own connector as a LOCAL app route. It now runs on THIS box
+# (docker-compose.relay.yml), and this connector terminates `g.toon.relay`
+# against it — co-located, instead of reached across the apex's container
+# network — while the apex forwards that prefix here over the peering below.
 #
 # **`[[peers]]` and `[[peer_channels]]` below, as of issue #820.** Peering
 # this box to the apex needs a live on-chain payment channel between the two
@@ -32,12 +32,11 @@
 # infra/linode-store/): the same Base Sepolia `TokenNetworkRegistry` and USDC,
 # the same Solana payment-channel program and mint, both at 6 decimals. A
 # claim resolves against one deployment, so every node that might ever accept
-# one has to agree on which. This node has no counterparty channel yet (no
-# `[[peer_channels]]` — see above), but its client edge already accepts
+# one has to agree on which. That holds independently of the apex<->relay
+# `[[peer_channels]]` row above: this box's client edge already accepts
 # unaffiliated buyers' own on-chain channels (issue #556/#611), and those
 # buyers pick the deployment by what the fleet advertises, not by which box
-# answers — so this section is live from day one, not a template to fill in
-# when the peering lands.
+# answers — so this section was live from day one, before the peering existed.
 #
 # `decimals = 6` is checked against the token's own on-chain `decimals()` at
 # startup and a disagreement refuses the boot (#564), so a stale value here is

@@ -333,35 +333,7 @@ fn with_sandbox_paths(
     // clear panic rather than `Config::load` refusing later with a confusing
     // "file not found".
     match peer_secret {
-        Some(peer_secret) => {
-            const NEEDLE: &str = "secret_file = \"/app/data/";
-            let mut out = String::with_capacity(replaced.len());
-            let mut replaced_any = false;
-            for line in replaced.lines() {
-                if let Some(start) = line.find(NEEDLE) {
-                    let after_needle = &line[start + NEEDLE.len()..];
-                    let close_quote = after_needle.find('"').unwrap_or_else(|| {
-                        panic!("`{NEEDLE}` line has no closing quote: {line:?}")
-                    });
-                    out.push_str(&line[..start]);
-                    out.push_str(&format!("secret_file = \"{}\"", peer_secret.display()));
-                    // Keep whatever followed the original value's closing
-                    // quote on this line (e.g. the inline table's ` }`).
-                    out.push_str(&after_needle[close_quote + 1..]);
-                    replaced_any = true;
-                } else {
-                    out.push_str(line);
-                }
-                out.push('\n');
-            }
-            assert!(
-                replaced_any,
-                "expected at least one `secret_file` line in the committed \
-                 config text -- if every peering was removed, pass `None` \
-                 instead of `Some(..)` here"
-            );
-            out
-        }
+        Some(peer_secret) => repoint_every_secret_file(&replaced, peer_secret),
         None => {
             assert!(
                 !replaced.contains("secret_file ="),
@@ -371,6 +343,46 @@ fn with_sandbox_paths(
             replaced
         }
     }
+}
+
+/// Point every `secret_file = "/app/data/…"` line in `raw` at `peer_secret`,
+/// keeping the rest of each line (an inline table's trailing ` }`) intact.
+///
+/// A line rewrite rather than a [`replace_expecting_a_match`] call per
+/// peering: the apex file carries two `secret_file` lines as of issue #820
+/// (`apex-store` and `apex-relay`) and would grow a third the day a third
+/// peering lands, so the substitution follows the file instead of having to
+/// be re-taught each committed path. Finding no line at all is a failure,
+/// for the same reason `replace_expecting_a_match` exists.
+fn repoint_every_secret_file(raw: &str, peer_secret: &std::path::Path) -> String {
+    const NEEDLE: &str = "secret_file = \"/app/data/";
+
+    let mut out = String::with_capacity(raw.len());
+    let mut replaced_any = false;
+    for line in raw.lines() {
+        match line.find(NEEDLE) {
+            Some(start) => {
+                let after_needle = &line[start + NEEDLE.len()..];
+                let close_quote = after_needle
+                    .find('"')
+                    .unwrap_or_else(|| panic!("`{NEEDLE}` line has no closing quote: {line:?}"));
+                out.push_str(&line[..start]);
+                out.push_str(&format!("secret_file = \"{}\"", peer_secret.display()));
+                out.push_str(&after_needle[close_quote + 1..]);
+                replaced_any = true;
+            }
+            None => out.push_str(line),
+        }
+        out.push('\n');
+    }
+
+    assert!(
+        replaced_any,
+        "expected at least one `secret_file` line in the committed config \
+         text -- if every peering was removed, pass `None` instead of \
+         `Some(..)` here"
+    );
+    out
 }
 
 /// The apex file's two settlement key files, each pointed at a real file
@@ -688,6 +700,9 @@ async fn the_apex_relay_side_devnet_config_loads_and_serves_verbatim() {
 
 #[tokio::test]
 async fn the_store_side_devnet_config_loads_and_serves_verbatim() {
+    // The one prefix this box terminates, and the reason the config exists:
+    // a store box that did not answer `g.toon.ario` could not take over from
+    // the TypeScript node it replaced.
     assert!(STORE_CONFIG.contains("g.toon.ario"));
     // `g.toon.relay.ario`, the relay-hop spelling, was retired by issue #820
     // alongside `g.toon.store` -- it was never actually reachable (see
@@ -1323,15 +1338,13 @@ fn the_store_announce_carries_a_btp_endpoint_when_its_target_route_demands_one()
         .iter()
         .find(|route| route.prefix() == publish_to);
 
-    let demands_btp = match (terminating_target, forwarding_target) {
+    let needs_a_btp_endpoint = match (terminating_target, forwarding_target) {
         (Some(route), None) => route.transport_policy() == TransportPolicy::Btp,
-        (None, Some(_)) => {
-            // A `peer_id` route cannot itself carry `transport` -- the apex's
-            // own greeting for it never demands BTP, so this branch does not
-            // set `demands_btp` from that mechanism. `publish_btp_url` is
-            // still required below regardless (see the fn doc comment).
-            true
-        }
+        // A `peer_id` route cannot itself carry `transport`, so the apex's
+        // greeting for a forward never demands BTP -- the endpoint is still
+        // required here, but as the repo/live parity the fn doc comment
+        // describes rather than as `NoBtpEndpoint` avoidance.
+        (None, Some(_)) => true,
         (None, None) => panic!(
             "the store announces through `{publish_to}`, which the apex's \
              committed route table neither terminates nor forwards -- one of \
@@ -1344,7 +1357,7 @@ fn the_store_announce_carries_a_btp_endpoint_when_its_target_route_demands_one()
         ),
     };
 
-    if demands_btp {
+    if needs_a_btp_endpoint {
         assert!(
             announce.publish_btp_url().is_some(),
             "an announce paid through `{publish_to}` needs a BTP endpoint \
@@ -1496,8 +1509,9 @@ fn the_apex_relay_peer_channel_names_the_new_token_network_with_placeholder_fiel
 ///
 /// Issue #820 moved that pin off the apex: `transport` is illegal on a
 /// `peer_id` route (`ConfigError::PeerRouteHasTransport`), so the apex's
-/// `g.toon.relay` forward now carries none, and enforcement lives solely on
-/// the relay box's own terminating route
+/// `g.toon.relay` forward now carries none, and the pin lives solely on the
+/// relay box's own terminating route -- where it gates that box's own client
+/// edge and nothing else, since a peer-wire arrival is never transport-checked
 /// (docs/devnet-pricing.md's "apex therefore loses client-edge BTP
 /// enforcement on this prefix"). This test asserts that split directly: the
 /// apex's greeting for `g.toon.relay` no longer names a required transport

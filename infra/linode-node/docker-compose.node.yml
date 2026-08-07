@@ -1,5 +1,6 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# TOON connector node — relay + proxy + faucet + TLS.
+# TOON connector node — proxy + faucet + TLS. (The relay app moved to its own
+# box in issue #820; see the note where its service used to be, below.)
 # Run from the CONNECTOR REPO ROOT:
 #   docker compose -f infra/linode-node/docker-compose.node.yml up -d
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

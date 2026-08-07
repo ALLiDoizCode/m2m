@@ -144,9 +144,14 @@ fee = 0
 # with the terminating side, to infra/linode-relay/connector-rust.toml's own
 # `g.toon.relay` route, where the persistent-session rationale actually
 # applies now. This apex therefore loses client-edge BTP enforcement on
-# this prefix: an HTTP request reaching THIS box for `g.toon.relay` is no
-# longer refused here for the wrong transport -- the relay box refuses it
-# instead, one hop further out.
+# this prefix, and nothing downstream restores it: transport policy is a
+# CLIENT-EDGE gate only (`connector-client-edge`'s `handle_ilp`/`handle_btp`),
+# never re-checked on a peer-wire arrival (`Connector::handle_peer_prepare`
+# gates on ceiling and price alone), and the apex's own carriage to the relay
+# box is BTP regardless. So an HTTP client paying THIS box for
+# `g.toon.relay` is served -- the relay box's own pin refuses only clients
+# arriving directly at ITS client edge over HTTP. #701's pin is now a
+# statement about the relay's direct edge, not about the prefix fleet-wide.
 
 [[routes]]
 prefix = "g.toon.ario"
@@ -188,9 +193,9 @@ fee = 2
 # is the one compiled into a shipped client.
 #
 # A client that still addresses `g.toon.store` now gets F02 "no route to
-# destination". Nothing advertised it: the announcer publishes
-# `ANNOUNCER_ILP_ADDRESSES: g.toon,g.toon.relay` and never named it, so this
-# removes a name no discovery path hands out.
+# destination". Nothing advertised it: this box's announcer sidecar has never
+# named it in `ANNOUNCER_ILP_ADDRESSES` (`g.toon` alone today, after #833 and
+# #843), so this removes a name no discovery path hands out.
 
 # ── The g.toon proxy<->store peering (ADR 0027, issues #678/#750) ─────────
 # The fleet's first inter-node link (the apex<->relay peering below, issue

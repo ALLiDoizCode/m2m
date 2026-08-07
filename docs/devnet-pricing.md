@@ -81,12 +81,17 @@ cost flat while the arithmetic still holds: `1 - 0 = 1 >= 1`.
 
 **`transport = "btp"` moves with the terminating route.** It is only legal alongside `handler_url`
 — `ConfigError::PeerRouteHasTransport` refuses it on a `peer_id` route
-(`crates/connector-config/src/error.rs:125`) — so the pin the apex carries today
-(`infra/linode-node/connector-rust.toml`, issue #701) moves down to
-`infra/linode-relay/connector-rust.toml`'s own terminating route, where it already sits (committed
-in #816/#823). **The apex therefore loses client-edge BTP enforcement on this prefix**: once the
-route is a forward, an HTTP client can reach the apex's `g.toon.relay` and it is the relay box, not
-the apex, that refuses it for the wrong transport.
+(`crates/connector-config/src/error.rs:125`) — so the pin the apex used to carry
+(`infra/linode-node/connector-rust.toml`, issue #701) is gone from there, and lives only on
+`infra/linode-relay/connector-rust.toml`'s own terminating route (committed in #816/#823).
+**The apex therefore loses client-edge BTP enforcement on this prefix, and nothing downstream
+restores it**: transport policy is a client-edge gate only — `handle_peer_prepare`
+(`crates/connector-runtime/src/connector.rs`) gates a peer-wire arrival on the exposure ceiling and
+the route's price, never on its transport policy, and the apex→relay carriage is BTP regardless. An
+HTTP client paying the apex for `g.toon.relay` is therefore served end to end; the relay box's pin
+refuses only clients arriving directly at its own client edge over HTTP. #701's decision-11 pin is
+now a statement about the relay's direct edge rather than about the prefix fleet-wide — a
+deliberate consequence of the flip, not an oversight.
 
 ## `announcePrice` 2000
 
