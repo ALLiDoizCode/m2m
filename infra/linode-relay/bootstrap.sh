@@ -33,7 +33,10 @@ apt-get install -y git jq gettext-base openssl ufw curl iptables
 echo "==> [2/5] Firewall (public = 22/80/443 only)"
 "$HERE/firewall.sh"
 
-echo "==> [3/5] Pull images (connector-rust + relay)"
+# Pulls the PINNED images only (connector-rust, relay, nginx, certbot). The
+# faucet has no `image:` — it is built from `packages/faucet/Dockerfile` with
+# the repo root as context, which `up -d` below does on first bring-up.
+echo "==> [3/5] Pull images (connector-rust + relay; the faucet builds at [5/5])"
 ( cd "$ROOT" && "${COMPOSE[@]}" pull --ignore-pull-failures )
 
 echo "==> [4/5] Render nginx config for ${DOMAIN}"
@@ -60,3 +63,7 @@ echo
 echo "✅ TOON relay node up."
 echo "   ILP edge : https://proxy.relay.${DOMAIN}/ilp"
 echo "   Relay ws : wss://relay-ws.${DOMAIN}"
+# Served by this box's nginx as of #870, but the A-record still points at the
+# apex until the live cutover — so this URL reaches the apex's copy, not this
+# one, until DNS moves.
+echo "   Faucet   : https://faucet.${DOMAIN}  (once DNS points here — #870)"

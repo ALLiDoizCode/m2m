@@ -80,8 +80,9 @@ SANS
 # Pass 1: work out which lineages need issuing, and make sure EVERY lineage has
 # at least a self-signed cert on disk BEFORE nginx starts. nginx refuses to
 # start at all if any `ssl_certificate` file named in the config is missing, and
-# relay-ws.${DOMAIN} now names a lineage of its own — so the dummies have to be
-# seeded for both names up front, not one at a time inside the issuing loop.
+# relay-ws.${DOMAIN} and faucet.${DOMAIN} each name a lineage of their own — so
+# the dummies have to be seeded for EVERY name in CERT_NAMES up front, not one
+# at a time inside the issuing loop.
 NEEDS_ISSUE=()
 for name in "${CERT_NAMES[@]}"; do
   use_cert "$name"

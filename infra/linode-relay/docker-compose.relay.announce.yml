@@ -70,8 +70,10 @@
 # `connector announce` loads the SAME `./connector-rust.toml` the serving
 # `connector-rust` service does, and `Config::load` requires every key file
 # it names regardless of which subcommand reads it, so this service mounts
-# the same three key files `docker-compose.relay.rust.yml` does (no peering
-# secret to mount -- this box has no `[[peers]]` table yet, issue #820).
+# the same four key files `docker-compose.relay.rust.yml` does -- the
+# `[signer]` key, the two `[settlement]` keys, and `./announce.key` (issue
+# #870). (No peering secret to mount -- this box has no `[[peers]]` table
+# yet, issue #820).
 # `state_dir` gets a SEPARATE named volume: two processes sharing one
 # journal is a documented hazard (docs/operators/announcing-a-node.md,
 # "When it refuses to run beside a serving node"), and while that guard is

@@ -129,6 +129,13 @@ services:
       BASE_SEPOLIA_ETH_AMOUNT: ${BASE_SEPOLIA_ETH_AMOUNT:-0.001}
       BASE_SEPOLIA_ETH_RESERVE: ${BASE_SEPOLIA_ETH_RESERVE:-0.01}
     volumes:
+      # A HOST path that exists on the apex box and must be provisioned onto
+      # THIS one too (issue #870) — it is not carried by any repo change, for
+      # the same reason ./announce.key is not (see ./connector-rust.toml's
+      # `[announce] identity_key_file` comment). Missing is a soft failure,
+      # not a boot failure: `createSolanaFaucet` (packages/faucet/src/solana.js)
+      # logs "Solana faucet disabled" and returns null, so /health and every
+      # other chain's route keep answering while the Solana leg 503s.
       - /root/keys/solana-usdc-treasury.json:/keys/usdc-authority.json:ro
     ports:
       # Loopback-only (unlike the apex's own `'3500:3500'`) — this box's

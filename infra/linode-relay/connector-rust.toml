@@ -119,8 +119,10 @@ key_file = "/app/data/signer.key"
 # CARRIES OVER the apex's own announce identity, reversing the reasoning
 # this comment used to give for leaving the field absent: the genesis peer
 # seed baked into published `@toon-protocol/core` pins the apex announcer
-# sidecar's pubkey (`30fdd01d…`, `ANNOUNCER_IDENTITY_SECRET_KEY_FILE` =
-# `/root/keys/announce.key` in infra/linode-node/docker-compose.node.
+# sidecar's pubkey (`30fdd01d…` -- the key that sidecar reads via
+# `ANNOUNCER_IDENTITY_SECRET_KEY_FILE`, whose in-container path
+# `/app/data/announce.key` is bind-mounted from the apex HOST's
+# `/root/keys/announce.key`; infra/linode-node/docker-compose.node.
 # announcer.yml), not this box's `[signer]`. Once the apex is retired this
 # box becomes the fleet's public front, so it must sign `g.toon.relay`'s
 # announce under that SAME pubkey -- docs/operators/announcing-a-node.md's
