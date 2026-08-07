@@ -1389,6 +1389,49 @@ fn relay_overlays_sharing_one_config_pin_one_image() {
     );
 }
 
+/// The committed store config, parsed the way the two `[announce]` tests
+/// below need it: sandbox paths and sandbox settlement keys, nothing else
+/// rewritten.
+///
+/// The temp key/state/secret files exist only for the parse -- `Config::load`
+/// reads what it needs there and then, and both callers go on to read the
+/// parsed config rather than back to disk -- so the guards are free to drop
+/// with the call.
+fn load_committed_store_config() -> Config {
+    let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let peer_secret = write_peer_secret();
+    let text = with_sandbox_settlement_keys(
+        &with_sandbox_paths(
+            STORE_CONFIG,
+            key_file.path(),
+            state_dir.path(),
+            Some(peer_secret.path()),
+        ),
+        key_file.path(),
+    );
+    let config_file = write_config(&text);
+    Config::load(config_file.path()).expect("the committed store config must parse")
+}
+
+/// The relay box's committed config, on the same terms as
+/// [`load_committed_store_config`]. `without_live_settlement` rather than
+/// that helper's settlement-key rewrite because the tests below read this
+/// box's route table and `[announce]` section, never its settlement legs.
+fn load_committed_relay_config() -> Config {
+    let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let peer_secret = write_peer_secret();
+    let text = with_sandbox_paths(
+        &without_live_settlement(RELAY_CONFIG),
+        key_file.path(),
+        state_dir.path(),
+        Some(peer_secret.path()),
+    );
+    let config_file = write_config(&text);
+    Config::load(config_file.path()).expect("the committed relay config must parse")
+}
+
 /// Issue #701's carriage negotiation, read across the two boxes: the store
 /// announces THROUGH an address the relay box owns, and if the relay pins
 /// that route to `transport = "btp"` then the store's `[announce]` must
@@ -1412,21 +1455,7 @@ fn relay_overlays_sharing_one_config_pin_one_image() {
 /// this announce is paid).
 #[test]
 fn the_store_announce_carries_a_btp_endpoint_when_its_target_route_demands_one() {
-    let key_file = write_raw_key_file(9);
-    let state_dir = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
-
-    let store_text = with_sandbox_settlement_keys(
-        &with_sandbox_paths(
-            STORE_CONFIG,
-            key_file.path(),
-            state_dir.path(),
-            Some(peer_secret.path()),
-        ),
-        key_file.path(),
-    );
-    let store_file = write_config(&store_text);
-    let store = Config::load(store_file.path()).expect("the committed store config must parse");
+    let store = load_committed_store_config();
     let announce = store
         .announce()
         .expect("the store config's [announce] section must parse");
@@ -1434,16 +1463,7 @@ fn the_store_announce_carries_a_btp_endpoint_when_its_target_route_demands_one()
         .publish_to()
         .expect("the store's [announce] must name a publish_to -- the destination is not guessed");
 
-    let relay_state = tempfile::tempdir().expect("temp state dir");
-    let relay_text = with_sandbox_paths(
-        &without_live_settlement(RELAY_CONFIG),
-        key_file.path(),
-        relay_state.path(),
-        Some(peer_secret.path()),
-    );
-    let relay_file = write_config(&relay_text);
-    let relay = Config::load(relay_file.path()).expect("the committed relay config must parse");
-
+    let relay = load_committed_relay_config();
     let target = relay
         .routes()
         .iter()
@@ -1474,38 +1494,23 @@ fn the_store_announce_carries_a_btp_endpoint_when_its_target_route_demands_one()
 /// (`wss://proxy.devnet.toonprotocol.dev/ilp/btp`, issue #820); toon-meta#310
 /// is retiring the apex, and the relay box is the fleet's only public write
 /// ingress once it goes, so the store buys relay writes directly, like any
-/// other client. Asserted as equality with the relay's OWN advertised
-/// `btp_endpoint` (not a second literal) so the two files cannot drift the
-/// way the apex/store price pair once did.
+/// other client.
+///
+/// Asserted as equality with the relay's OWN advertised `btp_endpoint`
+/// rather than a literal of this test's own, so the two files cannot drift
+/// the way the apex/store price pair once did. The RETIRED apex endpoint is
+/// then pinned as a literal by a second assertion -- a value that must never
+/// come back is the one thing no other committed file's contents can say,
+/// and it would survive the equality check above if the relay's own
+/// `[announce]` were ever repointed at the apex.
 #[test]
 fn the_store_announces_through_the_relay_box_not_the_apex() {
-    let key_file = write_raw_key_file(9);
-    let store_state = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
-    let store_text = with_sandbox_settlement_keys(
-        &with_sandbox_paths(
-            STORE_CONFIG,
-            key_file.path(),
-            store_state.path(),
-            Some(peer_secret.path()),
-        ),
-        key_file.path(),
-    );
-    let store_file = write_config(&store_text);
-    let store = Config::load(store_file.path()).expect("the committed store config must parse");
+    let store = load_committed_store_config();
     let announce = store
         .announce()
         .expect("the store config's [announce] section must parse");
 
-    let relay_state = tempfile::tempdir().expect("temp state dir");
-    let relay_text = with_sandbox_paths(
-        &without_live_settlement(RELAY_CONFIG),
-        key_file.path(),
-        relay_state.path(),
-        Some(peer_secret.path()),
-    );
-    let relay_file = write_config(&relay_text);
-    let relay = Config::load(relay_file.path()).expect("the committed relay config must parse");
+    let relay = load_committed_relay_config();
     let relay_announce = relay
         .announce()
         .expect("the relay config's [announce] section must parse");

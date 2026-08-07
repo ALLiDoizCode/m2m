@@ -205,12 +205,15 @@ it (`infra/linode-store/connector-rust.toml`'s `[announce]` +
 
 Run it in this order, on the boxes named:
 
-1. **STORE box — open and fund the store→apex client channel**, then write its 32-byte on-chain id
-   into `[announce] pay_channel` in the box's `connector-rust.toml`. The committed file carries a
-   clearly-marked `0xdead…` placeholder there (issue #853): the field's **shape** is in git, but the
-   real id is a live fact no diff can supply, so until the box's own copy names a funded channel
-   every run fails. (Remember the bind-mounted box config **leads** the repo copy — edit the file
-   the container mounts.)
+1. **STORE box — open and fund the store→relay client channel**, then write its 32-byte on-chain id
+   into `[announce] pay_channel` in the box's `connector-rust.toml`. (The counterparty was the
+   **apex** until issue #871 repointed this announce: toon-meta#310 retires the apex, and the relay
+   box is the fleet's only public write ingress once it goes, so the store buys relay writes
+   directly. `[announce] publish_btp_url` and the compose file's through-URL name the relay box for
+   the same reason.) The committed file carries a clearly-marked `0xdead…` placeholder there (issue
+   #853): the field's **shape** is in git, but the real id is a live fact no diff can supply, so
+   until the box's own copy names a funded channel every run fails. (Remember the bind-mounted box
+   config **leads** the repo copy — edit the file the container mounts.)
 2. **STORE box — bring the publisher up**:
 
    ```
