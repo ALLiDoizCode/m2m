@@ -29,12 +29,10 @@ flip) has not landed. This row is the target #820 must write; it is pinned here 
 replaces the terminate row above it, and the `relay` row becomes what actually answers the write.
 
 \*\* `infra/linode-store/connector.yaml` is the retired TypeScript config — it no longer fronts
-traffic (see "The TypeScript fleet" below) and is not a current source of truth for anything. It is
-cited here only as the historical origin of the `2000` figure. The Rust `connector announce`
-mechanism that replaces `selfAnnounce` carries no configured price at all: it derives the amount to
-pay live from the target's own x402 greeting plus this box's own `[[routes]]` forwarding fee
-(`amount_to_pay`, `crates/connector-cli/src/announce.rs`), so there is no committed literal to cite
-in its place. See "`announcePrice` 2000" below.
+traffic (see "The TypeScript fleet" below) and is not a current source of truth for anything. The
+row survives only as the historical origin of the `2000` figure: the Rust `connector announce` that
+replaced `selfAnnounce` configures no announce price at all, so there is no committed literal to
+repoint this citation at. See "`announcePrice` 2000" below.
 
 Verified live against both boxes via the unauthenticated
 `GET /ilp/routes/price?destination=…` (ADR 0022 puts configuration answers on
@@ -104,10 +102,11 @@ comparable to the figures above.
 The Rust `connector announce` mechanism that replaced `selfAnnounce`
 (`crates/connector-cli/src/announce.rs`) does not configure this figure at
 all — there is nothing to repoint the citation at. Each announce run asks the
-publish target's own x402 greeting for its live price and adds this box's own
-`[[routes]]` forwarding fee (`amount_to_pay`), so the amount paid tracks the
-target's price automatically instead of needing a hand-maintained buffer like
-`2000`.
+publish target's own x402 greeting for its live price and pays that; only when
+it originates through its own routing (`--via-own-routing`) does it add this
+box's own `[[routes]]` forwarding fee on top, ADR 0028's arithmetic from the
+originating side (`amount_to_pay`). Either way the amount tracks the target's
+live price instead of needing a hand-maintained buffer like `2000`.
 
 ## Retired names
 
