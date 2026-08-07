@@ -3,13 +3,13 @@
 # GET /ilp/identity on connector-rust and republishes the proven facts.
 # Deployed 2026-08-01 (buzz epic toon-meta#256 orchestration).
 #
-# RECONCILED FROM THE LIVE APEX BOX 2026-08-04, byte-for-byte, behaviour
+# RECONCILED FROM THE LIVE g.toon PROXY BOX 2026-08-04, byte-for-byte, behaviour
 # unchanged. It had been running for three days with **no source in this
 # repo at all** — the announcer's *code* is versioned (packages/announcer/,
 # which is what builds the image named below) but this deployment overlay,
 # the file that says which endpoints this box announces, was not. Redeploying
-# the apex from a clean checkout would therefore have silently dropped the
-# service that publishes every endpoint the network discovers.
+# the g.toon proxy from a clean checkout would therefore have silently dropped
+# the service that publishes every endpoint the network discovers.
 #
 # Bring it up alongside the other overlays:
 #   docker compose -f infra/linode-node/docker-compose.node.yml \
@@ -40,11 +40,11 @@ services:
       # shipped client actually dials (buzz pins it in compiled code) — has
       # been undiscoverable ever since.
       #
-      # Announcing it HERE is honest rather than a fudge: since #772 the apex
-      # FORWARDS g.toon.ario across the apex<->store peering, so the endpoint
-      # this announce advertises really is where a client should send that
-      # traffic. It pays this edge 1002, this hop keeps 2, and 1000 reaches
-      # the store box (ADR 0028).
+      # Announcing it HERE is honest rather than a fudge: since #772 the
+      # g.toon proxy FORWARDS g.toon.ario across the g.toon proxy<->store
+      # peering, so the endpoint this announce advertises really is where a
+      # client should send that traffic. It pays this edge 1002, this hop
+      # keeps 2, and 1000 reaches the store box (ADR 0028).
       #
       # What it does NOT restore: an announce under the STORE's own pubkey.
       # A client discovering by that identity still finds nothing. Nothing was

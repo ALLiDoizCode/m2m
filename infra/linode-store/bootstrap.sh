@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Provision a fresh Linode (Ubuntu/Debian) into the TOON store (Arweave DVM) box.
-# Runs: connector (apex g.proxy.store) + store (DVM) + nginx/TLS.
+# Runs: connector (the g.toon proxy, g.proxy.store) + store (DVM) + nginx/TLS.
 # No relay, no faucet, no Mina lightnet — this box settles against the existing
 # devnet chain boxes (see connector.yaml chainProviders).
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
