@@ -2,12 +2,19 @@
 # TOON devnet — RELAY box's own kind:10032 publisher (issue #843, repo half
 # of #815)
 # =============================================================================
-# Gives `g.toon.relay` a publisher that advertises THIS box's own identity --
-# the `[signer]` key `./connector-rust.toml`'s `[announce]` section names,
-# which is the exact key `GET /ilp/identity` answers with and every gift wrap
-# this node opens is sealed to (ADR 0018). Mirrors
+# Gives `g.toon.relay` a publisher that advertises this box's OWN endpoints --
+# where clients pay it and (via `relay_url`) where they read it for free --
+# under an identity a client already trusts. Originally that was this box's
+# own `[signer]` key; as of issue #870 (toon-meta#310, the apex retirement)
+# it is the apex's CARRIED-OVER announce identity instead --
+# `./connector-rust.toml`'s `[announce] identity_key_file`, which overrides
+# what this command signs with (crates/connector-cli/src/announce.rs). Either
+# way this node still opens every gift wrap sealed to its own `[signer]` --
+# `identity_key_file` only changes which key SIGNS the announce event, never
+# which key clients pay against (ADR 0018). Mirrors
 # infra/linode-store/docker-compose.store.announce.yml (issue #833), which did
-# the same for the store box's `g.toon.ario`.
+# the same shape for the store box's `g.toon.ario` (still signed under the
+# store's own `[signer]` -- it never had a prior identity to carry over).
 #
 # ── Paying itself, not the apex ──────────────────────────────────────────
 # The store's announce loop pays the g.toon proxy's client edge to reach a
@@ -126,6 +133,11 @@ services:
       - ./signer-rust.key:/app/data/signer.key:ro
       - ./settlement-rust.key:/app/data/settlement.key:ro
       - ./settlement-solana-rust.key:/app/data/settlement-solana.key:ro
+      # The apex's announce identity (issue #870), same file
+      # docker-compose.relay.rust.yml mounts for the serving connector --
+      # this is the process that actually SIGNS under it. See
+      # ./connector-rust.toml's `[announce] identity_key_file` comment.
+      - ./announce.key:/app/data/announce.key:ro
       - relay_announce_state:/app/state
     restart: unless-stopped
 

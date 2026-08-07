@@ -115,11 +115,36 @@ key_file = "/app/data/signer.key"
 # key the TERMINATING node does not hold, pays at the client edge, and is
 # refused `F01 gift wrap could not be opened` -- after the money is spent.
 #
-# `identity_key_file` is deliberately ABSENT, for the same reason the store's
-# is: this box has never had a kind:10032 publisher of its own (no sidecar,
-# no prior `connector announce`), and the genesis peer seed pins the g.toon
-# proxy's announcer pubkey, not this box's. Announcing under this node's own
-# `[signer]` is correct from the start and strands nobody.
+# `identity_key_file` (issue #870, toon-meta#310's apex-retirement spec) now
+# CARRIES OVER the apex's own announce identity, reversing the reasoning
+# this comment used to give for leaving the field absent: the genesis peer
+# seed baked into published `@toon-protocol/core` pins the apex announcer
+# sidecar's pubkey (`30fdd01d…`, `ANNOUNCER_IDENTITY_SECRET_KEY_FILE` =
+# `/root/keys/announce.key` in infra/linode-node/docker-compose.node.
+# announcer.yml), not this box's `[signer]`. Once the apex is retired this
+# box becomes the fleet's public front, so it must sign `g.toon.relay`'s
+# announce under that SAME pubkey -- docs/operators/announcing-a-node.md's
+# "carry over a durable Nostr identity" case exactly, and the reason every
+# already-deployed client can repair itself without an update: it already
+# trusts this author, and only needs to learn the new endpoints.
+#
+# `/app/data/announce.key` is a box-local file this line names but does not
+# supply -- like every other key_file in this section, real key material is
+# never committed (`infra/linode-relay/*.key` in .gitignore). It must hold
+# the EXACT bytes of the apex's `/root/keys/announce.key`, copied verbatim:
+# the Rust reader accepts either 64-hex or 32 raw bytes, so no reformatting
+# is needed. Provisioning that copy onto this box is the live, human,
+# reversible extraction step (toon-meta#310 Wave B, issue #311) -- proven
+# working BEFORE the apex is touched, per that spec's own sequencing rule --
+# not something this commit does. Until that copy lands, this box has no
+# file at that path and refuses to boot (`AnnounceIdentityKeyFileNotFound`),
+# which is why the compose overlays that mount it
+# (docker-compose.relay.rust.yml, docker-compose.relay.announce.yml) are
+# part of this same change: the mount and the config line must land
+# together or neither does anything. The key itself is set below, inside
+# the `[announce]` table proper -- a bare `key = value` up here, before any
+# table header, would be read as a TOP-LEVEL key instead (the same trap
+# `peer_expose`'s own comment above notes in reverse).
 #
 # Unlike the store, `relay_url` IS set here: this box fronts the relay app
 # (docker-compose.relay.yml's `relay` service, port 7100 behind this box's
@@ -169,12 +194,13 @@ key_file = "/app/data/signer.key"
 # the fallback) is load-bearing: do not remove either key without also
 # removing the reason `derive_route_hints` would misfire without it.
 [announce]
-addresses     = ["g.toon.relay"]
-http_endpoint = "https://proxy.relay.devnet.toonprotocol.dev/ilp"
-btp_endpoint  = "wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp"
-relay_url     = "wss://relay-ws.devnet.toonprotocol.dev"
-route_publish = "g.toon.relay"
-route_store   = "g.toon.ario"
+addresses         = ["g.toon.relay"]
+http_endpoint     = "https://proxy.relay.devnet.toonprotocol.dev/ilp"
+btp_endpoint      = "wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp"
+relay_url         = "wss://relay-ws.devnet.toonprotocol.dev"
+identity_key_file = "/app/data/announce.key"
+route_publish     = "g.toon.relay"
+route_store       = "g.toon.ario"
 
 # ── Routes ─────────────────────────────────────────────────────────────────
 

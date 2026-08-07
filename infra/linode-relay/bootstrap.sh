@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Provision a fresh Linode (Ubuntu/Debian) into the TOON relay box.
-# Runs: connector-rust (client-edge only, no peering yet — issue #816) +
-# relay + nginx/TLS. No TypeScript connector — there is no predecessor to run
-# alongside and one is prohibited on this fleet. No store, no faucet, no Mina
-# lightnet.
+# Runs: connector-rust (with its apex<->relay peering, issue #820) + relay +
+# faucet (issue #870, toon-meta#310's apex-retirement spec) + nginx/TLS. No
+# TypeScript connector — there is no predecessor to run alongside and one is
+# prohibited on this fleet. No store, no Mina lightnet.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Run as root on a clean Ubuntu box:
 #   git clone https://github.com/toon-protocol/connector.git
