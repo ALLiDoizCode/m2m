@@ -81,7 +81,7 @@ price       = 100
 
 | Key                   | Type        | Required  | Meaning                                                                                               |
 | --------------------- | ----------- | --------- | ----------------------------------------------------------------------------------------------------- |
-| `client_edge_addr`    | `host:port` | yes       | Where `POST /ilp` (and, if configured, the operator surface) listens.                                 |
+| `client_edge_addr`    | `host:port` | yes       | Where `POST /ilp`, `GET /ilp/btp` (and, if configured, the operator surface) listen.                  |
 | `[signer]`            | table       | yes       | Exactly one of `key_file` or `kms_key_id` — a location, never a key value.                            |
 | `[[routes]]`          | array       | no        | See below.                                                                                            |
 | `apex`                | ILP address | no        | Required only if `[[children]]` is used.                                                              |
@@ -107,6 +107,12 @@ authentication _and_ a channel binding. A `credential` sets **exactly one** of `
 path to the secret — what a deployed node uses, so the peering can live in a committed config) or
 `secret` (the literal). See
 [`docs/operators/btp-peer-transport-bringup.md`](docs/operators/btp-peer-transport-bringup.md).
+
+`peer_expose` and `credential` are **peer-role** settings and nothing else. `peer_expose` opens no
+port: it turns on peer handling, behind the credential check, on the listeners this node already
+serves. A node that leaves it at its `neither` default still serves clients over BTP, and a node
+that sets it still admits a client that presents no credential at all — see "The client edge"
+below.
 
 `[settlement]` configures one or more chains, in either of two shapes (issue #628) — Mina is out of
 scope per [ADR 0002](docs/adr/0002-drop-mina-from-the-rust-connector.md) either way. The legacy
@@ -196,6 +202,14 @@ listener, per [`docs/protocol/peer-carriage-spec.md`](docs/protocol/peer-carriag
 caller controls). Full detail on all six:
 [`docs/protocol/client-edge-spec.md`](docs/protocol/client-edge-spec.md).
 
+**Opening a client BTP session takes no token.** `GET /ilp/btp` is permissionless: a client that
+presents no credential at all — or the `auth` frame the deployed client sends with `secret: ""` —
+is accepted and stays a client, its contents unverified. Nothing about the handshake is trusted.
+What authorizes a **write** is the signed payment-channel claim on each frame, exactly as on
+`POST /ilp` ([`client-edge-spec.md`](docs/protocol/client-edge-spec.md) §1.9 step 1: _"Authorization
+to write comes from the claim, never the session"_). The `credential` in `[[peers]]` upgrades an
+already-admitted session from client to peer; it is not what admits it.
+
 ### `POST /ilp`
 
 Body: an OER-encoded ILPv4 PREPARE, `Content-Type: application/octet-stream`. Response: an
@@ -274,6 +288,12 @@ The peer endpoint's URL **scheme** picks the carriage — `wss://` for BTP (RFC-
 binding, never by which port or listener it arrived on. A claim rides the _next_ frame or request
 to a peer after a fulfilment, not the PREPARE that caused it, and is signed as an EIP-712
 `BalanceProof` ([ADR 0024](docs/adr/0024-peer-wire-claims-sign-the-eip-712-balance-proof.md)).
+
+"Role is decided by authentication" says **which role you get**, not **whether you are let in**. An
+interaction presenting no credential — every ordinary client — is admitted as a `client`; so is one
+whose credential fails either requirement, which is logged as `peer_auth_refused` and never refused
+on the wire, because refusing would make the check an oracle for the peer ids this node configures
+([`peer-carriage-spec.md`](docs/protocol/peer-carriage-spec.md) §1.6).
 
 The carriage mapping is specified in
 [`docs/protocol/peer-carriage-spec.md`](docs/protocol/peer-carriage-spec.md). The semantics it
