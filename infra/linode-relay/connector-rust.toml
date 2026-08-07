@@ -182,8 +182,14 @@ route_store   = "g.toon.ario"
 prefix = "g.toon.relay"
 # `/write`, not the bare origin: `HttpAppClient::deliver` POSTs here, and the
 # relay app serves only `POST /write` and `GET /health`. A bare
-# `http://relay:3100` comes back F99 "app declined the delivery with HTTP
-# 404" — the same gap the apex's own route hit on first deploy (#492).
+# `http://relay:3100` -- the same gap the apex's own route hit on first
+# deploy (#492) -- does NOT come back as an F99 reject. Under ADR 0020 a
+# non-2xx from the app is a real answer that consumed real work, so it rides
+# home on a FULFILL with `status: 404` and the payer is charged in full for
+# nothing (`crates/connector-runtime/src/connector.rs`'s `AppOutcome::Answered`
+# arm; `crates/connector-bin/tests/local_stack_rehearsal.rs` spells this out).
+# There is no reject and no alarm -- misconfiguring this path silently
+# charges payers, it does not fail loudly.
 handler_url = "http://relay:3100/write"
 # 1 micro-USDC per relay write, matching the apex's live price for this
 # prefix (infra/linode-node/connector-rust.toml, owner decision 2026-08-04).
