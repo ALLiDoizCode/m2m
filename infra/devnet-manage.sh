@@ -450,22 +450,32 @@ redeploy)
     # `depends_on: connector` in both base files
     # (docker-compose.node.yml:142-145, docker-compose.store.yml:98-101), and
     # `up` pulls a named service's dependencies into the graph anyway.
-    # `required: false` does not help -- it only tolerates an UNHEALTHY
-    # dependency, it does not stop compose from trying to create one, so the
-    # purged image is still fetched and the whole `up` aborts on
-    # `manifest unknown`, taking nginx and connector-rust down with it.
+    # `required: false` does not help -- it tolerates a dependency that is
+    # missing or unhealthy, it does not stop compose from creating one that IS
+    # declared, so the purged image is still fetched and the whole `up` aborts
+    # on `manifest unknown`, taking nginx and connector-rust down with it.
     # `--no-deps` is what actually excludes it. (`pull` needs no such flag:
     # it ignores dependencies already.) The relay leg deliberately has neither
     # -- it deploys every service in its file set.
+    #
+    # `compose`/`services` are split out only so these lines stay readable:
+    # each leg names its file set twice (`pull` then `up`) and its service set
+    # twice, and the two must not drift from each other.
     if [ "$key" = "toon" ]; then
-      ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && docker compose -f infra/linode-node/docker-compose.node.yml -f infra/linode-node/docker-compose.node.rust.yml pull relay faucet nginx certbot connector-rust && docker compose -f infra/linode-node/docker-compose.node.yml -f infra/linode-node/docker-compose.node.rust.yml up --build -d --no-deps relay faucet nginx certbot connector-rust" &
+      compose="docker compose -f infra/linode-node/docker-compose.node.yml -f infra/linode-node/docker-compose.node.rust.yml"
+      services="relay faucet nginx certbot connector-rust"
+      ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && $compose pull $services && $compose up --build -d --no-deps $services" &
     elif [ "$key" = "store" ]; then
-      ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && docker compose -f infra/linode-store/docker-compose.store.yml -f infra/linode-store/docker-compose.store.rust.yml pull store nginx certbot connector-rust && docker compose -f infra/linode-store/docker-compose.store.yml -f infra/linode-store/docker-compose.store.rust.yml up -d --no-deps store nginx certbot connector-rust" &
+      compose="docker compose -f infra/linode-store/docker-compose.store.yml -f infra/linode-store/docker-compose.store.rust.yml"
+      services="store nginx certbot connector-rust"
+      ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && $compose pull $services && $compose up -d --no-deps $services" &
     else
       # relay has no TypeScript compose file at all (issue #816) -- always
       # both files together, since the connector-rust service is only
-      # defined in the overlay.
-      ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && docker compose -f infra/linode-relay/docker-compose.relay.yml -f infra/linode-relay/docker-compose.relay.rust.yml pull && docker compose -f infra/linode-relay/docker-compose.relay.yml -f infra/linode-relay/docker-compose.relay.rust.yml up -d" &
+      # defined in the overlay. No service list and no `--no-deps`: every
+      # service in the file set is meant to run.
+      compose="docker compose -f infra/linode-relay/docker-compose.relay.yml -f infra/linode-relay/docker-compose.relay.rust.yml"
+      ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && $compose pull && $compose up -d" &
     fi
   done
   wait
