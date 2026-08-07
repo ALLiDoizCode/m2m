@@ -153,5 +153,11 @@ exists only in `crates/connector-domain/src/error.rs`), and by nginx returning
 
 The TypeScript `connector.yaml` files remain in the repo but no longer front
 traffic. They are not a second source of pricing truth, and the retirement is
-tracked in #714. Note `infra/devnet-manage.sh` still deploys the TypeScript
-compose files, so running it would resurrect them — see that ticket.
+tracked in #714.
+
+`infra/devnet-manage.sh redeploy` no longer resurrects them (#851): every leg
+now composes its box's base file with the matching Rust overlay and names only
+the services that should run, so the base files' TypeScript `connector` service
+— pinned to an image purged from GHCR — is never started. The provisioning
+paths (`up`, `store`) are a separate matter: they still run each box's
+`bootstrap.sh`, which brings up the base file alone, `connector` included.
