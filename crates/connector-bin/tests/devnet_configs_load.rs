@@ -1163,6 +1163,112 @@ fn the_relay_devnet_config_announces_only_prefixes_it_terminates() {
     );
 }
 
+/// The trimmed lines of a committed `[announce]` section, or `None` for a
+/// file that has no such section -- [`route_price`]'s precedent again, no
+/// TOML dependency needed to read a couple of keys written one per line.
+fn announce_section(raw: &str) -> Option<Vec<&str>> {
+    let mut lines = raw.lines().map(str::trim);
+    lines.find(|line| *line == "[announce]")?;
+    Some(lines.take_while(|line| !line.starts_with('[')).collect())
+}
+
+/// The `addresses = [...]` list of an [`announce_section`], written as one
+/// array literal on one line the way every committed file writes it.
+fn announce_addresses(section: &[&str]) -> Vec<String> {
+    let value = section
+        .iter()
+        .find_map(|line| line.strip_prefix("addresses"))
+        .expect("no `[announce] addresses` line in the committed config text");
+    value
+        .trim_start()
+        .trim_start_matches('=')
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split(',')
+        .map(|address| address.trim().trim_matches('"').to_string())
+        .filter(|address| !address.is_empty())
+        .collect()
+}
+
+/// Whether an [`announce_section`] pins `route_store` explicitly. Read off
+/// the raw text rather than a loaded `AnnounceConfig`: the loaded value is
+/// never absent (`derive_route_hints` always fills it in, pinned or
+/// guessed), so only the raw text can tell an explicit pin apart from a
+/// silent fallback -- which is exactly the distinction issue #845 is about.
+fn announce_pins_route_store(section: &[&str]) -> bool {
+    section.iter().any(|line| line.starts_with("route_store"))
+}
+
+/// What `derive_route_hints` (`crates/connector-config/src/announce.rs`)
+/// would guess for `routes.store` from an address list carrying no
+/// `.store`/`.ario` entry, mirroring its fallback rather than approximating
+/// it: cut `.relay` off the address it derives `publish` from and append
+/// `.store` -- and, when no address ends `.relay` for it to cut, the
+/// primary address itself. A guard whose message names a value the real
+/// derivation would not produce sends its reader looking for the wrong bug.
+fn derived_route_store(addresses: &[String]) -> String {
+    let publish = addresses
+        .iter()
+        .find(|address| address.ends_with(".relay"))
+        .or_else(|| addresses.first());
+    match publish {
+        Some(publish) => publish
+            .strip_suffix(".relay")
+            .map(|stem| format!("{stem}.store"))
+            .unwrap_or_else(|| publish.clone()),
+        None => "<no address to guess from>".to_string(),
+    }
+}
+
+/// Issue #845: the connector-native `[announce]` path has the identical
+/// derivation hazard #841 pinned shut on the TypeScript sidecar's
+/// `ANNOUNCER_ROUTE_STORE`. `derive_route_hints`
+/// (`crates/connector-config/src/announce.rs`) first looks for a
+/// `.store`/`.ario` entry in `addresses`; when none exists it falls
+/// through to suffix surgery -- strip `.relay` off whichever address it
+/// does have and append `.store` -- inventing a prefix with no signal that
+/// it was ever guessed. That is exactly how the relay's own announce (only
+/// address `g.toon.relay`) derived `routes.store = g.toon.store`, a prefix
+/// nothing on this fleet routes (the store prefix is `g.toon.ario`).
+///
+/// This is the guard the issue asks for: every committed devnet
+/// `[announce]` section whose address list contains no `.store`/`.ario`
+/// entry must pin `route_store` explicitly, so the fallback never fires
+/// unnoticed on this fleet again. The failure message names the file, the
+/// key it is missing, and the exact unrouted prefix that key's absence
+/// would derive -- the remedy is the message, not a separate lookup.
+#[test]
+fn every_committed_announce_without_a_store_or_ario_address_pins_route_store() {
+    for (label, raw) in [
+        ("infra/linode-node/connector-rust.toml", APEX_CONFIG),
+        ("infra/linode-store/connector-rust.toml", STORE_CONFIG),
+        ("infra/linode-relay/connector-rust.toml", RELAY_CONFIG),
+    ] {
+        let Some(section) = announce_section(raw) else {
+            continue;
+        };
+        let addresses = announce_addresses(&section);
+        let has_store_or_ario = addresses
+            .iter()
+            .any(|address| address.ends_with(".store") || address.ends_with(".ario"));
+        if has_store_or_ario {
+            continue;
+        }
+
+        let derived = derived_route_store(&addresses);
+        assert!(
+            announce_pins_route_store(&section),
+            "{label}'s [announce] addresses ({addresses:?}) contain no \
+             `.store`/`.ario` entry, so `derive_route_hints` falls through \
+             to its suffix-surgery fallback and would derive \
+             `routes.store = {derived}` -- a prefix nothing on this fleet \
+             routes (issue #845, same class as #841's ANNOUNCER_ROUTE_STORE). \
+             Pin `route_store` explicitly in this file's [announce] section."
+        );
+    }
+}
+
 /// The `image:` tag every service in a compose overlay pins, read off the
 /// committed text -- [`route_price`]'s precedent again, and for the same
 /// reason: one line, no YAML dependency.

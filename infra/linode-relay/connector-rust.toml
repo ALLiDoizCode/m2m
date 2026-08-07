@@ -152,12 +152,29 @@ key_file = "/app/data/signer.key"
 # even though this file has one as of issue #820: that table funds the
 # apex<->relay PEERING, which is a separate fact from this announce's own
 # `--via-own-routing` path -- there is nobody to pay here regardless of
-# whether the peering is funded.
+# whether the peering is funded. Do not add a placeholder channel id to make
+# this section "complete" -- there is nothing for one to pay.
+#
+# `route_publish`/`route_store` are PINNED, not left to derive -- issue #845,
+# the same class of defect #841 pinned shut on the TypeScript sidecar's
+# ANNOUNCER_ROUTE_STORE. `derive_route_hints` (crates/connector-config/src/
+# announce.rs) first looks for a `.store`/`.ario` address in `addresses`
+# above; this box's list is just `["g.toon.relay"]`, so it falls through to
+# suffix surgery -- strip `.relay` off the one address it has and append
+# `.store` -- inventing `g.toon.store`, a prefix NOTHING on this fleet
+# routes (the store prefix is `g.toon.ario`). A client that takes that
+# unpinned `routes.store` hint at face value has nowhere to upload. Pinning
+# both here the way the store box's own address already does implicitly
+# (`g.toon.ario` matches the `.ario` branch directly, so it never reaches
+# the fallback) is load-bearing: do not remove either key without also
+# removing the reason `derive_route_hints` would misfire without it.
 [announce]
 addresses     = ["g.toon.relay"]
 http_endpoint = "https://proxy.relay.devnet.toonprotocol.dev/ilp"
 btp_endpoint  = "wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp"
 relay_url     = "wss://relay-ws.devnet.toonprotocol.dev"
+route_publish = "g.toon.relay"
+route_store   = "g.toon.ario"
 
 # ── Routes ─────────────────────────────────────────────────────────────────
 
