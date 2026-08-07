@@ -14,7 +14,7 @@
 
 services:
   relay:
-    # Moved verbatim from infra/linode-node/docker-compose.node.yml:32-47 —
+    # Moved verbatim from infra/linode-node/docker-compose.node.yml:32-52 —
     # same image, same env, same healthcheck. The relay app itself is
     # unmodified by this move; only which box it runs on (and which
     # connector fronts it) changes.
