@@ -38,6 +38,23 @@ services:
       TOON_CHAIN: 'none'
       NOSTR_SECRET_KEY: ${RELAY_NOSTR_SECRET_KEY:-0000000000000000000000000000000000000000000000000000000000000002}
       TOON_DEV_MODE: ${RELAY_DEV_MODE:-false}
+      # Made explicit rather than relied on as an image default (issue #831):
+      # `docker inspect` on the live box showed the image already sets this to
+      # /data and declares /data as a VOLUME, but neither fact is visible from
+      # this file, and an image change could move the default without anyone
+      # noticing here.
+      TOON_DATA_DIR: /data
+    volumes:
+      # events.db (NIP-01 event store — every note/profile/huddle-frame/
+      # renderer-event this relay has accepted). Named, not bind-mounted, same
+      # as `connector_data` above: without it, the image's own anonymous
+      # VOLUME declaration still makes the data survive a plain restart, but
+      # it has no name an operator can find, isn't declared anywhere in this
+      # file, and a stray `docker volume prune` — which by default reaps
+      # exactly the unused ANONYMOUS volumes — deletes it with no warning
+      # (issue #831). Naming it does not make it survive
+      # `docker compose down -v`; nothing declared here does.
+      - relay_data:/data
     restart: unless-stopped
     healthcheck:
       # 127.0.0.1, not localhost: the relay app binds 0.0.0.0 (IPv4 only),
@@ -147,5 +164,6 @@ services:
 
 volumes:
   connector_data:
+  relay_data:
   node_certbot_conf:
   node_certbot_www:
