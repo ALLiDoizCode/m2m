@@ -1072,56 +1072,62 @@ fn the_relay_devnet_config_announces_only_prefixes_it_terminates() {
     );
 }
 
-/// The `addresses = [...]` list inside a committed `[announce]` section,
-/// read off the raw text -- [`route_price`]'s precedent again, no TOML
-/// dependency needed for one array literal written on one line.
-fn announce_addresses(raw: &str) -> Vec<String> {
-    let mut in_announce = false;
-    for line in raw.lines().map(str::trim) {
-        if line == "[announce]" {
-            in_announce = true;
-            continue;
-        }
-        if in_announce && line.starts_with('[') {
-            break;
-        }
-        if let Some(value) = in_announce
-            .then(|| line.strip_prefix("addresses"))
-            .flatten()
-        {
-            let value = value.trim_start().trim_start_matches('=').trim();
-            return value
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .split(',')
-                .map(|a| a.trim().trim_matches('"').to_string())
-                .filter(|a| !a.is_empty())
-                .collect();
-        }
-    }
-    panic!("no `[announce] addresses` line in the committed config text");
+/// The trimmed lines of a committed `[announce]` section, or `None` for a
+/// file that has no such section -- [`route_price`]'s precedent again, no
+/// TOML dependency needed to read a couple of keys written one per line.
+fn announce_section(raw: &str) -> Option<Vec<&str>> {
+    let mut lines = raw.lines().map(str::trim);
+    lines.find(|line| *line == "[announce]")?;
+    Some(lines.take_while(|line| !line.starts_with('[')).collect())
 }
 
-/// Whether a committed `[announce]` section pins `route_store` explicitly.
-/// Read off the raw text rather than a loaded `AnnounceConfig`: the loaded
-/// value is never absent (`derive_route_hints` always fills it in, pinned
-/// or guessed), so only the raw text can tell an explicit pin apart from a
+/// The `addresses = [...]` list of an [`announce_section`], written as one
+/// array literal on one line the way every committed file writes it.
+fn announce_addresses(section: &[&str]) -> Vec<String> {
+    let value = section
+        .iter()
+        .find_map(|line| line.strip_prefix("addresses"))
+        .expect("no `[announce] addresses` line in the committed config text");
+    value
+        .trim_start()
+        .trim_start_matches('=')
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split(',')
+        .map(|address| address.trim().trim_matches('"').to_string())
+        .filter(|address| !address.is_empty())
+        .collect()
+}
+
+/// Whether an [`announce_section`] pins `route_store` explicitly. Read off
+/// the raw text rather than a loaded `AnnounceConfig`: the loaded value is
+/// never absent (`derive_route_hints` always fills it in, pinned or
+/// guessed), so only the raw text can tell an explicit pin apart from a
 /// silent fallback -- which is exactly the distinction issue #845 is about.
-fn announce_pins_route_store(raw: &str) -> bool {
-    let mut in_announce = false;
-    for line in raw.lines().map(str::trim) {
-        if line == "[announce]" {
-            in_announce = true;
-            continue;
-        }
-        if in_announce && line.starts_with('[') {
-            break;
-        }
-        if in_announce && line.starts_with("route_store") {
-            return true;
-        }
+fn announce_pins_route_store(section: &[&str]) -> bool {
+    section.iter().any(|line| line.starts_with("route_store"))
+}
+
+/// What `derive_route_hints` (`crates/connector-config/src/announce.rs`)
+/// would guess for `routes.store` from an address list carrying no
+/// `.store`/`.ario` entry, mirroring its fallback rather than approximating
+/// it: cut `.relay` off the address it derives `publish` from and append
+/// `.store` -- and, when no address ends `.relay` for it to cut, the
+/// primary address itself. A guard whose message names a value the real
+/// derivation would not produce sends its reader looking for the wrong bug.
+fn derived_route_store(addresses: &[String]) -> String {
+    let publish = addresses
+        .iter()
+        .find(|address| address.ends_with(".relay"))
+        .or_else(|| addresses.first());
+    match publish {
+        Some(publish) => publish
+            .strip_suffix(".relay")
+            .map(|stem| format!("{stem}.store"))
+            .unwrap_or_else(|| publish.clone()),
+        None => "<no address to guess from>".to_string(),
     }
-    false
 }
 
 /// Issue #845: the connector-native `[announce]` path has the identical
@@ -1148,24 +1154,20 @@ fn every_committed_announce_without_a_store_or_ario_address_pins_route_store() {
         ("infra/linode-store/connector-rust.toml", STORE_CONFIG),
         ("infra/linode-relay/connector-rust.toml", RELAY_CONFIG),
     ] {
-        if !raw.contains("[announce]") {
+        let Some(section) = announce_section(raw) else {
             continue;
-        }
-        let addresses = announce_addresses(raw);
+        };
+        let addresses = announce_addresses(&section);
         let has_store_or_ario = addresses
             .iter()
-            .any(|a| a.ends_with(".store") || a.ends_with(".ario"));
+            .any(|address| address.ends_with(".store") || address.ends_with(".ario"));
         if has_store_or_ario {
             continue;
         }
 
-        let derived = addresses
-            .first()
-            .and_then(|a| a.strip_suffix(".relay"))
-            .map(|stem| format!("{stem}.store"))
-            .unwrap_or_else(|| "<no address to guess from>".to_string());
+        let derived = derived_route_store(&addresses);
         assert!(
-            announce_pins_route_store(raw),
+            announce_pins_route_store(&section),
             "{label}'s [announce] addresses ({addresses:?}) contain no \
              `.store`/`.ario` entry, so `derive_route_hints` falls through \
              to its suffix-surgery fallback and would derive \
