@@ -24,16 +24,20 @@ services:
       TOON_BLS_PORT: '3100'
       TOON_RELAY_PORT: '7100'
       TOON_CHAIN: 'none'
-      # Carried over byte-identical from the apex box (issue #816's
-      # `.env.example` deliverable): this is the relay APP's own Nostr
-      # identity, unrelated to the connector's `[signer]` key in
-      # ./connector-rust.toml. Changing it on the move would change what the
-      # relay announces under and break existing discovery.
+      # This is the relay APP's own Nostr identity, unrelated to the
+      # connector's `[signer]` key in ./connector-rust.toml. Whether it
+      # should be carried over byte-identical from the apex box or generated
+      # fresh here is a trade-off #820 decides, not this file — see
+      # ./.env.example's RELAY_NOSTR_SECRET_KEY comment.
       NOSTR_SECRET_KEY: ${RELAY_NOSTR_SECRET_KEY:-0000000000000000000000000000000000000000000000000000000000000002}
       TOON_DEV_MODE: ${RELAY_DEV_MODE:-false}
     restart: unless-stopped
     healthcheck:
-      test: ['CMD-SHELL', 'wget -q --spider http://localhost:3100/health || exit 1']
+      # 127.0.0.1, not localhost: the relay app binds 0.0.0.0 (IPv4 only),
+      # but busybox wget resolves "localhost" to ::1 first and does not fall
+      # back to IPv4 on refusal — so a `localhost` check reports permanently
+      # unhealthy even though /health answers fine over IPv4.
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:3100/health || exit 1']
       interval: 10s
       timeout: 5s
       retries: 12
