@@ -5,6 +5,16 @@ fulfilment rather than riding the outgoing PREPARE, which reverses the existing 
 in which the payer paid for the forward _attempt_. Claims remain one per packet: they are not
 batched.
 
+> **The peer path is inverted by
+> [ADR 0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md)** (owner
+> decision, 2026-08-07, issue #868). On the peer wire a PREPARE now arrives **with** its covering
+> claim or it is refused with the x402 greeting, and the credit window this ADR's trailing-claim
+> mechanism creates is retired. Everything else here stands: value moves on fulfilment, one claim
+> per packet, no batching, `lockedAmount`/`locksRoot` stay dead. The reasoning below for why the
+> claim trailed the fulfilment is **superseded, not wrong** — it was correct for a world in which
+> a forwarding hop had no way to sign a claim for a packet it had not yet been paid for (issue
+> #866 is what supplies one).
+
 ## Why the reversal
 
 The old model is documented as deliberate in
