@@ -170,6 +170,15 @@ What tells a peer interaction from a client one on that shared socket is the cre
 else (below). The listener, the port and the bind address are explicitly **not** allowed to decide,
 which is why there is nothing to open and nothing to firewall separately.
 
+**The shared socket stays permissionless for clients.** Exposing a peer carriage adds peer handling
+behind the credential check; it does not put a credential in front of anybody. A client still opens
+`GET /ilp/btp` presenting no credential — or, as the deployed client does, an `auth` entry with
+`secret: ""` — and is admitted as a client, unverified; what authorizes its **writes** is the signed
+payment-channel claim it puts on each frame, per
+[`../protocol/client-edge-spec.md`](../protocol/client-edge-spec.md) §1.9 step 1 (_"Authorization to
+write comes from the claim, never the session"_). Nothing in this runbook asks an operator to issue
+a token to clients, because there is none to issue.
+
 A peering establishes only if at least one side dials a carriage the other exposes. What the far
 side exposes is not knowable from this file, so that half surfaces as an ordinary dial failure
 naming the peer and the endpoint. What _is_ knowable is refused at load — see `PeerUndialable` and

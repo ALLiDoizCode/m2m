@@ -1620,6 +1620,55 @@ fn the_apex_relay_peer_channel_names_the_new_token_network_with_placeholder_fiel
     }
 }
 
+/// Issue #853's own version of the #822 placeholder convention
+/// ([`PEER_CHANNEL_ID_PLACEHOLDER`] above), applied to `[announce]
+/// pay_channel` rather than a `[[peer_channels]]` row: the store box's real
+/// funded channel (opened as part of #833's live cutover) lives only on the
+/// box, so this repo commits a clearly-marked placeholder instead of either
+/// the live value or an absent field.
+const STORE_ANNOUNCE_PAY_CHANNEL_PLACEHOLDER: &str =
+    "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeadc0de";
+
+/// Issue #853's repo-side AC: the store's `[announce]` section carries the
+/// clearly-marked `pay_channel` placeholder (never the live channel id, and
+/// never simply absent) and it decodes -- proving the whole `[announce]`
+/// shape, not just this one field, is enough for a fresh box to load from
+/// the repo plus its secrets with no hand-editing of config structure.
+#[test]
+fn the_store_announce_pay_channel_is_a_clearly_marked_placeholder() {
+    assert!(
+        STORE_CONFIG.contains(&format!(
+            "pay_channel = \"{STORE_ANNOUNCE_PAY_CHANNEL_PLACEHOLDER}\""
+        )),
+        "the store config's [announce] pay_channel must be the clearly-marked placeholder -- \
+         the real funded channel id lives only on the box (issue #853) and must never be \
+         committed here"
+    );
+
+    let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let peer_secret = write_peer_secret();
+    let text = with_sandbox_settlement_keys(
+        &with_sandbox_paths(
+            STORE_CONFIG,
+            key_file.path(),
+            state_dir.path(),
+            Some(peer_secret.path()),
+        ),
+        key_file.path(),
+    );
+    let config_file = write_config(&text);
+    let config = Config::load(config_file.path()).expect("the committed store config must parse");
+
+    let announce = config
+        .announce()
+        .expect("the store config's [announce] section must parse");
+    assert!(
+        announce.pay_channel().is_some(),
+        "the placeholder must decode as a valid 32-byte channel id, not merely appear as text"
+    );
+}
+
 /// Issue #701 (toon-meta#262 decision 11): `g.toon.relay` is restricted to
 /// BTP -- a high-frequency, always-connected carriage where a persistent
 /// session pays off -- while the store legs stay at the default (`both`)

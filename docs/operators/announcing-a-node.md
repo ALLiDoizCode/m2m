@@ -206,10 +206,11 @@ it (`infra/linode-store/connector-rust.toml`'s `[announce]` +
 Run it in this order, on the boxes named:
 
 1. **STORE box — open and fund the store→apex client channel**, then write its 32-byte on-chain id
-   into `[announce] pay_channel` in the box's `connector-rust.toml`. The committed file deliberately
-   has no `pay_channel`: it is a live fact, not something a diff can supply. Until it is there every
-   run refuses by name with `NoPayChannel`. (Remember the bind-mounted box config **leads** the repo
-   copy — edit the file the container mounts.)
+   into `[announce] pay_channel` in the box's `connector-rust.toml`. The committed file carries a
+   clearly-marked `0xdead…` placeholder there (issue #853): the field's **shape** is in git, but the
+   real id is a live fact no diff can supply, so until the box's own copy names a funded channel
+   every run fails. (Remember the bind-mounted box config **leads** the repo copy — edit the file
+   the container mounts.)
 2. **STORE box — bring the publisher up**:
 
    ```
