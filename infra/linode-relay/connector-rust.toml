@@ -3,40 +3,31 @@
 # per box, each fronting its own app — decided on #714, tracked as #815)
 # ═══════════════════════════════════════════════════════════════════════════
 #
-# ── What this file is, and is not, yet ──────────────────────────────────────
-# Today the relay app (`relay:3100`) sits on the apex box, fronted by the
-# apex's own connector as a LOCAL app route — not a peer of its own. This file
-# is step 1 of moving it to its own box: a CLIENT-EDGE-ONLY connector that
-# terminates `g.toon.relay` against the SAME relay app, now co-located with it
-# instead of reached across the apex's container network.
-#
-# **No `[[peers]]` and no `[[peer_channels]]` here, deliberately.** Peering
-# this box to the apex needs a live on-chain payment channel between the two
-# boxes' settlement identities, which does not exist yet — opening it and
-# wiring the peering is #820, once the channel facts are real. Until then this
-# is exactly the shape `infra/linode-store/connector-rust.toml` carried before
-# #678 gave it a peering: a legitimately deployable intermediate that answers
-# its own client edge and nothing else. `infra/linode-store/` is mirrored
-# file for file into this directory; do not invent a new shape here.
-#
-# When #820 lands, the apex's `g.toon.relay` route (currently a local
-# `handler_url` route with `transport = "btp"` pinned on it, per issue #815
-# constraint 1) becomes a `peer_id` forward to this box, and `transport`
-# moves down here — a `peer_id` route cannot carry `transport`
-# (`ConfigError::PeerRouteHasTransport`); the terminating route is where a
-# persistent BTP session actually terminates.
+# ── What this file is ────────────────────────────────────────────────────────
+# Originally the relay app (`relay:3100`) sat on the apex box, fronted by the
+# apex's own connector as a LOCAL app route — not a peer of its own. #816/#823
+# moved it to this box as a CLIENT-EDGE-ONLY connector, with no peering of its
+# own until the apex<->relay payment channel existed (#821). #820 is that
+# peering: the apex's `g.toon.relay` route is now a `peer_id` forward to this
+# box, `transport = "btp"` moved down here from the apex's former local route
+# (a `peer_id` route cannot carry `transport` --
+# `ConfigError::PeerRouteHasTransport`, crates/connector-config/src/error.rs:125
+# -- the terminating route is where a persistent BTP session actually
+# terminates), and this file gained the `[[peers]]`/`[[peer_channels]]` tables
+# below. `infra/linode-store/connector-rust.toml` is still the shape this was
+# mirrored from file for file; its own peering section is the model for this
+# one too.
 #
 # ── Settlement ─────────────────────────────────────────────────────────────
 # Deliberately identical to both other boxes' (infra/linode-node/,
 # infra/linode-store/): the same Base Sepolia `TokenNetworkRegistry` and USDC,
 # the same Solana payment-channel program and mint, both at 6 decimals. A
 # claim resolves against one deployment, so every node that might ever accept
-# one has to agree on which. This node has no counterparty channel yet (no
-# `[[peer_channels]]` — see above), but its client edge already accepts
+# one has to agree on which. Its client edge also already accepts
 # unaffiliated buyers' own on-chain channels (issue #556/#611), and those
 # buyers pick the deployment by what the fleet advertises, not by which box
-# answers — so this section is live from day one, not a template to fill in
-# when the peering lands.
+# answers — so this section was live from day one, not a template filled in
+# only once the apex<->relay `[[peer_channels]]` row below existed.
 #
 # `decimals = 6` is checked against the token's own on-chain `decimals()` at
 # startup and a disagreement refuses the boot (#564), so a stale value here is
@@ -59,6 +50,59 @@ client_edge_addr = "0.0.0.0:4000"
 # claim watermark survive a restart. Backed by the `connector_rust_state`
 # named volume in docker-compose.relay.rust.yml.
 state_dir = "/app/state"
+
+# ── The g.toon proxy<->relay peering (issue #820) ─────────────────────────
+# This box is the ACCEPTING half: it exposes a BTP listener and never dials.
+# The g.toon proxy is the dialing half and carries the `endpoint`
+# (infra/linode-node/connector-rust.toml).
+#
+# `peer_expose` is a bare top-level key, so it lives up here with
+# `client_edge_addr` and `state_dir` rather than next to the [[peers]] table
+# it configures -- written after any table header it would be read as a key
+# OF that table and refused.
+peer_expose = "btp"
+
+# The peering lived on the boxes only until #750 gave `credential` a
+# `secret_file`: this file is committed to a PUBLIC repository, so a peering
+# written with a literal could not be committed at all.
+[[peers]]
+# ONE string both operators write: the g.toon proxy puts this in its credential
+# and this node proves P1 by looking it up here. Same literal on both sides, or
+# nothing peers and there is no error anywhere.
+id = "apex-relay"
+# The shared secret, as a FILE. `infra/linode-relay/*.secret` is gitignored,
+# so the peering is tracked and only the bytes stay on the box. Missing,
+# unreadable or empty is a refuse-to-start by name (PeerSecretFileNotFound /
+# -Unreadable / -Empty), never a peering that silently never establishes.
+credential = { secret_file = "/app/data/apex-relay.secret" }
+# No `endpoint`: this node accepts and never dials. That is exactly why
+# `ceiling` is REQUIRED rather than optional here -- an accept-only peering
+# cannot FLUSH on its own initiative, so the ceiling is its only bound on
+# unclaimed value, and a config omitting it is refused by name
+# (AcceptOnlyPeerWithoutCeiling). 1 USDC.
+ceiling = 1000000
+
+# Role is decided by authentication AND a channel binding (peer-carriage-spec
+# 1.2, ADR 0024). Without this row the g.toon proxy authenticates fine, is
+# admitted only as an ordinary client, and every claim it sends is refused
+# `unknown_channel`.
+[[peer_channels]]
+peer_id = "apex-relay"
+# Opened and funded 2026-08-06 (issue #821) -- a REAL channel, not a
+# placeholder: the apex box deposited 10 USDC and this box deposits 0, since
+# `claimFromChannel` checks the SENDER's deposit and the apex is the payer
+# for forwarded `g.toon.relay` traffic (this box only ever claims).
+channel_id = "0x62c81d83bf0bda1af54233fa92cae0c287e34838fb3434e6911d289dba6fa3fa"
+# The g.toon proxy's own settlement address (#811/#822), NOT this box's --
+# this row lives on the relay side, so `counterparty_key` names who pays it.
+counterparty_key = "0xF29fD62C4848B9573C9b90adbF61b664F386d9CF"
+# The EIP-712 domain a claim on this channel is signed over
+# (EIP712("TokenNetwork","1"), ADR 0024). The same live ERC-2771
+# TokenNetwork every settlement leg on this fleet resolves through
+# (#695/#811) -- opened directly against it, so unlike the apex<->store
+# channel there is no old-contract migration to track here.
+chain_id = 84532
+token_network = "0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478"
 
 [signer]
 key_file = "/app/data/signer.key"

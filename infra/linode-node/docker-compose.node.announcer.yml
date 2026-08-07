@@ -29,7 +29,30 @@ services:
     restart: unless-stopped
     environment:
       ANNOUNCER_RUST_EDGE_URL: http://connector-rust:4000
-      ANNOUNCER_RELAY_URLS: http://relay:3100
+      # Was `http://relay:3100` -- the sidecar sat on the SAME docker network
+      # as the relay app, upstream of any payment boundary, so publishing
+      # there was always free by construction (the "trusted-local free path"
+      # packages/announcer/src/publisher.ts documents). Issue #820: the relay
+      # app moved to its own box (infra/linode-relay/, #816/#823), so
+      # `relay:3100` stopped resolving from this container's network
+      # entirely. The replacement is this box's own IP-restricted
+      # `= /write` location on the relay box's nginx
+      # (infra/linode-relay/nginx/conf.d/node.conf) -- allowlisted to the
+      # apex box's own IP rather than opened to the internet (the #778 free
+      # door this fleet already learned not to repeat) or taught to the
+      # announcer as a paying client (a new capability publisher.ts's own doc
+      # comment says this module deliberately does not have). Suffixed with
+      # `/write` by publisher.ts's `publishToHttpIngress` since this URL
+      # doesn't already end with it.
+      ANNOUNCER_RELAY_URLS: https://proxy.relay.devnet.toonprotocol.dev
+      # Unchanged: this is the PUBLIC read endpoint advertised for discovery
+      # (relay-ws.DOMAIN), not the private write ingress above. It keeps
+      # naming the apex box today because DNS for that name has not moved
+      # yet (issue #820's own repo change only drops the apex's TLS SAN for
+      # it -- see infra/linode-node/nginx/conf.d/node.conf's header -- the
+      # DNS record move and the relay box's own already-templated
+      # relay-ws.DOMAIN routing are the live steps
+      # docs/operators/relay-box-bringup.md still gates on).
       ANNOUNCER_RELAY_PUBLIC_URL: wss://relay-ws.devnet.toonprotocol.dev
       # `g.toon.ario` added 2026-08-05 — a STOPGAP for a live outage, see below.
       #

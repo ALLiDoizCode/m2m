@@ -1,5 +1,8 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# TOON connector node — relay + proxy + faucet + TLS.
+# TOON connector node — proxy + faucet + TLS. The relay app that used to run
+# here moved to its own box (issue #816/#823); this box now forwards
+# `g.toon.relay` to it over a peering instead of fronting it locally
+# (issue #820).
 # Run from the CONNECTOR REPO ROOT:
 #   docker compose -f infra/linode-node/docker-compose.node.yml up -d
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -27,23 +30,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 15s
-
-  relay:
-    image: ghcr.io/toon-protocol/relay:sha-d80f279
-    environment:
-      TOON_OBLIVIOUS_MODE: 'true'
-      TOON_BLS_PORT: '3100'
-      TOON_RELAY_PORT: '7100'
-      TOON_CHAIN: 'none'
-      NOSTR_SECRET_KEY: ${RELAY_NOSTR_SECRET_KEY:-0000000000000000000000000000000000000000000000000000000000000002}
-      TOON_DEV_MODE: ${RELAY_DEV_MODE:-false}
-    restart: unless-stopped
-    healthcheck:
-      test: ['CMD-SHELL', 'wget -q --spider http://localhost:3100/health || exit 1']
-      interval: 10s
-      timeout: 5s
-      retries: 12
       start_period: 15s
 
   faucet:

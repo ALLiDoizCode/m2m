@@ -1,6 +1,6 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TOON connector node (apex) nginx config.
-# Serves: relay-ws.DOMAIN  proxy.DOMAIN  faucet.DOMAIN
+# Serves: proxy.DOMAIN  faucet.DOMAIN
 #
 # Fixed by issue #819: this template previously pointed proxy.${DOMAIN} at
 # http://connector:3000 (the retired TypeScript connector) and had no
@@ -10,6 +10,12 @@
 # deployed a broken, less-hardened box. This is now a DOMAIN-parameterized
 # copy of that live config's shape; see its own history there for the full
 # story behind each guard below.
+#
+# relay-ws.DOMAIN moved off this box (issue #820): the relay app it fronted
+# is now on its own box (infra/linode-relay/, issues #816/#823), reached from
+# here over a peering rather than a local route, so this box has nothing left
+# to answer that name with. Dropped from every map, server_name and the TLS
+# certificate lineage below.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 limit_req_zone $binary_remote_addr zone=node:10m rate=200r/s;
@@ -21,7 +27,6 @@ map $http_upgrade $connection_upgrade {
 
 map $host $backend {
     default               "";
-    relay-ws.${DOMAIN}    "http://relay:7100";
     proxy.${DOMAIN}       "http://connector-rust:4000";
     faucet.${DOMAIN}      "http://faucet:3500";
 }
@@ -35,13 +40,12 @@ map $host $health_backend {
     # AND has read its signer key file.
     proxy.${DOMAIN}       "http://connector-rust:4000/ilp/identity";
     faucet.${DOMAIN}      "http://faucet:3500/health";
-    relay-ws.${DOMAIN}    "http://relay:3100/health";
 }
 
 server {
     listen 80;
     listen [::]:80;
-    server_name relay-ws.${DOMAIN} proxy.${DOMAIN} faucet.${DOMAIN};
+    server_name proxy.${DOMAIN} faucet.${DOMAIN};
 
     location /.well-known/acme-challenge/ {
         root /var/www/certbot;
@@ -55,10 +59,10 @@ server {
     listen 443 ssl;
     listen [::]:443 ssl;
     http2 on;
-    server_name relay-ws.${DOMAIN} proxy.${DOMAIN} faucet.${DOMAIN};
+    server_name proxy.${DOMAIN} faucet.${DOMAIN};
 
-    ssl_certificate     /etc/letsencrypt/live/relay-ws.${DOMAIN}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/relay-ws.${DOMAIN}/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/proxy.${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/proxy.${DOMAIN}/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
 
     resolver 127.0.0.11 valid=10s ipv6=off;

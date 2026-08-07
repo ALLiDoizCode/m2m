@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Provision a fresh Linode (Ubuntu/Debian) into the TOON connector node.
-# Runs: connector (proxy/relay) + relay + faucet + nginx/TLS.
+# Runs: connector (proxy) + faucet + nginx/TLS. The relay app moved to its
+# own box (infra/linode-relay/, issue #816/#820).
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Run as root on a clean Ubuntu box:
 #   git clone https://github.com/toon-protocol/connector.git
@@ -56,6 +57,5 @@ DOMAIN="$DOMAIN" "$HERE/provision-mina-lightnet.sh" || \
 
 echo
 echo "✅ TOON connector node up."
-echo "   Relay WS : wss://relay-ws.${DOMAIN}"
 echo "   Proxy    : https://proxy.${DOMAIN}/ilp"
 echo "   Faucet   : https://faucet.${DOMAIN}"

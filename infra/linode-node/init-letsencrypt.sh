@@ -9,8 +9,12 @@ cd "$ROOT"
 set -a; . "$HERE/.env"; set +a
 
 DC=(docker compose -f infra/linode-node/docker-compose.node.yml)
-PRIMARY="relay-ws.${DOMAIN}"
-DOMAINS=("relay-ws.${DOMAIN}" "proxy.${DOMAIN}" "faucet.${DOMAIN}")
+# `relay-ws.${DOMAIN}` dropped from this lineage (issue #820): the relay app
+# it fronted moved to its own box (infra/linode-relay/), so this box has
+# nothing left to serve that name with -- see nginx/conf.d/node.conf's own
+# header. PRIMARY moves to the next name this lineage still serves.
+PRIMARY="proxy.${DOMAIN}"
+DOMAINS=("proxy.${DOMAIN}" "faucet.${DOMAIN}")
 CERT_PATH="/etc/letsencrypt/live/${PRIMARY}"
 RENEW_WINDOW_DAYS="${RENEW_WINDOW_DAYS:-30}"
 

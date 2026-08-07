@@ -3,10 +3,10 @@
 # ═══════════════════════════════════════════════════════════════════════════
 # Copy of infra/linode-store/docker-compose.store.rust.yml: same pinned
 # image, the same read-only key bind mounts, the same `connector_rust_state`
-# named volume, the same loopback-only `127.0.0.1:4000:4000` publish. The one
-# difference is what it does NOT mount: no `apex-store.secret`-shaped peering
-# credential, because this box has no `[[peers]]` entry yet (issue #816 scope
-# — the peering is #820).
+# named volume, the same loopback-only `127.0.0.1:4000:4000` publish, and
+# (since issue #820) the same shape of peering-secret mount -- this box's
+# `[[peers]]` entry is the accepting half of the g.toon proxy<->relay peering,
+# so it needs the same shared secret bytes the apex box's own overlay mounts.
 #
 # Run alongside the base stack (never on its own — it has no relay service of
 # its own to front):
@@ -46,6 +46,14 @@ services:
       - ./signer-rust.key:/app/data/signer.key:ro
       - ./settlement-rust.key:/app/data/settlement.key:ro
       - ./settlement-solana-rust.key:/app/data/settlement-solana.key:ro
+      # The g.toon proxy<->relay peering's shared secret (issue #820). This
+      # box's `[[peers]]` entry names this path as `credential.secret_file`,
+      # so a missing or unreadable file here is a refuse-to-start, not a
+      # peering that quietly never establishes. Generated on the box
+      # (`openssl rand -hex 32`), gitignored as `*.secret`, and the SAME
+      # BYTES infra/linode-node/docker-compose.node.rust.yml mounts on the
+      # other end.
+      - ./apex-relay.secret:/app/data/apex-relay.secret:ro
       # Durable claim watermarks (#605). Named, not bind-mounted: the replay
       # of this journal is what stops a restart from re-accepting a spent
       # claim, so it must outlive the container.

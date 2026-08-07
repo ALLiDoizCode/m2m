@@ -7,9 +7,10 @@
 //!
 //! The fleet is THREE files as of issue #817: the apex
 //! (`infra/linode-node/`), the store (`infra/linode-store/`) and the relay
-//! (`infra/linode-relay/`, added by #816 -- client-edge-only, with no
-//! peering of its own until #820 opens the channel). There are two cases
-//! per file (three for the apex), and they prove different things.
+//! (`infra/linode-relay/`, added by #816 -- client-edge-only until issue
+//! #820 opened the apex<->relay payment channel and gave this file its own
+//! `[[peers]]`/`[[peer_channels]]` tables). There are two cases per file
+//! (three for the apex), and they prove different things.
 //!
 //! **Verbatim** (`*_devnet_config_loads_and_serves_verbatim`) boots the file
 //! exactly as committed, substituting only what this sandbox physically
@@ -166,12 +167,9 @@ const SOLANA_SETTLEMENT_SECTIONS: &[&str] = &["[settlement.solana]", "[settlemen
 /// `price: '1000'` on the same box (`infra/linode-node/connector.yaml`).
 const EXPECTED_STORE_PRICE: u64 = 1000;
 
-/// The `price` the apex file puts on `g.toon.relay`, which is **not** the
-/// store price and is deliberately not folded into one constant. Shared
-/// with the relay box's own file (`infra/linode-relay/connector-rust.toml`,
-/// issue #816/#817): its terminating route names the same literal, since
-/// it is deliberately the same per-frame price quoted for the same prefix,
-/// today just answered on a different box.
+/// The `price` the relay box's own file (`infra/linode-relay/connector-rust.toml`,
+/// issue #816/#817) puts on its terminating `g.toon.relay` route, which is
+/// **not** the store price and is deliberately not folded into one constant.
 ///
 /// The apex box served `1` from 2026-08-03; the repo said `1000` while the
 /// comment above the value asserted parity with the TypeScript route on the
@@ -205,6 +203,25 @@ const EXPECTED_APEX_FORWARD_PRICE: u64 = 1002;
 /// What the apex retains for carriage on that forward (ADR 0010/0028),
 /// matching the TypeScript fleet's own inter-node fee of 2.
 const EXPECTED_APEX_FORWARD_FEE: u64 = 2;
+
+/// The `price` the apex charges its own client for `g.toon.relay`, which it
+/// now FORWARDS across the apex<->relay peering (issue #820) rather than
+/// terminating locally against a co-located `relay:3100`.
+///
+/// Equal to [`EXPECTED_RELAY_PRICE`] -- not derived from it, for the same
+/// "keep every expectation a literal" reason as the other constants here --
+/// because `docs/devnet-pricing.md`'s owner decision (2026-08-06) is a ZERO
+/// carriage margin on this leg specifically: `g.toon.relay` carries buzz
+/// huddles at 49 fps, and any non-zero fee would force this price above the
+/// relay's own, at minimum doubling the per-frame client cost. See the
+/// arithmetic assertion in
+/// [`the_forwarded_relay_leg_delivers_exactly_the_far_ends_price`] below.
+const EXPECTED_RELAY_FORWARD_PRICE: u64 = 1;
+
+/// What the apex retains for carriage on the `g.toon.relay` forward (ADR
+/// 0010/0028) -- zero, by the same owner decision as
+/// [`EXPECTED_RELAY_FORWARD_PRICE`], not merely defaulted.
+const EXPECTED_RELAY_FORWARD_FEE: u64 = 0;
 
 /// `str::replace`, but a pattern that matches nothing is a test failure
 /// rather than a silent no-op -- otherwise renaming a line in a committed
@@ -248,13 +265,16 @@ fn write_peer_secret() -> tempfile::NamedTempFile {
 /// load-bearing -- deleting the line from any of the fleet's files fails
 /// this test rather than silently testing a node with no durable state.
 ///
-/// `peer_secret` is `Some` for a file that carries a peering and `None` for
-/// one that does not -- see the `match` at the end.
+/// `peer_secrets` names one `(file name, sandbox path)` pair per `[[peers]]`
+/// credential the raw config carries -- the apex file has carried two since
+/// issue #820 (`apex-store.secret`, `apex-relay.secret`), the store and relay
+/// files one each (`apex-store.secret`, `apex-relay.secret` respectively).
+/// Empty for a file with no peering at all -- see the assertion at the end.
 fn with_sandbox_paths(
     raw: &str,
     key_path: &std::path::Path,
     state_dir: &std::path::Path,
-    peer_secret: Option<&std::path::Path>,
+    peer_secrets: &[(&str, &std::path::Path)],
 ) -> String {
     let replaced = replace_expecting_a_match(
         raw,
@@ -271,35 +291,38 @@ fn with_sandbox_paths(
         "state_dir = \"/app/state\"",
         &format!("state_dir = \"{}\"", state_dir.display()),
     );
-    // The peering's shared secret (issue #750), same substitution and same
+    // Each peering's shared secret (issue #750), same substitution and same
     // reason as the key files: the committed configs name a path on the box,
     // never the bytes, and config load refuses a `secret_file` that is not
-    // there. `replace_expecting_a_match` makes it load-bearing -- deleting
-    // the peering from either config fails this test rather than silently
-    // testing a fleet with no inter-node link.
+    // there. `replace_expecting_a_match` makes each one load-bearing --
+    // deleting a peering from any config fails this test rather than
+    // silently testing a fleet with one fewer inter-node link.
     //
-    // `None` for a client-edge-only file with no `[[peers]]` table of its
-    // own -- the relay box, issue #817, until #820 gives it one.
-    // `replace_expecting_a_match` would panic on a pattern that is not
-    // there, so this substitution is skipped rather than forced; the `None`
-    // arm instead asserts the pattern is genuinely absent, so a config that
-    // grows a peering without its caller here being taught `Some` fails
-    // loudly instead of silently booting with a foreign secret path.
-    match peer_secret {
-        Some(peer_secret) => replace_expecting_a_match(
+    // Empty for a client-edge-only file with no `[[peers]]` table of its own.
+    // `replace_expecting_a_match` would panic on a pattern that is not there,
+    // so a substitution is only attempted for what the caller names; the
+    // final assertion instead checks no OTHER `secret_file` survived, so a
+    // config that grows a peering without its caller here being taught about
+    // it fails loudly instead of silently booting with a foreign secret path.
+    let mut replaced = replaced;
+    for (file_name, secret_path) in peer_secrets {
+        replaced = replace_expecting_a_match(
             &replaced,
-            "secret_file = \"/app/data/apex-store.secret\"",
-            &format!("secret_file = \"{}\"", peer_secret.display()),
-        ),
-        None => {
-            assert!(
-                !replaced.contains("secret_file ="),
-                "this config carries a `secret_file` but was booted with no \
-                 peer secret -- pass `Some(..)` to `with_sandbox_paths` for it"
-            );
-            replaced
-        }
+            &format!("secret_file = \"/app/data/{file_name}\""),
+            &format!("secret_file = \"{}\"", secret_path.display()),
+        );
     }
+    // A successful substitution above still leaves the KEY `secret_file =`
+    // in the text -- only the value changes, from a committed `/app/data/`
+    // path to a sandbox tempfile path -- so the survivor check below looks
+    // for that committed prefix specifically, not for the key name.
+    assert!(
+        !replaced.contains("secret_file = \"/app/data/"),
+        "this config carries a `secret_file` this test was not told about -- \
+         add its file name and a sandbox path to the `peer_secrets` passed \
+         to `with_sandbox_paths` for it"
+    );
+    replaced
 }
 
 /// The apex file's two settlement key files, each pointed at a real file
@@ -567,6 +590,10 @@ async fn x402_terms(client_edge_addr: &str, destination: &str) -> serde_json::Va
 async fn the_apex_relay_side_devnet_config_loads_and_serves_verbatim() {
     assert!(APEX_CONFIG.contains("g.toon.relay"));
     assert!(APEX_CONFIG.contains("g.toon.ario"));
+    // Issue #820: `g.toon.relay.ario` is more specific than `g.toon.relay`
+    // and must have its own route now that `g.toon.relay` is a peer forward
+    // -- see the config's own "Known divergence, repaired here" comment.
+    assert!(APEX_CONFIG.contains("g.toon.relay.ario"));
     // `g.toon.store` was retired on 2026-08-05 (owner decision): one name
     // for one app. This asserts its ABSENCE, so re-adding the alias has to
     // be a deliberate edit here too rather than drifting back in.
@@ -574,20 +601,32 @@ async fn the_apex_relay_side_devnet_config_loads_and_serves_verbatim() {
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
+    let apex_store_secret = write_peer_secret();
+    let apex_relay_secret = write_peer_secret();
     // The live [settlement] tail is stripped for hermeticity (module
     // docs); the anvil-backed case below boots it.
     let connector = boot(&with_sandbox_paths(
         &without_live_settlement(APEX_CONFIG),
         key_file.path(),
         state_dir.path(),
-        Some(peer_secret.path()),
+        &[
+            ("apex-store.secret", apex_store_secret.path()),
+            ("apex-relay.secret", apex_relay_secret.path()),
+        ],
     ));
 
+    // Issue #820: `g.toon.relay` is now FORWARDED across the apex<->relay
+    // peering rather than terminated locally against a co-located
+    // `relay:3100`. Greeted at [`EXPECTED_RELAY_FORWARD_PRICE`] -- equal to
+    // [`EXPECTED_RELAY_PRICE`] today (the owner decision is a zero-fee
+    // forward), but asserted as its own literal since the two constants
+    // describe different hops. That a `peer_id` route is greeted AT ALL is
+    // the #620 property -- before it, a peer route greeted nothing and
+    // charged nothing, which is a free-write path on `g.toon`.
     assert_answered_with_x402_greeting(
         &connector.client_edge_addr,
         "g.toon.relay",
-        EXPECTED_RELAY_PRICE,
+        EXPECTED_RELAY_FORWARD_PRICE,
     )
     .await;
     // The store leg (#600): `g.toon.ario` is the destination a shipped
@@ -604,6 +643,18 @@ async fn the_apex_relay_side_devnet_config_loads_and_serves_verbatim() {
     assert_answered_with_x402_greeting(
         &connector.client_edge_addr,
         "g.toon.ario",
+        EXPECTED_APEX_FORWARD_PRICE,
+    )
+    .await;
+    // Issue #820's repair of the `g.toon.relay.ario` divergence: it must
+    // reach the SAME store forward as `g.toon.ario`, at the same price --
+    // it is the relay-hop spelling of the same path, not a cheaper or
+    // differently-routed one. Before this route existed, this destination
+    // fell through to the `g.toon.relay` route above and would have ridden
+    // the relay peering to a dead end (see the config's own comment).
+    assert_answered_with_x402_greeting(
+        &connector.client_edge_addr,
+        "g.toon.relay.ario",
         EXPECTED_APEX_FORWARD_PRICE,
     )
     .await;
@@ -648,7 +699,7 @@ async fn the_store_side_devnet_config_loads_and_serves_verbatim() {
         &without_live_settlement(STORE_CONFIG),
         key_file.path(),
         state_dir.path(),
-        Some(peer_secret.path()),
+        &[("apex-store.secret", peer_secret.path())],
     ));
 
     assert_answered_with_x402_greeting(
@@ -671,35 +722,36 @@ async fn the_store_side_devnet_config_loads_and_serves_verbatim() {
 
 /// The relay box's own file (issue #816/#817), modelled on the store's case
 /// above: a client-edge-only connector that terminates `g.toon.relay`
-/// against the relay app now co-located with it, in place of the apex's
-/// former local `handler_url` route to the same app.
+/// against the relay app co-located with it. Since issue #820 it also
+/// carries the accepting half of the apex<->relay peering -- the forward
+/// the apex's own file now makes rides this.
 #[tokio::test]
 async fn the_relay_side_devnet_config_loads_and_serves_verbatim() {
     assert!(RELAY_CONFIG.contains("g.toon.relay"));
 
-    // #815 constraint: this box has no peering yet -- opening the on-chain
-    // channel and wiring it is #820. Line-anchored because the file's own
-    // header prose names both tables (in backticks) while explaining their
-    // absence, and a substring match would trip on that prose rather than
-    // an actual table.
+    // #820: this box now HAS a peering -- the accepting half of the
+    // apex<->relay link. Line-anchored because the file's own header prose
+    // still discusses `[[peers]]`/`[[peer_channels]]` in backticks while
+    // explaining what they are, and a substring match would trip on that
+    // prose rather than an actual table.
     assert!(
-        !RELAY_CONFIG
-            .lines()
-            .any(|line| line.trim() == "[[peers]]" || line.trim() == "[[peer_channels]]"),
-        "the relay box has no peering yet (issue #820) -- a live \
-         [[peers]]/[[peer_channels]] table here means `with_sandbox_paths` \
-         must be taught a peer secret for this file too"
+        RELAY_CONFIG.lines().any(|line| line.trim() == "[[peers]]")
+            && RELAY_CONFIG
+                .lines()
+                .any(|line| line.trim() == "[[peer_channels]]"),
+        "the relay box has carried a peering since issue #820 -- if this \
+         table was removed, `with_sandbox_paths` below should go back to \
+         passing an empty peer-secrets slice for this file"
     );
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    // No peer secret to substitute (see the assertion above) -- unlike the
-    // apex and store cases, this file carries no `[[peers]]` table.
+    let peer_secret = write_peer_secret();
     let connector = boot(&with_sandbox_paths(
         &without_live_settlement(RELAY_CONFIG),
         key_file.path(),
         state_dir.path(),
-        None,
+        &[("apex-relay.secret", peer_secret.path())],
     ));
 
     assert_answered_with_x402_greeting(
@@ -749,6 +801,49 @@ fn the_forwarded_store_leg_delivers_exactly_the_far_ends_price() {
         route_price(STORE_CONFIG, "g.toon.relay.ario"),
         EXPECTED_STORE_PRICE,
         "the relay-hop spelling reaches the same app and must cost the same"
+    );
+    // Issue #820: the apex's own forward for the relay-hop spelling must
+    // cost exactly what its `g.toon.ario` sibling does -- it reaches the
+    // same store box over the same peering at the same price/fee, and is
+    // not a second, cheaper or differently-metered door to the same app.
+    assert_eq!(
+        route_price(APEX_CONFIG, "g.toon.relay.ario"),
+        EXPECTED_APEX_FORWARD_PRICE,
+        "the repaired `g.toon.relay.ario` divergence (issue #820) must cost \
+         the same as `g.toon.ario` -- it is the relay-hop spelling of the \
+         same forward, not a separate route"
+    );
+}
+
+/// ADR 0028's arithmetic, for the `g.toon.relay` leg (issue #820): what the
+/// apex forwards must be EXACTLY what the relay box's own terminating route
+/// charges. Modelled on
+/// [`the_forwarded_store_leg_delivers_exactly_the_far_ends_price`] above,
+/// but the relation this decision holds is `== `, not `>`: the owner's
+/// 2026-08-06 decision is a ZERO carriage margin on this leg, not merely a
+/// smaller one, so a short-forward AND an over-forward are both a config
+/// bug here, not just the short case #754 turns into an F03.
+#[test]
+fn the_forwarded_relay_leg_delivers_exactly_the_far_ends_price() {
+    let forwarded = EXPECTED_RELAY_FORWARD_PRICE - EXPECTED_RELAY_FORWARD_FEE;
+    assert_eq!(
+        forwarded, EXPECTED_RELAY_PRICE,
+        "the apex charges {EXPECTED_RELAY_FORWARD_PRICE} and keeps \
+         {EXPECTED_RELAY_FORWARD_FEE}, so {forwarded} reaches the relay box -- \
+         which prices its own terminating route at {EXPECTED_RELAY_PRICE}. \
+         Since #754 a short-forward is an F03, not a silent subsidy, and this \
+         leg's own owner decision (docs/devnet-pricing.md) is exactly zero \
+         margin, not merely non-negative"
+    );
+
+    // And the literals above must still be what the files say.
+    assert_eq!(
+        route_price(APEX_CONFIG, "g.toon.relay"),
+        EXPECTED_RELAY_FORWARD_PRICE
+    );
+    assert_eq!(
+        route_price(RELAY_CONFIG, "g.toon.relay"),
+        EXPECTED_RELAY_PRICE
     );
 }
 
@@ -848,46 +943,112 @@ fn the_apex_store_peer_channel_names_the_new_token_network_with_placeholder_fiel
     }
 }
 
+/// The relay box's own settlement address (#821) -- the apex's `[[peer_channels]]`
+/// row for `apex-relay` names this as `counterparty_key`, since that row lives on
+/// the paying side and names who it pays.
+const RELAY_SETTLEMENT_ADDRESS: &str = "0x3F43d923a611bCB2D0Bfb5d6ee2C3AC3EfEaf308";
+
+/// The apex box's own settlement address (#811/#822) -- the relay's own
+/// `[[peer_channels]]` row for `apex-relay` names this as `counterparty_key`,
+/// for the same reason in reverse: that row lives on the relay side and names
+/// who pays it.
+const APEX_SETTLEMENT_ADDRESS: &str = "0xF29fD62C4848B9573C9b90adbF61b664F386d9CF";
+
+/// Issue #820's own AC, unlike #822's above: this is a REAL channel opened
+/// directly against the live TokenNetwork (#821), not a sentinel waiting on a
+/// migration, so both boxes' `[[peer_channels]]` rows for `apex-relay` must
+/// carry the SAME real `channel_id`/`token_network` and each other's
+/// settlement address as `counterparty_key` -- never the `0xdead...`
+/// placeholder shape #822's row still (deliberately) uses.
+#[test]
+fn the_apex_relay_peer_channel_names_a_real_channel_on_the_live_token_network() {
+    const RELAY_CHANNEL_ID: &str =
+        "0x62c81d83bf0bda1af54233fa92cae0c287e34838fb3434e6911d289dba6fa3fa";
+
+    for (label, raw, counterparty) in [
+        ("apex", APEX_CONFIG, RELAY_SETTLEMENT_ADDRESS),
+        ("relay", RELAY_CONFIG, APEX_SETTLEMENT_ADDRESS),
+    ] {
+        assert!(
+            raw.contains(&format!("channel_id = \"{RELAY_CHANNEL_ID}\"")),
+            "the {label} config's apex-relay [[peer_channels]] row must name the real \
+             channel #821 opened, not a placeholder -- unlike apex-store, this peering \
+             has no pending on-chain migration to wait on"
+        );
+        assert!(
+            raw.contains(&format!(
+                "token_network = \"{PEER_CHANNEL_LIVE_TOKEN_NETWORK}\""
+            )),
+            "the {label} config's apex-relay row must settle on the live ERC-2771 \
+             TokenNetwork ({PEER_CHANNEL_LIVE_TOKEN_NETWORK}) -- opened directly against \
+             it, so unlike apex-store there is no old-contract value it could regress to"
+        );
+        assert!(
+            raw.contains(&format!("counterparty_key = \"{counterparty}\"")),
+            "the {label} config's apex-relay counterparty_key must name the OTHER box's \
+             own settlement address ({counterparty}), not its own and not a placeholder"
+        );
+    }
+}
+
 /// Issue #701 (toon-meta#262 decision 11): the committed apex file
 /// restricts `g.toon.relay` to BTP -- a high-frequency, always-connected
-/// carriage where a persistent session pays off -- while the store legs on
-/// the same apex, and the store box's own file, are left at the default
-/// (`both`) for the one-shot anonymous uploads `channels.rs` calls "a
-/// first-class path, not a fallback". An HTTP request to the relay is
-/// refused with terms naming `"btp"`; the store legs' greetings carry no
-/// `requiredTransport` at all.
+/// carriage where a persistent session pays off. Since issue #820 that pin
+/// lives ONLY on the relay box's own terminating route -- a `peer_id` route
+/// cannot carry `transport` at all (`ConfigError::PeerRouteHasTransport`,
+/// crates/connector-config/src/error.rs:125) -- so every route the apex
+/// itself greets, including its `g.toon.relay` forward, now accepts both
+/// transports like the store legs always have.
 ///
-/// The relay box's own file (issue #817) pins the identical `transport =
-/// "btp"` on its own terminating `g.toon.relay` route, and is asserted here
-/// too -- the apex still terminates the route itself until #820 flips it to
-/// a forward, so until then BOTH files price and pin the same prefix and
-/// both must agree.
+/// Before #820 this test asserted the opposite split (the apex pinned btp,
+/// the relay box's own file merely agreed); the move of the pin, not just
+/// its assertion, is the point of issue #820's own "apex therefore loses
+/// client-edge BTP enforcement on this prefix" note.
 #[tokio::test]
-async fn the_relay_route_is_btp_only_and_the_store_routes_accept_both() {
+async fn the_relay_terminating_route_is_btp_only_and_every_apex_forward_accepts_both() {
+    // Line-anchored: the apex file's own comments now *discuss*
+    // `transport = "btp"` at length (explaining where the pin moved and
+    // why), so a substring match would trip on prose rather than an actual
+    // assignment.
     assert!(
-        APEX_CONFIG.contains("transport = \"btp\""),
-        "the apex file must restrict a route to btp -- the relay leg, per issue #701"
+        !APEX_CONFIG
+            .lines()
+            .any(|line| line.trim() == "transport = \"btp\""),
+        "the apex file must carry no live `transport` assignment since issue \
+         #820 -- `g.toon.relay` is now a `peer_id` forward, and \
+         `PeerRouteHasTransport` refuses to let a forward carry one"
     );
     assert!(
         RELAY_CONFIG.contains("transport = \"btp\""),
         "the relay box's own file must restrict its terminating route to \
-         btp too, per issue #701 -- see the apex assertion above"
+         btp, per issue #701 -- this is the ONLY place the pin lives now"
     );
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
+    let apex_store_secret = write_peer_secret();
+    let apex_relay_secret = write_peer_secret();
     let connector = boot(&with_sandbox_paths(
         &without_live_settlement(APEX_CONFIG),
         key_file.path(),
         state_dir.path(),
-        Some(peer_secret.path()),
+        &[
+            ("apex-store.secret", apex_store_secret.path()),
+            ("apex-relay.secret", apex_relay_secret.path()),
+        ],
     ));
 
+    // The apex's own `g.toon.relay` greeting no longer names a required
+    // transport: it is a forward now, and enforcement moved to the relay
+    // box's own terminating route (asserted separately below).
     let relay_terms = x402_terms(&connector.client_edge_addr, "g.toon.relay").await;
-    assert_eq!(
-        relay_terms["accepts"][0]["extra"]["requiredTransport"], "btp",
-        "the relay route must tell an HTTP client it needs BTP: {relay_terms}"
+    assert!(
+        relay_terms["accepts"][0]["extra"]
+            .get("requiredTransport")
+            .is_none(),
+        "the apex's g.toon.relay FORWARD must not carry requiredTransport -- \
+         that pin lives on the relay box's own terminating route since #820: \
+         {relay_terms}"
     );
 
     let store_terms = x402_terms(&connector.client_edge_addr, "g.toon.ario").await;
@@ -900,11 +1061,12 @@ async fn the_relay_route_is_btp_only_and_the_store_routes_accept_both() {
 
     let relay_key_file = write_raw_key_file(10);
     let relay_state_dir = tempfile::tempdir().expect("temp state dir");
+    let relay_peer_secret = write_peer_secret();
     let relay_connector = boot(&with_sandbox_paths(
         &without_live_settlement(RELAY_CONFIG),
         relay_key_file.path(),
         relay_state_dir.path(),
-        None,
+        &[("apex-relay.secret", relay_peer_secret.path())],
     ));
     let relay_own_terms = x402_terms(&relay_connector.client_edge_addr, "g.toon.relay").await;
     assert_eq!(
@@ -946,7 +1108,8 @@ async fn the_apex_devnet_settlement_section_boots_against_a_deployed_contract() 
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
+    let apex_store_secret = write_peer_secret();
+    let apex_relay_secret = write_peer_secret();
     // The apex EVM section is LIVE as committed -- no template to
     // uncomment. Its [settlement.evm.key] names its own file
     // (/app/data/settlement.key, distinct from the signer's -- the live box
@@ -975,7 +1138,10 @@ async fn the_apex_devnet_settlement_section_boots_against_a_deployed_contract() 
         &text,
         key_file.path(),
         state_dir.path(),
-        Some(peer_secret.path()),
+        &[
+            ("apex-store.secret", apex_store_secret.path()),
+            ("apex-relay.secret", apex_relay_secret.path()),
+        ],
     );
 
     drop(boot(&text));
@@ -1012,12 +1178,16 @@ const EXPECTED_SETTLEMENT_DECIMALS: u8 = 6;
 fn the_apex_devnet_config_declares_both_committed_settlement_legs() {
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
+    let apex_store_secret = write_peer_secret();
+    let apex_relay_secret = write_peer_secret();
     let text = with_sandbox_paths(
         APEX_CONFIG,
         key_file.path(),
         state_dir.path(),
-        Some(peer_secret.path()),
+        &[
+            ("apex-store.secret", apex_store_secret.path()),
+            ("apex-relay.secret", apex_relay_secret.path()),
+        ],
     );
     let text = with_sandbox_settlement_keys(&text, key_file.path());
     let config_file = write_config(&text);
@@ -1146,7 +1316,7 @@ async fn the_store_devnet_settlement_section_boots_against_a_deployed_contract()
         &text,
         key_file.path(),
         state_dir.path(),
-        Some(peer_secret.path()),
+        &[("apex-store.secret", peer_secret.path())],
     );
 
     drop(boot(&text));
@@ -1155,10 +1325,11 @@ async fn the_store_devnet_settlement_section_boots_against_a_deployed_contract()
 /// The relay box's own live `[settlement.evm]` leg (issue #816/#817), boots
 /// against a freshly deployed local chain exactly like the apex's and
 /// store's cases above. It names the SAME registry the other two fleet
-/// files name: this box has no peering yet (#820), but its client edge
-/// already accepts an unaffiliated buyer's own on-chain channel (the
-/// relay file's own header, issue #556/#611), and that buyer's channel
-/// lives on the one shared deployment.
+/// files name: since issue #820 this box's client edge is also the
+/// terminating end of the apex<->relay peering, but its client edge already
+/// accepted an unaffiliated buyer's own on-chain channel before that landed
+/// too (the relay file's own header, issue #556/#611), and that buyer's
+/// channel lives on the one shared deployment either way.
 #[tokio::test]
 async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract() {
     if !require_anvil() {
@@ -1168,6 +1339,7 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
+    let peer_secret = write_peer_secret();
 
     assert!(
         RELAY_CONFIG.contains("[settlement.evm]")
@@ -1207,9 +1379,12 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
         "key_file = \"/app/data/settlement.key\"",
         &format!("key_file = \"{}\"", key_file.path().display()),
     );
-    // No peer secret to substitute: unlike the apex and store, this file
-    // carries no `[[peers]]` table (issue #820 has not landed yet).
-    let text = with_sandbox_paths(&text, key_file.path(), state_dir.path(), None);
+    let text = with_sandbox_paths(
+        &text,
+        key_file.path(),
+        state_dir.path(),
+        &[("apex-relay.secret", peer_secret.path())],
+    );
 
     drop(boot(&text));
 }
