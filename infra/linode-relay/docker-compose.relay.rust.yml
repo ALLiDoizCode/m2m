@@ -30,10 +30,18 @@
 
 services:
   connector-rust:
-    # Same pinned tag both other boxes run — see
+    # Same pinned tag both other boxes' compose files pin — see
     # infra/linode-store/docker-compose.store.rust.yml for the ordering
     # constraints (#605/#614) this tag already satisfies.
-    image: ghcr.io/toon-protocol/connector:rust-sha-33f10e2
+    #
+    # PIN OF RECORD (issue #848): bumped from `rust-sha-33f10e2` (what the
+    # relay box still runs as of this change) to `rust-sha-440eab7` -- the
+    # earliest tag carrying the announce-identity fix #848 requires the
+    # fleet's pin of record to carry (issue #833, PR #839; the tag IS that
+    # fix's commit). A forward move only, not yet deployed to the box -- see
+    # `EXPECTED_CONNECTOR_TAG` in
+    # crates/connector-bin/tests/devnet_configs_load.rs.
+    image: ghcr.io/toon-protocol/connector:rust-sha-440eab7
     volumes:
       - ./connector-rust.toml:/app/config/connector.toml:ro
       # Three raw key files, FRESH RANDOM (`openssl rand -hex 32`) per
