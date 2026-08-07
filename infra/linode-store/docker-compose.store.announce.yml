@@ -1,0 +1,111 @@
+# =============================================================================
+# TOON devnet — STORE box's own kind:10032 publisher (issue #833)
+# =============================================================================
+# Gives `g.toon.ario` a publisher that advertises THIS box's own identity --
+# the `[signer]` key `./connector-rust.toml`'s `[announce]` section names,
+# which is the exact key `GET /ilp/identity` answers with and every gift wrap
+# this node opens is sealed to (ADR 0018). Before this overlay, the only
+# publisher of `g.toon.ario` was the g.toon proxy's announcer sidecar
+# (infra/linode-node/docker-compose.node.announcer.yml), advertising the
+# PROXY's identity for a prefix the proxy FORWARDS rather than terminates. A
+# stock client sealing to that advertised identity is refused
+# `F01 gift wrap could not be opened` at THIS box, after paying at the client
+# edge -- issue #833. The proxy's stopgap announce of this same prefix is
+# retired in the same change; see that file's own comment.
+#
+# ── Why a shell loop, not `restart: unless-stopped` on the bare subcommand ──
+# `connector announce` (crates/connector-cli/src/announce.rs, issue #784) is
+# a ONE-SHOT operator action, not a daemon: it negotiates, signs and PAYS for
+# one write, then exits. Wrapping the bare subcommand in `restart:
+# unless-stopped` would re-run it the instant it exits -- a tight restart
+# loop that pays for a fresh announce as fast as the container can restart,
+# draining `[announce] pay_channel` for no benefit (a NIP-40 `expiration` of
+# `ttl_secs` already keeps one publish valid for a while; nothing needs a
+# faster cadence than that). This overlay instead runs the SAME pinned image
+# under a `/bin/sh` loop (alpine's base image, `deploy/connector-rust/
+# Dockerfile`, ships busybox sh) that pays once, sleeps, and repeats --
+# mirroring the announcer sidecar's own `ANNOUNCER_REFRESH_INTERVAL_SECS`
+# shape (`packages/announcer/src/config.ts`), just driven by this node's own
+# key instead of a separate process holding a separate identity.
+#
+# `REFRESH_SECS` is comfortably inside `[announce] ttl_secs` (600 s, the
+# config's default -- see `connector-config/src/announce.rs`'s
+# `DEFAULT_TTL_SECS`), so an announce a client already has cached does not
+# expire before this republishes it -- the same safety margin the sidecar
+# keeps between its own `refreshIntervalSecs` and `ttlSeconds` (a factor of
+# ~2).
+#
+# `|| true` after the announce command: a failed run (channel not yet funded,
+# the g.toon proxy briefly unreachable, ...) must not kill the loop -- the
+# NEXT scheduled attempt is the retry, and a container that exits on the
+# first failure needs an operator to notice and restart it by hand, which is
+# exactly the silent-gap failure mode issue #833 is about in the first place.
+#
+# ── What this needs before it can do anything (live/operator, issue #833's
+#    own scope boundary -- NOT provided by this file) ──────────────────────
+# `./connector-rust.toml`'s `[announce]` section carries no `pay_channel`:
+# opening and funding a channel this box pays the g.toon proxy from is a
+# live, human step (docs/operators/announcing-a-node.md, "What the node needs
+# before this can work"). Until that channel id is written into
+# `[announce] pay_channel`, every run here fails loudly with `NoPayChannel`
+# and the loop's `|| true` simply waits for the next attempt -- it does not
+# mask the gap, it just does not crash-loop the container over it.
+#
+# Bring up alongside the store's Rust edge (never on its own -- there is
+# nothing here for it to announce without `docker-compose.store.rust.yml`'s
+# `connector-rust` service already serving `/ilp/identity`):
+#
+#   docker compose -f infra/linode-store/docker-compose.store.yml \
+#                  -f infra/linode-store/docker-compose.store.rust.yml \
+#                  -f infra/linode-store/docker-compose.store.announce.yml \
+#                  up -d announce
+#
+# ── Its OWN state volume, deliberately not `connector_rust_state` ──────────
+# `connector announce` loads the SAME `./connector-rust.toml` the serving
+# `connector-rust` service does, and `Config::load` requires every key file
+# and secret the file names -- the signer, both settlement legs, and the
+# apex-store peering secret -- regardless of which subcommand reads it, so
+# this service mounts all four exactly as `docker-compose.store.rust.yml`
+# does. `state_dir`, though, gets a SEPARATE named volume: building a runtime
+# replays the peer- and client-claim journals under `state_dir` into memory
+# at startup, and docs/operators/announcing-a-node.md documents a real hazard
+# from two processes sharing one journal. That hazard is scoped to
+# `--via-own-routing` (which this loop never passes -- the client path
+# never journals a claim locally), but there is no reason to depend on that
+# argument being read correctly by whoever brings this up: a dedicated,
+# empty volume makes the question moot rather than merely answered.
+# =============================================================================
+
+services:
+  announce:
+    image: ghcr.io/toon-protocol/connector:rust-sha-b31a7c9
+    # `$$` throughout: compose interpolates a bare `$VAR`/`${VAR}` in this
+    # file's own text against the HOST's environment at `up` time, same as
+    # the nginx/certbot reload loops elsewhere in this fleet
+    # (docker-compose.store.yml's `wait $${!}`) -- `$$` is what survives that
+    # pass as a literal `$`, so the shell below sees it, not compose.
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        set -eu
+        REFRESH_SECS="$${STORE_ANNOUNCE_REFRESH_SECS:-240}"
+        while true; do
+          echo "[announce] publishing g.toon.ario via g.toon.relay..."
+          /usr/local/bin/connector announce \
+            --config /app/config/connector.toml \
+            https://proxy.devnet.toonprotocol.dev/ilp || true
+          sleep "$$REFRESH_SECS"
+        done
+    environment:
+      STORE_ANNOUNCE_REFRESH_SECS: '240'
+    volumes:
+      - ./connector-rust.toml:/app/config/connector.toml:ro
+      - ./signer-rust.key:/app/data/signer.key:ro
+      - ./settlement-rust.key:/app/data/settlement.key:ro
+      - ./settlement-solana-rust.key:/app/data/settlement-solana.key:ro
+      - ./apex-store.secret:/app/data/apex-store.secret:ro
+      - store_announce_state:/app/state
+    restart: unless-stopped
+
+volumes:
+  store_announce_state:

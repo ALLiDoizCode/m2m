@@ -123,6 +123,14 @@ const APEX_CONFIG: &str = include_str!("../../../infra/linode-node/connector-rus
 const STORE_CONFIG: &str = include_str!("../../../infra/linode-store/connector-rust.toml");
 const RELAY_CONFIG: &str = include_str!("../../../infra/linode-relay/connector-rust.toml");
 
+/// The apex's announcer sidecar overlay (issue #833) -- committed separately
+/// from `APEX_CONFIG` because it configures a different process
+/// (`packages/announcer`, not the connector binary this module otherwise
+/// boots), but read here for the one property test that ties the two
+/// together: [`the_apex_announcer_never_advertises_a_prefix_it_forwards`].
+const ANNOUNCER_OVERLAY: &str =
+    include_str!("../../../infra/linode-node/docker-compose.node.announcer.yml");
+
 /// This test binary's own base port for [`Anvil::spawn`] -- distinct from
 /// other test binaries' bases (`connector-settlement-evm`'s own tests use
 /// 18_600; `connector-cli`'s use 18_700/18_800) so that binaries running
@@ -773,6 +781,130 @@ fn route_price(raw: &str, prefix: &str) -> u64 {
         }
     }
     panic!("no priced `{prefix}` route in the committed config text");
+}
+
+/// The `ANNOUNCER_ILP_ADDRESSES` CSV value the apex's announcer sidecar
+/// overlay commits, parsed from its own text -- matching [`route_price`]'s
+/// precedent of reading a config-shape assertion straight off the committed
+/// line rather than pulling in a YAML parser for one env var.
+fn announcer_ilp_addresses(raw: &str) -> Vec<String> {
+    let line = raw
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("ANNOUNCER_ILP_ADDRESSES:"))
+        .expect("the announcer overlay must set ANNOUNCER_ILP_ADDRESSES");
+    line.trim().split(',').map(str::to_string).collect()
+}
+
+/// Issue #833's core property: this node must never advertise, under its
+/// OWN identity, an address it FORWARDS rather than terminates. A stock
+/// client seals a gift wrap to whichever `edgeIdentity` published the
+/// announce it read -- ADR 0018 requires that be the TERMINATING
+/// connector's key, but nothing on the wire enforces a publisher only
+/// advertising what it terminates. An announce claiming a forwarded prefix
+/// under the forwarder's own key is exactly the defect that let a client
+/// pay `g.toon.ario`, seal to the apex, and be refused
+/// `F01 gift wrap could not be opened` at the store -- after the money was
+/// already spent.
+///
+/// Asserted as a PROPERTY over the apex's own committed `[[routes]]` table
+/// (which prefixes it forwards, via `Config::peer_routes()`) against the
+/// announcer overlay's committed `ANNOUNCER_ILP_ADDRESSES` (which prefixes
+/// it announces), rather than a literal "must not contain g.toon.ario"
+/// string: nothing before this test modelled two connectors with distinct
+/// identities where one forwards a prefix the other terminates, which is
+/// exactly why the defect survived every other gate. The same defect
+/// reproduces the moment `g.toon.relay` becomes a forwarded `peer_id` route
+/// (issue #820) if this sidecar is still announcing it then, and a property
+/// test catches that the day it happens rather than needing to be re-taught
+/// the new prefix by hand -- the issue's own "gate #820 on this".
+#[test]
+fn the_apex_announcer_never_advertises_a_prefix_it_forwards() {
+    let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let peer_secret = write_peer_secret();
+    let text = with_sandbox_paths(
+        &without_live_settlement(APEX_CONFIG),
+        key_file.path(),
+        state_dir.path(),
+        Some(peer_secret.path()),
+    );
+    let config_file = write_config(&text);
+    let config = Config::load(config_file.path()).expect("the committed apex config must parse");
+
+    let forwarded: Vec<&str> = config.peer_routes().iter().map(|r| r.prefix()).collect();
+    assert!(
+        !forwarded.is_empty(),
+        "the apex config is expected to forward at least `g.toon.ario` \
+         across the apex-store peering -- if that changed, this test's \
+         premise needs revisiting, not silently passing over an empty set"
+    );
+
+    let announced = announcer_ilp_addresses(ANNOUNCER_OVERLAY);
+    for prefix in forwarded {
+        assert!(
+            !announced.iter().any(|a| a == prefix),
+            "the announcer sidecar's ANNOUNCER_ILP_ADDRESSES names `{prefix}`, \
+             which the apex config forwards (not terminates) via a peer_id \
+             route -- announcing it under the apex's OWN identity is issue \
+             #833's exact defect: a client seals its gift wrap to the \
+             publisher's key, pays, and the terminating node refuses to open \
+             it. Give the terminating node its own publisher instead (see \
+             infra/linode-store/connector-rust.toml's [announce] section) \
+             and drop the prefix from this list"
+        );
+    }
+}
+
+/// Issue #833's fix, terminating side: the store box announces
+/// `g.toon.ario` under its OWN `[signer]` identity -- the key that answers
+/// this node's `/ilp/identity` and opens every gift wrap it terminates
+/// (ADR 0018) -- rather than depending on the apex's now-removed stopgap
+/// announce (the property test above is what makes removing that stopgap
+/// safe to assert here rather than merely hoped for).
+#[test]
+fn the_store_devnet_config_announces_g_toon_ario_under_its_own_identity() {
+    assert!(
+        STORE_CONFIG.contains("[announce]"),
+        "the store config must carry its own [announce] section -- issue #833"
+    );
+
+    let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let peer_secret = write_peer_secret();
+    let text = with_sandbox_paths(
+        STORE_CONFIG,
+        key_file.path(),
+        state_dir.path(),
+        Some(peer_secret.path()),
+    );
+    let text = with_sandbox_settlement_keys(&text, key_file.path());
+    let config_file = write_config(&text);
+    let config = Config::load(config_file.path()).expect("the committed store config must parse");
+
+    let announce = config
+        .announce()
+        .expect("the store config's [announce] section must parse");
+    assert_eq!(announce.primary_address(), "g.toon.ario");
+    assert_eq!(
+        announce.http_endpoint(),
+        "https://proxy.ario.devnet.toonprotocol.dev/ilp",
+        "the store must advertise ITS OWN public edge, not the apex's -- \
+         advertising the apex's endpoint here would just relocate the \
+         mismatch from identity to endpoint"
+    );
+    assert_eq!(
+        announce.identity_key_file(),
+        None,
+        "the store has no prior publisher identity to carry over (issue \
+         #799 does not apply here -- see the config's own comment); it must \
+         sign with its own [signer], not a carried-over key"
+    );
+    assert_eq!(
+        announce.relay_url(),
+        None,
+        "the store fronts no relay and must not advertise reads it does not serve"
+    );
 }
 
 /// The new ERC-2771 `TokenNetwork` (#695/#811) the apex<->store
