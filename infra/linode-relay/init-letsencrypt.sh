@@ -10,7 +10,12 @@ set -a; . "$HERE/.env"; set +a
 
 DC=(docker compose -f infra/linode-relay/docker-compose.relay.yml)
 PRIMARY="proxy.relay.${DOMAIN}"
-DOMAINS=("proxy.relay.${DOMAIN}" "relay-ws.${DOMAIN}")
+# relay-ws.${DOMAIN} is NOT requested here: certbot's SAN request is
+# all-or-nothing, and relay-ws.${DOMAIN} still resolves to the apex box
+# until #820 moves it — an ACME challenge for it can only fail and would
+# take proxy.relay's own cert down with it. #820 adds it back once the DNS
+# record (and the apex's own TLS lineage naming it) actually move.
+DOMAINS=("proxy.relay.${DOMAIN}")
 CERT_PATH="/etc/letsencrypt/live/${PRIMARY}"
 RENEW_WINDOW_DAYS="${RENEW_WINDOW_DAYS:-30}"
 

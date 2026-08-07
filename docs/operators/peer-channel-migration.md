@@ -108,7 +108,13 @@ rollback means reverting the edit, not the on-chain state.
    (apex names store's `0x6B6c2DACf7Ac1F1273F72beF2E6084F9Ee6D3bff`; store names apex's
    `0xF29fD62C4848B9573C9b90adbF61b664F386d9CF` — unchanged from the retired channel, since the two
    participants are the same, only the channel is new). Do not restart either box until both files
-   are edited.
+   are edited. **Rotating `peer-claims.log` is no longer a step here.** Issue #832 found that,
+   before its fix, `ClaimBook::record_fulfillment` kept signing against whatever `channel_id` the
+   journal replay left in the outbound ledger, ignoring the freshly edited config entirely — the
+   live workaround was to move the payer's `peer-claims.log` aside so the ledger rebuilt empty. As
+   of the fix landing, `record_fulfillment` itself detects that config now names a different
+   channel than the ledger's and rebinds to it at a fresh nonce/amount before signing, so the old
+   journal can be left in place; it is still read for its inbound-side (received-claim) history.
 6. **Restart both connectors.** `docker compose restart connector-rust` on each box —
    **`docker compose up -d` is a no-op against a bind-mounted config file** and will report success
    while changing nothing.
@@ -149,11 +155,20 @@ rollback means reverting the edit, not the on-chain state.
   (`g.toon.ario`, and `g.toon.relay` if it forwards at the time of migration) still answer x402
   greetings at their committed prices — a broken peer binding fails closed at the connector's own
   routing layer, not silently.
-- **(e) Paid write end to end on the NEW channel, with no free-write path.** A forwarded write is
-  charged at the apex client edge, carries a peer claim signed under the **new** EIP-712 domain
-  (`chainId` 84532, `verifyingContract` = the new `TokenNetwork`), is fulfilled, and the store
-  side's claim watermark advances. A claimless peer PREPARE to the same route is still rejected —
-  this is issue #620's gate, and migrating the channel must not accidentally regress it.
+- **(e) The first claim on the new channel journals under the new channel id.** Concretely: the
+  payer's `peer-claims.log` records `outbound_claim_signed <peer> <new_channel_id> 1 <amount>` for
+  the first forwarded write after restart — nonce 1, not a nonce continuing the old channel's
+  sequence, and naming the new `channel_id`, not the old one. Checking the journal line directly
+  (rather than assuming the config edit was sufficient) is what catches the old-channel-id failure
+  mode issue #832 found: applied without the `record_fulfillment` fix, the config edit alone left
+  the payer signing claims that still named the old channel, which the receiver's
+  `verify_signature` cannot resolve (`unknown_channel`) — silently, since neither
+  `Rejected(UnknownChannel)` nor an un-acked outbound claim journaled anything before issue #832's
+  observability fix landed. A forwarded write is charged at the apex client edge, carries a peer
+  claim signed under the **new** EIP-712 domain (`chainId` 84532, `verifyingContract` = the new
+  `TokenNetwork`), is fulfilled, and the store side's claim watermark advances. A claimless peer
+  PREPARE to the same route is still rejected — this is issue #620's gate, and migrating the
+  channel must not accidentally regress it.
 - **(f) Claim exchange completes.** A FLUSH sent when traffic quiesces is acknowledged with a
   `claim-ack` entry on its RESPONSE, and a deliberately stale-nonce claim is rejected
   (`nonce_not_advancing`) without rejecting the PREPARE it rode on — the same claim-ack contract
