@@ -5,6 +5,10 @@ The committed source of truth for what every devnet route charges, and why
 blocks in four config files, which is how a hand-edit on one box sat
 unreconciled for twenty hours.
 
+For the mechanism these numbers are plugged into — who pays whom, on which channel, and why
+`price - fee >= next hop price` is an F03 rather than a subsidy when it is violated — see
+[`protocol/money-model.md`](protocol/money-model.md).
+
 All prices are in **base units of 6-decimal USDC** (ADR 0010;
 `docs/usdc-cross-chain-settlement.md`'s "6 decimals everywhere" is canonical
 across EVM/Solana/Mina, not a TypeScript-only asset config). So `1000` is
