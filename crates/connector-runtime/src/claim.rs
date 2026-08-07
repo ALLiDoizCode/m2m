@@ -899,11 +899,21 @@ impl ClaimBook {
             // one this ledger's nonce/cumulative sequence was built against
             // (a peer-channel migration, issue #832) -- a new channel starts
             // its own nonce/amount sequence by definition, so carrying the
-            // old watermark across it is never correct. `record_fulfillment`
+            // old watermark across it is never correct. The signing path
             // below re-signs and re-journals from nonce 1, which is exactly
-            // what a restart replaying this fresh entry through
+            // what a restart replaying that fresh entry through
             // `rebuild_from` will also land on, so the rebind needs no
-            // journal entry of its own.
+            // journal entry of its own -- but it does get a log line, since
+            // discarding a watermark is precisely the kind of
+            // revenue-affecting event issue #832 found happening silently.
+            tracing::warn!(
+                peer_id,
+                retired_channel_id = %ledger.channel_id,
+                retired_nonce = ledger.nonce,
+                retired_cumulative_amount = ledger.cumulative_amount,
+                channel_id = %channel_id,
+                "config names a new channel for this peer; rebinding the outbound ledger from nonce 1"
+            );
             *ledger = OutboundLedger {
                 channel_id: channel_id.clone(),
                 ..Default::default()
@@ -1943,9 +1953,21 @@ mod tests {
                 book.set_journal(Arc::new(FileJournal::open(&path).unwrap()))
                     .unwrap();
 
-                book.record_fulfillment("peer-b", 100, now());
-                book.record_fulfillment("peer-b", 50, now());
+                book.record_fulfillment("peer-b", 100, now()).unwrap();
+                book.record_fulfillment("peer-b", 50, now()).unwrap();
             }
+
+            // The premise the migration is applied on top of, asserted
+            // rather than assumed: the journal on disk ends on channel A.
+            assert_eq!(
+                FileJournal::open(&path).unwrap().read_all().unwrap().last(),
+                Some(&JournalEntry::OutboundClaimSigned {
+                    peer_id: "peer-b".to_string(),
+                    channel_id: channel_a,
+                    nonce: 2,
+                    cumulative_amount: 150,
+                })
+            );
 
             // A fresh process, standing in for the restart the migration
             // runbook's step 6 performs: config now names channel B for
