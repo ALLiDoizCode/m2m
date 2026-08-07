@@ -81,13 +81,12 @@ price       = 100
 
 | Key                   | Type        | Required  | Meaning                                                                                               |
 | --------------------- | ----------- | --------- | ----------------------------------------------------------------------------------------------------- |
-| `client_edge_addr`    | `host:port` | yes       | Where `POST /ilp` (and, if configured, the operator surface) listens.                                 |
+| `client_edge_addr`    | `host:port` | yes       | Where `POST /ilp`, `GET /ilp/btp` (and, if configured, the operator surface) listen.                  |
 | `[signer]`            | table       | yes       | Exactly one of `key_file` or `kms_key_id` — a location, never a key value.                            |
 | `[[routes]]`          | array       | no        | See below.                                                                                            |
 | `apex`                | ILP address | no        | Required only if `[[children]]` is used.                                                              |
 | `[[children]]`        | array       | no        | `{ name, handler_url, price }` — sugar for a route at `<apex>.<name>`.                                |
 | `[operator]`          | table       | no        | Absent ⇒ the operator surface is not mounted at all.                                                  |
-| `peer_wire_addr`      | `host:port` | no        | Absent ⇒ no inbound peer listener.                                                                    |
 | `peer_expose`         | string      | no        | `btp` / `http` / `both` / `neither` — which peer carriages this node listens for. Absent ⇒ `neither`. |
 | `[[peers]]`           | array       | no        | `{ id, endpoint, credential, ceiling, … }` — the peerings `routes.peer_id` may name.                  |
 | `[[peer_channels]]`   | array       | no        | `{ peer_id, channel_id, counterparty_key, chain_id, token_network }` — required for every peering.    |
@@ -101,19 +100,32 @@ because it is never silently free. A forwarding route may carry a `fee` (default
 
 A `[[peers]]` entry's `endpoint` is a URL whose **scheme** selects the carriage — `wss://` for BTP,
 `https://` for ILP-over-HTTP (ADR 0027); the old `SocketAddr`-shaped `addr` and the top-level
-`peer_wire_addr` are refused by name. Every peering needs a `credential` and at least one
-`[[peer_channels]]` row, because role is decided by authentication _and_ a channel binding. A
-`credential` sets **exactly one** of `secret_file` (a path to the secret — what a deployed node
-uses, so the peering can live in a committed config) or `secret` (the literal). See
+`peer_wire_addr` are refused by name — `peer_wire_addr` is still parsed, but only so a config that
+still sets it fails at boot with a named error rather than being silently ignored. Every peering
+needs a `credential` and at least one `[[peer_channels]]` row, because role is decided by
+authentication _and_ a channel binding. A `credential` sets **exactly one** of `secret_file` (a
+path to the secret — what a deployed node uses, so the peering can live in a committed config) or
+`secret` (the literal). See
 [`docs/operators/btp-peer-transport-bringup.md`](docs/operators/btp-peer-transport-bringup.md).
 
-`[settlement]` takes `chain` (only `"evm"` is accepted today — Mina is out of scope per
-[ADR 0002](docs/adr/0002-drop-mina-from-the-rust-connector.md), and the Solana backend crate
-exists but is not yet selectable from config), `rpc_url`, `contract_address` (the
-**`TokenNetworkRegistry`**, which `getTokenNetwork(token)` is called on — not a channel contract),
-`token_address`, non-zero `decimals`, and a `[settlement.key]` table with the same
-`key_file`/`kms_key_id` choice as `[signer]`. An absent section is fine; a present but wrong one
-is a startup failure, because the backend resolves the registry before the node serves anything.
+`peer_expose` and `credential` are **peer-role** settings and nothing else. `peer_expose` opens no
+port: it turns on peer handling, behind the credential check, on the listeners this node already
+serves. A node that leaves it at its `neither` default still serves clients over BTP, and a node
+that sets it still admits a client that presents no credential at all — see "The client edge"
+below.
+
+`[settlement]` configures one or more chains, in either of two shapes (issue #628) — Mina is out of
+scope per [ADR 0002](docs/adr/0002-drop-mina-from-the-rust-connector.md) either way. The legacy
+flat shape — `chain = "evm"`, `rpc_url`, `contract_address` (the **`TokenNetworkRegistry`**, which
+`getTokenNetwork(token)` is called on — not a channel contract), `token_address`, non-zero
+`decimals`, and a `[settlement.key]` table — is frozen at `"evm"` and never accepts `"solana"`. To
+settle on Solana, or on both chains at once, use the keyed shape instead: `[settlement.evm]` (the
+same fields as the legacy shape, minus `chain`) and/or `[settlement.solana]` (`rpc_url`,
+`program_id` — the deployed `payment-channel` program, in place of `contract_address` —
+`token_address`, `decimals`, `[settlement.solana.key]`). Either shape's `key` table takes the same
+`key_file`/`kms_key_id` choice as `[signer]`. An absent `[settlement]` is fine; a present but wrong
+one is a startup failure — `connector-cli` constructs a real backend for every chain configured,
+EVM or Solana, before the node serves anything.
 
 `decimals` is a declaration, not a conversion. Nothing scales by it: every amount on the value
 path — route prices, claim amounts, channel deposits — is already in the settlement token's base
@@ -138,9 +150,9 @@ with no watermark accepts any nonce, which hands a client every claim it has alr
 as free service. Config load therefore **refuses** a file that sets `[[client_channels]]` without
 a `state_dir`, and startup refuses to boot at all if the directory cannot be written, naming the
 path. Two append-only files live there: `client-edge-claims.log` (claims accepted at `POST /ilp`)
-and `peer-claims.log` (the peer wire's own `ClaimBook`). Both are replayed before the node serves;
-a journal that cannot be read, or that carries a line this build cannot decode, is a refusal to
-start rather than a silent restart from zero.
+and `peer-claims.log` (the peer carriage's own `ClaimBook`). Both are replayed before the node
+serves; a journal that cannot be read, or that carries a line this build cannot decode, is a
+refusal to start rather than a silent restart from zero.
 
 In a container this must be a **mounted volume**, not a path in the writable layer — a watermark
 that dies with the container is the same defect one indirection down. The image runs as uid
@@ -159,8 +171,10 @@ cargo run -p connector --bin connector -- path/to/connector.toml
 ```
 
 (`--bin connector` is not optional: the package also builds `stub-app`, a payment-oblivious test
-app used by the integration tests.) The one positional argument is the config path; there are no
-flags and no subcommands. A missing argument prints `usage: connector <config-file>` and exits 1.
+app used by the integration tests.) The positional argument is the config path — there is one
+subcommand, `announce`, which publishes this node's discovery event instead of serving traffic; see
+[`docs/operators/announcing-a-node.md`](docs/operators/announcing-a-node.md). A missing argument
+prints the usage line and exits 1.
 
 Logs are structured JSON on stdout, one object per line. Every line emitted while handling a
 packet carries the same `correlation_id` — the packet's execution condition, hex-encoded — and
@@ -179,8 +193,22 @@ builds.
 
 What a client speaks to the connector it pays. Versioned rather than redesigned, because its far
 end is software this repository does not ship
-([ADR 0003](docs/adr/0003-clean-room-peer-wire-versioned-client-edge.md)). Three routes, all
-unauthenticated, all on `client_edge_addr`:
+([ADR 0003](docs/adr/0003-clean-room-peer-wire-versioned-client-edge.md)). Six routes, all on
+`client_edge_addr`: the three below (`POST /ilp`, `GET /ilp/identity`, `GET /ilp/routes/price`),
+plus `POST /ilp/probe` (raises a `TOON-Accumulated-Cost` reject deliberately, for cost discovery),
+`GET /ilp/btp` (the BTP carriage's websocket upgrade, ADR 0027 — also where a BTP peer rides this
+listener, per [`docs/protocol/peer-carriage-spec.md`](docs/protocol/peer-carriage-spec.md)) and
+`POST /ilp/claim-state` (a bulk, signature-authenticated read of claim state for channels the
+caller controls). Full detail on all six:
+[`docs/protocol/client-edge-spec.md`](docs/protocol/client-edge-spec.md).
+
+**Opening a client BTP session takes no token.** `GET /ilp/btp` is permissionless: a client that
+presents no credential at all — or the `auth` frame the deployed client sends with `secret: ""` —
+is accepted and stays a client, its contents unverified. Nothing about the handshake is trusted.
+What authorizes a **write** is the signed payment-channel claim on each frame, exactly as on
+`POST /ilp` ([`client-edge-spec.md`](docs/protocol/client-edge-spec.md) §1.9 step 1: _"Authorization
+to write comes from the claim, never the session"_). The `credential` in `[[peers]]` upgrades an
+already-admitted session from client to peer; it is not what admits it.
 
 ### `POST /ilp`
 
@@ -221,8 +249,6 @@ Reads the same longest-prefix lookup that the x402 terms and the claim's value b
 against, so it never quotes a price a real request would not also be charged. **404** when no
 locally-terminated route matches — it never fabricates a price for a route it does not serve.
 
-Full detail: [`docs/protocol/client-edge-spec.md`](docs/protocol/client-edge-spec.md).
-
 ## The operator surface
 
 Mounted only when `[operator]` is configured, and **merged onto `client_edge_addr`** — there is
@@ -251,17 +277,44 @@ counter is operational history and does not follow them onto the free side of th
 dashboard therefore needs a server-side holder for the token, never a token in the browser and
 never an open endpoint — see issue #669.
 
-## The peer wire
+## Peer carriage
 
-Connector-to-connector traffic is a length-prefixed frame protocol of this repository's own
-design, not BTP — both ends are operator-controlled, so it is redesigned rather than versioned
-([ADR 0003](docs/adr/0003-clean-room-peer-wire-versioned-client-edge.md)). A claim rides the
-_next_ frame to a peer after a fulfilment, not the PREPARE that caused it, and is signed as an
-EIP-712 `BalanceProof` ([ADR 0024](docs/adr/0024-peer-wire-claims-sign-the-eip-712-balance-proof.md)).
+A peer rides one of the same two carriages a client speaks to, on `client_edge_addr` — there is no
+second listener and no raw-TCP frame protocol; that was deleted with the old peer wire
+([ADR 0027](docs/adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md)).
+The peer endpoint's URL **scheme** picks the carriage — `wss://` for BTP (RFC-0023 frames),
+`https://` for ILP-over-HTTP — and **role is decided by authentication**: an interaction is a
+`peer` only if it presents a credential naming a peer id with a matching `[[peer_channels]]`
+binding, never by which port or listener it arrived on. A claim rides the _next_ frame or request
+to a peer after a fulfilment, not the PREPARE that caused it, and is signed as an EIP-712
+`BalanceProof` ([ADR 0024](docs/adr/0024-peer-wire-claims-sign-the-eip-712-balance-proof.md)).
 
-The specification is [`docs/protocol/peer-wire-spec.md`](docs/protocol/peer-wire-spec.md). Note
-its §1.1 gap: the shipped transport is **plain TCP with no TLS and no peer authentication**, so
-`peer_wire_addr` must be bound to a private interface.
+"Role is decided by authentication" says **which role you get**, not **whether you are let in**. An
+interaction presenting no credential — every ordinary client — is admitted as a `client`, and so is
+one whose credential does not satisfy both requirements. Neither is refused on the wire, because
+refusing would make the check an oracle for the peer ids this node configures. What an operator
+sees, though, depends on _which_ mistake was made:
+
+- A credential naming a **configured** peer id that then fails P1 (wrong secret) or P2 (no
+  `[[peer_channels]]` row) emits the rate-limited `peer_auth_refused` event
+  ([`peer-carriage-spec.md`](docs/protocol/peer-carriage-spec.md) §1.6).
+- A credential naming a peer id **no `[[peers]]` entry configures** emits **nothing at all**
+  ([`decide_role`](crates/connector-peer-auth/src/decision.rs)'s branch table). Every ordinary
+  client declares a `peerId` of its own on the same `auth` entry, so emitting there would fire on
+  essentially every client session and hand any anonymous caller a log-volume lever.
+
+The trap that falls out of it is worth memorising before you debug a peering: **a peer that
+mistypes its `id` presents as an ordinary client with nothing logged, while a peer that mistypes
+its `secret` is loud.** If the event you expect is missing entirely, check the id spelling on both
+sides — see
+[`docs/operators/btp-peer-transport-bringup.md`](docs/operators/btp-peer-transport-bringup.md).
+
+The carriage mapping is specified in
+[`docs/protocol/peer-carriage-spec.md`](docs/protocol/peer-carriage-spec.md). The semantics it
+carries — claim exchange, flush, fees, ceilings, minimum delivery, the refusal taxonomy — are
+unchanged and still specified in [`docs/protocol/peer-wire-spec.md`](docs/protocol/peer-wire-spec.md)
+§3–§6; that document's §1–§2 (the deleted raw-TCP frame protocol) no longer describes anything
+this binary ships.
 
 ## Tests
 
@@ -297,7 +350,7 @@ them. `packages/solana-program` is excluded from the workspace gate and has its 
 | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [`CONTEXT.md`](CONTEXT.md)           | The vocabulary every doc here uses — connector, app, handler, packet, route, claim, watermark, exposure, fee, price, probe. Read this first.                                                                                                                                                                      |
 | [`docs/adr/`](docs/adr/)             | Numbered architecture decisions. Where an ADR and a spec disagree, the ADR wins.                                                                                                                                                                                                                                  |
-| [`docs/protocol/`](docs/protocol/)   | The client-edge and peer-wire specs, and the invariants behind the vectors.                                                                                                                                                                                                                                       |
+| [`docs/protocol/`](docs/protocol/)   | The client-edge, peer-carriage and peer-semantics specs, and the invariants behind the vectors.                                                                                                                                                                                                                   |
 | [`vectors/`](vectors/)               | `wire-vectors.json` — the cross-repo contract for `toon-client`, `rig` and `swap`. Generated, self-verified, and **normative**: prose is not ([ADR 0021](docs/adr/0021-vectors-are-normative-prose-is-not.md)). [`vectors/README.md`](vectors/README.md) documents it well enough to replay without reading Rust. |
 | [`docs/operators/`](docs/operators/) | The prefix-retirement checklist, and closed records. Note that `admin-api.md`, `admin-api-inventory.md` and `load-testing-guide.md` document the **retired** TypeScript connector and are banner-marked as such.                                                                                                  |
 
@@ -316,6 +369,10 @@ cargo run -p connector-vectors --bin generate-vectors
 | `connector-runtime`                         | The packet plane and its ports: the `Connector`, peer transport, claim book, leased routes, metrics.                               |
 | `connector-signer`                          | The only crate that touches key material: the `Signer` port, the treasury, gift wrap, claim-signature verification.                |
 | `connector-config`                          | The one typed config file and every refuse-to-start error it can raise.                                                            |
+| `connector-btp`                             | The BTP frame codec and session framing (RFC-0023), transport-neutral — knows nothing about claims, routes or prices.              |
+| `connector-peer-auth`                       | Role-by-authentication: whether an interaction is a peer or a client, decided from credential and config alone (ADR 0027).         |
+| `connector-peer-btp`                        | The BTP peer carriage: dials and accepts peerings over `wss://`, atop `connector-btp`.                                             |
+| `connector-peer-http`                       | The ILP-over-HTTP peer carriage: dials and accepts peerings over `https://`.                                                       |
 | `connector-client-edge`                     | The client-edge router.                                                                                                            |
 | `connector-operator`                        | The operator router.                                                                                                               |
 | `connector-settlement`                      | The chain-agnostic settlement port and its contract suite.                                                                         |
@@ -333,6 +390,8 @@ Beside the workspace, and not part of the connector:
 - `packages/faucet`, `packages/mina-zkapp`, `packages/mina-usdc-faucet-web`, `tools/fund-peers` —
   devnet faucet tooling. These are the only reason npm, Jest and `package.json` are still here;
   `npm test` runs them, not the connector.
+- [`packages/announcer`](packages/announcer) — a standalone `kind:10032` announcer sidecar for the
+  client edge (ADR 0022: the connector answers, it does not announce, so this lives outside it).
 - [`infra/`](infra) and [`deploy/`](deploy) — devnet overlays and deployment recipes.
 
 ## Devnet

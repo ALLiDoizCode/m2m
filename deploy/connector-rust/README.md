@@ -126,9 +126,11 @@ ILP address and handler URL, or delete the block if this node only peers.
 `price` is required on a terminated route — write `price = 0` if free is
 deliberate, because it is never silently free.
 
-To peer, set `peer_expose` (which peer carriages this node listens for),
-add a `[[peers]]` entry with a `wss://` or `https://` `endpoint` and a
-`credential`, a `[[peer_channels]]` row binding it to a channel, and a
+To peer, set `peer_expose` (which peer carriages this node accepts _peer_
+traffic on — it opens no port, and a node that leaves it at its `neither`
+default still serves clients over BTP exactly as before), add a `[[peers]]`
+entry with a `wss://` or `https://` `endpoint` and a `credential`, a
+`[[peer_channels]]` row binding it to a channel, and a
 `[[routes]]` entry that names the peer's `id` instead of a `handler_url`.
 The template's commented peering block annotates every field. ADR 0027
 deleted the raw-TCP peer wire that preceded this (issue #679), along with
@@ -165,7 +167,13 @@ Two things to get right, both of which fail silently rather than loudly:
 - **There is no peer port.** A peer's `endpoint` is
   `wss://<host>/ilp/btp` or `https://<host>/ilp` — this node's own client
   edge — because peer carriages ride the listener it already serves and
-  role is decided by the credential, not by the port.
+  role is decided by the credential, not by the port. Those are the same
+  two URLs an ordinary client uses, and a client uses them **without a
+  credential**: `GET /ilp/btp` accepts a session that presents none (or an
+  empty `secret`) and keeps it a client, and what pays for a write is the
+  signed claim on each frame, never the session
+  (`docs/protocol/client-edge-spec.md` §1.9 step 1). The `credential` here
+  buys peer role, not entry.
 
 A packet routed to a peer this node cannot dial is still answered
 `T01 peer unreachable`, never dropped. See

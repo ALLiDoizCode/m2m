@@ -290,7 +290,6 @@ up)
   RELAY_IP=$(get_box_ip "${NODE_LABELS[relay]}")
 
   echo "==> [2/4] Update DNS"
-  update_dns "relay-ws.devnet"      "$TOON_IP"
   update_dns "proxy.devnet"         "$TOON_IP"
   update_dns "faucet.devnet"        "$TOON_IP"
   # `proxy.ario` is the store box's paid edge, matching the g.toon.ario
@@ -302,20 +301,20 @@ up)
   update_dns "proxy.ario.devnet"    "$STORE_IP"
   update_dns "dvm.devnet"           "$STORE_IP"
   update_dns "proxy.relay.devnet"   "$RELAY_IP"
-  # `relay-ws.devnet` stays pointed at the apex above, deliberately, even
-  # though the relay app already answers it on its own box too. The apex's
-  # TLS cert LINEAGE is still named relay-ws.devnet.toonprotocol.dev
-  # (infra/linode-node/nginx/conf.d/node.conf:66-67) and also covers
-  # proxy.devnet + faucet.devnet on that same lineage — moving the record
-  # before the SAN is dropped fails renewal for all three, sixty days later.
-  # The apex still terminates g.toon.relay over HTTP itself until #820 flips
-  # it to forward over the new peering, so reads keep working either way.
-  # Set MOVE_RELAY_WS=1 to move it anyway, once #820 has landed and the SAN
-  # has been dropped from the apex's cert lineage.
-  if [ "${MOVE_RELAY_WS:-0}" = "1" ]; then
-    echo "  MOVE_RELAY_WS=1 — moving relay-ws.devnet off the apex onto the relay box"
-    update_dns "relay-ws.devnet"    "$RELAY_IP"
-  fi
+  # `relay-ws.devnet` points at the RELAY box, not the apex (#820 / #815).
+  # It used to point at the apex because the apex's TLS lineage was NAMED
+  # relay-ws.devnet.toonprotocol.dev and carried proxy.devnet + faucet.devnet
+  # as SANs on it, so moving the record before the SAN came off would have
+  # failed renewal for all three sixty days later. Both preconditions are now
+  # met in this tree: the apex's nginx no longer names relay-ws in any
+  # server_name or backend map, its lineage is re-primaried on
+  # proxy.devnet.toonprotocol.dev (infra/linode-node/nginx/conf.d/node.conf,
+  # infra/linode-node/init-letsencrypt.sh) and the relay container is gone
+  # from that box. The relay box serves relay-ws itself, off a SEPARATELY
+  # issued cert lineage of its own (#830 — never bundled into one
+  # all-or-nothing SAN request): infra/linode-relay/nginx/conf.d/node.conf +
+  # infra/linode-relay/init-letsencrypt.sh.
+  update_dns "relay-ws.devnet"      "$RELAY_IP"
 
   echo "==> [3/4] Deploy all nodes (parallel)"
   deploy_toon_node "$TOON_IP" "$TOON_MNEMONIC" &
@@ -364,13 +363,9 @@ relay)
   RELAY_IP=$(get_box_ip "${NODE_LABELS[relay]}")
   echo "==> [2/3] Update DNS"
   update_dns "proxy.relay.devnet" "$RELAY_IP"
-  # relay-ws.devnet is NOT moved here — see the `up)` case's comment; it stays
-  # on the apex until #820 flips the peering and the apex cert's SAN is
-  # dropped. Use MOVE_RELAY_WS=1 ./devnet-manage.sh relay to move it anyway.
-  if [ "${MOVE_RELAY_WS:-0}" = "1" ]; then
-    echo "  MOVE_RELAY_WS=1 — moving relay-ws.devnet off the apex onto the relay box"
-    update_dns "relay-ws.devnet"  "$RELAY_IP"
-  fi
+  # relay-ws.devnet belongs to this box too, post-#820 — see the `up)` case's
+  # comment for why it used to sit on the apex and what had to land first.
+  update_dns "relay-ws.devnet"    "$RELAY_IP"
   echo "==> [3/3] Deploy relay node"
   deploy_relay_node "$RELAY_IP" "$TOON_MNEMONIC"
   "$0" status
@@ -494,17 +489,14 @@ dns)
   TOON_IP=$(get_box_ip "${NODE_LABELS[toon]}")
   STORE_IP=$(get_box_ip "${NODE_LABELS[store]}")
   RELAY_IP=$(get_box_ip "${NODE_LABELS[relay]}")
-  [ -n "$TOON_IP" ] && update_dns "relay-ws.devnet" "$TOON_IP"     || echo "  ${NODE_LABELS[toon]} not found"
-  [ -n "$TOON_IP" ] && update_dns "proxy.devnet" "$TOON_IP"        || true
+  [ -n "$TOON_IP" ] && update_dns "proxy.devnet" "$TOON_IP"        || echo "  ${NODE_LABELS[toon]} not found"
   [ -n "$TOON_IP" ] && update_dns "faucet.devnet" "$TOON_IP"       || true
   [ -n "$STORE_IP" ] && update_dns "proxy.ario.devnet" "$STORE_IP"  || echo "  ${NODE_LABELS[store]} not found"
   [ -n "$STORE_IP" ] && update_dns "dvm.devnet" "$STORE_IP"        || true
   [ -n "$RELAY_IP" ] && update_dns "proxy.relay.devnet" "$RELAY_IP" || echo "  ${NODE_LABELS[relay]} not found"
-  # relay-ws.devnet is deliberately not synced here — see the `up)`/`relay)`
-  # cases' comment; it stays on the apex until #820. MOVE_RELAY_WS=1 opts in.
-  if [ "${MOVE_RELAY_WS:-0}" = "1" ] && [ -n "$RELAY_IP" ]; then
-    update_dns "relay-ws.devnet" "$RELAY_IP"
-  fi
+  # relay-ws.devnet follows the relay box, not the apex, post-#820 — see the
+  # `up)` case's comment.
+  [ -n "$RELAY_IP" ] && update_dns "relay-ws.devnet" "$RELAY_IP"    || true
   echo "Done."
   ;;
 

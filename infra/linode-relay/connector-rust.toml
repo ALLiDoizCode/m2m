@@ -3,40 +3,40 @@
 # per box, each fronting its own app — decided on #714, tracked as #815)
 # ═══════════════════════════════════════════════════════════════════════════
 #
-# ── What this file is, and is not, yet ──────────────────────────────────────
-# Today the relay app (`relay:3100`) sits on the apex box, fronted by the
-# apex's own connector as a LOCAL app route — not a peer of its own. This file
-# is step 1 of moving it to its own box: a CLIENT-EDGE-ONLY connector that
-# terminates `g.toon.relay` against the SAME relay app, now co-located with it
-# instead of reached across the apex's container network.
+# ── What this file is ───────────────────────────────────────────────────────
+# The relay app (`relay:3100`) used to sit on the apex box, fronted by the
+# apex's own connector as a LOCAL app route. It now runs on THIS box
+# (docker-compose.relay.yml), and this connector terminates `g.toon.relay`
+# against it — co-located, instead of reached across the apex's container
+# network — while the apex forwards that prefix here over the peering below.
 #
-# **No `[[peers]]` and no `[[peer_channels]]` here, deliberately.** Peering
+# **`[[peers]]` and `[[peer_channels]]` below, as of issue #820.** Peering
 # this box to the apex needs a live on-chain payment channel between the two
-# boxes' settlement identities, which does not exist yet — opening it and
-# wiring the peering is #820, once the channel facts are real. Until then this
-# is exactly the shape `infra/linode-store/connector-rust.toml` carried before
-# #678 gave it a peering: a legitimately deployable intermediate that answers
-# its own client edge and nothing else. `infra/linode-store/` is mirrored
-# file for file into this directory; do not invent a new shape here.
+# boxes' settlement identities -- issue #821 opened and funded one -- and the
+# `[[peer_channels]]` row below carries the same clearly-marked PLACEHOLDER
+# `channel_id`/`counterparty_key` convention `infra/linode-node/
+# connector-rust.toml`'s `apex-store` row uses: this repo never commits a
+# peering's live facts (see that row's own comment for why), so the real
+# values #821 already produced are applied directly to both boxes' untracked
+# files as part of #820's live cutover, not committed here.
 #
-# When #820 lands, the apex's `g.toon.relay` route (currently a local
-# `handler_url` route with `transport = "btp"` pinned on it, per issue #815
-# constraint 1) becomes a `peer_id` forward to this box, and `transport`
-# moves down here — a `peer_id` route cannot carry `transport`
-# (`ConfigError::PeerRouteHasTransport`); the terminating route is where a
-# persistent BTP session actually terminates.
+# The apex's `g.toon.relay` route is now a `peer_id` forward to this box
+# (issue #820), and `transport = "btp"` has moved down to this file's own
+# terminating route below -- a `peer_id` route cannot carry `transport`
+# (`ConfigError::PeerRouteHasTransport`); a persistent BTP session actually
+# terminates here now, which is why issue #701's rationale lives on this
+# route rather than the apex's any more.
 #
 # ── Settlement ─────────────────────────────────────────────────────────────
 # Deliberately identical to both other boxes' (infra/linode-node/,
 # infra/linode-store/): the same Base Sepolia `TokenNetworkRegistry` and USDC,
 # the same Solana payment-channel program and mint, both at 6 decimals. A
 # claim resolves against one deployment, so every node that might ever accept
-# one has to agree on which. This node has no counterparty channel yet (no
-# `[[peer_channels]]` — see above), but its client edge already accepts
+# one has to agree on which. That holds independently of the apex<->relay
+# `[[peer_channels]]` row above: this box's client edge already accepts
 # unaffiliated buyers' own on-chain channels (issue #556/#611), and those
 # buyers pick the deployment by what the fleet advertises, not by which box
-# answers — so this section is live from day one, not a template to fill in
-# when the peering lands.
+# answers — so this section was live from day one, before the peering existed.
 #
 # `decimals = 6` is checked against the token's own on-chain `decimals()` at
 # startup and a disagreement refuses the boot (#564), so a stale value here is
@@ -59,6 +59,47 @@ client_edge_addr = "0.0.0.0:4000"
 # claim watermark survive a restart. Backed by the `connector_rust_state`
 # named volume in docker-compose.relay.rust.yml.
 state_dir = "/app/state"
+
+# ── The g.toon proxy<->relay peering (issue #820, Shape A -- #815) ────────
+# This box is the ACCEPTING half: it exposes a BTP listener and never dials.
+# The g.toon proxy is the dialing half and carries the `endpoint`
+# (infra/linode-node/connector-rust.toml).
+#
+# `peer_expose` is a bare top-level key, so it lives up here with
+# `client_edge_addr` and `state_dir` rather than next to the `[[peers]]`
+# table it configures -- written after any table header it would be read as
+# a key OF that table and refused. Mirrors
+# infra/linode-store/connector-rust.toml's identical placement.
+peer_expose = "btp"
+
+# The peering's shared secret is a FILE, same handling as the store peering:
+# `infra/linode-relay/*.secret` is gitignored, so the peering is tracked and
+# only the bytes stay on the box.
+[[peers]]
+id = "apex-relay"
+credential = { secret_file = "/app/data/apex-relay.secret" }
+# No `endpoint`: this node accepts and never dials -- exactly why `ceiling`
+# is REQUIRED rather than optional here (`AcceptOnlyPeerWithoutCeiling`, an
+# accept-only peering cannot flush on its own initiative). 1 USDC, matching
+# the store box's own accept-only peering.
+ceiling = 1000000
+
+# Role is decided by authentication AND a channel binding (peer-carriage-spec
+# 1.2, ADR 0024). Without this row the g.toon proxy authenticates fine, is
+# admitted only as an ordinary client, and every claim it sends is refused
+# `unknown_channel`.
+[[peer_channels]]
+peer_id = "apex-relay"
+# PLACEHOLDER (issue #820) -- see infra/linode-node/connector-rust.toml's
+# matching row for the full explanation. Issue #821 already opened and
+# funded the real channel (channel_id 0x62c81d83bf0bda1af54233fa92cae0c287e
+# 34838fb3434e6911d289dba6fa3fa); its real facts are applied directly to
+# both boxes' untracked files as part of #820's live cutover, not committed
+# here.
+channel_id = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeadbeef"
+counterparty_key = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeadbeef"
+chain_id = 84532
+token_network = "0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478"
 
 [signer]
 key_file = "/app/data/signer.key"
@@ -107,16 +148,33 @@ key_file = "/app/data/signer.key"
 # `--via-own-routing` replaces the funded-channel requirement with "a
 # [[routes]] entry reaching the destination", which this file already has.
 #
-# This is also why this section needs no `[[peer_channels]]` row: that table
-# funds the apex<->relay PEERING (issue #820, live/human, not yet open --
-# see this file's own header above), which is a separate fact from this
-# announce and is not invented here. Do not add a placeholder channel id to
-# make this section "complete" -- there is nothing for one to pay.
+# This announce does not depend on the `[[peer_channels]]` row below either,
+# even though this file has one as of issue #820: that table funds the
+# apex<->relay PEERING, which is a separate fact from this announce's own
+# `--via-own-routing` path -- there is nobody to pay here regardless of
+# whether the peering is funded. Do not add a placeholder channel id to make
+# this section "complete" -- there is nothing for one to pay.
+#
+# `route_publish`/`route_store` are PINNED, not left to derive -- issue #845,
+# the same class of defect #841 pinned shut on the TypeScript sidecar's
+# ANNOUNCER_ROUTE_STORE. `derive_route_hints` (crates/connector-config/src/
+# announce.rs) first looks for a `.store`/`.ario` address in `addresses`
+# above; this box's list is just `["g.toon.relay"]`, so it falls through to
+# suffix surgery -- strip `.relay` off the one address it has and append
+# `.store` -- inventing `g.toon.store`, a prefix NOTHING on this fleet
+# routes (the store prefix is `g.toon.ario`). A client that takes that
+# unpinned `routes.store` hint at face value has nowhere to upload. Pinning
+# both here the way the store box's own address already does implicitly
+# (`g.toon.ario` matches the `.ario` branch directly, so it never reaches
+# the fallback) is load-bearing: do not remove either key without also
+# removing the reason `derive_route_hints` would misfire without it.
 [announce]
 addresses     = ["g.toon.relay"]
 http_endpoint = "https://proxy.relay.devnet.toonprotocol.dev/ilp"
 btp_endpoint  = "wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp"
 relay_url     = "wss://relay-ws.devnet.toonprotocol.dev"
+route_publish = "g.toon.relay"
+route_store   = "g.toon.ario"
 
 # ── Routes ─────────────────────────────────────────────────────────────────
 
@@ -124,8 +182,14 @@ relay_url     = "wss://relay-ws.devnet.toonprotocol.dev"
 prefix = "g.toon.relay"
 # `/write`, not the bare origin: `HttpAppClient::deliver` POSTs here, and the
 # relay app serves only `POST /write` and `GET /health`. A bare
-# `http://relay:3100` comes back F99 "app declined the delivery with HTTP
-# 404" — the same gap the apex's own route hit on first deploy (#492).
+# `http://relay:3100` -- the same gap the apex's own route hit on first
+# deploy (#492) -- does NOT come back as an F99 reject. Under ADR 0020 a
+# non-2xx from the app is a real answer that consumed real work, so it rides
+# home on a FULFILL with `status: 404` and the payer is charged in full for
+# nothing (`crates/connector-runtime/src/connector.rs`'s `AppOutcome::Answered`
+# arm; `crates/connector-bin/tests/local_stack_rehearsal.rs` spells this out).
+# There is no reject and no alarm -- misconfiguring this path silently
+# charges payers, it does not fail loudly.
 handler_url = "http://relay:3100/write"
 # 1 micro-USDC per relay write, matching the apex's live price for this
 # prefix (infra/linode-node/connector-rust.toml, owner decision 2026-08-04).

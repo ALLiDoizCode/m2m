@@ -73,7 +73,16 @@ services:
     # FRESH named volume below. Both are ancestors of this tag. It is a
     # constraint on rolling BACK — do not roll this service to a tag older than
     # `rust-sha-63b8188`.
-    image: ghcr.io/toon-protocol/connector:rust-sha-33f10e2
+    #
+    # PIN OF RECORD (issue #848): bumped from `rust-sha-33f10e2` (what the
+    # store box still runs as of this change) to `rust-sha-440eab7` -- the
+    # earliest tag carrying the announce-identity fix #848 requires the
+    # fleet's pin of record to carry (issue #833, PR #839; the tag IS that
+    # fix's commit). A forward move only, not yet deployed to the box -- see
+    # infra/linode-node/docker-compose.node.rust.yml's matching comment and
+    # `EXPECTED_CONNECTOR_TAG` in
+    # crates/connector-bin/tests/devnet_configs_load.rs.
+    image: ghcr.io/toon-protocol/connector:rust-sha-440eab7
     volumes:
       - ./connector-rust.toml:/app/config/connector.toml:ro
       # Three raw key files, provisioned two different ways — see
