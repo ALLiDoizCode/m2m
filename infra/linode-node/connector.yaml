@@ -65,8 +65,8 @@ chainProviders:
     keyId: 'placeholder-overwritten-by-mnemonic'
     txFeeNanomina: '100000000'
 
-# The Arweave store runs on its own box. The apex peers with it over BTP so it
-# can FORWARD store-bound writes (the apex earns the configured hop fee).
+# The Arweave store runs on its own box. The g.toon proxy peers with it over BTP
+# so it can FORWARD store-bound writes (the proxy earns the configured hop fee).
 peers:
   - id: store-box
     # `proxy.ario`, not `proxy.store` — the store box's paid edge was renamed on
@@ -76,12 +76,12 @@ peers:
     url: wss://proxy.ario.devnet.toonprotocol.dev:443
     relation: peer
     authToken: ''
-    # solana:devnet, NOT evm — the live apex has settled this leg on Solana
+    # solana:devnet, NOT evm — the live g.toon proxy has settled this leg on Solana
     # since the store box moved to it; the repo said evm:84532 for months
     # while the box did not, so applying this file verbatim would have moved
     # the leg back to EVM and orphaned the open Solana channel. Confirmed
     # against chain: channel 2jvyMck3nzDXHurDDkaBghASb42Qj9e7wcoo3mFEDjox
-    # names apex HgNmgJYr… ↔ store W6yK72j3… with 2.0 USDC deposited.
+    # names the g.toon proxy HgNmgJYr… ↔ store W6yK72j3… with 2.0 USDC deposited.
     chain: solana:devnet
     settlementAddress: 'W6yK72j365eK7t4Qj5An1AaYtUEJcJK7TBPvGeDk1LV'
 
@@ -132,8 +132,8 @@ routes:
       mina: 'B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq'
 
 # ── Self-announce (kind:10032 IlpPeerInfo) — relay#37 / store#22 / toon-meta#69 ──
-# The apex publishes its own IlpPeerInfo THROUGH its own routing: announceTo is its
-# OWN terminated route (g.toon.relay → relay:3100), so the write is delivered
+# The g.toon proxy publishes its own IlpPeerInfo THROUGH its own routing: announceTo
+# is its OWN terminated route (g.toon.relay → relay:3100), so the write is delivered
 # LOCALLY = free. Lands in the relay event store → served on the free read WS, so a
 # genesis-seed-only client discovers the publish + store routes out of band.
 # Requires connector >= 3.28.0 (the relay-connector:latest image was rebuilt on it).
