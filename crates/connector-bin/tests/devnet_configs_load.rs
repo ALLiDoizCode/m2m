@@ -515,7 +515,7 @@ fn with_anvil_settlement(
     );
     replace_expecting_a_match(
         &replaced,
-        "token_address = \"0x49beE1Bca5d15Fb0963117923403F9498119a9Ce\"",
+        &format!("token_address = \"{EXPECTED_SETTLEMENT_TOKEN_ADDRESS}\""),
         &format!("token_address = \"{token_address:?}\""),
     )
 }
@@ -1707,11 +1707,24 @@ async fn deploy_settlement_on_anvil() -> (Anvil, ethers::types::Address, ethers:
     (anvil, registry_address, token)
 }
 
-/// The registry the apex file's LIVE `[settlement.evm]` section names --
-/// the deployed Base Sepolia `TokenNetworkRegistry` (#576, #577). The anvil
-/// case replaces exactly this committed value, so it doubles as the guard
-/// that the committed section keeps naming it.
+/// The registry every fleet file's LIVE `[settlement.evm]` section names --
+/// the deployed Base Sepolia `TokenNetworkRegistry` (#576, #577), repointed
+/// here by the ERC-2771 cutover (#695/#811, broadcast 2026-08-06,
+/// `docs/evm-deployment.md`). The anvil cases replace exactly this committed
+/// value, so they double as the guard that the committed sections keep
+/// naming it; [`every_fleet_configs_settlement_evm_leg_matches_the_live_identity`]
+/// below asserts it directly, as parsed, for all three files.
 const APEX_LIVE_REGISTRY: &str = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1";
+
+/// The retired pre-ERC-2771 `TokenNetworkRegistry` [`APEX_LIVE_REGISTRY`]
+/// replaced -- `docs/evm-deployment.md`'s "Current live deployment
+/// (pre-cutover)" table and its "Rollback: one step" section, which names
+/// this exact address as what a rollback reverts `contract_address` to. Not
+/// itself asserted against any committed file; named only so a regression
+/// back to it is called out by address in the identity test's failure
+/// message, not left for a reader to recognise on sight.
+const SETTLEMENT_CONTRACT_ADDRESS_ROLLBACK_TARGET: &str =
+    "0xcC9079adE929b168B54145f6d25262b64FAB9D5b";
 
 #[tokio::test]
 async fn the_apex_devnet_settlement_section_boots_against_a_deployed_contract() {
@@ -1773,6 +1786,16 @@ const APEX_SOLANA_USDC_MINT: &str = "xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in
 /// would be a box that cannot boot.
 const EXPECTED_SETTLEMENT_DECIMALS: u8 = 6;
 
+/// The mock USDC ERC-20 every fleet config's `[settlement.evm]` leg settles
+/// in. Unchanged by the #695/#811 ERC-2771 registry cutover -- only the
+/// `TokenNetworkRegistry` moved (see [`APEX_LIVE_REGISTRY`]); the token being
+/// registered through it did not (`docs/evm-deployment.md`: "never a new
+/// token, so no existing balance or faucet distribution is disturbed").
+/// [`with_anvil_settlement`] looks for this same literal before retargeting a
+/// leg at a freshly deployed mock, so the substitution and this identity
+/// check read one constant instead of two copies that could drift apart.
+const EXPECTED_SETTLEMENT_TOKEN_ADDRESS: &str = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce";
+
 /// Both of the apex file's keyed settlement legs parse, as committed, into
 /// the typed per-chain tables issue #628 introduced -- with no chain
 /// reached at all.
@@ -1824,6 +1847,11 @@ fn the_apex_devnet_config_declares_both_committed_settlement_legs() {
         APEX_LIVE_REGISTRY.to_lowercase(),
         "the EVM leg must keep naming the deployed TokenNetworkRegistry"
     );
+    assert_eq!(
+        format!("0x{}", hex_lower(evm.token_address().as_slice())).to_lowercase(),
+        EXPECTED_SETTLEMENT_TOKEN_ADDRESS.to_lowercase(),
+        "the EVM leg must keep naming the fleet's mock USDC"
+    );
     assert_eq!(evm.decimals(), EXPECTED_SETTLEMENT_DECIMALS);
 
     let solana = settlements
@@ -1847,6 +1875,87 @@ fn the_apex_devnet_config_declares_both_committed_settlement_legs() {
 /// the committed literal.
 fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Every fleet config's `[settlement.evm]` leg -- apex, store and relay
+/// alike -- must name the identical registry, asset and precision: a claim
+/// or channel a buyer opened against one `TokenNetworkRegistry`/token is
+/// unresolvable by a box pointed at a different one. The boot tests below
+/// assert the same property for store/relay with a substring `.contains`
+/// check against the committed text; this asserts it as PARSED, typed
+/// values against literal constants instead, which is what actually catches
+/// a value that merely *looks* right in the text -- `.contains` would still
+/// pass on different whitespace, a different case, or a longer address that
+/// happens to contain the expected one as a substring.
+///
+/// Reads no chain and boots nothing, so it runs even where `anvil` is not on
+/// `PATH` (unlike the three `*_devnet_settlement_section_boots_against_a_
+/// deployed_contract` cases, which are skipped there) -- the same
+/// no-network proof [`the_apex_devnet_config_declares_both_committed_
+/// settlement_legs`] already relies on for the apex's own Solana leg.
+///
+/// Failure messages name both the expected literal and the value actually
+/// found, per issue #852 -- including calling out
+/// [`SETTLEMENT_CONTRACT_ADDRESS_ROLLBACK_TARGET`] by address, so a silent
+/// revert to the retired pre-ERC-2771 registry is named rather than just
+/// failed.
+#[test]
+fn every_fleet_configs_settlement_evm_leg_matches_the_live_identity() {
+    for (label, raw) in [
+        ("apex", APEX_CONFIG),
+        ("store", STORE_CONFIG),
+        ("relay", RELAY_CONFIG),
+    ] {
+        let key_file = write_raw_key_file(9);
+        let state_dir = tempfile::tempdir().expect("temp state dir");
+        let peer_secret = write_peer_secret();
+        let text = with_sandbox_paths(
+            raw,
+            key_file.path(),
+            state_dir.path(),
+            Some(peer_secret.path()),
+        );
+        let text = with_sandbox_settlement_keys(&text, key_file.path());
+        let config_file = write_config(&text);
+
+        let config = Config::load(config_file.path())
+            .unwrap_or_else(|e| panic!("the committed {label} config must parse: {e}"));
+
+        let evm = config
+            .settlements()
+            .iter()
+            .find_map(|settlement| match settlement {
+                SettlementConfig::Evm(evm) => Some(evm),
+                SettlementConfig::Solana(_) => None,
+            })
+            .unwrap_or_else(|| panic!("the {label} config must carry a live [settlement.evm] leg"));
+
+        let contract_address = format!("0x{}", hex_lower(evm.contract_address().as_slice()));
+        assert_eq!(
+            contract_address.to_lowercase(),
+            APEX_LIVE_REGISTRY.to_lowercase(),
+            "the {label} config's [settlement.evm] contract_address must be the live \
+             TokenNetworkRegistry {APEX_LIVE_REGISTRY} (expected), found {contract_address} -- \
+             {SETTLEMENT_CONTRACT_ADDRESS_ROLLBACK_TARGET} is the retired pre-ERC-2771 registry \
+             and must not be accepted silently"
+        );
+
+        let token_address = format!("0x{}", hex_lower(evm.token_address().as_slice()));
+        assert_eq!(
+            token_address.to_lowercase(),
+            EXPECTED_SETTLEMENT_TOKEN_ADDRESS.to_lowercase(),
+            "the {label} config's [settlement.evm] token_address must be \
+             {EXPECTED_SETTLEMENT_TOKEN_ADDRESS} (expected), found {token_address}"
+        );
+
+        assert_eq!(
+            evm.decimals(),
+            EXPECTED_SETTLEMENT_DECIMALS,
+            "the {label} config's [settlement.evm] decimals must be \
+             {EXPECTED_SETTLEMENT_DECIMALS} (expected), found {}",
+            evm.decimals()
+        );
+    }
 }
 
 /// The store box's settlement is no longer a commented template waiting on a
