@@ -5,7 +5,7 @@
 # TypeScript fleet on this SAME box, WITHOUT editing that file and WITHOUT
 # taking anything down. It is the store-box mirror of
 # infra/linode-node/docker-compose.node.rust.yml, which has run beside the
-# apex's TypeScript connector since #601.
+# g.toon proxy's TypeScript connector since #601.
 #
 # Run alongside the existing stack (never on its own — it has no store service
 # of its own to front):
@@ -27,7 +27,7 @@
 # inter-node link the devnet topology needs (#623). Both are still true, and
 # neither applies any more, because this overlay no longer stands up a peer
 # wire or a forwarded route at all. It stands up a CLIENT EDGE that terminates
-# and PRICES its own routes — the same shape as the apex's Rust node.
+# and PRICES its own routes — the same shape as the g.toon proxy's Rust node.
 #
 # The free-write hazard the old banner warned about is therefore gone by
 # construction: ./connector-rust.toml prices every route it terminates at
@@ -40,11 +40,11 @@
 # ufw says — Docker's iptables chain runs ahead of it. Binding the publish to
 # 127.0.0.1 means the only public path to this connector is through this box's
 # nginx, under the /rust/ilp and /rust/ilp/btp locations that
-# ./nginx/conf.d/node.conf defines and rate-limits. Identical to the apex
-# overlay's own `127.0.0.1:4000:4000` (#492/#517), and for the same reason:
-# every route into the process should be one nginx can see, log and throttle.
-# Widen it only if something needs to reach this edge without TLS, which
-# nothing does.
+# ./nginx/conf.d/node.conf defines and rate-limits. Identical to the
+# g.toon proxy overlay's own `127.0.0.1:4000:4000` (#492/#517), and for the
+# same reason: every route into the process should be one nginx can see, log
+# and throttle. Widen it only if something needs to reach this edge without
+# TLS, which nothing does.
 #
 # There is no `4001` publish because there is no peer wire to publish — see
 # ./connector-rust.toml's header. That also retires the `STORE_PEER_WIRE_BIND`
@@ -89,12 +89,12 @@ services:
       # and so is an unreachable settlement chain (ADR 0009).
       - ./signer-rust.key:/app/data/signer.key:ro
       - ./settlement-rust.key:/app/data/settlement.key:ro
-      # The apex<->store peering's shared secret (issue #750). Its `[[peers]]`
-      # entry names this path as `credential.secret_file`, so a missing or
-      # unreadable file here is a refuse-to-start, not a peering that quietly
-      # never establishes. Generated on the box (`openssl rand -hex 32`),
-      # gitignored as `*.secret`, and the SAME BYTES on both boxes -- the two
-      # sides authenticate against each other with it.
+      # The g.toon proxy<->store peering's shared secret (issue #750). Its
+      # `[[peers]]` entry names this path as `credential.secret_file`, so a
+      # missing or unreadable file here is a refuse-to-start, not a peering
+      # that quietly never establishes. Generated on the box
+      # (`openssl rand -hex 32`), gitignored as `*.secret`, and the SAME BYTES
+      # on both boxes -- the two sides authenticate against each other with it.
       - ./apex-store.secret:/app/data/apex-store.secret:ro
       - ./settlement-solana-rust.key:/app/data/settlement-solana.key:ro
       # Durable claim watermarks (#605). Named, not bind-mounted: the replay
