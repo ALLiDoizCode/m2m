@@ -1006,7 +1006,7 @@ fn the_store_devnet_config_announces_g_toon_ario_under_its_own_identity() {
 /// that let #841 slip past #839's own test (see the module docs and
 /// [`the_apex_announcer_never_advertises_a_prefix_it_forwards`] above).
 #[test]
-fn the_relay_devnet_config_announces_exactly_the_prefixes_it_terminates() {
+fn the_relay_devnet_config_announces_only_prefixes_it_terminates() {
     assert!(
         RELAY_CONFIG.contains("[announce]"),
         "the relay config must carry its own [announce] section -- issue #843"

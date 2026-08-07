@@ -99,12 +99,13 @@ key_file = "/app/data/signer.key"
 # terminates `g.toon.relay` itself (see `[[routes]]` below), so its
 # scheduled announce (docker-compose.relay.announce.yml) runs
 # `--via-own-routing --to g.toon.relay` against its OWN client edge instead
-# of the default pay-the-URL path -- the packet never leaves this process,
-# so there is nobody to pay and no through-address to name
-# (`crates/connector-cli/src/announce.rs:966-975`,
-# docs/operators/announcing-a-node.md's "Routing it yourself", `--via-own-
-# routing` replaces the funded-channel requirement with "a [[routes]] entry
-# reaching the destination", which this file already has).
+# of the default pay-the-URL path -- the packet is handed straight to this
+# node's own `handle_prepare` rather than to `pay_the_through_url`
+# (`crates/connector-cli/src/announce.rs`'s `via_own_routing` branch), so it
+# never leaves this process: there is nobody to pay and no through-address to
+# name. Per docs/operators/announcing-a-node.md's "Routing it yourself",
+# `--via-own-routing` replaces the funded-channel requirement with "a
+# [[routes]] entry reaching the destination", which this file already has.
 #
 # This is also why this section needs no `[[peer_channels]]` row: that table
 # funds the apex<->relay PEERING (issue #820, live/human, not yet open --

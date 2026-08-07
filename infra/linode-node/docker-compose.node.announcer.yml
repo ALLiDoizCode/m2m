@@ -60,11 +60,12 @@ services:
       # ambiguous), so removing this stopgap has to land in the same change
       # as the store's own publisher landing, not stay a "later" cleanup.
       #
-      # #784 is still the long-run answer for `g.toon` too: a
-      # `connector announce` subcommand run FROM the node being announced.
-      # This sidecar remains for that one -- genuinely terminated here --
-      # until that retirement happens; see the RETIRING THIS SIDECAR note
-      # below.
+      # #784 is still the long-run answer for `g.toon` too: a `connector
+      # announce` subcommand run FROM the node being announced. This sidecar
+      # remains for that one -- the fleet's identity prefix, which this box
+      # is the natural publisher of even though no `[[routes]]` entry serves
+      # the bare prefix (see ANNOUNCER_PROBE_ROUTES below) -- until that
+      # retirement happens; see the RETIRING THIS SIDECAR note below.
       #
       # `g.toon.relay` RETIRED from this list 2026-08-07 (issue #843, repo
       # half of #815). The relay box now has its own kind:10032 publisher
@@ -102,10 +103,10 @@ services:
       ANNOUNCER_ROUTE_STORE: g.toon.ario
       # THE SAME TRAP, one derivation earlier (issue #843): `routes.publish`
       # is ALSO derived from `.relay`-suffixed entries in
-      # ANNOUNCER_ILP_ADDRESSES (`deriveRouteHints`, packages/announcer/src/
-      # config.ts:110-134) when unset. With `g.toon.relay` removed above,
-      # that derivation finds no `.relay` entry, falls through to the
-      # store-hint fallback, and would silently set `routes.publish =
+      # ANNOUNCER_ILP_ADDRESSES (`deriveRouteHints`,
+      # packages/announcer/src/config.ts) when unset. With `g.toon.relay`
+      # removed above, that derivation finds no `.relay` entry, falls through
+      # to the store-hint fallback, and would silently set `routes.publish =
       # g.toon.ario` -- telling clients to publish Nostr WRITES at the
       # Arweave store prefix. Pin the real destination explicitly instead.
       ANNOUNCER_ROUTE_PUBLISH: g.toon.relay
