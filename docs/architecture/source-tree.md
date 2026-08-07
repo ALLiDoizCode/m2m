@@ -62,8 +62,8 @@ connector-peer-auth              role-by-authentication: peer vs. client, decide
 connector-peer-btp               the BTP peer carriage: dial/accept a peering over wss://
 connector-peer-http              the ILP-over-HTTP peer carriage: dial/accept over https://
 
-connector-client-edge            axum Router: POST /ilp, /ilp/identity, /ilp/routes/price,
-                                  POST /ilp/probe, GET /ilp/btp, POST /ilp/claim-state
+connector-client-edge            axum Router: POST /ilp, POST /ilp/probe, POST /ilp/claim-state,
+                                  GET /ilp/btp, GET /ilp/identity, GET /ilp/routes/price
 connector-operator               axum Router: bearer-gated reads, RFC 9421-signed writes
 connector-cli                    config → runtime → merged routers → bound listeners
 connector-bin                    bin/connector, bin/stub-app

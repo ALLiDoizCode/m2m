@@ -102,10 +102,10 @@ A `[[peers]]` entry's `endpoint` is a URL whose **scheme** selects the carriage 
 `https://` for ILP-over-HTTP (ADR 0027); the old `SocketAddr`-shaped `addr` and the top-level
 `peer_wire_addr` are refused by name — `peer_wire_addr` is still parsed, but only so a config that
 still sets it fails at boot with a named error rather than being silently ignored. Every peering
-needs a `credential` and at least one
-`[[peer_channels]]` row, because role is decided by authentication _and_ a channel binding. A
-`credential` sets **exactly one** of `secret_file` (a path to the secret — what a deployed node
-uses, so the peering can live in a committed config) or `secret` (the literal). See
+needs a `credential` and at least one `[[peer_channels]]` row, because role is decided by
+authentication _and_ a channel binding. A `credential` sets **exactly one** of `secret_file` (a
+path to the secret — what a deployed node uses, so the peering can live in a committed config) or
+`secret` (the literal). See
 [`docs/operators/btp-peer-transport-bringup.md`](docs/operators/btp-peer-transport-bringup.md).
 
 `[settlement]` configures one or more chains, in either of two shapes (issue #628) — Mina is out of
@@ -144,9 +144,9 @@ with no watermark accepts any nonce, which hands a client every claim it has alr
 as free service. Config load therefore **refuses** a file that sets `[[client_channels]]` without
 a `state_dir`, and startup refuses to boot at all if the directory cannot be written, naming the
 path. Two append-only files live there: `client-edge-claims.log` (claims accepted at `POST /ilp`)
-and `peer-claims.log` (the peer wire's own `ClaimBook`). Both are replayed before the node serves;
-a journal that cannot be read, or that carries a line this build cannot decode, is a refusal to
-start rather than a silent restart from zero.
+and `peer-claims.log` (the peer carriage's own `ClaimBook`). Both are replayed before the node
+serves; a journal that cannot be read, or that carries a line this build cannot decode, is a
+refusal to start rather than a silent restart from zero.
 
 In a container this must be a **mounted volume**, not a path in the writable layer — a watermark
 that dies with the container is the same defect one indirection down. The image runs as uid
@@ -190,7 +190,7 @@ end is software this repository does not ship
 ([ADR 0003](docs/adr/0003-clean-room-peer-wire-versioned-client-edge.md)). Six routes, all on
 `client_edge_addr`: the three below (`POST /ilp`, `GET /ilp/identity`, `GET /ilp/routes/price`),
 plus `POST /ilp/probe` (raises a `TOON-Accumulated-Cost` reject deliberately, for cost discovery),
-`GET /ilp/btp` (the BTP carriage's websocket upgrade, ADR 0027 — also where a peer rides this
+`GET /ilp/btp` (the BTP carriage's websocket upgrade, ADR 0027 — also where a BTP peer rides this
 listener, per [`docs/protocol/peer-carriage-spec.md`](docs/protocol/peer-carriage-spec.md)) and
 `POST /ilp/claim-state` (a bulk, signature-authenticated read of claim state for channels the
 caller controls). Full detail on all six:
@@ -316,7 +316,7 @@ them. `packages/solana-program` is excluded from the workspace gate and has its 
 | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [`CONTEXT.md`](CONTEXT.md)           | The vocabulary every doc here uses — connector, app, handler, packet, route, claim, watermark, exposure, fee, price, probe. Read this first.                                                                                                                                                                      |
 | [`docs/adr/`](docs/adr/)             | Numbered architecture decisions. Where an ADR and a spec disagree, the ADR wins.                                                                                                                                                                                                                                  |
-| [`docs/protocol/`](docs/protocol/)   | The client-edge and peer-wire specs, and the invariants behind the vectors.                                                                                                                                                                                                                                       |
+| [`docs/protocol/`](docs/protocol/)   | The client-edge, peer-carriage and peer-semantics specs, and the invariants behind the vectors.                                                                                                                                                                                                                   |
 | [`vectors/`](vectors/)               | `wire-vectors.json` — the cross-repo contract for `toon-client`, `rig` and `swap`. Generated, self-verified, and **normative**: prose is not ([ADR 0021](docs/adr/0021-vectors-are-normative-prose-is-not.md)). [`vectors/README.md`](vectors/README.md) documents it well enough to replay without reading Rust. |
 | [`docs/operators/`](docs/operators/) | The prefix-retirement checklist, and closed records. Note that `admin-api.md`, `admin-api-inventory.md` and `load-testing-guide.md` document the **retired** TypeScript connector and are banner-marked as such.                                                                                                  |
 
