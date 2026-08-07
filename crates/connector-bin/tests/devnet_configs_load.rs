@@ -140,6 +140,15 @@ const STORE_RUST_OVERLAY: &str =
 const STORE_ANNOUNCE_OVERLAY: &str =
     include_str!("../../../infra/linode-store/docker-compose.store.announce.yml");
 
+/// The relay box's two overlays (issue #843, repo half of #815), read here
+/// for the same property as the store's pair above: they bind-mount the
+/// SAME `connector-rust.toml`, so they must pin the same image tag. See
+/// [`relay_overlays_sharing_one_config_pin_one_image`].
+const RELAY_RUST_OVERLAY: &str =
+    include_str!("../../../infra/linode-relay/docker-compose.relay.rust.yml");
+const RELAY_ANNOUNCE_OVERLAY: &str =
+    include_str!("../../../infra/linode-relay/docker-compose.relay.announce.yml");
+
 /// This test binary's own base port for [`Anvil::spawn`] -- distinct from
 /// other test binaries' bases (`connector-settlement-evm`'s own tests use
 /// 18_600; `connector-cli`'s use 18_700/18_800) so that binaries running
@@ -881,23 +890,28 @@ fn the_apex_announcer_never_advertises_a_prefix_it_forwards() {
     }
 }
 
-/// Issue #841: `routes.store` in the kind:10032 announce is how a client
-/// finds where to upload -- it must name a prefix this node actually has a
-/// route for (terminated or forwarded), or every client that trusts it gets
-/// `F02 no route`. `routes.store` is DERIVED when `ANNOUNCER_ROUTE_STORE` is
-/// unset (`deriveRouteHints`, `packages/announcer/src/config.ts`): #833
-/// removed `g.toon.ario` from `ANNOUNCER_ILP_ADDRESSES`, which silently fired
-/// that derivation's fallback guess (`g.toon.relay` -> `g.toon.store`)
-/// instead of the pinned override this test now requires -- `g.toon.store`
-/// was retired from the apex's own route table entirely (2026-08-05), so the
-/// guess named a prefix nobody serves.
+/// Issue #841 (extended by #843 to cover `ANNOUNCER_ROUTE_PUBLISH` too):
+/// `routes.store`/`routes.publish` in the kind:10032 announce are how a
+/// client finds where to upload/publish -- each must name a prefix this
+/// node actually has a route for (terminated or forwarded), or every client
+/// that trusts it gets `F02 no route`. Both hints are DERIVED when their
+/// override env var is unset (`deriveRouteHints`,
+/// `packages/announcer/src/config.ts`), off whichever `.store`/`.ario` or
+/// `.relay` entry is in `ANNOUNCER_ILP_ADDRESSES` -- and derivation falls
+/// through to guessing one hint FROM the other when its own suffix is
+/// absent from that list. #833 removing `g.toon.ario` silently fired the
+/// store guess (`g.toon.relay` -> `g.toon.store`, issue #841); #843 removing
+/// `g.toon.relay` would just as silently fire the PUBLISH guess the other
+/// way (`g.toon.ario` -> `g.toon.relay`'s spot, i.e. `routes.publish =
+/// g.toon.ario`) if the override were left unset. Both are pinned overrides
+/// now, and this test covers both rather than just the one #841 caught.
 ///
 /// Asserted as a property over the apex's own committed route table rather
-/// than a literal `"g.toon.ario"` on both sides -- a test that hardcodes the
-/// same string twice passes even if both are wrong together, which is
-/// exactly the shape #839's test missed this in.
+/// than a literal on both sides -- a test that hardcodes the same string
+/// twice passes even if both are wrong together, which is exactly the shape
+/// #839's test missed this in.
 #[test]
-fn the_announced_route_store_names_a_prefix_the_apex_actually_routes() {
+fn the_announced_route_hints_name_prefixes_the_apex_actually_routes() {
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
     let peer_secret = write_peer_secret();
@@ -917,15 +931,20 @@ fn the_announced_route_store_names_a_prefix_the_apex_actually_routes() {
         .chain(config.peer_routes().iter().map(|r| r.prefix()))
         .collect();
 
-    let route_store = announcer_env(ANNOUNCER_OVERLAY, "ANNOUNCER_ROUTE_STORE");
-    assert!(
-        routed.iter().any(|prefix| *prefix == route_store),
-        "the announcer overlay's ANNOUNCER_ROUTE_STORE names `{route_store}`, \
-         which is not a prefix the apex's own committed connector-rust.toml \
-         routes at all (routed prefixes: {routed:?}) -- a client reading \
-         `routes.store` off the kind:10032 announce to find where to upload \
-         would get F02 no route. See issue #841"
-    );
+    for (env_key, announce_field) in [
+        ("ANNOUNCER_ROUTE_STORE", "routes.store"),
+        ("ANNOUNCER_ROUTE_PUBLISH", "routes.publish"),
+    ] {
+        let hint = announcer_env(ANNOUNCER_OVERLAY, env_key);
+        assert!(
+            routed.iter().any(|prefix| *prefix == hint),
+            "the announcer overlay's {env_key} names `{hint}`, which is not \
+             a prefix the apex's own committed connector-rust.toml routes at \
+             all (routed prefixes: {routed:?}) -- a client reading \
+             `{announce_field}` off the kind:10032 announce would get \
+             F02 no route. See issue #841/#843"
+        );
+    }
 }
 
 /// Issue #833's fix, terminating side: the store box announces
@@ -979,6 +998,80 @@ fn the_store_devnet_config_announces_g_toon_ario_under_its_own_identity() {
     );
 }
 
+/// Issue #843's core property, mirroring #833's for the store: the relay
+/// box's `[announce]` must claim ONLY prefixes it actually terminates.
+/// Asserted over the committed `[[routes]]` table rather than a literal
+/// `"g.toon.relay"` on both sides -- a test that hardcodes the same string
+/// twice passes when both are wrong together, which is exactly the shape
+/// that let #841 slip past #839's own test (see the module docs and
+/// [`the_apex_announcer_never_advertises_a_prefix_it_forwards`] above).
+#[test]
+fn the_relay_devnet_config_announces_only_prefixes_it_terminates() {
+    assert!(
+        RELAY_CONFIG.contains("[announce]"),
+        "the relay config must carry its own [announce] section -- issue #843"
+    );
+
+    let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let text = with_sandbox_settlement_keys(
+        &with_sandbox_paths(RELAY_CONFIG, key_file.path(), state_dir.path(), None),
+        key_file.path(),
+    );
+    let config_file = write_config(&text);
+    let config = Config::load(config_file.path()).expect("the committed relay config must parse");
+
+    let terminated: Vec<&str> = config.routes().iter().map(|r| r.prefix()).collect();
+    assert!(
+        !terminated.is_empty(),
+        "the relay config is expected to terminate at least `g.toon.relay` -- \
+         if that changed, this test's premise needs revisiting"
+    );
+
+    let announce = config
+        .announce()
+        .expect("the relay config's [announce] section must parse");
+    for address in announce.addresses() {
+        assert!(
+            terminated.iter().any(|prefix| prefix == address),
+            "the relay's [announce] addresses names `{address}`, which the \
+             relay's own committed connector-rust.toml does not terminate \
+             (terminated prefixes: {terminated:?}) -- announcing a prefix \
+             this box does not terminate is issue #833's exact defect \
+             reproduced on a new box: a client seals its gift wrap to this \
+             node's key and the node that actually holds it (whichever one \
+             that is) cannot open it"
+        );
+    }
+
+    assert_eq!(
+        announce.http_endpoint(),
+        "https://proxy.relay.devnet.toonprotocol.dev/ilp",
+        "the relay must advertise ITS OWN public edge"
+    );
+    assert_eq!(
+        announce.identity_key_file(),
+        None,
+        "the relay box has no prior publisher identity to carry over (issue \
+         #799 does not apply -- this box has never had a kind:10032 \
+         publisher of its own); it must sign with its own [signer]"
+    );
+    assert!(
+        announce.relay_url().is_some(),
+        "the relay box fronts a relay app (docker-compose.relay.yml) and \
+         must advertise it -- omitting relay_url would mean nobody ever \
+         hears about its free reads"
+    );
+    assert!(
+        announce.publish_to().is_none(),
+        "the relay's announce terminates its own prefix and runs \
+         --via-own-routing with an explicit --to on the command line \
+         (docker-compose.relay.announce.yml) -- a committed publish_to \
+         here would be dead config nothing reads, or worse, silently used \
+         if the compose command ever drops --to"
+    );
+}
+
 /// The `image:` tag every service in a compose overlay pins, read off the
 /// committed text -- [`route_price`]'s precedent again, and for the same
 /// reason: one line, no YAML dependency.
@@ -990,65 +1083,99 @@ fn pinned_connector_images(raw: &str) -> Vec<String> {
         .collect()
 }
 
-/// The store box's two overlays bind-mount the SAME `connector-rust.toml`,
-/// so they must pin the SAME image: the config file and the binary that
-/// reads it are one agreement, and `RawConfig` is `deny_unknown_fields`
-/// (issue #542). A binary older than a section the file carries does not
-/// ignore that section, it exits 1 -- so a stale pin in the announce
-/// overlay is not a broken sidecar, it is `docker compose up` recreating
-/// the SERVING `connector-rust` from a repo where the two disagree and
-/// taking the store's client edge down.
+/// A box's two overlays (the serving `connector-rust` and the scheduled
+/// `announce` loop) bind-mount the SAME `connector-rust.toml`, so they must
+/// pin the SAME image: the config file and the binary that reads it are one
+/// agreement, and `RawConfig` is `deny_unknown_fields` (issue #542). A
+/// binary older than a section the file carries does not ignore that
+/// section, it exits 1 -- so a stale pin in the announce overlay is not a
+/// broken sidecar, it is `docker compose up` recreating the SERVING
+/// `connector-rust` from a repo where the two disagree and taking that
+/// box's client edge down.
 ///
-/// This is the gate that was missing. `docker-compose.store.announce.yml`
-/// was first committed pinning `rust-sha-b31a7c9`, a tag published three
-/// hours BEFORE `[announce]` and the `connector announce` verb existed
-/// (09bc2299, issue #784) -- a config the binary refuses to load and a
-/// subcommand it does not have -- and every existing test passed, because
-/// nothing in this suite had any notion of an image tag. Asserted as
-/// agreement between the two files rather than against a literal tag so it
-/// does not need editing on every routine bump; what it refuses is the two
-/// DRIFTING, which is the only shape this failure comes in.
-#[test]
-fn store_overlays_sharing_one_config_pin_one_image() {
+/// This is the gate that was missing for the store's pair.
+/// `docker-compose.store.announce.yml` was first committed pinning
+/// `rust-sha-b31a7c9`, a tag published three hours BEFORE `[announce]` and
+/// the `connector announce` verb existed (09bc2299, issue #784) -- a config
+/// the binary refuses to load and a subcommand it does not have -- and
+/// every existing test passed, because nothing in this suite had any
+/// notion of an image tag. Asserted as agreement between the two files
+/// rather than against a literal tag so it does not need editing on every
+/// routine bump; what it refuses is the two DRIFTING, which is the only
+/// shape this failure comes in. Shared by the relay's own pair (issue
+/// #843) so the same defect cannot slip past a second time unnoticed.
+fn assert_overlays_sharing_one_config_pin_one_image(
+    box_label: &str,
+    rust_overlay: &str,
+    rust_overlay_name: &str,
+    announce_overlay: &str,
+    announce_overlay_name: &str,
+) {
     const CONFIG_MOUNT: &str = "./connector-rust.toml:/app/config/connector.toml";
 
-    for overlay in [STORE_RUST_OVERLAY, STORE_ANNOUNCE_OVERLAY] {
+    for (overlay, name) in [
+        (rust_overlay, rust_overlay_name),
+        (announce_overlay, announce_overlay_name),
+    ] {
         assert!(
             overlay.contains(CONFIG_MOUNT),
-            "this test's premise is that both store overlays mount the SAME \
-             `{CONFIG_MOUNT}` -- one of them no longer does, so the \
+            "this test's premise is that both {box_label} overlays mount the \
+             SAME `{CONFIG_MOUNT}` -- {name} no longer does, so the \
              agreement it asserts needs rethinking rather than silently \
              holding"
         );
     }
 
-    let serving = pinned_connector_images(STORE_RUST_OVERLAY);
-    let announcing = pinned_connector_images(STORE_ANNOUNCE_OVERLAY);
+    let serving = pinned_connector_images(rust_overlay);
+    let announcing = pinned_connector_images(announce_overlay);
     assert_eq!(
         serving.len(),
         1,
-        "docker-compose.store.rust.yml is expected to pin exactly one connector image"
+        "{rust_overlay_name} is expected to pin exactly one connector image"
     );
     assert_eq!(
         announcing.len(),
         1,
-        "docker-compose.store.announce.yml is expected to pin exactly one connector image"
+        "{announce_overlay_name} is expected to pin exactly one connector image"
     );
     assert_eq!(
         announcing[0], serving[0],
-        "docker-compose.store.announce.yml pins `{}` while \
-         docker-compose.store.rust.yml pins `{}`, and both mount the same \
-         connector-rust.toml. The older of the two decides what that file \
-         may contain: `deny_unknown_fields` makes an unrecognized section a \
-         refuse-to-start, not a warning. Bump the stale one -- do not add a \
-         second config",
+        "{announce_overlay_name} pins `{}` while {rust_overlay_name} pins \
+         `{}`, and both mount the same connector-rust.toml. The older of the \
+         two decides what that file may contain: `deny_unknown_fields` makes \
+         an unrecognized section a refuse-to-start, not a warning. Bump the \
+         stale one -- do not add a second config",
         announcing[0], serving[0]
     );
     assert!(
         serving[0].starts_with("rust-sha-"),
-        "the store overlays must pin an immutable `rust-sha-` tag, never a \
-         floating one (`rust-main`): a floating tag makes the agreement \
-         above unfalsifiable"
+        "the {box_label} overlays must pin an immutable `rust-sha-` tag, \
+         never a floating one (`rust-main`): a floating tag makes the \
+         agreement above unfalsifiable"
+    );
+}
+
+#[test]
+fn store_overlays_sharing_one_config_pin_one_image() {
+    assert_overlays_sharing_one_config_pin_one_image(
+        "store",
+        STORE_RUST_OVERLAY,
+        "docker-compose.store.rust.yml",
+        STORE_ANNOUNCE_OVERLAY,
+        "docker-compose.store.announce.yml",
+    );
+}
+
+/// The relay's own pair (issue #843), same property as the store's above --
+/// see [`assert_overlays_sharing_one_config_pin_one_image`].
+#[test]
+fn relay_overlays_sharing_one_config_pin_one_image() {
+    assert_overlays_sharing_one_config_pin_one_image(
+        "relay",
+        RELAY_RUST_OVERLAY,
+        "docker-compose.relay.rust.yml",
+        RELAY_ANNOUNCE_OVERLAY,
+        "docker-compose.relay.announce.yml",
     );
 }
 

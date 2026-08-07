@@ -63,6 +63,61 @@ state_dir = "/app/state"
 [signer]
 key_file = "/app/data/signer.key"
 
+# ── Announce (issue #843, repo half of #815) ────────────────────────────────
+# This box's own kind:10032 publisher, so `g.toon.relay` is discoverable
+# under THIS node's identity -- the same `[signer]` key that answers `GET
+# /ilp/identity` and opens every gift wrap this node terminates (ADR 0018).
+# Mirrors the store's own publisher (issue #833,
+# infra/linode-store/connector-rust.toml's [announce] section), which fixed
+# the identical defect for `g.toon.ario`: a stock client that reads an
+# announce published under a FORWARDER's identity seals its gift wrap to a
+# key the TERMINATING node does not hold, pays at the client edge, and is
+# refused `F01 gift wrap could not be opened` -- after the money is spent.
+#
+# `identity_key_file` is deliberately ABSENT, for the same reason the store's
+# is: this box has never had a kind:10032 publisher of its own (no sidecar,
+# no prior `connector announce`), and the genesis peer seed pins the g.toon
+# proxy's announcer pubkey, not this box's. Announcing under this node's own
+# `[signer]` is correct from the start and strands nobody.
+#
+# Unlike the store, `relay_url` IS set here: this box fronts the relay app
+# (docker-compose.relay.yml's `relay` service, port 7100 behind this box's
+# own nginx) and genuinely serves free reads, so the announce says so.
+# `relay-ws.devnet.toonprotocol.dev` is this box's OWN nginx's name for that
+# service (./nginx/conf.d/node.conf) -- the same public name the apex's
+# announcer sidecar advertises today (`ANNOUNCER_RELAY_PUBLIC_URL`,
+# infra/linode-node/docker-compose.node.announcer.yml), which still resolves
+# to the apex box until the DNS move (#815 constraint 4, #820/#821 --
+# NOT this file's scope, and NOT done by committing this section).
+#
+# `publish_to`, `publish_btp_url` and `pay_channel` are all deliberately
+# ABSENT -- and unlike the store's omissions above, this is not "not yet
+# provisioned", it is "does not apply". Those three fields describe PAYING
+# THROUGH somebody else's client edge to reach a prefix this node does not
+# terminate (the store's shape: it announces `g.toon.ario` by paying the
+# g.toon proxy, which does not terminate that prefix either). This node
+# terminates `g.toon.relay` itself (see `[[routes]]` below), so its
+# scheduled announce (docker-compose.relay.announce.yml) runs
+# `--via-own-routing --to g.toon.relay` against its OWN client edge instead
+# of the default pay-the-URL path -- the packet is handed straight to this
+# node's own `handle_prepare` rather than to `pay_the_through_url`
+# (`crates/connector-cli/src/announce.rs`'s `via_own_routing` branch), so it
+# never leaves this process: there is nobody to pay and no through-address to
+# name. Per docs/operators/announcing-a-node.md's "Routing it yourself",
+# `--via-own-routing` replaces the funded-channel requirement with "a
+# [[routes]] entry reaching the destination", which this file already has.
+#
+# This is also why this section needs no `[[peer_channels]]` row: that table
+# funds the apex<->relay PEERING (issue #820, live/human, not yet open --
+# see this file's own header above), which is a separate fact from this
+# announce and is not invented here. Do not add a placeholder channel id to
+# make this section "complete" -- there is nothing for one to pay.
+[announce]
+addresses     = ["g.toon.relay"]
+http_endpoint = "https://proxy.relay.devnet.toonprotocol.dev/ilp"
+btp_endpoint  = "wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp"
+relay_url     = "wss://relay-ws.devnet.toonprotocol.dev"
+
 # ── Routes ─────────────────────────────────────────────────────────────────
 
 [[routes]]

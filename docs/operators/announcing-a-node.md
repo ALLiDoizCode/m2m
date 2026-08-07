@@ -240,6 +240,51 @@ that window finds no route to the prefix at all — the same outage the stopgap 
 publishers overlapping for a few minutes is the _safe_ direction to be wrong in; zero publishers is
 not.
 
+### Cutting `g.toon.relay` over: the relay box's own publisher (issue #843)
+
+Same shape as the `g.toon.ario` cutover above, with one simplification: the relay box's publisher
+pays **itself** (`--via-own-routing`, since it terminates `g.toon.relay` directly), so there is no
+channel to fund first — the `[[routes]]` entry that replaces requirements (1)/(2) of "What the node
+needs before this can work" is already committed, and `[announce] pay_channel` is not needed at all.
+Requirement (4) does not apply either, even though that route is pinned to `transport = "btp"`: the
+transport policy is enforced at the client edge, and this packet is handed to the node's own routing
+without crossing it. See `infra/linode-relay/connector-rust.toml`'s `[announce]` section for the
+fuller argument.
+
+1. **RELAY box — bring the publisher up**:
+
+   ```
+   docker compose -f infra/linode-relay/docker-compose.relay.yml \
+                  -f infra/linode-relay/docker-compose.relay.rust.yml \
+                  -f infra/linode-relay/docker-compose.relay.announce.yml \
+                  up -d announce
+   ```
+
+   Then read `docker compose logs announce`. `[announce] OK` is the only line that means published;
+   `[announce] FAILED rc=…` names the reason and the loop retries on the next tick.
+
+2. **VERIFY on the relay, not in the logs.** Query the relay for a kind:10032 whose author is the
+   **relay box's own** pubkey — the one `GET /ilp/identity` on that box answers with — and confirm
+   the event names `g.toon.relay`. Read its `ilpAddress`, not `ilpAddresses`: a single-address
+   announce omits the plural field entirely (`ilpAddresses.length > 1`), so grepping for the list is
+   how a correct event reads as a failure. A published event under the right key is the only evidence
+   that counts, exactly as in the `g.toon.ario` case above.
+3. **ONLY THEN, APEX box — retire the stopgap**: deploy the announcer overlay with `g.toon.relay`
+   already dropped from `ANNOUNCER_ILP_ADDRESSES` (issue #843) and restart the sidecar so the new
+   value is read. Keep `ANNOUNCER_ROUTE_STORE` **and** the new `ANNOUNCER_ROUTE_PUBLISH` pinned while
+   doing so — both hints are **derived** from the address list when their override is unset, and
+   dropping `g.toon.relay` from that list without pinning `ANNOUNCER_ROUTE_PUBLISH` silently repoints
+   `routes.publish` at the store hint instead (the same class of trap issue #841 hit from the other
+   direction). `ANNOUNCER_PROBE_ROUTES` is pinned in the same commit and is load-bearing for the same
+   reason: it defaults to the address list, and a probe of the bare `g.toon` prefix — which no route
+   serves — is skipped silently, dropping `routePrices` and every settlement field from the event.
+
+**Doing step 3 before step 2 leaves `g.toon.relay` announced by nobody**, for the same reason as the
+`g.toon.ario` case: the apex is still the box that actually _terminates_ `g.toon.relay` today (the
+peering forward is issue #820, not yet live), so this cutover only changes **which identity**
+announces it — but the window between "apex stops" and "relay box confirmed publishing" is still a
+real outage if it is skipped.
+
 ## When it refuses to run beside a serving node
 
 A node's outbound peer-claim ledger is replayed from `state_dir`'s journal at startup and held in
