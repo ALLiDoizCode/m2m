@@ -79,7 +79,20 @@ services:
     # re-pinned to an image built from #605 or later BEFORE (or in the same
     # `up -d` as) that file reaches a box. An older image reads `state_dir`
     # as an unknown top-level key and exits 1 on config load.
-    image: ghcr.io/toon-protocol/connector:rust-sha-33f10e2
+    #
+    # PIN OF RECORD (issue #848): this repo's infra compose files are the
+    # fleet's pin of record -- the live boxes follow them, not the reverse.
+    # Bumped from `rust-sha-33f10e2` (what all three boxes still run as of
+    # this change) to `rust-sha-440eab7` because 33f10e2 predates the
+    # announce-identity fixes (#833/#839) that #848 requires the pin of
+    # record to carry; 440eab7 is their own merge commit, so it is the
+    # earliest tag that qualifies (`git merge-base --is-ancestor
+    # 440eab7b9ff610fb4914d65bb5cbbacb84f2a7ae <this-tag's-sha>`). This is a
+    # forward move on every box, not a rollback -- the boxes have not moved
+    # yet; that cutover is a separate, human-gated ticket. See
+    # `crates/connector-bin/tests/devnet_configs_load.rs`'s
+    # `EXPECTED_CONNECTOR_TAG` for the single place this decision is recorded.
+    image: ghcr.io/toon-protocol/connector:rust-sha-440eab7
     volumes:
       - ./connector-rust.toml:/app/config/connector.toml:ro
       - ./signer-rust.key:/app/data/signer.key:ro

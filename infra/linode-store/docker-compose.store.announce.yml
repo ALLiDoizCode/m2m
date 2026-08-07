@@ -106,21 +106,32 @@ services:
     # `connector-rust` from a repo where the two disagree takes the store's
     # client edge down with it.
     #
-    # `rust-sha-33f10e2` is the floor AND the tag both devnet boxes run.
-    # `[announce]` and the `connector announce` verb itself
-    # (`ANNOUNCE_VERB`, connector-cli/src/lib.rs) both arrived in 09bc2299
-    # (#784, 2026-08-05 16:54); 33f10e2 (18:26) is its descendant. Anything
-    # older -- notably `rust-sha-b31a7c9` (13:04), which this file was first
-    # authored against -- has neither: the config refuses to load, and the
-    # command line below is misparsed as `connector <config-file>` against a
-    # file literally named `announce`.
+    # `rust-sha-33f10e2` was the floor AND the tag both devnet boxes run as of
+    # this comment's prior revision. `[announce]` and the `connector announce`
+    # verb itself (`ANNOUNCE_VERB`, connector-cli/src/lib.rs) both arrived in
+    # 09bc2299 (#784, 2026-08-05 16:54); 33f10e2 (18:26) is its descendant.
+    # Anything older -- notably `rust-sha-b31a7c9` (13:04), which this file
+    # was first authored against -- has neither: the config refuses to load,
+    # and the command line below is misparsed as `connector <config-file>`
+    # against a file literally named `announce`.
     #
     # `devnet_configs_load.rs`'s
     # `store_overlays_sharing_one_config_pin_one_image` asserts the agreement
     # between the two overlays, so they cannot drift apart again unnoticed --
     # nothing in that suite had any notion of an image tag before, which is
     # why `rust-sha-b31a7c9` sailed through a green gate.
-    image: ghcr.io/toon-protocol/connector:rust-sha-33f10e2
+    #
+    # PIN OF RECORD (issue #848): bumped past that floor to `rust-sha-440eab7`
+    # -- the earliest tag carrying the announce-identity fixes this very
+    # overlay exists to deploy (#833/#839; 440eab7 is their own merge commit).
+    # The store box itself still runs `rust-sha-33f10e2` as of this change --
+    # this repo's compose files are the fleet's pin of record and lead the
+    # boxes, not the reverse (#848 is a repo-only change; the cutover is
+    # separate and human-gated). See
+    # infra/linode-node/docker-compose.node.rust.yml's matching comment and
+    # `EXPECTED_CONNECTOR_TAG` in
+    # crates/connector-bin/tests/devnet_configs_load.rs.
+    image: ghcr.io/toon-protocol/connector:rust-sha-440eab7
     # `$$` throughout: compose interpolates a bare `$VAR`/`${VAR}` in this
     # file's own text against the HOST's environment at `up` time, same as
     # the nginx/certbot reload loops elsewhere in this fleet

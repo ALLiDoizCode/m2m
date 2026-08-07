@@ -87,7 +87,16 @@ services:
     # equivalent guard is what caught a three-hours-too-old pin sailing
     # through a green gate the first time this shape was written, issue
     # #833's review).
-    image: ghcr.io/toon-protocol/connector:rust-sha-33f10e2
+    #
+    # PIN OF RECORD (issue #848): bumped from `rust-sha-33f10e2` (what the
+    # relay box still runs as of this change) to `rust-sha-440eab7` -- the
+    # earliest tag carrying the announce-identity fixes this very overlay
+    # exists to deploy (#833/#839; 440eab7 is their own merge commit). Not
+    # yet deployed to the box -- this repo's compose files are the fleet's
+    # pin of record and lead the boxes, not the reverse. See
+    # `EXPECTED_CONNECTOR_TAG` in
+    # crates/connector-bin/tests/devnet_configs_load.rs.
+    image: ghcr.io/toon-protocol/connector:rust-sha-440eab7
     # `$$` throughout: compose interpolates a bare `$VAR`/`${VAR}` in this
     # file's own text against the HOST's environment at `up` time -- `$$` is
     # what survives that pass as a literal `$`, so the shell below sees it,

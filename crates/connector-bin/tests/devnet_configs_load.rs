@@ -131,6 +131,14 @@ const RELAY_CONFIG: &str = include_str!("../../../infra/linode-relay/connector-r
 const ANNOUNCER_OVERLAY: &str =
     include_str!("../../../infra/linode-node/docker-compose.node.announcer.yml");
 
+/// The apex's own Rust overlay (issue #490), read here for
+/// [`every_fleet_overlay_pins_the_connector_repos_pin_of_record`] -- the
+/// apex has no `announce` overlay of its own (it still announces through
+/// `packages/announcer`'s sidecar as of issue #848), so this is its only
+/// `image:` pin.
+const APEX_RUST_OVERLAY: &str =
+    include_str!("../../../infra/linode-node/docker-compose.node.rust.yml");
+
 /// The store box's two overlays, read here for one property they must share
 /// and which nothing else in this suite could see: they bind-mount the SAME
 /// `connector-rust.toml`, so they must pin the same image tag. See
@@ -1687,4 +1695,72 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
     let text = with_sandbox_paths(&text, key_file.path(), state_dir.path(), None);
 
     drop(boot(&text));
+}
+
+/// The fleet's **pin of record** (issue #848). This repo's infra compose
+/// files decide which `connector` image the fleet runs -- the boxes follow
+/// them, not the reverse -- and before #848 they did not agree with each
+/// other: the apex/relay overlays pinned `rust-sha-b31a7c9`, the store's
+/// pinned whatever it was last hand-edited to, and none of that matched what
+/// the live boxes were actually running by hand (`rust-sha-33f10e2`).
+///
+/// The value is a literal, not something derived from `git`, for the same
+/// reason every other `EXPECTED_*` constant in this module is: `cargo test`
+/// may run from a shallow checkout with no history for `git merge-base` to
+/// walk, and a value read back out of the files under test would keep
+/// passing if one of them regressed. The evidence for THIS literal was
+/// gathered once, by hand, and is recorded here rather than only in a PR
+/// diff:
+///
+/// - `rust-sha-440eab7` is `440eab7b9ff610fb4914d65bb5cbbacb84f2a7ae`, the
+///   merge commit for issue #839 (which folds in #833's revised
+///   deliverable) -- so it trivially carries both fixes; it is its own
+///   evidence.
+/// - It is the EARLIEST tag that qualifies: the fleet's prior floor,
+///   `rust-sha-33f10e2`, predates both (`git merge-base --is-ancestor
+///   33f10e2... 440eab7b...` -- 33f10e2 is an ancestor of, and strictly
+///   before, 440eab7b).
+/// - `git merge-base --is-ancestor 440eab7b9ff610fb4914d65bb5cbbacb84f2a7ae
+///   HEAD` succeeds as of this change, confirming the tag's commit is on
+///   `main`.
+///
+/// This is a forward move on every box, not yet deployed anywhere -- see
+/// each overlay's own "PIN OF RECORD (issue #848)" comment. Re-pin here
+/// FIRST on any future bump; the compose files below are asserted to agree
+/// with this constant, not the other way around.
+const EXPECTED_CONNECTOR_TAG: &str = "rust-sha-440eab7";
+
+/// Every `image:` pin this suite can see across the three-box fleet must
+/// name [`EXPECTED_CONNECTOR_TAG`] -- the property #848 exists to hold.
+/// Asserted against the literal (not merely "the five agree with each
+/// other", which [`store_overlays_sharing_one_config_pin_one_image`] and
+/// [`relay_overlays_sharing_one_config_pin_one_image`] already cover) so
+/// that all five silently drifting to some OTHER shared tag still fails --
+/// the exact shape #848's own investigation found (three artifacts, three
+/// different tags, none of them what the boxes ran).
+#[test]
+fn every_fleet_overlay_pins_the_connector_repos_pin_of_record() {
+    let overlays: &[(&str, &str)] = &[
+        ("docker-compose.node.rust.yml", APEX_RUST_OVERLAY),
+        ("docker-compose.store.rust.yml", STORE_RUST_OVERLAY),
+        ("docker-compose.store.announce.yml", STORE_ANNOUNCE_OVERLAY),
+        ("docker-compose.relay.rust.yml", RELAY_RUST_OVERLAY),
+        ("docker-compose.relay.announce.yml", RELAY_ANNOUNCE_OVERLAY),
+    ];
+
+    for (name, overlay) in overlays {
+        let pins = pinned_connector_images(overlay);
+        assert_eq!(
+            pins.len(),
+            1,
+            "{name} is expected to pin exactly one connector image"
+        );
+        assert_eq!(
+            pins[0], EXPECTED_CONNECTOR_TAG,
+            "{name} pins `{}`, expected the fleet's pin of record \
+             `{EXPECTED_CONNECTOR_TAG}` (issue #848) -- every connector \
+             image reference under infra/ must name the same tag",
+            pins[0]
+        );
+    }
 }
