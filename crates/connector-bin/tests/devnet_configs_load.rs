@@ -286,7 +286,7 @@ fn with_sandbox_paths(
         "client_edge_addr = \"0.0.0.0:4000\"",
         "client_edge_addr = \"127.0.0.1:0\"",
     );
-    let replaced = replace_expecting_a_match(
+    let mut replaced = replace_expecting_a_match(
         &replaced,
         "state_dir = \"/app/state\"",
         &format!("state_dir = \"{}\"", state_dir.display()),
@@ -304,7 +304,6 @@ fn with_sandbox_paths(
     // final assertion instead checks no OTHER `secret_file` survived, so a
     // config that grows a peering without its caller here being taught about
     // it fails loudly instead of silently booting with a foreign secret path.
-    let mut replaced = replaced;
     for (file_name, secret_path) in peer_secrets {
         replaced = replace_expecting_a_match(
             &replaced,
@@ -813,6 +812,15 @@ fn the_forwarded_store_leg_delivers_exactly_the_far_ends_price() {
          the same as `g.toon.ario` -- it is the relay-hop spelling of the \
          same forward, not a separate route"
     );
+    // The fees too, not just the prices: the arithmetic above is only a proof
+    // about the far end's takings if `fee` is what the files actually say.
+    for prefix in ["g.toon.ario", "g.toon.relay.ario"] {
+        assert_eq!(
+            route_fee(APEX_CONFIG, prefix),
+            EXPECTED_APEX_FORWARD_FEE,
+            "the apex must retain {EXPECTED_APEX_FORWARD_FEE} on `{prefix}`"
+        );
+    }
 }
 
 /// ADR 0028's arithmetic, for the `g.toon.relay` leg (issue #820): what the
@@ -845,15 +853,42 @@ fn the_forwarded_relay_leg_delivers_exactly_the_far_ends_price() {
         route_price(RELAY_CONFIG, "g.toon.relay"),
         EXPECTED_RELAY_PRICE
     );
+    // The zero is the whole decision on this leg, so it is asserted against
+    // the file rather than left to `fee`'s default: an apex that quietly grew
+    // a carriage margin here would forward `1 - fee < 1` and F03 every write,
+    // and every assertion above it would still pass.
+    assert_eq!(
+        route_fee(APEX_CONFIG, "g.toon.relay"),
+        EXPECTED_RELAY_FORWARD_FEE,
+        "the apex must state `fee = 0` on its `g.toon.relay` forward"
+    );
 }
 
-/// The `price` of the `[[routes]]` entry whose `prefix` matches, read from
-/// the committed text rather than from a loaded `Config` so this works
-/// without the settlement legs the loader would insist on reaching.
+/// The `price` of the `[[routes]]` entry whose `prefix` matches.
 fn route_price(raw: &str, prefix: &str) -> u64 {
+    route_field(raw, prefix, "price")
+}
+
+/// The `fee` of the `[[routes]]` entry whose `prefix` matches. A route that
+/// states no `fee` panics rather than reporting the default `0`: both callers
+/// assert a fee the committed file must say out loud, and `g.toon.relay`'s
+/// zero in particular is an owner decision (`docs/devnet-pricing.md`), not
+/// something that may drift in by omission.
+fn route_fee(raw: &str, prefix: &str) -> u64 {
+    route_field(raw, prefix, "fee")
+}
+
+/// The numeric `key` of the `[[routes]]` entry whose `prefix` matches, read
+/// from the committed text rather than from a loaded `Config` so this works
+/// without the settlement legs the loader would insist on reaching.
+///
+/// The scan gives up at the next table header of any kind, not just the next
+/// `[[routes]]`, so a route that omits `key` panics instead of silently
+/// answering with a LATER route's value.
+fn route_field(raw: &str, prefix: &str, key: &str) -> u64 {
     let mut in_route = false;
     for line in raw.lines().map(str::trim) {
-        if line == "[[routes]]" {
+        if line.starts_with('[') {
             in_route = false;
             continue;
         }
@@ -862,12 +897,14 @@ fn route_price(raw: &str, prefix: &str) -> u64 {
             continue;
         }
         if in_route {
-            if let Some(value) = line.strip_prefix("price = ") {
-                return value.parse().expect("a numeric price");
+            if let Some(value) = line.strip_prefix(&format!("{key} = ")) {
+                return value
+                    .parse()
+                    .unwrap_or_else(|_| panic!("a numeric `{key}`"));
             }
         }
     }
-    panic!("no priced `{prefix}` route in the committed config text");
+    panic!("no `{key}` on a `{prefix}` route in the committed config text");
 }
 
 /// The new ERC-2771 `TokenNetwork` (#695/#811) the apex<->store

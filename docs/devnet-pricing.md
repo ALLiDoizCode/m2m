@@ -12,15 +12,15 @@ across EVM/Solana/Mina, not a TypeScript-only asset config). So `1000` is
 
 ## The table
 
-| Route                                                        | Price    | Fee   | Where                                    | Guarded by                                |
-| ------------------------------------------------------------ | -------- | ----- | ---------------------------------------- | ----------------------------------------- |
-| apex `g.toon.relay` — forward, over the apex↔relay peering\* | **1**    | **0** | `infra/linode-node/connector-rust.toml`  | `EXPECTED_RELAY_FORWARD_PRICE` / `_FEE`   |
-| relay `g.toon.relay` — terminate, BTP-only                   | **1**    | —     | `infra/linode-relay/connector-rust.toml` | `EXPECTED_RELAY_PRICE`                    |
-| apex `g.toon.ario` — forward to store                        | **1002** | 2     | `infra/linode-node/connector-rust.toml`  | `EXPECTED_APEX_FORWARD_PRICE` / `_FEE`    |
-| apex `g.toon.relay.ario` — forward to store                  | **1002** | 2     | `infra/linode-node/connector-rust.toml`  | (repair of the divergence recorded below) |
-| store `g.toon.ario` — terminate                              | **1000** | —     | `infra/linode-store/connector-rust.toml` | `EXPECTED_STORE_PRICE`                    |
-| store `g.toon.relay.ario` — terminate                        | **1000** | —     | `infra/linode-store/connector-rust.toml` | `EXPECTED_STORE_PRICE`                    |
-| store `announcePrice`                                        | **2000** | —     | `infra/linode-store/connector.yaml`      | —                                         |
+| Route                                                        | Price    | Fee   | Where                                    | Guarded by                              |
+| ------------------------------------------------------------ | -------- | ----- | ---------------------------------------- | --------------------------------------- |
+| apex `g.toon.relay` — forward, over the apex↔relay peering\* | **1**    | **0** | `infra/linode-node/connector-rust.toml`  | `EXPECTED_RELAY_FORWARD_PRICE` / `_FEE` |
+| relay `g.toon.relay` — terminate, BTP-only                   | **1**    | —     | `infra/linode-relay/connector-rust.toml` | `EXPECTED_RELAY_PRICE`                  |
+| apex `g.toon.ario` — forward to store                        | **1002** | 2     | `infra/linode-node/connector-rust.toml`  | `EXPECTED_APEX_FORWARD_PRICE` / `_FEE`  |
+| apex `g.toon.relay.ario` — forward to store                  | **1002** | 2     | `infra/linode-node/connector-rust.toml`  | `EXPECTED_APEX_FORWARD_PRICE` / `_FEE`  |
+| store `g.toon.ario` — terminate                              | **1000** | —     | `infra/linode-store/connector-rust.toml` | `EXPECTED_STORE_PRICE`                  |
+| store `g.toon.relay.ario` — terminate                        | **1000** | —     | `infra/linode-store/connector-rust.toml` | `EXPECTED_STORE_PRICE`                  |
+| store `announcePrice`                                        | **2000** | —     | `infra/linode-store/connector.yaml`      | —                                       |
 
 \* Repo-side only as of #820's own PR. The apex's `transport = "btp"` local terminate route (a
 `handler_url` route to `relay:3100`) is what the two LIVE boxes still run today, because the live
