@@ -31,29 +31,40 @@ services:
       ANNOUNCER_RUST_EDGE_URL: http://connector-rust:4000
       ANNOUNCER_RELAY_URLS: http://relay:3100
       ANNOUNCER_RELAY_PUBLIC_URL: wss://relay-ws.devnet.toonprotocol.dev
-      # `g.toon.ario` added 2026-08-05 — a STOPGAP for a live outage, see below.
+      # `g.toon.ario` RETIRED from this list 2026-08-07 (issue #833). It was
+      # added 2026-08-05 as a STOPGAP for a live outage: the store box had no
+      # kind:10032 publisher of its own, so this sidecar announced
+      # `g.toon.ario` under the g.toon PROXY's identity instead, on the
+      # (recorded, at the time judged acceptable) theory that nothing
+      # discovers a node by an identity it never advertised.
       #
-      # The store box has had NO kind:10032 publisher since its TypeScript
-      # connector exited at 2026-08-04T19:24:29Z. That connector's
-      # `selfAnnounce` block was the publisher; the Rust connector has no
-      # equivalent and will not get one. So `g.toon.ario` — the prefix a
-      # shipped client actually dials (buzz pins it in compiled code) — has
-      # been undiscoverable ever since.
+      # That theory was wrong. A stock client reads a kind:10032 announce and
+      # seals its gift wrap to the SINGLE `edgeIdentity` it carries --
+      # whichever node published it, not whichever node actually terminates
+      # each address inside it. `g.toon.ario` is FORWARDED across the g.toon
+      # proxy<->store peering (ADR 0028, #772), not terminated here, so a
+      # client following this stopgap sealed to the proxy's key, paid at the
+      # client edge, and was refused `F01 gift wrap could not be opened` at
+      # the store -- the terminating connector, which actually holds the key
+      # ADR 0018 requires the wrap be sealed to. The money was already spent.
+      # See issue #833 for the full trace.
       #
-      # Announcing it HERE is honest rather than a fudge: since #772 the
-      # g.toon proxy FORWARDS g.toon.ario across the g.toon proxy<->store
-      # peering, so the endpoint this announce advertises really is where a
-      # client should send that traffic. It pays this edge 1002, this hop
-      # keeps 2, and 1000 reaches the store box (ADR 0028).
+      # The fix is not "keep the stopgap and hope nothing reads it" -- #833
+      # also gives the store box its OWN publisher
+      # (infra/linode-store/connector-rust.toml's `[announce]` section +
+      # docker-compose.store.announce.yml), announcing `g.toon.ario` under
+      # the store's own `[signer]` identity, the one gift wraps to that
+      # prefix are actually sealed against. Two announces claiming one prefix
+      # under two different identities is the SAME failure mode traded into a
+      # different shape (which announce a client's cache keeps is then
+      # ambiguous), so removing this stopgap has to land in the same change
+      # as the store's own publisher landing, not stay a "later" cleanup.
       #
-      # What it does NOT restore: an announce under the STORE's own pubkey.
-      # A client discovering by that identity still finds nothing. Nothing was
-      # found that discovers that way, which is why this is judged sufficient
-      # as a stopgap.
-      #
-      # It is a stopgap. #784 is the real answer: a `connector announce`
-      # subcommand run FROM the node being announced, paying like any other
-      # client, identity key never moving. This whole sidecar retires with it.
+      # #784 is still the long-run answer for `g.toon`/`g.toon.relay` too: a
+      # `connector announce` subcommand run FROM the node being announced.
+      # This sidecar remains for those two -- both genuinely terminated here
+      # -- until that retirement happens; see the RETIRING THIS SIDECAR note
+      # below.
       #
       # RETIRING THIS SIDECAR (issue #799): the genesis peer seed pins the
       # pubkey ANNOUNCER_IDENTITY_SECRET_KEY_FILE below produces, so before
@@ -63,7 +74,7 @@ services:
       # Skipping that carries the announce over under a NEW pubkey instead,
       # the seed goes stale, and every client bootstrapping from it fails
       # with `EOSE, found 0 events` -- see docs/operators/announcing-a-node.md.
-      ANNOUNCER_ILP_ADDRESSES: g.toon,g.toon.relay,g.toon.ario
+      ANNOUNCER_ILP_ADDRESSES: g.toon,g.toon.relay
       # NOTE: these two publish the `/rust/` path — the disposable artifact
       # ADR 0013 says "nothing durable should be published against". Phase 7
       # of the cutover plan repoints them at /ilp and /ilp/btp once the Rust

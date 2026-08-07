@@ -111,7 +111,7 @@ use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 
 use chrono::{Duration as ChronoDuration, Utc};
-use connector_config::{Config, SettlementConfig};
+use connector_config::{Config, SettlementConfig, TransportPolicy};
 use connector_domain::{derive_condition, EnvelopeRequest, Prepare};
 use connector_settlement_evm::test_support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
 use connector_settlement_evm::EvmSettlementBackend;
@@ -122,6 +122,23 @@ use support::{parse_json_log_addr, write_config, write_raw_key_file};
 const APEX_CONFIG: &str = include_str!("../../../infra/linode-node/connector-rust.toml");
 const STORE_CONFIG: &str = include_str!("../../../infra/linode-store/connector-rust.toml");
 const RELAY_CONFIG: &str = include_str!("../../../infra/linode-relay/connector-rust.toml");
+
+/// The apex's announcer sidecar overlay (issue #833) -- committed separately
+/// from `APEX_CONFIG` because it configures a different process
+/// (`packages/announcer`, not the connector binary this module otherwise
+/// boots), but read here for the one property test that ties the two
+/// together: [`the_apex_announcer_never_advertises_a_prefix_it_forwards`].
+const ANNOUNCER_OVERLAY: &str =
+    include_str!("../../../infra/linode-node/docker-compose.node.announcer.yml");
+
+/// The store box's two overlays, read here for one property they must share
+/// and which nothing else in this suite could see: they bind-mount the SAME
+/// `connector-rust.toml`, so they must pin the same image tag. See
+/// [`store_overlays_sharing_one_config_pin_one_image`].
+const STORE_RUST_OVERLAY: &str =
+    include_str!("../../../infra/linode-store/docker-compose.store.rust.yml");
+const STORE_ANNOUNCE_OVERLAY: &str =
+    include_str!("../../../infra/linode-store/docker-compose.store.announce.yml");
 
 /// This test binary's own base port for [`Anvil::spawn`] -- distinct from
 /// other test binaries' bases (`connector-settlement-evm`'s own tests use
@@ -773,6 +790,282 @@ fn route_price(raw: &str, prefix: &str) -> u64 {
         }
     }
     panic!("no priced `{prefix}` route in the committed config text");
+}
+
+/// The `ANNOUNCER_ILP_ADDRESSES` CSV value the apex's announcer sidecar
+/// overlay commits, parsed from its own text -- matching [`route_price`]'s
+/// precedent of reading a config-shape assertion straight off the committed
+/// line rather than pulling in a YAML parser for one env var.
+///
+/// Each entry is trimmed individually, not just the value as a whole: YAML
+/// accepts `g.toon, g.toon.relay` for the same list, and an untrimmed
+/// ` g.toon.relay` would compare unequal to the route prefix it names --
+/// which would let the property test below pass over exactly the announce
+/// it exists to refuse.
+fn announcer_ilp_addresses(raw: &str) -> Vec<String> {
+    let line = raw
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("ANNOUNCER_ILP_ADDRESSES:"))
+        .expect("the announcer overlay must set ANNOUNCER_ILP_ADDRESSES");
+    line.split(',')
+        .map(|address| address.trim().to_string())
+        .collect()
+}
+
+/// Issue #833's core property: this node must never advertise, under its
+/// OWN identity, an address it FORWARDS rather than terminates. A stock
+/// client seals a gift wrap to whichever `edgeIdentity` published the
+/// announce it read -- ADR 0018 requires that be the TERMINATING
+/// connector's key, but nothing on the wire enforces a publisher only
+/// advertising what it terminates. An announce claiming a forwarded prefix
+/// under the forwarder's own key is exactly the defect that let a client
+/// pay `g.toon.ario`, seal to the apex, and be refused
+/// `F01 gift wrap could not be opened` at the store -- after the money was
+/// already spent.
+///
+/// Asserted as a PROPERTY over the apex's own committed `[[routes]]` table
+/// (which prefixes it forwards, via `Config::peer_routes()`) against the
+/// announcer overlay's committed `ANNOUNCER_ILP_ADDRESSES` (which prefixes
+/// it announces), rather than a literal "must not contain g.toon.ario"
+/// string: nothing before this test modelled two connectors with distinct
+/// identities where one forwards a prefix the other terminates, which is
+/// exactly why the defect survived every other gate. The same defect
+/// reproduces the moment `g.toon.relay` becomes a forwarded `peer_id` route
+/// (issue #820) if this sidecar is still announcing it then, and a property
+/// test catches that the day it happens rather than needing to be re-taught
+/// the new prefix by hand -- the issue's own "gate #820 on this".
+#[test]
+fn the_apex_announcer_never_advertises_a_prefix_it_forwards() {
+    let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let peer_secret = write_peer_secret();
+    let text = with_sandbox_paths(
+        &without_live_settlement(APEX_CONFIG),
+        key_file.path(),
+        state_dir.path(),
+        Some(peer_secret.path()),
+    );
+    let config_file = write_config(&text);
+    let config = Config::load(config_file.path()).expect("the committed apex config must parse");
+
+    let forwarded: Vec<&str> = config.peer_routes().iter().map(|r| r.prefix()).collect();
+    assert!(
+        !forwarded.is_empty(),
+        "the apex config is expected to forward at least `g.toon.ario` \
+         across the apex-store peering -- if that changed, this test's \
+         premise needs revisiting, not silently passing over an empty set"
+    );
+
+    let announced = announcer_ilp_addresses(ANNOUNCER_OVERLAY);
+    for prefix in forwarded {
+        assert!(
+            !announced.iter().any(|a| a == prefix),
+            "the announcer sidecar's ANNOUNCER_ILP_ADDRESSES names `{prefix}`, \
+             which the apex config forwards (not terminates) via a peer_id \
+             route -- announcing it under the apex's OWN identity is issue \
+             #833's exact defect: a client seals its gift wrap to the \
+             publisher's key, pays, and the terminating node refuses to open \
+             it. Give the terminating node its own publisher instead (see \
+             infra/linode-store/connector-rust.toml's [announce] section) \
+             and drop the prefix from this list"
+        );
+    }
+}
+
+/// Issue #833's fix, terminating side: the store box announces
+/// `g.toon.ario` under its OWN `[signer]` identity -- the key that answers
+/// this node's `/ilp/identity` and opens every gift wrap it terminates
+/// (ADR 0018) -- rather than depending on the apex's now-removed stopgap
+/// announce (the property test above is what makes removing that stopgap
+/// safe to assert here rather than merely hoped for).
+#[test]
+fn the_store_devnet_config_announces_g_toon_ario_under_its_own_identity() {
+    assert!(
+        STORE_CONFIG.contains("[announce]"),
+        "the store config must carry its own [announce] section -- issue #833"
+    );
+
+    let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let peer_secret = write_peer_secret();
+    let text = with_sandbox_paths(
+        STORE_CONFIG,
+        key_file.path(),
+        state_dir.path(),
+        Some(peer_secret.path()),
+    );
+    let text = with_sandbox_settlement_keys(&text, key_file.path());
+    let config_file = write_config(&text);
+    let config = Config::load(config_file.path()).expect("the committed store config must parse");
+
+    let announce = config
+        .announce()
+        .expect("the store config's [announce] section must parse");
+    assert_eq!(announce.primary_address(), "g.toon.ario");
+    assert_eq!(
+        announce.http_endpoint(),
+        "https://proxy.ario.devnet.toonprotocol.dev/ilp",
+        "the store must advertise ITS OWN public edge, not the apex's -- \
+         advertising the apex's endpoint here would just relocate the \
+         mismatch from identity to endpoint"
+    );
+    assert_eq!(
+        announce.identity_key_file(),
+        None,
+        "the store has no prior publisher identity to carry over (issue \
+         #799 does not apply here -- see the config's own comment); it must \
+         sign with its own [signer], not a carried-over key"
+    );
+    assert_eq!(
+        announce.relay_url(),
+        None,
+        "the store fronts no relay and must not advertise reads it does not serve"
+    );
+}
+
+/// The `image:` tag every service in a compose overlay pins, read off the
+/// committed text -- [`route_price`]'s precedent again, and for the same
+/// reason: one line, no YAML dependency.
+fn pinned_connector_images(raw: &str) -> Vec<String> {
+    raw.lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix("image: ghcr.io/toon-protocol/connector:"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The store box's two overlays bind-mount the SAME `connector-rust.toml`,
+/// so they must pin the SAME image: the config file and the binary that
+/// reads it are one agreement, and `RawConfig` is `deny_unknown_fields`
+/// (issue #542). A binary older than a section the file carries does not
+/// ignore that section, it exits 1 -- so a stale pin in the announce
+/// overlay is not a broken sidecar, it is `docker compose up` recreating
+/// the SERVING `connector-rust` from a repo where the two disagree and
+/// taking the store's client edge down.
+///
+/// This is the gate that was missing. `docker-compose.store.announce.yml`
+/// was first committed pinning `rust-sha-b31a7c9`, a tag published three
+/// hours BEFORE `[announce]` and the `connector announce` verb existed
+/// (09bc2299, issue #784) -- a config the binary refuses to load and a
+/// subcommand it does not have -- and every existing test passed, because
+/// nothing in this suite had any notion of an image tag. Asserted as
+/// agreement between the two files rather than against a literal tag so it
+/// does not need editing on every routine bump; what it refuses is the two
+/// DRIFTING, which is the only shape this failure comes in.
+#[test]
+fn store_overlays_sharing_one_config_pin_one_image() {
+    const CONFIG_MOUNT: &str = "./connector-rust.toml:/app/config/connector.toml";
+
+    for overlay in [STORE_RUST_OVERLAY, STORE_ANNOUNCE_OVERLAY] {
+        assert!(
+            overlay.contains(CONFIG_MOUNT),
+            "this test's premise is that both store overlays mount the SAME \
+             `{CONFIG_MOUNT}` -- one of them no longer does, so the \
+             agreement it asserts needs rethinking rather than silently \
+             holding"
+        );
+    }
+
+    let serving = pinned_connector_images(STORE_RUST_OVERLAY);
+    let announcing = pinned_connector_images(STORE_ANNOUNCE_OVERLAY);
+    assert_eq!(
+        serving.len(),
+        1,
+        "docker-compose.store.rust.yml is expected to pin exactly one connector image"
+    );
+    assert_eq!(
+        announcing.len(),
+        1,
+        "docker-compose.store.announce.yml is expected to pin exactly one connector image"
+    );
+    assert_eq!(
+        announcing[0], serving[0],
+        "docker-compose.store.announce.yml pins `{}` while \
+         docker-compose.store.rust.yml pins `{}`, and both mount the same \
+         connector-rust.toml. The older of the two decides what that file \
+         may contain: `deny_unknown_fields` makes an unrecognized section a \
+         refuse-to-start, not a warning. Bump the stale one -- do not add a \
+         second config",
+        announcing[0], serving[0]
+    );
+    assert!(
+        serving[0].starts_with("rust-sha-"),
+        "the store overlays must pin an immutable `rust-sha-` tag, never a \
+         floating one (`rust-main`): a floating tag makes the agreement \
+         above unfalsifiable"
+    );
+}
+
+/// Issue #701's carriage negotiation, read across the two boxes: the store
+/// announces THROUGH an address the apex owns, and if the apex pins that
+/// route to `transport = "btp"` then the store's `[announce]` must carry a
+/// `publish_btp_url` -- `pay_the_through_url` takes the carriage from the
+/// greeting's `requiredTransport` and, for `btp` with neither `--btp-url`
+/// nor `publish_btp_url`, refuses with `NoBtpEndpoint` before anything is
+/// signed. The scheduled command in `docker-compose.store.announce.yml`
+/// passes no `--btp-url`, so the config is the only place it can come from.
+///
+/// A property over the apex's committed route table rather than a literal,
+/// for the same reason as the announcer test above: the day somebody pins
+/// another route to BTP, or unpins this one, the assertion follows the
+/// config instead of having to be re-taught.
+#[test]
+fn the_store_announce_carries_a_btp_endpoint_when_its_target_route_demands_one() {
+    let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let peer_secret = write_peer_secret();
+
+    let store_text = with_sandbox_settlement_keys(
+        &with_sandbox_paths(
+            STORE_CONFIG,
+            key_file.path(),
+            state_dir.path(),
+            Some(peer_secret.path()),
+        ),
+        key_file.path(),
+    );
+    let store_file = write_config(&store_text);
+    let store = Config::load(store_file.path()).expect("the committed store config must parse");
+    let announce = store
+        .announce()
+        .expect("the store config's [announce] section must parse");
+    let publish_to = announce
+        .publish_to()
+        .expect("the store's [announce] must name a publish_to -- the destination is not guessed");
+
+    let apex_state = tempfile::tempdir().expect("temp state dir");
+    let apex_text = with_sandbox_paths(
+        &without_live_settlement(APEX_CONFIG),
+        key_file.path(),
+        apex_state.path(),
+        Some(peer_secret.path()),
+    );
+    let apex_file = write_config(&apex_text);
+    let apex = Config::load(apex_file.path()).expect("the committed apex config must parse");
+
+    let target = apex
+        .routes()
+        .iter()
+        .find(|route| route.prefix() == publish_to)
+        .unwrap_or_else(|| {
+            panic!(
+                "the store announces through `{publish_to}`, which the apex's \
+                 committed route table does not terminate -- one of the two \
+                 files moved without the other"
+            )
+        });
+
+    if target.transport_policy() == TransportPolicy::Btp {
+        assert!(
+            announce.publish_btp_url().is_some(),
+            "the apex pins `{publish_to}` to `transport = \"btp\"`, so an \
+             announce paid through it is refused `NoBtpEndpoint` up front \
+             unless a BTP endpoint is supplied -- and the scheduled command \
+             in docker-compose.store.announce.yml passes no `--btp-url`. Set \
+             `publish_btp_url` in the store's [announce] section"
+        );
+    }
 }
 
 /// The new ERC-2771 `TokenNetwork` (#695/#811) the apex<->store

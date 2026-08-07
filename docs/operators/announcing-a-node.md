@@ -192,6 +192,51 @@ With `--via-own-routing`, replace (1) and (2) with: a `[[routes]]` entry reachin
 connector, and a channel with whoever carries it (over a peering, the `[[peer_channels]]` row it
 already needs). (4) does not apply — the client-edge transport policy applies to clients.
 
+## Cutting a prefix over from one publisher to another
+
+A prefix that moves from one node's announce to another node's announce is a **two-box, ordered**
+change, and the repo cannot do it for you: one half is a config file and one half is a running
+container on a different machine. The devnet `g.toon.ario` cutover (issue #833) is the worked
+example — the apex's announcer sidecar
+(`infra/linode-node/docker-compose.node.announcer.yml`) stops advertising a prefix it only
+**forwards**, and the store box starts advertising it under the identity that actually **terminates**
+it (`infra/linode-store/connector-rust.toml`'s `[announce]` +
+`infra/linode-store/docker-compose.store.announce.yml`).
+
+Run it in this order, on the boxes named:
+
+1. **STORE box — open and fund the store→apex client channel**, then write its 32-byte on-chain id
+   into `[announce] pay_channel` in the box's `connector-rust.toml`. The committed file deliberately
+   has no `pay_channel`: it is a live fact, not something a diff can supply. Until it is there every
+   run refuses by name with `NoPayChannel`. (Remember the bind-mounted box config **leads** the repo
+   copy — edit the file the container mounts.)
+2. **STORE box — bring the publisher up**:
+
+   ```
+   docker compose -f infra/linode-store/docker-compose.store.yml \
+                  -f infra/linode-store/docker-compose.store.rust.yml \
+                  -f infra/linode-store/docker-compose.store.announce.yml \
+                  up -d announce
+   ```
+
+   Then read `docker compose logs announce`. `[announce] OK` is the only line that means published;
+   `[announce] FAILED rc=…` names the reason and the loop retries on the next tick.
+
+3. **VERIFY on the relay, not in the logs.** Query the relay for a kind:10032 whose author is the
+   **store box's own** pubkey — the one `GET /ilp/identity` on that box answers with, which on the
+   live devnet store box today is
+   `499cdd71c7c3eab8d9b35f88ec9cde29018461e4bef86389004abcd7cfa1108a` — and confirm the event's
+   address list actually carries `g.toon.ario`. A published event under the right key is the only
+   evidence that counts.
+4. **ONLY THEN, APEX box — retire the stopgap**: deploy the announcer overlay with `g.toon.ario`
+   dropped from `ANNOUNCER_ILP_ADDRESSES` and restart the sidecar so the new value is read.
+
+**Doing step 4 before step 3 leaves the prefix announced by nobody.** The old publisher's event is
+gone (or expires with its NIP-40 `ttl_secs`) and no replacement exists, so a client bootstrapping in
+that window finds no route to the prefix at all — the same outage the stopgap was added to end. Two
+publishers overlapping for a few minutes is the _safe_ direction to be wrong in; zero publishers is
+not.
+
 ## When it refuses to run beside a serving node
 
 A node's outbound peer-claim ledger is replayed from `state_dir`'s journal at startup and held in

@@ -260,6 +260,72 @@ token_network = "0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478"
 [signer]
 key_file = "/app/data/signer.key"
 
+# ── Announce (issue #833) ───────────────────────────────────────────────────
+# This box's own kind:10032 publisher, so `g.toon.ario` is discoverable under
+# THIS node's identity -- the same `[signer]` key that answers `GET
+# /ilp/identity` and opens every gift wrap this node terminates.
+#
+# Before this section existed, the ONLY publisher of `g.toon.ario` was the
+# g.toon proxy's announcer sidecar (infra/linode-node/docker-compose.node.
+# announcer.yml), advertising the PROXY's identity for a prefix the proxy
+# FORWARDS rather than terminates (ADR 0028/#772). A stock client reads that
+# announce, seals its gift wrap to the proxy's key, pays at the client edge --
+# and the store box, which is the connector that actually holds the key the
+# wrap is sealed to (ADR 0018), cannot open it: `F01 gift wrap could not be
+# opened`, after the money is already spent. That defect is what issue #833
+# is. This section is the fix's terminating-side half; the proxy's stopgap
+# announce of this same prefix is retired in the same change (see that file's
+# own comment).
+#
+# `identity_key_file` is deliberately ABSENT. That field exists to carry a
+# PRIOR publisher's identity forward (issue #799) so a genesis seed already
+# pinning that pubkey does not go stale -- and it does not apply here: this
+# box has never had a kind:10032 publisher of its own (no sidecar, no prior
+# `connector announce`), and the genesis seed pins the g.toon proxy's
+# announcer pubkey, not this box's. Announcing under this node's own
+# `[signer]` is correct from the start and strands nobody.
+#
+# `relay_url` is deliberately ABSENT too: this box fronts no relay (see
+# docs/operators/announcing-a-node.md), and pointing it at the g.toon proxy's
+# relay would advertise free reads this node does not serve.
+[announce]
+addresses     = ["g.toon.ario"]
+http_endpoint = "https://proxy.ario.devnet.toonprotocol.dev/ilp"
+btp_endpoint  = "wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp"
+# The address of the route that terminates at the chosen relay's write
+# ingress -- a fact about the g.toon proxy's node, not this one. `g.toon.relay`
+# is the g.toon proxy's own terminating route (still true until #820 moves it
+# behind its own connector), so this box pays THROUGH the proxy's client edge
+# to publish there, exactly as docs/operators/announcing-a-node.md's own
+# worked example for this box describes.
+publish_to = "g.toon.relay"
+# The TARGET's BTP endpoint -- where THIS node pays the g.toon proxy, not
+# where clients pay this node (`btp_endpoint` above is that one; the two
+# point in opposite directions, which is why this one is spelled `publish_*`
+# alongside `publish_to`).
+#
+# Required, not optional, for this particular target: the apex pins its
+# `g.toon.relay` route to `transport = "btp"` (infra/linode-node/
+# connector-rust.toml, issue #701, because the relay is high-frequency with
+# an always-connected client). `pay_the_through_url` reads the carriage off
+# the greeting's `requiredTransport` rather than guessing
+# (connector-cli/src/announce.rs), so an announce to that address needs a
+# BTP endpoint from either `--btp-url` or this key -- and with neither it
+# fails `NoBtpEndpoint` up front, before anything is signed, however well
+# funded `pay_channel` is. The scheduled command in
+# docker-compose.store.announce.yml passes no `--btp-url`, so this is where
+# it comes from. Same literal the apex's own announcer sidecar advertises as
+# `ANNOUNCER_BTP_ENDPOINT` (infra/linode-node/docker-compose.node.
+# announcer.yml) -- it is that node's public BTP door, not a new fact.
+publish_btp_url = "wss://proxy.devnet.toonprotocol.dev/ilp/btp"
+# `pay_channel` is NOT set here. It names a funded EVM channel this box PAYS
+# the g.toon proxy from, as an ordinary client -- opening and funding one is a
+# live, human step (docs/operators/announcing-a-node.md's "What the node
+# needs before this can work"), not something a repo diff can supply. Without
+# it `connector announce` refuses by name (`NoPayChannel`) rather than
+# silently sending an unsigned claim; see
+# docker-compose.store.announce.yml for the scheduled command this fills in.
+
 # ── Routes ─────────────────────────────────────────────────────────────────
 
 [[routes]]
