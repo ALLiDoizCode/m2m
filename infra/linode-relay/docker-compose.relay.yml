@@ -43,7 +43,10 @@ services:
       # (issue #831): without it, the image's own anonymous VOLUME
       # declaration still makes the data survive a plain restart, but it has
       # no name an operator can find, isn't declared anywhere in this file,
-      # and `docker compose down -v` deletes it with no warning. This box
+      # and a stray `docker volume prune` — which by default reaps exactly
+      # the unused ANONYMOUS volumes — deletes it with no warning. (Naming it
+      # does not make it survive `docker compose down -v`; nothing declared
+      # here does.) This box
       # starts with an EMPTY relay_data — whether/how the apex box's existing
       # corpus is carried over is #820's cutover decision to make and record,
       # not this file's.

@@ -50,8 +50,10 @@ services:
       # as `connector_data` above: without it, the image's own anonymous
       # VOLUME declaration still makes the data survive a plain restart, but
       # it has no name an operator can find, isn't declared anywhere in this
-      # file, and `docker compose down -v` (or a stray `docker volume prune`)
-      # deletes it with no warning (issue #831).
+      # file, and a stray `docker volume prune` — which by default reaps
+      # exactly the unused ANONYMOUS volumes — deletes it with no warning
+      # (issue #831). Naming it does not make it survive
+      # `docker compose down -v`; nothing declared here does.
       - relay_data:/data
     restart: unless-stopped
     healthcheck:
