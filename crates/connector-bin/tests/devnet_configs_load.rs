@@ -1390,30 +1390,26 @@ fn relay_overlays_sharing_one_config_pin_one_image() {
 }
 
 /// Issue #701's carriage negotiation, read across the two boxes: the store
-/// announces THROUGH an address the apex owns, and if the apex pins that
-/// route to `transport = "btp"` then the store's `[announce]` must carry a
-/// `publish_btp_url` -- `pay_the_through_url` takes the carriage from the
-/// greeting's `requiredTransport` and, for `btp` with neither `--btp-url`
-/// nor `publish_btp_url`, refuses with `NoBtpEndpoint` before anything is
-/// signed. The scheduled command in `docker-compose.store.announce.yml`
-/// passes no `--btp-url`, so the config is the only place it can come from.
+/// announces THROUGH an address the relay box owns, and if the relay pins
+/// that route to `transport = "btp"` then the store's `[announce]` must
+/// carry a `publish_btp_url` -- `pay_the_through_url` takes the carriage
+/// from the greeting's `requiredTransport` and, for `btp` with neither
+/// `--btp-url` nor `publish_btp_url`, refuses with `NoBtpEndpoint` before
+/// anything is signed. The scheduled command in
+/// `docker-compose.store.announce.yml` passes no `--btp-url`, so the config
+/// is the only place it can come from.
 ///
-/// A property over the apex's committed route table rather than a literal,
+/// A property over the relay's committed route table rather than a literal,
 /// for the same reason as the announcer test above: the day somebody pins
 /// another route to BTP, or unpins this one, the assertion follows the
 /// config instead of having to be re-taught.
 ///
-/// The target can be EITHER a terminating route or, as of issue #820, a
-/// `peer_id` forward: `publish_to = "g.toon.relay"` used to name a
-/// terminating route on the apex, and now names a forward to the relay box.
-/// A `peer_id` route can never itself carry `transport` (`PeerRouteHasTransport`
-/// refuses it at load), so the ORIGINAL mechanism this test guards
-/// (`pay_the_through_url` reading `requiredTransport` off the apex's own
-/// greeting) no longer requires a BTP endpoint for this specific target --
-/// the apex's greeting for a forward carries no transport requirement at
-/// all. `publish_btp_url` is asserted set regardless: it matches what the
-/// live box already carries and does not depend on which shape the target
-/// route takes today.
+/// Issue #871 moved the store's announce off the apex and onto the relay
+/// box DIRECTLY -- the store now buys relay writes like any other client,
+/// with no forwarding hop in between. So the target is always the relay's
+/// own terminating route for `publish_to`, never a `peer_id` forward (the
+/// apex's forward is a fact about the apex's OWN client edge, not about how
+/// this announce is paid).
 #[test]
 fn the_store_announce_carries_a_btp_endpoint_when_its_target_route_demands_one() {
     let key_file = write_raw_key_file(9);
@@ -1438,45 +1434,30 @@ fn the_store_announce_carries_a_btp_endpoint_when_its_target_route_demands_one()
         .publish_to()
         .expect("the store's [announce] must name a publish_to -- the destination is not guessed");
 
-    let apex_state = tempfile::tempdir().expect("temp state dir");
-    let apex_text = with_sandbox_paths(
-        &without_live_settlement(APEX_CONFIG),
+    let relay_state = tempfile::tempdir().expect("temp state dir");
+    let relay_text = with_sandbox_paths(
+        &without_live_settlement(RELAY_CONFIG),
         key_file.path(),
-        apex_state.path(),
+        relay_state.path(),
         Some(peer_secret.path()),
     );
-    let apex_file = write_config(&apex_text);
-    let apex = Config::load(apex_file.path()).expect("the committed apex config must parse");
+    let relay_file = write_config(&relay_text);
+    let relay = Config::load(relay_file.path()).expect("the committed relay config must parse");
 
-    let terminating_target = apex
+    let target = relay
         .routes()
         .iter()
-        .find(|route| route.prefix() == publish_to);
-    let forwarding_target = apex
-        .peer_routes()
-        .iter()
-        .find(|route| route.prefix() == publish_to);
+        .find(|route| route.prefix() == publish_to)
+        .unwrap_or_else(|| {
+            panic!(
+                "the store announces through `{publish_to}`, which the \
+                 relay's committed route table does not terminate -- issue \
+                 #871 pays the relay box directly, so the target route now \
+                 lives there, not on the apex"
+            )
+        });
 
-    let needs_a_btp_endpoint = match (terminating_target, forwarding_target) {
-        (Some(route), None) => route.transport_policy() == TransportPolicy::Btp,
-        // A `peer_id` route cannot itself carry `transport`, so the apex's
-        // greeting for a forward never demands BTP -- the endpoint is still
-        // required here, but as the repo/live parity the fn doc comment
-        // describes rather than as `NoBtpEndpoint` avoidance.
-        (None, Some(_)) => true,
-        (None, None) => panic!(
-            "the store announces through `{publish_to}`, which the apex's \
-             committed route table neither terminates nor forwards -- one of \
-             the two files moved without the other"
-        ),
-        (Some(_), Some(_)) => panic!(
-            "`{publish_to}` is BOTH a terminating and a forwarding route on \
-             the apex -- that is a config-load error waiting to happen, not \
-             a state this test should silently pick one side of"
-        ),
-    };
-
-    if needs_a_btp_endpoint {
+    if target.transport_policy() == TransportPolicy::Btp {
         assert!(
             announce.publish_btp_url().is_some(),
             "an announce paid through `{publish_to}` needs a BTP endpoint \
@@ -1486,6 +1467,60 @@ fn the_store_announce_carries_a_btp_endpoint_when_its_target_route_demands_one()
              [announce] section"
         );
     }
+}
+
+/// Issue #871's own AC: `publish_btp_url` names the RELAY box, not the
+/// apex. The store used to pay the apex to publish
+/// (`wss://proxy.devnet.toonprotocol.dev/ilp/btp`, issue #820); toon-meta#310
+/// is retiring the apex, and the relay box is the fleet's only public write
+/// ingress once it goes, so the store buys relay writes directly, like any
+/// other client. Asserted as equality with the relay's OWN advertised
+/// `btp_endpoint` (not a second literal) so the two files cannot drift the
+/// way the apex/store price pair once did.
+#[test]
+fn the_store_announces_through_the_relay_box_not_the_apex() {
+    let key_file = write_raw_key_file(9);
+    let store_state = tempfile::tempdir().expect("temp state dir");
+    let peer_secret = write_peer_secret();
+    let store_text = with_sandbox_settlement_keys(
+        &with_sandbox_paths(
+            STORE_CONFIG,
+            key_file.path(),
+            store_state.path(),
+            Some(peer_secret.path()),
+        ),
+        key_file.path(),
+    );
+    let store_file = write_config(&store_text);
+    let store = Config::load(store_file.path()).expect("the committed store config must parse");
+    let announce = store
+        .announce()
+        .expect("the store config's [announce] section must parse");
+
+    let relay_state = tempfile::tempdir().expect("temp state dir");
+    let relay_text = with_sandbox_paths(
+        &without_live_settlement(RELAY_CONFIG),
+        key_file.path(),
+        relay_state.path(),
+        Some(peer_secret.path()),
+    );
+    let relay_file = write_config(&relay_text);
+    let relay = Config::load(relay_file.path()).expect("the committed relay config must parse");
+    let relay_announce = relay
+        .announce()
+        .expect("the relay config's [announce] section must parse");
+
+    assert_eq!(
+        announce.publish_btp_url(),
+        Some(relay_announce.btp_endpoint()),
+        "the store's [announce] publish_btp_url must name the relay box's \
+         own advertised BTP endpoint -- issue #871 moves this off the apex"
+    );
+    assert_ne!(
+        announce.publish_btp_url(),
+        Some("wss://proxy.devnet.toonprotocol.dev/ilp/btp"),
+        "the store's [announce] publish_btp_url must not still name the apex"
+    );
 }
 
 /// The new ERC-2771 `TokenNetwork` (#695/#811) the apex<->store
@@ -1623,7 +1658,8 @@ fn the_apex_relay_peer_channel_names_the_new_token_network_with_placeholder_fiel
 /// Issue #853's own version of the #822 placeholder convention
 /// ([`PEER_CHANNEL_ID_PLACEHOLDER`] above), applied to `[announce]
 /// pay_channel` rather than a `[[peer_channels]]` row: the store box's real
-/// funded channel (opened as part of #833's live cutover) lives only on the
+/// funded channel -- with the RELAY BOX as of issue #871, replacing the
+/// apex-funded channel #820's cutover made obsolete -- lives only on the
 /// box, so this repo commits a clearly-marked placeholder instead of either
 /// the live value or an absent field.
 const STORE_ANNOUNCE_PAY_CHANNEL_PLACEHOLDER: &str =
