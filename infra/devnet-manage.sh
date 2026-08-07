@@ -432,25 +432,25 @@ redeploy)
     ip=$(get_box_ip "$local_label") || continue
     [ -z "$ip" ] && echo "  $local_label: not found" && continue
     echo "  Redeploying $local_label ($ip)..."
-    # WARNING (#785, #714): for `toon` and `store` this deploys the TypeScript
-    # compose files, but both boxes currently serve the RUST connector on the
-    # public door (verified live: `GET /ilp/identity` answers, nginx 410s the
-    # transitional `/rust/` prefix because Rust took over `location /`). The
-    # Rust overlays are `docker-compose.node.rust.yml` /
-    # `docker-compose.store.rust.yml`.
+    # All three boxes serve the RUST connector on the public door (verified
+    # live: `GET /ilp/identity` answers, nginx 410s the transitional `/rust/`
+    # prefix because Rust took over `location /`) -- redeploy must bring that
+    # up, not the TypeScript `connector` service each base compose file still
+    # declares (issue #851: that service is pinned to
+    # `ghcr.io/toon-protocol/connector:3.36.3-solchan.0`, purged from GHCR, so
+    # a blanket `pull`/`up -d` over the whole file fails outright on it).
     #
-    # Deliberately NOT repointed here: swapping the compose file changes what a
-    # deploy does to the live fleet, and that swap has not been rehearsed. It
-    # belongs with the retirement runbook in #714, not with a pricing docs
-    # change. Until then, be aware this path would resurrect TypeScript.
-    if [ "$key" = "toon" ] || [ "$key" = "store" ]; then
-      echo "  !! WARNING: deploying the TypeScript compose file for '$key'." >&2
-      echo "  !! Both boxes serve Rust today; see #714 and docs/devnet-pricing.md." >&2
-    fi
+    # Every leg composes its base file with its Rust overlay, mirroring what
+    # the relay leg already did (issue #816: it never had a TypeScript
+    # service). `toon` and `store` additionally name services explicitly to
+    # skip the base file's now-dead `connector` service -- the Rust overlays
+    # add `connector-rust` alongside it, they don't replace it, so an
+    # unqualified `up -d` would still try to (re)create the purged image's
+    # container.
     if [ "$key" = "toon" ]; then
-      ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && docker compose -f infra/linode-node/docker-compose.node.yml pull && docker compose -f infra/linode-node/docker-compose.node.yml up --build -d" &
+      ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && docker compose -f infra/linode-node/docker-compose.node.yml -f infra/linode-node/docker-compose.node.rust.yml pull relay faucet nginx certbot connector-rust && docker compose -f infra/linode-node/docker-compose.node.yml -f infra/linode-node/docker-compose.node.rust.yml up --build -d relay faucet nginx certbot connector-rust" &
     elif [ "$key" = "store" ]; then
-      ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && docker compose -f infra/linode-store/docker-compose.store.yml pull && docker compose -f infra/linode-store/docker-compose.store.yml up -d" &
+      ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && docker compose -f infra/linode-store/docker-compose.store.yml -f infra/linode-store/docker-compose.store.rust.yml pull store nginx certbot connector-rust && docker compose -f infra/linode-store/docker-compose.store.yml -f infra/linode-store/docker-compose.store.rust.yml up -d store nginx certbot connector-rust" &
     else
       # relay has no TypeScript compose file at all (issue #816) -- always
       # both files together, since the connector-rust service is only
