@@ -23,9 +23,12 @@
 # period when the prefixes differed — read `g.rust` there as historical.
 #
 # Children mirror the TypeScript fleet's own two-app shape:
-#   g.toon.relay  — terminates locally at the SAME running relay app
-#                   (relay:3100) this box's TypeScript connector already
-#                   fronts.
+#   g.toon.relay  — FORWARDED across the g.toon proxy<->relay peering (issue
+#                   #820, Shape A -- #815) to the relay app's own box
+#                   (infra/linode-relay/), which now terminates it. Until
+#                   2026-08-07 this route terminated locally at the
+#                   co-located relay app (relay:3100); that app has since
+#                   moved to its own box and this box no longer runs one.
 #   g.toon.ario   — terminates at the store box's running store app over
 #                   that box's public TLS front (see below) under the name
 #                   the TS fleet's kind:10032 announce advertises as its
@@ -109,69 +112,41 @@ key_file = "/app/data/signer.key"
 
 [[routes]]
 prefix = "g.toon.relay"
-# `/write`, not the bare origin: `HttpAppClient::deliver` POSTs here, and the
-# relay app serves only `POST /write` and `GET /health`. A bare
-# `http://relay:3100` comes back F99 "app declined the delivery with HTTP
-# 404", which is what this route did when first deployed (#492).
+# ── FORWARDED ACROSS THE g.toon proxy<->relay PEERING (issue #820, Shape A,
+# #815) ──────────────────────────────────────────────────────────────────
+# Was `handler_url = "http://relay:3100/write"`, a route terminating
+# locally at the relay app co-located on this box (#492's `/write`-not-
+# bare-origin fix, and ADR 0025's target-cannot-override-the-path rule,
+# both still apply -- just one hop further out now, on
+# infra/linode-relay/connector-rust.toml's own copy of this same route).
+# The relay app has moved to its own box (issues #816/#821); this box runs
+# no relay app of its own any more, so there is nothing left here to point
+# a `handler_url` at.
+peer_id = "apex-relay"
+# ADR 0028's arithmetic is `amount == price`: this hop collects `price` from
+# the client, forwards `price - fee`, and so earns exactly `fee`.
 #
-# An envelope's own `target` cannot override this path (issue #596, ADR
-# 0025): it is resolved strictly beneath `/write`, never in place of it, so
-# a sender cannot address `/health` (or anywhere else) through this route at
-# this route's price by naming it as the target.
-#
-# The path is only the half of the app-delivery gap that config can close.
-# docs/operators/parallel-fleet-comparison.md has the rest.
-handler_url = "http://relay:3100/write"
-# 1 micro-USDC per relay write. OWNER DECISION, 2026-08-04.
-#
-# The live g.toon proxy box has served `1` since 2026-08-03. The edit was
-# undocumented -- no commit, no patch file, no shell history -- and this
-# comment used to assert parity with the TypeScript route at `1000`
-# directly above the value `1`, which is how a 1000x cut sat unnoticed for
-# twenty hours. The decision recorded here is that **`1` is correct** and
-# the repo moves to the box, not the box to the repo.
-#
-# Why: this route carries the buzz huddles workload, which is per-audio-
-# frame at 49 fps over BTP (toon-meta#262). 1 micro-USDC is a coherent
-# per-frame price; 0.001 USDC per frame is not. A general-write price is
-# the wrong frame for this route.
-#
-# Units, which the old comment got right and is worth keeping: both fleets
-# settle claims in base units of 6-decimal USDC (ADR 0010;
-# docs/usdc-cross-chain-settlement.md's "6 decimals everywhere" is the
-# canonical unit across EVM/Solana/Mina, not a TypeScript-only asset
-# config). So `1000` is 0.001 USDC and `1` is 1 micro-USDC.
-#
-# The TypeScript node's `connector.yaml` still names `1000` for this prefix,
-# but it no longer fronts traffic: Rust serves `location /` on both boxes
-# (nginx returns 410 for the transitional `/rust/` prefix), so there is no
-# live second door to arbitrage against. Retirement of those files is #714.
-#
-# CORRECTION (#785): an earlier revision of this comment claimed the store
-# legs' cross-fleet parity was enforced by a config-load test named
-# `the_two_fleets_price_the_shared_store_prefixes_identically`. **No such
-# test exists** -- the string appears nowhere in the repository, and the only
-# reference to the TypeScript yaml anywhere in test code is a doc comment in
-# `devnet_configs_load.rs`. The Rust prices ARE asserted, by
-# `EXPECTED_RELAY_PRICE` / `EXPECTED_STORE_PRICE` / `EXPECTED_APEX_FORWARD_*`
-# in that file; the cross-fleet comparison never was. Do not re-derive a
-# safety claim from that sentence.
-#
-# `docs/devnet-pricing.md` is the committed source of truth for every route's
-# price and rationale.
-#
-# #552 wired the x402 greeting behind this figure being non-zero; a
-# devnet box started from this file was still a free gateway until this
-# was set (issue #557). Keep it non-zero.
+# 1/0, OWNER DECISION 2026-08-06 (docs/devnet-pricing.md's "The g.toon.relay
+# forward: price/fee split" section has the full argument, kept there
+# rather than duplicated here per that file's own role as the committed
+# source of truth for every route's price). Client cost is unchanged at 1
+# micro-USDC/write -- this route carries the buzz huddles workload,
+# per-audio-frame at 49 fps over BTP (toon-meta#262), and any non-zero fee
+# here would force `price` above the relay's own terminating price of `1`,
+# at minimum doubling the per-frame cost for a workload billed 49 times a
+# second. The apex earns nothing for carriage on this leg, deliberately.
 price = 1
-# Issue #701 (toon-meta#262 decision 11): the relay is high-frequency and
-# latency-sensitive with an always-connected client -- huddles already run
-# 49 fps over BTP, and a persistent session amortizes the handshake and
-# claim round trip that an HTTP one-shot would pay on every write. `both`
-# (the default `channels.rs` calls "a first-class path, not a fallback")
-# stays right for the store legs below: a stranger doing one upload should
-# not need a session.
-transport = "btp"
+fee = 0
+# A `transport` pin is now ILLEGAL on this route: it forwards to a peer,
+# and a `peer_id` route cannot also carry a transport policy
+# (`ConfigError::PeerRouteHasTransport`,
+# crates/connector-config/src/error.rs:125). Issue #701's BTP pin moves
+# with the terminating side, to infra/linode-relay/connector-rust.toml's own
+# `g.toon.relay` route, where the persistent-session rationale actually
+# applies now. This apex therefore loses client-edge BTP enforcement on
+# this prefix: an HTTP request reaching THIS box for `g.toon.relay` is no
+# longer refused here for the wrong transport -- the relay box refuses it
+# instead, one hop further out.
 
 [[routes]]
 prefix = "g.toon.ario"
@@ -218,8 +193,9 @@ fee = 2
 # removes a name no discovery path hands out.
 
 # ── The g.toon proxy<->store peering (ADR 0027, issues #678/#750) ─────────
-# The fleet's only inter-node link, and what every g.toon.ario packet above
-# rides. It lived on the boxes only until #750 gave `credential` a
+# The fleet's first inter-node link (the apex<->relay peering below, issue
+# #820, is its second), and what every g.toon.ario packet above rides. It
+# lived on the boxes only until #750 gave `credential` a
 # `secret_file`: this file is committed to a PUBLIC repository, so a peering
 # written with a literal could not be committed at all.
 #
@@ -282,6 +258,47 @@ counterparty_key = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead"
 # refused. Repointed to the new ERC-2771 TokenNetwork (issue #822, #695/#811)
 # -- both boxes must agree, or a claim one accepts is unresolvable by the
 # other.
+chain_id = 84532
+token_network = "0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478"
+
+# ── The g.toon proxy<->relay peering (issue #820, Shape A -- #815) ────────
+# The fleet's second inter-node link, carrying every `g.toon.relay` packet
+# above. Dialing, exactly like the store peering above: the g.toon proxy
+# DIALS and never accepts (no `peer_expose` on this node -- the relay box is
+# the accepting half, `peer_expose = "btp"` in
+# infra/linode-relay/connector-rust.toml, which has no `endpoint` of its
+# own).
+[[peers]]
+id = "apex-relay"
+# ONE string both operators write, same rule as `apex-store` above.
+endpoint = "wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp"
+# The shared secret, as a FILE, same handling as `apex-store.secret` above
+# -- gitignored, generated once and copied byte-identical to both boxes
+# (issue #820's live human step), never a literal in this public repo.
+credential = { secret_file = "/app/data/apex-relay.secret" }
+# 1 USDC, matching the store peering's own ceiling.
+ceiling = 1000000
+# Same flush cadence as the store peering, for the same reason (unclaimed
+# value should not sit across an idle period) -- if anything MORE load-
+# bearing here, since this route's traffic is per-audio-frame at 49 fps.
+flush_interval_ms = 5000
+
+[[peer_channels]]
+peer_id = "apex-relay"
+# PLACEHOLDER (issue #820) -- these two values are NOT a real channel and
+# must not be used as one, same convention as the apex-store row above.
+# Unlike that row this is not a migration off a still-open old channel:
+# issue #821 already opened and funded a real apex<->relay channel against
+# the TokenNetwork below (on-chain channel_id 0x62c81d83bf0bda1af54233fa92
+# cae0c287e34838fb3434e6911d289dba6fa3fa, verified live). But this repo
+# never carries a peering's live facts on either side -- see the
+# apex-store row's own comment -- so the real values are applied directly
+# to both boxes' untracked connector-rust.toml files as part of #820's
+# live cutover window, not committed here.
+channel_id = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeadbeef"
+counterparty_key = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeadbeef"
+# Same EIP-712 domain as the apex-store row: both boxes must agree, or a
+# claim one accepts is unresolvable by the other.
 chain_id = 84532
 token_network = "0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478"
 

@@ -93,6 +93,9 @@ services:
       # (`openssl rand -hex 32`), gitignored as `*.secret`, and the SAME BYTES
       # on both boxes -- the two sides authenticate against each other with it.
       - ./apex-store.secret:/app/data/apex-store.secret:ro
+      # The g.toon proxy<->relay peering's shared secret (issue #820), same
+      # handling as apex-store.secret above.
+      - ./apex-relay.secret:/app/data/apex-relay.secret:ro
       - ./settlement-solana-rust.key:/app/data/settlement-solana.key:ro
       # Durable claim watermarks (issue #605) -- see the header.
       - connector_rust_state:/app/state

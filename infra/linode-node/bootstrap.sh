@@ -56,6 +56,5 @@ DOMAIN="$DOMAIN" "$HERE/provision-mina-lightnet.sh" || \
 
 echo
 echo "✅ TOON connector node up."
-echo "   Relay WS : wss://relay-ws.${DOMAIN}"
 echo "   Proxy    : https://proxy.${DOMAIN}/ilp"
 echo "   Faucet   : https://faucet.${DOMAIN}"

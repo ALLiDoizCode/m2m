@@ -304,17 +304,29 @@ publish_to = "g.toon.relay"
 # point in opposite directions, which is why this one is spelled `publish_*`
 # alongside `publish_to`).
 #
-# Required, not optional, for this particular target: the apex pins its
-# `g.toon.relay` route to `transport = "btp"` (infra/linode-node/
-# connector-rust.toml, issue #701, because the relay is high-frequency with
-# an always-connected client). `pay_the_through_url` reads the carriage off
-# the greeting's `requiredTransport` rather than guessing
-# (connector-cli/src/announce.rs), so an announce to that address needs a
-# BTP endpoint from either `--btp-url` or this key -- and with neither it
-# fails `NoBtpEndpoint` up front, before anything is signed, however well
-# funded `pay_channel` is. The scheduled command in
+# Committed here as of issue #820, matching what the live box already
+# carries (added 2026-08-07 13:51Z alongside #833's [announce] section --
+# see that box's own `connector-rust.toml.bak-pre-announce-20260807T135154Z`
+# backup). It was missing from THIS repo copy even though the live box
+# needed it from day one: `pay_the_through_url` reads the carriage off the
+# greeting's `requiredTransport` rather than guessing
+# (connector-cli/src/announce.rs), and until #820 the apex pinned
+# `g.toon.relay` to `transport = "btp"` (issue #701, the relay's
+# high-frequency always-connected traffic) -- so an announce to that address
+# needed a BTP endpoint from either `--btp-url` or this key, and with
+# neither it failed `NoBtpEndpoint` up front, before anything was signed,
+# however well funded `pay_channel` was. The scheduled command in
 # docker-compose.store.announce.yml passes no `--btp-url`, so this is where
-# it comes from. Same literal the apex's own announcer sidecar advertises as
+# it comes from.
+#
+# Issue #820 moved the `transport = "btp"` pin off the apex's `g.toon.relay`
+# route (now a `peer_id` forward, which cannot carry one) down to the relay
+# box's own terminating route -- so `pay_the_through_url`'s BTP requirement,
+# read off the APEX's greeting for this address, no longer fires either way.
+# Set regardless: it is still correct (this node pays the apex over BTP
+# either way) and matches the live box, so leaving it out of the repo would
+# just reopen the same repo/live gap this comment exists to close.
+# Same literal the apex's own announcer sidecar advertises as
 # `ANNOUNCER_BTP_ENDPOINT` (infra/linode-node/docker-compose.node.
 # announcer.yml) -- it is that node's public BTP door, not a new fact.
 publish_btp_url = "wss://proxy.devnet.toonprotocol.dev/ilp/btp"
@@ -333,11 +345,6 @@ prefix = "g.toon.ario"
 handler_url = "http://store:3300/store"
 price = 1000
 
-[[routes]]
-prefix = "g.toon.relay.ario"
-handler_url = "http://store:3300/store"
-price = 1000
-
 # ── `g.toon.store` is GONE (owner decision, 2026-08-05) ──────────────────
 # This box used to terminate a third prefix at the SAME store app and the
 # SAME price -- an alias, kept so a client arriving directly at this edge was
@@ -345,10 +352,25 @@ price = 1000
 # forward. The proxy dropped that forward, so this alias has nothing left to
 # mirror. One name for one app; `g.toon.ario` is the survivor because it is the
 # one compiled into a shipped client.
+
+# ── `g.toon.relay.ario` is ALSO GONE (issue #820) ─────────────────────────
+# This box used to terminate the relay-hop spelling too (client -> g.toon
+# proxy -> here) -- but it was never actually reachable that way, and
+# retiring it here (rather than the alternative docs/devnet-pricing.md's
+# "Known divergence" section named -- adding a dedicated apex forward row
+# for it at 1002/fee 2) is #820's resolution of that divergence.
 #
-# `g.toon.relay.ario` stays: it is the relay-hop spelling (client -> g.toon
-# proxy -> here), a different PATH to the same app rather than a second NAME
-# for it.
+# The apex's Rust route table has only ever declared `g.toon.relay` and
+# `g.toon.ario`, never this name, so longest-prefix matching always dropped
+# `g.toon.relay.ario` into the `g.toon.relay` route -- which the apex
+# TERMINATED against `relay:3100` until #820, so every arrival here 404'd
+# for free. #820 turns `g.toon.relay` into a peer_id forward to the relay
+# box, whose own route table also declares only `g.toon.relay`, never a
+# `.ario` child -- so the SAME longest-prefix match would keep landing
+# there, just after consuming a real signed claim on the apex<->relay
+# channel instead of failing for free. Retiring the name here (nothing in a
+# shipped client addresses it; buzz pins `storeDestination: "g.toon.ario"`
+# in compiled code) closes the gap rather than relocating and pricing it.
 
 # ── Settlement ─────────────────────────────────────────────────────────────
 

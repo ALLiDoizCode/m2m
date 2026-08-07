@@ -22,51 +22,24 @@ services:
     healthcheck:
       # wget (not curl): the connector slim image has no curl, so a curl-based
       # check always reports "unhealthy" even when /health is up. Mirrors the
-      # relay/faucet wget checks below.
+      # faucet wget check below.
       test: ['CMD-SHELL', 'wget -q --spider http://localhost:8080/health || exit 1']
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 15s
 
-  relay:
-    image: ghcr.io/toon-protocol/relay:sha-d80f279
-    environment:
-      TOON_OBLIVIOUS_MODE: 'true'
-      TOON_BLS_PORT: '3100'
-      TOON_RELAY_PORT: '7100'
-      TOON_CHAIN: 'none'
-      NOSTR_SECRET_KEY: ${RELAY_NOSTR_SECRET_KEY:-0000000000000000000000000000000000000000000000000000000000000002}
-      TOON_DEV_MODE: ${RELAY_DEV_MODE:-false}
-      # Made explicit rather than relied on as an image default (issue #831):
-      # `docker inspect` on the live box showed the image already sets this to
-      # /data and declares /data as a VOLUME, but neither fact is visible from
-      # this file, and an image change could move the default without anyone
-      # noticing here.
-      TOON_DATA_DIR: /data
-    volumes:
-      # events.db (NIP-01 event store — every note/profile/huddle-frame/
-      # renderer-event this relay has accepted). Named, not bind-mounted, same
-      # as `connector_data` above: without it, the image's own anonymous
-      # VOLUME declaration still makes the data survive a plain restart, but
-      # it has no name an operator can find, isn't declared anywhere in this
-      # file, and a stray `docker volume prune` — which by default reaps
-      # exactly the unused ANONYMOUS volumes — deletes it with no warning
-      # (issue #831). Naming it does not make it survive
-      # `docker compose down -v`; nothing declared here does.
-      - relay_data:/data
-    restart: unless-stopped
-    healthcheck:
-      # 127.0.0.1, not localhost: the relay app binds 0.0.0.0 (IPv4 only),
-      # but busybox wget resolves "localhost" to ::1 first and does not fall
-      # back to IPv4 on refusal — so a `localhost` check reports permanently
-      # unhealthy even though /health answers fine over IPv4 (found live on
-      # infra/linode-relay/, issue #830, and fixed here too).
-      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:3100/health || exit 1']
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 15s
+  # The `relay` service that used to run here (`ghcr.io/toon-protocol/
+  # relay:sha-d80f279`, TOON_BLS_PORT 3100 / TOON_RELAY_PORT 7100) has moved
+  # to its own box, infra/linode-relay/ (issues #816/#821). This box's
+  # `g.toon.relay` route now FORWARDS to that box over the apex<->relay
+  # peering (issue #820) instead of terminating against a co-located
+  # container -- see infra/linode-node/connector-rust.toml's own route
+  # comment. Nothing here proxies to a `relay` container any more; the
+  # `relay_data` volume that used to back it is gone with it (issue #831's
+  # named volume moved with the app -- see infra/linode-relay/
+  # docker-compose.relay.yml's own `relay_data`, a same-named but distinct
+  # volume scoped to that box's own compose project).
 
   faucet:
     # Build context is the REPO ROOT (not packages/faucet): the multi-stage
@@ -164,6 +137,5 @@ services:
 
 volumes:
   connector_data:
-  relay_data:
   node_certbot_conf:
   node_certbot_www:
