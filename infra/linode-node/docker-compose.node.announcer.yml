@@ -29,7 +29,23 @@ services:
     restart: unless-stopped
     environment:
       ANNOUNCER_RUST_EDGE_URL: http://connector-rust:4000
-      ANNOUNCER_RELAY_URLS: http://relay:3100
+      # Was `http://relay:3100` -- the relay app's payment-oblivious write
+      # ingress reached over the docker container network, back when the
+      # relay app and this sidecar shared one box. Issue #820 moved the relay
+      # app to its own box (infra/linode-relay/), so that container name no
+      # longer resolves here. Repointed at a new public URL rather than
+      # taught to pay through the apex<->relay peering: `packages/announcer/
+      # src/publisher.ts` documents this sidecar as holding no channel by
+      # design (v1 scope), so adding payment capability here is new work, not
+      # a repoint -- see that module's own doc comment. Instead the relay
+      # box's nginx (infra/linode-relay/nginx/conf.d/node.conf) exposes the
+      # SAME trusted-local write path one hop further out, restricted by IP
+      # to this box alone (`allow 104.237.150.177`) rather than opened to the
+      # world -- the free-door shape #778 closed elsewhere. Stated here per
+      # issue #820's own instruction to record the choice: this is option 1
+      # of that issue's two ("restrict a new nginx location on the relay box
+      # to the apex's IP"), not option 2 (having the announcer pay).
+      ANNOUNCER_RELAY_URLS: https://proxy.relay.devnet.toonprotocol.dev/relay-write
       ANNOUNCER_RELAY_PUBLIC_URL: wss://relay-ws.devnet.toonprotocol.dev
       # `g.toon.ario` RETIRED from this list 2026-08-07 (issue #833). It was
       # added 2026-08-05 as a STOPGAP for a live outage: the store box had no
@@ -72,11 +88,15 @@ services:
       # (infra/linode-relay/connector-rust.toml's [announce] section +
       # docker-compose.relay.announce.yml), announcing `g.toon.relay` under
       # ITS OWN identity -- exactly the fix issue #833 gave `g.toon.ario` and
-      # the store box. The reasoning is the same: this box still TERMINATES
-      # `g.toon.relay` today (the peering forward is #820, not yet live), so
-      # dropping this one entry a moment before the relay box's own announce
-      # is verified live would leave the prefix announced by nobody -- see
-      # docs/operators/announcing-a-node.md's ordered cutover for `g.toon.relay`.
+      # the store box, and required for the same reason: as of issue #820
+      # this box FORWARDS `g.toon.relay` (connector-rust.toml's `peer_id =
+      # "apex-relay"` route) rather than terminating it, so announcing the
+      # prefix under this box's identity would seal clients' gift wraps to a
+      # key the relay box does not hold. Ordering still matters on the live
+      # boxes -- dropping this entry a moment before the relay box's own
+      # announce is verified live leaves the prefix announced by nobody --
+      # see docs/operators/announcing-a-node.md's ordered cutover for
+      # `g.toon.relay`.
       #
       # RETIRING THIS SIDECAR (issue #799): the genesis peer seed pins the
       # pubkey ANNOUNCER_IDENTITY_SECRET_KEY_FILE below produces, so before
@@ -118,9 +138,13 @@ services:
       # (service.ts:144-146), dropping `routePrices`, `supportedChains`,
       # `settlementAddresses`, `tokenNetworks` and `preferredTokens` from
       # the announce entirely. Pin it at the prefix this sidecar is actually
-      # announcing route-publish access to, and which this box still
-      # terminates today -- the same route the probe implicitly covered
-      # before `g.toon.relay` sat in ANNOUNCER_ILP_ADDRESSES.
+      # announcing route-publish access to -- the same route the probe
+      # implicitly covered before `g.toon.relay` sat in
+      # ANNOUNCER_ILP_ADDRESSES. Issue #820 made that route a `peer_id`
+      # forward rather than a local termination, which does not change what
+      # the probe reads: this box still answers a greeting for the prefix
+      # (its own forward quote), which is exactly what `routePrices` should
+      # report for a client paying THIS edge.
       ANNOUNCER_PROBE_ROUTES: g.toon.relay
       # NOTE: these two publish the `/rust/` path — the disposable artifact
       # ADR 0013 says "nothing durable should be published against". Phase 7

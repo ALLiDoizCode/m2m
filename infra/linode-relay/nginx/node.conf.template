@@ -45,7 +45,7 @@ server {
     listen 443 ssl;
     listen [::]:443 ssl;
     http2 on;
-    server_name proxy.relay.${DOMAIN} relay-ws.${DOMAIN};
+    server_name proxy.relay.${DOMAIN};
 
     ssl_certificate     /etc/letsencrypt/live/proxy.relay.${DOMAIN}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/proxy.relay.${DOMAIN}/privkey.pem;
@@ -97,6 +97,60 @@ server {
         proxy_set_header X-Forwarded-Proto https;
         # What TLS-terminates `wss://…/ilp/btp` for the future peering, and
         # what relay-ws.DOMAIN needs for the relay app's own websocket.
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_read_timeout 1h;
+
+        client_max_body_size 4m;
+    }
+}
+
+# ── relay-ws.DOMAIN — the relay app's own public websocket edge ──────────────
+# A SEPARATE `server` block from proxy.relay above, for one reason: it presents
+# a SEPARATE certificate lineage. Per #830 the two names are issued as two
+# independent certbot requests (see init-letsencrypt.sh's CERT_NAMES), never as
+# one multi-SAN request -- a SAN request is all-or-nothing, so bundling them
+# means either name failing validation takes the other's certificate down with
+# it. That is exactly how the relay box ended up unable to obtain any
+# certificate at all before #830. Two lineages, two blind spots that cannot
+# reach each other.
+#
+# This is also the far end of the DNS move in infra/devnet-manage.sh: post-#820
+# `relay-ws.devnet` resolves HERE, and the apex no longer names it in any
+# server_name or cert lineage (infra/linode-node/nginx/conf.d/node.conf).
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name relay-ws.${DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/relay-ws.${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/relay-ws.${DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
+    # Same two guards as the proxy.relay block above, for the same reasons and
+    # to keep the two blocks' shape identical.
+    location ^~ /admin { return 404; }
+    location ^~ /rust/ { return 410; }
+
+    location / {
+        # `$backend` is the same `map $host` table at the top of this file, so
+        # this name's upstream (relay:7100 -- the relay app's PUBLIC websocket
+        # port, never the payment-oblivious :3100) stays declared in exactly
+        # one place. The guard keeps an unmapped Host a 404 rather than a
+        # proxy_pass to the empty string.
+        if ($backend = "") { return 404; }
+        limit_req zone=relay burst=60 nodelay;
+
+        proxy_pass $backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        # The relay speaks NIP-01 over a websocket: without these two the
+        # upgrade never completes and every client sees a plain HTTP 400.
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
         proxy_read_timeout 1h;

@@ -4,13 +4,14 @@
 # ADDITIVE: adds the Rust connector alongside docker-compose.node.yml's
 # existing TypeScript fleet on this SAME box, WITHOUT editing that file.
 # Compose merges multiple `-f` files into one project, so this service joins
-# the SAME default network as `relay` (and the TypeScript `connector`) —
-# `handler_url = "http://relay:3100"` in ./connector-rust.toml resolves by
-# the same container-name DNS the TypeScript node already relies on. Neither
-# `relay` nor any other existing service is touched here.
+# the SAME default network as the TypeScript `connector` and `faucet` and can
+# reach them by container-name DNS. No existing service is touched here. (This
+# box ran a co-located `relay` container until issue #820 moved that app to
+# its own box; ./connector-rust.toml now FORWARDS `g.toon.relay` there over
+# the apex<->relay peering rather than naming a local `handler_url`.)
 #
-# Run alongside the existing stack (never on its own — it has no relay
-# service of its own to front):
+# Run alongside the existing stack (never on its own — nginx, TLS and the
+# faucet all live in the base file):
 #   docker compose -f infra/linode-node/docker-compose.node.yml \
 #                   -f infra/linode-node/docker-compose.node.rust.yml up -d
 #
@@ -93,6 +94,9 @@ services:
       # (`openssl rand -hex 32`), gitignored as `*.secret`, and the SAME BYTES
       # on both boxes -- the two sides authenticate against each other with it.
       - ./apex-store.secret:/app/data/apex-store.secret:ro
+      # The g.toon proxy<->relay peering's shared secret (issue #820), same
+      # handling as apex-store.secret above.
+      - ./apex-relay.secret:/app/data/apex-relay.secret:ro
       - ./settlement-solana-rust.key:/app/data/settlement-solana.key:ro
       # Durable claim watermarks (issue #605) -- see the header.
       - connector_rust_state:/app/state
