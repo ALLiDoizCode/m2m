@@ -31,6 +31,7 @@ use chrono::Duration as ChronoDuration;
 use connector_settlement::SettlementBackend;
 use connector_settlement_evm::test_support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
 use connector_settlement_evm::EvmSettlementBackend;
+use connector_runtime::OutboundClientLedger;
 use connector_signer::{derive_evm_address, to_hex, Signer};
 
 mod support;
@@ -481,6 +482,92 @@ fn announcing_beside_a_serving_node_refuses_rather_than_forking_the_claim_journa
     assert!(
         stderr.contains("--dry-run"),
         "the message must name the escape that is safe beside a running node: {stderr}"
+    );
+}
+
+/// The same guard, asked about the ledger that MOVED (issue #873, this is
+/// issue #876's AC1).
+///
+/// `OutboundClientLedger` now lives in `connector-runtime`, and its
+/// file-backed form is a **second** book of money state under a serving
+/// node's `state_dir` -- one whose nonce floor two processes replaying the
+/// same file would both resume from and both advance to N+1. The guard
+/// above predates that book, so this test asks the guard's question with
+/// the relocated book actually present and standing where a serving node's
+/// own would:
+///
+///   * the seed is read back through `OutboundClientLedger::open` itself,
+///     so what is on disk is the relocated ledger and not merely a file
+///     shaped like one;
+///   * the announce is refused BY NAME -- delete
+///     `refuse_if_a_second_process_would_fork_the_ledger` (or its call in
+///     `announce`) and this fails on the "already serving" assertion, which
+///     is the whole point of the test;
+///   * and the refused process leaves the relocated ledger byte-identical,
+///     so the refusal lands *before* a second writer exists rather than
+///     after one has already advanced a nonce.
+///
+/// Deliberately NOT a second copy of the peer-journal test above: that one
+/// proves the guard fires at all, this one proves the book #873 introduced
+/// is behind it.
+#[test]
+fn a_second_process_is_refused_before_it_can_fork_the_relocated_outbound_client_ledger() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+
+    // A serving node's outbound client ledger, mid-life: it has already
+    // issued nonce 7 to the `carrier` peering this config forwards over.
+    let ledger_path = state_dir.path().join("outbound-client.ndjson");
+    std::fs::write(&ledger_path, "{\"nextHop\":\"carrier\",\"nonce\":7}\n")
+        .expect("seed the relocated ledger");
+    assert_eq!(
+        OutboundClientLedger::open(&ledger_path)
+            .expect("the seed must be a ledger the relocated book can read")
+            .issued_nonce("carrier"),
+        7,
+        "the fixture has to be the real relocated ledger, or this test guards nothing"
+    );
+    let before = std::fs::read(&ledger_path).expect("read the seeded ledger");
+
+    let key_file = support::write_raw_key_file(19);
+    let secret = write("a-real-peering-secret");
+    let config = write(&forwarding_config(
+        key_file.path(),
+        secret.path(),
+        state_dir.path(),
+        port,
+    ));
+
+    let (ok, _stdout, stderr) = run_connector(&[
+        "announce",
+        "--config",
+        &config.path().display().to_string(),
+        "http://127.0.0.1:1/ilp",
+        "--via-own-routing",
+    ]);
+
+    assert!(!ok, "a second writer over one state_dir must not succeed");
+    assert!(
+        stderr.contains("already serving"),
+        "the guard must refuse this by name -- if this line is what failed, the fork guard is \
+         gone and a second process can now advance the relocated ledger's nonce line: {stderr}"
+    );
+    assert!(
+        stderr.contains("--dry-run"),
+        "the message must name the escape that is safe beside a running node: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read(&ledger_path).expect("read the ledger back"),
+        before,
+        "the refused process must leave the relocated ledger exactly as it found it"
+    );
+    assert_eq!(
+        OutboundClientLedger::open(&ledger_path)
+            .expect("the ledger must still be readable")
+            .issued_nonce("carrier"),
+        7,
+        "no nonce may have been issued on the serving node's line"
     );
 }
 
