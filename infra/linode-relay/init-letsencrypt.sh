@@ -17,15 +17,14 @@ DC=(docker compose -f infra/linode-relay/docker-compose.relay.yml)
 # obtain any certificate at all before #830 (relay-ws.${DOMAIN} still pointed
 # at the apex then, so its challenge could only fail).
 #
-# All three names resolve HERE once the live cutover flips DNS -- #870
-# (toon-meta#310's apex-retirement spec) is repo-side only, so this box is
-# only PREPARED to serve faucet.${DOMAIN}, not yet reachable there: the apex
-# still answers for it until DNS moves and the apex's own copy is retired
-# (a separate, later, human-gated step -- this file does not touch the
-# apex). Same shape #820 already landed for relay-ws.${DOMAIN}. Each name
-# gets its own lineage, its own `server` block in nginx/conf.d/node.conf,
-# and its own independent renewal.
-CERT_NAMES=("proxy.relay.${DOMAIN}" "relay-ws.${DOMAIN}" "faucet.${DOMAIN}")
+# Both names resolve HERE now: #820 dropped relay-ws from the apex's nginx and
+# from its cert lineage, and infra/devnet-manage.sh points the record at this
+# box. Each name gets its own lineage, its own `server` block in
+# nginx/conf.d/node.conf, and its own independent renewal.
+#
+# faucet.${DOMAIN} is deliberately NOT here: the faucet gets its own box with
+# its own lineage (docs/two-node-architecture.md §4.3).
+CERT_NAMES=("proxy.relay.${DOMAIN}" "relay-ws.${DOMAIN}")
 RENEW_WINDOW_DAYS="${RENEW_WINDOW_DAYS:-30}"
 
 # Set per lineage by the loops below; seed_dummy/existing_cert_ok read them.
@@ -80,9 +79,8 @@ SANS
 # Pass 1: work out which lineages need issuing, and make sure EVERY lineage has
 # at least a self-signed cert on disk BEFORE nginx starts. nginx refuses to
 # start at all if any `ssl_certificate` file named in the config is missing, and
-# relay-ws.${DOMAIN} and faucet.${DOMAIN} each name a lineage of their own — so
-# the dummies have to be seeded for EVERY name in CERT_NAMES up front, not one
-# at a time inside the issuing loop.
+# relay-ws.${DOMAIN} now names a lineage of its own — so the dummies have to be
+# seeded for both names up front, not one at a time inside the issuing loop.
 NEEDS_ISSUE=()
 for name in "${CERT_NAMES[@]}"; do
   use_cert "$name"

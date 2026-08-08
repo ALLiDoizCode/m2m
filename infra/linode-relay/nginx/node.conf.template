@@ -1,8 +1,8 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TOON relay box nginx config.
 # Serves: proxy.relay.DOMAIN (connector ILP edge)  relay-ws.DOMAIN (relay app)
-#         faucet.DOMAIN (issue #870, toon-meta#310's apex-retirement spec —
-#         the faucet moves here from the apex, hostname unchanged)
+# NOT the faucet: it gets its own box, with no connector on it
+# (docs/two-node-architecture.md §4).
 #
 # Written to point directly at connector-rust:4000 — NOT at a TypeScript
 # connector. infra/linode-store/nginx/node.conf.template used to name
@@ -28,13 +28,12 @@ map $host $backend {
     default                  "";
     proxy.relay.${DOMAIN}    "http://connector-rust:4000";
     relay-ws.${DOMAIN}       "http://relay:7100";
-    faucet.${DOMAIN}         "http://faucet:3500";
 }
 
 server {
     listen 80;
     listen [::]:80;
-    server_name proxy.relay.${DOMAIN} relay-ws.${DOMAIN} faucet.${DOMAIN};
+    server_name proxy.relay.${DOMAIN} relay-ws.${DOMAIN};
 
     location /.well-known/acme-challenge/ {
         root /var/www/certbot;
@@ -162,41 +161,3 @@ server {
     }
 }
 
-# ── faucet.DOMAIN — the devnet faucet (issue #870) ───────────────────────────
-# Moved here from the apex (infra/linode-node/nginx/node.conf.template), same
-# hostname, same reason for a SEPARATE `server` block and cert lineage as
-# relay-ws above: one SAN failing must not take another name's cert down
-# with it (#830). The faucet app itself answers `/health` and every
-# `/api/*` route natively, so unlike proxy.relay's own block this needs no
-# `$health_backend` indirection -- the generic `$backend` map already routes
-# every path on this host to the same upstream.
-server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    http2 on;
-    server_name faucet.${DOMAIN};
-
-    ssl_certificate     /etc/letsencrypt/live/faucet.${DOMAIN}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/faucet.${DOMAIN}/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-
-    resolver 127.0.0.11 valid=10s ipv6=off;
-
-    # Same two guards as the other blocks in this file, for the same reasons.
-    location ^~ /admin { return 404; }
-    location ^~ /rust/ { return 410; }
-
-    location / {
-        if ($backend = "") { return 404; }
-        limit_req zone=relay burst=60 nodelay;
-
-        proxy_pass $backend;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_read_timeout 1h;
-
-        client_max_body_size 4m;
-    }
-}
