@@ -6,6 +6,10 @@ license.workspace = true
 
 [dependencies]
 chrono = "0.4"
+# The x402 greeting's wire shape (issue #874) is derived, not hand-rolled:
+# one definition serves the client edge that writes a greeting and the peer
+# carriages that read one.
+serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 thiserror = "2"
 serde_json = "1"
