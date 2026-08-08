@@ -21,10 +21,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [dev-dependencies]
 tempfile = "3"
-# `devnet_configs_load.rs` only: the committed devnet configs' keyed
+# `devnet_configs_load.rs`: the committed devnet configs' keyed
 # `[settlement.<chain>]` legs are asserted by loading them through the real
 # `Config::load` (issue #628's typed per-chain tables), which is the only
 # way to cover a leg no test can boot without reaching a public cluster.
+# `readme_config_keys.rs` (issue #900) hands that same `Config::load` a probe
+# per key the README's config-key table names, so the table cannot again
+# document a key the parser refuses.
 connector-config = { path = "../connector-config" }
 connector-domain = { path = "../connector-domain" }
 # `two_connectors_peer.rs` only (issue #734): a peer MESSAGE and the
