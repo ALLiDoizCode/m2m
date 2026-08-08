@@ -419,7 +419,10 @@ pub enum PeerAnswer {
     /// **distinct** outcome from [`PeerAnswer::Reject`] on purpose: terms
     /// were quoted, we could not tell what they were, and treating that as
     /// "no terms" would let a framing bug read as a free ride.
-    MalformedGreeting { reject: Reject, error: GreetingError },
+    MalformedGreeting {
+        reject: Reject,
+        error: GreetingError,
+    },
 }
 
 impl PeerAnswer {
