@@ -27,8 +27,9 @@
 # nothing about what serves production traffic.
 #
 # ── What this node terminates ──────────────────────────────────────────────
-# The same three prefixes this box's TypeScript connector.yaml terminates, at
-# the same prices, against the same payment-oblivious store app on :3300:
+# The same three prefixes this box's retired TypeScript connector terminated
+# (its config is deleted, issue #901), at the same prices, against the same
+# payment-oblivious store app on :3300:
 #
 #   g.toon.ario         this box's own advertised prefix
 #   g.toon.relay.ario   the relay-hop form (client → g.toon proxy → store)
@@ -37,7 +38,7 @@
 #                       directly is priced identically
 #
 # `http://store:3300/store` resolves by the same container-name DNS the
-# TypeScript node already relies on — the overlay joins this compose project's
+# TypeScript node relied on — the overlay joins this compose project's
 # default network. The path is `/store` because that is the store app's
 # HTTP-backend endpoint (DVM_BACKEND_MODE=http, HANDLER_PORT=3300); it is also
 # what this box's nginx `location /store` hands it, so the g.toon proxy's public
@@ -150,15 +151,16 @@
 # DECISION (owner-confirmed 2026-08-03): the settlement keys are derived from
 # the existing mnemonic rather than freshly generated. Reusing the seed means
 # this node inherits settlement identities the fleet has already funded and
-# already advertises in connector.yaml's `settlementAddresses`. Fresh
-# identities would each need funding, and every client with an open channel
-# would have to open a new one against the new address.
+# already advertises — `docker-compose.store.yml`'s store service publishes the
+# same pair as `SETTLE_EVM` / `SETTLE_SOL`. Fresh identities would each need
+# funding, and every client with an open channel would have to open a new one
+# against the new address.
 #
 # So for the settlement pair, matching the TypeScript node is the GOAL, not a
 # collision to avoid. Derive from `TOON_MNEMONIC` in this directory's `.env`
 # (the store box's own seed — `docker-compose.store.yml` calls it
 # STORE_TOON_MNEMONIC in prose) at **account index 0**, the index that
-# produced the addresses already in `connector.yaml`:
+# produced the two addresses that file's store service still advertises:
 #
 #   evm     m/44'/1237'/0'/0/0   → 0x6B6c2DACf7Ac1F1273F72beF2E6084F9Ee6D3bff
 #   solana  m/44'/501'/0'/0'     → W6yK72j365eK7t4Qj5An1AaYtUEJcJK7TBPvGeDk1LV

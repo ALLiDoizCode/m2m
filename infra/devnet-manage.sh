@@ -462,10 +462,9 @@ redeploy)
       compose="docker compose -f infra/linode-store/docker-compose.store.yml -f infra/linode-store/docker-compose.store.rust.yml"
       ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && $compose pull && $compose up -d" &
     else
-      # relay has no TypeScript compose file at all (issue #816) -- always
-      # both files together, since the connector-rust service is only
-      # defined in the overlay. No service list and no `--no-deps`: every
-      # service in the file set is meant to run.
+      # Always both files together, since the connector-rust service is only
+      # defined in the overlay -- see the store leg's note above, which this
+      # leg's shape is now identical to.
       compose="docker compose -f infra/linode-relay/docker-compose.relay.yml -f infra/linode-relay/docker-compose.relay.rust.yml"
       ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && $compose pull && $compose up -d" &
     fi

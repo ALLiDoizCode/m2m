@@ -2339,7 +2339,9 @@ fn no_surviving_box_pins_a_non_rust_connector_image() {
 /// `ports:` list item apart from a `volumes:` one that also starts `- '`. A
 /// `#`-comment line inside the block (several overlays carry one explaining
 /// the loopback bind) is skipped rather than mistaken for a malformed entry.
-fn compose_ports(raw: &str) -> Vec<String> {
+/// `name` is carried only so an unparseable entry names its file, like the
+/// two assertions below do.
+fn compose_ports(name: &str, raw: &str) -> Vec<String> {
     let mut ports = Vec::new();
     let mut lines = raw.lines().peekable();
     while let Some(line) = lines.next() {
@@ -2361,7 +2363,7 @@ fn compose_ports(raw: &str) -> Vec<String> {
                 .strip_prefix("- '")
                 .and_then(|s| s.strip_suffix('\''))
                 .unwrap_or_else(|| {
-                    panic!("expected a quoted `ports:` list entry, found `{trimmed}`")
+                    panic!("{name}: expected a quoted `ports:` list entry, found `{trimmed}`")
                 });
             ports.push(mapping.to_string());
             lines.next();
@@ -2389,7 +2391,7 @@ const UNPREFIXED_PORT_ALLOWLIST: &[&str] = &[
 #[test]
 fn every_surviving_box_port_binding_is_host_ip_prefixed_or_allowlisted() {
     for (name, raw) in SURVIVING_BOX_COMPOSE_FILES {
-        for mapping in compose_ports(raw) {
+        for mapping in compose_ports(name, raw) {
             let host_ip_prefixed = mapping.matches(':').count() >= 2;
             let allowlisted = UNPREFIXED_PORT_ALLOWLIST.contains(&mapping.as_str());
             assert!(

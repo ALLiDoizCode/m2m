@@ -1,11 +1,12 @@
 # ═══════════════════════════════════════════════════════════════════════════
 # TOON devnet — Rust connector overlay, STORE side
 # ═══════════════════════════════════════════════════════════════════════════
-# ADDITIVE: adds a Rust connector alongside docker-compose.store.yml's
-# TypeScript fleet on this SAME box, WITHOUT editing that file and WITHOUT
-# taking anything down. It is the store-box mirror of
-# infra/linode-node/docker-compose.node.rust.yml, which has run beside the
-# g.toon proxy's TypeScript connector since #601.
+# ADDITIVE: adds a Rust connector to docker-compose.store.yml's stack on this
+# SAME box, WITHOUT editing that file and WITHOUT taking anything down. It is
+# the store-box mirror of infra/linode-node/docker-compose.node.rust.yml,
+# which has run beside the g.toon proxy's TypeScript connector since #601.
+# Since issue #901 this is the box's ONLY connector: the base file's own
+# retired TypeScript service is deleted.
 #
 # Run alongside the existing stack (never on its own — it has no store service
 # of its own to front):
@@ -17,7 +18,7 @@
 # network beside `store` and `nginx`, so ./connector-rust.toml's
 # `handler_url = "http://store:3300/store"` and nginx's
 # `http://connector-rust:4000` both resolve by the container-name DNS the
-# TypeScript node already relies on.
+# TypeScript node relied on.
 #
 # ── STATUS ────────────────────────────────────────────────────────────────
 # NOT YET DEPLOYED, but now deployable — which is the change. The previous
@@ -31,9 +32,10 @@
 #
 # The free-write hazard the old banner warned about is therefore gone by
 # construction: ./connector-rust.toml prices every route it terminates at
-# `1000`, exactly matching the TypeScript connector.yaml's price on the same
-# prefixes, so the two doors into `store:3300` cost the same and neither
-# undercuts the other.
+# `1000`, the price the retired TypeScript connector charged on the same
+# prefixes for as long as the two edges coexisted — so neither door into
+# `store:3300` ever undercut the other, and since #901 deleted that service
+# this is the only door there is.
 #
 # ── Why 4000 is bound to loopback ─────────────────────────────────────────
 # A Docker `ports:` publish is reachable from the internet regardless of what
