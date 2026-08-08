@@ -84,17 +84,17 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
+use chrono::{Duration as ChronoDuration, Utc};
 use connector_config::{AnnounceConfig, Config, SecretLocation, SettlementConfig};
 use connector_domain::{
     derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, PacketResponse, Prepare, Reject,
 };
+// The outbound client ledger (issue #873): the receiver-authoritative
+// watermark, the nonce line and the claim signing this path used to carry
+// itself, now shared with the forwarding path.
+use connector_runtime::{EvmDomain, HttpClaimState, OutboundClientError, OutboundClientLedger};
 use connector_signer::giftwrap::{derive_fulfillment, open_response, seal_request};
-use connector_signer::{
-    derive_evm_address, evm_balance_proof_digest, evm_claim_state_challenge_digest,
-    sign_ilp_peer_info, to_hex, EvmBalanceProof, EvmClaimStateChallenge, LocalSigner, NostrEvent,
-    PublicKeyBytes, Signer,
-};
+use connector_signer::{sign_ilp_peer_info, LocalSigner, NostrEvent, PublicKeyBytes};
 use serde::Serialize;
 
 use crate::runtime::{
@@ -413,6 +413,39 @@ impl From<RuntimeError> for AnnounceError {
     }
 }
 
+/// The outbound client ledger's failures, said in this command's own words
+/// (issue #873).
+///
+/// Mapped rather than wrapped: an operator running `connector announce` by
+/// hand gets the same sentences this command printed before the ledger
+/// moved out of this file, because the sentences were the useful part.
+impl From<OutboundClientError> for AnnounceError {
+    fn from(source: OutboundClientError) -> Self {
+        match source {
+            OutboundClientError::ClaimStateUnavailable { channel, reason } => {
+                AnnounceError::ClaimStateUnavailable { channel, reason }
+            }
+            OutboundClientError::InsufficientHeadroom {
+                channel,
+                available,
+                amount,
+            } => AnnounceError::InsufficientHeadroom {
+                channel,
+                available,
+                amount,
+            },
+            OutboundClientError::Signing(reason) => AnnounceError::Signing(reason),
+            // Unreachable from this command as written -- it opens the
+            // ledger in memory (see `pay_the_through_url`) -- but carried
+            // through rather than unwrapped, so that stays a fact about the
+            // call site and not a `panic!` waiting for one to change.
+            source @ OutboundClientError::LedgerUnwritable { .. } => {
+                AnnounceError::Signing(source.to_string())
+            }
+        }
+    }
+}
+
 // ── the kind:10032 content ───────────────────────────────────────────────────
 
 /// The kind:10032 `IlpPeerInfo` payload, field-for-field the shape the
@@ -571,13 +604,6 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_secs())
-        .unwrap_or(0)
-}
-
 // ── negotiating with the through-URL, free and unauthenticated ───────────────
 
 /// The terms an edge answered an unpaid PREPARE with.
@@ -610,21 +636,6 @@ pub struct Terms {
     /// the window the far side will actually hold the session open for,
     /// rather than assuming a session lives forever.
     pub session_lease_ttl_ms: Option<u64>,
-}
-
-/// The two facts a client claim's signature is bound to, taken from the
-/// RECEIVER's own greeting rather than from this node's settlement section.
-///
-/// This is not a convenience. `claim_state.rs`'s `resolve_evm` builds its
-/// challenge domain from the channel as **that node** resolved it, and its
-/// claim gate recovers a claim's signer under the same domain -- so a claim
-/// signed under this node's idea of the domain verifies to a different
-/// address and is refused. The greeting is the receiver saying which
-/// `TokenNetwork` it judges by, and it is the only correct source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EvmDomain {
-    pub chain_id: u64,
-    pub token_network: [u8; 20],
 }
 
 /// Parse the x402 v2 greeting body. Tolerant of fields it does not read
@@ -790,179 +801,12 @@ async fn fetch_terms(
 /// The header a client-edge claim rides in, base64 of the claim JSON.
 const CLAIM_HEADER: &str = "ilp-payment-channel-claim";
 
-/// How long a `POST /ilp/claim-state` challenge is valid for. Short: it is
-/// signed and used in the same round trip, and a challenge is a capability
-/// to read a channel's state.
-const CLAIM_STATE_CHALLENGE_TTL_SECS: u64 = 60;
-
-/// Where a channel's watermark stands, according to the node that judges it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ClaimWatermark {
-    /// The last nonce this receiver accepted; the next claim must exceed it.
-    pub nonce: u64,
-    /// What this receiver has already accepted cumulatively on the channel.
-    pub cumulative: u128,
-    /// Spendable headroom (`deposit - claimed + credited`), or `None` for a
-    /// declared channel that names no amount.
-    pub available: Option<u128>,
-}
-
-/// Ask the through-URL where this node's own claims on `channel` stand.
-///
-/// **The receiver is the authority on its own watermark**, and this is why
-/// the client path needs no durable state here. A claim whose nonce does not
-/// advance the receiver's record is refused as a replay, and a cumulative
-/// amount below its record is refused too -- so a payer that remembered
-/// locally would still have to reconcile, and a payer that guessed would
-/// either replay or silently overpay (which is exactly why
-/// `devnet_store_leg_probe.rs` makes an operator type both numbers in by
-/// hand). `POST /ilp/claim-state` (issue #693) exists to answer this, and
-/// asking is strictly better than remembering.
-///
-/// Authenticated per channel by an EIP-712 challenge signed with the same
-/// settlement key the claim itself is signed with -- a *different* digest
-/// from a balance proof on purpose, so a captured challenge is not
-/// replayable as a payment.
-async fn fetch_claim_state(
-    client: &reqwest::Client,
-    through_url: &str,
-    channel: &[u8; 32],
-    domain: &EvmDomain,
-    signer: &LocalSigner,
-) -> Result<ClaimWatermark, AnnounceError> {
-    let channel_hex = format!("0x{}", hex_encode(channel));
-    let url = under(through_url, "claim-state");
-    let expires = now_secs() + CLAIM_STATE_CHALLENGE_TTL_SECS;
-    let digest = evm_claim_state_challenge_digest(&EvmClaimStateChallenge {
-        channel_id: *channel,
-        expires,
-        chain_id: domain.chain_id,
-        token_network_address: domain.token_network,
-    });
-    let signature = signer
-        .sign(&digest)
-        .map_err(|error| AnnounceError::ClaimStateUnavailable {
-            channel: channel_hex.clone(),
-            reason: error.to_string(),
-        })?
-        .to_bytes();
-
-    let request = serde_json::json!({
-        "channels": [{
-            "blockchain": "evm",
-            "channelId": channel_hex,
-            "expires": expires,
-            "signature": format!("0x{}", hex_encode(&signature)),
-        }]
-    });
-    let failed = |reason: String| AnnounceError::ClaimStateUnavailable {
-        channel: channel_hex.clone(),
-        reason,
-    };
-    let body: serde_json::Value = client
-        .post(&url)
-        .json(&request)
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|error| failed(error.to_string()))?
-        .json()
-        .await
-        .map_err(|error| failed(error.to_string()))?;
-
-    let entry = body["channels"]
-        .get(0)
-        .ok_or_else(|| failed(format!("no answer for the channel asked about: {body}")))?;
-    if entry["ok"] != serde_json::Value::Bool(true) {
-        // The endpoint collapses every refusal to one generic reason on
-        // purpose (a caller must learn nothing about a channel it does not
-        // control), so there is nothing more specific to report here --
-        // hence the long "usual causes" in the error's own Display.
-        return Err(failed(format!(
-            "answered ok=false ({})",
-            entry["error"].as_str().unwrap_or("no reason given")
-        )));
-    }
-    Ok(ClaimWatermark {
-        nonce: entry["nonce"]
-            .as_u64()
-            .ok_or_else(|| failed(format!("no nonce in the answer: {entry}")))?,
-        cumulative: entry["cumulativeClaimed"]
-            .as_str()
-            .and_then(|value| value.parse().ok())
-            .ok_or_else(|| failed(format!("no cumulativeClaimed in the answer: {entry}")))?,
-        available: entry["available"]
-            .as_str()
-            .and_then(|value| value.parse().ok()),
-    })
-}
-
-/// The next claim on `channel`: the receiver's watermark advanced by
-/// exactly `amount`.
-///
-/// A monotonic function of what the receiver reported, deliberately -- the
-/// two failure modes of getting this wrong are a replay (refused, free) and
-/// an overpayment (accepted, silent), and only one of them is survivable.
-fn next_claim(watermark: &ClaimWatermark, amount: u64) -> (u64, u128) {
-    (
-        watermark.nonce + 1,
-        watermark.cumulative + u128::from(amount),
-    )
-}
-
-/// The client-edge claim JSON, signed through this workspace's PRODUCTION
-/// signing path (`Signer::sign` + `Signature::to_bytes`), whose byte 64 is
-/// libsecp256k1's raw recovery id in `{0,1}`. Deliberately no `+27`: issues
-/// #590/#591 moved that normalisation to the settlement boundary, and
-/// pre-shifting it here would be a second implementation of a rule that
-/// already has one.
-fn claim_json(
-    signer: &LocalSigner,
-    channel: &[u8; 32],
-    domain: &EvmDomain,
-    nonce: u64,
-    cumulative: u128,
-) -> Result<String, AnnounceError> {
-    let proof = EvmBalanceProof {
-        channel_id: *channel,
-        nonce,
-        transferred_amount: cumulative,
-        locked_amount: 0,
-        locks_root: [0u8; 32],
-        chain_id: domain.chain_id,
-        token_network_address: domain.token_network,
-    };
-    let signature = signer
-        .sign(&evm_balance_proof_digest(&proof))
-        .map_err(|error| AnnounceError::Signing(error.to_string()))?
-        .to_bytes();
-    let address = derive_evm_address(
-        &signer
-            .public_key()
-            .map_err(|error| AnnounceError::Signing(error.to_string()))?,
-    );
-    Ok(serde_json::json!({
-        "version": "1.0",
-        "blockchain": "evm",
-        "messageId": format!("connector-announce-{nonce}"),
-        // `Z`, not `+00:00`. The claim gate refuses a `+00:00` offset by
-        // name -- "'timestamp' must be ISO 8601 with a 'Z' timezone" -- and
-        // `chrono`'s plain `to_rfc3339()` produces exactly the spelling it
-        // rejects.
-        "timestamp": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        "senderId": to_hex(&address),
-        "channelId": format!("0x{}", hex_encode(channel)),
-        "nonce": nonce,
-        "transferredAmount": cumulative.to_string(),
-        "lockedAmount": "0",
-        "locksRoot": format!("0x{}", "0".repeat(64)),
-        "signature": format!("0x{}", hex_encode(&signature)),
-        "signerAddress": to_hex(&address),
-        "chainId": domain.chain_id,
-        "tokenNetworkAddress": to_hex(&domain.token_network),
-    })
-    .to_string())
-}
+// What the header CARRIES is built and signed nowhere near here any more.
+// `OutboundClientLedger` in `connector-runtime` holds the three steps that
+// used to live in this file -- ask the RECEIVER for the watermark, advance
+// it by exactly this packet's amount, sign the claim (issue #873). They
+// moved because the forwarding path needs the same three steps to pay a
+// next hop, and two copies of a nonce rule is one copy too many.
 
 /// POST the paid PREPARE to the through-URL, exactly as any other client of
 /// that node does: the encoded packet as the body, the claim base64'd into
@@ -1543,34 +1387,45 @@ async fn pay_the_through_url(
         LocalSigner::from_secret_bytes("announce-claim", read_settlement_key_bytes(evm.key())?)
             .map_err(|error| AnnounceError::Signing(error.to_string()))?;
 
-    let watermark =
-        fetch_claim_state(client, &options.through_url, &channel, &domain, &signer).await?;
-    // Refused here rather than bought: a claim above what has actually been
-    // deposited could never be redeemed on chain, so the far side declines
-    // it (issue #646) -- and this way the operator is told the number.
-    if let Some(available) = watermark.available {
-        if available < u128::from(amount) {
-            return Err(AnnounceError::InsufficientHeadroom {
-                channel: format!("0x{}", hex_encode(&channel)),
-                available,
-                amount,
-            });
-        }
-    }
-    let (nonce, cumulative) = next_claim(&watermark, amount);
-    let claim = claim_json(&signer, &channel, &domain, nonce, cumulative)?;
+    // In MEMORY, deliberately, and this is the one place the CLI's use of
+    // the shared ledger differs from the serving node's.
+    //
+    // A file-backed ledger exists to stop a RESTART reissuing a nonce, and
+    // an announce has no restart to survive: it signs at most one claim in
+    // its whole life and the next invocation asks the receiver again from
+    // scratch. Giving it a file under `state_dir` would put a second writer
+    // beside a running node's own money state -- exactly the fork
+    // [`refuse_if_a_second_process_would_fork_the_ledger`] refuses, and
+    // that guard does not cover this path precisely because until now this
+    // path wrote nothing. It still writes nothing.
+    let ledger = OutboundClientLedger::in_memory();
+    // The next hop, for a payer arriving as an ordinary client, IS the
+    // through-URL: that is the node whose watermark is being advanced and
+    // whose nonce line this claim sits on.
+    let receiver = HttpClaimState::new(client, &options.through_url, &signer);
+    let claim = ledger
+        .next_claim(
+            &options.through_url,
+            &receiver,
+            &channel,
+            &domain,
+            &signer,
+            amount,
+        )
+        .await?;
 
     tracing::info!(
         destination = %prepare.destination,
         through = %options.through_url,
         carriage = carriage.name(),
         amount,
-        nonce,
-        cumulative = %cumulative,
+        nonce = claim.nonce,
+        cumulative = %claim.cumulative,
         event_id = %event.id,
         "paying the through-URL directly, as an ordinary client"
     );
 
+    let claim = claim.json;
     match &carriage {
         Carriage::Http => send_as_client(client, &options.through_url, prepare, &claim).await,
         Carriage::Btp(btp_url) => {
@@ -1675,6 +1530,8 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::path::Path;
+
+    use connector_signer::to_hex;
 
     /// Write `secret` to a fresh temp file, as an operator's key file holds
     /// it: 32 raw bytes. Held by the caller, since dropping it deletes it.
@@ -1910,139 +1767,6 @@ btp_endpoint = "wss://proxy.ario.example/ilp/btp"
         assert!(route_matches("g.toon.relay", "g.toon.relay.ario"));
         assert!(!route_matches("g.toon.relay", "g.toon.relayed"));
         assert!(!route_matches("g.toon.relay", "g.toon"));
-    }
-
-    // -- Paying like any other client (issue #784) --
-
-    const DOMAIN: EvmDomain = EvmDomain {
-        chain_id: 84_532,
-        token_network: [0x1eu8; 20],
-    };
-    const CHANNEL: [u8; 32] = [0x5cu8; 32];
-
-    fn claim_signer() -> LocalSigner {
-        LocalSigner::from_secret_bytes("announce-claim-test", [23u8; 32]).expect("signer")
-    }
-
-    /// The claim this node emits is verified here the way the RECEIVER
-    /// verifies it: recover the signer from the balance-proof digest and
-    /// check it is the channel participant this node's settlement key
-    /// derives. A claim that fails this is refused at the far gate with the
-    /// packet already formed, so it is worth proving locally.
-    #[test]
-    fn the_claim_verifies_as_the_settlement_address_the_channel_is_opened_with() {
-        let signer = claim_signer();
-        let json = claim_json(&signer, &CHANNEL, &DOMAIN, 7, 7_014).expect("sign a claim");
-        let claim: serde_json::Value = serde_json::from_str(&json).expect("claim JSON");
-
-        let expected = derive_evm_address(&signer.public_key().expect("public key"));
-        assert_eq!(claim["signerAddress"], to_hex(&expected));
-        assert_eq!(claim["senderId"], to_hex(&expected));
-        assert_eq!(claim["nonce"], 7);
-        assert_eq!(claim["transferredAmount"], "7014");
-        assert_eq!(claim["chainId"], 84_532);
-        assert_eq!(claim["tokenNetworkAddress"], to_hex(&DOMAIN.token_network));
-        assert_eq!(claim["blockchain"], "evm");
-
-        let signature = decode_hex_65(claim["signature"].as_str().expect("signature"));
-        assert!(
-            connector_signer::verify_evm_balance_proof(
-                &EvmBalanceProof {
-                    channel_id: CHANNEL,
-                    nonce: 7,
-                    transferred_amount: 7_014,
-                    locked_amount: 0,
-                    locks_root: [0u8; 32],
-                    chain_id: DOMAIN.chain_id,
-                    token_network_address: DOMAIN.token_network,
-                },
-                &signature,
-                &expected,
-            ),
-            "the receiving claim gate must recover this node's own settlement address"
-        );
-    }
-
-    /// `chrono`'s plain `to_rfc3339()` emits `+00:00`, which the claim gate
-    /// refuses by name ("'timestamp' must be ISO 8601 with a 'Z' timezone").
-    /// Cheap to hit, free to learn, and easy to reintroduce.
-    #[test]
-    fn the_claims_timestamp_ends_in_z_not_an_offset() {
-        let json = claim_json(&claim_signer(), &CHANNEL, &DOMAIN, 1, 1).expect("sign");
-        let claim: serde_json::Value = serde_json::from_str(&json).expect("claim JSON");
-        let timestamp = claim["timestamp"].as_str().expect("timestamp");
-
-        assert!(timestamp.ends_with('Z'), "{timestamp}");
-        assert!(!timestamp.contains("+00:00"), "{timestamp}");
-    }
-
-    /// The claim-state challenge is a DIFFERENT digest from a balance
-    /// proof, deliberately -- reusing the claim signature scheme would make
-    /// a captured read-challenge replayable as a payment. Verified through
-    /// the same function the receiving handler calls.
-    #[test]
-    fn the_claim_state_challenge_verifies_under_its_own_domain_separated_digest() {
-        let signer = claim_signer();
-        let challenge = EvmClaimStateChallenge {
-            channel_id: CHANNEL,
-            expires: 2_000_000_000,
-            chain_id: DOMAIN.chain_id,
-            token_network_address: DOMAIN.token_network,
-        };
-        let signature = signer
-            .sign(&evm_claim_state_challenge_digest(&challenge))
-            .expect("sign")
-            .to_bytes();
-        let address = derive_evm_address(&signer.public_key().expect("public key"));
-
-        assert!(connector_signer::verify_evm_claim_state_challenge(
-            &challenge, &signature, &address
-        ));
-        // ...and the two digests are genuinely different, so neither
-        // signature is usable as the other.
-        assert_ne!(
-            evm_claim_state_challenge_digest(&challenge),
-            evm_balance_proof_digest(&EvmBalanceProof {
-                channel_id: CHANNEL,
-                nonce: 0,
-                transferred_amount: 0,
-                locked_amount: 0,
-                locks_root: [0u8; 32],
-                chain_id: DOMAIN.chain_id,
-                token_network_address: DOMAIN.token_network,
-            })
-        );
-    }
-
-    /// The next claim advances the RECEIVER's watermark by exactly the
-    /// amount. A nonce that does not advance is refused as a replay; a
-    /// cumulative amount that overshoots is accepted silently and
-    /// overpays. Only one of those is survivable, so this is arithmetic
-    /// rather than a guess.
-    #[test]
-    fn the_next_claim_advances_the_receivers_watermark_by_exactly_the_amount() {
-        let fresh = ClaimWatermark {
-            nonce: 0,
-            cumulative: 0,
-            available: Some(10_000),
-        };
-        assert_eq!(next_claim(&fresh, 1_002), (1, 1_002));
-
-        let used = ClaimWatermark {
-            nonce: 41,
-            cumulative: 41_082,
-            available: Some(10_000),
-        };
-        assert_eq!(next_claim(&used, 1_002), (42, 42_084));
-    }
-
-    fn decode_hex_65(value: &str) -> [u8; 65] {
-        let value = value.strip_prefix("0x").unwrap_or(value);
-        let mut out = [0u8; 65];
-        for (i, byte) in out.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(&value[i * 2..i * 2 + 2], 16).expect("hex");
-        }
-        out
     }
 
     #[test]

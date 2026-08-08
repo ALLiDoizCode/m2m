@@ -25,6 +25,7 @@ use crate::metrics::Metrics;
 use crate::operator_view::{
     ChannelView, ClaimView, ExposureView, LeasedRouteView, PeerView, RouteView,
 };
+use crate::outbound_client::OutboundClientLedger;
 use crate::peer_transport::PeerTransport;
 use crate::route::{LeasedRoute, PeerRoute};
 
@@ -345,6 +346,21 @@ pub struct Connector {
     /// [`Connector::recognize_channel`], which the client edge calls when a
     /// claim clears its gate.
     recognized_channels: RwLock<HashSet<String>>,
+    /// This node's OUTBOUND client ledger (issue #873): the nonce line it
+    /// signs claims on when it pays a next hop **as an ordinary client of
+    /// that hop**, rather than as its configured peer.
+    ///
+    /// Deliberately not `claims` above, and the two must never merge.
+    /// `claims` is the inbound journal, where this node is the authority on
+    /// what it accepted; this one's authority is the RECEIVER, asked over
+    /// [`crate::ClaimStateSource`] every time. See
+    /// `crate::outbound_client`'s header for the full table.
+    ///
+    /// `None` on a node that has not been given one, in which case the
+    /// forwarding path simply has no client role available to it -- the
+    /// same way `settlements` degrades to "every channel operation
+    /// refuses" rather than to a second construction path.
+    outbound_client: Option<Arc<OutboundClientLedger>>,
 }
 
 /// [`Connector`]'s default probe rate limit absent
@@ -381,7 +397,29 @@ impl Connector {
             identity_signer: None,
             probe_rate_limiter: ProbeRateLimiter::new(DEFAULT_PROBE_LIMIT, default_probe_window()),
             recognized_channels: RwLock::new(HashSet::new()),
+            outbound_client: None,
         }
+    }
+
+    /// Give this node an outbound client ledger (issue #873) so the
+    /// forwarding path can pay a next hop it holds no matched credential
+    /// with, as an ordinary client of that hop.
+    ///
+    /// Pass the FILE-BACKED form ([`OutboundClientLedger::open`]) here: a
+    /// serving node restarts, and a restart that reissued a nonce would
+    /// fork its own outbound nonce line. Its path must not be either
+    /// journal file -- this book is not a `JournalEntry` stream, and the
+    /// two ledgers must never merge.
+    pub fn with_outbound_client_ledger(mut self, ledger: Arc<OutboundClientLedger>) -> Self {
+        self.outbound_client = Some(ledger);
+        self
+    }
+
+    /// This node's outbound client ledger, or `None` when it was never
+    /// given one -- the packet path's own read of
+    /// [`Connector::with_outbound_client_ledger`].
+    pub fn outbound_client_ledger(&self) -> Option<&Arc<OutboundClientLedger>> {
+        self.outbound_client.as_ref()
     }
 
     /// Configure this node's own identity key (issue #524), used to open a
