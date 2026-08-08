@@ -29,7 +29,7 @@ use crate::operator_view::{
     ChannelView, ClaimView, ExposureView, LeasedRouteView, PeerView, RouteView,
 };
 use crate::outbound_client::{ClaimStateSource, EvmDomain, OutboundClientLedger};
-use crate::peer_transport::{PeerForward, PeerTransport};
+use crate::peer_transport::PeerTransport;
 use crate::route::{LeasedRoute, PeerRoute};
 
 /// A reject this connector originates before a gift wrap's shared secret
@@ -1827,7 +1827,7 @@ mod tests {
     use super::*;
     use crate::app_client::FakeAppClient;
     use crate::clock::TestClock;
-    use crate::peer_transport::{InProcessPeerTransport, PeerTransport};
+    use crate::peer_transport::{InProcessPeerTransport, PeerForward, PeerTransport};
     use crate::test_support::{
         answered, answered_with_status, expected_fulfillment, fulfill_envelope,
         fulfill_envelope_with_status, identity_signer, matching_condition, open_sealed_envelope,

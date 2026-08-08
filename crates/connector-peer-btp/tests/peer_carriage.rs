@@ -30,7 +30,7 @@ use connector_peer_btp::dial::{DialError, PeerDialer, PeerRelation};
 use connector_peer_btp::{ack, AcceptedClaims, BtpPeerTransport, PeerCarriageState};
 use connector_runtime::{
     ChannelDomain, ClaimAckOutcome, ClaimRejectReason, ClaimSignature, Clock, Connector,
-    FakeAppClient, InProcessPeerTransport, PeerTransport, TestClock, WireClaim,
+    FakeAppClient, InProcessPeerTransport, PeerForward, PeerTransport, TestClock, WireClaim,
 };
 use connector_signer::{
     derive_evm_address, evm_balance_proof_digest, EvmBalanceProof, LocalSigner, Signature, Signer,
@@ -271,7 +271,12 @@ async fn a_claim_riding_a_prepare_is_judged_independently_of_the_packet() {
     let transport = transport(Arc::clone(&dialer) as Arc<dyn PeerDialer>, &payer_signer);
     let claim = sign_claim(&payer_signer, 1, 500);
 
-    let (response, ack, reached) = transport
+    let PeerForward {
+        response,
+        ack,
+        reached_peer: reached,
+        ..
+    } = transport
         .forward(PEER_ID, prepare("g.nowhere"), 0, Some(claim))
         .await;
 
@@ -563,7 +568,12 @@ async fn a_peer_that_cannot_be_dialed_rejects_t01_and_was_never_reached() {
     let payer_signer = LocalSigner::generate("payer");
     let transport = transport(Arc::new(DeadDialer) as Arc<dyn PeerDialer>, &payer_signer);
 
-    let (response, ack, reached) = transport
+    let PeerForward {
+        response,
+        ack,
+        reached_peer: reached,
+        ..
+    } = transport
         .forward(PEER_ID, prepare("g.somewhere"), 0, None)
         .await;
 
@@ -1096,7 +1106,11 @@ async fn the_btp_carriage_upholds_the_peer_transport_contract() {
     let dialer = LoopbackDialer::new(state);
     let transport = transport(Arc::clone(&dialer) as Arc<dyn PeerDialer>, &payer_signer);
 
-    let (response, _ack, reached) = transport
+    let PeerForward {
+        response,
+        reached_peer: reached,
+        ..
+    } = transport
         .forward(PEER_ID, prepare("g.nowhere-on-the-peer"), 0, None)
         .await;
     match response {
@@ -1146,7 +1160,11 @@ async fn concurrent_forwards_share_one_dialed_session() {
         }));
     }
     for handle in handles {
-        let (response, _, reached) = handle.await.expect("task");
+        let PeerForward {
+            response,
+            reached_peer: reached,
+            ..
+        } = handle.await.expect("task");
         assert!(matches!(response, PacketResponse::Reject(_)));
         assert!(reached);
     }

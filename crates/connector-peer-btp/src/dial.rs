@@ -47,7 +47,7 @@ use connector_btp::{
 };
 use connector_config::{PeerCarriage, PeerChannelConfig, PeerConfig};
 use connector_domain::x402::{GreetingError, X402PaymentRequired};
-use connector_domain::{Fulfill, PacketResponse, Prepare, Reject, RejectCode};
+use connector_domain::{Fulfill, PacketResponse, Prepare, Reject};
 use connector_peer_auth::{encode_raw, PresentedCredential};
 use connector_runtime::{ClaimAckOutcome, Clock, PeerForward, PeerTransport, WireClaim};
 use url::Url;
@@ -623,6 +623,7 @@ impl BtpPeerTransport {
 mod tests {
     use super::*;
     use connector_btp::{BTP_RESPONSE, PAYMENT_REQUIRED_PROTOCOL};
+    use connector_domain::RejectCode;
 
     /// The bytes the client edge's §1.9 greeting carries, in miniature.
     /// `crates/connector-client-edge/tests/btp_session.rs`'s

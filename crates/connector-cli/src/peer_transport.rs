@@ -162,7 +162,7 @@ mod tests {
     use std::io::Write as _;
 
     use chrono::{TimeZone, Utc};
-    use connector_domain::RejectCode;
+    use connector_domain::{PacketResponse, RejectCode};
     use connector_runtime::SystemClock;
 
     /// A config with `top` (top-level keys, which TOML requires before any
@@ -237,9 +237,7 @@ token_network = "0x00000000000000000000000000000000000000bb"
     /// nothing above the port able to tell which answered.
     #[tokio::test]
     async fn a_config_naming_both_schemes_builds_both_carriages() {
-        let PeerForward {
-            response: config, ..
-        } = config(
+        let (config, _state, _key) = config(
             "",
             &format!(
                 "{}{}",
@@ -254,7 +252,12 @@ token_network = "0x00000000000000000000000000000000000000bb"
         // the point being that each was *dialed*, on its own carriage,
         // rather than falling through to the unmapped path.
         for peer_id in ["over-btp", "over-http"] {
-            let (response, ack, reached) = transport
+            let PeerForward {
+                response,
+                ack,
+                reached_peer: reached,
+                ..
+            } = transport
                 .forward(peer_id, prepare("g.example.app"), 0, None)
                 .await;
             assert!(t01(&response), "{peer_id}: {response:?}");
@@ -299,9 +302,7 @@ token_network = "0x00000000000000000000000000000000000000bb"
     /// exactly what it held before this module existed.
     #[tokio::test]
     async fn a_node_with_nothing_to_dial_answers_t01_from_an_empty_transport() {
-        let PeerForward {
-            response: config, ..
-        } = config(
+        let (config, _state, _key) = config(
             r#"peer_expose = "btp""#,
             r#"
 [[peers]]
@@ -322,7 +323,11 @@ token_network = "0x00000000000000000000000000000000000000bb"
 
         let transport = build_peer_transport(&config, [0u8; 20], Arc::new(SystemClock));
 
-        let (response, _ack, reached) = transport
+        let PeerForward {
+            response,
+            reached_peer: reached,
+            ..
+        } = transport
             .forward("dials-in", prepare("g.example.app"), 0, None)
             .await;
 

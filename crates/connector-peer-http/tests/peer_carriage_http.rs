@@ -32,7 +32,7 @@ use connector_peer_http::headers::{Headers, PeerRequest, PeerResponse};
 use connector_peer_http::{HttpPeerTransport, NAT_NOTE};
 use connector_runtime::{
     ChannelDomain, ClaimAckOutcome, ClaimRejectReason, ClaimSignature, Clock, Connector,
-    FakeAppClient, InProcessPeerTransport, PeerTransport, TestClock, WireClaim,
+    FakeAppClient, InProcessPeerTransport, PeerForward, PeerTransport, TestClock, WireClaim,
 };
 use connector_signer::{
     derive_evm_address, evm_balance_proof_digest, EvmBalanceProof, LocalSigner, Signer,
