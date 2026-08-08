@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Duration, Utc};
 use connector_config::{SettlementChain, StaticRoute, TransportPolicy};
+use connector_domain::x402::X402PaymentRequired;
 use connector_domain::{
     amount_after_fee, condition_is_present, fulfillment_matches_condition, is_expired,
     is_valid_ilp_address, select_route, EnvelopeRequest, Fulfill, PacketResponse, Prepare,
@@ -18,15 +19,17 @@ use thiserror::Error;
 use tracing::Instrument;
 
 use crate::app_client::{AppClient, AppOutcome};
-use crate::claim::{ChannelDomain, ClaimAckOutcome, ClaimBook, InvalidChannelId, WireClaim};
+use crate::claim::{
+    ChannelDomain, ClaimAckOutcome, ClaimBook, ClaimSignature, InvalidChannelId, WireClaim,
+};
 use crate::clock::Clock;
 use crate::journal::{Journal, JournalError};
 use crate::metrics::Metrics;
 use crate::operator_view::{
     ChannelView, ClaimView, ExposureView, LeasedRouteView, PeerView, RouteView,
 };
-use crate::outbound_client::OutboundClientLedger;
-use crate::peer_transport::PeerTransport;
+use crate::outbound_client::{ClaimStateSource, EvmDomain, OutboundClientLedger};
+use crate::peer_transport::{PeerForward, PeerTransport};
 use crate::route::{LeasedRoute, PeerRoute};
 
 /// A reject this connector originates before a gift wrap's shared secret
@@ -361,6 +364,30 @@ pub struct Connector {
     /// same way `settlements` degrades to "every channel operation
     /// refuses" rather than to a second construction path.
     outbound_client: Option<Arc<OutboundClientLedger>>,
+    /// What this node needs in order to pay each next hop **as an ordinary
+    /// client of it** (issue #875), keyed by peer id: the channel it holds
+    /// with that hop, and the hop itself as the authority on where that
+    /// channel's claims stand.
+    ///
+    /// Empty on a node nobody configured a client role for, in which case a
+    /// greeted forward is relayed as the refusal it is rather than covered
+    /// -- the same "degrade to just empty" shape `settlements` and
+    /// `leased_routes` take.
+    outbound_client_hops: HashMap<String, OutboundClientHop>,
+}
+
+/// One next hop this connector can pay as a client (issue #875).
+struct OutboundClientHop {
+    /// The channel this node's settlement address holds with the hop, as
+    /// its on-chain `bytes32`...
+    channel: [u8; 32],
+    /// ...and as the `0x`-prefixed lower-case hex a claim names it by on
+    /// the wire, kept beside it so the packet path never re-renders it.
+    channel_id: String,
+    /// The hop, asked where this node's claims on that channel stand. The
+    /// RECEIVER is the authority on its own watermark (see
+    /// `crate::outbound_client`'s header); nothing local substitutes.
+    claim_state: Arc<dyn ClaimStateSource>,
 }
 
 /// [`Connector`]'s default probe rate limit absent
@@ -371,6 +398,11 @@ const DEFAULT_PROBE_LIMIT: u32 = 60;
 
 /// [`Connector`]'s default probe rate limit window, paired with
 /// [`DEFAULT_PROBE_LIMIT`].
+/// `bytes` as lower-case hex, no `0x`.
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 fn default_probe_window() -> Duration {
     Duration::seconds(60)
 }
@@ -398,6 +430,7 @@ impl Connector {
             probe_rate_limiter: ProbeRateLimiter::new(DEFAULT_PROBE_LIMIT, default_probe_window()),
             recognized_channels: RwLock::new(HashSet::new()),
             outbound_client: None,
+            outbound_client_hops: HashMap::new(),
         }
     }
 
@@ -420,6 +453,45 @@ impl Connector {
     /// [`Connector::with_outbound_client_ledger`].
     pub fn outbound_client_ledger(&self) -> Option<&Arc<OutboundClientLedger>> {
         self.outbound_client.as_ref()
+    }
+
+    /// Configure how this node pays `peer_id` **as an ordinary client of
+    /// it** (issue #875): the channel it holds with that hop, and the hop
+    /// itself as the source of that channel's watermark.
+    ///
+    /// Deliberately separate from [`Connector::with_peer_claim_channel`]
+    /// even where both name the same channel id. That one configures the
+    /// PEER role -- claims this node signs against its own `ClaimBook`
+    /// projection once a forward has fulfilled. This one configures the
+    /// CLIENT role, whose watermark authority is the receiver, asked over
+    /// `claim_state` every time. The two books must never merge (see
+    /// `crate::outbound_client`'s header), and configuring them apart is
+    /// where that starts.
+    ///
+    /// Without this -- or without [`Connector::with_outbound_client_ledger`]
+    /// -- a peer that answers a forward with x402 terms simply gets its
+    /// refusal relayed: there is nothing to pay it with, and a packet is
+    /// never emitted claiming to have paid when it has not.
+    pub fn with_outbound_client_hop(
+        mut self,
+        peer_id: impl Into<String>,
+        channel_id: impl Into<String>,
+        claim_state: Arc<dyn ClaimStateSource>,
+    ) -> Result<Self, InvalidChannelId> {
+        let channel_id = channel_id.into();
+        let channel = crate::claim::parse_channel_id(&channel_id)?;
+        self.outbound_client_hops.insert(
+            peer_id.into(),
+            OutboundClientHop {
+                channel,
+                // The canonical spelling (`peer-carriage-spec.md` §4.1): a
+                // claim naming the same channel in two casings is two
+                // watermarks at the far gate.
+                channel_id: format!("0x{}", hex_lower(&channel)),
+                claim_state,
+            },
+        );
+        Ok(self)
     }
 
     /// Configure this node's own identity key (issue #524), used to open a
@@ -1004,6 +1076,31 @@ impl Connector {
     /// against `prepare`'s own execution condition -- record a fresh claim
     /// for the value now owed (ADR 0004: value moves on fulfilment, never
     /// on a forward that merely returned a fulfillment-shaped answer).
+    ///
+    /// # The retry arm (issue #875)
+    ///
+    /// `pending_claim` is armed only by a *previous* fulfilment
+    /// (`ClaimBook::record_fulfillment`) and is cleared the moment that
+    /// claim is acknowledged, so on a healthy, fully-acked link the next
+    /// packet out carries nothing. A next hop this connector has no matched
+    /// peering credential with answers that packet with the x402 greeting
+    /// (`payment-required`), and before #875 the refusal was simply relayed:
+    /// the link could never bootstrap.
+    ///
+    /// So a greeted forward is retried **once**, carrying a claim minted
+    /// against the receiver's own watermark from the outbound client ledger
+    /// (issue #873). Once, deliberately: a second greeting after a covering
+    /// claim is a disagreement about the terms -- the price moved, the
+    /// channel is not one the far side judges, the claim did not clear its
+    /// gate -- and re-covering it in a loop would sign a fresh claim per
+    /// attempt against a hop that has already refused one.
+    ///
+    /// Cost: the retry arm adds nothing at all to a forward the peer does
+    /// not greet (no extra call, no extra `fdatasync`). A greeted forward
+    /// costs one round trip more, plus the single durable nonce reservation
+    /// `OutboundClientLedger::next_claim` makes (issue #879 measured the
+    /// forwarded-packet path at 3.00 `fdatasync`/packet with exposure
+    /// accounting on; this is a fourth **only on packets that are greeted**).
     async fn forward_via_peer_route(
         &self,
         peer_route: &PeerRoute,
@@ -1032,18 +1129,65 @@ impl Connector {
         };
         let peer_id = peer_route.peer_id();
         let pending_claim = self.claims.pending_claim(peer_id);
-        let (response, ack, reached_peer) = self
+        let mut answer = self
             .peer_transport
-            .forward(peer_id, outgoing, minimum_delivery, pending_claim.clone())
+            .forward(
+                peer_id,
+                outgoing.clone(),
+                minimum_delivery,
+                pending_claim.clone(),
+            )
             .await;
         if let Some(claim) = pending_claim {
-            self.claims.acknowledge_outbound(peer_id, claim.nonce, ack);
+            self.claims
+                .acknowledge_outbound(peer_id, claim.nonce, answer.ack);
         }
 
-        match response {
+        // Issue #875. `covered` is set the moment a covering claim is
+        // SIGNED AND SENT, not when the retry succeeds: the value is
+        // committed to the outbound client ledger either way, and it is what
+        // stops the peer ledger being charged for the same packet below.
+        let mut covered = false;
+        if let Some(terms) = answer.payment_required.take() {
+            if let Some(covering) = self.cover_greeted_packet(peer_id, &terms).await {
+                tracing::info!(
+                    peer_id,
+                    nonce = covering.nonce,
+                    cumulative = covering.cumulative_amount,
+                    price = terms.price().unwrap_or_default(),
+                    "covering a greeted forward and retrying it once"
+                );
+                covered = true;
+                answer = self
+                    .peer_transport
+                    .forward(peer_id, outgoing, minimum_delivery, Some(covering))
+                    .await;
+                // Bounded: whatever the retry answered is the answer. A
+                // second greeting is logged with its terms and relayed, not
+                // covered again.
+                if let Some(again) = &answer.payment_required {
+                    tracing::warn!(
+                        peer_id,
+                        price = again.price().unwrap_or_default(),
+                        pay_to = again.pay_to().unwrap_or_default(),
+                        resource = %again.resource.url,
+                        "peer demanded payment again after a covering claim -- not retrying"
+                    );
+                }
+            }
+        }
+        // The retry's own `ack` is deliberately NOT fed to `self.claims`:
+        // the claim it acknowledges belongs to the outbound CLIENT ledger,
+        // whose authority is the receiver's watermark rather than anything
+        // this book records (see `crate::outbound_client`'s header).
+
+        match answer.response {
             PacketResponse::Fulfill(fulfill) => {
                 let outcome = Self::accept_if_fulfilled(&condition, fulfill, 0);
-                if matches!(outcome, PacketResponse::Fulfill(_)) {
+                if matches!(outcome, PacketResponse::Fulfill(_)) && !covered {
+                    // A packet already paid for by a client-role claim is
+                    // not owed a second time on the peer ledger: one packet,
+                    // one debt, whichever role carried it.
                     self.claims
                         .record_fulfillment(peer_id, forwarded_amount, self.clock.now());
                 }
@@ -1055,12 +1199,112 @@ impl Connector {
             // transport synthesized locally (`reached_peer` false) because
             // the packet never actually traversed this hop in that case.
             PacketResponse::Reject(mut reject) => {
-                if reached_peer {
+                if answer.reached_peer {
                     reject.accumulated_cost += peer_route.fee();
                 }
                 PacketResponse::Reject(reject)
             }
         }
+    }
+
+    /// Sign a claim covering the terms `peer_id` just quoted, ready to ride
+    /// one retry of the packet it refused (issue #875).
+    ///
+    /// The claim is minted from the outbound CLIENT ledger (issue #873):
+    /// its cumulative amount is the RECEIVER's own watermark advanced by the
+    /// quoted price, and its EIP-712 domain is the receiver's own, read off
+    /// the greeting rather than out of this node's settlement config -- a
+    /// claim signed under the payer's idea of the `TokenNetwork` recovers to
+    /// a different address and is refused at the far gate.
+    ///
+    /// `None` -- with the reason logged, never silently -- for every way
+    /// this node cannot pay: no ledger, no client-role channel configured
+    /// for this hop, no settlement signer, a greeting naming no EVM
+    /// settlement, or a receiver that would not report the watermark (which
+    /// includes refusing for want of headroom). The caller then relays the
+    /// peer's refusal as it stands; nothing is ever emitted claiming to have
+    /// paid when it has not.
+    async fn cover_greeted_packet(
+        &self,
+        peer_id: &str,
+        terms: &X402PaymentRequired,
+    ) -> Option<WireClaim> {
+        let Some(ledger) = self.outbound_client.as_ref() else {
+            tracing::warn!(
+                peer_id,
+                "peer quoted x402 terms but this node has no outbound client ledger to pay from"
+            );
+            return None;
+        };
+        let Some(hop) = self.outbound_client_hops.get(peer_id) else {
+            tracing::warn!(
+                peer_id,
+                "peer quoted x402 terms but no client-role channel is configured for it"
+            );
+            return None;
+        };
+        let Some(signer) = self.claims.signer() else {
+            tracing::warn!(
+                peer_id,
+                "peer quoted x402 terms but this node has no settlement signer to sign a claim with"
+            );
+            return None;
+        };
+        let Some(domain) = EvmDomain::from_greeting(terms) else {
+            tracing::warn!(
+                peer_id,
+                resource = %terms.resource.url,
+                "peer quoted x402 terms naming no EVM settlement this node can sign under"
+            );
+            return None;
+        };
+        let Some(price) = terms.price() else {
+            // Unreachable through a parsed greeting (`parse_greeting`
+            // refuses an unreadable amount), and still not defaulted to
+            // zero: a free ride is exactly what must not be inferred.
+            tracing::warn!(peer_id, "peer quoted x402 terms with no readable price");
+            return None;
+        };
+
+        let claim = match ledger
+            .next_claim(
+                peer_id,
+                hop.claim_state.as_ref(),
+                &hop.channel,
+                &domain,
+                signer.as_ref(),
+                price,
+            )
+            .await
+        {
+            Ok(claim) => claim,
+            Err(error) => {
+                tracing::warn!(
+                    peer_id,
+                    %error,
+                    "could not sign a claim covering the peer's terms"
+                );
+                return None;
+            }
+        };
+        // The wire carries `cumulative_amount` as a `uint64` (§4.2); a
+        // channel whose lifetime total has outgrown that is refused here
+        // rather than truncated into a claim for a smaller number than the
+        // one signed.
+        let Ok(cumulative_amount) = u64::try_from(claim.cumulative) else {
+            tracing::error!(
+                peer_id,
+                cumulative = %claim.cumulative,
+                "the covering claim's cumulative amount does not fit the wire's uint64"
+            );
+            return None;
+        };
+        Some(WireClaim {
+            channel_id: hop.channel_id.clone(),
+            nonce: claim.nonce,
+            cumulative_amount,
+            signature: ClaimSignature::Evm(claim.signature),
+        })
     }
 
     /// Issue #545: a reject this connector originates because the packet

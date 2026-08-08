@@ -33,10 +33,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use connector_config::{Config, PeerCarriage};
-use connector_domain::{PacketResponse, Prepare};
+use connector_domain::Prepare;
 use connector_peer_btp::{BtpPeerTransport, TungsteniteDialer};
 use connector_peer_http::{HttpPeerTransport, ReqwestPeerClient};
-use connector_runtime::{ClaimAckOutcome, Clock, InProcessPeerTransport, PeerTransport, WireClaim};
+use connector_runtime::{
+    ClaimAckOutcome, Clock, InProcessPeerTransport, PeerForward, PeerTransport, WireClaim,
+};
 
 /// One [`PeerTransport`] over however many carriages a node's `[[peers]]`
 /// name, dispatching by peer id.
@@ -131,7 +133,7 @@ impl PeerTransport for ConfiguredPeerTransport {
         prepare: Prepare,
         minimum_delivery: u64,
         claim: Option<WireClaim>,
-    ) -> (PacketResponse, ClaimAckOutcome, bool) {
+    ) -> PeerForward {
         match self.transport_for(peer_id) {
             Some(transport) => {
                 transport
@@ -235,7 +237,9 @@ token_network = "0x00000000000000000000000000000000000000bb"
     /// nothing above the port able to tell which answered.
     #[tokio::test]
     async fn a_config_naming_both_schemes_builds_both_carriages() {
-        let (config, _state, _key) = config(
+        let PeerForward {
+            response: config, ..
+        } = config(
             "",
             &format!(
                 "{}{}",
@@ -269,7 +273,11 @@ token_network = "0x00000000000000000000000000000000000000bb"
             config("", &peer_block("dialed", "ws://127.0.0.1:1/ilp/btp", "a"));
         let transport = build_peer_transport(&config, [0u8; 20], Arc::new(SystemClock));
 
-        let (response, _ack, reached) = transport
+        let PeerForward {
+            response,
+            reached_peer: reached,
+            ..
+        } = transport
             .forward("never-configured", prepare("g.example.app"), 0, None)
             .await;
 
@@ -291,7 +299,9 @@ token_network = "0x00000000000000000000000000000000000000bb"
     /// exactly what it held before this module existed.
     #[tokio::test]
     async fn a_node_with_nothing_to_dial_answers_t01_from_an_empty_transport() {
-        let (config, _state, _key) = config(
+        let PeerForward {
+            response: config, ..
+        } = config(
             r#"peer_expose = "btp""#,
             r#"
 [[peers]]

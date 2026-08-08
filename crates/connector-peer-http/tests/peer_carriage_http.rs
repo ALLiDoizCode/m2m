@@ -353,7 +353,12 @@ async fn a_claim_riding_a_prepare_is_judged_independently_of_the_packet() {
     );
     let claim = sign_claim(&payer_signer, 1, 500);
 
-    let (response, ack, reached) = transport
+    let PeerForward {
+        response,
+        ack,
+        reached_peer: reached,
+        ..
+    } = transport
         .forward(PEER_ID, prepare("g.nowhere"), 0, Some(claim))
         .await;
 
@@ -655,7 +660,12 @@ async fn a_non_200_answer_is_no_ilp_answer_at_all() {
     let payer_signer = LocalSigner::generate("payer");
     let transport = transport(Arc::new(Status(400)), &payer_signer);
 
-    let (response, ack, reached) = transport
+    let PeerForward {
+        response,
+        ack,
+        reached_peer: reached,
+        ..
+    } = transport
         .forward(
             PEER_ID,
             prepare("g.nowhere"),
@@ -685,7 +695,12 @@ async fn a_peer_that_cannot_be_reached_rejects_t01_and_was_never_reached() {
     let payer_signer = LocalSigner::generate("payer");
     let transport = transport(Arc::new(Unreachable), &payer_signer);
 
-    let (response, ack, reached) = transport
+    let PeerForward {
+        response,
+        ack,
+        reached_peer: reached,
+        ..
+    } = transport
         .forward(PEER_ID, prepare("g.nowhere"), 0, None)
         .await;
 
@@ -707,7 +722,12 @@ async fn a_peer_this_connector_cannot_originate_to_says_why_in_its_t01() {
     let payer_signer = LocalSigner::generate("payer");
     let transport = transport(Arc::new(Unreachable), &payer_signer);
 
-    let (response, ack, reached) = transport
+    let PeerForward {
+        response,
+        ack,
+        reached_peer: reached,
+        ..
+    } = transport
         .forward("accept-only", prepare("g.nowhere"), 0, None)
         .await;
 

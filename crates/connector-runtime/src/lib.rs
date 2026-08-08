@@ -42,5 +42,5 @@ pub use outbound_client::{
     ClaimStateSource, ClaimWatermark, EvmDomain, HttpClaimState, OutboundClaim,
     OutboundClientError, OutboundClientLedger,
 };
-pub use peer_transport::{InProcessPeerTransport, PeerTransport};
+pub use peer_transport::{InProcessPeerTransport, PeerForward, PeerTransport};
 pub use route::{LeasedRoute, PeerRoute};

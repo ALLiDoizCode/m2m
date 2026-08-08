@@ -583,7 +583,11 @@ async fn a_peer_id_this_connector_does_not_dial_rejects_t01() {
     let payer_signer = LocalSigner::generate("payer");
     let transport = transport(Arc::new(DeadDialer) as Arc<dyn PeerDialer>, &payer_signer);
 
-    let (response, _ack, reached) = transport
+    let PeerForward {
+        response,
+        reached_peer: reached,
+        ..
+    } = transport
         .forward("nowhere", prepare("g.somewhere"), 0, None)
         .await;
 
@@ -1104,7 +1108,12 @@ async fn the_btp_carriage_upholds_the_peer_transport_contract() {
     }
     assert!(reached);
 
-    let (response, ack, reached) = transport
+    let PeerForward {
+        response,
+        ack,
+        reached_peer: reached,
+        ..
+    } = transport
         .forward("unregistered", prepare("g.anything"), 0, None)
         .await;
     match response {
