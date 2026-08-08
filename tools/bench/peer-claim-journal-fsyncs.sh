@@ -25,6 +25,31 @@
 # strace need not be on PATH: set STRACE=/path/to/strace. With no strace at
 # all the script still produces the latency table and says the counts were not
 # measured, rather than substituting a guess for them.
+#
+# WHAT IT MEASURED (2026-08-08, `tools/bench/peer-claim-journal-fsyncs.sh 8 20 49`,
+# AMD Ryzen 7 5800X, ext4 on a WSL2 virtual disk, load average 0.26; full
+# write-up on issue #879):
+#
+#   mode                  fdatasync/pkt      p50       p99   achieved
+#   baseline                          1   1.80ms    2.97ms     49.0/s
+#   window (ships today)              2   3.18ms    7.53ms     49.0/s
+#   covering                          3   4.81ms    9.36ms     49.0/s
+#   covering-no-exposure              2   3.40ms    7.74ms     49.0/s
+#
+# Requiring a covering claim costs +1 fdatasync and +1.8ms at p99 over the
+# window path if `record_inbound_delivery` stays, and nothing measurable if it
+# is retired alongside the window. Latency is linear in the fdatasync count
+# (~1.5ms per sync at p50 on this disk) -- the syscall itself is 20-45us, so
+# the millisecond is the ext4 journal commit. The counts are hardware
+# independent; the milliseconds are this filesystem's, so rerun on the target
+# box before trusting the constant. Under load average 23 the same ordering
+# held with ~5.1ms per sync, and `covering` then missed 49/s.
+#
+# The fix the data supports: `ClaimBook` appends a packet's entries through
+# three separate `append_and_project` calls (`claim.rs:845`, `:947`, `:1134`),
+# each its own fdatasync, while `FileJournal::append_batch` already syncs a
+# whole batch once. Batching one packet's entries makes `covering` cost 1
+# fdatasync -- cheaper than the window path it replaces.
 
 set -euo pipefail
 
@@ -88,8 +113,10 @@ done
 
 echo
 echo "==> per-mode median across rounds, microseconds"
+# `lat-covering-*.out` would also match `lat-covering-no-exposure-*.out`, so
+# the round number is matched explicitly rather than by a bare `*`.
 median() {
-  awk -v key="$2" '$1 == key {print $2}' "$out"/lat-"$1"-*.out |
+  awk -v key="$2" '$1 == key {print $2}' "$out"/lat-"$1"-[0-9]*.out |
     sort -n | awk '{v[NR]=$1} END {print (NR % 2) ? v[(NR+1)/2] : (v[NR/2]+v[NR/2+1])/2}'
 }
 for mode in "${MODES[@]}"; do
