@@ -427,43 +427,40 @@ redeploy)
     ip=$(get_box_ip "$local_label") || continue
     [ -z "$ip" ] && echo "  $local_label: not found" && continue
     echo "  Redeploying $local_label ($ip)..."
-    # All three boxes serve the RUST connector on the public door (verified
-    # live: `GET /ilp/identity` answers, nginx 410s the transitional `/rust/`
-    # prefix because Rust took over `location /`) -- redeploy must bring that
-    # up, not the TypeScript `connector` service each base compose file still
-    # declares (issue #851: that service is pinned to
-    # `ghcr.io/toon-protocol/connector:3.36.3-solchan.0`, purged from GHCR, so
-    # a blanket `pull`/`up -d` over the whole file fails outright on it).
+    # The apex still declares the TypeScript `connector` service in its base
+    # compose file (issue #872 is its removal; out of scope here) -- redeploy
+    # must bring up the RUST connector on the public door (verified live:
+    # `GET /ilp/identity` answers, nginx 410s the transitional `/rust/` prefix
+    # because Rust took over `location /`) without starting that service,
+    # which is pinned to `ghcr.io/toon-protocol/connector:3.36.3-solchan.0`,
+    # an image purged from GHCR -- a blanket `pull`/`up -d` over the whole
+    # file fails outright on it (issue #851).
     #
-    # Every leg composes its base file with its Rust overlay, mirroring what
-    # the relay leg already did (issue #816: it never had a TypeScript
-    # service). On `toon` and `store` the Rust overlays ADD `connector-rust`
-    # alongside the dead `connector`, they don't replace it, so those two legs
-    # must also keep it out of the run.
-    #
-    # Naming services is NOT enough to do that: `nginx` declares
-    # `depends_on: connector` in both base files
-    # (docker-compose.node.yml:142-145, docker-compose.store.yml:98-101), and
+    # Naming services is NOT enough to exclude it: `nginx` declares
+    # `depends_on: connector` in the base file (docker-compose.node.yml), and
     # `up` pulls a named service's dependencies into the graph anyway.
     # `required: false` does not help -- it tolerates a dependency that is
     # missing or unhealthy, it does not stop compose from creating one that IS
     # declared, so the purged image is still fetched and the whole `up` aborts
     # on `manifest unknown`, taking nginx and connector-rust down with it.
     # `--no-deps` is what actually excludes it. (`pull` needs no such flag:
-    # it ignores dependencies already.) The relay leg deliberately has neither
-    # -- it deploys every service in its file set.
+    # it ignores dependencies already.) `compose`/`services` are split out
+    # only so these lines stay readable: the leg names its file set twice
+    # (`pull` then `up`) and its service set twice, and the two must not
+    # drift from each other.
     #
-    # `compose`/`services` are split out only so these lines stay readable:
-    # each leg names its file set twice (`pull` then `up`) and its service set
-    # twice, and the two must not drift from each other.
+    # store and relay have no TypeScript service left to dodge (issue #901
+    # deleted the store's, along with its now-dangling `nginx` `depends_on`;
+    # the relay leg never had one, issue #816) -- both simply compose their
+    # base file with their Rust overlay and bring up every service in the
+    # file set, no service list and no `--no-deps` needed.
     if [ "$key" = "toon" ]; then
       compose="docker compose -f infra/linode-node/docker-compose.node.yml -f infra/linode-node/docker-compose.node.rust.yml"
       services="relay faucet nginx certbot connector-rust"
       ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && $compose pull $services && $compose up --build -d --no-deps $services" &
     elif [ "$key" = "store" ]; then
       compose="docker compose -f infra/linode-store/docker-compose.store.yml -f infra/linode-store/docker-compose.store.rust.yml"
-      services="store nginx certbot connector-rust"
-      ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && $compose pull $services && $compose up -d --no-deps $services" &
+      ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && $compose pull && $compose up -d" &
     else
       # relay has no TypeScript compose file at all (issue #816) -- always
       # both files together, since the connector-rust service is only

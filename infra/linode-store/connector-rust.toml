@@ -44,14 +44,16 @@
 # forward (https://proxy.store…/store) and this node's private one land on the
 # identical handler.
 #
-# Prices are pinned at `1000` (0.001 USDC in 6-decimal base units) to match
-# infra/linode-store/connector.yaml's `price: '1000'` on all three routes.
-# They MUST stay equal to the TypeScript values for as long as both connectors
-# front the same app: an unequal pair is an arbitrage between two doors into
-# one handler, and the cheaper door takes every packet. When the g.toon proxy's
+# Prices are pinned at `1000` (0.001 USDC in 6-decimal base units). This
+# matched the retired TypeScript connector's own `price: '1000'` on all three
+# routes for as long as both fronted this box's app -- an unequal pair would
+# have been an arbitrage between two doors into one handler, with the cheaper
+# door taking every packet. That TypeScript config is deleted (issue #901);
+# this Rust node is now the box's only door. When the g.toon proxy's
 # g.toon.relay price was hand-cut on the box from 1000 to 1 (2026-08-03 02:01,
-# undocumented) it created exactly that hazard on the other box; do not repeat
-# it here without changing both connectors in one edit.
+# undocumented) it created exactly that hazard on the other box; the
+# underlying rule -- multiple doors into one handler must price identically --
+# still applies to any future second connector on this box.
 #
 # Transport is left at the default (`both`): a store write is a one-shot
 # request from an arbitrary buyer, so unlike the proxy's relay leg — pinned
