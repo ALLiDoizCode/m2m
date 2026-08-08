@@ -24,30 +24,105 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
 
+use connector_domain::x402::X402PaymentRequired;
 use connector_domain::{PacketResponse, Prepare, Reject, RejectCode};
 
 use crate::claim::{ClaimAckOutcome, WireClaim};
 use crate::connector::Connector;
 
-/// Forwards a [`Prepare`] to the connector reachable at `peer_id` and
-/// returns whatever [`PacketResponse`] it produces, unchanged -- a reject
-/// originated at the far end reaches the caller exactly as that peer sent
-/// it. `minimum_delivery` is the amount the original sender declared must
-/// reach the destination (ADR 0010) -- carried alongside `prepare` rather
-/// than inside it, and passed to the peer unchanged so every hop enforces
-/// it against the same figure. `claim` piggybacks whatever this connector
-/// currently owes `peer_id` (peer-wire-spec.md §3.2); the returned
-/// [`ClaimAckOutcome`] is [`ClaimAckOutcome::NotSent`] when `claim` was
-/// `None`, or when the peer could not be reached to answer at all.
+/// What one forward to a peer produced.
 ///
-/// The trailing `bool` is whether this peer was actually reached -- `true`
-/// for any real answer (fulfil or reject) the peer itself decided on,
-/// `false` when this transport could not deliver the PREPARE at all, in
-/// which case the accompanying [`PacketResponse`] is this transport's own
-/// synthesized `T01` (see [`peer_unreachable`]). The caller (issue #426,
-/// ADR 0011) needs this to decide whether its own fee belongs on an
-/// outgoing REJECT: only a hop that actually forwarded earns one
-/// (peer-wire-spec.md §5.2).
+/// A named struct rather than a tuple because of its fourth field: the
+/// terms a peer quoted when it refused to carry the packet unpaid (issue
+/// #874). A carriage that read a `payment-required` greeting and then
+/// flattened it into a bare [`PacketResponse::Reject`] would hand the
+/// forwarding path a refusal it cannot act on -- and acting on it, by
+/// covering the packet and retrying once, is exactly what issue #875 adds
+/// above this port.
+#[derive(Debug)]
+pub struct PeerForward {
+    /// Whatever the peer decided, unchanged -- a reject originated at the
+    /// far end reaches the caller exactly as that peer sent it.
+    pub response: PacketResponse,
+    /// [`ClaimAckOutcome::NotSent`] when no claim rode along, or when the
+    /// peer could not be reached to answer at all.
+    pub ack: ClaimAckOutcome,
+    /// Whether this peer was actually reached -- `true` for any real answer
+    /// (fulfil or reject) the peer itself decided on, `false` when this
+    /// transport could not deliver the PREPARE at all, in which case
+    /// `response` is this transport's own synthesized `T01` (see
+    /// [`peer_unreachable`]). The caller (issue #426, ADR 0011) needs this
+    /// to decide whether its own fee belongs on an outgoing REJECT: only a
+    /// hop that actually forwarded earns one (peer-wire-spec.md §5.2).
+    pub reached_peer: bool,
+    /// The x402 terms the peer quoted while refusing the packet (issue
+    /// #874), or `None` when it quoted none. **Absence means "no terms were
+    /// offered", never "the terms could not be read"**: a carriage that
+    /// found a greeting it could not parse must answer with its own reject
+    /// and no terms rather than degrade an unreadable greeting into a free
+    /// ride (see `connector_domain::x402::GreetingError`).
+    pub payment_required: Option<Box<X402PaymentRequired>>,
+}
+
+impl PeerForward {
+    /// The peer answered for itself, quoting no terms.
+    pub fn answered(response: PacketResponse, ack: ClaimAckOutcome) -> PeerForward {
+        PeerForward {
+            response,
+            ack,
+            reached_peer: true,
+            payment_required: None,
+        }
+    }
+
+    /// The peer refused the packet **and quoted terms** for carrying it.
+    pub fn quoted(
+        response: PacketResponse,
+        ack: ClaimAckOutcome,
+        terms: X402PaymentRequired,
+    ) -> PeerForward {
+        PeerForward {
+            response,
+            ack,
+            reached_peer: true,
+            payment_required: Some(Box::new(terms)),
+        }
+    }
+
+    /// This transport never delivered the PREPARE at all: a synthesized
+    /// `T01`, nothing acknowledged, and no fee of the caller's on it.
+    pub fn unreachable(peer_id: &str) -> PeerForward {
+        PeerForward {
+            response: peer_unreachable(peer_id),
+            ack: ClaimAckOutcome::NotSent,
+            reached_peer: false,
+            payment_required: None,
+        }
+    }
+
+    /// The peer answered something this carriage could not read as an ILP
+    /// packet -- a `T01` like [`PeerForward::unreachable`], except that an
+    /// acknowledgement may still have been read off the frame.
+    pub fn undecodable(peer_id: &str, ack: ClaimAckOutcome) -> PeerForward {
+        PeerForward {
+            ack,
+            ..PeerForward::unreachable(peer_id)
+        }
+    }
+}
+
+/// Forwards a [`Prepare`] to the connector reachable at `peer_id` and
+/// returns whatever that peer answered, unchanged -- a reject originated at
+/// the far end reaches the caller exactly as that peer sent it.
+/// `minimum_delivery` is the amount the original sender declared must reach
+/// the destination (ADR 0010) -- carried alongside `prepare` rather than
+/// inside it, and passed to the peer unchanged so every hop enforces it
+/// against the same figure. `claim` piggybacks whatever this connector
+/// currently owes `peer_id` (peer-wire-spec.md §3.2).
+///
+/// See [`PeerForward`] for what comes back, and in particular for why a
+/// carriage that read x402 terms off a refusal must report them rather than
+/// flatten them into the reject.
 #[async_trait]
 pub trait PeerTransport: Send + Sync {
     async fn forward(
@@ -56,7 +131,7 @@ pub trait PeerTransport: Send + Sync {
         prepare: Prepare,
         minimum_delivery: u64,
         claim: Option<WireClaim>,
-    ) -> (PacketResponse, ClaimAckOutcome, bool);
+    ) -> PeerForward;
 
     /// Send `claim` with no packet to ride -- the flush mechanism
     /// (peer-wire-spec.md §3.3) that covers the case traffic to `peer_id`
@@ -65,6 +140,10 @@ pub trait PeerTransport: Send + Sync {
     async fn flush(&self, peer_id: &str, claim: WireClaim) -> ClaimAckOutcome;
 }
 
+/// §2.2, §5.1 of `peer-wire-spec.md`: a peer this connector could not reach
+/// rejects `T01`. Never `T00`, and never a silent drop. Every carriage
+/// reaches this through [`PeerForward::unreachable`], so the refusal an
+/// unreachable peer produces has one definition rather than one per wire.
 pub(crate) fn peer_unreachable(peer_id: &str) -> PacketResponse {
     PacketResponse::Reject(Reject {
         code: RejectCode::t01_peer_unreachable(),
@@ -181,7 +260,7 @@ impl PeerLink {
         prepare: Prepare,
         minimum_delivery: u64,
         claim: Option<WireClaim>,
-    ) -> (PacketResponse, ClaimAckOutcome, bool) {
+    ) -> PeerForward {
         let (respond_to, receiver) = oneshot::channel();
         if self
             .sender
@@ -194,11 +273,15 @@ impl PeerLink {
             .await
             .is_err()
         {
-            return (peer_unreachable(peer_id), ClaimAckOutcome::NotSent, false);
+            return PeerForward::unreachable(peer_id);
         }
         match receiver.await {
-            Ok((response, ack)) => (response, ack, true),
-            Err(_) => (peer_unreachable(peer_id), ClaimAckOutcome::NotSent, false),
+            // An in-process peer is a `Connector`, and a `Connector` quotes
+            // no terms of its own: greeting a claimless peer PREPARE is the
+            // client edge's job (issue #880), above this port on the
+            // receiving side.
+            Ok((response, ack)) => PeerForward::answered(response, ack),
+            Err(_) => PeerForward::unreachable(peer_id),
         }
     }
 
@@ -263,13 +346,13 @@ impl PeerTransport for InProcessPeerTransport {
         prepare: Prepare,
         minimum_delivery: u64,
         claim: Option<WireClaim>,
-    ) -> (PacketResponse, ClaimAckOutcome, bool) {
+    ) -> PeerForward {
         match self.peers.get(peer_id) {
             Some(link) => {
                 link.forward(peer_id, prepare, minimum_delivery, claim)
                     .await
             }
-            None => (peer_unreachable(peer_id), ClaimAckOutcome::NotSent, false),
+            None => PeerForward::unreachable(peer_id),
         }
     }
 
@@ -356,7 +439,12 @@ mod tests {
         transport.add_peer("peer-b", peer);
         let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-        let (response, ack, reached) = transport.forward("peer-b", sealed, 0, None).await;
+        let PeerForward {
+            response,
+            ack,
+            reached_peer: reached,
+            ..
+        } = transport.forward("peer-b", sealed, 0, None).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -376,7 +464,12 @@ mod tests {
     async fn returns_peer_unreachable_for_an_unregistered_peer_id() {
         let transport = InProcessPeerTransport::new();
 
-        let (response, ack, reached) = transport
+        let PeerForward {
+            response,
+            ack,
+            reached_peer: reached,
+            ..
+        } = transport
             .forward("nowhere", prepare("g.example.app"), 0, None)
             .await;
 
@@ -405,7 +498,11 @@ mod tests {
         let mut transport = InProcessPeerTransport::new();
         transport.add_peer("peer-b", peer);
 
-        let (response, _ack, reached) = transport
+        let PeerForward {
+            response,
+            reached_peer: reached,
+            ..
+        } = transport
             .forward("peer-b", prepare("g.nowhere-on-peer-b"), 0, None)
             .await;
 
@@ -441,7 +538,7 @@ mod tests {
         transport.add_peer("peer-b", peer);
         let claim = sign_wire_claim(&signer, 1, 1, 50);
 
-        let (response, ack, _reached) = transport
+        let PeerForward { response, ack, .. } = transport
             .forward("peer-b", prepare("g.nowhere"), 0, Some(claim))
             .await;
 
@@ -507,8 +604,8 @@ mod tests {
         }
 
         for handle in handles {
-            let (response, _ack, _reached) = handle.await.expect("task");
-            assert!(matches!(response, PacketResponse::Fulfill(_)));
+            let forward = handle.await.expect("task");
+            assert!(matches!(forward.response, PacketResponse::Fulfill(_)));
         }
     }
 
@@ -564,7 +661,11 @@ mod tests {
             let transport = build(vec![("peer-b", deliverer), ("peer-c", rejecter)]).await;
             let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-            let (response, _ack, reached) = transport.forward("peer-b", sealed, 0, None).await;
+            let PeerForward {
+                response,
+                reached_peer: reached,
+                ..
+            } = transport.forward("peer-b", sealed, 0, None).await;
             match response {
                 PacketResponse::Fulfill(fulfill) => {
                     assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
@@ -577,7 +678,11 @@ mod tests {
             }
             assert!(reached);
 
-            let (response, _ack, reached) = transport
+            let PeerForward {
+                response,
+                reached_peer: reached,
+                ..
+            } = transport
                 .forward("peer-c", prepare("g.nowhere-on-peer-c"), 0, None)
                 .await;
             match response {
@@ -589,7 +694,11 @@ mod tests {
             }
             assert!(reached);
 
-            let (response, _ack, reached) = transport
+            let PeerForward {
+                response,
+                reached_peer: reached,
+                ..
+            } = transport
                 .forward("nowhere", prepare("g.example.app"), 0, None)
                 .await;
             match response {

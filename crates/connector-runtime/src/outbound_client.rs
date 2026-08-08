@@ -66,9 +66,10 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
+use connector_domain::x402::X402PaymentRequired;
 use connector_signer::{
     derive_evm_address, evm_balance_proof_digest, evm_claim_state_challenge_digest, to_hex,
-    EvmBalanceProof, EvmClaimStateChallenge, Signer,
+    EvmBalanceProof, EvmClaimStateChallenge, Signature, Signer,
 };
 use thiserror::Error;
 
@@ -91,6 +92,41 @@ const CLAIM_STATE_CHALLENGE_TTL_SECS: u64 = 60;
 pub struct EvmDomain {
     pub chain_id: u64,
     pub token_network: [u8; 20],
+}
+
+impl EvmDomain {
+    /// The domain a receiver's own x402 greeting names (issue #875), read
+    /// from the `extra.settlement`/`extra.settlements` facts issue #617/#632
+    /// put there.
+    ///
+    /// `None` when the greeting names no EVM settlement, or names one this
+    /// connector cannot read -- `chain` that is not `evm:<decimal chainId>`,
+    /// or a `tokenNetwork` that is not a 20-byte hex address. Refused rather
+    /// than defaulted: a claim signed under a guessed domain recovers to a
+    /// different address and is refused at the far gate, with the packet
+    /// already spent getting there.
+    pub fn from_greeting(terms: &X402PaymentRequired) -> Option<EvmDomain> {
+        let settlement = terms.evm_settlement()?;
+        let chain_id = settlement.chain.strip_prefix("evm:")?.parse().ok()?;
+        Some(EvmDomain {
+            chain_id,
+            token_network: decode_address(&settlement.token_network)?,
+        })
+    }
+}
+
+/// `0x`-prefixed (or bare) 20-byte hex as an address, or `None` for
+/// anything else.
+fn decode_address(value: &str) -> Option<[u8; 20]> {
+    let value = value.strip_prefix("0x").unwrap_or(value);
+    if value.len() != 40 {
+        return None;
+    }
+    let mut out = [0u8; 20];
+    for (index, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(value.get(index * 2..index * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
 }
 
 /// Where a channel's watermark stands, according to the node that judges it.
@@ -277,6 +313,12 @@ pub struct OutboundClaim {
     /// The claim JSON, ready for the `ilp-payment-channel-claim` header or
     /// a BTP frame's protocol data.
     pub json: String,
+    /// The EIP-712 balance-proof signature the JSON above carries, kept in
+    /// its decoded form (issue #875) so a caller that has to put this claim
+    /// on a carriage taking `crate::WireClaim` -- the forwarding path's
+    /// `PeerTransport` port -- does not have to parse back the JSON this
+    /// module just wrote.
+    pub signature: Signature,
 }
 
 /// This node's outbound claims, one nonce line per next hop.
@@ -410,12 +452,13 @@ impl OutboundClientLedger {
         }
         let nonce = self.reserve_nonce(next_hop, watermark.nonce)?;
         let cumulative = watermark.cumulative + u128::from(amount);
-        let json = claim_json(signer, channel, domain, nonce, cumulative)?;
+        let (json, signature) = claim_json(signer, channel, domain, nonce, cumulative)?;
         Ok(OutboundClaim {
             nonce,
             cumulative,
             watermark,
             json,
+            signature,
         })
     }
 
@@ -497,7 +540,7 @@ fn claim_json(
     domain: &EvmDomain,
     nonce: u64,
     cumulative: u128,
-) -> Result<String, OutboundClientError> {
+) -> Result<(String, Signature), OutboundClientError> {
     let proof = EvmBalanceProof {
         channel_id: *channel,
         nonce,
@@ -509,14 +552,15 @@ fn claim_json(
     };
     let signature = signer
         .sign(&evm_balance_proof_digest(&proof))
-        .map_err(|error| OutboundClientError::Signing(error.to_string()))?
-        .to_bytes();
+        .map_err(|error| OutboundClientError::Signing(error.to_string()))?;
+    let signature_bytes = signature.to_bytes();
     let address = derive_evm_address(
         &signer
             .public_key()
             .map_err(|error| OutboundClientError::Signing(error.to_string()))?,
     );
-    Ok(serde_json::json!({
+    Ok((
+        serde_json::json!({
         "version": "1.0",
         "blockchain": "evm",
         "messageId": format!("connector-announce-{nonce}"),
@@ -531,12 +575,14 @@ fn claim_json(
         "transferredAmount": cumulative.to_string(),
         "lockedAmount": "0",
         "locksRoot": format!("0x{}", "0".repeat(64)),
-        "signature": format!("0x{}", hex_encode(&signature)),
+        "signature": format!("0x{}", hex_encode(&signature_bytes)),
         "signerAddress": to_hex(&address),
         "chainId": domain.chain_id,
         "tokenNetworkAddress": to_hex(&domain.token_network),
-    })
-    .to_string())
+        })
+        .to_string(),
+        signature,
+    ))
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -798,7 +844,7 @@ mod tests {
     #[test]
     fn the_claim_verifies_as_the_settlement_address_the_channel_is_opened_with() {
         let signer = claim_signer();
-        let json = claim_json(&signer, &CHANNEL, &DOMAIN, 7, 7_014).expect("sign a claim");
+        let (json, _) = claim_json(&signer, &CHANNEL, &DOMAIN, 7, 7_014).expect("sign a claim");
         let claim: serde_json::Value = serde_json::from_str(&json).expect("claim JSON");
 
         let expected = derive_evm_address(&signer.public_key().expect("public key"));
@@ -834,7 +880,7 @@ mod tests {
     /// Cheap to hit, free to learn, and easy to reintroduce.
     #[test]
     fn the_claims_timestamp_ends_in_z_not_an_offset() {
-        let json = claim_json(&claim_signer(), &CHANNEL, &DOMAIN, 1, 1).expect("sign");
+        let (json, _) = claim_json(&claim_signer(), &CHANNEL, &DOMAIN, 1, 1).expect("sign");
         let claim: serde_json::Value = serde_json::from_str(&json).expect("claim JSON");
         let timestamp = claim["timestamp"].as_str().expect("timestamp");
 

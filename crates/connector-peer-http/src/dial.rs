@@ -56,7 +56,7 @@ use connector_config::{PeerCarriage, PeerChannelConfig, PeerConfig};
 use connector_domain::{Fulfill, PacketResponse, Prepare, Reject, RejectCode};
 use connector_peer_auth::{encode_base64, PresentedCredential, PEER_AUTH_HEADER};
 use connector_peer_btp::claim_json::{self, PeerClaimDomain};
-use connector_runtime::{ClaimAckOutcome, Clock, PeerTransport, WireClaim};
+use connector_runtime::{ClaimAckOutcome, Clock, PeerForward, PeerTransport, WireClaim};
 use url::Url;
 
 use crate::headers::{self, Headers, PeerRequest, PeerResponse};
@@ -504,18 +504,6 @@ impl HttpPeerTransport {
     }
 }
 
-/// §2.2, §5.1 of `peer-wire-spec.md`: a peer this connector could not reach
-/// rejects `T01`. Never `T00`, and never a silent drop.
-fn peer_unreachable(peer_id: &str) -> PacketResponse {
-    PacketResponse::Reject(Reject {
-        code: RejectCode::t01_peer_unreachable(),
-        triggered_by: String::new(),
-        message: format!("peer '{peer_id}' unreachable"),
-        data: Vec::new(),
-        accumulated_cost: 0,
-    })
-}
-
 /// §6.4(1), the consequence that actually bites at configuration time: on
 /// HTTP only the dialing side can originate, so **the accept-only side can
 /// never forward a packet to that peer**. Where a route naming it as next
@@ -556,10 +544,13 @@ impl PeerTransport for HttpPeerTransport {
         prepare: Prepare,
         minimum_delivery: u64,
         claim: Option<WireClaim>,
-    ) -> (PacketResponse, ClaimAckOutcome, bool) {
+    ) -> PeerForward {
         let Some(state) = self.relations.get(peer_id) else {
             tracing::warn!(peer_id, "no HTTP peering to originate to; {NAT_NOTE}");
-            return (peer_not_dialable(peer_id), ClaimAckOutcome::NotSent, false);
+            return PeerForward {
+                response: peer_not_dialable(peer_id),
+                ..PeerForward::unreachable(peer_id)
+            };
         };
 
         let mut request = PeerRequest {
@@ -612,7 +603,7 @@ impl PeerTransport for HttpPeerTransport {
             .post(state, request, state.relation.peer_answer_timeout)
             .await
         else {
-            return (peer_unreachable(peer_id), ClaimAckOutcome::NotSent, false);
+            return PeerForward::unreachable(peer_id);
         };
         self.note_flush_hints(state, &response);
 
@@ -627,10 +618,16 @@ impl PeerTransport for HttpPeerTransport {
         }
 
         match decode_answer(&response) {
-            Some(answer) => (answer, ack, true),
+            // No terms are ever reported on this carriage: reading the HTTP
+            // 402's own `payment-required` body is issue #874's BTP-side
+            // change and has no twin here yet, so a peer that greets this
+            // connector over HTTP is reported as an ordinary refusal --
+            // absence of terms, never an unreadable greeting silently
+            // downgraded (see `PeerForward::payment_required`).
+            Some(answer) => PeerForward::answered(answer, ack),
             None => {
                 tracing::warn!(peer_id, "peer answer carried no decodable ILP packet");
-                (peer_unreachable(peer_id), ack, false)
+                PeerForward::undecodable(peer_id, ack)
             }
         }
     }

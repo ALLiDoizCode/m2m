@@ -47,9 +47,9 @@ use connector_btp::{
 };
 use connector_config::{PeerCarriage, PeerChannelConfig, PeerConfig};
 use connector_domain::x402::{GreetingError, X402PaymentRequired};
-use connector_domain::{Fulfill, PacketResponse, Prepare, Reject, RejectCode};
+use connector_domain::{Fulfill, PacketResponse, Prepare, Reject};
 use connector_peer_auth::{encode_raw, PresentedCredential};
-use connector_runtime::{ClaimAckOutcome, Clock, PeerTransport, WireClaim};
+use connector_runtime::{ClaimAckOutcome, Clock, PeerForward, PeerTransport, WireClaim};
 use url::Url;
 
 use crate::claim_json::{self, PeerClaimDomain};
@@ -375,18 +375,6 @@ impl BtpPeerTransport {
     }
 }
 
-/// §2.2, §5.1 of `peer-wire-spec.md`: a peer this connector could not
-/// reach rejects `T01`. Never `T00`, and never a silent drop.
-fn peer_unreachable(peer_id: &str) -> PacketResponse {
-    PacketResponse::Reject(Reject {
-        code: RejectCode::t01_peer_unreachable(),
-        triggered_by: String::new(),
-        message: format!("peer '{peer_id}' unreachable"),
-        data: Vec::new(),
-        accumulated_cost: 0,
-    })
-}
-
 /// What a peer's RESPONSE frame actually said (issue #874).
 ///
 /// [`PacketResponse`] alone cannot express it. A REJECT that carries the
@@ -477,15 +465,15 @@ impl PeerTransport for BtpPeerTransport {
         prepare: Prepare,
         minimum_delivery: u64,
         claim: Option<WireClaim>,
-    ) -> (PacketResponse, ClaimAckOutcome, bool) {
+    ) -> PeerForward {
         let Some(state) = self.relations.get(peer_id) else {
-            return (peer_unreachable(peer_id), ClaimAckOutcome::NotSent, false);
+            return PeerForward::unreachable(peer_id);
         };
         let handle = match self.session(state).await {
             Ok(handle) => handle,
             Err(error) => {
                 tracing::warn!(%error, "peer dial failed");
-                return (peer_unreachable(peer_id), ClaimAckOutcome::NotSent, false);
+                return PeerForward::unreachable(peer_id);
             }
         };
 
@@ -513,7 +501,7 @@ impl PeerTransport for BtpPeerTransport {
             Ok(Ok(frame)) => frame,
             _ => {
                 self.drop_session(state).await;
-                return (peer_unreachable(peer_id), ClaimAckOutcome::NotSent, false);
+                return PeerForward::unreachable(peer_id);
             }
         };
         // An ERROR means the peer could not decode our frame: there is no
@@ -525,40 +513,46 @@ impl PeerTransport for BtpPeerTransport {
                 reason = %String::from_utf8_lossy(&frame.ilp_packet),
                 "peer answered a forwarded PREPARE with a BTP ERROR"
             );
-            return (peer_unreachable(peer_id), ClaimAckOutcome::NotSent, false);
+            return PeerForward::unreachable(peer_id);
         }
 
         let ack = self.read_ack(state, claim.as_ref(), &frame);
         match decode_answer(&frame) {
-            // The terms are read and reported here, not acted on: the port
-            // this transport implements answers with a `PacketResponse`,
-            // and turning a quote into a payment is the forwarding path's
-            // decision to make (issue #875), not a carriage's. What issue
-            // #874 changes is that the terms are no longer thrown away
-            // before anything can decide.
-            Some(answer) => {
-                match &answer {
-                    PeerAnswer::PaymentRequired { reject, terms } => tracing::info!(
-                        peer_id,
-                        code = reject.code.as_str(),
-                        price = terms.price().unwrap_or_default(),
-                        pay_to = terms.pay_to().unwrap_or_default(),
-                        required_transport = terms.required_transport().unwrap_or_default(),
-                        "peer refused a forwarded PREPARE with x402 terms"
-                    ),
-                    PeerAnswer::MalformedGreeting { reject, error } => tracing::warn!(
-                        peer_id,
-                        code = reject.code.as_str(),
-                        %error,
-                        "peer refused a forwarded PREPARE with an unreadable x402 greeting"
-                    ),
-                    PeerAnswer::Fulfill(_) | PeerAnswer::Reject(_) => {}
-                }
-                (answer.into_response(), ack, true)
+            // The terms are read and REPORTED here, not acted on: turning a
+            // quote into a payment is the forwarding path's decision to make
+            // (issue #875), not a carriage's. What issue #874 changed is
+            // that the terms are no longer thrown away before anything can
+            // decide; what #875 changes is that the port now has somewhere
+            // to put them (`PeerForward::payment_required`).
+            Some(PeerAnswer::PaymentRequired { reject, terms }) => {
+                tracing::info!(
+                    peer_id,
+                    code = reject.code.as_str(),
+                    price = terms.price().unwrap_or_default(),
+                    pay_to = terms.pay_to().unwrap_or_default(),
+                    required_transport = terms.required_transport().unwrap_or_default(),
+                    "peer refused a forwarded PREPARE with x402 terms"
+                );
+                PeerForward::quoted(PacketResponse::Reject(reject), ack, *terms)
             }
+            // An unreadable greeting is reported as a plain refusal with NO
+            // terms, which is not a free ride: the packet is still refused,
+            // and the forwarding path is simply given nothing it could pay
+            // against. Guessing at a greeting we could not read would be the
+            // only worse answer.
+            Some(PeerAnswer::MalformedGreeting { reject, error }) => {
+                tracing::warn!(
+                    peer_id,
+                    code = reject.code.as_str(),
+                    %error,
+                    "peer refused a forwarded PREPARE with an unreadable x402 greeting"
+                );
+                PeerForward::answered(PacketResponse::Reject(reject), ack)
+            }
+            Some(answer) => PeerForward::answered(answer.into_response(), ack),
             None => {
                 tracing::warn!(peer_id, "peer answer carried no decodable ILP packet");
-                (peer_unreachable(peer_id), ack, false)
+                PeerForward::undecodable(peer_id, ack)
             }
         }
     }
@@ -629,6 +623,7 @@ impl BtpPeerTransport {
 mod tests {
     use super::*;
     use connector_btp::{BTP_RESPONSE, PAYMENT_REQUIRED_PROTOCOL};
+    use connector_domain::RejectCode;
 
     /// The bytes the client edge's §1.9 greeting carries, in miniature.
     /// `crates/connector-client-edge/tests/btp_session.rs`'s
