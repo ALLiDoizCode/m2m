@@ -6,7 +6,10 @@
 //! fields**, precisely so a hop can read and judge them without opening a
 //! payload it holds no key for.
 
-use connector_btp::{ProtocolData, ACCUMULATED_COST_PROTOCOL, CONTENT_TYPE_TEXT};
+use connector_btp::{
+    ProtocolData, ACCUMULATED_COST_PROTOCOL, CONTENT_TYPE_TEXT, PAYMENT_REQUIRED_PROTOCOL,
+};
+use connector_domain::x402::{parse_greeting, GreetingError, X402PaymentRequired};
 use connector_domain::{Reject, RejectCode};
 use connector_peer_auth::SessionRole;
 
@@ -109,6 +112,34 @@ pub fn accumulated_cost(protocol_data: &[ProtocolData]) -> u64 {
         .unwrap_or(0)
 }
 
+/// The x402 terms a REJECT's `payment-required` entry carries (issue #874),
+/// the BTP twin of the HTTP 402's `Payment-Required` header -- and by
+/// construction the identical bytes, since the client edge serves both from
+/// one `x402_terms_body`.
+///
+/// Three answers, and the difference between the last two is the whole
+/// point:
+///
+/// * `None` -- no such entry. The peer answered without greeting us; this
+///   is an ordinary answer and nothing is owed.
+/// * `Some(Err(_))` -- an entry was there and could not be read. **Never
+///   collapsed into `None`**: doing so would read a framing bug, a
+///   truncated frame or a future x402 version as "no payment required" and
+///   hand the far side a free-ride verdict it never gave.
+/// * `Some(Ok(terms))` -- the terms this connector has to satisfy.
+///
+/// The parse itself is [`connector_domain::x402::parse_greeting`], shared
+/// with whatever reads the HTTP carriage's 402: the greeting is not a BTP
+/// concept, only its carriage is.
+pub fn payment_required(
+    protocol_data: &[ProtocolData],
+) -> Option<Result<X402PaymentRequired, GreetingError>> {
+    let entry = protocol_data
+        .iter()
+        .find(|pd| pd.name == PAYMENT_REQUIRED_PROTOCOL)?;
+    Some(parse_greeting(&entry.data))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,5 +222,40 @@ mod tests {
         assert_eq!(accumulated_cost(&[]), 0);
         assert_eq!(accumulated_cost(&[accumulated_cost_protocol_data(0)]), 0);
         assert_eq!(accumulated_cost(&[accumulated_cost_protocol_data(41)]), 41);
+    }
+
+    fn greeting(body: &[u8]) -> Vec<ProtocolData> {
+        vec![entry(PAYMENT_REQUIRED_PROTOCOL, body)]
+    }
+
+    const TERMS: &[u8] = br#"{"x402Version":2,"resource":{"url":"g.toon.relay"},
+        "accepts":[{"amount":"2000","payTo":"g.toon.relay"}]}"#;
+
+    #[test]
+    fn an_answer_with_no_greeting_asks_for_nothing() {
+        assert!(payment_required(&[]).is_none());
+        assert!(payment_required(&[accumulated_cost_protocol_data(41)]).is_none());
+    }
+
+    #[test]
+    fn a_greeting_yields_the_terms_to_satisfy() {
+        let terms = payment_required(&greeting(TERMS))
+            .expect("the entry is there")
+            .expect("and it reads");
+        assert_eq!(terms.price(), Some(2000));
+        assert_eq!(terms.pay_to(), Some("g.toon.relay"));
+    }
+
+    /// Issue #874's load-bearing distinction: an unreadable greeting is an
+    /// error, never the `None` that means "nothing was asked for".
+    #[test]
+    fn an_unreadable_greeting_is_an_error_not_an_absence() {
+        for garbage in [&b""[..], b"{", b"null", br#"{"error":"no route"}"#] {
+            let read = payment_required(&greeting(garbage));
+            assert!(
+                matches!(read, Some(Err(_))),
+                "{garbage:?} was not read as a malformed greeting: {read:?}"
+            );
+        }
     }
 }

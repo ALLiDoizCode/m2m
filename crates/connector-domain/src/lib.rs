@@ -6,7 +6,10 @@
 //! execution condition / fulfilment / expiry rules (RFC-0022, issue #417),
 //! claim nonce / watermark rules (ADR 0004, ADR 0005, issue #423), and the
 //! structured envelope a packet carries to and from the app behind a
-//! terminated route (ADR 0018, issue #519).
+//! terminated route (ADR 0018, issue #519). Also the x402 `payment-required`
+//! greeting's wire shape and its reader (issue #874, [`x402`]) -- shared here
+//! because the crate that writes one and the crates that read one sit on
+//! opposite sides of the graph and must not each own a definition of it.
 
 mod address;
 mod claim;
@@ -19,6 +22,7 @@ mod oer;
 mod packet;
 mod projection;
 mod route;
+pub mod x402;
 
 pub use address::is_valid_ilp_address;
 pub use claim::{advance_watermark, validate_claim, validate_price, ClaimError, Watermark};

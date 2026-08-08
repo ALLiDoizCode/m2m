@@ -490,189 +490,22 @@ async fn route_price(
     }
 }
 
-/// The x402 v2 payment-required greeting (client-edge-spec.md §1.4): the
-/// terms of the one payment method this connector's client edge actually
-/// understands -- a TOON payment channel claim, over this same `/ilp`
-/// endpoint. `accepts` is a list (ADR 0022's fourth acceptance criterion)
-/// so a later method can be offered alongside this one without changing
-/// the answer's shape; only one entry exists today because on-chain
-/// settlement addresses (the `exact` x402 scheme's `asset`/`payTo`) are not
-/// yet configured anywhere in this connector (issue #526 is answering
-/// terms, not adding that config).
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct X402PaymentRequired {
-    #[serde(rename = "x402Version")]
-    x402_version: u32,
-    resource: X402Resource,
-    accepts: Vec<X402PaymentOption>,
-}
-
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct X402Resource {
-    url: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct X402PaymentOption {
-    scheme: String,
-    network: String,
-    amount: String,
-    #[serde(rename = "payTo")]
-    pay_to: String,
-    #[serde(rename = "maxTimeoutSeconds")]
-    max_timeout_seconds: u64,
-    #[serde(rename = "httpEndpoint")]
-    http_endpoint: String,
-    extra: X402ChannelExtra,
-}
-
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct X402ChannelExtra {
-    #[serde(rename = "ilpAddress")]
-    ilp_address: String,
-    endpoint: String,
-    price: String,
-    /// This node's own ILP address(es) (issue #807) -- the authoritative
-    /// list from `[announce]`, never an echo of the probed `destination`
-    /// the way `ilp_address` above is. Present exactly when
-    /// [`BootstrapIdentity`] is configured; empty (and absent on the wire)
-    /// otherwise, so a parser written before this field existed is
-    /// unaffected.
-    #[serde(
-        rename = "ilpAddresses",
-        skip_serializing_if = "Vec::is_empty",
-        default
-    )]
-    ilp_addresses: Vec<String>,
-    /// Where clients pay this node over BTP (issue #807) -- the same fact
-    /// a kind:10032 announce carries as `btpEndpoint`. Present exactly when
-    /// [`BootstrapIdentity`] is configured; `None` (and absent on the wire)
-    /// otherwise, same treatment as `settlement`/`settlements` below.
-    #[serde(
-        rename = "btpEndpoint",
-        skip_serializing_if = "Option::is_none",
-        default
-    )]
-    btp_endpoint: Option<String>,
-    /// The channel-opening facts (issue #617), present exactly when this
-    /// node has a settlement backend. `None` (and absent on the wire) on a
-    /// settlement-less node -- the terms shape is otherwise unchanged, so
-    /// a parser written before this field existed is unaffected.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    settlement: Option<X402SettlementTerms>,
-    /// Every configured chain's channel-opening facts (issue #632), additive
-    /// beside [`settlement`](Self::settlement): a node settling on N chains
-    /// (epic #627) lists all N here, including the same EVM entry
-    /// `settlement` already carries verbatim. Absent -- not an empty array
-    /// -- on a node with no settlement backend at all, so the pre-#632
-    /// shape (and the pre-#617 shape beneath it) stays byte-identical for a
-    /// settlement-less node; a parser written before either field existed
-    /// is unaffected either way.
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    settlements: Vec<X402ChainSettlementTerms>,
-    /// Present, and self-diagnosing, exactly when this greeting answers a
-    /// request that arrived over a transport its route's policy does not
-    /// accept (issue #701, toon-meta#262 decision 11): `"http"` or `"btp"`,
-    /// naming the transport the route actually requires. Absent -- not
-    /// `null` -- on every other greeting, so the pre-#701 shape is
-    /// unchanged for a route with no transport restriction.
-    #[serde(
-        rename = "requiredTransport",
-        skip_serializing_if = "Option::is_none",
-        default
-    )]
-    required_transport: Option<String>,
-    /// The session lease backstop TTL this node's client session registry
-    /// actually enforces (issue #722, toon-meta#262 decision 12's
-    /// cross-plane invariant), in milliseconds -- always present, unlike
-    /// `settlement`/`settlements`/`requiredTransport`, since every node has
-    /// a session registry regardless of settlement backend. Always the same
-    /// value [`crate::session_registry::SESSION_LEASE_BACKSTOP_TTL`]
-    /// enforces, never a second literal typed nearby: a client (buzz#84's
-    /// relay-side freshness window among them) reads this instead of
-    /// hardcoding a guessed millisecond count.
-    #[serde(rename = "sessionLeaseTtlMs")]
-    session_lease_ttl_ms: u64,
-}
-
-/// What an unaffiliated buyer needs to OPEN a channel with this node,
-/// carried in the x402 greeting's `extra` (issue #617). This is ADR 0022's
-/// "answers when asked" applied to channel establishment: the TypeScript
-/// fleet distributes these same facts in a kind:10032 announce, which this
-/// fleet will never make -- the greeting is the ask that replaces it.
+/// The x402 v2 `payment-required` greeting's wire shape, re-exported from
+/// [`connector_domain::x402`] where it lives as of issue #874. This edge
+/// writes it (`x402_terms_body` below); the peer carriages -- which sit
+/// under this crate in the graph and cannot import it -- read it back with
+/// `connector_domain::x402::parse_greeting`. One definition, so an emitter
+/// change cannot leave a reader behind.
 ///
-/// Every field is a fact the node already proved at startup:
-/// `EvmSettlementBackend::connect` resolved `token_network` through the
-/// registry and refused to boot on a `decimals` disagreement, so nothing
-/// here can drift from the deployment without the node failing to start.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct X402SettlementTerms {
-    /// `evm:<chainId>`, the chain the backend read at connect time.
-    pub chain: String,
-    /// The on-chain counterparty a buyer opens a channel WITH -- the
-    /// settlement backend's own signing address.
-    #[serde(rename = "settlementAddress")]
-    pub settlement_address: String,
-    /// The stable operator-facing factory address (issue #576).
-    #[serde(rename = "tokenNetworkRegistry")]
-    pub token_network_registry: String,
-    /// The resolved `TokenNetwork` -- the EIP-712 `verifyingContract` a
-    /// claim on any of its channels is signed under.
-    #[serde(rename = "tokenNetwork")]
-    pub token_network: String,
-    #[serde(rename = "tokenAddress")]
-    pub token_address: String,
-    /// The token's own reported scale -- informational (claims are already
-    /// in base units), verified against the chain at startup (issue #564).
-    pub decimals: u8,
-}
-
-/// One configured chain's entry in the x402 greeting's `extra.settlements`
-/// list (issue #632, epic #627's per-chain expansion of the single EVM
-/// [`X402SettlementTerms`] issue #617 shipped). Untagged: serde tries each
-/// variant in declaration order and keeps the first one whose required
-/// fields all deserialize, so as long as every variant has at least one
-/// field the others lack -- `tokenNetworkRegistry` for EVM, `programId` for
-/// Solana -- that structural mismatch alone disambiguates them; no explicit
-/// tag is needed on the wire.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(untagged)]
-pub enum X402ChainSettlementTerms {
-    /// Exactly the same facts, in the same shape, the legacy `extra.settlement`
-    /// object carries -- a two-chain node's `settlements` entry for its EVM
-    /// leg is byte-identical to its legacy `settlement` object.
-    Evm(X402SettlementTerms),
-    /// See [`X402SolanaSettlementTerms`] for what each field means.
-    Solana(X402SolanaSettlementTerms),
-}
-
-/// The Solana twin of [`X402SettlementTerms`] (issue #632): what an
-/// unaffiliated buyer needs to open a channel against this node's deployed
-/// `payment-channel` program instance. Every field is a fact
-/// `SolanaSettlementBackend::connect` already proved at startup (issue
-/// #630) -- the program is reachable, executable and proven to behave like
-/// the deployed payment-channel program, and the configured `decimals`
-/// agrees with the mint's own.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct X402SolanaSettlementTerms {
-    /// Always `"solana"` -- unlike EVM, a Solana backend has no chain id to
-    /// append: the program id already names exactly one deployed instance.
-    pub chain: String,
-    /// The on-chain counterparty a buyer opens a channel WITH -- the
-    /// settlement backend's own signing pubkey, base58-encoded.
-    #[serde(rename = "settlementAddress")]
-    pub settlement_address: String,
-    /// The deployed `payment-channel` program instance, base58-encoded.
-    #[serde(rename = "programId")]
-    pub program_id: String,
-    /// The SPL mint every channel this backend opens settles in,
-    /// base58-encoded.
-    #[serde(rename = "tokenAddress")]
-    pub token_address: String,
-    /// The mint's own reported scale -- informational (claims are already
-    /// in base units), verified against the chain at startup (issue #630).
-    pub decimals: u8,
-}
+/// Re-exported rather than merely imported because `X402SettlementTerms`,
+/// `X402ChainSettlementTerms` and `X402SolanaSettlementTerms` are this
+/// crate's public configuration surface -- `connector-cli` builds them at
+/// startup and hands them to [`ClientEdgeState`] -- so the paths its
+/// callers already use keep working.
+pub use connector_domain::x402::{
+    X402ChainSettlementTerms, X402ChannelExtra, X402PaymentOption, X402PaymentRequired,
+    X402Resource, X402SettlementTerms, X402SolanaSettlementTerms, X402_VERSION,
+};
 
 /// This node's own ILP address(es) and BTP endpoint (issue #807): the
 /// facts a client needs to bootstrap against this edge directly when it
@@ -694,7 +527,6 @@ pub struct BootstrapIdentity {
     pub btp_endpoint: String,
 }
 
-const X402_VERSION: u32 = 2;
 const X402_MAX_TIMEOUT_SECONDS: u64 = 60;
 
 /// Answer an unpaid request to `destination` with terms instead of doing
