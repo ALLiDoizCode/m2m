@@ -604,8 +604,8 @@ mod tests {
         }
 
         for handle in handles {
-            let (response, _ack, _reached) = handle.await.expect("task");
-            assert!(matches!(response, PacketResponse::Fulfill(_)));
+            let forward = handle.await.expect("task");
+            assert!(matches!(forward.response, PacketResponse::Fulfill(_)));
         }
     }
 
