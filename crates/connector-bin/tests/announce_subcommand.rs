@@ -28,10 +28,10 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use chrono::Duration as ChronoDuration;
+use connector_runtime::OutboundClientLedger;
 use connector_settlement::SettlementBackend;
 use connector_settlement_evm::test_support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
 use connector_settlement_evm::EvmSettlementBackend;
-use connector_runtime::OutboundClientLedger;
 use connector_signer::{derive_evm_address, to_hex, Signer};
 
 mod support;

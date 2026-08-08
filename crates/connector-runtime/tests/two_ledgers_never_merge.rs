@@ -89,7 +89,11 @@ impl ClaimStateSource for ReceiverSaying {
 /// Sign a claim on [`CHANNEL`] exactly as a peer's `record_fulfillment`
 /// would, so `accept_inbound` verifies a real signature rather than being
 /// handed a pre-accepted stub.
-fn signed_inbound_claim(counterparty: &LocalSigner, nonce: u64, cumulative_amount: u64) -> WireClaim {
+fn signed_inbound_claim(
+    counterparty: &LocalSigner,
+    nonce: u64,
+    cumulative_amount: u64,
+) -> WireClaim {
     let proof = EvmBalanceProof {
         channel_id: CHANNEL,
         nonce,
@@ -113,7 +117,10 @@ fn signed_inbound_claim(counterparty: &LocalSigner, nonce: u64, cumulative_amoun
 
 /// A `ClaimBook` that will accept claims on [`CHANNEL`] from
 /// `counterparty`, journaling to `path`.
-fn book_journaling_to(counterparty: &LocalSigner, path: &std::path::Path) -> (ClaimBook, Arc<FileJournal>) {
+fn book_journaling_to(
+    counterparty: &LocalSigner,
+    path: &std::path::Path,
+) -> (ClaimBook, Arc<FileJournal>) {
     let address = derive_evm_address(&counterparty.public_key().expect("counterparty public key"));
     let mut counterparties = HashMap::new();
     counterparties.insert(CHANNEL_HEX.to_string(), address);
@@ -194,7 +201,8 @@ async fn an_inbound_claim_and_an_outbound_client_claim_never_move_each_others_le
         .expect("sign an outbound client claim");
 
     assert_eq!(
-        claim.nonce, 1,
+        claim.nonce,
+        1,
         "the outbound nonce comes from the receiver (0) plus one -- a nonce of {} would mean the \
          inbound journal's watermark had leaked into the outbound line",
         INBOUND_NONCE + 1
@@ -209,7 +217,10 @@ async fn an_inbound_claim_and_an_outbound_client_claim_never_move_each_others_le
 
     // ── ...and the reverse: the outbound claim touched no journal ────────
     assert_eq!(
-        journal.read_all().expect("re-read the journal"),
+        journal.read_all().expect(
+            "the journal must still decode -- an unreadable one means something that is \
+                     not a JournalEntry was written into it"
+        ),
         journal_before,
         "signing an outbound client claim must append no JournalEntry -- the outbound book is not \
          a journal stream and nothing replaying the journal would understand one"
@@ -241,8 +252,7 @@ async fn an_inbound_claim_and_an_outbound_client_claim_never_move_each_others_le
             "the journal holds inbound entries only"
         );
     }
-    let journal_text =
-        String::from_utf8(journal_bytes_before).expect("the journal file is utf-8");
+    let journal_text = String::from_utf8(journal_bytes_before).expect("the journal file is utf-8");
     assert!(
         !journal_text.contains("nextHop"),
         "no outbound-ledger record may have been written into the journal: {journal_text}"
