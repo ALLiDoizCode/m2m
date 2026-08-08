@@ -70,10 +70,18 @@
 # `connector announce` loads the SAME `./connector-rust.toml` the serving
 # `connector-rust` service does, and `Config::load` requires every key file
 # it names regardless of which subcommand reads it, so this service mounts
-# the same four key files `docker-compose.relay.rust.yml` does -- the
-# `[signer]` key, the two `[settlement]` keys, and `./announce.key` (issue
-# #870). (No peering secret to mount -- this box has no `[[peers]]` table
-# yet, issue #820).
+# the same FIVE key files `docker-compose.relay.rust.yml` does -- the
+# `[signer]` key, the two `[settlement]` keys, `./announce.key` (issue
+# #870), and the `[[peers]]` credential `./apex-relay.secret` (issue #820).
+# That last one is not optional here even though this service never peers:
+# `Config::load` rejects a `secret_file` that is not on disk regardless of
+# whether the subcommand uses it (connector-config/src/error.rs, test
+# `rejects_a_secret_file_that_does_not_exist`), and compose merge cannot
+# supply it because the serving service's mount lives under a different
+# service name. Omitting it makes this service exit before it publishes
+# anything -- the failure #870's reviewer caught, where the adopted
+# identity would have announced nothing while the loop logged
+# `[announce] FAILED rc=...` every cycle.
 # `state_dir` gets a SEPARATE named volume: two processes sharing one
 # journal is a documented hazard (docs/operators/announcing-a-node.md,
 # "When it refuses to run beside a serving node"), and while that guard is
@@ -135,6 +143,13 @@ services:
       - ./signer-rust.key:/app/data/signer.key:ro
       - ./settlement-rust.key:/app/data/settlement.key:ro
       - ./settlement-solana-rust.key:/app/data/settlement-solana.key:ro
+      # The `[[peers]]` credential `./connector-rust.toml` names (issue #820).
+      # Mounted purely so `Config::load` succeeds -- this service runs
+      # `connector announce --via-own-routing`, which never opens the peering
+      # -- but the loader validates every `secret_file` the config names,
+      # not just the ones the subcommand reads. Same file, same read-only
+      # handling as docker-compose.relay.rust.yml's mount.
+      - ./apex-relay.secret:/app/data/apex-relay.secret:ro
       # The apex's announce identity (issue #870), same file
       # docker-compose.relay.rust.yml mounts for the serving connector --
       # this is the process that actually SIGNS under it. See
