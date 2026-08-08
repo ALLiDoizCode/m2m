@@ -17,6 +17,8 @@ future version would be introduced, per
 **Consumers:** `toon-client` and any other app that pays this connector directly — installed on
 machines this repository's operators do not control.
 **Vocabulary:** [`CONTEXT.md`](../../CONTEXT.md).
+**Where the claim a client pays here goes next**, and why it is never forwarded onward:
+[`money-model.md`](money-model.md).
 
 The **client edge** is the protocol a client speaks to the connector it attaches to
 (`CONTEXT.md`). Unlike the peer wire, it is versioned rather than redesigned: its far end is
