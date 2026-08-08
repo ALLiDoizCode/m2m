@@ -70,7 +70,7 @@ pub mod ws;
 
 pub use accept::{AcceptedClaims, PeerAcceptPolicy, PeerCarriageState, PeerSession};
 pub use claim_json::{ClaimDecodeError, PeerClaimDomain};
-pub use dial::{BtpPeerTransport, DialError, PeerDialer, PeerRelation};
+pub use dial::{decode_answer, BtpPeerTransport, DialError, PeerAnswer, PeerDialer, PeerRelation};
 pub use ws::TungsteniteDialer;
 
 use connector_config::PeerConfig;
