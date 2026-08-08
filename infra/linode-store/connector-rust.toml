@@ -293,57 +293,43 @@ addresses     = ["g.toon.ario"]
 http_endpoint = "https://proxy.ario.devnet.toonprotocol.dev/ilp"
 btp_endpoint  = "wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp"
 # The address of the route that terminates at the chosen relay's write
-# ingress -- a fact about the g.toon proxy's node, not this one. `g.toon.relay`
-# is the g.toon proxy's own terminating route (still true until #820 moves it
-# behind its own connector), so this box pays THROUGH the proxy's client edge
-# to publish there, exactly as docs/operators/announcing-a-node.md's own
-# worked example for this box describes.
+# ingress. `g.toon.relay` is the RELAY BOX's own terminating route -- as of
+# issue #871 this node pays THROUGH THE RELAY's client edge directly, not
+# through the apex, per toon-meta#310 (retiring the apex: the relay box is
+# the fleet's only public write ingress once it goes). Still the same
+# address; only who terminates it, and who this box pays, changed.
 publish_to = "g.toon.relay"
-# The TARGET's BTP endpoint -- where THIS node pays the g.toon proxy, not
+# The TARGET's BTP endpoint -- where THIS node pays the relay box, not
 # where clients pay this node (`btp_endpoint` above is that one; the two
 # point in opposite directions, which is why this one is spelled `publish_*`
 # alongside `publish_to`).
 #
-# Committed here as of issue #820, matching what the live box already
-# carries (added 2026-08-07 13:51Z alongside #833's [announce] section --
-# see that box's own `connector-rust.toml.bak-pre-announce-20260807T135154Z`
-# backup). It was missing from THIS repo copy even though the live box
-# needed it from day one: `pay_the_through_url` reads the carriage off the
-# greeting's `requiredTransport` rather than guessing
-# (connector-cli/src/announce.rs), and until #820 the apex pinned
-# `g.toon.relay` to `transport = "btp"` (issue #701, the relay's
-# high-frequency always-connected traffic) -- so an announce to that address
-# needed a BTP endpoint from either `--btp-url` or this key, and with
-# neither it failed `NoBtpEndpoint` up front, before anything was signed,
-# however well funded `pay_channel` was. The scheduled command in
-# docker-compose.store.announce.yml passes no `--btp-url`, so this is where
-# it comes from.
-#
-# Issue #820 moved the `transport = "btp"` pin off the apex's `g.toon.relay`
-# route (now a `peer_id` forward, which cannot carry one) down to the relay
-# box's own terminating route -- so `pay_the_through_url`'s BTP requirement,
-# read off the APEX's greeting for this address, no longer fires either way.
-# Set regardless: it is still correct (this node pays the apex over BTP
-# either way) and matches the live box, so leaving it out of the repo would
-# just reopen the same repo/live gap this comment exists to close.
-# Same literal the apex's own announcer sidecar advertises as
-# `ANNOUNCER_BTP_ENDPOINT` (infra/linode-node/docker-compose.node.
-# announcer.yml) -- it is that node's public BTP door, not a new fact.
-publish_btp_url = "wss://proxy.devnet.toonprotocol.dev/ilp/btp"
-# `pay_channel` names a funded EVM channel this box PAYS the g.toon proxy
+# Issue #871: repointed off the apex (`wss://proxy.devnet.toonprotocol.dev/
+# ilp/btp`, issue #820's value) onto the relay box's own advertised
+# `btp_endpoint` (infra/linode-relay/connector-rust.toml's `[announce]`
+# section). The relay's own `g.toon.relay` route is pinned
+# `transport = "btp"` (issue #701, the relay's high-frequency
+# always-connected traffic) -- `pay_the_through_url` reads that requirement
+# off the target's own greeting and refuses `NoBtpEndpoint` up front,
+# before anything is signed, with neither `--btp-url` nor this key set. The
+# scheduled command in docker-compose.store.announce.yml passes no
+# `--btp-url`, so this is where it comes from.
+publish_btp_url = "wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp"
+# `pay_channel` names a funded EVM channel this box PAYS THE RELAY BOX
 # from, as an ordinary client. It is deliberately NOT a
 # `[[client_channels]]` row: that table is channels this node RECEIVES on,
 # and one channel in both roles is the same collision `Config::load`
 # already refuses between the peer and client books
 # (`ConfigError::ChannelInBothNamespaces`). See ADR 0030.
 #
-# Opening and funding the real channel is a live, human step
-# (docs/operators/announcing-a-node.md's "What the node needs before this
-# can work"), not something a repo diff can supply, so -- per the same #822
-# placeholder policy the `[[peer_channels]]` channel id above already
-# follows -- this commits a clearly-marked placeholder rather than either
-# the live value or an absent field. The real id lives only on the box
-# (issue #853); the scheduled `connector announce` in
+# Opening and funding the real channel -- WITH THE RELAY BOX, replacing the
+# apex-funded channel issue #820's cutover made obsolete -- is a live,
+# human step (docs/operators/announcing-a-node.md's "What the node needs
+# before this can work"), not something a repo diff can supply, so -- per
+# the same #822 placeholder policy the `[[peer_channels]]` channel id above
+# already follows -- this commits a clearly-marked placeholder rather than
+# either the live value or an absent field. The real id lives only on the
+# box (issues #853/#871); the scheduled `connector announce` in
 # docker-compose.store.announce.yml reads whichever value the box's own
 # copy of this file carries.
 pay_channel = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeadc0de"

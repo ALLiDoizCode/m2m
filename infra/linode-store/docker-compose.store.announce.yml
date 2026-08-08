@@ -13,6 +13,11 @@
 # edge -- issue #833. The proxy's stopgap announce of this same prefix is
 # retired in the same change; see that file's own comment.
 #
+# Issue #871: the through-URL below now names the RELAY BOX, not the apex.
+# toon-meta#310 is retiring the apex; the relay box is the fleet's only
+# public write ingress once it goes, so this box buys relay writes directly,
+# like any other client, instead of paying through the apex's client edge.
+#
 # ── Why a shell loop, not `restart: unless-stopped` on the bare subcommand ──
 # `connector announce` (crates/connector-cli/src/announce.rs, issue #784) is
 # a ONE-SHOT operator action, not a daemon: it negotiates, signs and PAYS for
@@ -51,9 +56,9 @@
 # ── What this needs before it can do anything (live/operator, issue #833's
 #    own scope boundary -- NOT provided by this file) ──────────────────────
 # `./connector-rust.toml`'s `[announce] pay_channel` is a clearly-marked
-# `0xdead...` placeholder (issue #853, the same convention this repo already
-# uses for `[[peer_channels]]` channel ids): opening and funding a channel
-# this box pays the g.toon proxy from is a live, human step
+# `0xdead...` placeholder (issues #853/#871, the same convention this repo
+# already uses for `[[peer_channels]]` channel ids): opening and funding a
+# channel this box pays THE RELAY BOX from is a live, human step
 # (docs/operators/announcing-a-node.md, "What the node needs before this can
 # work"), so the repo commits the field's shape and the box's own copy
 # carries the real id. Until it does, every run here fails loudly -- the
@@ -152,7 +157,7 @@ services:
           echo "[announce] publishing g.toon.ario via g.toon.relay..."
           if /usr/local/bin/connector announce \
             --config /app/config/connector.toml \
-            https://proxy.devnet.toonprotocol.dev/ilp; then
+            https://proxy.relay.devnet.toonprotocol.dev/ilp; then
             echo "[announce] OK -- g.toon.ario published"
           else
             echo "[announce] FAILED rc=$$? -- g.toon.ario NOT published; retrying in $${REFRESH_SECS}s"

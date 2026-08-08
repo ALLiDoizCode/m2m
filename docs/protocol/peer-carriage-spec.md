@@ -7,6 +7,8 @@ wire, and a third-party connector has nothing else to implement against. Subject
 this prose and `vectors/wire-vectors.json` disagree about an encoding, the vectors are right and
 this text is the bug.** §10 enumerates the vectors that must exist for that sentence to mean
 anything.
+**End-to-end money model**, of which the claim re-derivation here is one step:
+[`money-model.md`](money-model.md).
 **Implements:** [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md).
 This document carries ADR 0027's decisions through to the wire; it does not re-decide them. Where
 it sharpens or resolves an ambiguity in that ADR it says so, in §12.
