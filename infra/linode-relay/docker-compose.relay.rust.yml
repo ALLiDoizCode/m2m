@@ -57,6 +57,15 @@ services:
       # handling as infra/linode-store/'s apex-store.secret: gitignored,
       # generated once and copied byte-identical to both boxes.
       - ./apex-relay.secret:/app/data/apex-relay.secret:ro
+      # The apex's announce identity (issue #870), carried over verbatim so
+      # this box signs `g.toon.relay`'s kind:10032 announce under the SAME
+      # pubkey the genesis peer seed already pins -- see
+      # ./connector-rust.toml's `[announce] identity_key_file` comment. Must
+      # exist before this service can boot at all: `Config::load` checks the
+      # path regardless of which subcommand reads the file's contents, so
+      # the SERVING connector needs this mount just as much as the `announce`
+      # one-shot in docker-compose.relay.announce.yml does.
+      - ./announce.key:/app/data/announce.key:ro
       # Durable claim watermarks (#605). Named, not bind-mounted: the replay
       # of this journal is what stops a restart from re-accepting a spent
       # claim, so it must outlive the container.

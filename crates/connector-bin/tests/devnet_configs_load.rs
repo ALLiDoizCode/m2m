@@ -300,12 +300,13 @@ fn write_peer_secret() -> tempfile::NamedTempFile {
 }
 
 /// Substitute only what this sandbox physically cannot supply: the signer
-/// key file (real key material is never committed), the bind addresses
-/// (fixed ports collide across parallel test runs) and `state_dir` (the
-/// committed value is a container path, `/app/state`, which no test host
-/// can create). Every other line -- prefixes, handler URLs, peer id/addr,
-/// `price`, and every `[settlement]` value -- stays the literal committed
-/// content.
+/// key file (real key material is never committed), the relay's carried-over
+/// `identity_key_file` when the file carries one (issue #870, same reason),
+/// the bind addresses (fixed ports collide across parallel test runs) and
+/// `state_dir` (the committed value is a container path, `/app/state`, which
+/// no test host can create). Every other line -- prefixes, handler URLs,
+/// peer id/addr, `price`, and every `[settlement]` value -- stays the
+/// literal committed content.
 ///
 /// The `state_dir` substitution is a path swap, not a removal: the
 /// committed files must keep naming one, since a devnet box without it
@@ -336,6 +337,20 @@ fn with_sandbox_paths(
         &replaced,
         "state_dir = \"/app/state\"",
         &format!("state_dir = \"{}\"", state_dir.display()),
+    );
+    // The relay's carried-over announce identity (issue #870) -- same
+    // reasoning as the `[signer]` key_file above (real key material is
+    // never committed, and `Config::load` checks `identity_key_file` exists
+    // regardless of which subcommand reads it), but optional: only the
+    // relay file carries this line as of #870, so a plain `.replace` rather
+    // than `replace_expecting_a_match` leaves the apex and store files, which
+    // have no `identity_key_file` at all, untouched. A no-op here is still
+    // caught rather than silently skipped: if the committed path ever moves,
+    // `Config::load` refuses the container path with
+    // `AnnounceIdentityKeyFileNotFound` and the caller's `.expect` fires.
+    let replaced = replaced.replace(
+        "identity_key_file = \"/app/data/announce.key\"",
+        &format!("identity_key_file = \"{}\"", key_path.display()),
     );
     // The peering's shared secret (issue #750), same substitution and same
     // reason as the key files: the committed configs name a path on the box,
@@ -1115,6 +1130,10 @@ fn the_store_devnet_config_announces_g_toon_ario_under_its_own_identity() {
 /// twice passes when both are wrong together, which is exactly the shape
 /// that let #841 slip past #839's own test (see the module docs and
 /// [`the_apex_announcer_never_advertises_a_prefix_it_forwards`] above).
+///
+/// Also covers issue #870's `identity_key_file` addition -- the property
+/// this test's name describes did not change (the relay still announces
+/// only what it terminates), but the identity it signs under did.
 #[test]
 fn the_relay_devnet_config_announces_only_prefixes_it_terminates() {
     assert!(
@@ -1167,10 +1186,14 @@ fn the_relay_devnet_config_announces_only_prefixes_it_terminates() {
     );
     assert_eq!(
         announce.identity_key_file(),
-        None,
-        "the relay box has no prior publisher identity to carry over (issue \
-         #799 does not apply -- this box has never had a kind:10032 \
-         publisher of its own); it must sign with its own [signer]"
+        Some(key_file.path()),
+        "the relay box carries over the apex's announce identity (issue \
+         #870, toon-meta#310's apex-retirement spec) so already-deployed \
+         clients -- which trust the genesis seed's apex pubkey -- self-heal \
+         without an update; the committed `/app/data/announce.key` must \
+         resolve to whatever `with_sandbox_paths` substituted the signer \
+         key_file to, since both key_file substitutions share one temp file \
+         in this test"
     );
     assert!(
         announce.relay_url().is_some(),

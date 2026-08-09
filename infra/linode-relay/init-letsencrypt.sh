@@ -21,6 +21,10 @@ DC=(docker compose -f infra/linode-relay/docker-compose.relay.yml)
 # from its cert lineage, and infra/devnet-manage.sh points the record at this
 # box. Each name gets its own lineage, its own `server` block in
 # nginx/conf.d/node.conf, and its own independent renewal.
+#
+# faucet.${DOMAIN} is deliberately NOT here: the faucet gets its own box with
+# its own lineage (toon-meta `docs/two-node-architecture.md` §4.3 — that doc
+# lives in toon-meta, not this repo; connector#898 tracks the faucet box here).
 CERT_NAMES=("proxy.relay.${DOMAIN}" "relay-ws.${DOMAIN}")
 RENEW_WINDOW_DAYS="${RENEW_WINDOW_DAYS:-30}"
 
