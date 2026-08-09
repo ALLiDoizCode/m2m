@@ -2,14 +2,14 @@ import express from 'express';
 import cors from 'cors';
 import { ethers, NonceManager } from 'ethers';
 import { createSolanaFaucet } from './solana.js';
-import { isValidMinaAddress, minaInfo, minaFallbackLink, createMinaFaucet } from './mina.js';
+import { isValidMinaAddress } from './mina.js';
 import { createBaseSepoliaFaucet, baseSepoliaInfo } from './base-sepolia.js';
 import { createDripLimiter } from './drip-limiter.js';
 // The Mina USDC drip (treasury self-mint + TRANSFER — the rate-limited token
 // has no admin-mint) lives in a SEPARATE pure-ESM module (`mina-usdc.mjs`)
 // because it pulls in o1js for zk-proving. It is loaded via a dynamic import so
 // a deploy that lacks the compiled mina-zkapp ESM build (or runs on a non-glibc
-// base) degrades to native-MINA-only instead of crashing boot. See mina-usdc.mjs.
+// base) degrades to the route 503ing instead of crashing boot. See mina-usdc.mjs.
 
 const app = express();
 const PORT = process.env.PORT || 3500;
@@ -52,20 +52,16 @@ let tokenDecimals = 18;
 // Solana faucet (null when not configured — EVM-only deploys still work).
 const solanaFaucet = createSolanaFaucet();
 
-// Mina faucet (null when MINA_FAUCET_KEY unset — route 503s + links out then).
-// createMinaFaucet throws fail-loud ONLY when a WRONG key is configured (the
-// derived pubkey must equal the treasury), which we want to crash boot.
-const minaFaucet = createMinaFaucet();
-
 // Base Sepolia faucet (null when BASE_SEPOLIA_FAUCET_KEY unset — route 503s).
 // Mints the ungated public mock USDC on the PUBLIC Base Sepolia testnet
 // (chainId 84532) + best-effort ETH gas. Mirrors createSolanaFaucet's shape.
 const baseSepoliaFaucet = createBaseSepoliaFaucet();
 
-// Mina USDC dripper (null when MINA_USDC_* env is unset — native MINA still
-// drips). Loaded via dynamic import so the o1js dependency only loads when the
-// module is present; a failed load is logged and treated as "USDC drip disabled"
-// rather than crashing the whole faucet (which also drips EVM + Solana).
+// Mina USDC dripper (null when MINA_USDC_* env is unset — the route 503s;
+// this faucet has no native-MINA leg, see the USDC-only note on the mina
+// route below). Loaded via dynamic import so the o1js dependency only loads
+// when the module is present; a failed load is logged and treated as "USDC
+// drip disabled" rather than crashing the whole faucet.
 let minaUsdcDripper = null;
 let minaUsdcInfoFn = () => ({ usdcDrip: false });
 {
@@ -161,15 +157,6 @@ async function initTokenContract() {
   }
 }
 
-// Validate Ethereum address
-function isValidAddress(address) {
-  try {
-    return ethers.isAddress(address);
-  } catch {
-    return false;
-  }
-}
-
 // Health check
 app.get('/health', (req, res) => {
   res.json({
@@ -178,6 +165,28 @@ app.get('/health', (req, res) => {
     tokenReady: !!tokenContract,
   });
 });
+
+// Mina capability descriptor for /api/info — USDC-only (no native-MINA leg;
+// see the mina route below). `usdcInfo` is `minaUsdcInfo(minaUsdcDripper)`'s
+// fragment: `{ usdcDrip: false }` when unconfigured, or the drip/treasury
+// fields when a treasury is set.
+function minaUsdcOnlyInfo(usdcInfo) {
+  if (!usdcInfo.usdcDrip) {
+    return { enabled: false, route: '/api/mina/usdc-request', ready: false };
+  }
+  return {
+    enabled: true,
+    route: '/api/mina/usdc-request',
+    ready: true,
+    drips: { usdc: usdcInfo.usdcAmount },
+    usdcToken: usdcInfo.usdcToken,
+    usdcTokenId: usdcInfo.usdcTokenId,
+    treasury: usdcInfo.treasury,
+    usdcDailyTreasuryCap: usdcInfo.dailyTreasuryCapUsdc,
+    usdcCooldownHours: usdcInfo.cooldownHours,
+    selfMint: usdcInfo.selfMint,
+  };
+}
 
 // Get faucet info
 app.get('/api/info', async (req, res) => {
@@ -211,40 +220,23 @@ app.get('/api/info', async (req, res) => {
 
       // ── Per-chain capability map ──
       //
-      // The PUBLIC devnet/testnet legs are `baseSepolia`, `solana`, and `mina`.
-      // The `evm` leg below drips against the LOCAL anvil chain (chainId 31337)
-      // and is retained only for local-dev / CI standalone-e2e — it is NOT a
-      // public faucet and the web UI no longer surfaces it. Flagged `local:true`
-      // + `deprecated:true` so any consumer can distinguish it from the public
-      // legs. On the public devnet box (where anvil is torn down) it reports
-      // ready:false.
+      // USDC only (toon-meta#310 §4.6, connector#898): this faucet dispenses no
+      // native gas/token of any chain — the local-anvil EVM leg (`/api/request`)
+      // and the native-SOL/native-MINA legs are gone, not just unconfigured. Each
+      // surviving leg advertises only its USDC-drip route.
       chains: {
-        evm: {
-          enabled: true,
-          local: true,
-          deprecated: true,
-          note: 'Local anvil (chainId 31337) — dev/CI only, not a public faucet.',
-          route: '/api/request',
-          ready: !!tokenContract,
-          drips: { eth: ETH_AMOUNT, token: TOKEN_AMOUNT, tokenSymbol },
-          tokenAddress: TOKEN_ADDRESS,
-        },
         solana: solanaFaucet
           ? {
               enabled: true,
-              route: '/api/solana/request',
-              usdcOnlyRoute: '/api/solana/usdc-request',
+              route: '/api/solana/usdc-request',
               ready: true,
-              drips: {
-                sol: String(solanaFaucet.solAmount),
-                usdc: String(solanaFaucet.usdcAmount),
-              },
+              drips: { usdc: String(solanaFaucet.usdcAmount) },
               cooldownHours: String(solanaFaucet.cooldownMs / 3_600_000),
               usdcMint: solanaFaucet.mint,
               rpcUrl: solanaFaucet.rpcUrl,
             }
-          : { enabled: false, route: '/api/solana/request', ready: false },
-        mina: minaInfo(minaFaucet, minaUsdcInfoFn(minaUsdcDripper)),
+          : { enabled: false, route: '/api/solana/usdc-request', ready: false },
+        mina: minaUsdcOnlyInfo(minaUsdcInfoFn(minaUsdcDripper)),
         baseSepolia: baseSepoliaInfo(baseSepoliaFaucet),
       },
     });
@@ -254,157 +246,6 @@ app.get('/api/info', async (req, res) => {
       message: error.message,
     });
   }
-});
-
-// ---------------------------------------------------------------------------
-// Request serialization queue
-//
-// All /api/request calls are processed one at a time.  Each handler appends
-// itself to the tail of the promise chain and only begins execution after the
-// previous handler has fully resolved (including on-chain tx confirmation).
-// This guarantees sequential nonce assignment even when many test workers
-// fire concurrent HTTP requests at the faucet.
-// ---------------------------------------------------------------------------
-let requestQueue = Promise.resolve();
-
-// Core logic extracted so it can be enqueued without capturing `req`/`res`
-// inside the chain (avoids accidental closure-over-mutable-variable bugs).
-async function handleFaucetRequest(address, res) {
-  // Check if token contract is ready
-  if (!tokenContract) {
-    const initialized = await initTokenContract();
-    if (!initialized) {
-      res.status(503).json({
-        error: 'Token contract not yet deployed',
-        message: 'Please wait for contract deployment to complete',
-      });
-      return;
-    }
-  }
-
-  console.log(`💧 Faucet request for ${address}`);
-
-  // Send ETH
-  const ethTx = await ethWallet.sendTransaction({
-    to: address,
-    value: ethers.parseEther(ETH_AMOUNT),
-  });
-  console.log(`  📤 Sending ${ETH_AMOUNT} ETH: ${ethTx.hash}`);
-
-  // Send tokens
-  const tokenAmount = ethers.parseUnits(TOKEN_AMOUNT, tokenDecimals);
-  const tokenTx = await tokenContract.transfer(address, tokenAmount);
-  console.log(`  📤 Sending ${TOKEN_AMOUNT} ${tokenSymbol}: ${tokenTx.hash}`);
-
-  // Wait for confirmations before the next queued request starts
-  await ethTx.wait();
-  await tokenTx.wait();
-
-  console.log(`  ✅ Faucet request completed for ${address}`);
-
-  res.json({
-    success: true,
-    transactions: {
-      eth: { hash: ethTx.hash, amount: ETH_AMOUNT },
-      token: { hash: tokenTx.hash, amount: TOKEN_AMOUNT, symbol: tokenSymbol },
-    },
-  });
-}
-
-// Request tokens
-app.post('/api/request', (req, res) => {
-  const { address } = req.body;
-
-  // Validate address before enqueuing
-  if (!address || !isValidAddress(address)) {
-    res.status(400).json({ error: 'Invalid Ethereum address' });
-    return;
-  }
-
-  // Append to the serialization queue; errors are caught per-entry so a
-  // single failure never stalls the queue for subsequent requests.
-  requestQueue = requestQueue
-    .then(() => handleFaucetRequest(address, res))
-    .catch((error) => {
-      console.error('❌ Faucet request failed:', error);
-      if (!res.headersSent) {
-        res.status(500).json({
-          error: 'Faucet request failed',
-          message: error.message,
-        });
-      }
-    });
-});
-
-// ---------------------------------------------------------------------------
-// Solana route — POST /api/solana/request { address }
-//
-// Transfers SOL (treasury-funded, falling back to the public airdrop only if
-// the treasury transfer itself fails) + mock USDC from the devnet treasury.
-// Returns a clear 503 when Solana isn't configured for this deploy (so
-// EVM-only still works). Honours a per-address cooldown (toon-meta#258): the
-// SOL leg spends from a small, NOT self-replenishing treasury balance, so an
-// uncapped route could be drained by one address looping requests.
-// ---------------------------------------------------------------------------
-app.post('/api/solana/request', (req, res) => {
-  if (!solanaFaucet) {
-    res.status(503).json({
-      error: 'Solana faucet not configured',
-      message: 'Set SOLANA_USDC_MINT and mount SOLANA_FAUCET_KEYPAIR to enable the Solana route.',
-    });
-    return;
-  }
-
-  const { address } = req.body || {};
-  if (!address || !solanaFaucet.isValidAddress(address)) {
-    res.status(400).json({ error: 'Invalid Solana address (expected base58 pubkey)' });
-    return;
-  }
-
-  // Per-address cooldown: claim BEFORE enqueueing (reserves the slot so
-  // concurrent requests for the same address cannot double-drip); released
-  // below if the drip fails.
-  const claim = solanaFaucet.claim(address);
-  if (!claim.allowed) {
-    res
-      .status(429)
-      .set('Retry-After', String(Math.ceil(claim.retryAfterMs / 1000)))
-      .json({
-        error: 'Solana drip rate limit',
-        message: 'This address already received a Solana drip inside the cooldown window.',
-        retryAfterMs: claim.retryAfterMs,
-      });
-    return;
-  }
-
-  console.log(`💧 Solana faucet request for ${address}`);
-  solanaQueue = solanaQueue
-    .then(async () => {
-      const result = await solanaFaucet.drip(address);
-      console.log(`  ✅ Solana faucet request completed for ${address}`);
-      res.json({ success: true, chain: 'solana', address, transactions: result });
-    })
-    .catch((error) => {
-      // A failed drip must not burn the address's cooldown.
-      solanaFaucet.release(address);
-      console.error('❌ Solana faucet request failed:', error);
-      if (!res.headersSent) {
-        // A wedged validator (block production halted while the RPC + /health
-        // stay up — issues #277/#348) is an UPSTREAM outage, not a faucet bug:
-        // answer 503 with the honest diagnosis instead of a misleading 500.
-        if (error.code === 'VALIDATOR_STALLED') {
-          res.status(503).json({
-            error: 'Solana validator not producing blocks',
-            message: error.message,
-          });
-          return;
-        }
-        res.status(500).json({
-          error: 'Solana faucet request failed',
-          message: error.message,
-        });
-      }
-    });
 });
 
 // Solana USDC-only route — POST /api/solana/usdc-request { address }
@@ -541,136 +382,6 @@ app.post('/api/base-sepolia/request', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Mina route — POST /api/mina/request { address }
-//
-// Drips native MINA from the funded devnet treasury (signed client-side with
-// mina-signer, no o1js proving) and submits via the public devnet sendPayment
-// mutation. When MINA_FAUCET_KEY is unset the route 503s with the public-faucet
-// link as a documented fallback, so an unconfigured deploy still points users
-// somewhere useful.
-// ---------------------------------------------------------------------------
-app.post('/api/mina/request', (req, res) => {
-  const { address } = req.body || {};
-
-  // Validate the recipient first (cheap, no key needed).
-  if (!address || !isValidMinaAddress(address)) {
-    res.status(400).json({ error: 'Invalid Mina address (expected B62… public key)' });
-    return;
-  }
-
-  // Unconfigured deploy: graceful 503 + documented public-faucet fallback.
-  if (!minaFaucet) {
-    res.status(503).json({
-      error: 'Mina drip not configured',
-      message:
-        'Set MINA_FAUCET_KEY (treasury base58 private key) to enable native-MINA drips. ' +
-        'Until then, request devnet MINA from the public faucet link below.',
-      faucetUrl: minaFallbackLink(address),
-    });
-    return;
-  }
-
-  console.log(`💧 Mina faucet request for ${address}`);
-  minaQueue = minaQueue
-    .then(async () => {
-      // 1. Native-MINA treasury drip (mina-signer, no proving).
-      const result = await minaFaucet.drip(address);
-
-      // 2. ALSO drip USDC when configured (o1js proving): a plain TRANSFER
-      //    from the treasury, which lazily replenishes itself by SELF-MINT
-      //    (≤1,000 USDC/~24h — the rate-limited token has no admin-mint; see
-      //    mina-usdc.mjs). This is independent of the native drip and must NOT
-      //    fail the whole route when the dripper is unconfigured — we just note
-      //    it was skipped. A USDC drip FAILURE (when configured) is surfaced in
-      //    the response (usdc.error) but still returns 200 because the native
-      //    drip already succeeded.
-      //
-      //    While the circuit cache is still WARMING (~3min after boot on the
-      //    2 GB devnet box — see the boot-time warm-up above), we do NOT hold
-      //    the response for compile+prove (~4min total, past client timeouts):
-      //    we answer with the native payment + usdc.pending and finish the drip
-      //    in the background ON THIS SAME QUEUE, so a later drip can never race
-      //    the treasury account's nonce (issue #348).
-      let usdc;
-      let pendingDrip = null;
-      if (minaUsdcDripper) {
-        // Per-address cooldown (claim BEFORE the drip; released on failure).
-        const claim = minaUsdcLimiter.claim(address);
-        if (!claim.allowed) {
-          usdc = {
-            limited: true,
-            retryAfterMs: claim.retryAfterMs,
-            note:
-              'This address already received a USDC drip inside the cooldown window ' +
-              '(the treasury can only replenish 1,000 USDC/day). Native MINA was still dripped.',
-            selfMintHint: minaUsdcDripper.selfMintHint,
-          };
-        } else if (minaUsdcDripper.isWarm()) {
-          try {
-            usdc = await minaUsdcDripper.drip(address);
-          } catch (dripErr) {
-            minaUsdcLimiter.release(address);
-            console.error(
-              '  ⚠️  Mina USDC drip failed (native drip still succeeded):',
-              dripErr.message
-            );
-            usdc = {
-              error: 'USDC drip failed',
-              message: dripErr.message,
-              ...(dripErr.code === 'USDC_TREASURY_EMPTY' ? { treasuryEmpty: true } : {}),
-              selfMintHint: minaUsdcDripper.selfMintHint,
-            };
-          }
-        } else {
-          usdc = {
-            pending: true,
-            note:
-              'USDC drip queued: the zk circuits are still compiling on this host ' +
-              '(first ~3min after a faucet restart). The transfer will land shortly after; ' +
-              'native MINA was dripped now.',
-          };
-          pendingDrip = () =>
-            minaUsdcDripper
-              .drip(address)
-              .then(() => console.log(`  ✅ Background Mina USDC drip completed for ${address}`))
-              .catch((dripErr) => {
-                minaUsdcLimiter.release(address);
-                console.error(
-                  `  ⚠️  Background Mina USDC drip failed for ${address}:`,
-                  dripErr.message
-                );
-              });
-        }
-      } else {
-        usdc = {
-          skipped: true,
-          note:
-            'USDC drip is not configured on this host (set MINA_USDC_TREASURY_KEY + ' +
-            'MINA_USDC_TOKEN + MINA_USDC_ADMIN_CONTRACT to enable). Native MINA was dripped.',
-        };
-      }
-
-      console.log(`  ✅ Mina faucet request completed for ${address}`);
-      res.json({ success: true, chain: 'mina', address, payment: result, usdc });
-
-      // Keep the queue serialized through the background drip (nonce safety);
-      // its errors are already handled above so it can never poison the queue.
-      if (pendingDrip) await pendingDrip();
-    })
-    .catch((error) => {
-      console.error('❌ Mina faucet request failed:', error.message);
-      if (res.headersSent) return;
-      // Underfunded treasury is an operator problem (503 + which account to
-      // top up), not a client error — surface it clearly.
-      if (error.code === 'INSUFFICIENT_FUNDS') {
-        res.status(503).json({ error: 'Mina treasury underfunded', message: error.message });
-        return;
-      }
-      res.status(500).json({ error: 'Mina faucet request failed', message: error.message });
-    });
-});
-
-// ---------------------------------------------------------------------------
 // Mina USDC route — POST /api/mina/usdc-request { address }
 //
 // USDC-only drip (no native MINA leg): a plain token TRANSFER from the faucet
@@ -777,10 +488,7 @@ app.listen(PORT, async () => {
   console.log(`   Token per drip: ${TOKEN_AMOUNT} ${tokenSymbol}`);
   console.log(`   Solana:        ${solanaFaucet ? 'enabled' : 'disabled'}`);
   console.log(
-    `   Mina:          ${minaFaucet ? `drip ${minaFaucet.dripAmount} MINA (treasury)` : 'disabled (503 + public-faucet link)'}`
-  );
-  console.log(
-    `   Mina USDC:     ${minaUsdcDripper ? `drip ${minaUsdcDripper.usdcAmount} USDC (treasury transfer, self-mint replenished ≤${minaUsdcDripper.dailyCapUsdc}/day)` : 'disabled (native MINA only)'}`
+    `   Mina USDC:     ${minaUsdcDripper ? `drip ${minaUsdcDripper.usdcAmount} USDC (treasury transfer, self-mint replenished ≤${minaUsdcDripper.dailyCapUsdc}/day)` : 'disabled (503)'}`
   );
   console.log(
     `   Base Sepolia:  ${baseSepoliaFaucet ? `mint ${baseSepoliaFaucet.usdcAmount} USDC (chainId ${baseSepoliaFaucet.chainId}, ungated mint)` : 'disabled (503)'}`
