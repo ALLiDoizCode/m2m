@@ -7,12 +7,23 @@
 //! `connector-runtime`, never the reverse -- so this arm lives here,
 //! wrapped around `handle_prepare` rather than folded into it.
 //!
-//! **Precedence.** A configured route (app, peer or leased) always wins:
-//! [`route_prepare`] calls `handle_prepare` first, and only falls through to
-//! the session registry when that call's own answer is `F02` (no route at
-//! all). A session therefore never shadows an operator's own routing table,
-//! and -- since `F02` is the only answer this arm ever overrides -- a
-//! configured route is never silently shadowed by one either.
+//! **Precedence.** A configured *forwarding* route (peer or leased) always
+//! wins: [`route_prepare`] calls `handle_prepare` first, and only falls
+//! through to the session registry when that call's own answer is `F02` (no
+//! route at all). A session therefore never shadows an operator's own
+//! routing table, and -- since `F02` is the only answer this arm ever
+//! overrides -- a forwarding route is never silently shadowed by one either.
+//!
+//! **A locally *terminated* route is different (issue #902).** ADR 0019 has
+//! the terminating connector itself derive the fulfilment from a sealed
+//! shared secret -- exactly the thing a client destination's own preimage
+//! must never let the connector do (a client session holds the preimage;
+//! nothing about it is derivable). So a destination that resolves to *both*
+//! a live session and a configured app route is never resolved by
+//! precedence at all: [`route_prepare`] refuses it outright, before either
+//! `handle_prepare` or the session is ever reached, as the configuration
+//! error it is -- an operator's route table has overlapped a client's
+//! address, and there is no silent-lookup-order answer that is safe to give.
 //!
 //! **`T01` vs `F02`.** [`crate::session_registry::SessionRegistry::resolve`]
 //! decides, cheaply and without side effects, whether this destination is
@@ -37,7 +48,7 @@ use connector_btp::{BtpFrame, BTP_RESPONSE};
 use connector_domain::{
     fulfillment_matches_condition, Fulfill, PacketResponse, Prepare, Reject, RejectCode,
 };
-use connector_runtime::ClaimAckOutcome;
+use connector_runtime::{ClaimAckOutcome, ClientRouteKind};
 
 use crate::btp::payout_claim_protocol_data;
 use crate::ClientEdgeState;
@@ -69,6 +80,20 @@ pub(crate) async fn route_prepare(
         // stands unchanged.
         return state.connector.handle_prepare(prepare, 0).await;
     };
+
+    // Issue #902: a live session and a locally terminated app route can
+    // never both match one destination. Checked, and refused, before either
+    // `handle_prepare` or the session is touched -- neither "the app route
+    // silently wins" (ADR 0019's derivation on a destination whose preimage
+    // it does not hold) nor "the session silently wins" (shadowing an
+    // operator's own route table, the precedence `handle_prepare` below
+    // still protects for a forwarding route) is a safe default here.
+    if matches!(
+        state.connector.client_route(&prepare.destination),
+        Some(route) if route.kind == ClientRouteKind::Terminated
+    ) {
+        return reject_overlapping_termination(&prepare.destination);
+    }
 
     let destination = prepare.destination.clone();
     let condition = prepare.execution_condition;
@@ -265,6 +290,32 @@ fn accept_if_fulfilled(
             accumulated_cost: price_on_reject,
         })
     }
+}
+
+/// Issue #902's guard: `destination` matches both a live client session and
+/// a configured app route, which -- unlike an overlap with a forwarding
+/// route -- has no safe precedence rule, only two silently-wrong ones (the
+/// app route deriving a fulfilment the client's preimage should have
+/// produced, or the session shadowing the operator's own routing table).
+/// `T00` (retryable) rather than a final code: the packet is not at fault,
+/// only this connector's own route table is, and the sender should retry
+/// once an operator has resolved the overlap. `accumulated_cost` is `0` --
+/// like `F02`/a dead-session `T01`, nothing was ever delivered anywhere.
+fn reject_overlapping_termination(destination: &str) -> PacketResponse {
+    tracing::error!(
+        destination,
+        "a live client session and a locally terminated app route both match this \
+         destination -- refusing rather than silently deriving a fulfilment for a \
+         client-held preimage (issue #902)"
+    );
+    PacketResponse::Reject(Reject {
+        code: RejectCode::t00_internal_error(),
+        triggered_by: String::new(),
+        message: "destination matches both a client session and a locally terminated route"
+            .to_string(),
+        data: Vec::new(),
+        accumulated_cost: 0,
+    })
 }
 
 fn undecodable_session_answer() -> Reject {
@@ -522,8 +573,69 @@ mod tests {
         );
     }
 
+    /// Issue #902's AC3, the regression test named in the issue's own
+    /// wording: "a client-destined PREPARE whose client never answers must
+    /// reject; it must not fulfil." This is what would catch a future
+    /// refactor that re-introduced ADR 0019's derivation on this path -- if
+    /// `route_prepare` ever grew a fallback that synthesized a fulfilment
+    /// when a session-bound destination's client stays silent (rather than
+    /// genuinely waiting on the client, which alone holds the preimage),
+    /// this is the test that would fail. `start_paused` lets the real
+    /// [`connector_btp::OUTBOUND_ANSWER_TIMEOUT`] (30s) elapse without the
+    /// test itself waiting on it -- tokio fast-forwards a paused clock to
+    /// the next timer once nothing else is runnable.
+    #[tokio::test(start_paused = true)]
+    async fn a_client_destined_prepare_whose_client_never_answers_rejects_and_never_fulfils() {
+        let registry = SessionRegistry::new();
+        let (handle, mut reply_rx, _outbound) = test_handle();
+        registry.bind("g.provider.silent", handle, crate::now_unix());
+        let state = test_state(empty_connector(), registry);
+
+        let condition = derive_condition(&FULFILLMENT);
+        let prepare = sample_prepare("g.provider.silent", condition);
+
+        // Deliberately no peer task: nothing ever answers the forwarded
+        // MESSAGE, the exact shape of a client that is bound but has gone
+        // quiet (asleep, network-partitioned, or simply slow).
+        let response = route_prepare(&state, prepare, 0).await;
+
+        assert!(
+            reply_rx.try_recv().is_ok(),
+            "the PREPARE must actually have been forwarded to the client -- this is not \
+             testing an unreachable session, it is testing a reachable one that stays silent"
+        );
+
+        let PacketResponse::Reject(reject) = response else {
+            panic!(
+                "a client destination whose client never answered must never be fulfilled -- \
+                 the connector holds no preimage to derive one from"
+            );
+        };
+        assert_eq!(
+            reject.code,
+            RejectCode::t01_peer_unreachable(),
+            "a client that never answers is unreachable, not a reason to invent a fulfilment"
+        );
+        assert_eq!(
+            reject.accumulated_cost, 0,
+            "no value is kept for a delivery nobody ever answered"
+        );
+    }
+
+    /// Issue #902: a configured app route (ADR 0019 -- this connector
+    /// derives the fulfilment from the sealed shared secret) and a live
+    /// client session (the client itself holds the preimage) can never
+    /// both cover the same destination. Before #902 this was resolved by
+    /// silent precedence -- the app route always won. That is exactly the
+    /// failure #902 exists to close: a seller accidentally wired as a route
+    /// termination would still get paid, with the connector deriving a
+    /// fulfilment the client's own preimage was supposed to gate, and the
+    /// hashlock would silently disappear. Both the app client and the
+    /// session are wired to answer if reached, so this proves neither is
+    /// touched -- the connector answers the configuration-error reject
+    /// itself, before dispatch.
     #[tokio::test]
-    async fn a_configured_app_route_is_never_shadowed_by_an_overlapping_session() {
+    async fn a_destination_matching_both_an_app_route_and_a_session_is_a_configuration_error() {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
         app_client.respond(
@@ -549,9 +661,10 @@ mod tests {
         );
 
         // A session is ALSO bound at the exact address the app route
-        // covers -- if this arm ever won, the peer task below would
-        // receive the forwarded MESSAGE and this test would hang waiting
-        // for an answer nobody sends.
+        // covers -- neither the app nor the session should ever be reached
+        // by this packet, so the session's reply half is left unanswered
+        // deliberately: the test would hang if `route_prepare` ever tried
+        // to deliver through it.
         let registry = SessionRegistry::new();
         let (handle, _reply_rx, _outbound) = test_handle();
         registry.bind("g.example.app", handle, crate::now_unix());
@@ -578,9 +691,61 @@ mod tests {
 
         let response = route_prepare(&state, prepare, 0).await;
 
-        assert!(
-            matches!(response, PacketResponse::Fulfill(_)),
-            "the configured app route must answer, never the overlapping session"
+        let PacketResponse::Reject(reject) = response else {
+            panic!("expected a reject, not a fulfilment the connector has no right to derive");
+        };
+        assert_eq!(
+            reject.code,
+            RejectCode::t00_internal_error(),
+            "an overlapping app route and session is this connector's own configuration \
+             error, reported as one -- not a value judgement about the packet"
+        );
+        assert_eq!(
+            reject.accumulated_cost, 0,
+            "nothing was delivered anywhere, so nothing is kept"
+        );
+    }
+
+    /// The forwarding-route half of #902's precedence note: unlike an app
+    /// route (above), a peer route never derives a fulfilment locally, so
+    /// an overlapping session is not a configuration error -- the existing
+    /// "a configured route always wins" rule (issue #736) still applies,
+    /// unchanged by #902.
+    #[tokio::test]
+    async fn a_configured_peer_route_still_outranks_an_overlapping_session() {
+        let connector = Arc::new(Connector::new(
+            vec![],
+            vec![connector_runtime::PeerRoute::new(
+                "g.example.peer",
+                "peer-a",
+                0,
+            )],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+
+        let registry = SessionRegistry::new();
+        let (handle, _reply_rx, _outbound) = test_handle();
+        registry.bind("g.example.peer", handle, crate::now_unix());
+        let state = test_state(connector, registry);
+
+        let condition = derive_condition(&FULFILLMENT);
+        let prepare = sample_prepare("g.example.peer", condition);
+
+        let response = route_prepare(&state, prepare, 0).await;
+
+        // `InProcessPeerTransport` with no peer named "peer-a" registered
+        // answers unreachable -- the point here is only that the peer
+        // route was the one consulted, never the session (which would
+        // otherwise have hung waiting on `_reply_rx`).
+        let PacketResponse::Reject(reject) = response else {
+            panic!("expected a reject from the (unregistered) peer transport");
+        };
+        assert_ne!(
+            reject.code,
+            RejectCode::t00_internal_error(),
+            "a peer route overlapping a session is not #902's configuration error"
         );
     }
 
