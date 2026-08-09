@@ -194,6 +194,13 @@ already needs). (4) does not apply — the client-edge transport policy applies 
 
 ## Cutting a prefix over from one publisher to another
 
+> **This section assumes the two publishers hold _different_ identity keys** — the old one announces
+> under its key, the new one under its own. That is true of both worked examples below, and it is
+> what makes "bring the new one up first" safe. **It is not true when the new publisher _adopts_ the
+> old one's key**, and under adoption the order below is exactly backwards. See
+> [Cutting over under an adopted key](#cutting-over-under-an-adopted-key) at the end of this section
+> before running any of it.
+
 A prefix that moves from one node's announce to another node's announce is a **two-box, ordered**
 change, and the repo cannot do it for you: one half is a config file and one half is a running
 container on a different machine. The devnet `g.toon.ario` cutover (issue #833) is the worked
@@ -241,8 +248,9 @@ Run it in this order, on the boxes named:
 **Doing step 4 before step 3 leaves the prefix announced by nobody.** The old publisher's event is
 gone (or expires with its NIP-40 `ttl_secs`) and no replacement exists, so a client bootstrapping in
 that window finds no route to the prefix at all — the same outage the stopgap was added to end. Two
-publishers overlapping for a few minutes is the _safe_ direction to be wrong in; zero publishers is
-not.
+publishers **holding different keys** overlapping for a few minutes is the _safe_ direction to be
+wrong in; zero publishers is not. Two publishers holding the **same** key is neither — they overwrite
+each other in one slot, and no amount of waiting resolves it.
 
 ### Cutting `g.toon.relay` over: the relay box's own publisher (issue #843)
 
@@ -288,6 +296,47 @@ fuller argument.
 peering forward is issue #820, not yet live), so this cutover only changes **which identity**
 announces it — but the window between "apex stops" and "relay box confirmed publishing" is still a
 real outage if it is skipped.
+
+### Cutting over under an adopted key
+
+When the new publisher is given the **old publisher's** identity key rather than its own — so that
+already-deployed clients, which trust one author, keep resolving after the old box is gone — every
+ordering rule above inverts. This is the devnet apex retirement (toon-meta#310); the operator runbook
+of record is **toon-meta#311**, and this section exists so nobody reaches for the different-key order
+by habit.
+
+**Why the order inverts.** `kind:10032` sits in NIP-01's regular replaceable range, so a relay keeps
+exactly one event per `(pubkey, kind)`, and there is no `d` tag to separate two publishers
+(`crates/connector-signer/src/nostr.rs`). Under a shared key the old sidecar and the new loop
+overwrite each other on their own refresh cadences, and a client bootstrapping from the seed gets
+whichever published last. The overlap that is merely untidy under different keys **is** the outage
+under one.
+
+So: **stop the old publisher, confirm it stopped, and only then bring the new one up.** The new
+publisher's first event replaces the old one's last cleanly, and nothing overwrites it afterwards.
+
+**There is no announced-by-nobody gap in that order**, and this is worth stating because it is the
+objection the different-key order was built to answer. The relay neither deletes nor filters expired
+events, and the seeded bootstrap path takes the most recent event without checking expiry — so
+between "old publisher stopped" and "new publisher's first `[announce] OK`" a client still resolves
+to the old announce, which is still correct as long as the old box is still serving. The NIP-40
+`ttl_secs` both publishers stamp binds only the `kind:10036` seed-relay path, which _does_ skip
+expired announces. Treat the TTL as a reason to keep the handoff brisk, not as a correctness
+deadline — and do not begin it after the old box has stopped serving.
+
+**Verification cannot use the author.** Every "query the relay for a kind:10032 whose author is the
+box's own pubkey" step above becomes useless the moment the key is shared: both publishers are that
+author. Verify on the announce's **content** instead — the `ilpAddress` and `httpEndpoint`/
+`btpEndpoint` differ between the two boxes even when the pubkey does not — and on `created_at`, which
+must advance on the new publisher's cadence and never step back to the old box's values. A single
+reversion means the old publisher is still alive.
+
+**Stop the loop before you edit the config, not after.** The announce overlay's loop re-executes
+`connector announce --config …` every cycle and re-reads the config file each time, so setting
+`[announce] identity_key_file` on a box whose loop is running flips that box's identity on the next
+tick with no restart and no further action. An operator who edits first and starts second has already
+opened the concurrent window they were trying to avoid. Bring the loop down, edit, then bring it up
+in the order above.
 
 ## When it refuses to run beside a serving node
 
