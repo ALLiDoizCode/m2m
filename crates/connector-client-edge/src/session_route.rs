@@ -88,10 +88,11 @@ pub(crate) async fn route_prepare(
     // it does not hold) nor "the session silently wins" (shadowing an
     // operator's own route table, the precedence `handle_prepare` below
     // still protects for a forwarding route) is a safe default here.
-    if matches!(
-        state.connector.client_route(&prepare.destination),
-        Some(route) if route.kind == ClientRouteKind::Terminated
-    ) {
+    if state
+        .connector
+        .client_route(&prepare.destination)
+        .is_some_and(|route| route.kind == ClientRouteKind::Terminated)
+    {
         return reject_overlapping_termination(&prepare.destination);
     }
 
@@ -630,10 +631,10 @@ mod tests {
     /// failure #902 exists to close: a seller accidentally wired as a route
     /// termination would still get paid, with the connector deriving a
     /// fulfilment the client's own preimage was supposed to gate, and the
-    /// hashlock would silently disappear. Both the app client and the
-    /// session are wired to answer if reached, so this proves neither is
-    /// touched -- the connector answers the configuration-error reject
-    /// itself, before dispatch.
+    /// hashlock would silently disappear. Both halves are watched -- the
+    /// app client's `deliveries()` and the session's reply half -- so the
+    /// test asserts directly that neither was reached: the connector
+    /// answers the configuration-error reject itself, before dispatch.
     #[tokio::test]
     async fn a_destination_matching_both_an_app_route_and_a_session_is_a_configuration_error() {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
@@ -653,7 +654,7 @@ mod tests {
             Connector::new(
                 vec![route],
                 vec![],
-                app_client,
+                app_client.clone(),
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             )
@@ -661,12 +662,11 @@ mod tests {
         );
 
         // A session is ALSO bound at the exact address the app route
-        // covers -- neither the app nor the session should ever be reached
-        // by this packet, so the session's reply half is left unanswered
-        // deliberately: the test would hang if `route_prepare` ever tried
-        // to deliver through it.
+        // covers. Its reply half is kept (rather than dropped) so the
+        // assertions below can read it: anything written there would mean
+        // `route_prepare` had tried to deliver through the session.
         let registry = SessionRegistry::new();
-        let (handle, _reply_rx, _outbound) = test_handle();
+        let (handle, mut reply_rx, _outbound) = test_handle();
         registry.bind("g.example.app", handle, crate::now_unix());
         let mut state = test_state(Arc::clone(&connector), registry);
         state.signer = signer.clone();
@@ -704,6 +704,16 @@ mod tests {
             reject.accumulated_cost, 0,
             "nothing was delivered anywhere, so nothing is kept"
         );
+        assert!(
+            app_client.deliveries().is_empty(),
+            "the app route must never have been reached -- a delivery here is the derived \
+             fulfilment #902 exists to prevent"
+        );
+        assert!(
+            reply_rx.try_recv().is_err(),
+            "the session must never have been reached either -- refusing the overlap is not \
+             the same as letting the session quietly win it"
+        );
     }
 
     /// The forwarding-route half of #902's precedence note: unlike an app
@@ -726,7 +736,7 @@ mod tests {
         ));
 
         let registry = SessionRegistry::new();
-        let (handle, _reply_rx, _outbound) = test_handle();
+        let (handle, mut reply_rx, _outbound) = test_handle();
         registry.bind("g.example.peer", handle, crate::now_unix());
         let state = test_state(connector, registry);
 
@@ -736,16 +746,27 @@ mod tests {
         let response = route_prepare(&state, prepare, 0).await;
 
         // `InProcessPeerTransport` with no peer named "peer-a" registered
-        // answers unreachable -- the point here is only that the peer
-        // route was the one consulted, never the session (which would
-        // otherwise have hung waiting on `_reply_rx`).
+        // answers `T01` naming that peer -- which is what makes this
+        // distinguishable from the session's own `T01`, and from #902's
+        // `T00`: the peer route was the one consulted.
         let PacketResponse::Reject(reject) = response else {
             panic!("expected a reject from the (unregistered) peer transport");
         };
-        assert_ne!(
+        assert_eq!(
             reject.code,
-            RejectCode::t00_internal_error(),
-            "a peer route overlapping a session is not #902's configuration error"
+            RejectCode::t01_peer_unreachable(),
+            "a peer route overlapping a session is not #902's configuration error -- it is \
+             still routed, and answers whatever the peer transport answers"
+        );
+        assert!(
+            reject.message.contains("peer-a"),
+            "the peer transport's own answer, not the session's: {}",
+            reject.message
+        );
+        assert!(
+            reply_rx.try_recv().is_err(),
+            "the configured peer route must have won outright -- the session is never \
+             delivered to while a configured route answers (issue #736)"
         );
     }
 
