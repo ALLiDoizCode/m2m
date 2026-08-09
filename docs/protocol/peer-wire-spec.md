@@ -9,6 +9,8 @@ it (contract-tested per [ADR 0007](../adr/0007-testing-doctrine-fakes-yes-mocks-
 non-Rust connector that wishes to peer with this fleet.
 **Vocabulary:** [`CONTEXT.md`](../../CONTEXT.md). The key words MUST, MUST NOT, SHOULD and MAY
 are per RFC 2119.
+**How the claim exchange below fits into value moving end to end across a forwarded packet,
+with a diagram:** [`money-model.md`](money-model.md).
 
 ## What this document is now
 

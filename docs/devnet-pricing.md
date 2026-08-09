@@ -5,6 +5,10 @@ The committed source of truth for what every devnet route charges, and why
 blocks in four config files, which is how a hand-edit on one box sat
 unreconciled for twenty hours.
 
+For the mechanism these numbers are plugged into — who pays whom, on which channel, and why
+`price - fee >= next hop price` is an F03 rather than a subsidy when it is violated — see
+[`protocol/money-model.md`](protocol/money-model.md).
+
 All prices are in **base units of 6-decimal USDC** (ADR 0010;
 `docs/usdc-cross-chain-settlement.md`'s "6 decimals everywhere" is canonical
 across EVM/Solana/Mina, not a TypeScript-only asset config). So `1000` is
@@ -18,7 +22,7 @@ across EVM/Solana/Mina, not a TypeScript-only asset config). So `1000` is
 | relay `g.toon.relay` — terminate                       | **1**    | —     | `infra/linode-relay/connector-rust.toml` | —                                      |
 | apex `g.toon.ario` — forward to store                  | **1002** | 2     | `infra/linode-node/connector-rust.toml`  | `EXPECTED_APEX_FORWARD_PRICE` / `_FEE` |
 | store `g.toon.ario` — terminate                        | **1000** | —     | `infra/linode-store/connector-rust.toml` | `EXPECTED_STORE_PRICE`                 |
-| store `announcePrice` (retired TypeScript concept)\*\* | **2000** | —     | `infra/linode-store/connector.yaml`      | —                                      |
+| store `announcePrice` (retired TypeScript concept)\*\* | **2000** | —     | — (historical, file deleted #901)        | —                                      |
 
 \* **Repo change landed in #820, live boxes NOT cut over yet.** `infra/linode-node/
 connector-rust.toml`'s `g.toon.relay` route is now a `peer_id` forward to `apex-relay` (the row that
@@ -30,11 +34,11 @@ repo change. Until that step runs, the live apex box still answers as a terminat
 live verification below (also pre-#820: `g.toon.relay.ario` was still live at the time, on the store
 box's own terminating route retired by #820's repo change — see "Retired names" below).
 
-\*\* `infra/linode-store/connector.yaml` is the retired TypeScript config — it no longer fronts
-traffic (see "The TypeScript fleet" below) and is not a current source of truth for anything. The
-row survives only as the historical origin of the `2000` figure: the Rust `connector announce` that
-replaced `selfAnnounce` configures no announce price at all, so there is no committed literal to
-repoint this citation at. See "`announcePrice` 2000" below.
+\*\* The retired TypeScript config that carried this figure, `infra/linode-store/connector.yaml`, is
+deleted (issue #901) — it no longer fronted traffic (see "The TypeScript fleet" below) and was not a
+current source of truth for anything. The row survives only as the historical origin of the `2000`
+figure: the Rust `connector announce` that replaced `selfAnnounce` configures no announce price at
+all, so there is no committed literal to repoint this citation at. See "`announcePrice` 2000" below.
 
 Last verified live (pre-#820) against both boxes via the unauthenticated
 `GET /ilp/routes/price?destination=…` (ADR 0022 puts configuration answers on the free side of the
@@ -151,13 +155,19 @@ exists only in `crates/connector-domain/src/error.rs`), and by nginx returning
 `410 Gone` for the transitional `/rust/` prefix because Rust took over
 `location /`.
 
-The TypeScript `connector.yaml` files remain in the repo but no longer front
-traffic. They are not a second source of pricing truth, and the retirement is
-tracked in #714.
+The apex's TypeScript `connector.yaml` remains in the repo but no longer fronts
+traffic; the store's own copy is deleted (issue #901) along with the retired
+`connector` service in `infra/linode-store/docker-compose.store.yml` that read
+it. Neither is a second source of pricing truth, and the retirement is tracked
+in #714 (apex removal itself is #872).
 
-`infra/devnet-manage.sh redeploy` no longer resurrects them (#851): every leg
-now composes its box's base file with the matching Rust overlay and names only
-the services that should run, so the base files' TypeScript `connector` service
-— pinned to an image purged from GHCR — is never started. The provisioning
-paths (`up`, `store`) are a separate matter: they still run each box's
-`bootstrap.sh`, which brings up the base file alone, `connector` included.
+`infra/devnet-manage.sh redeploy` no longer resurrects the apex's dead service
+(#851, simplified by #901): the apex leg composes its base file with its Rust
+overlay and names only the services that should run, since its base file still
+declares a TypeScript `connector` service pinned to an image purged from GHCR.
+The store and relay legs need no such list — neither box's base compose file
+declares that service any more (the store's was deleted here; the relay never
+had one, #816) — so both simply bring up their whole file set, like the relay
+leg always did. The provisioning paths (`up`, `store`) are a separate matter:
+they still run each box's `bootstrap.sh`, which brings up the base file alone
+— the apex's `connector` included, the store's no longer.

@@ -149,6 +149,13 @@ const STORE_RUST_OVERLAY: &str =
 const STORE_ANNOUNCE_OVERLAY: &str =
     include_str!("../../../infra/linode-store/docker-compose.store.announce.yml");
 
+/// The store box's own base file (issue #901), read here for
+/// [`SURVIVING_BOX_COMPOSE_FILES`] -- the file whose retired TypeScript
+/// `connector` service #901 deleted, and whose `nginx` still publishes the
+/// fleet's one deliberately-bare port pair.
+const STORE_BASE_COMPOSE: &str =
+    include_str!("../../../infra/linode-store/docker-compose.store.yml");
+
 /// The relay box's two overlays (issue #843, repo half of #815), read here
 /// for the same property as the store's pair above: they bind-mount the
 /// SAME `connector-rust.toml`, so they must pin the same image tag. See
@@ -157,6 +164,11 @@ const RELAY_RUST_OVERLAY: &str =
     include_str!("../../../infra/linode-relay/docker-compose.relay.rust.yml");
 const RELAY_ANNOUNCE_OVERLAY: &str =
     include_str!("../../../infra/linode-relay/docker-compose.relay.announce.yml");
+
+/// The relay box's own base file, read here for [`SURVIVING_BOX_COMPOSE_FILES`]
+/// -- see [`STORE_BASE_COMPOSE`].
+const RELAY_BASE_COMPOSE: &str =
+    include_str!("../../../infra/linode-relay/docker-compose.relay.yml");
 
 /// This test binary's own base port for [`Anvil::spawn`] -- distinct from
 /// other test binaries' bases (`connector-settlement-evm`'s own tests use
@@ -1409,38 +1421,19 @@ fn relay_overlays_sharing_one_config_pin_one_image() {
     );
 }
 
-/// Issue #701's carriage negotiation, read across the two boxes: the store
-/// announces THROUGH an address the apex owns, and if the apex pins that
-/// route to `transport = "btp"` then the store's `[announce]` must carry a
-/// `publish_btp_url` -- `pay_the_through_url` takes the carriage from the
-/// greeting's `requiredTransport` and, for `btp` with neither `--btp-url`
-/// nor `publish_btp_url`, refuses with `NoBtpEndpoint` before anything is
-/// signed. The scheduled command in `docker-compose.store.announce.yml`
-/// passes no `--btp-url`, so the config is the only place it can come from.
+/// The committed store config, parsed the way the two `[announce]` tests
+/// below need it: sandbox paths and sandbox settlement keys, nothing else
+/// rewritten.
 ///
-/// A property over the apex's committed route table rather than a literal,
-/// for the same reason as the announcer test above: the day somebody pins
-/// another route to BTP, or unpins this one, the assertion follows the
-/// config instead of having to be re-taught.
-///
-/// The target can be EITHER a terminating route or, as of issue #820, a
-/// `peer_id` forward: `publish_to = "g.toon.relay"` used to name a
-/// terminating route on the apex, and now names a forward to the relay box.
-/// A `peer_id` route can never itself carry `transport` (`PeerRouteHasTransport`
-/// refuses it at load), so the ORIGINAL mechanism this test guards
-/// (`pay_the_through_url` reading `requiredTransport` off the apex's own
-/// greeting) no longer requires a BTP endpoint for this specific target --
-/// the apex's greeting for a forward carries no transport requirement at
-/// all. `publish_btp_url` is asserted set regardless: it matches what the
-/// live box already carries and does not depend on which shape the target
-/// route takes today.
-#[test]
-fn the_store_announce_carries_a_btp_endpoint_when_its_target_route_demands_one() {
+/// The temp key/state/secret files exist only for the parse -- `Config::load`
+/// reads what it needs there and then, and both callers go on to read the
+/// parsed config rather than back to disk -- so the guards are free to drop
+/// with the call.
+fn load_committed_store_config() -> Config {
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
     let peer_secret = write_peer_secret();
-
-    let store_text = with_sandbox_settlement_keys(
+    let text = with_sandbox_settlement_keys(
         &with_sandbox_paths(
             STORE_CONFIG,
             key_file.path(),
@@ -1449,8 +1442,52 @@ fn the_store_announce_carries_a_btp_endpoint_when_its_target_route_demands_one()
         ),
         key_file.path(),
     );
-    let store_file = write_config(&store_text);
-    let store = Config::load(store_file.path()).expect("the committed store config must parse");
+    let config_file = write_config(&text);
+    Config::load(config_file.path()).expect("the committed store config must parse")
+}
+
+/// The relay box's committed config, on the same terms as
+/// [`load_committed_store_config`]. `without_live_settlement` rather than
+/// that helper's settlement-key rewrite because the tests below read this
+/// box's route table and `[announce]` section, never its settlement legs.
+fn load_committed_relay_config() -> Config {
+    let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let peer_secret = write_peer_secret();
+    let text = with_sandbox_paths(
+        &without_live_settlement(RELAY_CONFIG),
+        key_file.path(),
+        state_dir.path(),
+        Some(peer_secret.path()),
+    );
+    let config_file = write_config(&text);
+    Config::load(config_file.path()).expect("the committed relay config must parse")
+}
+
+/// Issue #701's carriage negotiation, read across the two boxes: the store
+/// announces THROUGH an address the relay box owns, and if the relay pins
+/// that route to `transport = "btp"` then the store's `[announce]` must
+/// carry a `publish_btp_url` -- `pay_the_through_url` takes the carriage
+/// from the greeting's `requiredTransport` and, for `btp` with neither
+/// `--btp-url` nor `publish_btp_url`, refuses with `NoBtpEndpoint` before
+/// anything is signed. The scheduled command in
+/// `docker-compose.store.announce.yml` passes no `--btp-url`, so the config
+/// is the only place it can come from.
+///
+/// A property over the relay's committed route table rather than a literal,
+/// for the same reason as the announcer test above: the day somebody pins
+/// another route to BTP, or unpins this one, the assertion follows the
+/// config instead of having to be re-taught.
+///
+/// Issue #871 moved the store's announce off the apex and onto the relay
+/// box DIRECTLY -- the store now buys relay writes like any other client,
+/// with no forwarding hop in between. So the target is always the relay's
+/// own terminating route for `publish_to`, never a `peer_id` forward (the
+/// apex's forward is a fact about the apex's OWN client edge, not about how
+/// this announce is paid).
+#[test]
+fn the_store_announce_carries_a_btp_endpoint_when_its_target_route_demands_one() {
+    let store = load_committed_store_config();
     let announce = store
         .announce()
         .expect("the store config's [announce] section must parse");
@@ -1458,45 +1495,21 @@ fn the_store_announce_carries_a_btp_endpoint_when_its_target_route_demands_one()
         .publish_to()
         .expect("the store's [announce] must name a publish_to -- the destination is not guessed");
 
-    let apex_state = tempfile::tempdir().expect("temp state dir");
-    let apex_text = with_sandbox_paths(
-        &without_live_settlement(APEX_CONFIG),
-        key_file.path(),
-        apex_state.path(),
-        Some(peer_secret.path()),
-    );
-    let apex_file = write_config(&apex_text);
-    let apex = Config::load(apex_file.path()).expect("the committed apex config must parse");
-
-    let terminating_target = apex
+    let relay = load_committed_relay_config();
+    let target = relay
         .routes()
         .iter()
-        .find(|route| route.prefix() == publish_to);
-    let forwarding_target = apex
-        .peer_routes()
-        .iter()
-        .find(|route| route.prefix() == publish_to);
+        .find(|route| route.prefix() == publish_to)
+        .unwrap_or_else(|| {
+            panic!(
+                "the store announces through `{publish_to}`, which the \
+                 relay's committed route table does not terminate -- issue \
+                 #871 pays the relay box directly, so the target route now \
+                 lives there, not on the apex"
+            )
+        });
 
-    let needs_a_btp_endpoint = match (terminating_target, forwarding_target) {
-        (Some(route), None) => route.transport_policy() == TransportPolicy::Btp,
-        // A `peer_id` route cannot itself carry `transport`, so the apex's
-        // greeting for a forward never demands BTP -- the endpoint is still
-        // required here, but as the repo/live parity the fn doc comment
-        // describes rather than as `NoBtpEndpoint` avoidance.
-        (None, Some(_)) => true,
-        (None, None) => panic!(
-            "the store announces through `{publish_to}`, which the apex's \
-             committed route table neither terminates nor forwards -- one of \
-             the two files moved without the other"
-        ),
-        (Some(_), Some(_)) => panic!(
-            "`{publish_to}` is BOTH a terminating and a forwarding route on \
-             the apex -- that is a config-load error waiting to happen, not \
-             a state this test should silently pick one side of"
-        ),
-    };
-
-    if needs_a_btp_endpoint {
+    if target.transport_policy() == TransportPolicy::Btp {
         assert!(
             announce.publish_btp_url().is_some(),
             "an announce paid through `{publish_to}` needs a BTP endpoint \
@@ -1506,6 +1519,45 @@ fn the_store_announce_carries_a_btp_endpoint_when_its_target_route_demands_one()
              [announce] section"
         );
     }
+}
+
+/// Issue #871's own AC: `publish_btp_url` names the RELAY box, not the
+/// apex. The store used to pay the apex to publish
+/// (`wss://proxy.devnet.toonprotocol.dev/ilp/btp`, issue #820); toon-meta#310
+/// is retiring the apex, and the relay box is the fleet's only public write
+/// ingress once it goes, so the store buys relay writes directly, like any
+/// other client.
+///
+/// Asserted as equality with the relay's OWN advertised `btp_endpoint`
+/// rather than a literal of this test's own, so the two files cannot drift
+/// the way the apex/store price pair once did. The RETIRED apex endpoint is
+/// then pinned as a literal by a second assertion -- a value that must never
+/// come back is the one thing no other committed file's contents can say,
+/// and it would survive the equality check above if the relay's own
+/// `[announce]` were ever repointed at the apex.
+#[test]
+fn the_store_announces_through_the_relay_box_not_the_apex() {
+    let store = load_committed_store_config();
+    let announce = store
+        .announce()
+        .expect("the store config's [announce] section must parse");
+
+    let relay = load_committed_relay_config();
+    let relay_announce = relay
+        .announce()
+        .expect("the relay config's [announce] section must parse");
+
+    assert_eq!(
+        announce.publish_btp_url(),
+        Some(relay_announce.btp_endpoint()),
+        "the store's [announce] publish_btp_url must name the relay box's \
+         own advertised BTP endpoint -- issue #871 moves this off the apex"
+    );
+    assert_ne!(
+        announce.publish_btp_url(),
+        Some("wss://proxy.devnet.toonprotocol.dev/ilp/btp"),
+        "the store's [announce] publish_btp_url must not still name the apex"
+    );
 }
 
 /// The new ERC-2771 `TokenNetwork` (#695/#811) the apex<->store
@@ -1643,7 +1695,8 @@ fn the_apex_relay_peer_channel_names_the_new_token_network_with_placeholder_fiel
 /// Issue #853's own version of the #822 placeholder convention
 /// ([`PEER_CHANNEL_ID_PLACEHOLDER`] above), applied to `[announce]
 /// pay_channel` rather than a `[[peer_channels]]` row: the store box's real
-/// funded channel (opened as part of #833's live cutover) lives only on the
+/// funded channel -- with the RELAY BOX as of issue #871, replacing the
+/// apex-funded channel #820's cutover made obsolete -- lives only on the
 /// box, so this repo commits a clearly-marked placeholder instead of either
 /// the live value or an absent field.
 const STORE_ANNOUNCE_PAY_CHANNEL_PLACEHOLDER: &str =
@@ -2239,5 +2292,137 @@ fn every_fleet_overlay_pins_the_connector_repos_pin_of_record() {
              image reference under infra/ must name the same tag",
             pins[0]
         );
+    }
+}
+
+/// Every committed compose file belonging to a box that survives the
+/// TypeScript retirement (issue #901 deleted the store's dead `connector`
+/// service; the apex's own equivalent is connector#872's job). Named
+/// explicitly rather than globbed `infra/*/docker-compose*.yml`: #872 is
+/// going to delete `infra/linode-node/*` in a separate PR, and a guard that
+/// walked the directory would silently start (or stop) covering that box
+/// the moment the filesystem changed under it, rather than only when a real
+/// image or port regression landed. Two boxes, three files each (the base
+/// file plus its two overlays) -- see [`no_surviving_box_pins_a_non_rust_connector_image`]
+/// and [`every_surviving_box_port_binding_is_host_ip_prefixed_or_allowlisted`].
+const SURVIVING_BOX_COMPOSE_FILES: &[(&str, &str)] = &[
+    (
+        "infra/linode-store/docker-compose.store.yml",
+        STORE_BASE_COMPOSE,
+    ),
+    (
+        "infra/linode-store/docker-compose.store.rust.yml",
+        STORE_RUST_OVERLAY,
+    ),
+    (
+        "infra/linode-store/docker-compose.store.announce.yml",
+        STORE_ANNOUNCE_OVERLAY,
+    ),
+    (
+        "infra/linode-relay/docker-compose.relay.yml",
+        RELAY_BASE_COMPOSE,
+    ),
+    (
+        "infra/linode-relay/docker-compose.relay.rust.yml",
+        RELAY_RUST_OVERLAY,
+    ),
+    (
+        "infra/linode-relay/docker-compose.relay.announce.yml",
+        RELAY_ANNOUNCE_OVERLAY,
+    ),
+];
+
+/// A committed compose file's `connector:` image tag is a purged, retired
+/// TypeScript node whenever it does not start `rust-` (issue #901's own
+/// finding: `ghcr.io/toon-protocol/connector:3.36.3-solchan.0`, a semver
+/// tag, was purged from GHCR in the post-cutover package purge, and any
+/// `docker compose up` naming it fails `manifest unknown`). A surviving
+/// box's committed compose files must never reintroduce one.
+#[test]
+fn no_surviving_box_pins_a_non_rust_connector_image() {
+    for (name, raw) in SURVIVING_BOX_COMPOSE_FILES {
+        for tag in pinned_connector_images(raw) {
+            assert!(
+                tag.starts_with("rust-"),
+                "{name} pins `ghcr.io/toon-protocol/connector:{tag}` -- a \
+                 non-`rust-` tag names the retired TypeScript node, an image \
+                 purged from GHCR (issue #901). Every surviving box's \
+                 committed compose files must pin a `rust-sha-` tag."
+            );
+        }
+    }
+}
+
+/// The `ports:` mappings a committed compose file's `ports:` block declares,
+/// verbatim, in commit order -- [`route_price`]'s line-scan precedent again:
+/// no YAML dependency, and indentation alone (not a parser) tells a
+/// `ports:` list item apart from a `volumes:` one that also starts `- '`. A
+/// `#`-comment line inside the block (several overlays carry one explaining
+/// the loopback bind) is skipped rather than mistaken for a malformed entry.
+/// `name` is carried only so an unparseable entry names its file, like the
+/// two assertions below do.
+fn compose_ports(name: &str, raw: &str) -> Vec<String> {
+    let mut ports = Vec::new();
+    let mut lines = raw.lines().peekable();
+    while let Some(line) = lines.next() {
+        if line.trim() != "ports:" {
+            continue;
+        }
+        let block_indent = line.len() - line.trim_start().len();
+        while let Some(next) = lines.peek() {
+            let trimmed = next.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                lines.next();
+                continue;
+            }
+            let next_indent = next.len() - next.trim_start().len();
+            if next_indent <= block_indent {
+                break;
+            }
+            let mapping = trimmed
+                .strip_prefix("- '")
+                .and_then(|s| s.strip_suffix('\''))
+                .unwrap_or_else(|| {
+                    panic!("{name}: expected a quoted `ports:` list entry, found `{trimmed}`")
+                });
+            ports.push(mapping.to_string());
+            lines.next();
+        }
+    }
+    ports
+}
+
+/// `ports:` mappings a surviving box's committed compose files may publish
+/// with NO host-IP prefix. Exactly nginx's own public TLS door on each box
+/// (issue #901's own framing: this is deliberately public, everything else
+/// must bind loopback and go through nginx). Any addition here must be
+/// commented with why it is deliberately public -- this list is the guard,
+/// not a place to quietly grow.
+const UNPREFIXED_PORT_ALLOWLIST: &[&str] = &[
+    "80:80",   // nginx HTTP -> ACME http-01 + redirect to TLS
+    "443:443", // nginx HTTPS -- the fleet's one public TLS terminator per box
+];
+
+/// A `ports:` mapping with no host-IP prefix (`host:container`, two fields)
+/// is reachable from the internet regardless of what ufw says: Docker's own
+/// iptables chain runs ahead of ufw's rules. Every surviving box's
+/// committed compose files must either bind loopback explicitly
+/// (`127.0.0.1:host:container`) or be on [`UNPREFIXED_PORT_ALLOWLIST`].
+#[test]
+fn every_surviving_box_port_binding_is_host_ip_prefixed_or_allowlisted() {
+    for (name, raw) in SURVIVING_BOX_COMPOSE_FILES {
+        for mapping in compose_ports(name, raw) {
+            let host_ip_prefixed = mapping.matches(':').count() >= 2;
+            let allowlisted = UNPREFIXED_PORT_ALLOWLIST.contains(&mapping.as_str());
+            assert!(
+                host_ip_prefixed || allowlisted,
+                "{name} publishes `ports:` mapping `{mapping}` with no \
+                 host-IP prefix, and it is not on UNPREFIXED_PORT_ALLOWLIST \
+                 -- Docker's `ports:` publish reaches the internet ahead of \
+                 ufw, so this must be `127.0.0.1:{mapping}` unless it is \
+                 deliberately public (add it to the allowlist with a comment \
+                 saying why, like nginx's 80/443)."
+            );
+        }
     }
 }

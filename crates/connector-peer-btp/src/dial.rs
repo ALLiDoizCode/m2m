@@ -46,9 +46,10 @@ use connector_btp::{
     CONTENT_TYPE_TEXT,
 };
 use connector_config::{PeerCarriage, PeerChannelConfig, PeerConfig};
-use connector_domain::{Fulfill, PacketResponse, Prepare, Reject, RejectCode};
+use connector_domain::x402::{GreetingError, X402PaymentRequired};
+use connector_domain::{Fulfill, PacketResponse, Prepare, Reject};
 use connector_peer_auth::{encode_raw, PresentedCredential};
-use connector_runtime::{ClaimAckOutcome, Clock, PeerTransport, WireClaim};
+use connector_runtime::{ClaimAckOutcome, Clock, PeerForward, PeerTransport, WireClaim};
 use url::Url;
 
 use crate::claim_json::{self, PeerClaimDomain};
@@ -374,28 +375,86 @@ impl BtpPeerTransport {
     }
 }
 
-/// §2.2, §5.1 of `peer-wire-spec.md`: a peer this connector could not
-/// reach rejects `T01`. Never `T00`, and never a silent drop.
-fn peer_unreachable(peer_id: &str) -> PacketResponse {
-    PacketResponse::Reject(Reject {
-        code: RejectCode::t01_peer_unreachable(),
-        triggered_by: String::new(),
-        message: format!("peer '{peer_id}' unreachable"),
-        data: Vec::new(),
-        accumulated_cost: 0,
-    })
+/// What a peer's RESPONSE frame actually said (issue #874).
+///
+/// [`PacketResponse`] alone cannot express it. A REJECT that carries the
+/// x402 greeting is not the same event as a bare REJECT: it is the far side
+/// quoting terms, and a caller that can satisfy them can turn it into a
+/// FULFILL by paying. Flattening the two loses the only signal that says
+/// so, which is why the negotiate-then-pay loop of #866 could not exist on
+/// this path.
+///
+/// Every variant still carries the [`Reject`] verbatim, so relaying a
+/// peer's answer unchanged (spec I5) stays available to a caller that has
+/// nothing to do with the terms -- [`PeerAnswer::into_response`] is that
+/// caller.
+#[derive(Debug)]
+pub enum PeerAnswer {
+    /// The packet was delivered.
+    Fulfill(Fulfill),
+    /// The packet was refused, and no terms were quoted.
+    Reject(Reject),
+    /// The packet was refused **with terms** -- the far side's client edge
+    /// answered a claimless or under-covered dial with the §1.4 greeting
+    /// (`F06`, or `F02` when the route wants a different carriage). The
+    /// reject rides along unchanged beside them, because a caller that
+    /// cannot pay must still be able to relay the refusal it was given.
+    PaymentRequired {
+        reject: Reject,
+        terms: Box<X402PaymentRequired>,
+    },
+    /// The packet was refused with a greeting that could not be read. A
+    /// **distinct** outcome from [`PeerAnswer::Reject`] on purpose: terms
+    /// were quoted, we could not tell what they were, and treating that as
+    /// "no terms" would let a framing bug read as a free ride.
+    MalformedGreeting {
+        reject: Reject,
+        error: GreetingError,
+    },
+}
+
+impl PeerAnswer {
+    /// The answer as the port's [`PacketResponse`], for a caller with no
+    /// interest in the terms. Value-preserving in every arm: the reject a
+    /// greeting rode on is the same reject that goes back.
+    pub fn into_response(self) -> PacketResponse {
+        match self {
+            PeerAnswer::Fulfill(fulfill) => PacketResponse::Fulfill(fulfill),
+            PeerAnswer::Reject(reject)
+            | PeerAnswer::PaymentRequired { reject, .. }
+            | PeerAnswer::MalformedGreeting { reject, .. } => PacketResponse::Reject(reject),
+        }
+    }
 }
 
 /// Read a peer's answer back off the RESPONSE frame: the packet's own
-/// verdict from `ilpPacket`, and a REJECT's running cost from the
-/// `toon-accumulated-cost` entry the client edge already uses (§5.2).
-fn decode_answer(frame: &BtpFrame) -> Option<PacketResponse> {
+/// verdict from `ilpPacket`, a REJECT's running cost from the
+/// `toon-accumulated-cost` entry the client edge already uses (§5.2), and
+/// -- since issue #874 -- the x402 terms from the `payment-required` entry
+/// the client edge greets a claimless request with (§1.9 step 3).
+///
+/// `None` means the frame carried no decodable ILP packet at all, which is
+/// a framing failure rather than a verdict. It does **not** mean "no terms":
+/// an unreadable greeting on an otherwise decodable REJECT is
+/// [`PeerAnswer::MalformedGreeting`], never a silent `None` and never a
+/// plain [`PeerAnswer::Reject`].
+///
+/// A FULFILL is never inspected for terms: the far side delivered the
+/// packet, so whatever it might have quoted is moot.
+pub fn decode_answer(frame: &BtpFrame) -> Option<PeerAnswer> {
     if let Ok(fulfill) = Fulfill::decode(&frame.ilp_packet) {
-        return Some(PacketResponse::Fulfill(fulfill));
+        return Some(PeerAnswer::Fulfill(fulfill));
     }
     let mut reject = Reject::decode(&frame.ilp_packet).ok()?;
     reject.accumulated_cost = fields::accumulated_cost(&frame.protocol_data);
-    Some(PacketResponse::Reject(reject))
+    Some(match fields::payment_required(&frame.protocol_data) {
+        None => PeerAnswer::Reject(reject),
+        Some(Ok(terms)) => PeerAnswer::PaymentRequired {
+            reject,
+            terms: Box::new(terms),
+        },
+        Some(Err(error)) => PeerAnswer::MalformedGreeting { reject, error },
+    })
 }
 
 #[async_trait]
@@ -406,15 +465,15 @@ impl PeerTransport for BtpPeerTransport {
         prepare: Prepare,
         minimum_delivery: u64,
         claim: Option<WireClaim>,
-    ) -> (PacketResponse, ClaimAckOutcome, bool) {
+    ) -> PeerForward {
         let Some(state) = self.relations.get(peer_id) else {
-            return (peer_unreachable(peer_id), ClaimAckOutcome::NotSent, false);
+            return PeerForward::unreachable(peer_id);
         };
         let handle = match self.session(state).await {
             Ok(handle) => handle,
             Err(error) => {
                 tracing::warn!(%error, "peer dial failed");
-                return (peer_unreachable(peer_id), ClaimAckOutcome::NotSent, false);
+                return PeerForward::unreachable(peer_id);
             }
         };
 
@@ -442,7 +501,7 @@ impl PeerTransport for BtpPeerTransport {
             Ok(Ok(frame)) => frame,
             _ => {
                 self.drop_session(state).await;
-                return (peer_unreachable(peer_id), ClaimAckOutcome::NotSent, false);
+                return PeerForward::unreachable(peer_id);
             }
         };
         // An ERROR means the peer could not decode our frame: there is no
@@ -454,15 +513,46 @@ impl PeerTransport for BtpPeerTransport {
                 reason = %String::from_utf8_lossy(&frame.ilp_packet),
                 "peer answered a forwarded PREPARE with a BTP ERROR"
             );
-            return (peer_unreachable(peer_id), ClaimAckOutcome::NotSent, false);
+            return PeerForward::unreachable(peer_id);
         }
 
         let ack = self.read_ack(state, claim.as_ref(), &frame);
         match decode_answer(&frame) {
-            Some(response) => (response, ack, true),
+            // The terms are read and REPORTED here, not acted on: turning a
+            // quote into a payment is the forwarding path's decision to make
+            // (issue #875), not a carriage's. What issue #874 changed is
+            // that the terms are no longer thrown away before anything can
+            // decide; what #875 changes is that the port now has somewhere
+            // to put them (`PeerForward::payment_required`).
+            Some(PeerAnswer::PaymentRequired { reject, terms }) => {
+                tracing::info!(
+                    peer_id,
+                    code = reject.code.as_str(),
+                    price = terms.price().unwrap_or_default(),
+                    pay_to = terms.pay_to().unwrap_or_default(),
+                    required_transport = terms.required_transport().unwrap_or_default(),
+                    "peer refused a forwarded PREPARE with x402 terms"
+                );
+                PeerForward::quoted(PacketResponse::Reject(reject), ack, *terms)
+            }
+            // An unreadable greeting is reported as a plain refusal with NO
+            // terms, which is not a free ride: the packet is still refused,
+            // and the forwarding path is simply given nothing it could pay
+            // against. Guessing at a greeting we could not read would be the
+            // only worse answer.
+            Some(PeerAnswer::MalformedGreeting { reject, error }) => {
+                tracing::warn!(
+                    peer_id,
+                    code = reject.code.as_str(),
+                    %error,
+                    "peer refused a forwarded PREPARE with an unreadable x402 greeting"
+                );
+                PeerForward::answered(PacketResponse::Reject(reject), ack)
+            }
+            Some(answer) => PeerForward::answered(answer.into_response(), ack),
             None => {
                 tracing::warn!(peer_id, "peer answer carried no decodable ILP packet");
-                (peer_unreachable(peer_id), ack, false)
+                PeerForward::undecodable(peer_id, ack)
             }
         }
     }
@@ -526,5 +616,142 @@ impl BtpPeerTransport {
             self.claim_acknowledged(state, claim);
         }
         ack
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use connector_btp::{BTP_RESPONSE, PAYMENT_REQUIRED_PROTOCOL};
+    use connector_domain::RejectCode;
+
+    /// The bytes the client edge's §1.9 greeting carries, in miniature.
+    /// `crates/connector-client-edge/tests/btp_session.rs`'s
+    /// `a_dialing_peer_reads_the_terms_off_the_greeting_the_edge_emits`
+    /// runs this same reader over what the real emitter actually writes, so
+    /// this stays a fixture rather than a second definition of the shape.
+    const TERMS: &[u8] = br#"{"x402Version":2,"resource":{"url":"g.toon.relay"},
+        "accepts":[{"amount":"2000","payTo":"g.toon.relay"}]}"#;
+
+    fn response(ilp_packet: Vec<u8>, protocol_data: Vec<ProtocolData>) -> BtpFrame {
+        BtpFrame {
+            frame_type: BTP_RESPONSE,
+            request_id: 7,
+            amount: None,
+            protocol_data,
+            ilp_packet,
+        }
+    }
+
+    fn entry(name: &str, data: &[u8]) -> ProtocolData {
+        ProtocolData {
+            name: name.to_string(),
+            content_type: CONTENT_TYPE_TEXT,
+            data: data.to_vec(),
+        }
+    }
+
+    fn refusal() -> Reject {
+        Reject {
+            code: RejectCode::f06_unexpected_payment(),
+            triggered_by: String::new(),
+            message: "No payment channel claim attached".to_string(),
+            data: Vec::new(),
+            accumulated_cost: 0,
+        }
+    }
+
+    #[test]
+    fn a_fulfill_is_read_as_delivery_and_never_searched_for_terms() {
+        let fulfill = Fulfill {
+            fulfillment: [3u8; 32],
+            data: b"sealed".to_vec(),
+        };
+        let frame = response(
+            fulfill.encode(),
+            vec![entry(PAYMENT_REQUIRED_PROTOCOL, TERMS)],
+        );
+
+        assert!(matches!(
+            decode_answer(&frame),
+            Some(PeerAnswer::Fulfill(_))
+        ));
+    }
+
+    #[test]
+    fn a_bare_reject_quotes_no_terms_and_still_carries_its_running_cost() {
+        let frame = response(
+            refusal().encode(),
+            vec![fields::accumulated_cost_protocol_data(41)],
+        );
+
+        let Some(PeerAnswer::Reject(reject)) = decode_answer(&frame) else {
+            panic!("a reject with no greeting is a plain reject");
+        };
+        assert_eq!(reject.accumulated_cost, 41);
+    }
+
+    /// Issue #874's first acceptance: a claimless dial learns what it owes.
+    #[test]
+    fn a_greeted_reject_yields_the_terms_beside_the_refusal() {
+        let frame = response(
+            refusal().encode(),
+            vec![
+                entry(PAYMENT_REQUIRED_PROTOCOL, TERMS),
+                fields::accumulated_cost_protocol_data(41),
+            ],
+        );
+
+        let Some(PeerAnswer::PaymentRequired { reject, terms }) = decode_answer(&frame) else {
+            panic!("a greeted reject carries its terms");
+        };
+        assert_eq!(reject.code.as_str(), "F06");
+        assert_eq!(reject.accumulated_cost, 41);
+        assert_eq!(terms.price(), Some(2000));
+        assert_eq!(terms.pay_to(), Some("g.toon.relay"));
+    }
+
+    /// Issue #874's second: garbage in the greeting slot is its own
+    /// outcome. A caller that sees `Reject` may conclude nothing was
+    /// asked for, so an unreadable greeting must never reach it as one.
+    #[test]
+    fn an_unreadable_greeting_is_distinct_from_a_reject_that_quoted_nothing() {
+        let frame = response(
+            refusal().encode(),
+            vec![entry(PAYMENT_REQUIRED_PROTOCOL, b"{ truncated")],
+        );
+
+        let Some(PeerAnswer::MalformedGreeting { reject, error }) = decode_answer(&frame) else {
+            panic!("an unreadable greeting is neither terms nor a bare reject");
+        };
+        assert_eq!(reject.code.as_str(), "F06");
+        assert!(matches!(error, GreetingError::NotJson(_)), "{error:?}");
+    }
+
+    /// Spec I5: whatever this reads, the peer's own refusal is what goes
+    /// back up -- reading terms adds an outcome, it does not rewrite one.
+    #[test]
+    fn every_arm_relays_the_peers_own_answer_unchanged() {
+        for protocol_data in [
+            vec![],
+            vec![entry(PAYMENT_REQUIRED_PROTOCOL, TERMS)],
+            vec![entry(PAYMENT_REQUIRED_PROTOCOL, b"rubbish")],
+        ] {
+            let frame = response(refusal().encode(), protocol_data);
+            let PacketResponse::Reject(relayed) =
+                decode_answer(&frame).expect("decodable").into_response()
+            else {
+                panic!("a reject stays a reject");
+            };
+            assert_eq!(relayed.code.as_str(), refusal().code.as_str());
+            assert_eq!(relayed.message, refusal().message);
+        }
+    }
+
+    #[test]
+    fn a_frame_with_no_ilp_packet_at_all_is_no_answer() {
+        let frame = response(Vec::new(), vec![entry(PAYMENT_REQUIRED_PROTOCOL, TERMS)]);
+
+        assert!(decode_answer(&frame).is_none());
     }
 }

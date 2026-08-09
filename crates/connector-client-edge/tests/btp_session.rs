@@ -431,6 +431,90 @@ async fn a_claimless_prepare_to_a_priced_route_is_refused_with_the_terms() {
     );
 }
 
+/// Issue #874: the other half of the greeting above -- a connector that
+/// **dials** an edge like this one reads the terms back off the very bytes
+/// it just emitted. Round-tripped through the real emitter on purpose:
+/// `connector-peer-btp`'s reader and this edge's writer share one wire type
+/// (`connector_domain::x402`), and this is the test that fails if they ever
+/// stop agreeing -- a fixture copied into the reader's own unit tests could
+/// not tell.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dialing_peer_reads_the_terms_off_the_greeting_the_edge_emits() {
+    let (addr, signer) = serve_edge().await;
+    let mut session = connect(addr).await;
+
+    let prepare = sealed_prepare("g.test.app", &signer.public_key().unwrap());
+    send(&mut session, btp_message(2, &[], &prepare.encode())).await;
+    let answer = next_answer(&mut session).await;
+
+    // The frame as the dialing side receives it, entries and all -- not a
+    // hand-picked field lifted out of it.
+    let frame = connector_btp::BtpFrame {
+        frame_type: answer.frame_type,
+        request_id: answer.request_id,
+        amount: None,
+        protocol_data: answer
+            .protocol_data
+            .iter()
+            .map(|(name, data)| connector_btp::ProtocolData {
+                name: name.clone(),
+                content_type: connector_btp::CONTENT_TYPE_TEXT,
+                data: data.clone(),
+            })
+            .collect(),
+        ilp_packet: answer.ilp_packet.clone(),
+    };
+
+    let Some(connector_peer_btp::PeerAnswer::PaymentRequired { reject, terms }) =
+        connector_peer_btp::decode_answer(&frame)
+    else {
+        panic!("a claimless dial must learn the terms, not an opaque refusal");
+    };
+    assert_eq!(reject.code.as_str(), "F06");
+    assert_eq!(
+        terms.price(),
+        Some(PRICE),
+        "the price the dialer must cover is the one this route charges"
+    );
+    assert_eq!(terms.pay_to(), Some("g.test.app"));
+    assert_eq!(terms.required_transport(), None);
+    assert_eq!(
+        terms.offer().unwrap().extra.session_lease_ttl_ms,
+        SESSION_LEASE_BACKSTOP_TTL.as_millis() as u64
+    );
+}
+
+/// The greeting reused for issue #701's wrong-transport refusal is read the
+/// same way, so a dialer that picked the wrong carriage learns which one to
+/// use instead of guessing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dialing_peer_reads_the_required_transport_off_the_same_greeting() {
+    let route = StaticRoute::new_priced_with_transport(
+        "g.test.app",
+        "http://localhost:4000",
+        PRICE,
+        TransportPolicy::Http,
+    )
+    .unwrap();
+    let (addr, signer) = serve_edge_with_route(route, Arc::new(FakeAppClient::new())).await;
+    let mut session = connect(addr).await;
+
+    let prepare = sealed_prepare("g.test.app", &signer.public_key().unwrap());
+    send(&mut session, btp_message(2, &[], &prepare.encode())).await;
+    let answer = next_answer(&mut session).await;
+
+    let greeting = pd(&answer, "payment-required").expect("the terms ride along");
+    let entries = vec![connector_btp::ProtocolData {
+        name: "payment-required".to_string(),
+        content_type: connector_btp::CONTENT_TYPE_TEXT,
+        data: greeting.to_vec(),
+    }];
+    let terms = connector_peer_btp::fields::payment_required(&entries)
+        .expect("the entry is there")
+        .expect("and the shared wire type reads it");
+    assert_eq!(terms.required_transport(), Some("http"));
+}
+
 /// Issue #701 (toon-meta#262 decision 11): a route restricted to HTTP
 /// refuses a PREPARE arriving over this BTP session -- F02 (Unreachable,
 /// from this carriage's own point of view), with the same terms JSON the

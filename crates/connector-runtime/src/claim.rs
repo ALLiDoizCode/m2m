@@ -508,6 +508,19 @@ impl ClaimBook {
         self.signer = Some(signer);
     }
 
+    /// This node's settlement signing key, or `None` on a node that
+    /// configured none.
+    ///
+    /// Read by the forwarding path's client role (issue #875): the key that
+    /// signs a peer claim on this book is the on-chain participant of the
+    /// same channel, so the claim this node signs as an ordinary *client* of
+    /// a next hop is signed by exactly the same key. Exposed rather than
+    /// duplicated as a second configured signer, so the two roles can never
+    /// end up signing as two different addresses on one channel.
+    pub fn signer(&self) -> Option<&Arc<dyn Signer>> {
+        self.signer.as_ref()
+    }
+
     /// Configure this connector's own ed25519 identity, used to sign every
     /// outbound claim on a channel registered through
     /// [`ClaimBook::set_solana_channel`] (issue #742) -- the Solana

@@ -103,6 +103,13 @@ greeted. A peer that sends too little is simply rejected, the same way `R01` ref
 hop cannot forward at the declared minimum delivery — told the packet failed, not invited to retry
 with different terms.
 
+(Amended by
+[ADR 0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md), owner decision
+2026-08-07: a peer-role PREPARE carrying **no claim at all** is now greeted, because §3.1's "PREPAREs
+never carry claims to gate at PREPARE time" no longer holds. This paragraph is otherwise unchanged
+and still governs the case this ADR decides — a peer that carried a claim but too small an `amount`
+for a priced termination is rejected `F03`, not greeted.)
+
 **Leased routes are unaffected.** `Connector::client_route` already excludes them (ADR 0028); they
 carry no price and this decision adds none.
 

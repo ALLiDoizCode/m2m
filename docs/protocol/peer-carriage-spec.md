@@ -7,6 +7,8 @@ wire, and a third-party connector has nothing else to implement against. Subject
 this prose and `vectors/wire-vectors.json` disagree about an encoding, the vectors are right and
 this text is the bug.** §10 enumerates the vectors that must exist for that sentence to mean
 anything.
+**End-to-end money model**, of which the claim re-derivation here is one step:
+[`money-model.md`](money-model.md).
 **Implements:** [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md).
 This document carries ADR 0027's decisions through to the wire; it does not re-decide them. Where
 it sharpens or resolves an ambiguity in that ADR it says so, in §12.
@@ -75,16 +77,147 @@ role, no `unknown`, and no unroled state.
 
 ### 1.2 The rule
 
+> **Amended 2026-08-07 by [issue #868](https://github.com/toon-protocol/connector/issues/868)**, the
+> owner decision that _every peer packet carries a covering claim, or gets the 402 greeting_. **P1,
+> the `{peerId, secret}` bearer credential, no longer decides role.** The argument P1 rested on is
+> not deleted: it is kept, dated and marked superseded, at the end of this section.
+> [Issue #863](https://github.com/toon-protocol/connector/issues/863) was filed because that
+> argument was **absent** from this document, and deleting it now would recreate the very gap that
+> issue named.
+
 An interaction has role `peer` **if and only if both** of the following hold:
 
-- **P1 — a proven credential.** The interaction presented a credential naming a peer id `p` that
-  appears in `[[peers]]`, and the presented secret matched the secret configured for `p`. The
-  comparison MUST be constant-time. An empty configured secret MUST NOT match anything, including
-  an empty presented secret.
-- **P2 — a channel binding.** `p` has at least one `[[peer_channels]]` entry.
+- **P2 — a channel binding.** The interaction is bound to a peer id `p` that has at least one
+  `[[peer_channels]]` entry.
+- **P3 — a verified claim on one of that peer's channels.** The frame carries a claim naming a
+  `channel_id` that one of `p`'s `[[peer_channels]]` rows configures, and that claim's signature
+  verifies against **the counterparty key that row configures** — never against anything the claim
+  declares about itself.
 
-If either fails, for any reason, the interaction has role `client`. **There is no fallthrough**:
-no degraded peer, no peer-for-routing-but-client-for-claims, no retry into peer role.
+If either fails, for any reason, the interaction has role `client`. **There is no fallthrough**: no
+degraded peer, no peer-for-routing-but-client-for-claims, no retry into peer role.
+
+There is no third case left to decide. Under #868 a peer PREPARE carrying no covering claim is not
+admitted at all — it is answered with the same 402 greeting the client edge already gives. Role and
+payment are therefore read from the same bytes, on the same packet, every time.
+
+**Why a verified claim proves more than a bearer token does.** A claim's signature is checked
+against this connector's **own** record of the channel — `counterparties` for an EVM channel, a
+`SolanaChannel`'s `counterparty_public_key` for a Solana one — populated from `[[peer_channels]]`,
+"never the claim's own self-declared field" (`crates/connector-runtime/src/claim.rs:439-443`). The
+check itself is `verify_signature` (`crates/connector-runtime/src/claim.rs:1055-1089`), which
+answers `UnknownChannel` for a channel it holds no record of and `SignatureInvalid` for a signature
+that does not recover to the configured key. A bearer secret proves only possession of a string both
+operators wrote into their own config files, presented by the dialer out of its own `[[peers]]` row
+(`crates/connector-peer-btp/src/dial.rs:152` builds the credential, `:285-296` puts it on the
+session's first MESSAGE). A signature over ADR 0024's balance proof proves control of the key the
+channel was actually opened against — strictly stronger, and now present on every packet rather than
+once per session.
+
+**P3 resolves to exactly one relation.** A `channel_id` may appear in at most one
+`[[peer_channels]]` row — a second is `PeerChannelDuplicate` at load, refused precisely so that
+"whichever row's counterparty key won" cannot depend on iteration order
+(`crates/connector-config/src/peer_channel.rs:285-293`) — and a channel in `[[peer_channels]]` may
+never also appear in `[[client_channels]]` (§1.8, `ChannelInBothNamespaces`). A verified claim
+therefore names one channel, one row and one `peer_id`, with no ambiguity for a caller to resolve
+and none for an attacker to manufacture. That config-enforced uniqueness is what makes deciding role
+from a claim safe, and it is why §1.3's former prohibition on doing so is withdrawn.
+
+**What is retired, and what is not.** P1 is retired **as a role requirement**. The credential
+surface itself is untouched by this amendment: `[[peers]].credential` still loads and is still
+required of a peering relation, a dialer still presents it (§1.4), a mismatch is still the
+`peer_auth_refused` operator event (§1.6), and §12(7)'s "both operators write the same string" still
+describes how a relation is named. §1.9's five regression cases all still classify `client`, because
+none of them carries a verifying claim on a configured peer channel — but the _reason_ changes, and
+case 3 in particular ("a correct `peerId` with a wrong `secret`") MUST NOT be read as "a wrong
+secret defeats a valid claim". Under the amended rule it does not. Whether the credential surface
+should exist at all is [issue #867](https://github.com/toon-protocol/connector/issues/867)'s
+question and is not decided here.
+
+**Implementation status.** This section states the rule, not the code as it stands today.
+`connector_peer_auth::decide_role` still implements the P1/P2 branch table
+(`crates/connector-peer-auth/src/decision.rs:186-221`), and `handle_peer_prepare` still accepts a
+`None` claim (`crates/connector-runtime/src/connector.rs:667-676`). Issue #880 lands the receive-side
+refusal and issue #881 the send side; §3.1's "a connector MUST NOT answer a peer-role PREPARE with
+the x402 greeting" is a residual of the retired credit window and is #880's to correct.
+
+#### Peer role is not a prerequisite for paid carriage
+
+Stated here because #863 was originally filed while standing up an `apex-relay` peering, and implied
+the opposite — that because peer role needs a shared credential, one connector paying another for
+carriage needs one too. **It does not**, and leaving the correction to be inferred would re-teach
+the error.
+
+- A `[[peers]]` row is the **sending** node's own outbound config. It is what lets that node dial
+  and present a credential (`crates/connector-peer-btp/src/dial.rs:152`, `:285-296`); by itself it
+  grants the sender nothing at the far end. Peer **role** does require the accepting side to have
+  configured the same relation (§12(7)). Paid **carriage** requires nothing of the sort: the
+  counterparty needs no matching row and is never handed the secret.
+- A connector may simply pay another as an ordinary client. Its auth frame, if it sends one at all,
+  is _acknowledged, not verified_ at the far client edge — "Authorization to write comes from the
+  claim on each packet, never from the session"
+  (`crates/connector-client-edge/src/btp.rs:552-555`) — and the claim JSON a peer would have sent
+  _is_ a client-edge claim, judged by the same `ClaimBook`
+  (`crates/connector-peer-btp/src/lib.rs:41-43`).
+- [ADR 0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md) prices a **forwarded**
+  route at the client edge: `client_route` reports a peer route's own `price` under
+  `ClientRouteKind::Forwarded` (`crates/connector-runtime/src/connector.rs:1217-1230`), so the 402
+  greeting covers carriage and not only termination — "one that terminates here, whose `price` buys
+  the app's work, and one that forwards over a peering, whose `price` buys the whole path"
+  (`client-edge-spec.md:457-464`). Before that ADR a forwarded destination "was greeted with
+  nothing, required no claim and was carried for free; that was a free gateway, not a design".
+
+**Live evidence, this fleet, 2026-08-07.** The store box pays box 1 **as a client, not as a peer**,
+even though an `apex-store` peering is configured between them. Both halves of that peering exist in
+the store box's config — the `[[peers]]` row at `infra/linode-store/connector-rust.toml:216-231` and
+the `[[peer_channels]]` row at `:238-258` — and the box nonetheless pays through `[announce]
+pay_channel`, which that same file describes in as many words as "a funded EVM channel this box PAYS
+the g.toon box from, as an ordinary client … deliberately NOT a `[[client_channels]]` row"
+(`infra/linode-store/connector-rust.toml:333-338`). The peer channel has nothing to claim against:
+the committed row is still the issue #822 placeholder, and the live box's row names a real channel
+(`0x0bfd0b88…`) whose deposit is 0, so a claim on it is refused before it is ever signed —
+`InsufficientHeadroom`, because "a claim above what has actually been deposited could never be
+redeemed on chain" (`crates/connector-cli/src/announce.rs:227-233` for the error, `:1546-1559` for
+the check). It falls back to a client channel, and that fallback is the point: on that path every
+packet is covered by a claim, and an uncovered one is answered `402` with the x402 terms
+(`crates/connector-cli/src/announce.rs:294`). #868's rule is already what runs in production on the
+link that matters, with no shared credential anywhere in it.
+
+#### Superseded 2026-08-07 by #868 — the credit-window rationale for P1
+
+Kept rather than deleted. It is the answer #863 was filed to obtain, and it is the reason the rule
+above could not have been written before the decision that removed its premise.
+
+> While a peer PREPARE could legally carry **no claim at all**, a claim signature could not carry
+> the role. The receive path takes `claim: Option<WireClaim>` and treats `None` as
+> `ClaimAckOutcome::NotSent` rather than a refusal
+> (`crates/connector-runtime/src/connector.rs:667-676`). The send path emits claimless PREPAREs by
+> construction: it attaches `pending_claim` (`crates/connector-runtime/src/connector.rs:996`), which
+> answers `None` once the previous claim was acknowledged
+> (`crates/connector-runtime/src/claim.rs:956-964`, and `:966-975` for why an acknowledgement clears
+> `pending`), and a fresh claim is armed only by `record_fulfillment`, after a fulfil
+> (`crates/connector-runtime/src/connector.rs:1009-1010`). Value consumed without a covering claim
+> was recorded as uncovered exposure (`crates/connector-runtime/src/claim.rs:839-849`), bounded by
+> `ceiling` (`crates/connector-runtime/src/connector.rs:678-689`,
+> `crates/connector-domain/src/projection.rs:169-174`) and settled later on `flush_interval_ms`
+> (`crates/connector-config/src/peer.rs:458-462`).
+>
+> That was the asymmetry. A **client** presented a covering claim per frame, with no configuration,
+> flag or build profile able to disable it (`crates/connector-client-edge/src/lib.rs:26-31`). A
+> **peer** was extended a credit window. So on precisely the packets that made peering _peering_ —
+> the ones arriving between flushes — there was no signature to check, and something other than a
+> claim had to carry the role.
+>
+> `ceiling = 0` did not recover the property either: `ceiling` is `Option<u64>` where `None` means
+> unbounded (`crates/connector-config/src/peer.rs:379-380`) and the predicate is
+> `exposure > ceiling` (`crates/connector-domain/src/projection.rs:172-173`), so exposure is still
+> `0` when the check runs and exactly one uncovered packet is admitted before `T04`.
+
+#868 removes the premise rather than answering the question: with a covering claim on every peer
+packet there is no claimless packet left for P1 to cover. The disposition of the exposure machinery
+itself — `record_inbound_delivery`, `ceiling`, `flush_interval_ms` — is
+[issue #882](https://github.com/toon-protocol/connector/issues/882)'s, not this document's, and until
+it lands that machinery stays exactly as described above.
 
 ### 1.3 What MUST NOT enter the decision
 
@@ -94,11 +227,19 @@ A connector MUST NOT infer, weight or override role from any of:
 - the source address, the TLS SNI name, or the presence of a TLS client certificate;
 - whether the `btp` websocket subprotocol was offered or selected;
 - a hostname or endpoint appearing in `[[peers]]`;
-- the shape of what the interaction sent — an inbound TRANSFER, a `toon-minimum-delivery` entry,
-  or a claim naming a channel that happens to be in `[[peer_channels]]`;
+- the shape of what the interaction sent — an inbound TRANSFER, or a `toon-minimum-delivery` entry;
 - anything the interaction did earlier, or that another interaction from the same address did.
 
-Role is decided by the credential, or it is `client`.
+Role is decided by P2 and a verified claim, or it is `client`.
+
+> **Withdrawn 2026-08-07 by #868.** The fifth bullet used to end "…or a claim naming a channel that
+> happens to be in `[[peer_channels]]`". That prohibition is now the exact inverse of the rule:
+> under §1.2 a claim naming a configured peer channel, **whose signature verifies against that
+> row's counterparty key**, is what decides role. The word carrying the weight is _verifies_ —
+> "happens to be in `[[peer_channels]]`" describes a claim taken at face value, and a claim is never
+> taken at face value (`crates/connector-runtime/src/claim.rs:1055-1089`). Every other entry on this
+> list is unchanged and still forbidden; one bullet moved, and it moved because the credit window it
+> was written under is gone, not because face-value inference became acceptable.
 
 ### 1.4 Presentation, on each carriage
 
@@ -126,24 +267,45 @@ without it is a client request, whatever the previous request from the same conn
 
 ### 1.5 Binding, and the anti-escalation rules
 
-- **BTP: role is bound once, at auth, and is immutable for the session's lifetime.** A session
-  starts as `client` and becomes `peer` only when an `auth` entry satisfying P1 and P2 is
-  evaluated.
-- **Frames processed before the role is bound are processed as client frames and MUST NOT be
-  retroactively reclassified.** A claim ingested as a client claim stays a client claim, and its
-  effects on client watermarks stand.
+> **Inverted 2026-08-07 by #868.** The last bullet of this section used to require role to be fixed
+> _before_ a claim is decoded. **That ordering existed because claimless peer packets existed**; it
+> falls with them. The claim moves from _after_ the decision to _inside_ it. What the bullet was
+> actually protecting — that nothing downstream re-derives role, and that no money and no state move
+> before role is known — is preserved below, unchanged in force. The session-binding bullet inverts
+> with it, for the same reason: a per-session credential fixed a per-session role, and a per-packet
+> claim fixes a per-packet one.
+
+- **Role is decided from the claim, not before it.** A connector MUST decode and verify the frame's
+  claim first; the verification result is what P3 reads. Role MUST still be fixed **before the
+  packet is routed, before a fee is taken, before a ceiling is consulted, and before any watermark
+  is advanced or anything is journaled.** That ordering already holds in the claim path as written:
+  `accept_inbound_inner` verifies the signature and returns on failure before it so much as reads a
+  watermark, so a claim that does not verify advances nothing
+  (`crates/connector-runtime/src/claim.rs:1116-1131`). Nothing downstream of the `PeerTransport`
+  port may ask which carriage or which credential produced the interaction; it is handed a role.
+- **Role is a property of the frame, not of the session.** On BTP a session no longer becomes
+  `peer` once and stay so: each frame stands on the claim it carries, and a frame carrying no claim
+  that satisfies P2 and P3 is a client frame however many peer frames preceded it on that socket.
+  This is strictly narrower than the rule it replaces — a session could previously present one
+  credential and then send anything.
+- **Frames not admitted as peer frames MUST NOT be retroactively reclassified.** A claim ingested
+  as a client claim stays a client claim, and its effects on client watermarks stand. §1.8's
+  namespace disjointness is what keeps that safe: the two namespaces can never describe the same
+  channel, so a frame judged in one can never be re-judged in the other.
 - **A second `auth` entry on a session whose role is already bound MUST NOT be evaluated.** The
   connector MUST answer that frame with a BTP ERROR (`code F00`, `name NotAcceptedError`) and MUST
-  leave the role unchanged. Re-authentication mid-session is the escalation path this closes.
+  leave the role unchanged.
 - **Ambiguous credentials are refused, not resolved.** More than one `auth` entry on a single BTP
   frame, or more than one `Toon-Peer-Auth` header on a single HTTP request, MUST refuse the frame
   or request — BTP: an ERROR frame as above; HTTP: `400`, with no ILP body. The connector MUST NOT
   pick the first, the last, or a concatenation. This is the header-smuggling defence, and its
   absence is how "which credential did we check?" becomes unanswerable.
-- **Role is decided before anything else happens.** A connector MUST determine role before it
-  decodes a claim, before it consults a watermark, before it routes a packet, and before any fee,
-  ceiling or journal accounting. Nothing downstream of the port may ask which carriage or which
-  credential produced the interaction; it is handed a role.
+
+The last two bullets are retained as written and are **no longer role rules**. With P1 retired
+(§1.2) there is no credential-driven escalation left for them to close; they are hygiene on the
+credential surface, kept because an unanswerable "which credential did we check?" is a defect
+whatever the credential is used for. They are removed or kept on #867's disposition of that surface,
+not on this amendment's.
 
 ### 1.6 An asserted role is not a proven one
 
