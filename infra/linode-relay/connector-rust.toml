@@ -144,9 +144,11 @@ key_file = "/app/data/signer.key"
 # (docker-compose.relay.rust.yml, docker-compose.relay.announce.yml) are
 # part of this same change: the mount and the config line must land
 # together or neither does anything. The key itself is set below, inside
-# the `[announce]` table proper -- a bare `key = value` up here, before any
-# table header, would be read as a TOP-LEVEL key instead (the same trap
-# `peer_expose`'s own comment above notes in reverse).
+# the `[announce]` table proper -- a bare `key = value` up here, under the
+# `[signer]` header this comment block sits below, would be read as a
+# `[signer]` key instead and refused (the same trap `peer_expose`'s own
+# comment above notes in reverse: that one must go BEFORE any header, this
+# one AFTER its own).
 #
 # Unlike the store, `relay_url` IS set here: this box fronts the relay app
 # (docker-compose.relay.yml's `relay` service, port 7100 behind this box's

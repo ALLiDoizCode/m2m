@@ -1,8 +1,9 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TOON relay box nginx config.
 # Serves: proxy.relay.DOMAIN (connector ILP edge)  relay-ws.DOMAIN (relay app)
-# NOT the faucet: it gets its own box, with no connector on it
-# (docs/two-node-architecture.md §4).
+# NOT the faucet: it gets its own box, with no connector on it (toon-meta
+# `docs/two-node-architecture.md` §4 — that doc lives in toon-meta, not this
+# repo; connector#898 tracks the faucet box here).
 #
 # Written to point directly at connector-rust:4000 — NOT at a TypeScript
 # connector. infra/linode-store/nginx/node.conf.template used to name
@@ -160,4 +161,3 @@ server {
         client_max_body_size 4m;
     }
 }
-

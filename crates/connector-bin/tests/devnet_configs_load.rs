@@ -343,8 +343,11 @@ fn with_sandbox_paths(
     // never committed, and `Config::load` checks `identity_key_file` exists
     // regardless of which subcommand reads it), but optional: only the
     // relay file carries this line as of #870, so a plain `.replace` rather
-    // than `replace_expecting_a_match` leaves the apex and store files (who
-    // have no `identity_key_file` at all) untouched.
+    // than `replace_expecting_a_match` leaves the apex and store files, which
+    // have no `identity_key_file` at all, untouched. A no-op here is still
+    // caught rather than silently skipped: if the committed path ever moves,
+    // `Config::load` refuses the container path with
+    // `AnnounceIdentityKeyFileNotFound` and the caller's `.expect` fires.
     let replaced = replaced.replace(
         "identity_key_file = \"/app/data/announce.key\"",
         &format!("identity_key_file = \"{}\"", key_path.display()),

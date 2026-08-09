@@ -66,8 +66,8 @@ services:
 
   # nginx + certbot, copied from infra/linode-store/docker-compose.store.yml —
   # this box's own TLS front, fronting connector-rust:4000 (the rust overlay)
-  # and relay:7100. Port 3100 (the relay app's payment-oblivious
-  # write backend) is deliberately never given a public route here — see
+  # and relay:7100. Port 3100 (the relay app's payment-oblivious write
+  # backend) is deliberately never given a public route here — see
   # ./nginx/node.conf.template and the "docker publishes past ufw" rule.
   nginx:
     image: nginx:alpine
