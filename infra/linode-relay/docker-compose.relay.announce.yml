@@ -56,15 +56,44 @@
 #                  up -d announce
 #
 # ── ORDER MATTERS ACROSS THE TWO BOXES (this box and the apex) ────────────
-# Bring THIS up first, VERIFY a real kind:10032 under the relay's own pubkey
-# carrying `g.toon.relay`, and only then redeploy/restart the apex's
-# announcer sidecar with `g.toon.relay` dropped from
-# `ANNOUNCER_ILP_ADDRESSES` (already the committed state of
-# infra/linode-node/docker-compose.node.announcer.yml as of this same
-# change -- but that is a different machine, so "same repo change" is not
-# "same deployment moment"). Retiring the apex's stopgap first leaves the
-# prefix announced by nobody. See docs/operators/announcing-a-node.md,
-# "Cutting a prefix over from one publisher to another".
+# STOP THE APEX'S ANNOUNCER SIDECAR FIRST, confirm it stopped, and only THEN
+# bring this loop up. That is the REVERSE of the cutover order in
+# docs/operators/announcing-a-node.md, and the reason is `[announce]
+# identity_key_file` below: this box ADOPTS the apex's announce identity
+# (pubkey `30fdd01d...`, issue #870), so the two publishers sign under ONE
+# pubkey. kind:10032 is regular-replaceable by `(pubkey, kind)` with no `d`
+# tag (crates/connector-signer/src/nostr.rs), and both publish into THIS
+# box's relay -- the sidecar's `ANNOUNCER_RELAY_URLS` is
+# `https://proxy.relay.devnet.toonprotocol.dev/relay-write`, and
+# `relay-ws.devnet.toonprotocol.dev` resolves here. One slot, last writer
+# wins, on 300s and 240s cadences: overlapping the two IS the outage this
+# ordering exists to prevent.
+#
+# STOP THIS LOOP BEFORE EDITING `./connector-rust.toml`. The loop below
+# re-execs `connector announce --config` every cycle and re-reads the file
+# each time, so setting `[announce] identity_key_file` on a box whose loop
+# is already running flips its identity on the next tick with no restart --
+# the box opens the concurrent window by itself while the operator believes
+# nothing has started yet.
+#
+# VERIFY BY CONTENT, NOT BY AUTHOR. Once the pubkey is shared, "a kind:10032
+# under the relay's own pubkey" can no longer tell the two publishers apart.
+# This box announces `ilpAddress g.toon.relay` + `httpEndpoint
+# https://proxy.relay.devnet.toonprotocol.dev/ilp`; the apex announces
+# `g.toon` + `proxy.devnet.toonprotocol.dev`. Confirm the content, and a
+# `created_at` that advances on the ~240s cadence and never reverts.
+#
+# There is NO announced-by-nobody gap in this order: the relay neither
+# deletes nor filters expired events and the seeded bootstrap path ignores
+# NIP-40, so the apex's last announce keeps serving until this loop replaces
+# it. The 600s `ttl_secs` binds only the kind:10036 seed-relay path -- keep
+# the handoff brisk, but it is not a correctness deadline.
+#
+# `g.toon.relay` is already dropped from `ANNOUNCER_ILP_ADDRESSES` in the
+# committed infra/linode-node/docker-compose.node.announcer.yml -- but that
+# is a different machine, so "same repo change" is not "same deployment
+# moment". Runbook of record: toon-meta#311. See also
+# docs/operators/announcing-a-node.md, "Cutting over under an adopted key".
 #
 # ── Its OWN state volume, deliberately not `connector_rust_state` ──────────
 # `connector announce` loads the SAME `./connector-rust.toml` the serving
