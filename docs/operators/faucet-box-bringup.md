@@ -97,6 +97,11 @@ every other infra-touching ticket in this repo's history records when it applies
 up -d --build faucet`) to pick them up. Record how each key was generated somewhere off this
    box — there is no legacy identity to fall back to if it is lost.
 
+   No Mina endpoint needs setting: `MINA_GRAPHQL_URL` defaults to the public Mina devnet
+   (`api.minascan.io`), the same node the faucet code defaults to. `.env.example` carries it
+   commented out as an override only — do not point it at `mina.$DOMAIN`, the self-hosted
+   lightnet box deleted 2026-07-19.
+
 5. **Funding.** Fund the Base Sepolia EVM address (a little ETH for gas — the mock USDC mint is
    ungated) and the Solana treasury (USDC on the public Solana devnet; SOL only for tx fees — this
    box airdrops no SOL, §4.6). The Mina USDC leg self-mints its own replenishment on-chain (rate-

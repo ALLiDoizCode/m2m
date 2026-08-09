@@ -38,7 +38,14 @@ services:
       # native-MINA route (POST /api/mina/request) is retired (§4.6); this
       # faucet has no native-MINA leg at all, so the treasury key that would
       # fund it is not part of this box's secret set.
-      MINA_GRAPHQL_URL: ${MINA_GRAPHQL_URL:-https://mina.${DOMAIN:-devnet.toonprotocol.dev}/graphql}
+      # PUBLIC Mina devnet, matching this block's heading and the faucet code's
+      # own default (packages/faucet/src/mina-usdc.mjs). NOT the self-hosted
+      # `https://mina.${DOMAIN}/graphql` that infra/linode-node/docker-compose.node.yml
+      # still carries: that lightnet host was DELETED 2026-07-19 with the rest of
+      # the self-hosted chain boxes (infra/devnet-manage.sh's header; issue #819),
+      # so the name now resolves to registrar parking and fails TLS — a box
+      # shipped with it would have its Mina USDC leg dead on arrival.
+      MINA_GRAPHQL_URL: ${MINA_GRAPHQL_URL:-https://api.minascan.io/node/devnet/v1/graphql}
       # USDC transfer-drip (o1js proving) — set by the human on this box after
       # generating a FRESH treasury key (§4.4; never copied from box 1).
       # Unset → POST /api/mina/usdc-request 503s.
