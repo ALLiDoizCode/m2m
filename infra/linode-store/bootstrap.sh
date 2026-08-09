@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Provision a fresh Linode (Ubuntu/Debian) into the TOON store (Arweave DVM) box.
-# Runs: connector (the g.toon proxy, g.proxy.store) + store (DVM) + nginx/TLS.
+# Runs: store (DVM) + nginx/TLS. NOT the connector — issue #901 deleted this
+# box's retired TypeScript one, and its replacement lives in the sibling
+# docker-compose.store.rust.yml overlay, which this script does not bring up
+# because that overlay first needs key files provisioned by hand on the box
+# (see its header). Bringing it in here the way infra/linode-relay/bootstrap.sh
+# does is a separate, deliberate step.
 # No relay, no faucet, no Mina lightnet — this box settles against the existing
-# devnet chain boxes (see connector.yaml chainProviders).
+# devnet chain boxes (see connector-rust.toml's [settlement.*] sections).
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Run as root on a clean Ubuntu box:
 #   git clone https://github.com/toon-protocol/connector.git
@@ -28,7 +33,7 @@ apt-get install -y git jq gettext-base openssl ufw curl iptables
 echo "==> [2/5] Firewall (public = 22/80/443 only)"
 "$HERE/firewall.sh"
 
-echo "==> [3/5] Pull images (connector + dvm)"
+echo "==> [3/5] Pull images (store + nginx/TLS)"
 ( cd "$ROOT" && "${COMPOSE[@]}" pull --ignore-pull-failures )
 
 echo "==> [4/5] Render nginx config for ${DOMAIN}"
@@ -38,16 +43,16 @@ envsubst '${DOMAIN}' < "$HERE/nginx/node.conf.template" > "$HERE/nginx/conf.d/no
 echo "==> [5/5] Start services + issue TLS certs"
 ( cd "$ROOT" && "${COMPOSE[@]}" up -d )
 
-echo "Waiting for connector health..."
-for i in $(seq 1 30); do
-  curl -sf http://localhost:8080/health >/dev/null 2>&1 && echo "Connector healthy." && break || true
-  sleep 3
-done
-
+# No connector health wait: the only thing that ever answered
+# http://localhost:8080/health here was the TypeScript connector's published
+# healthcheck port, and issue #901 deleted that service — nothing this script
+# starts listens on the host any more except nginx, which init-letsencrypt.sh
+# brings up on its own before it asks for certs.
 chmod +x "$HERE/init-letsencrypt.sh"
 "$HERE/init-letsencrypt.sh"
 
 echo
 echo "✅ TOON store node up."
-echo "   ILP edge : https://proxy.ario.${DOMAIN}/ilp   (g.toon.ario)"
+echo "   ILP edge : https://proxy.ario.${DOMAIN}/ilp   (g.toon.ario — 502s until"
+echo "              docker-compose.store.rust.yml is brought up beside this)"
 echo "   DVM      : https://dvm.${DOMAIN}/health"

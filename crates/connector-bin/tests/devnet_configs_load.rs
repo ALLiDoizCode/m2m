@@ -149,6 +149,13 @@ const STORE_RUST_OVERLAY: &str =
 const STORE_ANNOUNCE_OVERLAY: &str =
     include_str!("../../../infra/linode-store/docker-compose.store.announce.yml");
 
+/// The store box's own base file (issue #901), read here for
+/// [`SURVIVING_BOX_COMPOSE_FILES`] -- the file whose retired TypeScript
+/// `connector` service #901 deleted, and whose `nginx` still publishes the
+/// fleet's one deliberately-bare port pair.
+const STORE_BASE_COMPOSE: &str =
+    include_str!("../../../infra/linode-store/docker-compose.store.yml");
+
 /// The relay box's two overlays (issue #843, repo half of #815), read here
 /// for the same property as the store's pair above: they bind-mount the
 /// SAME `connector-rust.toml`, so they must pin the same image tag. See
@@ -157,6 +164,11 @@ const RELAY_RUST_OVERLAY: &str =
     include_str!("../../../infra/linode-relay/docker-compose.relay.rust.yml");
 const RELAY_ANNOUNCE_OVERLAY: &str =
     include_str!("../../../infra/linode-relay/docker-compose.relay.announce.yml");
+
+/// The relay box's own base file, read here for [`SURVIVING_BOX_COMPOSE_FILES`]
+/// -- see [`STORE_BASE_COMPOSE`].
+const RELAY_BASE_COMPOSE: &str =
+    include_str!("../../../infra/linode-relay/docker-compose.relay.yml");
 
 /// This test binary's own base port for [`Anvil::spawn`] -- distinct from
 /// other test binaries' bases (`connector-settlement-evm`'s own tests use
@@ -2260,5 +2272,137 @@ fn every_fleet_overlay_pins_the_connector_repos_pin_of_record() {
              image reference under infra/ must name the same tag",
             pins[0]
         );
+    }
+}
+
+/// Every committed compose file belonging to a box that survives the
+/// TypeScript retirement (issue #901 deleted the store's dead `connector`
+/// service; the apex's own equivalent is connector#872's job). Named
+/// explicitly rather than globbed `infra/*/docker-compose*.yml`: #872 is
+/// going to delete `infra/linode-node/*` in a separate PR, and a guard that
+/// walked the directory would silently start (or stop) covering that box
+/// the moment the filesystem changed under it, rather than only when a real
+/// image or port regression landed. Two boxes, three files each (the base
+/// file plus its two overlays) -- see [`no_surviving_box_pins_a_non_rust_connector_image`]
+/// and [`every_surviving_box_port_binding_is_host_ip_prefixed_or_allowlisted`].
+const SURVIVING_BOX_COMPOSE_FILES: &[(&str, &str)] = &[
+    (
+        "infra/linode-store/docker-compose.store.yml",
+        STORE_BASE_COMPOSE,
+    ),
+    (
+        "infra/linode-store/docker-compose.store.rust.yml",
+        STORE_RUST_OVERLAY,
+    ),
+    (
+        "infra/linode-store/docker-compose.store.announce.yml",
+        STORE_ANNOUNCE_OVERLAY,
+    ),
+    (
+        "infra/linode-relay/docker-compose.relay.yml",
+        RELAY_BASE_COMPOSE,
+    ),
+    (
+        "infra/linode-relay/docker-compose.relay.rust.yml",
+        RELAY_RUST_OVERLAY,
+    ),
+    (
+        "infra/linode-relay/docker-compose.relay.announce.yml",
+        RELAY_ANNOUNCE_OVERLAY,
+    ),
+];
+
+/// A committed compose file's `connector:` image tag is a purged, retired
+/// TypeScript node whenever it does not start `rust-` (issue #901's own
+/// finding: `ghcr.io/toon-protocol/connector:3.36.3-solchan.0`, a semver
+/// tag, was purged from GHCR in the post-cutover package purge, and any
+/// `docker compose up` naming it fails `manifest unknown`). A surviving
+/// box's committed compose files must never reintroduce one.
+#[test]
+fn no_surviving_box_pins_a_non_rust_connector_image() {
+    for (name, raw) in SURVIVING_BOX_COMPOSE_FILES {
+        for tag in pinned_connector_images(raw) {
+            assert!(
+                tag.starts_with("rust-"),
+                "{name} pins `ghcr.io/toon-protocol/connector:{tag}` -- a \
+                 non-`rust-` tag names the retired TypeScript node, an image \
+                 purged from GHCR (issue #901). Every surviving box's \
+                 committed compose files must pin a `rust-sha-` tag."
+            );
+        }
+    }
+}
+
+/// The `ports:` mappings a committed compose file's `ports:` block declares,
+/// verbatim, in commit order -- [`route_price`]'s line-scan precedent again:
+/// no YAML dependency, and indentation alone (not a parser) tells a
+/// `ports:` list item apart from a `volumes:` one that also starts `- '`. A
+/// `#`-comment line inside the block (several overlays carry one explaining
+/// the loopback bind) is skipped rather than mistaken for a malformed entry.
+/// `name` is carried only so an unparseable entry names its file, like the
+/// two assertions below do.
+fn compose_ports(name: &str, raw: &str) -> Vec<String> {
+    let mut ports = Vec::new();
+    let mut lines = raw.lines().peekable();
+    while let Some(line) = lines.next() {
+        if line.trim() != "ports:" {
+            continue;
+        }
+        let block_indent = line.len() - line.trim_start().len();
+        while let Some(next) = lines.peek() {
+            let trimmed = next.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                lines.next();
+                continue;
+            }
+            let next_indent = next.len() - next.trim_start().len();
+            if next_indent <= block_indent {
+                break;
+            }
+            let mapping = trimmed
+                .strip_prefix("- '")
+                .and_then(|s| s.strip_suffix('\''))
+                .unwrap_or_else(|| {
+                    panic!("{name}: expected a quoted `ports:` list entry, found `{trimmed}`")
+                });
+            ports.push(mapping.to_string());
+            lines.next();
+        }
+    }
+    ports
+}
+
+/// `ports:` mappings a surviving box's committed compose files may publish
+/// with NO host-IP prefix. Exactly nginx's own public TLS door on each box
+/// (issue #901's own framing: this is deliberately public, everything else
+/// must bind loopback and go through nginx). Any addition here must be
+/// commented with why it is deliberately public -- this list is the guard,
+/// not a place to quietly grow.
+const UNPREFIXED_PORT_ALLOWLIST: &[&str] = &[
+    "80:80",   // nginx HTTP -> ACME http-01 + redirect to TLS
+    "443:443", // nginx HTTPS -- the fleet's one public TLS terminator per box
+];
+
+/// A `ports:` mapping with no host-IP prefix (`host:container`, two fields)
+/// is reachable from the internet regardless of what ufw says: Docker's own
+/// iptables chain runs ahead of ufw's rules. Every surviving box's
+/// committed compose files must either bind loopback explicitly
+/// (`127.0.0.1:host:container`) or be on [`UNPREFIXED_PORT_ALLOWLIST`].
+#[test]
+fn every_surviving_box_port_binding_is_host_ip_prefixed_or_allowlisted() {
+    for (name, raw) in SURVIVING_BOX_COMPOSE_FILES {
+        for mapping in compose_ports(name, raw) {
+            let host_ip_prefixed = mapping.matches(':').count() >= 2;
+            let allowlisted = UNPREFIXED_PORT_ALLOWLIST.contains(&mapping.as_str());
+            assert!(
+                host_ip_prefixed || allowlisted,
+                "{name} publishes `ports:` mapping `{mapping}` with no \
+                 host-IP prefix, and it is not on UNPREFIXED_PORT_ALLOWLIST \
+                 -- Docker's `ports:` publish reaches the internet ahead of \
+                 ufw, so this must be `127.0.0.1:{mapping}` unless it is \
+                 deliberately public (add it to the allowlist with a comment \
+                 saying why, like nginx's 80/443)."
+            );
+        }
     }
 }

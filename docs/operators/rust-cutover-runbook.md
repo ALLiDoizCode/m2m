@@ -42,7 +42,8 @@ serves only `/rust/ilp*` through nginx.
 
 ### Store — `linode-store-connector-1` (same TS image)
 
-`infra/linode-store/connector.yaml` on the box:
+Its TypeScript config (deleted from the repo by issue #901; this section documents the box's
+pre-cutover state as audited 2026-08-04):
 
 - terminates `g.toon.ario` and `g.toon.relay.ario` → `http://store:3300` at price `1000`
 - forwards `g.toon.relay` → peer `relay-connector` = `wss://proxy.devnet.toonprotocol.dev:443` (the
