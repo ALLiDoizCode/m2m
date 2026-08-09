@@ -145,14 +145,14 @@ services:
       SOLANA_USDC_MINT: H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H
       SOLANA_FAUCET_KEYPAIR: /keys/usdc-authority.json
 
-      # ── Mina (native-MINA treasury drip) ──
-      # Signs a native payment client-side with mina-signer (no o1js proving) and
-      # submits it to the PUBLIC Mina devnet via sendPayment. Reads/writes go to
-      # MINA_GRAPHQL_URL. MINA_FAUCET_KEY is the treasury (HD index 2) base58
-      # PRIVATE key — a SECRET, passed through from the host environment (never
-      # hardcoded). When unset, the Mina route 503s with a public-faucet link, so
-      # an EVM/Solana-only deploy still boots. The faucet asserts the derived
-      # public key matches the treasury at startup (fail-loud on a wrong key).
+      # ── Mina (native-MINA treasury drip) — RETIRED, this var is inert ──
+      # The faucet is USDC only since connector#898 (toon-meta#310 §4.6): there
+      # is no `POST /api/mina/request` in the service any more, so nothing reads
+      # MINA_FAUCET_KEY. It is left declared (never hardcoded — a SECRET passed
+      # through from the host environment) only so redeploys of a box whose .env
+      # still carries it do not error; drop it with the rest of the apex's faucet
+      # config in connector#872. MINA_GRAPHQL_URL below IS still read — the USDC
+      # leg reads and submits through it.
       MINA_FAUCET_KEY: ${MINA_FAUCET_KEY:-}
       MINA_GRAPHQL_URL: ${MINA_GRAPHQL_URL:-https://api.minascan.io/node/devnet/v1/graphql}
       MINA_DRIP_AMOUNT: ${MINA_DRIP_AMOUNT:-5}
@@ -162,13 +162,14 @@ services:
       # permissionless but capped (1,000 USDC/address/~24h) and require the
       # RECIPIENT's signature — so the faucet cannot mint to users. Instead, when
       # MINA_USDC_TREASURY_KEY + MINA_USDC_TOKEN + MINA_USDC_ADMIN_CONTRACT are
-      # all set, /api/mina/request and /api/mina/usdc-request drip USDC by plain
-      # TRANSFER from the treasury, which lazily SELF-MINTS its own daily
-      # allowance when below MINA_USDC_LOW_WATER (≤1,000 USDC/day ceiling).
+      # all set, /api/mina/usdc-request drips USDC by plain TRANSFER from the
+      # treasury, which lazily SELF-MINTS its own daily allowance when below
+      # MINA_USDC_LOW_WATER (≤1,000 USDC/day ceiling).
       # MINA_USDC_TREASURY_KEY is the FUNDED treasury base58 PRIVATE key (a
       # SECRET — pass through from the host env, never hardcoded; the legacy
       # MINA_USDC_ADMIN_KEY name is still accepted as a fallback). When unset,
-      # the route keeps dripping native MINA only. Reuses MINA_GRAPHQL_URL above.
+      # the route 503s — there is no native-MINA leg to fall back to any more.
+      # Reuses MINA_GRAPHQL_URL above.
       MINA_USDC_TREASURY_KEY: ${MINA_USDC_TREASURY_KEY:-}
       MINA_USDC_ADMIN_KEY: ${MINA_USDC_ADMIN_KEY:-} # legacy name (treasury fallback)
       MINA_USDC_TOKEN: ${MINA_USDC_TOKEN:-}

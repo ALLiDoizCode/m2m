@@ -28,8 +28,8 @@
 # derives — with this token you can only fund an address whose key signs.
 #
 # Zero-MINA recipients: use the faucet instead — POST {"address": "B62q…"} to
-# /api/mina/usdc-request (or /api/mina/request for MINA + USDC) on the deployed
-# faucet (packages/faucet). It drips by TRANSFER from a treasury that self-mints
+# /api/mina/usdc-request on the deployed faucet (packages/faucet; USDC only
+# since connector#898). It drips by TRANSFER from a treasury that self-mints
 # its own daily allowance, so recipients need no MINA and no signature.
 #
 # ── LEGACY --admin-mint mode ──────────────────────────────────────────────────

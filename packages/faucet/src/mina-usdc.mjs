@@ -402,7 +402,8 @@ export function createMinaUsdcDripper() {
   };
 }
 
-// Capability descriptor fragment surfaced via mina.js's minaInfo. `dripper` is
+// Capability descriptor fragment surfaced via index.js's minaUsdcOnlyInfo (and
+// still consumed by mina.js's now-unmounted minaInfo). `dripper` is
 // the live createMinaUsdcDripper() (or null when unconfigured).
 export function minaUsdcInfo(dripper) {
   if (!dripper) {

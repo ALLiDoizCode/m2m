@@ -1,0 +1,117 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TOON faucet box — faucet app + nginx/TLS. NO connector, NO ILP config of any
+# kind (toon-meta `docs/two-node-architecture.md` §4.5 — that doc lives in
+# toon-meta, not this repo; connector#898 tracks the faucet box here). This box
+# is reached over plain HTTPS, by humans and by client bootstrap code; it is
+# not a node on the network, so it has no `[[peers]]` row naming it anywhere,
+# no signer key, no settlement key, no state directory, no payment channel.
+#
+# USDC only (§4.6): the local-anvil EVM leg and the native-SOL/native-MINA legs
+# are retired from the faucet app itself (packages/faucet/src/index.js); this
+# box's env below configures only the surviving USDC-only legs.
+#
+# Run from the CONNECTOR REPO ROOT:
+#   docker compose -f infra/linode-faucet/docker-compose.faucet.yml up -d
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+services:
+  faucet:
+    # Build context is the REPO ROOT (not packages/faucet): the multi-stage
+    # Dockerfile builds the mina-zkapp ESM bundle the USDC mint path imports,
+    # so it needs packages/mina-zkapp/ in context. See packages/faucet/Dockerfile.
+    build:
+      context: ../..
+      dockerfile: packages/faucet/Dockerfile
+    environment:
+      PORT: 3500
+      # ── Solana — public devnet, USDC only ──────────────────────────────
+      SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.devnet.solana.com}
+      SOLANA_USDC_MINT: ${SOLANA_USDC_MINT:-xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in}
+      SOLANA_FAUCET_KEYPAIR: /keys/usdc-authority.json
+      SOLANA_DRIP_COOLDOWN_MS: ${SOLANA_DRIP_COOLDOWN_MS:-86400000}
+      # SOLANA_SOL_AMOUNT is deliberately NOT set here — the native-SOL route
+      # (POST /api/solana/request) is retired (§4.6); only the USDC-only leg
+      # (dripUsdcOnly) runs on this box, and it never reads that amount.
+      #
+      # ── Mina — public devnet, USDC only ────────────────────────────────
+      # MINA_FAUCET_KEY / MINA_DRIP_AMOUNT are deliberately NOT set — the
+      # native-MINA route (POST /api/mina/request) is retired (§4.6); this
+      # faucet has no native-MINA leg at all, so the treasury key that would
+      # fund it is not part of this box's secret set.
+      # PUBLIC Mina devnet, matching this block's heading and the faucet code's
+      # own default (packages/faucet/src/mina-usdc.mjs). NOT the self-hosted
+      # `https://mina.${DOMAIN}/graphql` that infra/linode-node/docker-compose.node.yml
+      # still carries: that lightnet host was DELETED 2026-07-19 with the rest of
+      # the self-hosted chain boxes (infra/devnet-manage.sh's header; issue #819),
+      # so the name now resolves to registrar parking and fails TLS — a box
+      # shipped with it would have its Mina USDC leg dead on arrival.
+      MINA_GRAPHQL_URL: ${MINA_GRAPHQL_URL:-https://api.minascan.io/node/devnet/v1/graphql}
+      # USDC transfer-drip (o1js proving) — set by the human on this box after
+      # generating a FRESH treasury key (§4.4; never copied from box 1).
+      # Unset → POST /api/mina/usdc-request 503s.
+      MINA_USDC_TREASURY_KEY: ${MINA_USDC_TREASURY_KEY:-}
+      MINA_USDC_TOKEN: ${MINA_USDC_TOKEN:-}
+      MINA_USDC_ADMIN_CONTRACT: ${MINA_USDC_ADMIN_CONTRACT:-}
+      MINA_TX_FEE: ${MINA_TX_FEE:-0.2}
+      # ── Base Sepolia — PUBLIC Base testnet (chainId 84532) ─────────────
+      # Mints the ungated mock USDC (mint() needs no faucet USDC balance); the
+      # faucet key only needs Base Sepolia ETH for gas. Unset key → route 503s.
+      BASE_SEPOLIA_FAUCET_KEY: ${BASE_SEPOLIA_FAUCET_KEY:-}
+      BASE_SEPOLIA_RPC_URL: ${BASE_SEPOLIA_RPC_URL:-https://sepolia.base.org}
+      BASE_SEPOLIA_USDC: ${BASE_SEPOLIA_USDC:-0x49beE1Bca5d15Fb0963117923403F9498119a9Ce}
+      BASE_SEPOLIA_USDC_AMOUNT: ${BASE_SEPOLIA_USDC_AMOUNT:-1000}
+      # Pinned to '0', not an overridable default (§4.6's own table entry: the
+      # code's own default is already '0' — packages/faucet/src/base-sepolia.js
+      # — this box does not carry infra/linode-node/docker-compose.node.yml's
+      # override to '0.001'). USDC only means no native-gas drip of any kind,
+      # on any chain, ever, from this box.
+      BASE_SEPOLIA_ETH_AMOUNT: '0'
+    volumes:
+      # Fresh treasury keypair, generated ON THIS BOX (§4.4) — never copied
+      # from box 1's /root/keys/solana-usdc-treasury.json. A missing file
+      # disables only the Solana leg (createSolanaFaucet returns null); it
+      # does not fail the container.
+      - /root/keys/solana-usdc-treasury.json:/keys/usdc-authority.json:ro
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://localhost:3500/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    depends_on:
+      faucet:
+        condition: service_healthy
+        required: false
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - faucet_certbot_conf:/etc/letsencrypt:ro
+      - faucet_certbot_www:/var/www/certbot:ro
+    command: >
+      sh -c "while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g 'daemon off;'"
+
+  certbot:
+    image: certbot/certbot
+    restart: unless-stopped
+    volumes:
+      - faucet_certbot_conf:/etc/letsencrypt
+      - faucet_certbot_www:/var/www/certbot
+    entrypoint: >
+      sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"
+
+volumes:
+  faucet_certbot_conf:
+  faucet_certbot_www:

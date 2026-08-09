@@ -12,6 +12,8 @@
 #   ./devnet-manage.sh up        Provision boxes + deploy all nodes
 #   ./devnet-manage.sh store     Provision + deploy ONLY the store (DVM) box
 #   ./devnet-manage.sh relay     Provision + deploy ONLY the relay box
+#   ./devnet-manage.sh faucet    Provision ONLY the faucet box (no connector — connector#898)
+#   ./devnet-manage.sh faucet-cutover  Repoint faucet.devnet at the faucet box (run AFTER it's live)
 #   ./devnet-manage.sh down      Stop containers (boxes stay, restart is fast)
 #   ./devnet-manage.sh destroy   Delete all Linode boxes (loses chain state)
 #   ./devnet-manage.sh status    Probe every public HTTPS endpoint
@@ -57,9 +59,9 @@ PORKBUN_API="https://api.porkbun.com/api/json/v3"
 # label used to read "toon-devnet-store", which does not match the live
 # "ario" label; get_box_ip would find nothing and `create_box` would stand up
 # a SECOND store box.
-declare -A NODE_LABELS=( [toon]=toon [store]=ario [relay]=relay )
-declare -A NODE_TYPES=(  [toon]=g6-standard-2 [store]=g6-standard-2 [relay]=g6-standard-2 )
-declare -A NODE_PASSWORDS=( [toon]="T00nDevN3t!N0DE2026" [store]="T00nDevN3t!ST0RE2026" [relay]="T00nDevN3t!RELAY2026" )
+declare -A NODE_LABELS=( [toon]=toon [store]=ario [relay]=relay [faucet]=faucet )
+declare -A NODE_TYPES=(  [toon]=g6-standard-2 [store]=g6-standard-2 [relay]=g6-standard-2 [faucet]=g6-standard-2 )
+declare -A NODE_PASSWORDS=( [toon]="T00nDevN3t!N0DE2026" [store]="T00nDevN3t!ST0RE2026" [relay]="T00nDevN3t!RELAY2026" [faucet]="T00nDevN3t!FAUCET2026" )
 
 # ── Linode helpers ─────────────────────────────────────────────────────────
 linode_get() { curl -sf -H "Authorization: Bearer $LINODE_CLI_TOKEN" "$LINODE_API/$1"; }
@@ -87,7 +89,7 @@ wait_box_running() {
   echo "ERROR: $label never reached running status" >&2; return 1
 }
 
-create_box() {  # key: toon|store|relay
+create_box() {  # key: toon|store|relay|faucet
   local key=$1 label="${NODE_LABELS[$1]}" type="${NODE_TYPES[$1]}"
   existing_ip="$(get_box_ip "$label")"
   if [ -n "$existing_ip" ]; then
@@ -291,6 +293,11 @@ up)
 
   echo "==> [2/4] Update DNS"
   update_dns "proxy.devnet"         "$TOON_IP"
+  # Still box 1, deliberately: the faucet moves to its OWN box with no
+  # connector (toon-meta#310 §4, connector#898 — `./devnet-manage.sh faucet`
+  # provisions it), but the record only repoints once that box is live,
+  # funded and proven serving (§6.2's ordered runbook) — not as a side
+  # effect of routine fleet bring-up. See docs/operators/faucet-box-bringup.md.
   update_dns "faucet.devnet"        "$TOON_IP"
   # `proxy.ario` is the store box's paid edge, matching the g.toon.ario
   # prefix it serves. It replaced `proxy.store.devnet` on 2026-08-05; that
@@ -371,8 +378,45 @@ relay)
   "$0" status
   ;;
 
+faucet)
+  # Targeted: provision ONLY the faucet box (toon-meta#310 §4, connector#898).
+  # No TOON_MNEMONIC, no deploy_*_node call, and — unlike `store`/`relay`
+  # above — no automatic DNS repoint here either: this box has no connector
+  # (§4.5) and its USDC-only secrets are generated FRESH ON THE BOX by a
+  # human (§4.4, never copied from box 1), so there is nothing this script
+  # can write into a `.env` heredoc the way deploy_relay_node does for
+  # RELAY_NOSTR_SECRET_KEY. And per the ordering §6.2 runbook, faucet.devnet
+  # must keep resolving to box 1 until the NEW box is live, funded and
+  # proven serving — flipping it here, at provision time, would prescribe
+  # the outage the runbook exists to prevent. Once that verification has
+  # passed, `./devnet-manage.sh faucet-cutover` (below) repoints the record
+  # — see docs/operators/faucet-box-bringup.md.
+  echo "==> [1/2] Provision faucet box"
+  create_box faucet
+  wait_box_running "${NODE_LABELS[faucet]}"
+  FAUCET_IP=$(get_box_ip "${NODE_LABELS[faucet]}")
+  echo "==> [2/2] Provisioned at ${FAUCET_IP:-<not found>}"
+  echo "Next (human, on the box): clone the repo, cd infra/linode-faucet,"
+  echo "cp .env.example .env and fill in fresh keys, then run ./bootstrap.sh."
+  echo "See docs/operators/faucet-box-bringup.md."
+  ;;
+
+faucet-cutover)
+  # Separate, explicit action (toon-meta#310 §6.2 step 9 / toon-meta#313):
+  # repoints faucet.devnet at the faucet box. Deliberately its own command,
+  # not folded into `up`/`dns`/`faucet` above — run this ONLY after the new
+  # box is live, funded and has served real traffic; see the ordered runbook
+  # in docs/operators/faucet-box-bringup.md.
+  FAUCET_IP=$(get_box_ip "${NODE_LABELS[faucet]}")
+  [ -n "$FAUCET_IP" ] || { echo "ERROR: faucet box not found — run './devnet-manage.sh faucet' first." >&2; exit 1; }
+  update_dns "faucet.devnet" "$FAUCET_IP"
+  ;;
+
 down)
-  echo "==> Stopping containers on all nodes"
+  # toon/store/relay only — the faucet box is brought up and down on the box
+  # itself (infra/linode-faucet/bootstrap.sh), not from here. Same for
+  # `redeploy` below. See docs/operators/faucet-box-bringup.md.
+  echo "==> Stopping containers on the toon/store/relay nodes"
   for key in toon store relay; do
     local_label="${NODE_LABELS[$key]}"
     ip=$(get_box_ip "$local_label") || continue
@@ -392,7 +436,11 @@ down)
   ;;
 
 destroy)
-  echo "==> Deleting all devnet boxes (irreversible)"
+  # Covers the three CONNECTOR-BEARING boxes only. The faucet box (connector#898)
+  # is provisioned by its own targeted case above and is not in this loop, so a
+  # `destroy` here cannot take the faucet down with the fleet — delete it
+  # explicitly if that is what you want.
+  echo "==> Deleting the toon/store/relay devnet boxes (irreversible; NOT the faucet box)"
   read -r -p "Are you sure? [y/N] " ans
   [[ "$ans" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 1; }
   for key in toon store relay; do
@@ -486,6 +534,10 @@ dns)
   STORE_IP=$(get_box_ip "${NODE_LABELS[store]}")
   RELAY_IP=$(get_box_ip "${NODE_LABELS[relay]}")
   [ -n "$TOON_IP" ] && update_dns "proxy.devnet" "$TOON_IP"        || echo "  ${NODE_LABELS[toon]} not found"
+  # faucet.devnet stays on box 1 here too, for the same reason as the `up)`
+  # case above — this command syncs to CURRENT state, and box 1 is still
+  # current until the ordered runbook (docs/operators/faucet-box-bringup.md)
+  # cuts over.
   [ -n "$TOON_IP" ] && update_dns "faucet.devnet" "$TOON_IP"       || true
   [ -n "$STORE_IP" ] && update_dns "proxy.ario.devnet" "$STORE_IP"  || echo "  ${NODE_LABELS[store]} not found"
   [ -n "$STORE_IP" ] && update_dns "dvm.devnet" "$STORE_IP"        || true
@@ -566,9 +618,10 @@ endpoints)
     "nodeIp": "${STORE_IP}"
   },
   "faucet": {
-    "evmUrl": "https://faucet.${DOMAIN}/api/request",
-    "solanaUrl": "https://faucet.${DOMAIN}/api/solana/request",
-    "minaUrl": "https://faucet.${DOMAIN}/api/mina/request"
+    "baseSepoliaUrl": "https://faucet.${DOMAIN}/api/base-sepolia/request",
+    "solanaUrl": "https://faucet.${DOMAIN}/api/solana/usdc-request",
+    "minaUrl": "https://faucet.${DOMAIN}/api/mina/usdc-request",
+    "_note": "USDC only (connector#898) — the native-token legs (/api/request, /api/solana/request, /api/mina/request) are gone from the service and 404."
   }
 }
 JSON
