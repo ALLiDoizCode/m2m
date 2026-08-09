@@ -389,8 +389,8 @@ faucet)
   # must keep resolving to box 1 until the NEW box is live, funded and
   # proven serving — flipping it here, at provision time, would prescribe
   # the outage the runbook exists to prevent. Once that verification has
-  # passed, repoint the record by hand (or `update_dns "faucet.devnet" "$(get_box_ip faucet)"`
-  # from a shell) — see docs/operators/faucet-box-bringup.md.
+  # passed, `./devnet-manage.sh faucet-cutover` (below) repoints the record
+  # — see docs/operators/faucet-box-bringup.md.
   echo "==> [1/2] Provision faucet box"
   create_box faucet
   wait_box_running "${NODE_LABELS[faucet]}"
@@ -611,9 +611,10 @@ endpoints)
     "nodeIp": "${STORE_IP}"
   },
   "faucet": {
-    "evmUrl": "https://faucet.${DOMAIN}/api/request",
-    "solanaUrl": "https://faucet.${DOMAIN}/api/solana/request",
-    "minaUrl": "https://faucet.${DOMAIN}/api/mina/request"
+    "baseSepoliaUrl": "https://faucet.${DOMAIN}/api/base-sepolia/request",
+    "solanaUrl": "https://faucet.${DOMAIN}/api/solana/usdc-request",
+    "minaUrl": "https://faucet.${DOMAIN}/api/mina/usdc-request",
+    "_note": "USDC only (connector#898) — the native-token legs (/api/request, /api/solana/request, /api/mina/request) are gone from the service and 404."
   }
 }
 JSON

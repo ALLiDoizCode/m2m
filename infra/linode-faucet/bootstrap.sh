@@ -44,8 +44,16 @@ echo "==> [5/5] Build the faucet image + start services + issue TLS certs"
 ( cd "$ROOT" && "${COMPOSE[@]}" up -d --build )
 
 echo "Waiting for faucet health..."
-for i in $(seq 1 30); do
-  curl -sf http://127.0.0.1:3500/health >/dev/null 2>&1 && echo "Faucet healthy." && break || true
+# Probed from INSIDE the container, not from the host: unlike box 1's compose
+# file this one publishes no `3500:3500` (the only public ports on this box are
+# nginx's 80/443 — a published container port would also punch straight through
+# ufw's deny-by-default, since docker writes its own iptables rules), so
+# `curl http://127.0.0.1:3500/health` on the host could never succeed. This is
+# the same check the service's own healthcheck runs.
+for _ in $(seq 1 30); do
+  ( cd "$ROOT" && "${COMPOSE[@]}" exec -T faucet node -e \
+      "fetch('http://localhost:3500/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))" \
+    ) >/dev/null 2>&1 && echo "Faucet healthy." && break || true
   sleep 3
 done
 

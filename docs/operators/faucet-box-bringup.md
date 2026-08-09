@@ -106,7 +106,9 @@ up -d --build faucet`) to pick them up. Record how each key was generated somewh
 6. **Standalone verification.** With `./bootstrap.sh` already run in step 3:
 
    ```sh
-   curl -sf http://<box IP>:80/health -H 'Host: faucet.devnet.toonprotocol.dev'   # via nginx, self-signed cert warning is expected pre-cutover
+   # Pre-cutover the public name still resolves to box 1, so pin it to THIS box's IP.
+   # -k because port 80 only 301s to https and the cert here is still the self-signed seed.
+   curl -ksf --resolve faucet.devnet.toonprotocol.dev:443:<box IP> https://faucet.devnet.toonprotocol.dev/health
    curl -sf https://faucet.devnet.toonprotocol.dev/api/info   # once a real cert issues, post-cutover
    ```
 

@@ -501,8 +501,14 @@ app.listen(PORT, async () => {
   // when the faucet boots. Poll in the background until it appears so
   // `/health` `tokenReady` flips true on its own once the deploy lands — no
   // restart required. See issue #104.
+  //
+  // Only poll when TOKEN_ADDRESS names a token at all: it is read once, at
+  // module load, so an unset address can never become set later and the poll
+  // would just log the same "not set" line every 2s forever. The faucet box
+  // (infra/linode-faucet/) is exactly that case — it has no anvil chain and
+  // sets no TOKEN_ADDRESS.
   const ready = await initTokenContract();
-  if (!ready) {
+  if (!ready && TOKEN_ADDRESS) {
     const poll = setInterval(async () => {
       if (await initTokenContract()) {
         clearInterval(poll);
