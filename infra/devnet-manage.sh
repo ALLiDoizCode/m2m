@@ -89,7 +89,7 @@ wait_box_running() {
   echo "ERROR: $label never reached running status" >&2; return 1
 }
 
-create_box() {  # key: toon|store|relay
+create_box() {  # key: toon|store|relay|faucet
   local key=$1 label="${NODE_LABELS[$1]}" type="${NODE_TYPES[$1]}"
   existing_ip="$(get_box_ip "$label")"
   if [ -n "$existing_ip" ]; then
@@ -413,7 +413,10 @@ faucet-cutover)
   ;;
 
 down)
-  echo "==> Stopping containers on all nodes"
+  # toon/store/relay only — the faucet box is brought up and down on the box
+  # itself (infra/linode-faucet/bootstrap.sh), not from here. Same for
+  # `redeploy` below. See docs/operators/faucet-box-bringup.md.
+  echo "==> Stopping containers on the toon/store/relay nodes"
   for key in toon store relay; do
     local_label="${NODE_LABELS[$key]}"
     ip=$(get_box_ip "$local_label") || continue
@@ -433,7 +436,11 @@ down)
   ;;
 
 destroy)
-  echo "==> Deleting all devnet boxes (irreversible)"
+  # Covers the three CONNECTOR-BEARING boxes only. The faucet box (connector#898)
+  # is provisioned by its own targeted case above and is not in this loop, so a
+  # `destroy` here cannot take the faucet down with the fleet — delete it
+  # explicitly if that is what you want.
+  echo "==> Deleting the toon/store/relay devnet boxes (irreversible; NOT the faucet box)"
   read -r -p "Are you sure? [y/N] " ans
   [[ "$ans" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 1; }
   for key in toon store relay; do

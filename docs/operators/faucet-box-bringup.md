@@ -19,7 +19,9 @@ move (a service moving to a new box) was done for the relay app.
   from the service entirely (404, not merely 503-when-unconfigured), and `/api/info`'s capability
   map and `packages/faucet/public/index.html`'s web UI stop advertising them. The surviving
   USDC-only routes (`/api/solana/usdc-request`, `/api/mina/usdc-request`,
-  `/api/base-sepolia/request`) and `GET /health` / `GET /api/info` are unchanged in shape.
+  `/api/base-sepolia/request`) keep their request/response shapes, as do `GET /health` and
+  `GET /api/info` — only `/api/info`'s `chains` map changes (the `evm` leg is gone and the
+  `solana`/`mina` legs now advertise their `usdc-request` route).
   `BASE_SEPOLIA_ETH_AMOUNT` is pinned to `'0'` in `docker-compose.faucet.yml` (the code's own
   default — this box does not carry `infra/linode-node/docker-compose.node.yml`'s override to
   `0.001`).
@@ -57,9 +59,12 @@ every other infra-touching ticket in this repo's history records when it applies
 ## Preconditions
 
 - `infra/linode-faucet/` config, compose file and scripts exist and are reviewed (this issue).
-- Box 1's faucet (`infra/linode-node/docker-compose.node.yml`'s `faucet` service) keeps serving
-  unchanged and untouched — nothing here strips it. It is removed only as part of connector#872's
-  apex teardown, and only after step 8 below.
+- Box 1's `faucet` service (`infra/linode-node/docker-compose.node.yml`) keeps serving and is
+  untouched by this change — nothing here strips it. It is removed only as part of connector#872's
+  apex teardown, and only after step 8 below. Note that it is _built from this repo_, so the next
+  `./devnet-manage.sh redeploy` retires box 1's three native-token routes too — that is §4.6
+  applied to the service itself, not to this box, and it is why box 1 must not be redeployed at a
+  moment when someone still depends on those legs.
 - A funded devnet faucet / on-chain path exists to fund THIS box's fresh keys (§4.4) — there is no
   legacy identity to reproduce here, every key is new material.
 
@@ -79,7 +84,7 @@ every other infra-touching ticket in this repo's history records when it applies
    elsewhere), then `./bootstrap.sh`. It opens the firewall (22/80/443 only), pulls the `nginx`/
    `certbot` base images, builds the faucet image, renders `nginx/conf.d/node.conf` from the
    template for `${DOMAIN}`, starts the compose stack, and runs `init-letsencrypt.sh`. Because the
-   public name does not point here yet, the first real issuance attempt in step 3 will fail ACME's
+   public name does not point here yet, the issuance attempt this step makes will fail ACME's
    HTTP-01 challenge — expected; it falls back to the self-signed cert and logs a warning. Re-run
    `init-letsencrypt.sh` after step 8 flips DNS.
 

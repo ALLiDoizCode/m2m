@@ -94,7 +94,7 @@ const minaUsdcLimiter = minaUsdcDripper
 // Warm the o1js circuit cache in the BACKGROUND at boot (issue #348): compiling
 // RateLimitedUsdcAdmin + UsdcChannelToken takes ~3 minutes on the 2 GB devnet
 // box (178.6s observed), and before this warm-up the compile ran lazily inside
-// the FIRST /api/mina/request — pushing that request to ~4min15s total (compile
+// the FIRST Mina USDC drip — pushing that request to ~4min15s total (compile
 // + ~76s prove) while clients time out at ~2min. Failures here are non-fatal:
 // compileOnce resets its cache so the next drip retries.
 if (minaUsdcDripper) {
@@ -248,13 +248,15 @@ app.get('/api/info', async (req, res) => {
   }
 });
 
-// Solana USDC-only route — POST /api/solana/usdc-request { address }
+// ---------------------------------------------------------------------------
+// Solana route — POST /api/solana/usdc-request { address }
 //
-// Transfers mock USDC from the devnet treasury with NO SOL airdrop leg. The
-// treasury pays the fee + ATA rent, so this succeeds even when the public devnet
-// airdrop is dry/rate-limited (the coupling that makes /api/solana/request 429)
-// and even if the recipient holds 0 SOL. Use it for addresses already funded with
-// SOL. Mirrors /api/mina/usdc-request.
+// USDC only (no SOL leg at all — the SOL-dispensing route it used to sit beside
+// is retired, toon-meta#310 §4.6): transfers mock USDC from the devnet treasury.
+// The treasury pays the fee + ATA rent, so this succeeds even when the public
+// devnet airdrop is dry/rate-limited and even if the recipient holds 0 SOL.
+// Recipients get their SOL for gas from the chain's own faucet. Mirrors
+// /api/mina/usdc-request.
 // ---------------------------------------------------------------------------
 app.post('/api/solana/usdc-request', (req, res) => {
   if (!solanaFaucet) {
@@ -271,9 +273,8 @@ app.post('/api/solana/usdc-request', (req, res) => {
     return;
   }
 
-  // Same per-address cooldown as /api/solana/request: this route still spends
-  // treasury SOL (tx fee + a possible ATA-rent payment), just skips the direct
-  // SOL-transfer leg.
+  // Per-address cooldown: this route still spends treasury SOL (tx fee + a
+  // possible ATA-rent payment), it just never transfers SOL to the recipient.
   const claim = solanaFaucet.claim(address);
   if (!claim.allowed) {
     res

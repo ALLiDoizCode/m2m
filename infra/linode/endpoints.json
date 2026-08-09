@@ -17,7 +17,7 @@
     "programId": "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip",
     "tokenMint": "xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in",
     "tokenDecimals": 6,
-    "_fund": "https://faucet.devnet.toonprotocol.dev (web UI) or POST /api/solana/request → drips SOL + USDC on the PUBLIC Solana devnet",
+    "_fund": "https://faucet.devnet.toonprotocol.dev (web UI) or POST /api/solana/usdc-request → drips USDC on the PUBLIC Solana devnet (USDC only since connector#898 — the SOL leg is retired; get SOL from https://faucet.solana.com)",
     "_chainNote": "PUBLIC Solana devnet — the self-hosted test validator (mint H8HSreUF…) is deleted."
   },
   "baseSepolia": {
@@ -37,7 +37,7 @@
     "adminContractAddress": "B62qpeGPgEhz6Vbd9E11PoTzz2EZZCJjqhwALxJ2BnkdozFm2rZtmRB",
     "channelZkApp": "B62qmgPhv2Xo6QVEtwjLja8UZJUtu8yapRFAR6gaoGtbM9zE5hG7Tkf",
     "tokenDecimals": 6,
-    "_fund": "https://faucet.devnet.toonprotocol.dev (web UI) or POST /api/mina/request → drips native MINA + admin-minted USDC",
+    "_fund": "https://faucet.devnet.toonprotocol.dev (web UI) or POST /api/mina/usdc-request → drips USDC by treasury transfer (USDC only since connector#898 — the native-MINA leg is retired; get MINA from https://faucet.minaprotocol.com)",
     "_note": "PUBLIC Mina devnet (the mina.<DOMAIN> passthrough proxy is deleted — use the minascan URL directly). CANONICAL devnet USDC token: B62qqN1Pu… (tokenId above, admin contract B62qpeGPgEhz…) — this is the token the live faucet drips and both apex+store kind:10032 announces advertise. A previous revision of this file claimed the permissionless-admin token B62qnZnmV3jAD… superseded B62qqN1Pu…; that was BACKWARDS — B62qqN1Pu… is the live token. PaymentChannel zkApp: B62qmgPhv2… (client-build vk)."
   },
   "_decimalsNote": "USDC is 6-decimal on every chain, so claim base units are uniform — no cross-chain normalization needed."
