@@ -78,7 +78,7 @@ make solana-build
 cd packages/solana-program && cargo build-sbf
 ```
 
-This produces the compiled BPF binary at `target/deploy/payment_channel.so` (~95KB) -- `packages/solana-program` is a member of the repository's root Cargo workspace, so build output lands in the workspace-root `target/`, not a per-crate one.
+This produces the compiled BPF binary at `target/deploy/payment_channel.so` (size varies by build -- ~109KB for the current source; see [Deployment Cost Estimates](#deployment-cost-estimates) for the rent this implies) -- `packages/solana-program` is a member of the repository's root Cargo workspace, so build output lands in the workspace-root `target/`, not a per-crate one.
 
 ### Deploy to Devnet
 
@@ -119,12 +119,45 @@ The deploy script (`tools/solana/deploy.sh`) performs the following steps:
 
 ### Deployment Cost Estimates
 
-| Item                         | Approximate Cost    | Notes                                                |
-| ---------------------------- | ------------------- | ---------------------------------------------------- |
-| Program account rent         | ~0.21--0.42 SOL     | Refundable rent-exempt deposit for ~95KB binary      |
-| Channel PDA rent             | ~0.00203 SOL        | Per channel account (~256 bytes)                     |
-| Token vault rent             | ~0.00204 SOL        | Per vault account (~165 bytes for SPL Token account) |
-| **Total initial deployment** | **~0.21--0.42 SOL** | Program rent only; channels created later            |
+Program account rent is a rent-exempt deposit sized to the deployed binary -- it is not a fixed
+number, and should be recomputed whenever the binary size changes rather than re-guessed.
+Solana's rent-exemption formula:
+
+```
+rent_lamports = (binary_bytes + 45-byte ProgramData header + 128-byte loader overhead) x 6,960
+```
+
+`6,960` lamports/byte is the 2-year rent-exemption rate (`3,480` lamports/byte-year, times two).
+
+This reconciles exactly against our own measured public-devnet deploy
+(`packages/solana-program/deployments/devnet-public.md`): its 105,128-byte binary cost
+
+```
+(105,128 + 45 + 128) x 6,960 = 732,894,960 lamports  (~0.733 SOL)
+```
+
+-- matching the `~0.733 SOL` recorded there for the same deploy.
+
+`packages/solana-program/src` has since grown past that deploy (issue #581's claim/settlement
+validation). Per the deployment record's provenance amendment, the current source builds to a
+**109,401-byte** binary, which implies:
+
+```
+(109,401 + 45 + 128) x 6,960 = 762,635,040 lamports  (~0.76 SOL)
+```
+
+| Item                         | Approximate Cost | Notes                                                                                               |
+| ---------------------------- | ---------------- | --------------------------------------------------------------------------------------------------- |
+| Program account rent         | ~0.76 SOL        | Rent-exempt deposit for the current ~109KB binary; recompute from the formula above if size changes |
+| Channel PDA rent             | ~0.00203 SOL     | Per channel account (~256 bytes)                                                                    |
+| Token vault rent             | ~0.00204 SOL     | Per vault account (~165 bytes for SPL Token account)                                                |
+| **Total initial deployment** | **~0.76 SOL**    | Program rent only; channels created later                                                           |
+
+**Upgrade headroom:** `solana program deploy` sizes the `ProgramData` account's `max_len` to
+exactly the deployed binary -- there is no free headroom for a later upgrade to grow into. A
+devnet deploy that allocates exactly the binary size (as ours did) means upgrading to a larger
+binary requires `solana program extend <PROGRAM_ID> <ADDITIONAL_BYTES>` first, which charges rent
+only on the size delta, not the full account.
 
 On devnet, SOL is free via airdrop:
 
@@ -486,17 +519,20 @@ setInterval(async () => {
 
 Solana uses rent-exempt deposits for on-chain accounts. All rent is refundable when the account is closed.
 
-| Account Type      | Size       | Approximate Rent | Notes                                |
-| ----------------- | ---------- | ---------------- | ------------------------------------ |
-| Program account   | ~95KB      | ~0.21--0.42 SOL  | One-time deployment cost             |
-| Channel PDA       | ~256 bytes | ~0.00203 SOL     | Per channel                          |
-| Token vault (SPL) | ~165 bytes | ~0.00204 SOL     | Per vault (associated token account) |
+| Account Type      | Size                                                                                 | Approximate Rent | Notes                                                                                                |
+| ----------------- | ------------------------------------------------------------------------------------ | ---------------- | ---------------------------------------------------------------------------------------------------- |
+| Program account   | ~109KB (current source; see [Deployment Cost Estimates](#deployment-cost-estimates)) | ~0.76 SOL        | One-time deployment cost; recompute via `(bytes + 45 + 128) * 6,960 lamports` if binary size changes |
+| Channel PDA       | ~256 bytes                                                                           | ~0.00203 SOL     | Per channel                                                                                          |
+| Token vault (SPL) | ~165 bytes                                                                           | ~0.00204 SOL     | Per vault (associated token account)                                                                 |
 
 **Rent reclamation:**
 
 - Channel PDA rent is reclaimable when the channel is settled (state transitions to `Settled` and the account is closed)
 - Token vault rent is reclaimable when the vault is closed after settlement
 - Program account rent is reclaimable if the program is closed (requires upgrade authority; closing removes the program permanently)
+- Program account rent is NOT automatically increased on upgrade: the `ProgramData` account's
+  `max_len` is fixed at first deploy, so growing the binary past that size requires
+  `solana program extend` (rent charged on the size delta only) before the upgrade will fit
 
 ---
 
