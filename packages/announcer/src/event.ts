@@ -28,12 +28,6 @@ export const ILP_PEER_INFO_KIND = 10032;
 export const EXPIRATION_TAG = 'expiration';
 
 /**
- * ILP Peer Info — the kind:10032 content payload this sidecar announces on
- * the Rust edge's behalf. Field names and shapes mirror the retired
- * connector's `IlpPeerInfo` so a kind:10032 consumer (rig, toon-client, any
- * `@toon-protocol/core` parser) needs no changes.
- */
-/**
  * Operator notice (toon#183). A pointer, not the payload — the durable text
  * lives at `url`; this carries only enough for a consumer to decide whether
  * to go read it. Configuration only: this sidecar never composes or infers
@@ -47,6 +41,12 @@ export interface OperatorNotice {
   url: string;
 }
 
+/**
+ * ILP Peer Info — the kind:10032 content payload this sidecar announces on
+ * the Rust edge's behalf. Field names and shapes mirror the retired
+ * connector's `IlpPeerInfo` so a kind:10032 consumer (rig, toon-client, any
+ * `@toon-protocol/core` parser) needs no changes.
+ */
 export interface IlpPeerInfo {
   ilpAddress: string;
   ilpAddresses?: string[];
