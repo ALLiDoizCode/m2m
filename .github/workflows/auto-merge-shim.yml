@@ -1,0 +1,55 @@
+# auto-merge shim — forwards this repo's PR lifecycle events to the central
+# auto-merge pass in toon-meta (toon-meta#285, epic #270).
+#
+# CANONICAL COPY. This file is fanned out VERBATIM to every factory repo as
+# .github/workflows/auto-merge-shim.yml (toon-meta itself needs no shim — its
+# auto-merge.yml carries the same triggers directly). When onboarding a new
+# factory repo, copy this file unchanged; when changing it, change it here
+# first and re-fan-out.
+#
+# All logic (the five merge preconditions, the check-set honesty rule, the
+# native-auto-merge seam, the merge cap) lives ONCE in toon-meta — this shim
+# only decides WHEN to invoke it:
+#   * a check suite completed on a factory branch (sandcastle/ or agent/) —
+#     the PR's gate just finished, the usual moment a PR becomes eligible;
+#   * a review was submitted on a factory PR — the factory-ops APPROVE (#282)
+#     is the precondition that often flips last;
+#   * a PR merged into this repo — under strict protection (#272) that merge
+#     just put every other open PR behind `main`, and updating those branches
+#     is part of the pass.
+#
+# `secrets: inherit` hands the called workflow this repo's FACTORY_OPS_TOKEN
+# (org secret, monitored by toon-meta's factory-ops-credential workflow) —
+# which is both the merge credential and the definition of "approved".
+# Writes are still gated centrally: until the org Actions variable
+# AUTOMERGE_APPLY is 'true', every run is a no-write dry-run report.
+
+name: auto-merge-shim
+
+on:
+  check_suite:
+    types: [completed]
+  pull_request_review:
+    types: [submitted]
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+
+jobs:
+  forward:
+    # Only factory branches matter, and only merged PRs (a plain close changes
+    # nobody's mergeability).
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
+      (github.event_name == 'pull_request_review' && (
+        startsWith(github.event.pull_request.head.ref, 'sandcastle/') ||
+        startsWith(github.event.pull_request.head.ref, 'agent/'))) ||
+      (github.event_name == 'check_suite' && (
+        startsWith(github.event.check_suite.head_branch, 'sandcastle/') ||
+        startsWith(github.event.check_suite.head_branch, 'agent/')))
+    uses: toon-protocol/toon-meta/.github/workflows/auto-merge.yml@main
+    with:
+      repos: ${{ github.repository }}
+    secrets: inherit
