@@ -45,6 +45,12 @@ export interface AnnounceStaticConfig {
    * matching this fleet's only deployed cluster).
    */
   solanaChainId: string;
+  /**
+   * Operator notice (toon#183's `IlpPeerInfo.notice`), sourced straight from
+   * config — never composed or inferred here. `undefined` (the overwhelming
+   * common case) omits the key entirely; see {@link buildAnnouncementInfo}.
+   */
+  notice?: IlpPeerInfo['notice'];
 }
 
 /**
@@ -102,6 +108,7 @@ export function buildAnnouncementInfo(
     ...(Object.keys(routePrices).length > 0 ? { routePrices } : {}),
     ...(identity ? { edgeIdentity: { keyId: identity.keyId, publicKey: identity.publicKey } } : {}),
     routes: { publish: config.routePublish, store: config.routeStore },
+    ...(config.notice ? { notice: config.notice } : {}),
   };
 
   return info;

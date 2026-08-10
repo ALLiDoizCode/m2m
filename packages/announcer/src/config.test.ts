@@ -155,3 +155,68 @@ test('loadConfig: rejects a non-positive refresh interval', () => {
     /positive number/
   );
 });
+
+test('loadConfig: notice is undefined when no ANNOUNCER_NOTICE_* var is set — the common case', () => {
+  const config = loadConfig(baseEnv());
+  assert.equal(config.notice, undefined);
+});
+
+test('loadConfig: a fully configured notice is carried through, defaulting severity to info', () => {
+  const config = loadConfig(
+    baseEnv({
+      ANNOUNCER_NOTICE_ID: 'maintenance-2026-08',
+      ANNOUNCER_NOTICE_SUMMARY: 'Scheduled maintenance this weekend',
+      ANNOUNCER_NOTICE_URL: 'https://example.com/notices/maintenance-2026-08',
+    })
+  );
+  assert.deepEqual(config.notice, {
+    id: 'maintenance-2026-08',
+    severity: 'info',
+    summary: 'Scheduled maintenance this weekend',
+    url: 'https://example.com/notices/maintenance-2026-08',
+  });
+});
+
+test('loadConfig: an explicit ANNOUNCER_NOTICE_SEVERITY overrides the info default', () => {
+  const config = loadConfig(
+    baseEnv({
+      ANNOUNCER_NOTICE_ID: 'fee-change-2026-08',
+      ANNOUNCER_NOTICE_SEVERITY: 'action-required',
+      ANNOUNCER_NOTICE_SUMMARY: 'Route prices are changing',
+      ANNOUNCER_NOTICE_URL: 'https://example.com/notices/fee-change',
+    })
+  );
+  assert.equal(config.notice?.severity, 'action-required');
+});
+
+test('loadConfig: throws when notice config is only partially set', () => {
+  assert.throws(
+    () => loadConfig(baseEnv({ ANNOUNCER_NOTICE_ID: 'only-an-id' })),
+    /ANNOUNCER_NOTICE_ID, ANNOUNCER_NOTICE_SUMMARY and ANNOUNCER_NOTICE_URL must all be set together/
+  );
+  assert.throws(
+    () =>
+      loadConfig(
+        baseEnv({
+          ANNOUNCER_NOTICE_ID: 'partial',
+          ANNOUNCER_NOTICE_SUMMARY: 'missing the url',
+        })
+      ),
+    /must all be set together/
+  );
+});
+
+test('loadConfig: throws on an unrecognized ANNOUNCER_NOTICE_SEVERITY rather than announcing a bad value', () => {
+  assert.throws(
+    () =>
+      loadConfig(
+        baseEnv({
+          ANNOUNCER_NOTICE_ID: 'bad-severity',
+          ANNOUNCER_NOTICE_SEVERITY: 'urgent',
+          ANNOUNCER_NOTICE_SUMMARY: 'summary',
+          ANNOUNCER_NOTICE_URL: 'https://example.com/n',
+        })
+      ),
+    /ANNOUNCER_NOTICE_SEVERITY must be "info" or "action-required"/
+  );
+});
