@@ -100,7 +100,7 @@ rollback means reverting the edit, not the on-chain state.
    side's deposit is a separate read, `participants(bytes32,address)` for that participant, since
    `channels` carries no deposit of its own. Nothing in either box's live config points at it yet,
    so this step is zero-risk to the live peering.
-5. **Quiesce, then edit both configs together.** Let in-flight peer-forwarded traffic drain --
+5. **Quiesce, then edit both configs together.** Let in-flight peer-forwarded traffic drain —
    `flush_interval_ms` is retired (ADR 0033, issue #882; the committed configs no longer set it), so
    there is no periodic flush to wait out, only whatever traffic is genuinely in flight — then, on
    **both** boxes, back up the live file and replace the `[[peer_channels]]` row's three

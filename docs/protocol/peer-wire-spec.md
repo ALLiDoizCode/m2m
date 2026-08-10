@@ -69,7 +69,7 @@ peer's word reintroduces exactly the forgeable-payment hole this rule closes.
 > **Superseded 2026-08-07 by [ADR 0031](../adr/0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md)
 > (issue #868).** A peer PREPARE now arrives **with** its covering claim or is refused with the
 > x402 greeting; a claim no longer trails the fulfilment it covers, as this section describes. Kept
-> for historical record, not current behaviour -- ADR 0031 explains why the trailing model was
+> for historical record, not current behaviour — ADR 0031 explains why the trailing model was
 > right for the world it was written in.
 
 Value is owed only on fulfilment ([ADR 0004](../adr/0004-value-moves-on-fulfilment.md)). When
@@ -246,7 +246,7 @@ Peer-wire REJECTs use the existing RFC-0027 §3.3 codes:
 | `T01`             | The configured next-hop peer is unreachable (stream down).                                                                                        |
 | `F99`/`T99`/`R99` | Application-level reject from the terminating app, passed through unchanged.                                                                      |
 
-`T04_INSUFFICIENT_LIQUIDITY` had exactly one use here -- the exposure ceiling (§5.3) -- and is
+`T04_INSUFFICIENT_LIQUIDITY` had exactly one use here — the exposure ceiling (§5.3) — and is
 retired along with it ([ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md),
 issue #882). `connector_domain::RejectCode::t04_insufficient_liquidity` still exists for wire
 interop (RFC-0027), but nothing in this codebase emits it any more.
@@ -338,7 +338,7 @@ x402 greeting of its own: since issue #880 (ADR 0031) a peer-role PREPARE with n
 with one that does not cover this route's price, is greeted one layer up by the accept pipeline's
 own price-coverage gate (`peer-carriage-spec.md` §3.1) before this check is ever reached.
 
-> `peer-carriage-spec.md` §3.1 stands as originally written above only for its own subject -- a
+> `peer-carriage-spec.md` §3.1 stands as originally written above only for its own subject — a
 > claim-bearing peer-role PREPARE is never negotiated with, only accepted or refused outright. Its
 > claim about "a peer-role PREPARE is never greeted" is itself superseded by ADR 0031/issue #880: a
 > claimless one now is. The exposure-ceiling reference this paragraph made (§5.3, `T04`) is retired

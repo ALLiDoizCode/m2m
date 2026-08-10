@@ -36,8 +36,8 @@
 //! what happens when the two audiences meet in one handler. Here a
 //! client-role request reaches no peer handling at all: its claim is not
 //! judged, no watermark moves, nothing is appended to the peer claim ledger,
-//! and no `Toon-Claim-Ack` is emitted. Falling a
-//! client-role request through to `connector-client-edge` instead of
+//! and no `Toon-Claim-Ack` is emitted. Falling a client-role request
+//! through to `connector-client-edge` instead of
 //! answering it `F02` is the bring-up wiring of issue #678; what §1 requires
 //! of *this* module is that role is decided by the credential and that a
 //! client can never reach peer handling, and that holds either way.

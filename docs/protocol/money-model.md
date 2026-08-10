@@ -401,7 +401,7 @@ What that changed, relative to this document:
 - **Measured (issue #879, PR #895):** the credit window was doing no throughput work the
   covering-claim requirement didn't already also do. `record_inbound_delivery` journalled durably on
   every fulfilment just as a claim's own acceptance did, so keeping both after #880/#881 landed was a
-  second sync for no benefit -- exactly what the bullet above's decision retired.
+  second sync for no benefit — exactly what the bullet above's decision retired.
 
 The model in the sections above described the code before #868; it is not the model in the code
 today. See the banner at the top of this document.

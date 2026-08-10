@@ -4,16 +4,14 @@
 //!
 //! [`PeerView`] has no fields yet because nothing in the runtime tracks
 //! that state yet: no peer transport has landed (ADR 0027, #676).
-//! [`ChannelView`]
-//! gained real fields in #459, once a settlement backend existed for
-//! [`Connector`] to project channel state from. [`ClaimView`] gained real
-//! fields in #423, once `crate::claim::ClaimBook` existed to report on.
-//! [`Connector`]'s accessor for the still-empty
-//! [`PeerView`] returns an empty list until #676 lands; the operator
-//! surface is already complete as an interface; that ticket only needs to
-//! start populating it. An `ExposureView` existed from #424 until ADR
-//! 0031/ADR 0033 (issue #882) retired the credit-window accounting it
-//! reported.
+//! [`ChannelView`] gained real fields in #459, once a settlement backend
+//! existed for [`Connector`] to project channel state from. [`ClaimView`]
+//! gained real fields in #423, once `crate::claim::ClaimBook` existed to
+//! report on. [`Connector`]'s accessor for the still-empty [`PeerView`]
+//! returns an empty list until #676 lands; the operator surface is already
+//! complete as an interface; that ticket only needs to start populating
+//! it. An `ExposureView` existed from #424 until ADR 0031/ADR 0033 (issue
+//! #882) retired the credit-window accounting it reported.
 
 use chrono::{DateTime, Utc};
 use connector_settlement::{ChannelState, ChannelStatus};

@@ -235,8 +235,8 @@ packet there is no claimless packet left for P1 to cover. The disposition of the
 itself — `record_inbound_delivery`, `ceiling`, `flush_interval_ms` — was
 [issue #882](https://github.com/toon-protocol/connector/issues/882)'s, not this document's: it landed
 as removal, not restatement ([ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md)).
-The three names above no longer exist in `crates/` -- `ceiling`/`flush_interval_ms` are parsed only
-as removed-field traps -- and are described above only as the historical shape P1's justification
+The three names above no longer exist in `crates/` — `ceiling`/`flush_interval_ms` are parsed only
+as removed-field traps — and are described above only as the historical shape P1's justification
 argued from.
 
 ### 1.3 What MUST NOT enter the decision
@@ -402,7 +402,8 @@ following is classified `client` and reaches no peer handling whatsoever:
    configured.
 
 "Reaches no peer handling" is testable as: no peer watermark moved, nothing was appended to the
-peer claim ledger, no peer-relation exposure changed, and no `claim-ack` was emitted.
+peer claim ledger, and no `claim-ack` was emitted. (Before ADR 0033 this list also named
+peer-relation exposure, which no longer exists to change.)
 
 ### 1.10 The dedicated-listener fallback
 
@@ -662,7 +663,7 @@ requirements:
 **Retired 2026-08-10 by [ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md)
 (issue #882).** `peer-wire-spec.md` §5.3 no longer describes live behaviour: exposure is not
 tracked, `ceiling` is not live configuration, and no PREPARE is ever rejected `T04`. The
-accept-only HTTP peering's ceiling configuration obligation (§6.4, §11) is retired with it -- an
+accept-only HTTP peering's ceiling configuration obligation (§6.4, §11) is retired with it — an
 accept-only peering now loads with no ceiling-shaped config at all, bounded only by the
 covering-claim requirement every peering already carries (ADR 0031).
 
@@ -709,9 +710,13 @@ Therefore, normatively:
   for a malformed request or a connector fault, i.e. cases where there is no ILP answer at all.
 - A rejected claim MUST NOT change the packet's own outcome, its `accumulatedCost`, or its fee
   accounting.
-- The **consequence** is unchanged and is policy above the carriage: the payee now holds unclaimed
-  exposure it cannot account for, and SHOULD stop forwarding to that peer until a valid claim
-  restores the watermark (`peer-wire-spec.md` §3.4, §5.3).
+- The **consequence** is policy above the carriage: the payee's watermark did not advance, so it
+  holds no claim covering what that peer's packets asked of it, and it SHOULD stop forwarding to
+  that peer until a valid claim restores the watermark (`peer-wire-spec.md` §3.4). The exposure
+  accounting that used to quantify this is retired
+  ([ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md), issue #882, with
+  `peer-wire-spec.md` §5.3); the SHOULD above is unchanged by that and is now the whole of the
+  consequence.
 
 A `claim-ack` MUST NOT appear on a response answering a frame that carried no claim. If one
 arrives there it MUST be ignored.
@@ -724,8 +729,9 @@ compensating rules are the sharpest new requirements in this document.
 
 **Absence.** A response answering a claim-bearing request that carries **no** `claim-ack` /
 `Toon-Claim-Ack` means **NOT ACKNOWLEDGED**. Never accepted, never rejected, never inferred from
-the packet's verdict. The claim stays pending, the flush timer keeps running, and the payer's own
-exposure accounting is unchanged. A malformed ack — undecodable JSON, an unknown `result`, an
+the packet's verdict. The claim stays pending until the retransmission deadline below — there is
+no flush timer to keep running, and no exposure accounting to disturb, since ADR 0033 (issue #882)
+retired both. A malformed ack — undecodable JSON, an unknown `result`, an
 unknown `reason`, a `rejected` with no `reason` — is likewise **not acknowledged**, and MUST NOT be
 read as either verdict.
 
@@ -759,7 +765,7 @@ the payer, so retransmission is required and must be safe:
 - A payee that receives a claim whose `(channel, nonce, cumulative, signature)` is **byte-identical
   to the claim already at its current watermark** MUST answer `{"result":"accepted"}`, MUST NOT
   answer `nonce_not_advancing`, and MUST NOT advance or record anything (there is nothing to
-  advance — the exposure covered is identical).
+  advance — the cumulative amount covered is identical).
 - A claim at the **same nonce** but differing in any other field is a _different_ claim and MUST be
   refused `nonce_not_advancing`, exactly as §3.2's strictly-advancing rule requires.
 
@@ -776,7 +782,7 @@ direction; debt flows in the direction packets flow (`peer-wire-spec.md` §3.2 �
 therefore on a one-way-dialed HTTP peering the dialing side is structurally the payer and the
 accept-only side is structurally the payee.**
 
-Three consequences, in the order an operator meets them -- the third retired by
+Three consequences, in the order an operator meets them — the third retired by
 [ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md) (issue #882):
 
 1. **The peering is unidirectional for packets.** The accept-only side can never forward a packet
@@ -788,7 +794,7 @@ Three consequences, in the order an operator meets them -- the third retired by
    that peer — because it could dial earlier and can no longer, or its configured endpoint is
    unreachable — it **cannot send the FLUSH at all**. The claim stays pending until it can dial
    again. `flushIntervalMs` no longer exists as configuration (ADR 0033), and the ceiling that used
-   to bound its counterparty during that window is retired with it -- every peer PREPARE this
+   to bound its counterparty during that window is retired with it — every peer PREPARE this
    connector admits still requires its own covering claim (ADR 0031) regardless of this case.
 3. ~~**The ceiling is the accept-only payee's only real bound, and MUST be explicit.**~~ **Retired**
    (ADR 0033, issue #882). An accept-only peering now loads with no ceiling-shaped config at all;
@@ -809,7 +815,7 @@ Toon-Flush-Requested: 0x3f2a…    # the channel id, canonical form per §4.1
 - A payer with **no** pending claim for the named channel, or that does not recognise the channel,
   MUST ignore the header. It MUST NOT be answered, acknowledged, or error on.
 - **It creates no obligation.** A payee MUST NOT refuse traffic, reject a packet, or change any
-  accounting because a hint went unanswered -- nothing does (ADR 0033 retired the ceiling that
+  accounting because a hint went unanswered — nothing does (ADR 0033 retired the ceiling that
   used to). A payer that ignores every hint is not in violation of this specification.
 - A payee MUST NOT set it on a response to a **client** interaction, and a connector MUST ignore it
   on a client-role response.
@@ -1204,8 +1210,10 @@ not the claim ack as a field, not role-by-auth, not the deletion of the raw-TCP 
 
 This specification uses exactly the vocabulary of `CONTEXT.md` (connector, app, packet, route,
 client edge, claim, nonce, watermark, exposure, ceiling, flush, in flight, projection, settlement,
-fee, minimum delivery, probe), adding **carriage**, **expose**, **dial** and **peering relation**
-as defined in §0.1 and §2 — the first three from ADR 0027, the fourth already implicit in
+fee, minimum delivery, probe — of which _exposure_, _ceiling_ and _flush_ are retired terms per
+[ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md) and appear above only in
+clauses marked retired or historical), adding **carriage**, **expose**, **dial** and **peering
+relation** as defined in §0.1 and §2 — the first three from ADR 0027, the fourth already implicit in
 `peer-wire-spec.md` §3.3's "per peering relation".
 
 It implements [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md)

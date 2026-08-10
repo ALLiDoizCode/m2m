@@ -9,7 +9,7 @@
 > 0027 names: on a peering where only one side dials, the non-dialing side cannot FLUSH. Before
 > [ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md) (issue #882) this also
 > meant setting a lower exposure ceiling instead of relying on `flushIntervalMs`; both are retired
-> along with the credit window they bounded -- every peer PREPARE now carries its own covering
+> along with the credit window they bounded — every peer PREPARE now carries its own covering
 > claim (ADR 0031) regardless of which side dials.
 
 Operator runbook for
@@ -436,7 +436,7 @@ one of the four).
 
 1. Delete `peer_wire_addr`. Decide what this node should expose and write `peer_expose`.
 2. Replace each `[[peers]].addr` with an `endpoint` URL, or delete it for an accept-only peering.
-   Delete any `ceiling`/`flush_interval_ms` lines too -- both are retired (ADR 0033) and setting
+   Delete any `ceiling`/`flush_interval_ms` lines too — both are retired (ADR 0033) and setting
    either is now a named load-time error, not a default.
 3. Add a `credential` to every peering, and share the secret with the counterparty out of band. On
    a deployed node write it as `secret_file` and put the file on the box, so the peering itself can

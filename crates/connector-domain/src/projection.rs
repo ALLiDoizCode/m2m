@@ -16,8 +16,7 @@ use std::collections::BTreeMap;
 
 /// One durably-recorded fact about money state (ADR 0005). Everything else
 /// -- a peer's owed balance -- is re-derived by folding a sequence of these
-/// with [`Projection::apply`], never stored
-/// directly.
+/// with [`Projection::apply`], never stored directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JournalEntry {
     /// This connector signed an outbound claim owed to `peer_id` on

@@ -91,8 +91,8 @@ struct OperatorState {
 }
 
 /// Mount the operator surface's read-only half at `connector`: `GET`
-/// endpoints for peers, routes, channels, claims, node identity
-/// and the write audit log, each requiring the bearer token
+/// endpoints for peers, routes, channels, claims, node identity and the
+/// write audit log, each requiring the bearer token
 /// `bearer_token` and nothing more (ADR 0008). `write_keys` is the
 /// allowlist of ed25519 public keys permitted to sign a write once a
 /// write endpoint lands (issue #421); removing a key from this list and

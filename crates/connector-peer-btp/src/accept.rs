@@ -41,8 +41,8 @@
 //!
 //! §1.9's named regression is testable as: a client-role interaction moves
 //! no peer watermark, appends nothing to the peer claim ledger, and gets no
-//! `claim-ack`. Here a client-role
-//! session reaches none of the peer pipeline at all -- its packets are
+//! `claim-ack`. Here a client-role session reaches none of the peer
+//! pipeline at all -- its packets are
 //! answered `F02` and its claims are not judged. Composing this carriage
 //! onto the *shared* client listener, so that a client-role session falls
 //! through to `connector-client-edge` instead, is the bring-up wiring of

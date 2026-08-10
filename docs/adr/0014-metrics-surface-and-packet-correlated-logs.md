@@ -31,7 +31,7 @@ reporting non-zero.
 > (issue #882) retired the exposure projection this gauge was shaped for before it was ever wired
 > up; `ExposureView` and the operator surface's `GET /exposure` are gone with it. The gauge itself
 > is kept at its decided name for scrape-config stability, but it is now permanently zero with no
-> producer, not "zero until" -- the shape-first precedent held for `toon_settlement_total`, not for
+> producer, not "zero until" — the shape-first precedent held for `toon_settlement_total`, not for
 > this one.
 
 **Why metrics live behind the operator surface's bearer token rather than an unauthenticated

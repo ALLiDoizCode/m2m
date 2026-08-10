@@ -2,7 +2,7 @@
 
 > **The exposure ceiling and `T04` this ADR references throughout as already-existing, unaffected
 > machinery are retired** by [ADR 0033](0033-the-exposure-machinery-is-retired-not-restated.md)
-> (issue #882). This ADR's own decision -- the per-packet `F03` price-coverage check -- is untouched
+> (issue #882). This ADR's own decision — the per-packet `F03` price-coverage check — is untouched
 > and still stands; only its citations of the ceiling as a _separate, still-live_ mechanism are now
 > historical.
 
