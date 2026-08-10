@@ -388,6 +388,32 @@ struct OutboundClientHop {
     /// RECEIVER is the authority on its own watermark (see
     /// `crate::outbound_client`'s header); nothing local substitutes.
     claim_state: Arc<dyn ClaimStateSource>,
+    /// This channel's EIP-712 signing domain (issue #881): operator
+    /// config, the same way [`ClaimBook::set_channel_domain`] is for the
+    /// peer role on the very same channel -- a node that opened this
+    /// channel already knows which `TokenNetwork` it was deployed under,
+    /// so this is a configured input, not a guess. Used only to COVER a
+    /// forward proactively, before any greeting exists to read a domain
+    /// off of; [`Connector::cover_greeted_packet`]'s reactive retry still
+    /// reads the domain from the peer's own greeting, deliberately.
+    domain: EvmDomain,
+}
+
+/// What [`Connector::cover_forward`] found when asked to cover a forward to
+/// a peer from the outbound client ledger (issue #881).
+enum CoverOutcome {
+    /// No [`Connector::with_outbound_client_hop`] is configured for this
+    /// peer at all -- the packet proceeds under the peer ledger's own
+    /// postpay convention (ADR 0004), entirely unaffected by #881.
+    NotConfigured,
+    /// A claim covering the packet's own forwarded value, ready to ride
+    /// the outgoing PREPARE.
+    Covered(WireClaim),
+    /// A hop IS configured, but no claim could be produced -- `reason`
+    /// names why. The caller must fail the packet rather than emit it
+    /// uncovered: a hop with covering turned on is either covered or
+    /// refused, never silently downgraded.
+    Failed(String),
 }
 
 /// [`Connector`]'s default probe rate limit absent
@@ -472,10 +498,19 @@ impl Connector {
     /// -- a peer that answers a forward with x402 terms simply gets its
     /// refusal relayed: there is nothing to pay it with, and a packet is
     /// never emitted claiming to have paid when it has not.
+    ///
+    /// Configuring a hop here also switches [`Connector::forward_via_peer_route`]
+    /// (issue #881) to cover **every** packet forwarded to `peer_id` from
+    /// this ledger proactively, rather than waiting for a `pending_claim`
+    /// watermark the peer ledger's own postpay convention (ADR 0004) would
+    /// otherwise arm. A hop this is never called for is entirely
+    /// unaffected: it keeps riding `pending_claim` exactly as before this
+    /// method existed.
     pub fn with_outbound_client_hop(
         mut self,
         peer_id: impl Into<String>,
         channel_id: impl Into<String>,
+        domain: EvmDomain,
         claim_state: Arc<dyn ClaimStateSource>,
     ) -> Result<Self, InvalidChannelId> {
         let channel_id = channel_id.into();
@@ -489,6 +524,7 @@ impl Connector {
                 // watermarks at the far gate.
                 channel_id: format!("0x{}", hex_lower(&channel)),
                 claim_state,
+                domain,
             },
         );
         Ok(self)
@@ -1073,37 +1109,50 @@ impl Connector {
         response
     }
 
-    /// Forward `prepare` to `peer_route`'s peer, piggybacking whatever
-    /// claim this connector currently owes it (issue #423, peer-wire-spec.md
-    /// §3.2), and -- only once the answer is a genuine fulfilment, verified
-    /// against `prepare`'s own execution condition -- record a fresh claim
-    /// for the value now owed (ADR 0004: value moves on fulfilment, never
-    /// on a forward that merely returned a fulfillment-shaped answer).
+    /// Forward `prepare` to `peer_route`'s peer, covering it from the
+    /// outbound CLIENT ledger when this hop is configured for that (issue
+    /// #881), or piggybacking whatever claim this connector currently owes
+    /// it on the peer ledger otherwise (issue #423, peer-wire-spec.md
+    /// §3.2). Only once the answer is a genuine fulfilment, verified
+    /// against `prepare`'s own execution condition, and only when the
+    /// packet was NOT already covered by a client-role claim, does a fresh
+    /// peer-ledger claim get recorded for the value now owed (ADR 0004:
+    /// value moves on fulfilment, never on a forward that merely returned a
+    /// fulfillment-shaped answer) -- ADR 0004 having been inverted for a
+    /// hop covering proactively (issue #868): value and its covering claim
+    /// travel together on the SAME PREPARE there, not on the fulfilment
+    /// that follows it.
     ///
-    /// # The retry arm (issue #875)
+    /// # Proactive covering (issue #881), and the retry arm it replaced
     ///
-    /// `pending_claim` is armed only by a *previous* fulfilment
-    /// (`ClaimBook::record_fulfillment`) and is cleared the moment that
-    /// claim is acknowledged, so on a healthy, fully-acked link the next
-    /// packet out carries nothing. A next hop this connector has no matched
-    /// peering credential with answers that packet with the x402 greeting
-    /// (`payment-required`), and before #875 the refusal was simply relayed:
-    /// the link could never bootstrap.
+    /// Before #881, the claim riding the first attempt was always
+    /// `pending_claim` -- armed only by a *previous* fulfilment
+    /// (`ClaimBook::record_fulfillment`) and cleared the moment that claim
+    /// was acknowledged, so on a healthy, fully-acked link the next packet
+    /// out carried nothing. A next hop enforcing #868's "every peer packet
+    /// carries a covering claim" rule would refuse that packet outright.
     ///
-    /// So a greeted forward is retried **once**, carrying a claim minted
-    /// against the receiver's own watermark from the outbound client ledger
-    /// (issue #873). Once, deliberately: a second greeting after a covering
-    /// claim is a disagreement about the terms -- the price moved, the
-    /// channel is not one the far side judges, the claim did not clear its
-    /// gate -- and re-covering it in a loop would sign a fresh claim per
-    /// attempt against a hop that has already refused one.
+    /// So [`Connector::cover_forward`] is tried FIRST, for exactly this
+    /// packet's own forwarded value: a hop configured via
+    /// [`Connector::with_outbound_client_hop`] gets a fresh claim from the
+    /// outbound client ledger (issue #873) minted and attached before the
+    /// packet is ever sent -- covered from the first attempt, including the
+    /// first attempt after a restart, never merely recovered after a
+    /// refusal. A hop with no such config is unaffected and keeps riding
+    /// `pending_claim` exactly as before this method existed. If a
+    /// configured hop's claim cannot be produced at all (no signer, no
+    /// headroom, a receiver that will not report its watermark), the
+    /// packet fails right there naming the hop and the reason -- it is
+    /// never emitted uncovered as a fallback.
     ///
-    /// Cost: the retry arm adds nothing at all to a forward the peer does
-    /// not greet (no extra call, no extra `fdatasync`). A greeted forward
-    /// costs one round trip more, plus the single durable nonce reservation
-    /// `OutboundClientLedger::next_claim` makes (issue #879 measured the
-    /// forwarded-packet path at 3.00 `fdatasync`/packet with exposure
-    /// accounting on; this is a fourth **only on packets that are greeted**).
+    /// The retry arm issue #875 added is kept, narrowed to what it is now
+    /// actually for: a covered packet the peer STILL greets is a
+    /// disagreement about the terms (the price moved, the claim did not
+    /// clear the far gate) rather than the routine case, and is retried
+    /// **once** with a claim minted against the peer's own quoted price
+    /// from its greeting -- the authoritative figure in a disagreement,
+    /// where this hop's own idea of the forwarded value is not. A second
+    /// greeting after that is a failure, not a second retry.
     async fn forward_via_peer_route(
         &self,
         peer_route: &PeerRoute,
@@ -1131,26 +1180,44 @@ impl Connector {
             ..prepare
         };
         let peer_id = peer_route.peer_id();
-        let pending_claim = self.claims.pending_claim(peer_id);
+
+        // Issue #881: a hop configured for client-role covering is covered
+        // proactively, from this packet's own forwarded value -- never
+        // falling back to an uncovered send when it cannot be. A hop with
+        // no such config keeps riding the peer ledger's `pending_claim`,
+        // untouched.
+        let (mut covered, first_claim, pending_claim) =
+            match self.cover_forward(peer_id, forwarded_amount).await {
+                CoverOutcome::Covered(claim) => (true, Some(claim), None),
+                CoverOutcome::NotConfigured => {
+                    let pending = self.claims.pending_claim(peer_id);
+                    (false, pending.clone(), pending)
+                }
+                CoverOutcome::Failed(reason) => {
+                    tracing::warn!(
+                        peer_id,
+                        %reason,
+                        "refusing to forward to this peer uncovered -- a covering claim could \
+                         not be produced"
+                    );
+                    return PacketResponse::Reject(Reject {
+                        code: RejectCode::t00_internal_error(),
+                        triggered_by: String::new(),
+                        message: format!("cannot cover a peer PREPARE to '{peer_id}': {reason}"),
+                        data: Vec::new(),
+                        accumulated_cost: 0,
+                    });
+                }
+            };
         let mut answer = self
             .peer_transport
-            .forward(
-                peer_id,
-                outgoing.clone(),
-                minimum_delivery,
-                pending_claim.clone(),
-            )
+            .forward(peer_id, outgoing.clone(), minimum_delivery, first_claim)
             .await;
         if let Some(claim) = pending_claim {
             self.claims
                 .acknowledge_outbound(peer_id, claim.nonce, answer.ack);
         }
 
-        // Issue #875. `covered` is set the moment a covering claim is
-        // SIGNED AND SENT, not when the retry succeeds: the value is
-        // committed to the outbound client ledger either way, and it is what
-        // stops the peer ledger being charged for the same packet below.
-        let mut covered = false;
         if let Some(terms) = answer.payment_required.take() {
             if let Some(covering) = self.cover_greeted_packet(peer_id, &terms).await {
                 tracing::info!(
@@ -1208,6 +1275,63 @@ impl Connector {
                 PacketResponse::Reject(reject)
             }
         }
+    }
+
+    /// Cover a forward to `peer_id` for exactly `amount` -- the value THIS
+    /// packet forwards -- from the outbound CLIENT ledger (issue #873),
+    /// before the packet is ever sent (issue #881). Mirrors
+    /// [`Connector::cover_greeted_packet`]'s mechanism but never reads a
+    /// greeting: `amount` and [`OutboundClientHop::domain`] are both known
+    /// locally, which is exactly what lets this run proactively rather
+    /// than only once a refusal has already taught this node a price.
+    async fn cover_forward(&self, peer_id: &str, amount: u64) -> CoverOutcome {
+        let Some(hop) = self.outbound_client_hops.get(peer_id) else {
+            // Never configured for client-role covering: the peer ledger's
+            // own postpay convention (ADR 0004) is untouched by #881.
+            return CoverOutcome::NotConfigured;
+        };
+        let Some(ledger) = self.outbound_client.as_ref() else {
+            return CoverOutcome::Failed(
+                "a client-role channel is configured for this peer but this node has no \
+                 outbound client ledger to sign from"
+                    .to_string(),
+            );
+        };
+        let Some(signer) = self.claims.signer() else {
+            return CoverOutcome::Failed(
+                "this node has no settlement signer to sign a claim with".to_string(),
+            );
+        };
+
+        let claim = match ledger
+            .next_claim(
+                peer_id,
+                hop.claim_state.as_ref(),
+                &hop.channel,
+                &hop.domain,
+                signer.as_ref(),
+                amount,
+            )
+            .await
+        {
+            Ok(claim) => claim,
+            Err(error) => return CoverOutcome::Failed(error.to_string()),
+        };
+        // The wire carries `cumulative_amount` as a `uint64` (§4.2); see
+        // the matching check in `cover_greeted_packet` for why this is
+        // refused rather than truncated.
+        let Ok(cumulative_amount) = u64::try_from(claim.cumulative) else {
+            return CoverOutcome::Failed(format!(
+                "the covering claim's cumulative amount {} does not fit the wire's uint64",
+                claim.cumulative
+            ));
+        };
+        CoverOutcome::Covered(WireClaim {
+            channel_id: hop.channel_id.clone(),
+            nonce: claim.nonce,
+            cumulative_amount,
+            signature: ClaimSignature::Evm(claim.signature),
+        })
     }
 
     /// Sign a claim covering the terms `peer_id` just quoted, ready to ride
@@ -3300,6 +3424,19 @@ mod tests {
             }
         }
 
+        /// [`test_channel_domain`]'s facts, as the [`EvmDomain`]
+        /// `with_outbound_client_hop` (issue #881) takes as operator
+        /// config rather than reads off a greeting -- the same chain id
+        /// and `TokenNetwork` a channel's peer-role domain carries, since
+        /// both roles sign against the very same on-chain channel.
+        fn test_channel_evm_domain() -> EvmDomain {
+            let domain = test_channel_domain();
+            EvmDomain {
+                chain_id: domain.chain_id,
+                token_network: domain.token_network_address,
+            }
+        }
+
         /// A first hop routing `g.example.app` to `second-hop`, holding
         /// BOTH roles for that hop: the peer role (`with_peer_claim_channel`,
         /// ADR 0004's post-pay claim) and the client role (`#875`'s ledger
@@ -3323,7 +3460,12 @@ mod tests {
             .with_channel_domain(test_channel_id(1), test_channel_domain())
             .expect("test_channel_id(1) is a valid on-chain channel id")
             .with_outbound_client_ledger(ledger)
-            .with_outbound_client_hop("second-hop", test_channel_id(1), receiver)
+            .with_outbound_client_hop(
+                "second-hop",
+                test_channel_id(1),
+                test_channel_evm_domain(),
+                receiver,
+            )
             .expect("test_channel_id(1) is a valid on-chain channel id")
         }
 
@@ -3335,38 +3477,102 @@ mod tests {
             (dir, ledger)
         }
 
-        /// **The test that proves the hole is closed.** The link is
-        /// healthy and fully acked -- a previous fulfilment armed a claim
-        /// and the peer acknowledged it -- so `pending_claim` is `None` and
-        /// the packet goes out carrying nothing, exactly as it does today.
-        /// Before #875 the greeting that answers it was simply relayed and
-        /// the packet failed. Now it is covered from the outbound client
-        /// ledger and retried, and the forward succeeds.
+        /// **The test that proves the hole is closed.** N consecutive
+        /// forwards over a healthy link -- nothing is ever pending on the
+        /// peer ledger in this test at all, so before #881 the old
+        /// `pending_claim`-first design would have sent every single one
+        /// of these uncovered -- each carry their OWN covering claim from
+        /// the FIRST attempt: no round trip is ever spent discovering a
+        /// refusal before this node pays.
         #[tokio::test]
-        async fn a_fully_acked_link_still_forwards_because_the_retry_arm_covers_the_packet() {
+        async fn n_consecutive_forwards_over_a_healthy_link_each_carry_their_own_covering_claim() {
             let (sealed, shared_secret) = sealed_prepare(b"hello");
             let peer = GreetingPeer::new(expected_fulfillment(&shared_secret));
             let receiver = StandingWatermark::at(7, 7_000);
             let (_dir, ledger) = ledger();
             let connector = first_hop(peer.clone(), receiver, ledger.clone());
 
-            // The acked link: a claim armed by an earlier fulfilment, and
-            // acknowledged, which is what clears `pending_claim`.
-            let armed = connector
-                .claims
-                .record_fulfillment("second-hop", 500, connector.clock.now())
-                .expect("a configured channel arms a claim on fulfilment");
-            connector.claims.acknowledge_outbound(
-                "second-hop",
-                armed.nonce,
-                ClaimAckOutcome::Accepted,
-            );
-            assert!(
-                connector.claims.pending_claim("second-hop").is_none(),
-                "the hole this ticket closes: an acked link owes nothing, so the next packet \
-                 out would carry nothing"
-            );
+            const N: u64 = 3;
+            for _ in 0..N {
+                let response = connector
+                    .handle_prepare(
+                        Prepare {
+                            amount: PACKET_AMOUNT,
+                            ..sealed.clone()
+                        },
+                        0,
+                    )
+                    .await;
+                assert!(
+                    matches!(response, PacketResponse::Fulfill(_)),
+                    "a proactively covered forward must fulfil, got {response:?}"
+                );
+            }
 
+            let seen = peer.seen();
+            assert_eq!(
+                seen.len(),
+                N as usize,
+                "no retries: every one of the N attempts was covered and fulfilled on its first try"
+            );
+            for (index, claim) in seen.iter().enumerate() {
+                let claim = claim.as_ref().unwrap_or_else(|| {
+                    panic!("packet {index} was emitted uncovered -- exactly the hole #881 closes")
+                });
+                assert_eq!(claim.channel_id, test_channel_id(1));
+                assert_eq!(
+                    claim.nonce,
+                    8 + index as u64,
+                    "nonces advance one per packet, starting above the receiver's watermark"
+                );
+                assert_eq!(
+                    claim.cumulative_amount,
+                    7_000 + PACKET_AMOUNT,
+                    "each claim covers this node's own forwarded value over the receiver's \
+                     watermark, not merely the peer's quoted price"
+                );
+            }
+            assert_eq!(ledger.issued_nonce("second-hop"), 7 + N);
+        }
+
+        /// The first packet after a restart is covered too -- not just
+        /// packets after the process has already signed one (issue #881's
+        /// own acceptance). A restart reopens the SAME ledger file with a
+        /// fresh, empty in-memory book, which is exactly what proves the
+        /// nonce floor on disk -- not anything this process remembers --
+        /// is what makes the first forward proactive rather than merely
+        /// "warmed up".
+        #[tokio::test]
+        async fn the_first_forward_after_a_restart_is_covered() {
+            let (sealed, shared_secret) = sealed_prepare(b"hello");
+            let receiver = StandingWatermark::at(5, 5_000);
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("outbound-client.log");
+
+            // A prior process's ledger, over the same file, signs one claim
+            // and exits -- nothing in memory survives it.
+            {
+                let ledger = Arc::new(OutboundClientLedger::open(&path).expect("open"));
+                let peer = GreetingPeer::new(expected_fulfillment(&shared_secret));
+                let connector = first_hop(peer.clone(), receiver.clone(), ledger.clone());
+                let response = connector
+                    .handle_prepare(
+                        Prepare {
+                            amount: PACKET_AMOUNT,
+                            ..sealed.clone()
+                        },
+                        0,
+                    )
+                    .await;
+                assert!(matches!(response, PacketResponse::Fulfill(_)));
+                assert_eq!(ledger.issued_nonce("second-hop"), 6);
+            }
+
+            // The restart: a fresh ledger, over the same file, in a fresh
+            // connector.
+            let ledger = Arc::new(OutboundClientLedger::open(&path).expect("reopen"));
+            let peer = GreetingPeer::new(expected_fulfillment(&shared_secret));
+            let connector = first_hop(peer.clone(), receiver, ledger);
             let response = connector
                 .handle_prepare(
                     Prepare {
@@ -3379,29 +3585,26 @@ mod tests {
 
             assert!(
                 matches!(response, PacketResponse::Fulfill(_)),
-                "the covered retry must fulfil, got {response:?}"
+                "the first forward after a restart must still be covered, got {response:?}"
             );
             let seen = peer.seen();
-            assert_eq!(seen.len(), 2, "one forward and exactly one retry");
-            assert!(
-                seen[0].is_none(),
-                "the first attempt carries nothing -- that is the hole"
-            );
-            let covering = seen[1]
-                .as_ref()
-                .expect("the retry carries a covering claim");
-            assert_eq!(covering.channel_id, test_channel_id(1));
             assert_eq!(
-                (covering.nonce, covering.cumulative_amount),
-                (8, 7_000 + PRICE),
-                "the claim advances the RECEIVER's watermark by the quoted price"
+                seen.len(),
+                1,
+                "covered from the first attempt -- no retry needed"
             );
-            assert_eq!(ledger.issued_nonce("second-hop"), 8);
+            let claim = seen[0]
+                .as_ref()
+                .expect("the first packet after a restart must not be emitted uncovered");
+            assert_eq!(
+                claim.nonce, 7,
+                "the restart resumes above every nonce ever issued, never reusing one"
+            );
         }
 
         /// One retry, never a loop: a peer that keeps demanding payment
-        /// gets exactly one covered attempt, and its second refusal is the
-        /// answer.
+        /// despite an already-covering claim gets exactly one recovery
+        /// attempt, and its second refusal is the answer.
         #[tokio::test]
         async fn a_second_payment_required_is_a_failure_rather_than_a_second_retry() {
             let (sealed, shared_secret) = sealed_prepare(b"hello");
@@ -3428,19 +3631,18 @@ mod tests {
             assert_eq!(
                 peer.seen().len(),
                 2,
-                "bounded: the original forward and exactly one retry"
+                "bounded: the proactively covered attempt and exactly one recovery retry"
             );
             assert_eq!(
                 ledger.issued_nonce("second-hop"),
-                1,
-                "one covering claim was signed, not one per attempt"
+                2,
+                "one claim for the proactive attempt, one more for the one bounded retry"
             );
         }
 
-        /// No double-spend, part one: a packet paid for as a client is not
-        /// owed a second time as a peer. The outbound client ledger advances
-        /// exactly once, and no peer-role claim is armed for the same
-        /// packet.
+        /// No double-spend: a proactively covered forward advances the
+        /// outbound client ledger exactly once, and no peer-role claim is
+        /// armed for the same packet.
         #[tokio::test]
         async fn a_covered_forward_advances_one_ledger_once_and_the_other_not_at_all() {
             let (sealed, shared_secret) = sealed_prepare(b"hello");
@@ -3477,13 +3679,14 @@ mod tests {
             );
         }
 
-        /// No double-spend, part two: a retry that still fails skips a
-        /// nonce and nothing else. The next claim is signed at a strictly
-        /// higher nonce (never a reissue, which the far side would refuse as
-        /// a replay) and is still priced off the receiver's own watermark,
-        /// so the value the failed attempt would have moved is not lost.
+        /// No double-spend, part two: even a fully failed forward --
+        /// proactive cover refused, recovery retry refused too -- only
+        /// ever skips nonces, and the value it would have moved is never
+        /// lost: a fresh attempt against a peer that now accepts payment
+        /// succeeds proactively, at a strictly higher nonce, still priced
+        /// off whatever the receiver reports.
         #[tokio::test]
-        async fn a_failed_retry_skips_a_nonce_rather_than_burning_the_ledger() {
+        async fn a_failed_forward_skips_nonces_rather_than_burning_the_ledger() {
             let (sealed, shared_secret) = sealed_prepare(b"hello");
             let mut peer = GreetingPeer::new(expected_fulfillment(&shared_secret));
             Arc::get_mut(&mut peer).expect("sole owner").always_greets = true;
@@ -3501,14 +3704,25 @@ mod tests {
                 )
                 .await;
             assert!(matches!(refused, PacketResponse::Reject(_)));
-            let burned = peer.seen()[1]
+            let seen = peer.seen();
+            let proactive = seen[0]
+                .as_ref()
+                .expect("the proactive attempt did carry a claim");
+            let burned = seen[1]
                 .as_ref()
                 .expect("the failed retry did carry a claim")
                 .clone();
-            assert_eq!(burned.nonce, 12);
+            assert!(
+                burned.nonce > proactive.nonce,
+                "the retry must burn a strictly higher nonce than the proactive attempt: \
+                 {} vs {}",
+                burned.nonce,
+                proactive.nonce
+            );
 
-            // The receiver never recorded that claim -- it is still where it
-            // was. A second attempt, against a peer that now takes payment.
+            // The receiver never recorded either claim -- it is still where
+            // it was. A second attempt, against a peer that now takes
+            // payment, succeeds proactively on the first try.
             let peer = GreetingPeer::new(expected_fulfillment(&shared_secret));
             let connector = first_hop(peer.clone(), receiver.clone(), ledger.clone());
             let response = connector
@@ -3522,9 +3736,15 @@ mod tests {
                 .await;
 
             assert!(matches!(response, PacketResponse::Fulfill(_)));
-            let covering = peer.seen()[1]
+            let seen = peer.seen();
+            assert_eq!(
+                seen.len(),
+                1,
+                "covered proactively -- no retry needed this time"
+            );
+            let covering = seen[0]
                 .as_ref()
-                .expect("the retry carries a covering claim")
+                .expect("the proactive claim covers it")
                 .clone();
             assert!(
                 covering.nonce > burned.nonce,
@@ -3534,18 +3754,20 @@ mod tests {
             );
             assert_eq!(
                 covering.cumulative_amount,
-                11_000 + PRICE,
-                "still priced off the receiver's watermark, so the failed attempt cost nothing \
-                 but a nonce"
+                11_000 + PACKET_AMOUNT,
+                "priced off the receiver's watermark advanced by this node's own forwarded \
+                 value, so the failed attempts cost nothing but two nonces"
             );
         }
 
-        /// The unpaid path is untouched: a peer that demands nothing sees
-        /// exactly one forward, the client ledger is never consulted, and
-        /// the peer-role claim ADR 0004 arms on fulfilment is armed exactly
-        /// as before.
+        /// Interop (issue #881's own acceptance): a receiver that has not
+        /// taken #868/#880 and demands no payment at all still gets the
+        /// default covering claim -- attaching one is harmless to a
+        /// receiver that never asked for it, and this hop is configured
+        /// for client-role covering regardless of what any one receiver
+        /// currently enforces.
         #[tokio::test]
-        async fn a_peer_that_demands_no_payment_sees_one_forward_and_an_untouched_client_ledger() {
+        async fn a_peer_that_demands_no_payment_still_gets_the_default_covering_claim() {
             let (sealed, shared_secret) = sealed_prepare(b"hello");
             let mut peer = GreetingPeer::new(expected_fulfillment(&shared_secret));
             Arc::get_mut(&mut peer).expect("sole owner").greets = false;
@@ -3564,9 +3786,61 @@ mod tests {
                 .await;
 
             assert!(matches!(response, PacketResponse::Fulfill(_)));
-            assert_eq!(peer.seen(), vec![None], "one forward, carrying nothing");
-            assert_eq!(ledger.issued_nonce("second-hop"), 0);
-            assert_eq!(receiver.asked.load(Ordering::SeqCst), 0);
+            let seen = peer.seen();
+            assert_eq!(seen.len(), 1, "one forward, no retry needed");
+            let claim = seen[0]
+                .as_ref()
+                .expect("covered by default even though the peer never demanded it");
+            assert_eq!(claim.cumulative_amount, PACKET_AMOUNT);
+            assert_eq!(ledger.issued_nonce("second-hop"), 1);
+            assert_eq!(receiver.asked.load(Ordering::SeqCst), 1);
+            assert!(
+                connector.claims.pending_claim("second-hop").is_none(),
+                "a packet covered by the client-role claim must not also arm a peer-role one"
+            );
+        }
+
+        /// A hop with NO client-role config at all is entirely unaffected
+        /// by #881: it keeps riding the peer ledger's own postpay claim
+        /// (ADR 0004), exactly as before this mechanism existed --
+        /// bilateral peer-to-peer forwarding is not what #868/#881 changed
+        /// (`peer-carriage-spec.md` §3.1: a `Forwarded` route is priced by
+        /// the peering's bilateral fee, not a client edge's price).
+        #[tokio::test]
+        async fn a_hop_with_no_client_role_configured_is_unaffected_by_proactive_covering() {
+            let (sealed, shared_secret) = sealed_prepare(b"hello");
+            let mut peer = GreetingPeer::new(expected_fulfillment(&shared_secret));
+            Arc::get_mut(&mut peer).expect("sole owner").greets = false;
+            let connector = Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
+                Arc::new(FakeAppClient::new()),
+                peer.clone(),
+                test_clock(),
+            )
+            .with_signer(Arc::new(LocalSigner::generate("settlement-key")))
+            .with_peer_claim_channel("second-hop", test_channel_id(1))
+            .with_channel_domain(test_channel_id(1), test_channel_domain())
+            .expect("test_channel_id(1) is a valid on-chain channel id");
+            // Deliberately no `with_outbound_client_ledger` /
+            // `with_outbound_client_hop`.
+
+            let response = connector
+                .handle_prepare(
+                    Prepare {
+                        amount: PACKET_AMOUNT,
+                        ..sealed
+                    },
+                    0,
+                )
+                .await;
+
+            assert!(matches!(response, PacketResponse::Fulfill(_)));
+            assert_eq!(
+                peer.seen(),
+                vec![None],
+                "one forward, carrying nothing -- the peer ledger's own postpay convention"
+            );
             let armed = connector
                 .claims
                 .pending_claim("second-hop")
@@ -3608,10 +3882,11 @@ mod tests {
         }
 
         /// A receiver that will not report its watermark leaves nothing
-        /// safe to sign, so the packet is not retried at all -- never
-        /// emitted against a guessed watermark.
+        /// safe to sign, so the packet FAILS outright (issue #881's own
+        /// acceptance) -- it is never emitted uncovered as a fallback, and
+        /// never even reaches the peer: there is nothing honest to send.
         #[tokio::test]
-        async fn a_receiver_that_will_not_report_its_watermark_stops_the_retry() {
+        async fn a_receiver_that_will_not_report_its_watermark_fails_without_forwarding() {
             let (sealed, shared_secret) = sealed_prepare(b"hello");
             let peer = GreetingPeer::new(expected_fulfillment(&shared_secret));
             let receiver = StandingWatermark::at(0, 0);
@@ -3629,8 +3904,22 @@ mod tests {
                 )
                 .await;
 
-            assert!(matches!(response, PacketResponse::Reject(_)));
-            assert_eq!(peer.seen().len(), 1, "no watermark, no claim, no retry");
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "T00");
+                    assert!(
+                        reject.message.contains("second-hop"),
+                        "the refusal must name the next hop: {}",
+                        reject.message
+                    );
+                }
+                other => panic!("expected a local refusal, got {other:?}"),
+            }
+            assert_eq!(
+                peer.seen().len(),
+                0,
+                "no watermark, no claim, and nothing sent uncovered"
+            );
             assert_eq!(
                 ledger.issued_nonce("second-hop"),
                 0,

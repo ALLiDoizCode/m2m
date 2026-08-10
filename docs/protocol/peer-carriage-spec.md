@@ -148,7 +148,14 @@ carriage already judges inline. Both call one decision,
 carriage what it refuses over the other; each carriage keeps only the shape its own wire gives the
 refusal. §3.1's former "a connector MUST NOT answer a peer-role PREPARE with the x402 greeting" was
 corrected by #880 to state the rule that now runs. Issue #881 is the send
-side: covering an outbound peer PREPARE with a claim in the first place.
+side: covering an outbound peer PREPARE with a claim in the first place. It lands in
+`Connector::forward_via_peer_route` (`crates/connector-runtime/src/connector.rs`): a next hop
+configured via `Connector::with_outbound_client_hop` is covered proactively, from the outbound
+client ledger (#873), for this node's own forwarded value -- before the first attempt is ever sent,
+not merely recovered by #875's retry arm after a refusal teaches this node it must pay. A hop with
+no such config keeps riding the peer ledger's `pending_claim` (ADR 0004's postpay convention),
+untouched: bilateral peer-to-peer forwarding is not what #868/#881 changed, per this section's own
+"a `Forwarded` route is priced by the peering's bilateral fee" note above.
 
 #### Peer role is not a prerequisite for paid carriage
 
