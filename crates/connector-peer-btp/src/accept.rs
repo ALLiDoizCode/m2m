@@ -619,9 +619,16 @@ impl PeerSession {
             .map_or(0, |route| route.price);
         if price > 0 {
             let claim = judged.as_ref().and_then(|judged| judged.claim.as_ref());
-            let covers = claim.is_some_and(|claim| {
-                validate_price(prior_watermark, claim.cumulative_amount, price).is_ok()
-            });
+            // §880's correction: coverage requires the claim book's own
+            // verdict to be `Accepted`, not merely that the claim decoded.
+            // A forged signature or a replayed nonce still *decodes* and can
+            // still declare any `cumulative_amount` it likes -- judging
+            // coverage off that declared amount rather than the verdict lets
+            // an unlimited-value, never-verified claim buy service.
+            let covers = ack == ClaimAckOutcome::Accepted
+                && claim.is_some_and(|claim| {
+                    validate_price(prior_watermark, claim.cumulative_amount, price).is_ok()
+                });
             if !covers {
                 let advanced = claim.map_or(0, |claim| {
                     claim

@@ -1090,6 +1090,142 @@ async fn a_covering_claim_is_admitted_exactly_as_today() {
     assert_eq!(app_client.deliveries().len(), 1);
 }
 
+/// PR #913 review finding: a claim signed by a non-counterparty key still
+/// *decodes* and can declare any `cumulative_amount` it likes -- coverage
+/// judged off that declared amount, ignoring the claim book's own verdict,
+/// let an unlimited-value, never-verified claim buy service. The verdict
+/// here is `signature_invalid`; coverage must be refused regardless of the
+/// amount declared, exactly like a claimless PREPARE.
+#[tokio::test]
+async fn a_forged_claim_declaring_a_large_amount_does_not_buy_coverage() {
+    let payer_signer = LocalSigner::generate("payer");
+    let impostor = LocalSigner::generate("impostor");
+    let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+    let app_client = Arc::new(FakeAppClient::new());
+    let counterparty = derive_evm_address(&payer_signer.public_key().unwrap());
+    let connector = Arc::new(
+        Connector::new(
+            vec![route],
+            vec![],
+            app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            clock(),
+        )
+        .with_channel_verification_key(channel_id(), counterparty)
+        .with_channel_domain(channel_id(), domain())
+        .expect("a bytes32 channel id"),
+    );
+    let state = carriage(connector, bound_policy());
+    let dialer = LoopbackDialer::new(state);
+    let transport = transport(Arc::clone(&dialer) as Arc<dyn PeerDialer>, &payer_signer);
+    // Signed by an impostor, not the channel's configured counterparty --
+    // declares far more than the route's price, but never verifies.
+    let claim = sign_claim(&impostor, 1, 1_000_000);
+
+    let PeerForward {
+        response,
+        ack,
+        payment_required,
+        ..
+    } = transport
+        .forward(PEER_ID, prepare("g.example.app"), 0, Some(claim))
+        .await;
+
+    assert_eq!(
+        ack,
+        ClaimAckOutcome::Rejected(ClaimRejectReason::SignatureInvalid)
+    );
+    match response {
+        PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "F06"),
+        other => panic!("expected an F06 reject, got {other:?}"),
+    }
+    assert!(payment_required.is_some());
+    assert!(
+        app_client.deliveries().is_empty(),
+        "a forged claim must never reach the app"
+    );
+}
+
+/// PR #913 review finding, second case: a genuinely signed claim replayed
+/// at an already-used nonce also decodes and can declare any amount, and
+/// its verdict is `nonce_not_advancing` -- not `signature_invalid`, but
+/// equally not `accepted`. The refusal must repeat on every retransmission
+/// and the watermark must never move off the last genuinely accepted
+/// claim.
+#[tokio::test]
+async fn a_claim_replayed_at_a_used_nonce_never_buys_coverage() {
+    let payer_signer = LocalSigner::generate("payer");
+    let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+    let app_client = Arc::new(FakeAppClient::new());
+    let counterparty = derive_evm_address(&payer_signer.public_key().unwrap());
+    let connector = Arc::new(
+        Connector::new(
+            vec![route],
+            vec![],
+            app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            clock(),
+        )
+        .with_channel_verification_key(channel_id(), counterparty)
+        .with_channel_domain(channel_id(), domain())
+        .expect("a bytes32 channel id"),
+    );
+    let accepted = Arc::new(AcceptedClaims::new());
+    let state = Arc::new(PeerCarriageState::new(
+        connector,
+        bound_policy(),
+        Arc::clone(&accepted),
+        PeerAcceptPolicy::default(),
+    ));
+    let dialer = LoopbackDialer::new(state);
+    let transport = transport(Arc::clone(&dialer) as Arc<dyn PeerDialer>, &payer_signer);
+
+    // A first claim at nonce 1 genuinely covers the price and advances the
+    // watermark to 25.
+    let first = sign_claim(&payer_signer, 1, 25);
+    let first_ack = transport.flush(PEER_ID, first).await;
+    assert_eq!(first_ack, ClaimAckOutcome::Accepted);
+
+    // Replayed at the same nonce, declaring an amount that would cover many
+    // more packets if it were judged by amount alone.
+    let replayed = sign_claim(&payer_signer, 1, 1_000_000);
+
+    for attempt in 0..2 {
+        let PeerForward {
+            response,
+            ack,
+            payment_required,
+            ..
+        } = transport
+            .forward(PEER_ID, prepare("g.example.app"), 0, Some(replayed.clone()))
+            .await;
+
+        assert_eq!(
+            ack,
+            ClaimAckOutcome::Rejected(ClaimRejectReason::NonceNotAdvancing),
+            "attempt {attempt}"
+        );
+        match response {
+            PacketResponse::Reject(reject) => {
+                assert_eq!(reject.code.as_str(), "F06", "attempt {attempt}")
+            }
+            other => panic!("expected an F06 reject on attempt {attempt}, got {other:?}"),
+        }
+        assert!(payment_required.is_some(), "attempt {attempt}");
+    }
+    assert!(
+        app_client.deliveries().is_empty(),
+        "the replayed claim must never reach the app"
+    );
+    let watermark = accepted
+        .watermark(PEER_ID, &channel_id())
+        .expect("a watermark was recorded by the first, genuine claim");
+    assert_eq!(
+        watermark.cumulative_amount, 25,
+        "the replayed claim's declared amount must never advance the watermark"
+    );
+}
+
 // ─── §6.1: the four reasons reach the wire ───
 
 /// A claim signed by somebody who is not the channel's configured
