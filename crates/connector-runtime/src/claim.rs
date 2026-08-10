@@ -13,7 +13,8 @@
 //! process, exactly like `Connector`'s `leased_routes`.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{mpsc, Arc, RwLock};
+use std::thread;
 
 use chrono::{DateTime, Duration, Utc};
 
@@ -461,8 +462,18 @@ pub struct ClaimBook {
     journal: Arc<dyn Journal>,
     /// Balances, derived from `journal`'s own entries rather than stored
     /// independently (ADR 0005). Updated alongside every journal append so
-    /// a live read never has to replay the journal.
-    projection: RwLock<Projection>,
+    /// a live read never has to replay the journal. `Arc`-wrapped so
+    /// [`GroupCommitter`]'s background thread can fold a batch's entries in
+    /// -- in batch order, under one lock hold -- without needing `self`.
+    projection: Arc<RwLock<Projection>>,
+    /// Issue #710: batches concurrent [`ClaimBook::record_fulfillment`] and
+    /// [`ClaimBook::accept_inbound`] journal appends into one
+    /// [`Journal::append_batch`] write, the same group-commit mechanism
+    /// issue #686 gave the client edge's `ClientClaimGate`
+    /// (`connector_client_edge::claim_gate::GroupCommitter`). See
+    /// [`GroupCommitter`]'s own doc for why this book's version carries no
+    /// rollback, unlike that one's.
+    committer: GroupCommitter,
 }
 
 impl ClaimBook {
@@ -471,6 +482,9 @@ impl ClaimBook {
         outbound_channels: HashMap<String, String>,
         counterparties: HashMap<String, Address>,
     ) -> ClaimBook {
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let projection = Arc::new(RwLock::new(Projection::default()));
+        let committer = GroupCommitter::spawn(journal.clone(), projection.clone());
         ClaimBook {
             signer,
             solana_signer: None,
@@ -480,8 +494,9 @@ impl ClaimBook {
             solana_channels: HashMap::new(),
             outbound: RwLock::new(HashMap::new()),
             inbound_watermarks: RwLock::new(HashMap::new()),
-            journal: Arc::new(InMemoryJournal::new()),
-            projection: RwLock::new(Projection::default()),
+            journal,
+            projection,
+            committer,
         }
     }
 
@@ -648,10 +663,19 @@ impl ClaimBook {
             self.solana_signer.as_ref(),
             &self.solana_channels,
         );
+        let projection = Arc::new(RwLock::new(projection));
+        // A fresh committer bound to the real journal -- the one spawned in
+        // `new` was writing to the default `InMemoryJournal` and would keep
+        // doing so forever if left in place, batching entries into a
+        // journal nothing ever replays. Dropping the old `GroupCommitter`
+        // here drops its sender, which ends that thread's loop; called only
+        // while a `Connector` is still being built (this method's own doc),
+        // so no commit can be in flight on it.
+        self.committer = GroupCommitter::spawn(journal.clone(), projection.clone());
         self.journal = journal;
         self.outbound = RwLock::new(outbound);
         self.inbound_watermarks = RwLock::new(inbound_watermarks);
-        self.projection = RwLock::new(projection);
+        self.projection = projection;
         Ok(())
     }
 
@@ -758,22 +782,6 @@ impl ClaimBook {
             }
         }
         (outbound, inbound_watermarks, projection)
-    }
-
-    /// Append `entry` to the durable journal and fold it into the live
-    /// projection. A failed durable write is logged rather than losing the
-    /// in-memory update entirely -- this connector's own session-lifetime
-    /// bookkeeping stays correct even in that case; only surviving a
-    /// restart is at risk, exactly the same degradation a node with no
-    /// journal configured lives with for its entire lifetime.
-    fn append_and_project(&self, entry: JournalEntry) {
-        if let Err(err) = self.journal.append(&entry) {
-            tracing::error!(%err, "failed to durably append a journal entry");
-        }
-        self.projection
-            .write()
-            .expect("projection lock poisoned")
-            .apply(&entry);
     }
 
     /// The channel this connector claims against when it owes `peer_id`,
@@ -898,12 +906,23 @@ impl ClaimBook {
         };
         ledger.pending = Some(claim.clone());
         ledger.pending_since = Some(now);
-        self.append_and_project(JournalEntry::OutboundClaimSigned {
+        // Enqueue while still holding the outbound write lock, then drop it
+        // before waiting for the batch's fsync (issue #710) -- the same
+        // shape issue #686 gave the client edge's `ClientClaimGate::admit`.
+        // Enqueueing under the lock is what keeps the committer's batch
+        // order identical to the order every peer's ledger actually
+        // advanced in; waiting outside it is what lets a fulfilment to one
+        // peer share its fsync with a concurrent fulfilment to another,
+        // instead of serializing the whole connector behind one lock for
+        // the length of a disk write.
+        let ticket = self.committer.enqueue(JournalEntry::OutboundClaimSigned {
             peer_id: peer_id.to_string(),
             channel_id: claim.channel_id.clone(),
             nonce: claim.nonce,
             cumulative_amount: claim.cumulative_amount,
         });
+        drop(outbound);
+        self.committer.wait(ticket);
         Some(claim)
     }
 
@@ -1084,13 +1103,22 @@ impl ClaimBook {
                     claim.channel_id.clone(),
                     advance_watermark(claim.nonce, claim.cumulative_amount),
                 );
-                drop(watermarks);
-                self.append_and_project(JournalEntry::InboundClaimAccepted {
+                // Enqueue before dropping the watermark lock, then wait
+                // outside it (issue #710, mirroring `record_fulfillment`
+                // and issue #686's own `ClientClaimGate::admit`): a claim
+                // accepted on one channel shares its fsync with a
+                // concurrent acceptance on another instead of serializing
+                // behind one lock for the length of a disk write, and this
+                // channel's own entries still reach the committer in
+                // exactly the order their watermark advanced in.
+                let ticket = self.committer.enqueue(JournalEntry::InboundClaimAccepted {
                     channel_id: claim.channel_id.clone(),
                     nonce: claim.nonce,
                     cumulative_amount: claim.cumulative_amount,
                     signature: claim.signature.to_bytes(),
                 });
+                drop(watermarks);
+                self.committer.wait(ticket);
                 ClaimAckOutcome::Accepted
             }
             Err(ClaimError::NonceNotAdvancing { .. }) => {
@@ -1145,6 +1173,165 @@ impl ClaimBook {
                 }),
         );
         views
+    }
+}
+
+/// The most entries one journal batch carries -- a bound on the buffer a
+/// commit builds, not a tuning knob, mirroring
+/// `connector_client_edge::claim_gate`'s own `GROUP_COMMIT_MAX_BATCH`: the
+/// committer drains only what is already queued, so a batch is naturally
+/// sized by how many entries arrived during the previous batch's fsync.
+const GROUP_COMMIT_MAX_BATCH: usize = 4096;
+
+/// One entry queued for the committer, and the channel it is handed back on
+/// once that entry's batch has been written (or failed) and folded into the
+/// projection.
+type QueuedEntry = (JournalEntry, mpsc::Sender<()>);
+
+/// Issue #710's group commit for [`ClaimBook`]'s peer claim journal: a
+/// dedicated thread that drains every [`JournalEntry`] queued since the
+/// last batch and writes them as one [`Journal::append_batch`] -- one
+/// write, one fsync -- instead of the one-fsync-per-entry `Journal::append`
+/// calls `record_fulfillment`/`accept_inbound` each made directly before
+/// this issue. The mechanism is issue #686's, adopted rather than
+/// reinvented (see `connector_client_edge::claim_gate::GroupCommitter`):
+/// concurrent forwards queue behind one another only for the microseconds
+/// it takes to enqueue, not for a whole fsync each.
+///
+/// **Deliberately no rollback**, unlike the client edge's version. That
+/// gate's watermark is gated behind a signature it will never see again if
+/// it discards the claim, so an unrecorded acceptance is refused outright.
+/// `ClaimBook`'s appends never had that failure mode: their
+/// contract (predating this issue) is that a failed durable write is
+/// logged and the in-memory ledger/watermark update is kept regardless --
+/// the same degradation a node with no journal configured lives with for
+/// its entire lifetime (`ClaimBook::new`'s default `InMemoryJournal`
+/// journals nothing durably and nothing here refuses on that account
+/// either). Batching preserves that contract exactly: every batch, failed
+/// or not, still folds into the projection before any caller it is holding
+/// is released.
+struct GroupCommitter {
+    sender: mpsc::Sender<QueuedEntry>,
+    /// Kept so [`GroupCommitter::enqueue`]/[`GroupCommitter::wait`] can
+    /// apply an entry directly if the committer thread itself is gone
+    /// (only possible if it panicked) -- the same fallback the thread's
+    /// own loop performs, so a dead committer degrades exactly like a live
+    /// one, one entry at a time instead of batched.
+    journal: Arc<dyn Journal>,
+    projection: Arc<RwLock<Projection>>,
+}
+
+/// [`GroupCommitter::enqueue`]'s return: either the batch this entry landed
+/// in is on its way (wait on the channel), or the committer thread was
+/// already gone when it tried to queue and the entry travels back for
+/// [`GroupCommitter::wait`] to apply directly.
+enum CommitTicket {
+    Queued(mpsc::Receiver<()>),
+    CommitterGone(JournalEntry),
+}
+
+impl GroupCommitter {
+    fn spawn(journal: Arc<dyn Journal>, projection: Arc<RwLock<Projection>>) -> GroupCommitter {
+        let (sender, receiver) = mpsc::channel();
+        let thread_journal = journal.clone();
+        let thread_projection = projection.clone();
+        thread::Builder::new()
+            .name("peer-claim-journal-commit".to_string())
+            .spawn(move || group_commit_loop(receiver, thread_journal, thread_projection))
+            .expect("spawning the peer claim journal committer thread");
+        GroupCommitter {
+            sender,
+            journal,
+            projection,
+        }
+    }
+
+    /// Queue `entry` for the next batch -- microseconds, no I/O, safe to
+    /// call while still holding the write lock `entry` was decided under
+    /// (that is what keeps the committer's batch order identical to
+    /// acceptance order). Callers not holding such a lock, or that do not
+    /// need to shrink its hold time, can call this immediately followed by
+    /// [`GroupCommitter::wait`].
+    fn enqueue(&self, entry: JournalEntry) -> CommitTicket {
+        let (done_tx, done_rx) = mpsc::channel();
+        match self.sender.send((entry.clone(), done_tx)) {
+            Ok(()) => CommitTicket::Queued(done_rx),
+            // The committer thread is gone -- only possible if it panicked.
+            // Carried back rather than applied here: `enqueue` may be
+            // called under a lock this connector wants held only for
+            // microseconds, and the fallback below does I/O.
+            Err(_) => CommitTicket::CommitterGone(entry),
+        }
+    }
+
+    /// Block until `ticket`'s batch -- and every other entry sharing it --
+    /// has been written and folded into the projection.
+    /// `ClaimBook::record_fulfillment`/`accept_inbound`'s entire durability
+    /// contract: synchronous, and it always returns, whatever the journal
+    /// did.
+    fn wait(&self, ticket: CommitTicket) {
+        match ticket {
+            // A receiver gone before the batch lands means the caller
+            // stopped waiting for some other reason -- the commit still
+            // happened (or was logged as failing to), so there is nothing
+            // to do about it.
+            CommitTicket::Queued(done_rx) => {
+                let _ = done_rx.recv();
+            }
+            CommitTicket::CommitterGone(entry) => {
+                tracing::error!(
+                    "peer claim journal committer is gone; appending this entry directly"
+                );
+                if let Err(err) = self.journal.append(&entry) {
+                    tracing::error!(%err, "failed to durably append a journal entry");
+                }
+                self.projection
+                    .write()
+                    .expect("projection lock poisoned")
+                    .apply(&entry);
+            }
+        }
+    }
+}
+
+fn group_commit_loop(
+    receiver: mpsc::Receiver<QueuedEntry>,
+    journal: Arc<dyn Journal>,
+    projection: Arc<RwLock<Projection>>,
+) {
+    while let Ok(first) = receiver.recv() {
+        let mut batch = vec![first];
+        while batch.len() < GROUP_COMMIT_MAX_BATCH {
+            match receiver.try_recv() {
+                Ok(queued) => batch.push(queued),
+                Err(_) => break,
+            }
+        }
+        let entries: Vec<JournalEntry> = batch.iter().map(|(entry, _)| entry.clone()).collect();
+        if let Err(err) = journal.append_batch(&entries) {
+            tracing::error!(
+                %err,
+                entries = entries.len(),
+                "failed to durably append a batch of journal entries; keeping the in-memory \
+                 state (only surviving a restart is at risk, the same degradation a node with \
+                 no journal configured lives with for its entire lifetime)"
+            );
+        }
+        {
+            // Applied in batch order -- the same order these entries were
+            // enqueued in, which is the same order their ledgers/watermarks
+            // advanced in (each caller enqueues while still holding the
+            // write lock its advance was made under) -- so the projection
+            // never sees a later entry before an earlier one for the same
+            // channel, regardless of which caller's thread wakes first.
+            let mut projection = projection.write().expect("projection lock poisoned");
+            for entry in &entries {
+                projection.apply(entry);
+            }
+        }
+        for (_, done) in batch {
+            let _ = done.send(());
+        }
     }
 }
 
@@ -1868,6 +2055,186 @@ mod tests {
                     cumulative_amount: 10,
                 })
             );
+        }
+    }
+
+    /// Issue #710: `ClaimBook`'s peer claim journal group-commits the way
+    /// issue #686 already had the client edge do it.
+    mod group_commit {
+        use super::*;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Barrier, Mutex};
+        use std::time::Duration;
+
+        /// A [`Journal`] whose first `append_batch` stalls long enough
+        /// that every concurrently-enqueuing caller lands in the channel
+        /// before it returns -- the deterministic way to prove batching
+        /// happens at all, rather than hoping a race resolves the same way
+        /// twice on a loaded CI box. Records every batch's size (and every
+        /// single-entry `append`, which group commit should never call)
+        /// so a test can assert on the shape of what was actually written.
+        struct StallingJournal {
+            inner: InMemoryJournal,
+            stalled_once: AtomicBool,
+            batch_sizes: Mutex<Vec<usize>>,
+        }
+
+        impl StallingJournal {
+            fn new() -> StallingJournal {
+                StallingJournal {
+                    inner: InMemoryJournal::new(),
+                    stalled_once: AtomicBool::new(false),
+                    batch_sizes: Mutex::new(Vec::new()),
+                }
+            }
+        }
+
+        impl Journal for StallingJournal {
+            fn append(&self, entry: &JournalEntry) -> Result<(), JournalError> {
+                self.batch_sizes.lock().expect("lock poisoned").push(1);
+                self.inner.append(entry)
+            }
+
+            fn append_batch(&self, entries: &[JournalEntry]) -> Result<(), JournalError> {
+                if !self.stalled_once.swap(true, Ordering::SeqCst) {
+                    // Give every other concurrently-enqueuing caller time
+                    // to land in the committer's channel before this (the
+                    // first) batch's write returns and the committer loops
+                    // back for more -- everything queued while this sleeps
+                    // is guaranteed to drain into its successor batch in
+                    // one shot.
+                    thread::sleep(Duration::from_millis(200));
+                }
+                self.batch_sizes
+                    .lock()
+                    .expect("lock poisoned")
+                    .push(entries.len());
+                self.inner.append_batch(entries)
+            }
+
+            fn read_all(&self) -> Result<Vec<JournalEntry>, JournalError> {
+                self.inner.read_all()
+            }
+        }
+
+        /// Issue #710's own claim: concurrent forwards no longer pay one
+        /// fsync each under `ClaimBook`'s one journal-file lock. Eight
+        /// threads each accept a claim on their own channel at once --
+        /// before this issue's fix, `ClaimBook::accept_inbound` called
+        /// `Journal::append` directly and every one of those eight would
+        /// be its own `append`/fsync; with the fix, the ones that arrive
+        /// while the first (stalled) write is in flight share its
+        /// successor `append_batch` call.
+        #[test]
+        fn concurrent_inbound_claims_on_distinct_channels_share_a_batch() {
+            const CHANNELS: u8 = 8;
+            let peer_key = LocalSigner::generate("peer-key");
+            let counterparty = derive_evm_address(&peer_key.public_key().unwrap());
+
+            let mut book = ClaimBook::new(None, HashMap::new(), HashMap::new());
+            for n in 1..=CHANNELS {
+                book.set_verification_key(channel_id(n), counterparty);
+                book.set_channel_domain(channel_id(n), test_domain())
+                    .unwrap();
+            }
+            let journal = Arc::new(StallingJournal::new());
+            book.set_journal(journal.clone()).unwrap();
+            let book = Arc::new(book);
+
+            let barrier = Arc::new(Barrier::new(CHANNELS as usize));
+            let handles: Vec<_> = (1..=CHANNELS)
+                .map(|n| {
+                    let book = book.clone();
+                    let barrier = barrier.clone();
+                    let claim = sign_claim(&peer_key, &channel_id(n), 1, 100);
+                    thread::spawn(move || {
+                        barrier.wait();
+                        assert_eq!(book.accept_inbound(&claim), ClaimAckOutcome::Accepted);
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().expect("accepting thread panicked");
+            }
+
+            let batch_sizes = journal.batch_sizes.lock().expect("lock poisoned");
+            assert_eq!(
+                batch_sizes.iter().sum::<usize>(),
+                CHANNELS as usize,
+                "every accepted claim must land in exactly one batch: {batch_sizes:?}"
+            );
+            assert!(
+                batch_sizes.iter().any(|&size| size > 1),
+                "expected at least one batch to carry more than one entry \
+                 (group commit not amortizing concurrent appends), got {batch_sizes:?}"
+            );
+            for n in 1..=CHANNELS {
+                assert_eq!(
+                    book.latest_inbound_claim(&channel_id(n)),
+                    Some(connector_settlement::Claim {
+                        nonce: 1,
+                        cumulative_amount: 100,
+                        signature: sign_claim(&peer_key, &channel_id(n), 1, 100)
+                            .signature
+                            .to_bytes(),
+                    })
+                );
+            }
+        }
+
+        /// The send-side mirror of the receive-side test above:
+        /// `record_fulfillment` holds a single global outbound-ledger lock
+        /// across every peer (issue #710's own "under one lock"), so it is
+        /// this path -- not `accept_inbound`'s -- where a fsync held under
+        /// the lock would have serialized every forward in the connector,
+        /// not just forwards on the same peer.
+        #[test]
+        fn concurrent_outbound_fulfillments_across_peers_share_a_batch() {
+            const PEERS: u8 = 8;
+            let signer = Arc::new(LocalSigner::generate("claim-key"));
+            let mut outbound_channels = HashMap::new();
+            for n in 1..=PEERS {
+                outbound_channels.insert(format!("peer-{n}"), channel_id(n));
+            }
+            let mut book = ClaimBook::new(Some(signer), outbound_channels, HashMap::new());
+            for n in 1..=PEERS {
+                book.set_channel_domain(channel_id(n), test_domain())
+                    .unwrap();
+            }
+            let journal = Arc::new(StallingJournal::new());
+            book.set_journal(journal.clone()).unwrap();
+            let book = Arc::new(book);
+
+            let barrier = Arc::new(Barrier::new(PEERS as usize));
+            let handles: Vec<_> = (1..=PEERS)
+                .map(|n| {
+                    let book = book.clone();
+                    let barrier = barrier.clone();
+                    thread::spawn(move || {
+                        barrier.wait();
+                        book.record_fulfillment(&format!("peer-{n}"), 100, now())
+                            .expect("channel is bound and signed")
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().expect("fulfilling thread panicked");
+            }
+
+            let batch_sizes = journal.batch_sizes.lock().expect("lock poisoned");
+            assert_eq!(
+                batch_sizes.iter().sum::<usize>(),
+                PEERS as usize,
+                "every signed claim must land in exactly one batch: {batch_sizes:?}"
+            );
+            assert!(
+                batch_sizes.iter().any(|&size| size > 1),
+                "expected at least one batch to carry more than one entry \
+                 (group commit not amortizing concurrent appends), got {batch_sizes:?}"
+            );
+            for n in 1..=PEERS {
+                assert_eq!(book.pending_claim(&format!("peer-{n}")).unwrap().nonce, 1);
+            }
         }
     }
 
