@@ -258,16 +258,24 @@ no second port. The split is read from write
 ([ADR 0008](docs/adr/0008-operator-surface-splits-read-from-write.md)):
 
 - **Reads** need `Authorization: Bearer <bearer_token>` and nothing else:
-  `GET /peers`, `/routes`, `/routes/leased`, `/channels`, `/claims`, `/exposure`, `/identity`,
+  `GET /peers`, `/routes`, `/routes/leased`, `/routes/peers`, `/channels`, `/claims`, `/identity`,
   `/audit-log`, and `/metrics` (Prometheus text: `toon_packets_total`,
-  `toon_packets_rejected_total`, `toon_fees_earned_total`, `toon_exposure`,
+  `toon_packets_rejected_total`, `toon_fees_earned_total`, `toon_exposure` (always zero; kept for
+  scrape-config stability, [ADR 0033](docs/adr/0033-the-exposure-machinery-is-retired-not-restated.md)),
   `toon_settlement_total`).
 - **Writes** need an RFC 9421 HTTP Message Signature from an ed25519 key on `write_keys`, with
   the body bound by an RFC 9530 `Content-Digest`. A bearer token is never sufficient to move
-  value. `POST /packets`, `/routes/leased`, `/channels`, and — all under the channel they act on
-  — `/channels/:id/fund`, `/channels/:id/redeem`, `/channels/:id/redeem-latest`,
-  `/channels/:id/close`, `/channels/:id/cooperative-close`. Channel operations answer `503` when
-  no `[settlement]` backend is configured.
+  value. `POST /packets`, `/routes/leased`, `/peers`, `/routes/peers`, `/channels`, and — all
+  under the channel they act on — `/channels/:id/fund`, `/channels/:id/redeem`,
+  `/channels/:id/redeem-latest`, `/channels/:id/close`, `/channels/:id/cooperative-close` — plus
+  `DELETE /peers/:id` and `DELETE /routes/peers/:prefix` (issue #884). Channel operations answer
+  `503` when no `[settlement]` backend is configured.
+
+`POST`/`DELETE /peers*` and `/routes/peers*` (issue #884) are the runtime-mutable, durable
+peer/route table: unlike `/routes/leased` (a TTL-bound push that lapses on its own and never
+survives a restart, ADR 0006), these persist to `state_dir` and are refused outright — never
+silently accepted as a shadow — when they'd collide with a row the config file already owns
+([ADR 0034](docs/adr/0034-a-runtime-peer-route-table-never-shadows-the-config-file.md)).
 
 There is **no health endpoint** on either surface, and **no unauthenticated metrics path** on
 either. `[operator]` is how a node opts into metrics at all: absent, `/metrics` is not mounted and

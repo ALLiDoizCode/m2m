@@ -2,16 +2,29 @@
 //! here is exactly what [`crate::Connector`] hands back to a read handler --
 //! no method beyond what the handler serializes as-is.
 //!
-//! [`PeerView`] has no fields yet because nothing in the runtime tracks
-//! that state yet: no peer transport has landed (ADR 0027, #676).
 //! [`ChannelView`] gained real fields in #459, once a settlement backend
 //! existed for [`Connector`] to project channel state from. [`ClaimView`]
 //! gained real fields in #423, once `crate::claim::ClaimBook` existed to
-//! report on. [`Connector`]'s accessor for the still-empty [`PeerView`]
-//! returns an empty list until #676 lands; the operator surface is already
-//! complete as an interface; that ticket only needs to start populating
-//! it. An `ExposureView` existed from #424 until ADR 0031/ADR 0033 (issue
-//! #882) retired the credit-window accounting it reported.
+//! report on. [`PeerView`] gained its first field in #884, once
+//! [`Connector`] gained a runtime-mutable peer table to report on --
+//! before that it was a literal empty struct, since nothing in the
+//! runtime tracked peer identity at all (peer carriage credentials live
+//! entirely in `connector_config::PeerConfig`, consumed once at boot and
+//! never stored back on [`Connector`]). An `ExposureView` existed from
+//! #424 until ADR 0031/ADR 0033 (issue #882) retired the credit-window
+//! accounting it reported.
+
+/// Whether a peer or route row came from the config file, loaded once at
+/// boot and immutable for the process's life, or was added at runtime
+/// over the operator surface (issue #884) -- durable, but never able to
+/// shadow or be shadowed by a config-file row of the same key. See
+/// `docs/adr/0034-a-runtime-peer-route-table-never-shadows-the-config-file.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RouteSource {
+    Config,
+    Runtime,
+}
 
 use chrono::{DateTime, Utc};
 use connector_settlement::{ChannelState, ChannelStatus};
@@ -38,10 +51,32 @@ pub struct LeasedRouteView {
     pub expires_at: DateTime<Utc>,
 }
 
-/// A peer as seen by the operator surface. See the module docs: always
-/// empty until a peer transport (ADR 0027, #676) lands.
+/// A peer as seen by the operator surface (issue #884): every peer id this
+/// node knows, from the config file (`source: Config`) or added at
+/// runtime over the operator surface (`source: Runtime`). Peer carriage
+/// details -- endpoint, credential, exposure -- stay in
+/// `connector_config::PeerConfig` and are not reported here; this is only
+/// the identity a `peer_id` on a route resolves against.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PeerView {}
+pub struct PeerView {
+    pub id: String,
+    pub source: RouteSource,
+}
+
+/// A peer-forwarding route (as opposed to [`RouteView`]'s app-terminating
+/// one) as seen by the operator surface (issue #884): every row from
+/// `[[routes]]`'s peer form (`source: Config`) plus every row added at
+/// runtime (`source: Runtime`). Deliberately excludes a leased route
+/// (issue #427) -- [`LeasedRouteView`] already reports those, and a lease
+/// carries no `price` at all, unlike either of these.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerRouteView {
+    pub prefix: String,
+    pub peer_id: String,
+    pub fee: u64,
+    pub price: u64,
+    pub source: RouteSource,
+}
 
 /// A payment channel as seen by the operator surface (issue #459).
 /// `counterparty` is hex-encoded (`0x`-prefixed) since it is arbitrary
