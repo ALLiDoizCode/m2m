@@ -1212,8 +1212,8 @@ type QueuedEntry = (JournalEntry, mpsc::Sender<()>);
 /// is released.
 struct GroupCommitter {
     sender: mpsc::Sender<QueuedEntry>,
-    /// Kept so [`GroupCommitter::enqueue`]/[`GroupCommitter::wait`] can
-    /// apply an entry directly if the committer thread itself is gone
+    /// Kept so [`GroupCommitter::wait`] can apply an entry directly if
+    /// the committer thread itself is gone
     /// (only possible if it panicked) -- the same fallback the thread's
     /// own loop performs, so a dead committer degrades exactly like a live
     /// one, one entry at a time instead of batched.
@@ -1254,13 +1254,14 @@ impl GroupCommitter {
     /// [`GroupCommitter::wait`].
     fn enqueue(&self, entry: JournalEntry) -> CommitTicket {
         let (done_tx, done_rx) = mpsc::channel();
-        match self.sender.send((entry.clone(), done_tx)) {
+        match self.sender.send((entry, done_tx)) {
             Ok(()) => CommitTicket::Queued(done_rx),
             // The committer thread is gone -- only possible if it panicked.
-            // Carried back rather than applied here: `enqueue` may be
-            // called under a lock this connector wants held only for
-            // microseconds, and the fallback below does I/O.
-            Err(_) => CommitTicket::CommitterGone(entry),
+            // A failed `send` hands the entry back, so it is carried back
+            // rather than applied here: `enqueue` may be called under a
+            // lock this connector wants held only for microseconds, and
+            // the fallback in `wait` does I/O.
+            Err(mpsc::SendError((entry, _))) => CommitTicket::CommitterGone(entry),
         }
     }
 
@@ -1307,7 +1308,8 @@ fn group_commit_loop(
                 Err(_) => break,
             }
         }
-        let entries: Vec<JournalEntry> = batch.iter().map(|(entry, _)| entry.clone()).collect();
+        let (entries, waiters): (Vec<JournalEntry>, Vec<mpsc::Sender<()>>) =
+            batch.into_iter().unzip();
         if let Err(err) = journal.append_batch(&entries) {
             tracing::error!(
                 %err,
@@ -1329,7 +1331,7 @@ fn group_commit_loop(
                 projection.apply(entry);
             }
         }
-        for (_, done) in batch {
+        for done in waiters {
             let _ = done.send(());
         }
     }
