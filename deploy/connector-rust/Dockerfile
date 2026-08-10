@@ -37,16 +37,66 @@
 # `cargo build` compiles natively for whichever architecture buildx/QEMU
 # presents as the container's own -- there is no cross-compilation step and
 # no BUILDPLATFORM pinning to work around here.
+#
+# Dependency layer (issue #609): the builder is split into `chef` / `planner`
+# / `builder` stages using cargo-chef so a source-only commit reuses the
+# compiled dependency graph from `cache-from: type=gha` instead of paying for
+# `ethers`, `solana-*`, `axum` and `tokio` again on every push. See the
+# per-stage comments below for how the recipe keys the cache and what makes
+# a broken/missing manifest fail the build rather than silently rebuild
+# everything.
 # =============================================================================
 
 # ============================================
-# Stage 1: builder
+# Stage 1a: chef -- base image with cargo-chef installed. No source of any
+# kind is copied in here, so this stage's own layers are as stable as the
+# rust:1.90-alpine3.22 tag itself and are never invalidated by a source or
+# manifest edit.
 # ============================================
-FROM rust:1.90-alpine3.22 AS builder
+FROM rust:1.90-alpine3.22 AS chef
 
 RUN apk add --no-cache musl-dev
+RUN cargo install cargo-chef --locked
 
 WORKDIR /workspace
+
+# ============================================
+# Stage 1b: planner -- computes a recipe (issue #609) naming exactly the
+# manifests `-p connector`'s dependency graph touches. `--bin connector`
+# (the binary crates/connector-bin's Cargo.toml declares, not a package
+# name) drops the recipe to just that closure, the same scoping `-p
+# connector` below already applies to the real build -- so unrelated
+# workspace members (e.g. connector-vectors' fixture binaries) can't bloat
+# the dependency layer or falsely widen its cache key.
+# ============================================
+FROM chef AS planner
+
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY packages/solana-program ./packages/solana-program
+
+RUN cargo chef prepare --recipe-path recipe.json --bin connector
+
+# ============================================
+# Stage 1c: builder -- `cook` builds every third-party dependency the recipe
+# names against stub sources, keyed only on the recipe's content. A commit
+# that touches `crates/connector-runtime/src/**` (or any other crate source)
+# without changing a `Cargo.toml`/`Cargo.lock` produces a byte-identical
+# recipe, so this RUN layer -- and everything `ethers`, `solana-*`, `axum`
+# and `tokio` cost to compile -- is reused from `cache-from: type=gha`
+# instead of rebuilt. Real sources are copied in and built only after: the
+# thing that changes on every commit is also the only thing that recompiles
+# on every commit.
+#
+# `cargo chef cook` fails loudly (a stub build error, not a silent skip) if
+# a crate's manifest is unreadable or malformed -- e.g. a new crate added
+# under `crates/` without a Cargo.toml the workspace can resolve -- rather
+# than quietly falling back to a full rebuild.
+# ============================================
+FROM chef AS builder
+
+COPY --from=planner /workspace/recipe.json recipe.json
+RUN cargo chef cook --release --locked -p connector --recipe-path recipe.json
 
 # The workspace root and every crate the connector binary's dependency
 # closure can reach. `packages/solana-program` (the `payment-channel`
