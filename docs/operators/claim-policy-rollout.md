@@ -88,7 +88,8 @@ None of the fleet's three peerings carry **live, real-channel** peer traffic tod
 
 - **apex↔store** (`apex-store`): the real peer channel `0x0bfd0b88…` has zero deposit on the
   store side, so a claim against it fails `InsufficientHeadroom`
-  (`crates/connector-runtime/src/claim.rs:1546-1559`) and the store box pays box 1 **as a client**
+  (`crates/connector-runtime/src/outbound_client.rs:165` for the error, `:444-450` for the
+  headroom check that raises it) and the store box pays box 1 **as a client**
   instead — a client-edge claim, not a peer one. The committed `[[peer_channels]]` row is a
   documented placeholder (`0xdead…`, `docs/operators/peer-channel-migration.md`, issue #822),
   pending that migration.
@@ -108,8 +109,10 @@ true on the day it merges.
 
 ## Prerequisite: a published image containing #880/#881/#882/#883
 
-`.github/workflows/publish-connector-rust-image.yml` publishes `rust-sha-<short-sha>` on every
-push to `main` — content-pinned, immutable. B2/B3/B5 are already on `main`
+`.github/workflows/publish-connector-rust-image.yml` publishes `rust-sha-<short-sha>` on a push to
+`main` that touches `crates/**`, `Cargo.toml`/`Cargo.lock`, the Dockerfile or the workflow itself —
+content-pinned, immutable. (A docs-only merge cuts no tag; this PR touches `crates/**`, so it
+does.) B2/B3/B5 are already on `main`
 (commits `1823b4fb`, `568b9e4f`, `6439562c`); once this issue's own PR (adding
 `claim_enforcement`) merges too, the **next** `rust-sha-<sha>` tag published after that merge is
 the one this runbook rolls. Note it down before starting Order below — do not assume the fleet's
@@ -118,8 +121,8 @@ committed pin of record is it.
 **The committed pin of record and the live pin are two different things, and both matter here:**
 `crates/connector-bin/tests/devnet_configs_load.rs::EXPECTED_CONNECTOR_TAG` is
 `rust-sha-440eab7` today — what the _repo's_ five compose files declare — and it predates B2/B3/B5
-(issue numbers #880/#881/#882 postdate #859, the PR that set it). **The live boxes are still
-running an older tag still** (`rust-sha-33f10e2` per this issue's own text) — nothing on any box
+(issue numbers #880/#881/#882 postdate #859, the PR that set it). **The live boxes are running an
+older tag still** (`rust-sha-33f10e2` per this issue's own text) — nothing on any box
 auto-deploys, so neither tag is what Order step 1 below actually checks; the box's live tag is.
 Bumping `EXPECTED_CONNECTOR_TAG` and the five `image:` pins to the new tag is a **separate, later**
 repo change (once the new tag exists and this rollout's Gates hold) — not performed by this
