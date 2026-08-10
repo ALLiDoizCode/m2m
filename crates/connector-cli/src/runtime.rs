@@ -877,11 +877,9 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
         // and arm the connector to persist future writes back to the same
         // file -- the same `state_dir` scoping as the two journals above,
         // so an operator restoring a node from `state_dir` alone restores
-        // this table too.
-        std::fs::create_dir_all(state_dir).map_err(|source| RuntimeError::StateDirUnusable {
-            path: state_dir.to_path_buf(),
-            source,
-        })?;
+        // this table too. `open_journal` just created `state_dir` itself,
+        // so a node with nowhere writable has already failed above with
+        // the path in the message.
         let table_path = state_dir.join(RUNTIME_PEER_ROUTE_TABLE);
         let (store, runtime_peers, runtime_peer_routes) = PeerRouteStore::open(&table_path)
             .map_err(|source| RuntimeError::RuntimePeerRouteTableUnusable {

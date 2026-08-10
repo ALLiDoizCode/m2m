@@ -1,5 +1,6 @@
 //! `pub struct Connector` -- the packet plane. See ADR 0001.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -232,24 +233,37 @@ enum RouteTarget {
     RuntimePeer(PeerRoute),
 }
 
+/// How permanent a matched routing-table entry is, least to most -- the
+/// one place route precedence is written down, read by both
+/// [`RouteTarget`] and [`ConfiguredTarget`] so what the router prefers and
+/// what the client edge prices can never drift apart.
+///
+/// A lease (issue #427) is TTL-bound and pushed by an automated
+/// controller, so it is outranked by everything durable. A runtime
+/// peer-forwarding route (issue #884) IS durable -- a deliberate, paid
+/// relationship, not an automated push -- so it outranks a lease at the
+/// same prefix, but a config-file row always wins over anything written at
+/// runtime, which `upsert_runtime_peer_route` enforces by refusing a
+/// runtime write that collides with a config-file prefix in the first
+/// place, rather than by ranking them here. Peer routes (config or
+/// runtime) fall between leases and app routes: also forwarding rather
+/// than terminating, but static.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RouteRank {
+    Leased = 0,
+    RuntimePeer = 1,
+    Peer = 2,
+    App = 3,
+}
+
 impl RouteTarget {
-    /// Break a tie in matched prefix length. Ordered least to most
-    /// permanent: a lease (issue #427) is TTL-bound and pushed by an
-    /// automated controller, so it is outranked by everything durable. A
-    /// runtime peer-forwarding route (issue #884) IS durable -- a
-    /// deliberate, paid relationship, not an automated push -- so it
-    /// outranks a lease at the same prefix, but a config-file row always
-    /// wins over anything written at runtime, which `upsert_runtime_peer_route`
-    /// enforces by refusing a runtime write that collides with a
-    /// config-file prefix in the first place, rather than by ranking them
-    /// here. Peer routes (config or runtime) fall between leases and app
-    /// routes: also forwarding rather than terminating, but static.
-    fn priority(&self) -> u8 {
+    /// Break a tie in matched prefix length -- see [`RouteRank`].
+    fn rank(&self) -> RouteRank {
         match self {
-            RouteTarget::Leased(_) => 0,
-            RouteTarget::RuntimePeer(_) => 1,
-            RouteTarget::Peer(_) => 2,
-            RouteTarget::App(_) => 3,
+            RouteTarget::Leased(_) => RouteRank::Leased,
+            RouteTarget::RuntimePeer(_) => RouteRank::RuntimePeer,
+            RouteTarget::Peer(_) => RouteRank::Peer,
+            RouteTarget::App(_) => RouteRank::App,
         }
     }
 }
@@ -293,14 +307,17 @@ impl ConfiguredTarget {
         }
     }
 
-    /// The same tie-break [`RouteTarget::priority`] applies, read off the
-    /// same table rather than restated (via a clone -- one bounded-size
-    /// clone per match, only ever a [`PeerRoute`] in the `RuntimePeer`
-    /// case, never the ADR 0015 whole-collection copy), so
-    /// configured-route precedence cannot drift between the router and
-    /// the client edge.
-    fn priority(&self) -> u8 {
-        self.clone().into_route_target().priority()
+    /// The same tie-break [`RouteTarget::rank`] applies, off the same
+    /// [`RouteRank`] ordering rather than one restated here, so
+    /// configured-route precedence cannot drift between the router and the
+    /// client edge -- and read without cloning the matched route to reach
+    /// it.
+    fn rank(&self) -> RouteRank {
+        match self {
+            ConfiguredTarget::App(_) => RouteRank::App,
+            ConfiguredTarget::Peer(_) => RouteRank::Peer,
+            ConfiguredTarget::RuntimePeer(_) => RouteRank::RuntimePeer,
+        }
     }
 }
 
@@ -1359,7 +1376,7 @@ impl Connector {
         let Some((_, target)) = [configured_match, leased_match]
             .into_iter()
             .flatten()
-            .max_by_key(|(len, target)| (*len, target.priority()))
+            .max_by_key(|(len, target)| (*len, target.rank()))
         else {
             return self.finish(PacketResponse::Reject(Reject {
                 code: RejectCode::f02_unreachable(),
@@ -1370,22 +1387,22 @@ impl Connector {
             }));
         };
 
-        // Owned rather than borrowed (issue #884): the `RuntimePeer` arm
-        // holds its `PeerRoute` by value already (cloned once out of the
-        // runtime snapshot in `select_configured_route`), so the other two
-        // arms clone too rather than forcing a borrow with three different
-        // lifetimes to unify -- each clone is one small, fixed-size struct
-        // (two `String`s, two `u64`s), never the ADR 0015 whole-collection
-        // copy.
-        let peer_route: PeerRoute = match target {
+        // A `Cow`, not a plain clone (issue #884): the `RuntimePeer` arm
+        // owns its [`PeerRoute`] already -- cloned once out of the runtime
+        // snapshot inside `select_configured_route`, which drops that
+        // snapshot before returning -- while the other two arms still
+        // borrow straight out of the table that holds them, so a forwarded
+        // packet allocates nothing here it did not before this route
+        // source existed (ADR 0015).
+        let peer_route: Cow<'_, PeerRoute> = match target {
             RouteTarget::App(index) => {
                 tracing::debug!(handler_url = %self.routes[index].handler_url(), "routed to app");
                 let response = self.deliver_to_app(&self.routes[index], prepare).await;
                 return self.finish(response);
             }
-            RouteTarget::Peer(index) => self.peer_routes[index].clone(),
-            RouteTarget::Leased(index) => active_leased[index].as_peer_route().clone(),
-            RouteTarget::RuntimePeer(route) => route,
+            RouteTarget::Peer(index) => Cow::Borrowed(&self.peer_routes[index]),
+            RouteTarget::Leased(index) => Cow::Borrowed(active_leased[index].as_peer_route()),
+            RouteTarget::RuntimePeer(route) => Cow::Owned(route),
         };
         tracing::debug!(peer_id = %peer_route.peer_id(), "routed to peer");
         let response = self
@@ -1942,7 +1959,7 @@ impl Connector {
         [app_match, peer_match, runtime_match]
             .into_iter()
             .flatten()
-            .max_by_key(|(len, target)| (*len, target.priority()))
+            .max_by_key(|(len, target)| (*len, target.rank()))
     }
 
     /// Price, transport policy and route kind for the configured route

@@ -14,6 +14,10 @@
 //! #424 until ADR 0031/ADR 0033 (issue #882) retired the credit-window
 //! accounting it reported.
 
+use chrono::{DateTime, Utc};
+use connector_settlement::{ChannelState, ChannelStatus};
+use serde::{Deserialize, Serialize};
+
 /// Whether a peer or route row came from the config file, loaded once at
 /// boot and immutable for the process's life, or was added at runtime
 /// over the operator surface (issue #884) -- durable, but never able to
@@ -25,10 +29,6 @@ pub enum RouteSource {
     Config,
     Runtime,
 }
-
-use chrono::{DateTime, Utc};
-use connector_settlement::{ChannelState, ChannelStatus};
-use serde::{Deserialize, Serialize};
 
 /// A static route as seen by the operator surface. `price` is the flat
 /// per-packet amount a claim must advance by to pay for this route (issue
