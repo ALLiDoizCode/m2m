@@ -64,13 +64,16 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::sync::{Arc, RwLock};
 
-use connector_btp::{ACCUMULATED_COST_HEADER, CLAIM_ACK_HEADER, FLUSH_REQUESTED_HEADER};
+use connector_btp::{
+    ACCUMULATED_COST_HEADER, CLAIM_ACK_HEADER, FLUSH_REQUESTED_HEADER, PAYMENT_REQUIRED_HEADER,
+};
 use connector_domain::{Fulfill, PacketResponse, Prepare, Reject, RejectCode};
 use connector_peer_auth::{
     claim_ack_to_emit, decide_role, present_base64, Capability, PeerAuthPolicy, PeerAuthRefusalLog,
     SessionRole, PEER_AUTH_HEADER,
 };
 use connector_peer_btp::claim_json::{self};
+use connector_peer_btp::price_gate::{self, PaymentRequired};
 use connector_peer_btp::{fields, AcceptedClaims};
 use connector_runtime::{ClaimAckOutcome, Connector, WireClaim};
 
@@ -237,6 +240,18 @@ impl PeerHttpState {
             return PeerResponse::refused(401);
         }
 
+        // Decoded once, here, for the price-coverage check further down --
+        // and only for a peer, since §1.5 does not read a client's claim at
+        // all. Its watermark is read *before* `judge_claim` below may record
+        // this very claim, so that check judges the claim's own advance past
+        // the watermark it rode in on, not the one it just became (issue
+        // #880).
+        let claim = role.peer_id().and_then(|_| claim_on(&request));
+        let prior_watermark = role
+            .peer_id()
+            .zip(claim.as_ref())
+            .and_then(|(peer_id, claim)| self.accepted.watermark(peer_id, &claim.channel_id));
+
         let ack = self.judge_claim(&role, &request);
 
         // FLUSH (§3): a POST with an **empty ILP body** plus the claim
@@ -287,6 +302,24 @@ impl PeerHttpState {
                 )
             }
         };
+
+        // Issue #880 (owner decision #868): a peer PREPARE to a route this
+        // connector terminates and prices carries a covering claim, or it
+        // is refused with the client edge's own x402 greeting. The decision
+        // is `connector_peer_btp::price_gate`'s, shared with the BTP
+        // carriage so §0.1's one pipeline cannot admit over one carriage
+        // what it refuses over the other; what is this carriage's is only
+        // the response the refusal is shaped into.
+        if let Some(refusal) = price_gate::payment_required(
+            &self.connector,
+            &peer_id,
+            &prepare.destination,
+            ack,
+            claim.as_ref(),
+            prior_watermark,
+        ) {
+            return self.finish(&role, payment_required_response(refusal), ack);
+        }
 
         let channel_id = self.accepted.channel_for(&peer_id);
         // The one pipeline below the port (§0.1): a peer PREPARE that
@@ -408,6 +441,20 @@ fn packet_response(response: PacketResponse) -> PeerResponse {
             response
         }
     }
+}
+
+/// [`price_gate::payment_required`]'s refusal, HTTP-shaped: the greeting
+/// rides a header rather than the client edge's own real `402`, because
+/// this carriage keeps status `200` regardless of the packet's verdict,
+/// unchanged by this issue (§6.2). The REJECT itself is shaped by
+/// [`packet_response`], so §5.2's accumulated cost is not spelled twice.
+fn payment_required_response(refusal: PaymentRequired) -> PeerResponse {
+    let mut response = packet_response(PacketResponse::Reject(refusal.reject));
+    response.headers.push(
+        PAYMENT_REQUIRED_HEADER,
+        headers::payment_required_header_value(&refusal.terms),
+    );
+    response
 }
 
 /// A monotonic-enough millisecond reading for the refusal log's rate limit.

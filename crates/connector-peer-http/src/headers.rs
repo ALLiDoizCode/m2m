@@ -184,6 +184,16 @@ pub fn claim_header_value(json: &str) -> String {
     STANDARD.encode(json)
 }
 
+/// The [`connector_btp::PAYMENT_REQUIRED_HEADER`] value for `terms` (issue
+/// #880): `base64(JSON)`, the HTTP twin of the BTP carriage's raw
+/// protocolData entry, carrying the identical bytes
+/// [`connector_domain::x402::terms_body`] emits under the identical name
+/// the client edge's own `402` uses.
+#[must_use]
+pub fn payment_required_header_value(terms: &[u8]) -> String {
+    STANDARD.encode(terms)
+}
+
 /// The claim JSON a request carries, if it carries one.
 ///
 /// A request with no claim is legal on both carriages (§10.2 item 6), so

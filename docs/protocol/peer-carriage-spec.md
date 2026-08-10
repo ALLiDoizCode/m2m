@@ -134,12 +134,21 @@ secret defeats a valid claim". Under the amended rule it does not. Whether the c
 should exist at all is [issue #867](https://github.com/toon-protocol/connector/issues/867)'s
 question and is not decided here.
 
-**Implementation status.** This section states the rule, not the code as it stands today.
-`connector_peer_auth::decide_role` still implements the P1/P2 branch table
-(`crates/connector-peer-auth/src/decision.rs:186-221`), and `handle_peer_prepare` still accepts a
-`None` claim (`crates/connector-runtime/src/connector.rs:667-676`). Issue #880 lands the receive-side
-refusal and issue #881 the send side; §3.1's "a connector MUST NOT answer a peer-role PREPARE with
-the x402 greeting" is a residual of the retired credit window and is #880's to correct.
+**Implementation status.** This section states the rule for _role_, which is not yet the code as it
+stands today: `connector_peer_auth::decide_role` still implements the P1/P2 branch table
+(`crates/connector-peer-auth/src/decision.rs:186-221`), and role itself is not yet decided from a
+verified claim the way §1.2 describes -- that remains open work, not scoped to #880.
+`Connector::handle_peer_prepare` itself is unchanged and still accepts a `None` claim
+(`crates/connector-runtime/src/connector.rs:667-676`): issue #880 lands the _price-coverage_ half of
+this section (a `Terminated` route's own `price`, §3.1) one layer up, in the accept pipelines
+(`connector-peer-http`'s `PeerHttpState::handle` and `connector-peer-btp`'s
+`PeerSession::handle_message`) -- before `handle_peer_prepare` is ever called, using the claim each
+carriage already judges inline. Both call one decision,
+`connector_peer_btp::price_gate::payment_required`, so §0.1's one pipeline cannot admit over one
+carriage what it refuses over the other; each carriage keeps only the shape its own wire gives the
+refusal. §3.1's former "a connector MUST NOT answer a peer-role PREPARE with the x402 greeting" was
+corrected by #880 to state the rule that now runs. Issue #881 is the send
+side: covering an outbound peer PREPARE with a claim in the first place.
 
 #### Peer role is not a prerequisite for paid carriage
 
@@ -511,23 +520,34 @@ additively extensible) and MUST NOT be emitted.
   exactly the digest `connector_signer::evm_balance_proof_digest` produces today, over exactly the
   fields the deployed `TokenNetwork.sol` typehash requires, `lockedAmount`/`locksRoot` included and
   hashed as zeros (`peer-wire-spec.md` §3.5). Only carriage moves.
-- **`peer-wire-spec.md` §5.1's reject-code table is unchanged.** In particular `F06_UNEXPECTED_PAYMENT`
-  still has no peer use: PREPAREs never carry claims to gate at PREPARE time. A connector MUST NOT
-  answer a peer-role PREPARE with the x402 greeting of `client-edge-spec.md` §1.4, nor with the
-  `payment-required` entry or header. Peer fees are bilateral configuration (`peer-wire-spec.md`
-  §4), not a negotiation, and `requiredTransport` (issue #701) is a client-edge route policy with
-  no peer analogue.
+- **`peer-wire-spec.md` §5.1's reject-code table is unchanged, but `F06_UNEXPECTED_PAYMENT` now has
+  one peer use** (issue #880, correcting what this bullet said before it landed): a peer PREPARE
+  addressed to one of this node's own **`Terminated`** routes, reached over either carriage, MUST
+  carry a claim whose advance over that channel's watermark covers the route's `price`, or it is
+  refused `F06` with the x402 greeting of `client-edge-spec.md` §1.4 attached exactly as the client
+  edge's own BTP carriage attaches it -- `payment-required` protocolData (BTP) or a `payment-required`
+  response header, base64 (HTTP) -- built by the one shared emitter
+  (`connector_domain::x402::terms_body`), never a second wire shape. This is the same rule the
+  pre-existing amount check right beside it in `Connector::handle_peer_prepare` already enforces
+  against `prepare.amount`, extended to require that value be _proven_, not merely declared -- owner
+  decision #868's "every packet is paid, or it gets the 402 greeting" applied to the one place a
+  peer PREPARE is priced independently of the bilateral fee. A route explicitly priced at `0` is
+  untouched, exactly like the amount check.
 
-  This survives [ADR
+  **Every other peer PREPARE is still answered by nothing of the sort.** Peer fees are bilateral
+  configuration (`peer-wire-spec.md` §4), not a negotiation, and `requiredTransport` (issue #701) is
+  a client-edge route policy with no peer analogue. This survives [ADR
   0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md) unchanged, and the
   distinction is worth stating because that ADR looks at first like it contradicts this rule. A
   `[[routes]]` entry naming a `peer_id` now carries a `price`, and a **client-role** PREPARE to
   it is greeted, claim-gated and journaled exactly as one to a terminated route is (issue #620).
-  That is the client-facing direction of the same node. A **peer-role** PREPARE arriving over
-  either carriage is still answered by nothing of the sort: it is priced by the claim exchange of
-  §4 and `peer-wire-spec.md` §3, and a connector that greeted it would be inventing a negotiation
-  where a bilateral agreement already exists. The route's `price` is a fact about this node's
-  client edge; its `fee` is the fact its peers agreed to.
+  That is the client-facing direction of the same node. A **peer-role** PREPARE reaching this
+  node's `Forwarded` routes is still priced by the claim exchange of §4 and `peer-wire-spec.md` §3
+  alone -- greeting it would invent a negotiation where a bilateral agreement already exists. The
+  route's `price` is a fact about this node's client edge; its `fee` is the fact its peers agreed
+  to. The gate above binds only where the client edge's `price` and this node's own termination
+  coincide -- a `Terminated` route -- which is exactly where ADR 0028 says a fact about the client
+  edge, not a peering, is being charged.
 
 ### 3.2 The `WireClaim` binary encoding is not used on either carriage
 

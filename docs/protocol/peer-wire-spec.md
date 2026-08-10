@@ -234,10 +234,14 @@ Peer-wire REJECTs use the existing RFC-0027 §3.3 codes:
 | `T04`             | This connector's exposure ceiling for the inbound peer is exceeded (§5.3).                                                                        |
 | `F99`/`T99`/`R99` | Application-level reject from the terminating app, passed through unchanged.                                                                      |
 
-`F06_UNEXPECTED_PAYMENT`, previously used to reject a PREPARE arriving without an inline claim
-under the prepay model, has no peer-wire use: PREPAREs never carry claims now (§3.2), so there is
-nothing to gate at PREPARE time. A payer that cannot be trusted to pay is handled at the claim
-layer (§3.4), not the packet layer.
+`F06_UNEXPECTED_PAYMENT` has exactly one peer use, and it is not this table's: a PREPARE addressed
+to one of this node's own priced **terminated** routes is refused `F06` with the x402 greeting
+attached unless an accompanying claim's advance covers that route's `price`
+([`peer-carriage-spec.md` §3.1](peer-carriage-spec.md), issue #880, owner decision #868). That
+refusal is the carriage's, above this wire's own reject codes, and it never reaches the packet
+layer described here. Everything else this code once did under the prepay model is gone: a payer
+that cannot be trusted to pay for a **forwarded** packet is still handled at the claim layer
+(§3.4), whose fees are bilateral configuration (§4) rather than something a greeting quotes.
 
 ### 5.2 Accumulated cost
 

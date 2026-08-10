@@ -118,7 +118,11 @@ const OCTET_STREAM: &str = "application/octet-stream";
 /// (`peer-carriage-spec.md` §12.1).
 const CLAIM_HEADER: &str = connector_btp::CLAIM_HEADER;
 const CLAIM_WRAPPED_HEADER: &str = "ilp-payment-channel-claim-wrapped";
-const PAYMENT_REQUIRED_HEADER: &str = "payment-required";
+/// The other half of the pair (spec I2), read rather than re-spelled for the
+/// same reason [`CLAIM_HEADER`] is: the peer carriage answers an uncovered
+/// peer PREPARE with this edge's own greeting under this same name (issue
+/// #880), so one declaration serves both.
+const PAYMENT_REQUIRED_HEADER: &str = connector_btp::PAYMENT_REQUIRED_HEADER;
 /// client-edge-spec.md §1.6: a REJECT's running cost total rides beside the
 /// OER body in this header rather than inside it, since RFC-0027's REJECT
 /// `data` is reserved for an application-level reject's own diagnostic
@@ -527,8 +531,6 @@ pub struct BootstrapIdentity {
     pub btp_endpoint: String,
 }
 
-const X402_MAX_TIMEOUT_SECONDS: u64 = 60;
-
 /// Answer an unpaid request to `destination` with terms instead of doing
 /// the work (client-edge-spec.md §1.4, ADR 0022) -- this changes no state
 /// and is only ever a reply to the request that asked. Two shapes of
@@ -626,6 +628,11 @@ fn x402_response(
 /// never drift. `required_transport` (issue #701) is `None` for an ordinary
 /// unpaid-request greeting and `Some("http" | "btp")` when this same shape
 /// is reused to tell a client it used the wrong transport entirely.
+///
+/// The construction itself is [`connector_domain::x402::terms_body`] (issue
+/// #880): it moved there so the peer carriages -- which sit *below* this
+/// crate in the graph and cannot import it -- can call the same emitter for
+/// their own `F06` greeting rather than re-declaring the shape.
 fn x402_terms_body(
     destination: &str,
     price: u64,
@@ -634,35 +641,19 @@ fn x402_terms_body(
     bootstrap_identity: Option<&BootstrapIdentity>,
     required_transport: Option<&str>,
 ) -> Vec<u8> {
-    let terms = X402PaymentRequired {
-        x402_version: X402_VERSION,
-        resource: X402Resource {
-            url: destination.to_string(),
-        },
-        accepts: vec![X402PaymentOption {
-            scheme: "toon-channel".to_string(),
-            network: destination.to_string(),
-            amount: price.to_string(),
-            pay_to: destination.to_string(),
-            max_timeout_seconds: X402_MAX_TIMEOUT_SECONDS,
-            http_endpoint: "/ilp".to_string(),
-            extra: X402ChannelExtra {
-                ilp_address: destination.to_string(),
-                endpoint: "/ilp".to_string(),
-                price: price.to_string(),
-                ilp_addresses: bootstrap_identity
-                    .map(|identity| identity.ilp_addresses.clone())
-                    .unwrap_or_default(),
-                btp_endpoint: bootstrap_identity.map(|identity| identity.btp_endpoint.clone()),
-                settlement: settlement.cloned(),
-                settlements: settlements.to_vec(),
-                required_transport: required_transport.map(str::to_string),
-                session_lease_ttl_ms: crate::session_registry::SESSION_LEASE_BACKSTOP_TTL
-                    .as_millis() as u64,
-            },
-        }],
-    };
-    serde_json::to_vec(&terms).expect("x402 terms always serialize")
+    connector_domain::x402::terms_body(&connector_domain::x402::GreetingTerms {
+        destination,
+        price,
+        settlement,
+        settlements,
+        ilp_addresses: bootstrap_identity
+            .map(|identity| identity.ilp_addresses.as_slice())
+            .unwrap_or(&[]),
+        btp_endpoint: bootstrap_identity.map(|identity| identity.btp_endpoint.as_str()),
+        required_transport,
+        session_lease_ttl_ms: crate::session_registry::SESSION_LEASE_BACKSTOP_TTL.as_millis()
+            as u64,
+    })
 }
 
 /// Decode a claim header's raw (still base64-encoded) bytes into the

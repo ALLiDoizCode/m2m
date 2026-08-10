@@ -88,6 +88,12 @@ pub const MINIMUM_DELIVERY_HEADER: &str = "toon-minimum-delivery";
 /// The HTTP twin of [`ACCUMULATED_COST_PROTOCOL`] (§3, §5.2) -- already
 /// implemented on the client edge and reused verbatim.
 pub const ACCUMULATED_COST_HEADER: &str = "toon-accumulated-cost";
+/// The HTTP twin of [`PAYMENT_REQUIRED_PROTOCOL`] (§3.1, `client-edge-spec.md`
+/// §1.4) -- the client edge's own `402` header spelling, reused verbatim by
+/// the peer carriage that answers an uncovered peer PREPARE with the same
+/// greeting (issue #880). Declared here rather than spelled at either use
+/// site so the two halves stay a pair, exactly like the four above.
+pub const PAYMENT_REQUIRED_HEADER: &str = "payment-required";
 /// **The one field with no BTP twin** (§3, §6.4): the flush prompt a payee
 /// that cannot originate MAY set on a response. BTP needs none, because on
 /// BTP the payee can originate a request of its own -- so this constant
@@ -140,6 +146,11 @@ pub const CARRIAGE_NAMES: &[CarriageNames] = &[
         concept: "accumulated-cost",
         btp_protocol_entry: ACCUMULATED_COST_PROTOCOL,
         http_header: ACCUMULATED_COST_HEADER,
+    },
+    CarriageNames {
+        concept: "payment-required",
+        btp_protocol_entry: PAYMENT_REQUIRED_PROTOCOL,
+        http_header: PAYMENT_REQUIRED_HEADER,
     },
 ];
 
@@ -636,6 +647,14 @@ mod tests {
         assert_eq!(
             by_concept("accumulated-cost").http_header,
             ACCUMULATED_COST_HEADER
+        );
+        assert_eq!(
+            by_concept("payment-required").btp_protocol_entry,
+            PAYMENT_REQUIRED_PROTOCOL
+        );
+        assert_eq!(
+            by_concept("payment-required").http_header,
+            PAYMENT_REQUIRED_HEADER
         );
     }
 

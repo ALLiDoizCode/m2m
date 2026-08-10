@@ -20,9 +20,10 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use connector_btp::{
     ACCUMULATED_COST_HEADER, CLAIM_ACK_HEADER, CLAIM_HEADER, FLUSH_REQUESTED_HEADER,
-    MINIMUM_DELIVERY_HEADER,
+    MINIMUM_DELIVERY_HEADER, PAYMENT_REQUIRED_HEADER,
 };
-use connector_config::PeerCredential;
+use connector_config::{PeerCredential, StaticRoute};
+use connector_domain::x402::parse_greeting;
 use connector_domain::{PacketResponse, Prepare};
 use connector_peer_auth::{encode_base64, PeerAuthPolicy, PresentedCredential, PEER_AUTH_HEADER};
 use connector_peer_btp::AcceptedClaims;
@@ -99,6 +100,27 @@ fn payee(payer: &dyn Signer) -> Arc<Connector> {
     Arc::new(
         Connector::new(
             vec![],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            clock(),
+        )
+        .with_channel_verification_key(channel_id(), counterparty)
+        .with_channel_domain(channel_id(), domain())
+        .expect("a bytes32 channel id"),
+    )
+}
+
+/// As [`payee`], but with one terminated, priced route -- the fixture issue
+/// #880's price-coverage gate tests need, since a payee with no routes at
+/// all (`payee`) never reaches that gate (§3.1: the gate is scoped to a
+/// `Terminated` route's own price, exactly like the pre-existing amount
+/// check right below it in `Connector::handle_peer_prepare`).
+fn payee_with_route(payer: &dyn Signer, route: StaticRoute) -> Arc<Connector> {
+    let counterparty = derive_evm_address(&payer.public_key().unwrap());
+    Arc::new(
+        Connector::new(
+            vec![route],
             vec![],
             Arc::new(FakeAppClient::new()),
             Arc::new(InProcessPeerTransport::new()),
@@ -1062,6 +1084,290 @@ async fn a_payee_names_one_channel_per_occurrence_and_only_to_a_peer() {
         .headers
         .get(FLUSH_REQUESTED_HEADER)
         .is_none());
+}
+
+// ─── issue #880 (owner decision #868): every peer PREPARE to a priced
+// terminated route carries a covering claim, or is refused with the client
+// edge's own x402 greeting ───
+
+/// No claim at all: refused with the same `F06` + x402-terms shape the
+/// client edge's own BTP carriage answers a claimless request with (issue
+/// #880, `peer-carriage-spec.md` §3.1) -- never delivered to the app.
+#[tokio::test]
+async fn a_claimless_peer_prepare_to_a_priced_route_is_refused_with_the_x402_greeting() {
+    let payer_signer = LocalSigner::generate("payer");
+    let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+    let peer = accepting(payee_with_route(&payer_signer, route), bound_policy());
+
+    let response = peer
+        .handle(request(
+            Some((PEER_ID, SECRET)),
+            None,
+            prepare("g.example.app").encode(),
+        ))
+        .await;
+
+    assert_eq!(
+        response.status, 200,
+        "a packet verdict, not a transport 4xx (§6.2)"
+    );
+    let reject = connector_domain::Reject::decode(&response.body).expect("a reject");
+    assert_eq!(reject.code.as_str(), "F06");
+    let terms_header = response
+        .headers
+        .get(PAYMENT_REQUIRED_HEADER)
+        .expect("the x402 greeting rode the response");
+    let terms = parse_greeting(&base64_decode(terms_header)).expect("readable terms");
+    assert_eq!(terms.price(), Some(25));
+    assert_eq!(terms.pay_to(), Some("g.example.app"));
+}
+
+/// A claim rides the request, but its own advance over the watermark falls
+/// short of the route's price: refused exactly the same way as no claim at
+/// all (issue #880's second acceptance case) -- the claim's own nonce/amount
+/// validity is irrelevant to this gate, which judges coverage, not validity.
+#[tokio::test]
+async fn a_claim_that_does_not_cover_the_routes_price_is_refused_the_same_way() {
+    let payer_signer = LocalSigner::generate("payer");
+    let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+    let peer = accepting(payee_with_route(&payer_signer, route), bound_policy());
+    let claim = sign_claim(&payer_signer, 1, 10); // advances only 10, price is 25
+
+    let response = peer
+        .handle(request(
+            Some((PEER_ID, SECRET)),
+            Some(&claim_as_json(&claim, &payer_signer)),
+            prepare("g.example.app").encode(),
+        ))
+        .await;
+
+    // The claim itself is perfectly valid and is acknowledged -- the two
+    // verdicts stay independent (§6.2) even though this gate is new.
+    assert_eq!(ack_on(&response), Some(ClaimAckOutcome::Accepted));
+    let reject = connector_domain::Reject::decode(&response.body).expect("a reject");
+    assert_eq!(reject.code.as_str(), "F06");
+    assert!(response.headers.get(PAYMENT_REQUIRED_HEADER).is_some());
+}
+
+/// The boundary this gate exists to leave open: a claim whose advance
+/// exactly meets the route's price is admitted precisely as it was before
+/// this issue -- delivered to the app, no greeting.
+#[tokio::test]
+async fn a_covering_claim_is_admitted_exactly_as_today() {
+    let payer_signer = LocalSigner::generate("payer");
+    let identity_signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("payee-identity"));
+    let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+    let app_client = Arc::new(FakeAppClient::new());
+    let response_body = b"irrelevant".to_vec();
+    app_client.respond(
+        route.handler_url(),
+        connector_runtime::AppOutcome::Answered {
+            response: connector_domain::EnvelopeResponse {
+                status: 200,
+                headers: vec![],
+                body: response_body.clone(),
+            },
+        },
+    );
+    let counterparty = derive_evm_address(&payer_signer.public_key().unwrap());
+    let connector = Arc::new(
+        Connector::new(
+            vec![route],
+            vec![],
+            app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            clock(),
+        )
+        .with_channel_verification_key(channel_id(), counterparty)
+        .with_channel_domain(channel_id(), domain())
+        .expect("a bytes32 channel id")
+        .with_identity_signer(Arc::clone(&identity_signer)),
+    );
+    let peer = accepting(connector, bound_policy());
+    let claim = sign_claim(&payer_signer, 1, 25); // advances exactly the price
+
+    // A genuinely sealed envelope (ADR 0018/0019), so this termination can
+    // actually fulfil rather than being refused for want of sealing --
+    // orthogonal to this gate, but needed to prove delivery reached the app.
+    let envelope = connector_domain::EnvelopeRequest {
+        method: "POST".to_string(),
+        target: "/".to_string(),
+        headers: vec![],
+        body: b"hello".to_vec(),
+    };
+    let identity_public = identity_signer.public_key().expect("identity public key");
+    let (data, shared_secret) =
+        connector_signer::giftwrap::seal_request(&envelope.encode(), &identity_public)
+            .expect("seal");
+    let condition = connector_domain::derive_condition(
+        &connector_signer::giftwrap::derive_fulfillment(&shared_secret),
+    );
+    let prepare = Prepare {
+        amount: 25,
+        expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
+        execution_condition: condition,
+        destination: "g.example.app".to_string(),
+        data,
+    };
+
+    let response = peer
+        .handle(request(
+            Some((PEER_ID, SECRET)),
+            Some(&claim_as_json(&claim, &payer_signer)),
+            prepare.encode(),
+        ))
+        .await;
+
+    assert_eq!(ack_on(&response), Some(ClaimAckOutcome::Accepted));
+    assert!(
+        response.headers.get(PAYMENT_REQUIRED_HEADER).is_none(),
+        "an admitted packet carries no greeting"
+    );
+    let fulfill = connector_domain::Fulfill::decode(&response.body).expect("a fulfil");
+    let opened = connector_signer::giftwrap::open_response(&shared_secret, &fulfill.data)
+        .expect("open the sealed fulfil");
+    let opened = connector_domain::EnvelopeResponse::decode(&opened).expect("decode envelope");
+    assert_eq!(opened.body, response_body);
+    assert_eq!(app_client.deliveries().len(), 1);
+}
+
+/// PR #913 review finding: a claim signed by a non-counterparty key still
+/// *decodes* and can declare any `cumulative_amount` it likes -- coverage
+/// judged off that declared amount, ignoring the claim book's own verdict,
+/// let an unlimited-value, never-verified claim buy service. The verdict
+/// here is `signature_invalid`; coverage must be refused regardless of the
+/// amount declared, exactly like a claimless PREPARE.
+#[tokio::test]
+async fn a_forged_claim_declaring_a_large_amount_does_not_buy_coverage() {
+    let payer_signer = LocalSigner::generate("payer");
+    let impostor = LocalSigner::generate("impostor");
+    let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+    let app_client = Arc::new(FakeAppClient::new());
+    let counterparty = derive_evm_address(&payer_signer.public_key().unwrap());
+    let connector = Arc::new(
+        Connector::new(
+            vec![route],
+            vec![],
+            app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            clock(),
+        )
+        .with_channel_verification_key(channel_id(), counterparty)
+        .with_channel_domain(channel_id(), domain())
+        .expect("a bytes32 channel id"),
+    );
+    let peer = accepting(connector, bound_policy());
+    // Signed by an impostor, not the channel's configured counterparty --
+    // declares far more than the route's price, but never verifies.
+    let claim = sign_claim(&impostor, 1, 1_000_000);
+
+    let response = peer
+        .handle(request(
+            Some((PEER_ID, SECRET)),
+            Some(&claim_as_json(&claim, &impostor)),
+            prepare("g.example.app").encode(),
+        ))
+        .await;
+
+    assert_eq!(
+        ack_on(&response),
+        Some(ClaimAckOutcome::Rejected(
+            ClaimRejectReason::SignatureInvalid
+        ))
+    );
+    let reject = connector_domain::Reject::decode(&response.body).expect("a reject");
+    assert_eq!(reject.code.as_str(), "F06");
+    assert!(response.headers.get(PAYMENT_REQUIRED_HEADER).is_some());
+    assert!(
+        app_client.deliveries().is_empty(),
+        "a forged claim must never reach the app"
+    );
+}
+
+/// PR #913 review finding, second case: a genuinely signed claim replayed
+/// at an already-used nonce also decodes and can declare any amount, and
+/// its verdict is `nonce_not_advancing` -- not `signature_invalid`, but
+/// equally not `accepted`. The refusal must repeat on every retransmission
+/// and the watermark must never move off the last genuinely accepted
+/// claim.
+#[tokio::test]
+async fn a_claim_replayed_at_a_used_nonce_never_buys_coverage() {
+    let payer_signer = LocalSigner::generate("payer");
+    let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+    let app_client = Arc::new(FakeAppClient::new());
+    let counterparty = derive_evm_address(&payer_signer.public_key().unwrap());
+    let connector = Arc::new(
+        Connector::new(
+            vec![route],
+            vec![],
+            app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            clock(),
+        )
+        .with_channel_verification_key(channel_id(), counterparty)
+        .with_channel_domain(channel_id(), domain())
+        .expect("a bytes32 channel id"),
+    );
+    let accepted = Arc::new(AcceptedClaims::new());
+    let peer = Arc::new(PeerHttpState::new(
+        connector,
+        bound_policy(),
+        Arc::clone(&accepted),
+        Arc::new(FlushHints::new()),
+        PeerHttpPolicy::default(),
+    ));
+
+    // A first claim at nonce 1 genuinely covers the price and advances the
+    // watermark to 25 (a FLUSH: an empty body plus the claim header).
+    let first = sign_claim(&payer_signer, 1, 25);
+    let flush_response = peer
+        .handle(request(
+            Some((PEER_ID, SECRET)),
+            Some(&claim_as_json(&first, &payer_signer)),
+            Vec::new(),
+        ))
+        .await;
+    assert_eq!(ack_on(&flush_response), Some(ClaimAckOutcome::Accepted));
+
+    // Replayed at the same nonce, declaring an amount that would cover many
+    // more packets if it were judged by amount alone.
+    let replayed = sign_claim(&payer_signer, 1, 1_000_000);
+    let replayed_json = claim_as_json(&replayed, &payer_signer);
+
+    for attempt in 0..2 {
+        let response = peer
+            .handle(request(
+                Some((PEER_ID, SECRET)),
+                Some(&replayed_json),
+                prepare("g.example.app").encode(),
+            ))
+            .await;
+
+        assert_eq!(
+            ack_on(&response),
+            Some(ClaimAckOutcome::Rejected(
+                ClaimRejectReason::NonceNotAdvancing
+            )),
+            "attempt {attempt}"
+        );
+        let reject = connector_domain::Reject::decode(&response.body).expect("a reject");
+        assert_eq!(reject.code.as_str(), "F06", "attempt {attempt}");
+        assert!(
+            response.headers.get(PAYMENT_REQUIRED_HEADER).is_some(),
+            "attempt {attempt}"
+        );
+    }
+    assert!(
+        app_client.deliveries().is_empty(),
+        "the replayed claim must never reach the app"
+    );
+    let watermark = accepted
+        .watermark(PEER_ID, &channel_id())
+        .expect("a watermark was recorded by the first, genuine claim");
+    assert_eq!(
+        watermark.cumulative_amount, 25,
+        "the replayed claim's declared amount must never advance the watermark"
+    );
 }
 
 // ─── §7.2: the claim race, and its mitigation ───
