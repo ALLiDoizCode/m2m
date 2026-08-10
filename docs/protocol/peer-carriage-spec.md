@@ -137,14 +137,17 @@ question and is not decided here.
 **Implementation status.** This section states the rule for _role_, which is not yet the code as it
 stands today: `connector_peer_auth::decide_role` still implements the P1/P2 branch table
 (`crates/connector-peer-auth/src/decision.rs:186-221`), and role itself is not yet decided from a
-verified claim the way §1.2 describes -- that remains open work, not scoped to #880. `Connector::
-handle_peer_prepare` itself is unchanged and still accepts a `None` claim
+verified claim the way §1.2 describes -- that remains open work, not scoped to #880.
+`Connector::handle_peer_prepare` itself is unchanged and still accepts a `None` claim
 (`crates/connector-runtime/src/connector.rs:667-676`): issue #880 lands the _price-coverage_ half of
 this section (a `Terminated` route's own `price`, §3.1) one layer up, in the accept pipelines
 (`connector-peer-http`'s `PeerHttpState::handle` and `connector-peer-btp`'s
 `PeerSession::handle_message`) -- before `handle_peer_prepare` is ever called, using the claim each
-carriage already judges inline. §3.1's former "a connector MUST NOT answer a peer-role PREPARE with
-the x402 greeting" was corrected by #880 to state the rule that now runs. Issue #881 is the send
+carriage already judges inline. Both call one decision,
+`connector_peer_btp::price_gate::payment_required`, so §0.1's one pipeline cannot admit over one
+carriage what it refuses over the other; each carriage keeps only the shape its own wire gives the
+refusal. §3.1's former "a connector MUST NOT answer a peer-role PREPARE with the x402 greeting" was
+corrected by #880 to state the rule that now runs. Issue #881 is the send
 side: covering an outbound peer PREPARE with a claim in the first place.
 
 #### Peer role is not a prerequisite for paid carriage

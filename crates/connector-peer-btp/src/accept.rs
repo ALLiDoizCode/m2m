@@ -59,15 +59,16 @@ use connector_btp::{
     OutboundRequests, ProtocolData, SessionGone, AUTH_PROTOCOL, BTP_ERROR, BTP_MESSAGE,
     BTP_RESPONSE, BTP_TRANSFER,
 };
-use connector_domain::{validate_price, Fulfill, PacketResponse, Prepare, Reject, RejectCode};
+use connector_domain::{Fulfill, PacketResponse, Prepare, Reject, RejectCode};
 use connector_peer_auth::{
     claim_ack_to_emit, decide_role, present_raw, PeerAuthPolicy, PeerAuthRefusalLog, SessionRole,
     SessionRoleBinding, PEER_AUTH_PROTOCOL_ENTRY,
 };
-use connector_runtime::{ClaimAckOutcome, ClientRouteKind, Connector, WireClaim};
+use connector_runtime::{ClaimAckOutcome, Connector, WireClaim};
 use tokio::sync::mpsc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use crate::price_gate::{self, PaymentRequired};
 use crate::{ack, claim_json, fields};
 
 /// How many completed replies may queue for the socket's writer before a
@@ -604,53 +605,23 @@ impl PeerSession {
         };
 
         // Issue #880 (owner decision #868): a peer PREPARE to a route this
-        // connector terminates and prices MUST carry a claim that covers
-        // that price, or it is refused with the client edge's own x402
-        // greeting (`peer-carriage-spec.md` §3.1, corrected by this issue).
-        // Scoped to a terminated route's own price exactly like the
-        // existing amount check `handle_peer_prepare` still runs below this
-        // one: a `Forwarded` route is priced by the peering's own bilateral
-        // fee (`peer-wire-spec.md` §4), not by this gate (§3.1).
-        let price = self
-            .state
-            .connector
-            .client_route(&prepare.destination)
-            .filter(|route| route.kind == ClientRouteKind::Terminated)
-            .map_or(0, |route| route.price);
-        if price > 0 {
-            let claim = judged.as_ref().and_then(|judged| judged.claim.as_ref());
-            // §880's correction: coverage requires the claim book's own
-            // verdict to be `Accepted`, not merely that the claim decoded.
-            // A forged signature or a replayed nonce still *decodes* and can
-            // still declare any `cumulative_amount` it likes -- judging
-            // coverage off that declared amount rather than the verdict lets
-            // an unlimited-value, never-verified claim buy service.
-            let covers = ack == ClaimAckOutcome::Accepted
-                && claim.is_some_and(|claim| {
-                    validate_price(prior_watermark, claim.cumulative_amount, price).is_ok()
-                });
-            if !covers {
-                let advanced = claim.map_or(0, |claim| {
-                    claim
-                        .cumulative_amount
-                        .saturating_sub(prior_watermark.map_or(0, |w| w.cumulative_amount))
-                });
-                tracing::warn!(
-                    peer_id,
-                    destination = %prepare.destination,
-                    price,
-                    advanced,
-                    "peer PREPARE refused: no claim covers this packet's price"
-                );
-                return self
-                    .send(self.payment_required_response(
-                        request_id,
-                        &prepare.destination,
-                        price,
-                        ack,
-                    ))
-                    .await;
-            }
+        // connector terminates and prices carries a covering claim, or it
+        // is refused with the client edge's own x402 greeting. The decision
+        // is `price_gate`'s, shared with the HTTP carriage so §0.1's one
+        // pipeline cannot admit over one carriage what it refuses over the
+        // other; what is this carriage's is only the frame the refusal is
+        // shaped into.
+        if let Some(refusal) = price_gate::payment_required(
+            &self.state.connector,
+            &peer_id,
+            &prepare.destination,
+            ack,
+            judged.as_ref().and_then(|judged| judged.claim.as_ref()),
+            prior_watermark,
+        ) {
+            return self
+                .send(self.payment_required_response(request_id, refusal, ack))
+                .await;
         }
 
         let channel_id = self.state.accepted.channel_for(&peer_id);
@@ -743,36 +714,24 @@ impl PeerSession {
         )
     }
 
-    /// Issue #880: the same x402 greeting the client edge answers an
-    /// unpaid or under-covering request with
-    /// ([`connector_domain::x402::terms_body`], the one emitter every
-    /// carriage shares), `F06`-shaped exactly like the client edge's own
-    /// BTP carriage answers a claimless request (`connector-client-edge`'s
-    /// `btp` module) since BTP cannot answer HTTP `402`. The claim ack
+    /// [`price_gate::payment_required`]'s refusal, BTP-shaped: `F06` plus
+    /// the greeting as protocolData, exactly like the client edge's own BTP
+    /// carriage answers a claimless request (`connector-client-edge`'s
+    /// `btp` module), since BTP cannot answer HTTP `402`. The claim ack
     /// still rides this same RESPONSE (§6.1) -- the packet's own refusal
     /// and the claim's verdict are independent (§6.2).
     fn payment_required_response(
         &self,
         request_id: u32,
-        destination: &str,
-        price: u64,
+        refusal: PaymentRequired,
         ack: ClaimAckOutcome,
     ) -> Vec<u8> {
-        let terms =
-            connector_domain::x402::terms_body(destination, price, None, &[], &[], None, None, 0);
-        let reject = Reject {
-            code: RejectCode::f06_unexpected_payment(),
-            triggered_by: String::new(),
-            message: "no payment channel claim covers this packet's price".to_string(),
-            data: Vec::new(),
-            accumulated_cost: 0,
-        };
         let mut entries = vec![
-            fields::accumulated_cost_protocol_data(reject.accumulated_cost),
-            fields::payment_required_protocol_data(terms),
+            fields::accumulated_cost_protocol_data(refusal.reject.accumulated_cost),
+            fields::payment_required_protocol_data(refusal.terms),
         ];
         entries.extend(self.claim_ack_entry(ack));
-        encode_response(request_id, &entries, &reject.encode())
+        encode_response(request_id, &entries, &refusal.reject.encode())
     }
 }
 

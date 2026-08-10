@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use connector_btp::{
     ACCUMULATED_COST_HEADER, CLAIM_ACK_HEADER, CLAIM_HEADER, FLUSH_REQUESTED_HEADER,
-    MINIMUM_DELIVERY_HEADER, PAYMENT_REQUIRED_PROTOCOL,
+    MINIMUM_DELIVERY_HEADER, PAYMENT_REQUIRED_HEADER,
 };
 use connector_config::{PeerCredential, StaticRoute};
 use connector_domain::x402::parse_greeting;
@@ -1115,7 +1115,7 @@ async fn a_claimless_peer_prepare_to_a_priced_route_is_refused_with_the_x402_gre
     assert_eq!(reject.code.as_str(), "F06");
     let terms_header = response
         .headers
-        .get(PAYMENT_REQUIRED_PROTOCOL)
+        .get(PAYMENT_REQUIRED_HEADER)
         .expect("the x402 greeting rode the response");
     let terms = parse_greeting(&base64_decode(terms_header)).expect("readable terms");
     assert_eq!(terms.price(), Some(25));
@@ -1146,7 +1146,7 @@ async fn a_claim_that_does_not_cover_the_routes_price_is_refused_the_same_way() 
     assert_eq!(ack_on(&response), Some(ClaimAckOutcome::Accepted));
     let reject = connector_domain::Reject::decode(&response.body).expect("a reject");
     assert_eq!(reject.code.as_str(), "F06");
-    assert!(response.headers.get(PAYMENT_REQUIRED_PROTOCOL).is_some());
+    assert!(response.headers.get(PAYMENT_REQUIRED_HEADER).is_some());
 }
 
 /// The boundary this gate exists to leave open: a claim whose advance
@@ -1220,7 +1220,7 @@ async fn a_covering_claim_is_admitted_exactly_as_today() {
 
     assert_eq!(ack_on(&response), Some(ClaimAckOutcome::Accepted));
     assert!(
-        response.headers.get(PAYMENT_REQUIRED_PROTOCOL).is_none(),
+        response.headers.get(PAYMENT_REQUIRED_HEADER).is_none(),
         "an admitted packet carries no greeting"
     );
     let fulfill = connector_domain::Fulfill::decode(&response.body).expect("a fulfil");
@@ -1277,7 +1277,7 @@ async fn a_forged_claim_declaring_a_large_amount_does_not_buy_coverage() {
     );
     let reject = connector_domain::Reject::decode(&response.body).expect("a reject");
     assert_eq!(reject.code.as_str(), "F06");
-    assert!(response.headers.get(PAYMENT_REQUIRED_PROTOCOL).is_some());
+    assert!(response.headers.get(PAYMENT_REQUIRED_HEADER).is_some());
     assert!(
         app_client.deliveries().is_empty(),
         "a forged claim must never reach the app"
@@ -1353,7 +1353,7 @@ async fn a_claim_replayed_at_a_used_nonce_never_buys_coverage() {
         let reject = connector_domain::Reject::decode(&response.body).expect("a reject");
         assert_eq!(reject.code.as_str(), "F06", "attempt {attempt}");
         assert!(
-            response.headers.get(PAYMENT_REQUIRED_PROTOCOL).is_some(),
+            response.headers.get(PAYMENT_REQUIRED_HEADER).is_some(),
             "attempt {attempt}"
         );
     }

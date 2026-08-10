@@ -21,6 +21,7 @@
 //! | CLAIM_ACK | `claim-ack` entry on the RESPONSE that already answers the claim-bearing frame ([`ack`]) |
 //! | `minimumDelivery` | `toon-minimum-delivery` entry ([`fields`]) |
 //! | `accumulatedCost` | `toon-accumulated-cost` entry on a REJECT ([`fields`]) |
+//! | x402 greeting | `payment-required` entry on the `F06` REJECT an uncovered PREPARE gets ([`price_gate`], [`fields`]) |
 //! | peer credential | `auth` entry, raw UTF-8 JSON |
 //!
 //! # Three things this crate must not do, and how it cannot
@@ -66,11 +67,13 @@ pub mod ack;
 pub mod claim_json;
 pub mod dial;
 pub mod fields;
+pub mod price_gate;
 pub mod ws;
 
 pub use accept::{AcceptedClaims, PeerAcceptPolicy, PeerCarriageState, PeerSession};
 pub use claim_json::{ClaimDecodeError, PeerClaimDomain};
 pub use dial::{decode_answer, BtpPeerTransport, DialError, PeerAnswer, PeerDialer, PeerRelation};
+pub use price_gate::PaymentRequired;
 pub use ws::TungsteniteDialer;
 
 use connector_config::PeerConfig;

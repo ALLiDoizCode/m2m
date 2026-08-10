@@ -65,16 +65,17 @@ use std::sync::Mutex;
 use std::sync::{Arc, RwLock};
 
 use connector_btp::{
-    ACCUMULATED_COST_HEADER, CLAIM_ACK_HEADER, FLUSH_REQUESTED_HEADER, PAYMENT_REQUIRED_PROTOCOL,
+    ACCUMULATED_COST_HEADER, CLAIM_ACK_HEADER, FLUSH_REQUESTED_HEADER, PAYMENT_REQUIRED_HEADER,
 };
-use connector_domain::{validate_price, Fulfill, PacketResponse, Prepare, Reject, RejectCode};
+use connector_domain::{Fulfill, PacketResponse, Prepare, Reject, RejectCode};
 use connector_peer_auth::{
     claim_ack_to_emit, decide_role, present_base64, Capability, PeerAuthPolicy, PeerAuthRefusalLog,
     SessionRole, PEER_AUTH_HEADER,
 };
 use connector_peer_btp::claim_json::{self};
+use connector_peer_btp::price_gate::{self, PaymentRequired};
 use connector_peer_btp::{fields, AcceptedClaims};
-use connector_runtime::{ClaimAckOutcome, ClientRouteKind, Connector, WireClaim};
+use connector_runtime::{ClaimAckOutcome, Connector, WireClaim};
 
 use crate::headers::{self, PeerRequest, PeerResponse};
 
@@ -303,48 +304,21 @@ impl PeerHttpState {
         };
 
         // Issue #880 (owner decision #868): a peer PREPARE to a route this
-        // connector terminates and prices MUST carry a claim that covers
-        // that price, or it is refused with the client edge's own x402
-        // greeting (`peer-carriage-spec.md` §3.1, corrected by this issue).
-        // Scoped to a terminated route's own price exactly like the
-        // existing amount check `handle_peer_prepare` still runs below this
-        // one: a `Forwarded` route is priced by the peering's own bilateral
-        // fee (`peer-wire-spec.md` §4), not by this gate (§3.1).
-        let price = self
-            .connector
-            .client_route(&prepare.destination)
-            .filter(|route| route.kind == ClientRouteKind::Terminated)
-            .map_or(0, |route| route.price);
-        if price > 0 {
-            // §880's correction: coverage requires the claim book's own
-            // verdict to be `Accepted`, not merely that the claim decoded.
-            // A forged signature or a replayed nonce still *decodes* and can
-            // still declare any `cumulative_amount` it likes -- judging
-            // coverage off that declared amount rather than the verdict lets
-            // an unlimited-value, never-verified claim buy service.
-            let covers = ack == ClaimAckOutcome::Accepted
-                && claim.as_ref().is_some_and(|claim| {
-                    validate_price(prior_watermark, claim.cumulative_amount, price).is_ok()
-                });
-            if !covers {
-                let advanced = claim.as_ref().map_or(0, |claim| {
-                    claim
-                        .cumulative_amount
-                        .saturating_sub(prior_watermark.map_or(0, |w| w.cumulative_amount))
-                });
-                tracing::warn!(
-                    peer_id,
-                    destination = %prepare.destination,
-                    price,
-                    advanced,
-                    "peer PREPARE refused: no claim covers this packet's price"
-                );
-                return self.finish(
-                    &role,
-                    payment_required_response(&prepare.destination, price),
-                    ack,
-                );
-            }
+        // connector terminates and prices carries a covering claim, or it
+        // is refused with the client edge's own x402 greeting. The decision
+        // is `connector_peer_btp::price_gate`'s, shared with the BTP
+        // carriage so §0.1's one pipeline cannot admit over one carriage
+        // what it refuses over the other; what is this carriage's is only
+        // the response the refusal is shaped into.
+        if let Some(refusal) = price_gate::payment_required(
+            &self.connector,
+            &peer_id,
+            &prepare.destination,
+            ack,
+            claim.as_ref(),
+            prior_watermark,
+        ) {
+            return self.finish(&role, payment_required_response(refusal), ack);
         }
 
         let channel_id = self.accepted.channel_for(&peer_id);
@@ -469,31 +443,17 @@ fn packet_response(response: PacketResponse) -> PeerResponse {
     }
 }
 
-/// Issue #880: the same x402 greeting the client edge answers an unpaid or
-/// under-covering request with ([`connector_domain::x402::terms_body`], the
-/// one emitter every carriage shares), `F06`-shaped exactly like the client
-/// edge's own BTP carriage answers a claimless request
-/// (`connector-client-edge`'s `btp` module) rather than the client edge's
-/// HTTP carriage's real `402` -- this carriage keeps status `200`
-/// regardless of the packet's verdict, unchanged by this issue (§6.2).
-fn payment_required_response(destination: &str, price: u64) -> PeerResponse {
-    let terms =
-        connector_domain::x402::terms_body(destination, price, None, &[], &[], None, None, 0);
-    let reject = Reject {
-        code: RejectCode::f06_unexpected_payment(),
-        triggered_by: String::new(),
-        message: "no payment channel claim covers this packet's price".to_string(),
-        data: Vec::new(),
-        accumulated_cost: 0,
-    };
-    let mut response = PeerResponse::ok(reject.encode());
+/// [`price_gate::payment_required`]'s refusal, HTTP-shaped: the greeting
+/// rides a header rather than the client edge's own real `402`, because
+/// this carriage keeps status `200` regardless of the packet's verdict,
+/// unchanged by this issue (§6.2). The REJECT itself is shaped by
+/// [`packet_response`], so §5.2's accumulated cost is not spelled twice.
+fn payment_required_response(refusal: PaymentRequired) -> PeerResponse {
+    let mut response = packet_response(PacketResponse::Reject(refusal.reject));
     response.headers.push(
-        PAYMENT_REQUIRED_PROTOCOL,
-        headers::payment_required_header_value(&terms),
+        PAYMENT_REQUIRED_HEADER,
+        headers::payment_required_header_value(&refusal.terms),
     );
-    response
-        .headers
-        .push(ACCUMULATED_COST_HEADER, reject.accumulated_cost.to_string());
     response
 }
 

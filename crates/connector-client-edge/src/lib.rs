@@ -118,7 +118,11 @@ const OCTET_STREAM: &str = "application/octet-stream";
 /// (`peer-carriage-spec.md` §12.1).
 const CLAIM_HEADER: &str = connector_btp::CLAIM_HEADER;
 const CLAIM_WRAPPED_HEADER: &str = "ilp-payment-channel-claim-wrapped";
-const PAYMENT_REQUIRED_HEADER: &str = "payment-required";
+/// The other half of the pair (spec I2), read rather than re-spelled for the
+/// same reason [`CLAIM_HEADER`] is: the peer carriage answers an uncovered
+/// peer PREPARE with this edge's own greeting under this same name (issue
+/// #880), so one declaration serves both.
+const PAYMENT_REQUIRED_HEADER: &str = connector_btp::PAYMENT_REQUIRED_HEADER;
 /// client-edge-spec.md §1.6: a REJECT's running cost total rides beside the
 /// OER body in this header rather than inside it, since RFC-0027's REJECT
 /// `data` is reserved for an application-level reject's own diagnostic
@@ -637,18 +641,19 @@ fn x402_terms_body(
     bootstrap_identity: Option<&BootstrapIdentity>,
     required_transport: Option<&str>,
 ) -> Vec<u8> {
-    connector_domain::x402::terms_body(
+    connector_domain::x402::terms_body(&connector_domain::x402::GreetingTerms {
         destination,
         price,
         settlement,
         settlements,
-        bootstrap_identity
+        ilp_addresses: bootstrap_identity
             .map(|identity| identity.ilp_addresses.as_slice())
             .unwrap_or(&[]),
-        bootstrap_identity.map(|identity| identity.btp_endpoint.as_str()),
+        btp_endpoint: bootstrap_identity.map(|identity| identity.btp_endpoint.as_str()),
         required_transport,
-        crate::session_registry::SESSION_LEASE_BACKSTOP_TTL.as_millis() as u64,
-    )
+        session_lease_ttl_ms: crate::session_registry::SESSION_LEASE_BACKSTOP_TTL.as_millis()
+            as u64,
+    })
 }
 
 /// Decode a claim header's raw (still base64-encoded) bytes into the

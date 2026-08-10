@@ -335,26 +335,21 @@ const X402_MAX_TIMEOUT_SECONDS: u64 = 60;
 /// comment gives for [`parse_greeting`] living here rather than being
 /// re-declared per reader.
 ///
-/// `destination` doubles as `resource.url`, the offer's `network`, `payTo`
-/// and `extra.ilpAddress` -- there is exactly one payment method and one
-/// party to pay, so all four name the same address. `ilp_addresses` and
-/// `btp_endpoint` are the emitting node's own bootstrap identity (issue
-/// #807); empty/`None` on a node -- or a carriage -- that carries none.
-/// `session_lease_ttl_ms` is the emitting node's client session lease
-/// backstop (issue #722); a carriage with no client session registry of its
-/// own (the peer carriages) passes `0`, which is otherwise never a real
-/// deployment's value.
-#[allow(clippy::too_many_arguments)]
-pub fn terms_body(
-    destination: &str,
-    price: u64,
-    settlement: Option<&X402SettlementTerms>,
-    settlements: &[X402ChainSettlementTerms],
-    ilp_addresses: &[String],
-    btp_endpoint: Option<&str>,
-    required_transport: Option<&str>,
-    session_lease_ttl_ms: u64,
-) -> Vec<u8> {
+/// Every emitter passes [`GreetingTerms`] rather than eight positional
+/// arguments, four of which are empty on a carriage carrying neither
+/// identity nor settlement terms: named at the call site, two of them
+/// cannot be transposed without anyone noticing.
+pub fn terms_body(terms: &GreetingTerms<'_>) -> Vec<u8> {
+    let GreetingTerms {
+        destination,
+        price,
+        settlement,
+        settlements,
+        ilp_addresses,
+        btp_endpoint,
+        required_transport,
+        session_lease_ttl_ms,
+    } = *terms;
     let terms = X402PaymentRequired {
         x402_version: X402_VERSION,
         resource: X402Resource {
@@ -381,6 +376,38 @@ pub fn terms_body(
         }],
     };
     serde_json::to_vec(&terms).expect("x402 terms always serialize")
+}
+
+/// What [`terms_body`] needs to know to quote one offer.
+///
+/// Everything but `destination` and `price` has a meaningful empty value,
+/// so a carriage that carries none of it writes
+/// `GreetingTerms { destination, price, ..Default::default() }` and says so
+/// by omission rather than by a row of `None`s.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GreetingTerms<'a> {
+    /// Doubles as `resource.url`, the offer's `network`, `payTo` and
+    /// `extra.ilpAddress` -- there is exactly one payment method and one
+    /// party to pay, so all four name the same address.
+    pub destination: &'a str,
+    /// What that address costs, quoted as both `amount` and `extra.price`.
+    pub price: u64,
+    /// The emitting node's settlement terms, and the per-chain terms beside
+    /// them; absent on a node that settles nowhere yet.
+    pub settlement: Option<&'a X402SettlementTerms>,
+    pub settlements: &'a [X402ChainSettlementTerms],
+    /// The emitting node's own bootstrap identity (issue #807):
+    /// empty/`None` on a node -- or a carriage -- that carries none.
+    pub ilp_addresses: &'a [String],
+    pub btp_endpoint: Option<&'a str>,
+    /// `Some("http" | "btp")` only when this same shape is reused to tell a
+    /// client it used the wrong transport entirely (issue #701).
+    pub required_transport: Option<&'a str>,
+    /// The emitting node's client session lease backstop (issue #722); a
+    /// carriage with no client session registry of its own (the peer
+    /// carriages) leaves it `0`, which is otherwise never a real
+    /// deployment's value.
+    pub session_lease_ttl_ms: u64,
 }
 
 /// Read a `payment-required` greeting's terms.
