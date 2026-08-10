@@ -176,14 +176,43 @@ SCRATCH_STATE=$(mktemp -d)
 #    shared secret in a second place.
 echo "dry-run-only-not-a-real-secret" > /tmp/dry-run-peer.secret
 
+# 2b. Key material is mounted FILE BY FILE, exactly as every box's own
+#     compose overlay declares it -- there is no `data/` DIRECTORY on any
+#     box to mount. Verified against the running containers on both
+#     surviving boxes (2026-08-10):
+#
+#       relay box  signer-rust.key, settlement-rust.key,
+#                  settlement-solana-rust.key, announce.key
+#                  (no peering secret -- it declares no [[peers]])
+#       store box  signer-rust.key, settlement-rust.key,
+#                  settlement-solana-rust.key, apex-store.secret
+#
+#     Mounting a non-existent `./data` instead would have Docker create an
+#     empty root-owned directory, and Config::load would then abort with
+#     SignerKeyFileNotFound("/app/data/signer.key") -- long before the
+#     settlement RPC this recipe is trying to reach. That failure looks
+#     exactly like the "not ready to bind-mount" case below, so it would
+#     send you chasing a config problem that does not exist.
+#
+#     Set the extras for the box you are on; leave empty if it has neither.
+BOX_EXTRA_MOUNTS=(
+  # relay box:
+  #   -v "$(pwd)/announce.key:/app/data/announce.key:ro"
+  # store box (and any box with a [[peers]] row -- the secret is per-peering,
+  # so a box peering as `apex-relay` names apex-relay.secret instead):
+  #   -v /tmp/dry-run-peer.secret:/app/data/apex-store.secret:ro
+)
+
 # 3. Run the RUNNING image, offline. Real signer/settlement keys mounted
 #    read-only (the connect step reads them even though it can't finish);
 #    the candidate TOML read-only; the scratch state dir the only writable
 #    mount; no network at all.
 docker run --rm --network none \
   -v "$(pwd)/connector-rust.toml:/app/config/connector.toml:ro" \
-  -v "$(pwd)/data:/app/data:ro" \
-  -v /tmp/dry-run-peer.secret:/app/data/apex-store.secret:ro \
+  -v "$(pwd)/signer-rust.key:/app/data/signer.key:ro" \
+  -v "$(pwd)/settlement-rust.key:/app/data/settlement.key:ro" \
+  -v "$(pwd)/settlement-solana-rust.key:/app/data/settlement-solana.key:ro" \
+  "${BOX_EXTRA_MOUNTS[@]}" \
   -v "$SCRATCH_STATE:/app/state" \
   ghcr.io/toon-protocol/connector:rust-sha-<the-rollout-tag>
 ```
@@ -215,8 +244,10 @@ printf '\nthis_key_does_not_exist = true\n' >> /tmp/negative-control.toml
 
 docker run --rm --network none \
   -v /tmp/negative-control.toml:/app/config/connector.toml:ro \
-  -v "$(pwd)/data:/app/data:ro" \
-  -v /tmp/dry-run-peer.secret:/app/data/apex-store.secret:ro \
+  -v "$(pwd)/signer-rust.key:/app/data/signer.key:ro" \
+  -v "$(pwd)/settlement-rust.key:/app/data/settlement.key:ro" \
+  -v "$(pwd)/settlement-solana-rust.key:/app/data/settlement-solana.key:ro" \
+  "${BOX_EXTRA_MOUNTS[@]}" \
   -v "$SCRATCH_STATE:/app/state" \
   ghcr.io/toon-protocol/connector:rust-sha-<the-rollout-tag>
 ```
