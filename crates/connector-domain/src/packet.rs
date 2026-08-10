@@ -215,10 +215,11 @@ impl RejectCode {
         RejectCode("T01".to_string())
     }
 
-    /// T04: Insufficient Liquidity -- this connector's exposure ceiling for
-    /// the inbound peering relation is exceeded (issue #424,
-    /// peer-wire-spec.md §5.1/§5.3). Retryable: the condition clears once
-    /// the peer's pending claim is acknowledged.
+    /// T04: Insufficient Liquidity (RFC-0027). Used until issue #424
+    /// (peer-wire-spec.md §5.1/§5.3) for this connector's own exposure
+    /// ceiling; that machinery is retired (ADR 0031, ADR 0033, issue #882)
+    /// and nothing in this codebase emits `T04` any more. Kept for wire
+    /// interop -- a standard ILPv4 code a counterparty may still send.
     pub fn t04_insufficient_liquidity() -> RejectCode {
         RejectCode("T04".to_string())
     }

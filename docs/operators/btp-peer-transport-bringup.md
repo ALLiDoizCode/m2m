@@ -6,8 +6,11 @@
 > and because BTP is the only carriage a NAT'd operator can use, so it is the one worth proving
 > first. An HTTP peering follows the same gates with the header equivalents
 > (`Payment-Channel-Claim`, `Toon-Claim-Ack`, `Toon-Accumulated-Cost`) and the one difference ADR
-> 0027 names: on a peering where only one side dials, the non-dialing side cannot FLUSH and must set
-> a lower exposure ceiling instead of relying on `flushIntervalMs`.
+> 0027 names: on a peering where only one side dials, the non-dialing side cannot FLUSH. Before
+> [ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md) (issue #882) this also
+> meant setting a lower exposure ceiling instead of relying on `flushIntervalMs`; both are retired
+> along with the credit window they bounded — every peer PREPARE now carries its own covering
+> claim (ADR 0031) regardless of which side dials.
 
 Operator runbook for
 [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md).
@@ -199,9 +202,10 @@ state_dir = "/app/state"
 id = "store"
 endpoint = "wss://store.example.net:443/btp"
 credential = { secret_file = "/app/data/store-peer.secret" }
-ceiling = 1000000
-flush_interval_ms = 5000
 # claim_ack_timeout_ms and peer_answer_timeout_ms default to 30000 each
+# `ceiling`/`flush_interval_ms` used to be set here -- retired along with the
+# credit window they bounded (ADR 0031, ADR 0033, issue #882). Delete them
+# rather than replace them; setting either now is a named load-time error.
 
 [[peer_channels]]
 peer_id = "store"
@@ -412,13 +416,17 @@ this document.
 | `PeerChannelUnbound`                | a `[[peers]]` entry with no `[[peer_channels]]` row                                     | add the channel binding, or remove the peering               |
 | `PeerChannelOrphaned`               | a `[[peer_channels]]` row naming a `peer_id` no `[[peers]]` entry configures            | fix the `peer_id` typo, or add the peer                      |
 | `ChannelInBothNamespaces`           | one channel id in both `[[peer_channels]]` and `[[client_channels]]`                    | keep the namespaces disjoint — pick one                      |
-| `AcceptOnlyPeerWithoutCeiling`      | a peering this node cannot dial and that carries no explicit `ceiling`                  | set an explicit `ceiling`; it is that peering's only bound   |
 | `PeerRouteUndeliverable`            | a route whose next hop is a peer this node can never originate to                       | give the peer an endpoint, or include `btp` in `peer_expose` |
 | `DuplicatePeerId`                   | two `[[peers]]` entries with the same `id`                                              | rename one                                                   |
 | `PeerAddrRemoved`                   | a `[[peers]]` entry still setting `addr`                                                | replace it with `endpoint`                                   |
 | `PeerWireAddrRemoved`               | a config still setting `peer_wire_addr`                                                 | delete the line and set `peer_expose` instead                |
+| `PeerCeilingRemoved`                | a `[[peers]]` entry still setting `ceiling` (ADR 0033, issue #882)                      | delete the line; no replacement is needed                    |
+| `PeerFlushIntervalRemoved`          | a `[[peers]]` entry still setting `flush_interval_ms` (ADR 0033, issue #882)            | delete the line; no replacement is needed                    |
 | `PeerChannelMissingSolanaProgramId` | a Solana `[[peer_channels]]` row with no `program_id`                                   | set `program_id` to the base58 deployed program address      |
 | `PeerChannelInvalidSolanaAccount`   | a Solana `[[peer_channels]]` row's account/key is not base58 of a 32-byte value         | fix the base58 value                                         |
+
+`AcceptOnlyPeerWithoutCeiling` no longer exists: it required an accept-only peering to carry an
+explicit `ceiling`, and both the requirement and the field are retired together (ADR 0033).
 
 Two more guard the same shape: `InvalidPeerEndpoint` (an `endpoint` that is not a URL at all — the
 old `host:port` spelling lands here) and `InvalidPeerExposure` (a `peer_expose` value that is not
@@ -427,8 +435,9 @@ one of the four).
 ## Migrating a running box
 
 1. Delete `peer_wire_addr`. Decide what this node should expose and write `peer_expose`.
-2. Replace each `[[peers]].addr` with an `endpoint` URL, or delete it for an accept-only peering
-   and give that peering an explicit `ceiling`.
+2. Replace each `[[peers]].addr` with an `endpoint` URL, or delete it for an accept-only peering.
+   Delete any `ceiling`/`flush_interval_ms` lines too — both are retired (ADR 0033) and setting
+   either is now a named load-time error, not a default.
 3. Add a `credential` to every peering, and share the secret with the counterparty out of band. On
    a deployed node write it as `secret_file` and put the file on the box, so the peering itself can
    be committed.

@@ -153,9 +153,12 @@ pub enum Capability {
     /// one's packets forwarded, which a client's are — the discriminating
     /// half is being a *destination* the table can name.
     BeARouteNextHop,
-    /// Count toward per-peering-relation exposure and ceiling accounting
-    /// (`peer-wire-spec.md` §5.3). A client interaction is never treated
-    /// as a peering relation for ceiling or flush purposes.
+    /// Be eligible for §6.4's flush prompt (`Toon-Flush-Requested`). A
+    /// client interaction is never treated as a peering relation for flush
+    /// purposes. Named for the credit-window exposure/ceiling accounting
+    /// this capability originally gated too; that machinery is retired
+    /// (ADR 0031, ADR 0033, issue #882) and this is now the flush prompt's
+    /// own gate.
     CountTowardPeeringExposure,
 
     /// Carriage without paying for it. Granted to neither role: a peering

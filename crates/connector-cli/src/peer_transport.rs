@@ -307,7 +307,6 @@ token_network = "0x00000000000000000000000000000000000000bb"
             r#"
 [[peers]]
 id = "dials-in"
-ceiling = 1000000
 
 [peers.credential]
 secret = "a-real-peering-secret"

@@ -1,26 +1,25 @@
-//! §2.1, §6.4(3), §11: what a **loaded configuration** says about this
-//! carriage, asserted against `Config::load` rather than against a
-//! hand-built value -- because the two properties under test are precisely
-//! the ones the carriage must **not** decide for itself.
+//! §2.1, §11: what a **loaded configuration** says about this carriage,
+//! asserted against `Config::load` rather than against a hand-built value
+//! -- because which carriage a peer dials on is precisely the property the
+//! carriage must **not** decide for itself.
 //!
-//! 1. **Which carriage this connector dials a peer on is decided solely by
-//!    the scheme of that peer's `endpoint`** (§2.1). The HTTP transport
-//!    registers `https://` peerings and no others; a `wss://` peering is the
-//!    BTP carriage's and an endpoint-less one is accept-only. `Config::load`
-//!    has already refused any other scheme (`PeerEndpointScheme`) and a
-//!    peering that can never establish (`PeerUndialable`), so dialability is
-//!    config's answer and is not re-derived at runtime.
-//! 2. **An accept-only peering carries an explicit ceiling, or it does not
-//!    load** (§6.4(3), `AcceptOnlyPeerWithoutCeiling`). It is the only real
-//!    bound that side has -- it cannot originate, so it cannot prompt a payer
-//!    that has stopped sending, and unlike BTP it has no live session to read
-//!    liveness from. This crate therefore has no runtime default to fall back
-//!    on, and this test is what says that is deliberate.
+//! **Which carriage this connector dials a peer on is decided solely by
+//! the scheme of that peer's `endpoint`** (§2.1). The HTTP transport
+//! registers `https://` peerings and no others; a `wss://` peering is the
+//! BTP carriage's and an endpoint-less one is accept-only. `Config::load`
+//! has already refused any other scheme (`PeerEndpointScheme`) and a
+//! peering that can never establish (`PeerUndialable`), so dialability is
+//! config's answer and is not re-derived at runtime.
+//!
+//! Before ADR 0031/ADR 0033 (issue #882) an accept-only peering also had to
+//! carry an explicit `ceiling` or refuse to load (§6.4(3),
+//! `AcceptOnlyPeerWithoutCeiling`) -- retired along with the credit window
+//! it bounded.
 
 use std::io::Write;
 use std::path::Path;
 
-use connector_config::{Config, ConfigError};
+use connector_config::Config;
 use connector_peer_http::dial::PeerRelation;
 
 const CHANNEL: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
@@ -31,7 +30,7 @@ const TOKEN_NETWORK: &str = "0x3333333333333333333333333333333333333333";
 
 /// One connector that dials one peer over HTTP, one over BTP, and accepts a
 /// third -- the three shapes §2.1 distinguishes, in one file.
-fn peering_config(key_path: &Path, state_dir: &Path, accept_only_ceiling: &str) -> String {
+fn peering_config(key_path: &Path, state_dir: &Path) -> String {
     format!(
         r#"
 client_edge_addr = "127.0.0.1:3000"
@@ -45,18 +44,15 @@ key_file = "{key_file}"
 id = "over-http"
 endpoint = "https://peer.example:443/ilp"
 credential = {{ secret = "shared-secret" }}
-ceiling = 1000000
 
 [[peers]]
 id = "over-btp"
 endpoint = "wss://peer.example:443/btp"
 credential = {{ secret = "shared-secret" }}
-ceiling = 1000000
 
 [[peers]]
 id = "accept-only"
 credential = {{ secret = "shared-secret" }}
-{accept_only_ceiling}
 
 [[peer_channels]]
 peer_id = "over-http"
@@ -84,7 +80,7 @@ token_network = "{TOKEN_NETWORK}"
     )
 }
 
-fn load(accept_only_ceiling: &str) -> Result<Config, ConfigError> {
+fn load() -> Config {
     let state_dir = tempfile::tempdir().expect("temp state dir");
     let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
     key_file.write_all(b"not a real key").expect("write key");
@@ -93,16 +89,14 @@ fn load(accept_only_ceiling: &str) -> Result<Config, ConfigError> {
         .tempfile()
         .expect("temp config file");
     config_file
-        .write_all(
-            peering_config(key_file.path(), state_dir.path(), accept_only_ceiling).as_bytes(),
-        )
+        .write_all(peering_config(key_file.path(), state_dir.path()).as_bytes())
         .expect("write config");
-    Config::load(config_file.path())
+    Config::load(config_file.path()).expect("load")
 }
 
 #[test]
 fn only_an_https_endpoint_selects_this_carriage() {
-    let config = load("ceiling = 250000").expect("load");
+    let config = load();
 
     let dialed: Vec<&str> = config
         .peers()
@@ -118,13 +112,12 @@ fn only_an_https_endpoint_selects_this_carriage() {
     );
 }
 
-/// §6.4(3): the accept-only side's ceiling is explicit, and this carriage
-/// reads it rather than defaulting one -- a defaulted ceiling on the one
-/// configuration where the ceiling is the sole bound is an unowned credit
-/// decision.
+/// ADR 0031/ADR 0033, issue #882: an accept-only peering now loads with no
+/// ceiling-shaped config at all -- the credit window that requirement
+/// bounded is retired.
 #[test]
-fn an_accept_only_peering_carries_an_explicit_ceiling_or_does_not_load() {
-    let config = load("ceiling = 250000").expect("load");
+fn an_accept_only_peering_loads_with_no_ceiling() {
+    let config = load();
     let accept_only = config
         .peers()
         .iter()
@@ -133,13 +126,4 @@ fn an_accept_only_peering_carries_an_explicit_ceiling_or_does_not_load() {
 
     assert_eq!(accept_only.endpoint(), None);
     assert_eq!(accept_only.dial(), None);
-    assert_eq!(accept_only.ceiling(), Some(250_000));
-
-    assert!(
-        matches!(
-            load(""),
-            Err(ConfigError::AcceptOnlyPeerWithoutCeiling { ref id }) if id == "accept-only"
-        ),
-        "an accept-only peering with no ceiling must not load (§11)"
-    );
 }

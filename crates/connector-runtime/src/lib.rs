@@ -31,8 +31,7 @@ pub use connector_config::{SettlementChain, UnknownSettlementChain};
 pub use journal::{FileJournal, InMemoryJournal, Journal, JournalError};
 pub use metrics::Metrics;
 pub use operator_view::{
-    ChannelView, ChannelViewStatus, ClaimDirection, ClaimView, ExposureView, LeasedRouteView,
-    PeerView, RouteView,
+    ChannelView, ChannelViewStatus, ClaimDirection, ClaimView, LeasedRouteView, PeerView, RouteView,
 };
 // The OUTBOUND client ledger (issue #873) -- what this node signs to pay a
 // next hop, deliberately a different book from `ClaimBook`'s inbound

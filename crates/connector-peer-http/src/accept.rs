@@ -36,26 +36,25 @@
 //! what happens when the two audiences meet in one handler. Here a
 //! client-role request reaches no peer handling at all: its claim is not
 //! judged, no watermark moves, nothing is appended to the peer claim ledger,
-//! no exposure changes, and no `Toon-Claim-Ack` is emitted. Falling a
-//! client-role request through to `connector-client-edge` instead of
+//! and no `Toon-Claim-Ack` is emitted. Falling a client-role request
+//! through to `connector-client-edge` instead of
 //! answering it `F02` is the bring-up wiring of issue #678; what §1 requires
 //! of *this* module is that role is decided by the credential and that a
 //! client can never reach peer handling, and that holds either way.
 //!
-//! # The accept-only side, and its ceiling (§6.4)
+//! # The accept-only side (§6.4)
 //!
 //! On HTTP an accept-only side cannot originate, so it is structurally a
 //! **payee**: it can never forward a packet to that peer, and it cannot
-//! flush a claim it happens to hold. Its only real bound is the configured
-//! `ceiling`, and **this module does not invent one**: issue #723 refuses an
-//! accept-only peering with no explicit ceiling at load
-//! (`ConfigError::AcceptOnlyPeerWithoutCeiling`), because a defaulted
-//! ceiling on the one configuration where the ceiling is the sole bound is
-//! an unowned credit decision. The accounting itself is
-//! [`Connector::handle_peer_prepare`]'s, per peering relation, unchanged by
-//! carriage.
+//! prompt a payer that has simply stopped sending the way a live BTP
+//! session's liveness can. Before ADR 0031/ADR 0033 (issue #882) this was
+//! bounded by a configured `ceiling`, the accept-only side's only real
+//! bound (`ConfigError::AcceptOnlyPeerWithoutCeiling`); that requirement is
+//! retired along with the credit window it protected, since every peer
+//! PREPARE now carries its own covering claim regardless of which side can
+//! originate.
 //!
-//! What this module *does* own is §6.4's prompt: a payee that cannot
+//! What this module still owns is §6.4's prompt: a payee that cannot
 //! originate MAY ask a payer to flush, with [`FlushHints`]. It is a hint and
 //! only a hint -- it creates no obligation, and a payer that ignores every
 //! one of them is not in violation of the specification.
@@ -103,8 +102,7 @@ pub struct PeerHttpPolicy {
 /// stopped sending, and unlike BTP it has no live session to read liveness
 /// from. `Toon-Flush-Requested` is the one thing it can do about that, and
 /// the specification is emphatic about how little it means: it creates no
-/// obligation, a payer that ignores it is conforming, and **only the ceiling
-/// bounds anything**.
+/// obligation, and a payer that ignores it is conforming.
 ///
 /// A hint is *drained* when it is emitted. Repeating it on every response
 /// until the claim arrived would name a channel many times in one exchange
@@ -190,7 +188,7 @@ impl PeerHttpState {
     ///
     /// **Role is decided before anything else happens** (§1.5): before a
     /// claim is decoded, before a watermark is consulted, before a packet is
-    /// routed, and before any fee, ceiling or journal accounting.
+    /// routed, and before any fee or journal accounting.
     pub async fn handle(&self, request: PeerRequest) -> PeerResponse {
         // §1.5's header-smuggling defence. Refused, not resolved: never the
         // first, never the last, never a concatenation, and counted before
@@ -263,7 +261,7 @@ impl PeerHttpState {
 
         let Some(peer_id) = role.peer_id().map(str::to_string) else {
             // A client-role packet reaches no peer handling at all: no
-            // watermark, no ledger, no exposure, no ack (§1.7, §1.9).
+            // watermark, no ledger, no ack (§1.7, §1.9).
             return self.finish(
                 &role,
                 packet_response(PacketResponse::Reject(Reject {
@@ -321,15 +319,13 @@ impl PeerHttpState {
             return self.finish(&role, payment_required_response(refusal), ack);
         }
 
-        let channel_id = self.accepted.channel_for(&peer_id);
         // The one pipeline below the port (§0.1): a peer PREPARE that
         // arrived over HTTP is indistinguishable here from one that arrived
         // over BTP. `handle_peer_prepare` is handed no claim -- this
-        // request's was judged above, before anything was routed -- so what
-        // it adds is the ceiling accounting and the packet itself.
+        // request's was judged above, before anything was routed.
         let (response, _) = self
             .connector
-            .handle_peer_prepare(prepare, minimum_delivery, None, channel_id)
+            .handle_peer_prepare(prepare, minimum_delivery, None)
             .await;
         self.finish(&role, packet_response(response), ack)
     }
@@ -368,8 +364,6 @@ impl PeerHttpState {
             }
         };
 
-        self.accepted.note_channel(peer_id, &claim.channel_id);
-
         // §6.3's idempotent re-ack, checked **before** the claim reaches the
         // book: a byte-identical retransmission at the current watermark is
         // `accepted`, and nothing is advanced or recorded. A payee that
@@ -403,8 +397,7 @@ impl PeerHttpState {
             response.headers.push(CLAIM_ACK_HEADER, value);
         }
         // §6.4: never on a response to a client interaction -- a client is
-        // never treated as a peering relation for ceiling or flush purposes
-        // (§1.7).
+        // never treated as a peering relation for flush purposes (§1.7).
         if let Some(peer_id) = role
             .grants(Capability::CountTowardPeeringExposure)
             .then(|| role.peer_id())

@@ -28,10 +28,10 @@
 //! **inline** -- decoding, the role decision, and above all claim
 //! admission -- so claims on one session are judged strictly sequentially
 //! in arrival order and cannot race each other into `nonce_not_advancing`.
-//! Only the post-admission tail (the ceiling check, routing, the
-//! downstream round trip, writing the RESPONSE) overlaps, bounded by the
-//! same per-session in-flight window `btp_session_window` sets. Losing that
-//! is the measured ~125--150 events/s admission wall.
+//! Only the post-admission tail (routing, the downstream round trip,
+//! writing the RESPONSE) overlaps, bounded by the same per-session
+//! in-flight window `btp_session_window` sets. Losing that is the measured
+//! ~125--150 events/s admission wall.
 //!
 //! Consequently RESPONSEs may leave in a different order than the MESSAGEs
 //! that provoked them; `requestId` is the correlation, and a peer must not
@@ -40,9 +40,9 @@
 //! # The client-role path is inert, on purpose
 //!
 //! §1.9's named regression is testable as: a client-role interaction moves
-//! no peer watermark, appends nothing to the peer claim ledger, changes no
-//! peer-relation exposure, and gets no `claim-ack`. Here a client-role
-//! session reaches none of the peer pipeline at all -- its packets are
+//! no peer watermark, appends nothing to the peer claim ledger, and gets no
+//! `claim-ack`. Here a client-role session reaches none of the peer
+//! pipeline at all -- its packets are
 //! answered `F02` and its claims are not judged. Composing this carriage
 //! onto the *shared* client listener, so that a client-role session falls
 //! through to `connector-client-edge` instead, is the bring-up wiring of
@@ -148,10 +148,6 @@ impl Default for PeerAcceptPolicy {
 pub struct AcceptedClaims {
     /// `(peer id, canonical channel id)` → the claim at that watermark.
     at_watermark: RwLock<HashMap<(String, String), WireClaim>>,
-    /// Peer id → the channel that peering last identified itself by, so a
-    /// packet arriving with no claim is still checked against the
-    /// relation's ceiling rather than not checked at all.
-    known_channel: RwLock<HashMap<String, String>>,
 }
 
 impl AcceptedClaims {
@@ -202,24 +198,6 @@ impl AcceptedClaims {
                 nonce: claim.nonce,
                 cumulative_amount: claim.cumulative_amount,
             })
-    }
-
-    /// Note the channel this peering identifies itself by.
-    pub fn note_channel(&self, peer_id: &str, channel_id: &str) {
-        self.known_channel
-            .write()
-            .expect("known channel lock poisoned")
-            .insert(peer_id.to_string(), channel_id.to_string());
-    }
-
-    /// The channel a peering's exposure and ceiling are accounted against.
-    #[must_use]
-    pub fn channel_for(&self, peer_id: &str) -> Option<String> {
-        self.known_channel
-            .read()
-            .expect("known channel lock poisoned")
-            .get(peer_id)
-            .cloned()
     }
 }
 
@@ -556,7 +534,7 @@ impl PeerSession {
 
         let Some(peer_id) = self.binding.role().peer_id().map(str::to_string) else {
             // A client-role packet reaches no peer handling at all: no
-            // watermark, no ledger, no exposure, no ack (§1.7, §1.9).
+            // watermark, no ledger, no ack (§1.7, §1.9).
             return self
                 .send(self.reject_response(
                     request_id,
@@ -624,7 +602,6 @@ impl PeerSession {
                 .await;
         }
 
-        let channel_id = self.state.accepted.channel_for(&peer_id);
         let permit = window_slot(&self.window).await;
         let state = Arc::clone(&self.state);
         let replies = self.replies.clone();
@@ -632,13 +609,12 @@ impl PeerSession {
         tokio::spawn(async move {
             let _slot = permit;
             // Everything past admission, overlapping up to the window
-            // (§7.1): the ceiling check, routing, the downstream round
-            // trip. `handle_peer_prepare` is handed no claim -- this
-            // frame's was judged inline above, in order -- so what it adds
-            // here is exposure accounting and the packet itself.
+            // (§7.1): routing and the downstream round trip.
+            // `handle_peer_prepare` is handed no claim -- this frame's was
+            // judged inline above, in order.
             let (response, _) = state
                 .connector
-                .handle_peer_prepare(prepare, minimum_delivery, None, channel_id)
+                .handle_peer_prepare(prepare, minimum_delivery, None)
                 .await;
             let frame = encode_packet_response(&role, request_id, response, ack);
             let _ = reply(&replies, frame).await;
@@ -675,8 +651,6 @@ impl PeerSession {
                 });
             }
         };
-
-        self.state.accepted.note_channel(peer_id, &claim.channel_id);
 
         // §6.3's idempotent re-ack, checked **before** the claim reaches
         // the book: a byte-identical retransmission at the current

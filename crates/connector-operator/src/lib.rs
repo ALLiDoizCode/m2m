@@ -2,9 +2,9 @@
 //!
 //! ADR 0008 splits the operator surface into a read half and a write
 //! half. The read half (issue #420) is `GET` endpoints -- peers, routes,
-//! channels, claims, exposure, node identity, this crate's own write
-//! audit log, and the metrics surface (`GET /metrics`, ADR 0014) -- gated
-//! by a bearer token and nothing else.
+//! channels, claims, node identity, this crate's own write audit log, and
+//! the metrics surface (`GET /metrics`, ADR 0014) -- gated by a bearer
+//! token and nothing else.
 //!
 //! This crate also carries the write half's authentication mechanism
 //! (issue #421): [`rfc9421`] verifies an RFC 9421 signature from a key on
@@ -65,8 +65,8 @@ use serde::{Deserialize, Serialize};
 
 use connector_domain::{PacketResponse, Prepare};
 use connector_runtime::{
-    ChannelOperationError, ChannelView, ClaimView, Connector, ExposureView, LeaseRouteError,
-    LeasedRouteView, PeerView, RouteView, SettlementChain,
+    ChannelOperationError, ChannelView, ClaimView, Connector, LeaseRouteError, LeasedRouteView,
+    PeerView, RouteView, SettlementChain,
 };
 use connector_settlement::Claim;
 use connector_signer::{derive_evm_address, to_hex, Signer, SignerError};
@@ -91,8 +91,8 @@ struct OperatorState {
 }
 
 /// Mount the operator surface's read-only half at `connector`: `GET`
-/// endpoints for peers, routes, channels, claims, exposure, node identity
-/// and the write audit log, each requiring the bearer token
+/// endpoints for peers, routes, channels, claims, node identity and the
+/// write audit log, each requiring the bearer token
 /// `bearer_token` and nothing more (ADR 0008). `write_keys` is the
 /// allowlist of ed25519 public keys permitted to sign a write once a
 /// write endpoint lands (issue #421); removing a key from this list and
@@ -120,7 +120,6 @@ pub fn router(
         .route("/routes/leased", get(leased_routes))
         .route("/channels", get(channels))
         .route("/claims", get(claims))
-        .route("/exposure", get(exposure))
         .route("/identity", get(identity))
         .route("/audit-log", get(audit_log))
         .route("/metrics", get(metrics))
@@ -206,10 +205,6 @@ async fn channels(State(state): State<OperatorState>) -> Json<Vec<ChannelView>> 
 
 async fn claims(State(state): State<OperatorState>) -> Json<Vec<ClaimView>> {
     Json(state.connector.claims())
-}
-
-async fn exposure(State(state): State<OperatorState>) -> Json<Vec<ExposureView>> {
-    Json(state.connector.exposure())
 }
 
 async fn audit_log(State(state): State<OperatorState>) -> Json<Vec<AuditRecord>> {
@@ -638,10 +633,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn peers_channels_claims_exposure_and_audit_log_read_as_empty_lists() {
+    async fn peers_channels_claims_and_audit_log_read_as_empty_lists() {
         let app = test_router(vec![], "correct-token");
 
-        for path in ["/peers", "/channels", "/claims", "/exposure", "/audit-log"] {
+        for path in ["/peers", "/channels", "/claims", "/audit-log"] {
             let response = get(app.clone(), path, Some("correct-token")).await;
             assert_eq!(response.status(), StatusCode::OK, "path {path}");
             let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();

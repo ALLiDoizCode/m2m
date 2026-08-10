@@ -6,8 +6,8 @@
 //! # What this crate is, and what it deliberately is not
 //!
 //! It is the **carriage**: where the bytes ride. It is not the semantics.
-//! Claim exchange, flush, fees, ceilings, minimum delivery and the refusal
-//! taxonomy are `peer-wire-spec.md` §3--§6's and live above the
+//! Claim exchange, flush, fees, minimum delivery and the refusal taxonomy
+//! are `peer-wire-spec.md` §3--§6's and live above the
 //! [`connector_runtime::PeerTransport`] port, unchanged by which wire
 //! carried them. This crate maps §3's table onto frames and back, and
 //! nothing else:
@@ -75,54 +75,3 @@ pub use claim_json::{ClaimDecodeError, PeerClaimDomain};
 pub use dial::{decode_answer, BtpPeerTransport, DialError, PeerAnswer, PeerDialer, PeerRelation};
 pub use price_gate::PaymentRequired;
 pub use ws::TungsteniteDialer;
-
-use connector_config::PeerConfig;
-
-/// Warn about a peering whose `claim_ack_timeout_ms` exceeds its
-/// `flush_interval_ms` (`peer-carriage-spec.md` §6.3, §11).
-///
-/// §6.3 makes `claimAckTimeoutMs <= flushIntervalMs` a SHOULD: a timed-out
-/// flush ought to be *superseded* by the next flush tick rather than
-/// overlapping it, and a configuration where the deadline outlives the
-/// interval quietly stacks retransmissions of the same pending claim.
-///
-/// The warning is emitted **here** rather than in `connector-config`
-/// because that crate has no logging seam and takes no `tracing`
-/// dependency -- issue #723 exposed both values on [`PeerConfig`] and
-/// handed the SHOULD to whichever carriage has a subscriber. This is that
-/// carriage. Call it once per peering at bring-up; it is pure apart from
-/// the log line, and returns whether it warned so a test can assert the
-/// SHOULD is actually checked rather than merely documented.
-///
-/// A peering with no configured `flush_interval_ms` is not warned about:
-/// the runtime's own default applies and this connector's config does not
-/// say what it is, so there is no comparison to make.
-pub fn warn_if_claim_ack_outlives_flush(peer: &PeerConfig) -> bool {
-    let Some(flush_interval_ms) = peer.flush_interval_ms() else {
-        return false;
-    };
-    warn_if_claim_ack_outlives(peer.id(), peer.claim_ack_timeout_ms(), flush_interval_ms)
-}
-
-/// [`warn_if_claim_ack_outlives_flush`]'s decision, over the two figures
-/// alone -- for a caller that holds the values without a [`PeerConfig`]
-/// around them, and so the SHOULD is testable without standing up a config
-/// file to hold two integers.
-pub fn warn_if_claim_ack_outlives(
-    peer_id: &str,
-    claim_ack_timeout_ms: u64,
-    flush_interval_ms: u64,
-) -> bool {
-    if claim_ack_timeout_ms <= flush_interval_ms {
-        return false;
-    }
-    tracing::warn!(
-        peer_id,
-        claim_ack_timeout_ms,
-        flush_interval_ms,
-        "peer-carriage-spec.md §6.3: claim_ack_timeout_ms should not exceed \
-         flush_interval_ms -- a timed-out flush will overlap the next flush \
-         tick rather than being superseded by it"
-    );
-    true
-}

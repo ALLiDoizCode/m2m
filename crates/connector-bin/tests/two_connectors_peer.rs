@@ -537,11 +537,9 @@ handler_url = "http://{stub_app_addr}"
 price = 0
 
 # The peering this node accepts. No `endpoint`: the payer dials us, which
-# on HTTP makes us structurally the payee (§6.4) and so obliges an explicit
-# `ceiling` -- its absence is `AcceptOnlyPeerWithoutCeiling`.
+# on HTTP makes us structurally the payee (§6.4).
 [[peers]]
 id = "{PAYER_ID}"
-ceiling = 1000000
 
 [peers.credential]
 secret = "{PEER_SECRET}"
@@ -627,7 +625,6 @@ price = {CLIENT_PRICE}
 [[peers]]
 id = "{PAYEE_ID}"
 endpoint = "{payee_endpoint}"
-ceiling = 1000000
 
 [peers.credential]
 secret = "{PEER_SECRET}"
@@ -974,7 +971,6 @@ key_file = "{key_file}"
 
 [[peers]]
 id = "unbound"
-ceiling = 1000000
 
 [peers.credential]
 secret = "{PEER_SECRET}"
@@ -1028,7 +1024,7 @@ async fn two_connectors_move_a_paid_packet_over_btp() {
 /// One property is genuinely HTTP's and is not a drift (§6.4): only the
 /// dialing side can originate, so this peering is unidirectional for
 /// packets and the payer is structurally the payer. That is why the payee's
-/// `[[peers]]` entry carries an explicit `ceiling` and no `endpoint`.
+/// `[[peers]]` entry carries no `endpoint`.
 #[tokio::test]
 async fn two_connectors_move_a_paid_packet_over_http() {
     two_connectors_move_a_paid_packet(Carriage::Http).await;

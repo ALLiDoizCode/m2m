@@ -415,7 +415,6 @@ key_file = "{key_file}"
 id = "carrier"
 endpoint = "wss://carrier.test.example/ilp/btp"
 credential = {{ secret_file = "{secret_file}" }}
-ceiling = 1000000
 
 [[peer_channels]]
 peer_id = "carrier"

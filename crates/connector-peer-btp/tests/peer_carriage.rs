@@ -1382,25 +1382,6 @@ async fn the_accepting_side_can_originate_on_the_session_it_accepted() {
     drop(driver);
 }
 
-// ─── §6.3, §11: the load-time warning #723 handed off ───
-
-/// §6.3's SHOULD, warned where a subscriber exists: `connector-config` has
-/// no logging seam, so it exposed both values and left the warning to a
-/// carriage.
-#[test]
-fn a_claim_ack_timeout_outliving_the_flush_interval_warns() {
-    assert!(connector_peer_btp::warn_if_claim_ack_outlives(
-        PEER_ID, 30_000, 5_000
-    ));
-    assert!(!connector_peer_btp::warn_if_claim_ack_outlives(
-        PEER_ID, 5_000, 30_000
-    ));
-    assert!(
-        !connector_peer_btp::warn_if_claim_ack_outlives(PEER_ID, 5_000, 5_000),
-        "equal is the SHOULD satisfied, not violated"
-    );
-}
-
 // ─── the port's own contract (spec I5) ───
 
 /// Establishing that nothing above the port can tell which carriage

@@ -153,8 +153,8 @@ pub enum ConfigError {
     PeerIdEmpty,
 
     #[error(
-        "duplicate peer id '{id}': two '[[peers]]' entries name it, so which credential, \
-         endpoint and ceiling apply to it is unanswerable -- see \
+        "duplicate peer id '{id}': two '[[peers]]' entries name it, so which credential and \
+         endpoint apply to it is unanswerable -- see \
          docs/operators/btp-peer-transport-bringup.md"
     )]
     DuplicatePeerId { id: String },
@@ -273,16 +273,6 @@ pub enum ConfigError {
     ChannelInBothNamespaces { value: String },
 
     #[error(
-        "peer '{id}' is accept-only (no 'endpoint', so this connector never dials it) and sets \
-         no 'ceiling': the accept-only side cannot originate, so it cannot prompt a payer that \
-         has stopped sending, and 'flush_interval_ms' bounds nothing for it -- the ceiling is \
-         its only real bound and a defaulted one there is an unowned credit decision \
-         (peer-carriage-spec.md §6.4). Set an explicit 'ceiling'; see \
-         docs/operators/btp-peer-transport-bringup.md"
-    )]
-    AcceptOnlyPeerWithoutCeiling { id: String },
-
-    #[error(
         "route '{prefix}' forwards to peer '{peer_id}', which this connector can never \
          originate to: the peering configures no 'endpoint' (so this connector never dials it) \
          and peer_expose does not include 'btp' (so it can never be reached back over a dialed \
@@ -346,6 +336,28 @@ pub enum ConfigError {
          see docs/operators/btp-peer-transport-bringup.md"
     )]
     PeerAddrRemoved { id: String },
+
+    /// §11's removed-field row, `ceiling` half (ADR 0033, issue #882): every
+    /// peer PREPARE now carries its own covering claim (ADR 0031), so there
+    /// is no trailing exposure left for a ceiling to bound.
+    #[error(
+        "peer '{id}' sets 'ceiling', which was removed once every peer PREPARE carries its own \
+         covering claim (ADR 0031, ADR 0033, issue #882) -- there is no trailing exposure left \
+         for a ceiling to bound, so delete the key rather than replace it; see \
+         docs/operators/btp-peer-transport-bringup.md"
+    )]
+    PeerCeilingRemoved { id: String },
+
+    /// §11's removed-field row, `flush_interval_ms` half (ADR 0033, issue
+    /// #882): a claim no longer trails the fulfilment it covers, so there is
+    /// nothing left to flush.
+    #[error(
+        "peer '{id}' sets 'flush_interval_ms', which was removed for the same reason 'ceiling' \
+         was (ADR 0031, ADR 0033, issue #882): a claim no longer trails the fulfilment it \
+         covers, so there is no pending claim left to flush on a timer. Delete the key rather \
+         than replace it; see docs/operators/btp-peer-transport-bringup.md"
+    )]
+    PeerFlushIntervalRemoved { id: String },
 
     /// The other half of §11's removed-field row, spelled and worded
     /// exactly as PR #718 (`feat/delete-peer-wire`) spells it.

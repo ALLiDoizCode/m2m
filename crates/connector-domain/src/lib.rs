@@ -33,5 +33,5 @@ pub use envelope::{EnvelopeError, EnvelopeRequest, EnvelopeResponse};
 pub use error::PacketError;
 pub use fee::amount_after_fee;
 pub use packet::{Fulfill, PacketResponse, Prepare, Reject, RejectCode};
-pub use projection::{JournalEntry, Projection, ProjectionDivergence};
+pub use projection::{JournalEntry, Projection};
 pub use route::select_route;

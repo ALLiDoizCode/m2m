@@ -1484,7 +1484,6 @@ mod tests {
         );
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
-        peer_transport.set_peer_channel("second-hop", channel_a());
         let first_hop = Arc::new(
             Connector::new(
                 vec![],

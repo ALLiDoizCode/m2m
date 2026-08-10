@@ -96,8 +96,10 @@ cost flat while the arithmetic still holds: `1 - 0 = 1 >= 1`.
 `infra/linode-relay/connector-rust.toml`'s own terminating route (committed in #816/#823).
 **The apex therefore loses client-edge BTP enforcement on this prefix, and nothing downstream
 restores it**: transport policy is a client-edge gate only — `handle_peer_prepare`
-(`crates/connector-runtime/src/connector.rs`) gates a peer-wire arrival on the exposure ceiling and
-the route's price, never on its transport policy, and the apex→relay carriage is BTP regardless. An
+(`crates/connector-runtime/src/connector.rs`) gates a peer-wire arrival on the route's price, never
+on its transport policy, and the apex→relay carriage is BTP regardless. (It gated on the exposure
+ceiling too until [ADR 0033](adr/0033-the-exposure-machinery-is-retired-not-restated.md), issue
+#882, retired it; that made no difference to transport policy either.) An
 HTTP client paying the apex for `g.toon.relay` is therefore served end to end; the relay box's pin
 refuses only clients arriving directly at its own client edge over HTTP. #701's decision-11 pin is
 now a statement about the relay's direct edge rather than about the prefix fleet-wide — a

@@ -363,7 +363,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// dropped and the node peering on terms nobody wrote. `addr` is kept as a
 /// *parsed and rejected* field rather than left to that generic message,
 /// so a stale bind-mounted box config gets told what happened and where to
-/// read about it (ADR 0027, issue #679).
+/// read about it (ADR 0027, issue #679). `ceiling`/`flush_interval_ms` are
+/// kept the same way (ADR 0031, ADR 0033, issue #882): the credit window
+/// they bounded is retired now that every peer PREPARE carries its own
+/// covering claim, and a devnet box's bind-mounted TOML still names them.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawPeer {
@@ -376,10 +379,15 @@ pub(crate) struct RawPeer {
     endpoint: Option<String>,
     #[serde(default)]
     credential: Option<RawPeerCredential>,
+    /// Removed with the credit window (ADR 0031, ADR 0033, issue #882);
+    /// there is no trailing exposure left for a ceiling to bound.
     #[serde(default)]
-    ceiling: Option<u64>,
+    ceiling: Option<toml::Value>,
+    /// Removed with the credit window (ADR 0031, ADR 0033, issue #882);
+    /// a claim no longer trails the fulfilment it covers, so there is
+    /// nothing left to flush on a timer.
     #[serde(default)]
-    flush_interval_ms: Option<u64>,
+    flush_interval_ms: Option<toml::Value>,
     #[serde(default)]
     claim_ack_timeout_ms: Option<u64>,
     #[serde(default)]
@@ -392,9 +400,9 @@ pub(crate) struct RawPeer {
 /// carries an endpoint at all -- one whose scheme names a real carriage.
 ///
 /// One value per **peering relation**, never per carriage and never per
-/// connection (`peer-carriage-spec.md` §2.5): the ceiling, the flush
-/// interval and the claim watermarks all belong to the relation, and
-/// splitting them per carriage is a double-spend surface.
+/// connection (`peer-carriage-spec.md` §2.5): the claim watermarks belong
+/// to the relation, and splitting them per carriage is a double-spend
+/// surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerConfig {
     id: String,
@@ -402,8 +410,6 @@ pub struct PeerConfig {
     dial: Option<PeerCarriage>,
     credential: PeerCredential,
     can_originate: bool,
-    ceiling: Option<u64>,
-    flush_interval_ms: Option<u64>,
     claim_ack_timeout_ms: u64,
     peer_answer_timeout_ms: u64,
 }
@@ -445,23 +451,7 @@ impl PeerConfig {
         self.can_originate
     }
 
-    /// The exposure ceiling for this peering relation, in the settlement
-    /// asset's smallest unit -- the most unclaimed value this connector
-    /// will carry for it before refusing. `None` means the runtime's own
-    /// default, which is allowed **only** for a peering this connector can
-    /// dial: for one it cannot, the ceiling is the sole real bound and an
-    /// absent one is refused at load (§6.4(3)).
-    pub fn ceiling(&self) -> Option<u64> {
-        self.ceiling
-    }
-
-    /// How often this connector promises to flush a pending claim to this
-    /// peer, in milliseconds; `None` means the runtime's own default.
-    pub fn flush_interval_ms(&self) -> Option<u64> {
-        self.flush_interval_ms
-    }
-
-    /// How long a flushed claim may go unacknowledged before it is
+    /// How long a sent claim may go unacknowledged before it is
     /// retransmitted (§6.3). Defaults to 30 000 ms.
     pub fn claim_ack_timeout_ms(&self) -> u64 {
         self.claim_ack_timeout_ms
@@ -503,6 +493,12 @@ pub(crate) fn resolve_peers(
         }
         if peer.addr.is_some() {
             return Err(ConfigError::PeerAddrRemoved { id: peer.id });
+        }
+        if peer.ceiling.is_some() {
+            return Err(ConfigError::PeerCeilingRemoved { id: peer.id });
+        }
+        if peer.flush_interval_ms.is_some() {
+            return Err(ConfigError::PeerFlushIntervalRemoved { id: peer.id });
         }
         if !seen.insert(peer.id.clone()) {
             return Err(ConfigError::DuplicatePeerId { id: peer.id });
@@ -553,15 +549,6 @@ pub(crate) fn resolve_peers(
             return Err(ConfigError::PeerUndialable { id: peer.id });
         }
 
-        // The accept-only side cannot originate, so it cannot prompt a
-        // payer that has simply stopped sending, and on HTTP it has no
-        // live session to read liveness from: the ceiling is its only real
-        // bound, and a defaulted one there is an unowned credit decision
-        // (§6.4(3)).
-        if endpoint.is_none() && peer.ceiling.is_none() {
-            return Err(ConfigError::AcceptOnlyPeerWithoutCeiling { id: peer.id });
-        }
-
         let can_originate = endpoint.is_some() || expose.exposes(PeerCarriage::Btp);
 
         peers.push(PeerConfig {
@@ -570,8 +557,6 @@ pub(crate) fn resolve_peers(
             dial,
             credential,
             can_originate,
-            ceiling: peer.ceiling,
-            flush_interval_ms: peer.flush_interval_ms,
             claim_ack_timeout_ms: peer.claim_ack_timeout_ms.unwrap_or(DEFAULT_PEER_TIMEOUT_MS),
             peer_answer_timeout_ms: peer
                 .peer_answer_timeout_ms
@@ -667,7 +652,6 @@ mod tests {
     fn an_accept_only_peer_can_be_originated_to_when_btp_is_exposed() {
         let mut entry = raw("peer-b");
         entry.endpoint = None;
-        entry.ceiling = Some(1_000);
 
         let peers = resolve_peers(vec![entry], PeerExposure::Btp, false).expect("resolve");
 
@@ -682,11 +666,35 @@ mod tests {
     fn an_accept_only_peer_cannot_be_originated_to_over_http_only() {
         let mut entry = raw("peer-b");
         entry.endpoint = None;
-        entry.ceiling = Some(1_000);
 
         let peers = resolve_peers(vec![entry], PeerExposure::Http, false).expect("resolve");
 
         assert!(!peers[0].can_originate());
+    }
+
+    /// §11's removed-field row, `ceiling`/`flush_interval_ms` half (ADR
+    /// 0031, ADR 0033, issue #882): a stale bind-mounted box config gets a
+    /// named error, not a silent drop.
+    #[test]
+    fn setting_ceiling_is_refused_by_name() {
+        let mut entry = raw("peer-b");
+        entry.ceiling = Some(toml::Value::Integer(1_000));
+
+        assert!(matches!(
+            resolve_peers(vec![entry], PeerExposure::Neither, false),
+            Err(ConfigError::PeerCeilingRemoved { ref id }) if id == "peer-b"
+        ));
+    }
+
+    #[test]
+    fn setting_flush_interval_ms_is_refused_by_name() {
+        let mut entry = raw("peer-b");
+        entry.flush_interval_ms = Some(toml::Value::Integer(5_000));
+
+        assert!(matches!(
+            resolve_peers(vec![entry], PeerExposure::Neither, false),
+            Err(ConfigError::PeerFlushIntervalRemoved { ref id }) if id == "peer-b"
+        ));
     }
 
     #[test]

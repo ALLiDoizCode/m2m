@@ -24,11 +24,11 @@ SHOULD, SHOULD NOT and MAY are per RFC 2119.
 
 ADR 0027 split one document into two layers.
 
-| Layer                                                                                                                                                                                           | Where it is specified                                                                         |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| **Semantics** — what a peer interaction _means_: claim exchange, flush, claim acknowledgement, claim contents, fees and minimum delivery, reject codes, accumulated cost, ceilings, consistency | [`peer-wire-spec.md`](peer-wire-spec.md) **§3–§6**, unchanged and still normative             |
-| **Carriage** — _where the bytes ride_ for each of those concepts, on each of the two wires a connector already serves                                                                           | **this document**                                                                             |
-| **Framing** — the deleted raw-TCP stream and its six frame types                                                                                                                                | gone: `peer-wire-spec.md` §1–§2, superseded by ADR 0027, implementation removed by issue #679 |
+| Layer                                                                                                                                                                                 | Where it is specified                                                                                                                                                              |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Semantics** — what a peer interaction _means_: claim exchange, flush, claim acknowledgement, claim contents, fees and minimum delivery, reject codes, accumulated cost, consistency | [`peer-wire-spec.md`](peer-wire-spec.md) **§3–§6**, normative except where marked superseded (§3.2–§3.4, ADR 0031) or retired (§3.3's `flushIntervalMs`, §5.3's ceiling, ADR 0033) |
+| **Carriage** — _where the bytes ride_ for each of those concepts, on each of the two wires a connector already serves                                                                 | **this document**                                                                                                                                                                  |
+| **Framing** — the deleted raw-TCP stream and its six frame types                                                                                                                      | gone: `peer-wire-spec.md` §1–§2, superseded by ADR 0027, implementation removed by issue #679                                                                                      |
 
 **This document sits beside `peer-wire-spec.md` §3–§6. It supersedes nothing in them.** It does
 not restate them and MUST NOT be read as replacing them: every existing citation of §3.2, §3.3,
@@ -53,7 +53,7 @@ Which of them a connector _exposes_, and which it _dials_ for a given peer, is o
 (§2). Neither is a protocol constant, and a connector MAY expose both.
 
 **One pipeline, two carriages.** Downstream of the carriage there is exactly one peer pipeline:
-one route lookup, one `ClaimBook`, one journal, one fee and ceiling policy, one refusal taxonomy.
+one route lookup, one `ClaimBook`, one journal, one fee policy, one refusal taxonomy.
 A peer PREPARE that arrived over HTTP MUST be indistinguishable, everywhere below the
 `PeerTransport` port, from one that arrived over BTP. Any observable peer behaviour that exists on
 one carriage and not the other is a defect, not a carriage property — except where this document
@@ -232,9 +232,12 @@ above could not have been written before the decision that removed its premise.
 
 #868 removes the premise rather than answering the question: with a covering claim on every peer
 packet there is no claimless packet left for P1 to cover. The disposition of the exposure machinery
-itself — `record_inbound_delivery`, `ceiling`, `flush_interval_ms` — is
-[issue #882](https://github.com/toon-protocol/connector/issues/882)'s, not this document's, and until
-it lands that machinery stays exactly as described above.
+itself — `record_inbound_delivery`, `ceiling`, `flush_interval_ms` — was
+[issue #882](https://github.com/toon-protocol/connector/issues/882)'s, not this document's: it landed
+as removal, not restatement ([ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md)).
+The three names above no longer exist in `crates/` — `ceiling`/`flush_interval_ms` are parsed only
+as removed-field traps — and are described above only as the historical shape P1's justification
+argued from.
 
 ### 1.3 What MUST NOT enter the decision
 
@@ -353,8 +356,7 @@ undefined trust is what leaks.
   peering relation may be a route's next hop;
 - `minimumDelivery` honoured as a sender declaration (§5, `peer-wire-spec.md` §4);
 - `accumulatedCost` relayed with this hop's own fee added (`peer-wire-spec.md` §5.2);
-- FLUSH accepted (§6);
-- exposure and ceiling accounted per peering relation (`peer-wire-spec.md` §5.3).
+- FLUSH accepted (§6).
 
 **Peer role does NOT grant:** free carriage; a route the routing table does not have; any operator
 or admin surface (ADR 0008); any exemption from sealing (§8); any say in this connector's fees or
@@ -368,7 +370,7 @@ it presents bytes that look like them:**
   interaction's minimum-delivery field MUST be **ignored**, not rejected and not applied;
 - a `claim-ack` / `Toon-Claim-Ack` on a client response — a connector MUST NOT emit one on a
   client interaction;
-- being treated as a peering relation for ceiling or flush purposes.
+- being treated as a peering relation for flush purposes (§6.4).
 
 ### 1.8 Namespace disjointness
 
@@ -400,7 +402,8 @@ following is classified `client` and reaches no peer handling whatsoever:
    configured.
 
 "Reaches no peer handling" is testable as: no peer watermark moved, nothing was appended to the
-peer claim ledger, no peer-relation exposure changed, and no `claim-ack` was emitted.
+peer claim ledger, and no `claim-ack` was emitted. (Before ADR 0033 this list also named
+peer-relation exposure, which no longer exists to change.)
 
 ### 1.10 The dedicated-listener fallback
 
@@ -482,11 +485,11 @@ recommendation for anything resembling a fleet link (ADR 0027).
 
 ### 2.5 One peering relation, however many paths
 
-`flushIntervalMs`, the fee, the ceiling, the exposure accounting, the claim watermarks and the
-claim ledger are **per peering relation, not per carriage and not per connection**. A peering that
-happens to have two paths (last row of §2.3) is still one relation with one set of watermarks. A
-connector MUST NOT maintain per-carriage exposure or per-carriage watermarks for one peer; doing
-so is a double-spend surface, since the same claim would advance two independent watermarks.
+The fee, the claim watermarks and the claim ledger are **per peering relation, not per carriage and
+not per connection**. A peering that happens to have two paths (last row of §2.3) is still one
+relation with one set of watermarks. A connector MUST NOT maintain per-carriage watermarks for one
+peer; doing so is a double-spend surface, since the same claim would advance two independent
+watermarks.
 
 Where two paths exist, a connector SHOULD prefer the BTP path for claim-bearing traffic, because
 it is the one on which claims cannot race (§7).
@@ -657,9 +660,12 @@ requirements:
 
 ### 5.3 Ceiling
 
-`peer-wire-spec.md` §5.3 is unchanged: exposure is tracked per peering relation, and a PREPARE that
-would push it over the configured ceiling MUST be rejected `T04`. Nothing about the ceiling is
-carriage-specific except its configuration obligation on an accept-only HTTP peering (§6.4, §11).
+**Retired 2026-08-10 by [ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md)
+(issue #882).** `peer-wire-spec.md` §5.3 no longer describes live behaviour: exposure is not
+tracked, `ceiling` is not live configuration, and no PREPARE is ever rejected `T04`. The
+accept-only HTTP peering's ceiling configuration obligation (§6.4, §11) is retired with it — an
+accept-only peering now loads with no ceiling-shaped config at all, bounded only by the
+covering-claim requirement every peering already carries (ADR 0031).
 
 ---
 
@@ -704,9 +710,13 @@ Therefore, normatively:
   for a malformed request or a connector fault, i.e. cases where there is no ILP answer at all.
 - A rejected claim MUST NOT change the packet's own outcome, its `accumulatedCost`, or its fee
   accounting.
-- The **consequence** is unchanged and is policy above the carriage: the payee now holds unclaimed
-  exposure it cannot account for, and SHOULD stop forwarding to that peer until a valid claim
-  restores the watermark (`peer-wire-spec.md` §3.4, §5.3).
+- The **consequence** is policy above the carriage: the payee's watermark did not advance, so it
+  holds no claim covering what that peer's packets asked of it, and it SHOULD stop forwarding to
+  that peer until a valid claim restores the watermark (`peer-wire-spec.md` §3.4). The exposure
+  accounting that used to quantify this is retired
+  ([ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md), issue #882, with
+  `peer-wire-spec.md` §5.3); the SHOULD above is unchanged by that and is now the whole of the
+  consequence.
 
 A `claim-ack` MUST NOT appear on a response answering a frame that carried no claim. If one
 arrives there it MUST be ignored.
@@ -719,8 +729,9 @@ compensating rules are the sharpest new requirements in this document.
 
 **Absence.** A response answering a claim-bearing request that carries **no** `claim-ack` /
 `Toon-Claim-Ack` means **NOT ACKNOWLEDGED**. Never accepted, never rejected, never inferred from
-the packet's verdict. The claim stays pending, the flush timer keeps running, and the payer's own
-exposure accounting is unchanged. A malformed ack — undecodable JSON, an unknown `result`, an
+the packet's verdict. The claim stays pending until the retransmission deadline below — there is
+no flush timer to keep running, and no exposure accounting to disturb, since ADR 0033 (issue #882)
+retired both. A malformed ack — undecodable JSON, an unknown `result`, an
 unknown `reason`, a `rejected` with no `reason` — is likewise **not acknowledged**, and MUST NOT be
 read as either verdict.
 
@@ -754,7 +765,7 @@ the payer, so retransmission is required and must be safe:
 - A payee that receives a claim whose `(channel, nonce, cumulative, signature)` is **byte-identical
   to the claim already at its current watermark** MUST answer `{"result":"accepted"}`, MUST NOT
   answer `nonce_not_advancing`, and MUST NOT advance or record anything (there is nothing to
-  advance — the exposure covered is identical).
+  advance — the cumulative amount covered is identical).
 - A claim at the **same nonce** but differing in any other field is a _different_ claim and MUST be
   refused `nonce_not_advancing`, exactly as §3.2's strictly-advancing rule requires.
 
@@ -771,7 +782,8 @@ direction; debt flows in the direction packets flow (`peer-wire-spec.md` §3.2 �
 therefore on a one-way-dialed HTTP peering the dialing side is structurally the payer and the
 accept-only side is structurally the payee.**
 
-Three consequences, in the order an operator meets them:
+Three consequences, in the order an operator meets them — the third retired by
+[ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md) (issue #882):
 
 1. **The peering is unidirectional for packets.** The accept-only side can never forward a packet
    to that peer. A route naming it as next hop is undeliverable, MUST be a load-time error where
@@ -780,17 +792,14 @@ Three consequences, in the order an operator meets them:
    an operator than the flush question below.
 2. **The residual flush case.** Where an accept-only side nonetheless holds a pending claim for
    that peer — because it could dial earlier and can no longer, or its configured endpoint is
-   unreachable — it **cannot send the FLUSH at all**, and `flushIntervalMs` bounds nothing for it.
-   The claim stays pending until it can dial again. Its counterparty's protection during that
-   window is that counterparty's own ceiling.
-3. **The ceiling is the accept-only payee's only real bound, and MUST be explicit.** The accept-only
-   side cannot originate, so it cannot prompt a payer that has simply stopped sending; and unlike
-   BTP it has no live session to read liveness from. `flushIntervalMs` remains a bilateral promise
-   that the payer will flush, but the payee has no mechanism to make it true. Therefore: **a
-   peering relation this connector cannot dial MUST carry an explicit `ceiling`, and its absence
-   MUST be a named load-time error** (§11, `AcceptOnlyPeerWithoutCeiling`) — never a default,
-   because a defaulted ceiling on the one configuration where the ceiling is the sole bound is an
-   unowned credit decision.
+   unreachable — it **cannot send the FLUSH at all**. The claim stays pending until it can dial
+   again. `flushIntervalMs` no longer exists as configuration (ADR 0033), and the ceiling that used
+   to bound its counterparty during that window is retired with it — every peer PREPARE this
+   connector admits still requires its own covering claim (ADR 0031) regardless of this case.
+3. ~~**The ceiling is the accept-only payee's only real bound, and MUST be explicit.**~~ **Retired**
+   (ADR 0033, issue #882). An accept-only peering now loads with no ceiling-shaped config at all;
+   `AcceptOnlyPeerWithoutCeiling` no longer exists. Kept here, struck through, only so a reader
+   following §11's history is not left guessing what the removed error covered.
 
 **`Toon-Flush-Requested` — a hint, and only a hint.** A payee that cannot originate MAY set this
 response header on any response it sends to that peer:
@@ -802,13 +811,12 @@ Toon-Flush-Requested: 0x3f2a…    # the channel id, canonical form per §4.1
 - It MAY appear more than once, one channel id per occurrence; a comma-separated list form MUST NOT
   be used. A payee SHOULD NOT name the same channel more than once in one response.
 - A payer receiving it, and holding a pending claim for the named channel, SHOULD send that claim
-  on its next request to that peer, or immediately as a standalone claim POST (§3), and in any case
-  no later than its `flushIntervalMs` would have caused anyway.
+  on its next request to that peer, or immediately as a standalone claim POST (§3).
 - A payer with **no** pending claim for the named channel, or that does not recognise the channel,
   MUST ignore the header. It MUST NOT be answered, acknowledged, or error on.
 - **It creates no obligation.** A payee MUST NOT refuse traffic, reject a packet, or change any
-  accounting because a hint went unanswered. Only the ceiling does that. A payer that ignores every
-  hint is not in violation of this specification.
+  accounting because a hint went unanswered — nothing does (ADR 0033 retired the ceiling that
+  used to). A payer that ignores every hint is not in violation of this specification.
 - A payee MUST NOT set it on a response to a **client** interaction, and a connector MUST ignore it
   on a client-role response.
 
@@ -947,14 +955,14 @@ on one carriage and not the other, and cannot appear on the wire without a vecto
 claim JSON, parsed by the same structural validator and checked against the same
 `connector_signer::claim_signature` digest (ADR 0024). There is no peer claim type on the wire.
 
-**I5 — One pipeline below the port.** Route lookup, `ClaimBook`, journal, fee, ceiling and exposure
-accounting are reached only through `PeerTransport`, and none of them can observe which carriage
-delivered a packet. _Enforced by:_ the port's existing contract suite being generic over how a peer
-is wired up (kept deliberately so in issue #679), extended with one arm per carriage. A carriage
-that needs to change anything above the port is a signal the seam is wrong.
+**I5 — One pipeline below the port.** Route lookup, `ClaimBook`, journal and fee accounting are
+reached only through `PeerTransport`, and none of them can observe which carriage delivered a
+packet. _Enforced by:_ the port's existing contract suite being generic over how a peer is wired up
+(kept deliberately so in issue #679), extended with one arm per carriage. A carriage that needs to
+change anything above the port is a signal the seam is wrong.
 
-**I6 — One relation, one set of watermarks.** §2.5: exposure, watermarks, ledger and
-`flushIntervalMs` are per peering relation, never per carriage or per connection.
+**I6 — One relation, one set of watermarks.** §2.5: watermarks and the ledger are per peering
+relation, never per carriage or per connection.
 
 **I7 — One role decision.** §1: the same P1/P2 rule, the same downgrade behaviour and the same
 named regression test on both carriages, with the credential in one JSON shape (§1.4) so a
@@ -1085,10 +1093,12 @@ Required surface:
 
 - `[peers].expose` — a set drawn from `{"btp", "http"}`; `[]` is legal and means dial-only (§2.1).
 - Per peer: `id`; optional `endpoint` (a URL whose scheme is `wss://` or `https://`, with host and
-  port, SNI-capable — omitted means accept-only); `credential` (§1.4); and the per-peering-relation
-  values `peer-wire-spec.md` §3.3, §4 and §5.3 already require: `fee`, `flush_interval_ms`,
-  `ceiling`, plus this document's `claim_ack_timeout_ms` and `peer_answer_timeout_ms` (§6.3,
-  default 30 000 each).
+  port, SNI-capable — omitted means accept-only); `credential` (§1.4); the per-peering-relation
+  `fee` (`peer-wire-spec.md` §4); and this document's `claim_ack_timeout_ms` and
+  `peer_answer_timeout_ms` (§6.3, default 30 000 each). `ceiling`/`flush_interval_ms` were also
+  required here before [ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md)
+  (issue #882); both are retired and now parsed only as removed-field traps
+  (`PeerCeilingRemoved`/`PeerFlushIntervalRemoved`, below).
 - The accepting mirror: configured credentials map to peer ids and thence to their channels.
 - `[[peer_channels]]` — EVM shape: `peer_id`, `channel_id`, `counterparty_key`, `chain_id`,
   `token_network`. Solana shape (issue #759): `peer_id`, `channel_account`, `counterparty_key`,
@@ -1104,22 +1114,22 @@ Required surface:
 
 Named load-time errors this specification requires (spelling #677's, identity ours):
 
-| Error                               | Condition                                                                                                                                                                                                     | Source     |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
-| `PeerUndialable`                    | `expose` is empty **and** a configured peer has no `endpoint` — a peering that can never establish                                                                                                            | §2.2       |
-| `PeerEndpointScheme`                | an `endpoint` whose scheme is neither `wss://` nor `https://`                                                                                                                                                 | §2.1       |
-| `PeerCredentialMissing`             | a `[[peers]]` entry with no credential — it could never satisfy P1                                                                                                                                            | §1.2       |
-| `PeerChannelUnbound`                | a `[[peers]]` entry with no `[[peer_channels]]` row — it could never satisfy P2                                                                                                                               | §1.2       |
-| `PeerChannelOrphaned`               | a `[[peer_channels]]` row naming an unknown `peer_id`                                                                                                                                                         | §1.2       |
-| `ChannelInBothNamespaces`           | a channel id present in both `[[peer_channels]]` and `[[client_channels]]`                                                                                                                                    | §1.8       |
-| `PeerChannelMissingSolanaProgramId` | a Solana `[[peer_channels]]` row with no `program_id`                                                                                                                                                         | #759       |
-| `PeerChannelInvalidSolanaAccount`   | a Solana `[[peer_channels]]` row's `channel_account`/`counterparty_key`/`program_id` is not base58 of a 32-byte value                                                                                         | #759       |
-| `AcceptOnlyPeerWithoutCeiling`      | a peering this connector cannot dial and that carries no explicit `ceiling`                                                                                                                                   | §6.4       |
-| `PeerRouteUndeliverable`            | a route naming as next hop a peer this connector can never originate to                                                                                                                                       | §2.2, §6.4 |
-| `DuplicatePeerId`                   | two `[[peers]]` entries with the same `id`                                                                                                                                                                    | —          |
-| removed-field errors                | `peer_wire_addr`, or `addr` in its old `SocketAddr` shape — a **hard, named** error pointing at the bring-up doc, never a silent ignore, because the devnet boxes run bind-mounted configs that lead the repo | ADR 0027   |
+| Error                               | Condition                                                                                                                                                                                                                                                           | Source             |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| `PeerUndialable`                    | `expose` is empty **and** a configured peer has no `endpoint` — a peering that can never establish                                                                                                                                                                  | §2.2               |
+| `PeerEndpointScheme`                | an `endpoint` whose scheme is neither `wss://` nor `https://`                                                                                                                                                                                                       | §2.1               |
+| `PeerCredentialMissing`             | a `[[peers]]` entry with no credential — it could never satisfy P1                                                                                                                                                                                                  | §1.2               |
+| `PeerChannelUnbound`                | a `[[peers]]` entry with no `[[peer_channels]]` row — it could never satisfy P2                                                                                                                                                                                     | §1.2               |
+| `PeerChannelOrphaned`               | a `[[peer_channels]]` row naming an unknown `peer_id`                                                                                                                                                                                                               | §1.2               |
+| `ChannelInBothNamespaces`           | a channel id present in both `[[peer_channels]]` and `[[client_channels]]`                                                                                                                                                                                          | §1.8               |
+| `PeerChannelMissingSolanaProgramId` | a Solana `[[peer_channels]]` row with no `program_id`                                                                                                                                                                                                               | #759               |
+| `PeerChannelInvalidSolanaAccount`   | a Solana `[[peer_channels]]` row's `channel_account`/`counterparty_key`/`program_id` is not base58 of a 32-byte value                                                                                                                                               | #759               |
+| `PeerRouteUndeliverable`            | a route naming as next hop a peer this connector can never originate to                                                                                                                                                                                             | §2.2, §6.4         |
+| `DuplicatePeerId`                   | two `[[peers]]` entries with the same `id`                                                                                                                                                                                                                          | —                  |
+| removed-field errors                | `peer_wire_addr`, `addr` in its old `SocketAddr` shape, or `ceiling`/`flush_interval_ms` (ADR 0033, issue #882) — a **hard, named** error pointing at the bring-up doc, never a silent ignore, because the devnet boxes run bind-mounted configs that lead the repo | ADR 0027, ADR 0033 |
 
-`claim_ack_timeout_ms > flush_interval_ms` SHOULD be a load-time warning (§6.3).
+`AcceptOnlyPeerWithoutCeiling` and the `claim_ack_timeout_ms > flush_interval_ms` load-time warning
+(§6.3) are retired along with `ceiling`/`flush_interval_ms` (ADR 0033, issue #882).
 
 **No `transport` selector.** There is no field selecting between a peer wire and a carriage: the
 raw-TCP wire is deleted, and the carriage is selected by `expose` and by each endpoint's scheme.
@@ -1147,10 +1157,10 @@ Recorded explicitly so review can accept or overturn each, rather than discoveri
    all." That is exactly true only in the residual case §6.4(2). In the ordinary accept-only
    configuration the non-dialing side is structurally a _payee_ — debt flows with packets, packets
    flow only in the dialing direction — so it has no trailing exposure of its own to bound, and the
-   real loss is **unidirectional packet flow** (§6.4(1)). The ADR's _conclusions_ are unchanged and
-   are strengthened, not weakened: the ceiling is still the accept-only side's only real bound, it
-   must still be explicit, and the hint is still only a hint. This document keeps them and gives the
-   sharper reason. **ADR 0027 should absorb the correction.**
+   real loss is **unidirectional packet flow** (§6.4(1)). The ADR's _conclusions_ as originally
+   recorded here were that the ceiling was still the accept-only side's only real bound and had to
+   be explicit; both are retired ([ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md),
+   issue #882) along with the ceiling itself. The hint is still only a hint.
 4. **The idempotent re-ack (§6.3) is derived, not stated.** ADR 0027 fixes "missing ack means not
    acknowledged" and requires a timeout, both of which imply retransmission; nothing in the ADR or
    in `peer-wire-spec.md` §3.2 says what a payee does with a byte-identical retransmission. Without
@@ -1200,8 +1210,10 @@ not the claim ack as a field, not role-by-auth, not the deletion of the raw-TCP 
 
 This specification uses exactly the vocabulary of `CONTEXT.md` (connector, app, packet, route,
 client edge, claim, nonce, watermark, exposure, ceiling, flush, in flight, projection, settlement,
-fee, minimum delivery, probe), adding **carriage**, **expose**, **dial** and **peering relation**
-as defined in §0.1 and §2 — the first three from ADR 0027, the fourth already implicit in
+fee, minimum delivery, probe — of which _exposure_, _ceiling_ and _flush_ are retired terms per
+[ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md) and appear above only in
+clauses marked retired or historical), adding **carriage**, **expose**, **dial** and **peering
+relation** as defined in §0.1 and §2 — the first three from ADR 0027, the fourth already implicit in
 `peer-wire-spec.md` §3.3's "per peering relation".
 
 It implements [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md)
