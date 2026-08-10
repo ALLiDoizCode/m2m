@@ -70,7 +70,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use connector_config::TransportPolicy;
-use connector_domain::identity::{resolve_identity, ConfiguredIdentity};
+use connector_domain::identity::{anonymous_identity, resolve_identity, ConfiguredIdentity};
 use connector_domain::{condition_is_present, PacketResponse, Prepare, Reject, RejectCode};
 use connector_runtime::{ClientRouteKind, Connector, ProbeDenied};
 use connector_signer::nip59::{unwrap_claim, WrappedClaim};
@@ -1021,20 +1021,25 @@ async fn handle_ilp(
     // the claim (if any) has been admitted, below.
     let presented_peer_id = headers
         .get(PEER_ID_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string);
-    let presented_secret = extract_bearer(&headers);
-    if let Some(peer_id) = presented_peer_id.as_deref() {
-        if let Err(rejection) =
-            resolve_identity(Some(peer_id), &presented_secret, None, &state.identities)
-        {
+        .and_then(|value| value.to_str().ok());
+    let authenticated_peer = match presented_peer_id.map(|peer_id| {
+        resolve_identity(
+            Some(peer_id),
+            &extract_bearer(&headers),
+            None,
+            &state.identities,
+        )
+    }) {
+        None => None,
+        Some(Ok(identity)) => Some(identity),
+        Some(Err(rejection)) => {
             tracing::warn!(
                 peer_id = %rejection.peer_id,
                 "client-edge identity presented but failed to authenticate"
             );
             return (StatusCode::UNAUTHORIZED, rejection.to_string()).into_response();
         }
-    }
+    };
 
     let prepare = match Prepare::decode(&body) {
         Ok(prepare) => prepare,
@@ -1135,20 +1140,13 @@ async fn handle_ilp(
 
     // client-edge-spec.md §1.2: the sender's identity, resolved and made
     // available to everything downstream that needs a payer (issue #502).
-    // A presented `ILP-Peer-Id` has already been proven to authenticate
-    // above -- `resolve_identity` cannot fail on the same inputs plus a
-    // claim signer it never consults on that path -- so an anonymous
-    // sender is the only outcome this call can newly produce here: the
-    // fixed anonymous identity, or one derived from a plaintext claim's
-    // self-declared signer (never a wrapped-only claim's, since
-    // `plaintext_claim_signer` is `None` for one by construction).
-    let identity = resolve_identity(
-        presented_peer_id.as_deref(),
-        &presented_secret,
-        plaintext_claim_signer.as_deref(),
-        &state.identities,
-    )
-    .expect("already authenticated above, or anonymous, which never fails");
+    // A presented `ILP-Peer-Id` was already resolved -- and authenticated,
+    // or this request would have been refused `401` -- above, before the
+    // claim was looked at; the claim signer is consulted only for a
+    // request that presented none, and never a wrapped-only claim's, since
+    // `plaintext_claim_signer` is `None` for one by construction.
+    let identity =
+        authenticated_peer.unwrap_or_else(|| anonymous_identity(plaintext_claim_signer.as_deref()));
     tracing::debug!(identity = %identity.id(), "client-edge request identity resolved");
 
     // client-edge-spec.md v1 carries no minimum-delivery field (§4 of

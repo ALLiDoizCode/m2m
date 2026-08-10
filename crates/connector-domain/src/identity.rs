@@ -3,7 +3,9 @@
 //! `ILP-Peer-Id`/`Authorization` header values off the HTTP request, plus
 //! (when one is available) the already-parsed [`crate::client_claim::ClientClaim`]'s
 //! self-declared signer, and hands them to [`resolve_identity`], the one
-//! place the identity policy is decided.
+//! place the identity policy is decided ([`anonymous_identity`] is that
+//! function's own no-peer-id branch, exposed so a caller that has already
+//! established there is no peer id to authenticate can take it directly).
 //!
 //! A request identifies its sender in one of two ways: a configured peer
 //! authenticating with a bearer secret, or an anonymous sender given an
@@ -89,10 +91,7 @@ pub fn resolve_identity(
     configured: &[ConfiguredIdentity],
 ) -> Result<SenderIdentity, UnauthorizedIdentity> {
     let Some(peer_id) = presented_peer_id else {
-        return Ok(SenderIdentity::Anonymous(match claim_signer {
-            Some(signer) => format!("http:{signer}"),
-            None => ANONYMOUS.to_string(),
-        }));
+        return Ok(anonymous_identity(claim_signer));
     };
 
     let authenticated = configured
@@ -106,6 +105,24 @@ pub fn resolve_identity(
             peer_id: peer_id.to_string(),
         })
     }
+}
+
+/// The [`SenderIdentity`] of a request that presented no `ILP-Peer-Id`
+/// (`docs/protocol/client-edge-spec.md` §1.2): `http:<signer>` when a
+/// plaintext claim named one, the fixed [`ANONYMOUS`] otherwise. This is
+/// [`resolve_identity`]'s own anonymous branch, callable directly by a
+/// client edge that has already established the request presented no peer
+/// id -- so resolving an anonymous sender never has to run, and then
+/// discharge, an authentication outcome that cannot happen.
+///
+/// `claim_signer` carries the same rule it does on [`resolve_identity`]: it
+/// is a plaintext `ILP-Payment-Channel-Claim`'s already-parsed,
+/// self-declared signer, never a wrapped claim's.
+pub fn anonymous_identity(claim_signer: Option<&str>) -> SenderIdentity {
+    SenderIdentity::Anonymous(match claim_signer {
+        Some(signer) => format!("http:{signer}"),
+        None => ANONYMOUS.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -170,6 +187,19 @@ mod tests {
             resolved,
             SenderIdentity::Anonymous("http:0xabc123".to_string())
         );
+    }
+
+    /// `anonymous_identity` is the same branch `resolve_identity` takes
+    /// with no peer id presented, so the two never disagree about what an
+    /// anonymous sender is called.
+    #[test]
+    fn anonymous_identity_is_resolve_identitys_own_no_peer_id_branch() {
+        for claim_signer in [None, Some("0xabc123")] {
+            assert_eq!(
+                anonymous_identity(claim_signer),
+                resolve_identity(None, "", claim_signer, &[]).unwrap()
+            );
+        }
     }
 
     #[test]
