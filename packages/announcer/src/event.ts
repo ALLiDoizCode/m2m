@@ -33,6 +33,20 @@ export const EXPIRATION_TAG = 'expiration';
  * connector's `IlpPeerInfo` so a kind:10032 consumer (rig, toon-client, any
  * `@toon-protocol/core` parser) needs no changes.
  */
+/**
+ * Operator notice (toon#183). A pointer, not the payload — the durable text
+ * lives at `url`; this carries only enough for a consumer to decide whether
+ * to go read it. Configuration only: this sidecar never composes or infers
+ * one, so this shape is declared once here (the wire schema owns it) and
+ * reused by everything that carries one.
+ */
+export interface OperatorNotice {
+  id: string;
+  severity: 'info' | 'action-required';
+  summary: string;
+  url: string;
+}
+
 export interface IlpPeerInfo {
   ilpAddress: string;
   ilpAddresses?: string[];
@@ -46,18 +60,8 @@ export interface IlpPeerInfo {
   tokenNetworks?: Record<string, string>;
   preferredTokens?: Record<string, string>;
   routes: { publish: string; store: string };
-  /**
-   * Operator notice (toon#183). A pointer, not the payload — the durable
-   * text lives at `url`; this carries only enough for a consumer to decide
-   * whether to go read it. Configuration only: this sidecar never composes
-   * or infers one.
-   */
-  notice?: {
-    id: string;
-    severity: 'info' | 'action-required';
-    summary: string;
-    url: string;
-  };
+  /** Operator notice (toon#183) — see {@link OperatorNotice}. */
+  notice?: OperatorNotice;
   /** Allow additional out-of-band content fields to ride along, exactly like core. */
   [key: string]: unknown;
 }

@@ -17,7 +17,7 @@
 
 import type { ClientEdgeIdentity, RouteGreeting } from './edge-client';
 import { isEvmSettlementTerms, isSolanaSettlementTerms } from './edge-client';
-import type { IlpPeerInfo } from './event';
+import type { IlpPeerInfo, OperatorNotice } from './event';
 
 /** Static (never edge-derived) parts of the announcement — sidecar config. */
 export interface AnnounceStaticConfig {
@@ -50,7 +50,7 @@ export interface AnnounceStaticConfig {
    * config — never composed or inferred here. `undefined` (the overwhelming
    * common case) omits the key entirely; see {@link buildAnnouncementInfo}.
    */
-  notice?: IlpPeerInfo['notice'];
+  notice?: OperatorNotice;
 }
 
 /**

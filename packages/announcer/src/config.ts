@@ -11,6 +11,8 @@
 
 import { readFileSync } from 'node:fs';
 
+import type { OperatorNotice } from './event';
+
 export interface AnnouncerConfig {
   /** Base URL of the Rust client edge to POLL. NEVER advertised — internal only. */
   rustEdgeUrl: string;
@@ -45,12 +47,7 @@ export interface AnnouncerConfig {
    * never derived. Absent unless every one of `ANNOUNCER_NOTICE_ID`,
    * `ANNOUNCER_NOTICE_SUMMARY` and `ANNOUNCER_NOTICE_URL` is set.
    */
-  notice?: {
-    id: string;
-    severity: 'info' | 'action-required';
-    summary: string;
-    url: string;
-  };
+  notice?: OperatorNotice;
 }
 
 /** The full set of environment variables this sidecar reads, for `--help`-style documentation. */
@@ -81,8 +78,6 @@ export const ENV_VARS = [
   'ANNOUNCER_NOTICE_URL',
   'LOG_LEVEL',
 ] as const;
-
-const NOTICE_SEVERITIES = ['info', 'action-required'] as const;
 
 const DEFAULT_REFRESH_INTERVAL_SECS = 300;
 const DEFAULT_ILP_ADDRESS = 'g.toon';
@@ -162,7 +157,7 @@ function deriveRouteHints(
  * severity to `info` for lenience on the READ side — this is the WRITE
  * side, where the operator can simply be told to fix it).
  */
-function resolveNotice(env: NodeJS.ProcessEnv): AnnouncerConfig['notice'] {
+function resolveNotice(env: NodeJS.ProcessEnv): OperatorNotice | undefined {
   const id = env.ANNOUNCER_NOTICE_ID;
   const summary = env.ANNOUNCER_NOTICE_SUMMARY;
   const url = env.ANNOUNCER_NOTICE_URL;
@@ -177,17 +172,12 @@ function resolveNotice(env: NodeJS.ProcessEnv): AnnouncerConfig['notice'] {
     );
   }
   const resolvedSeverity = severity ?? 'info';
-  if (!NOTICE_SEVERITIES.includes(resolvedSeverity as (typeof NOTICE_SEVERITIES)[number])) {
+  if (resolvedSeverity !== 'info' && resolvedSeverity !== 'action-required') {
     throw new Error(
       `ANNOUNCER_NOTICE_SEVERITY must be "info" or "action-required", got "${resolvedSeverity}"`
     );
   }
-  return {
-    id,
-    severity: resolvedSeverity as 'info' | 'action-required',
-    summary,
-    url,
-  };
+  return { id, severity: resolvedSeverity, summary, url };
 }
 
 /** Load and validate the full config from `process.env` (or an injected map, for tests). */
