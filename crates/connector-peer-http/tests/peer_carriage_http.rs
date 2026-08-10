@@ -20,9 +20,10 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use connector_btp::{
     ACCUMULATED_COST_HEADER, CLAIM_ACK_HEADER, CLAIM_HEADER, FLUSH_REQUESTED_HEADER,
-    MINIMUM_DELIVERY_HEADER,
+    MINIMUM_DELIVERY_HEADER, PAYMENT_REQUIRED_PROTOCOL,
 };
-use connector_config::PeerCredential;
+use connector_config::{PeerCredential, StaticRoute};
+use connector_domain::x402::parse_greeting;
 use connector_domain::{PacketResponse, Prepare};
 use connector_peer_auth::{encode_base64, PeerAuthPolicy, PresentedCredential, PEER_AUTH_HEADER};
 use connector_peer_btp::AcceptedClaims;
@@ -99,6 +100,27 @@ fn payee(payer: &dyn Signer) -> Arc<Connector> {
     Arc::new(
         Connector::new(
             vec![],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            clock(),
+        )
+        .with_channel_verification_key(channel_id(), counterparty)
+        .with_channel_domain(channel_id(), domain())
+        .expect("a bytes32 channel id"),
+    )
+}
+
+/// As [`payee`], but with one terminated, priced route -- the fixture issue
+/// #880's price-coverage gate tests need, since a payee with no routes at
+/// all (`payee`) never reaches that gate (§3.1: the gate is scoped to a
+/// `Terminated` route's own price, exactly like the pre-existing amount
+/// check right below it in `Connector::handle_peer_prepare`).
+fn payee_with_route(payer: &dyn Signer, route: StaticRoute) -> Arc<Connector> {
+    let counterparty = derive_evm_address(&payer.public_key().unwrap());
+    Arc::new(
+        Connector::new(
+            vec![route],
             vec![],
             Arc::new(FakeAppClient::new()),
             Arc::new(InProcessPeerTransport::new()),
@@ -1062,6 +1084,151 @@ async fn a_payee_names_one_channel_per_occurrence_and_only_to_a_peer() {
         .headers
         .get(FLUSH_REQUESTED_HEADER)
         .is_none());
+}
+
+// ─── issue #880 (owner decision #868): every peer PREPARE to a priced
+// terminated route carries a covering claim, or is refused with the client
+// edge's own x402 greeting ───
+
+/// No claim at all: refused with the same `F06` + x402-terms shape the
+/// client edge's own BTP carriage answers a claimless request with (issue
+/// #880, `peer-carriage-spec.md` §3.1) -- never delivered to the app.
+#[tokio::test]
+async fn a_claimless_peer_prepare_to_a_priced_route_is_refused_with_the_x402_greeting() {
+    let payer_signer = LocalSigner::generate("payer");
+    let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+    let peer = accepting(payee_with_route(&payer_signer, route), bound_policy());
+
+    let response = peer
+        .handle(request(
+            Some((PEER_ID, SECRET)),
+            None,
+            prepare("g.example.app").encode(),
+        ))
+        .await;
+
+    assert_eq!(
+        response.status, 200,
+        "a packet verdict, not a transport 4xx (§6.2)"
+    );
+    let reject = connector_domain::Reject::decode(&response.body).expect("a reject");
+    assert_eq!(reject.code.as_str(), "F06");
+    let terms_header = response
+        .headers
+        .get(PAYMENT_REQUIRED_PROTOCOL)
+        .expect("the x402 greeting rode the response");
+    let terms = parse_greeting(&base64_decode(terms_header)).expect("readable terms");
+    assert_eq!(terms.price(), Some(25));
+    assert_eq!(terms.pay_to(), Some("g.example.app"));
+}
+
+/// A claim rides the request, but its own advance over the watermark falls
+/// short of the route's price: refused exactly the same way as no claim at
+/// all (issue #880's second acceptance case) -- the claim's own nonce/amount
+/// validity is irrelevant to this gate, which judges coverage, not validity.
+#[tokio::test]
+async fn a_claim_that_does_not_cover_the_routes_price_is_refused_the_same_way() {
+    let payer_signer = LocalSigner::generate("payer");
+    let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+    let peer = accepting(payee_with_route(&payer_signer, route), bound_policy());
+    let claim = sign_claim(&payer_signer, 1, 10); // advances only 10, price is 25
+
+    let response = peer
+        .handle(request(
+            Some((PEER_ID, SECRET)),
+            Some(&claim_as_json(&claim, &payer_signer)),
+            prepare("g.example.app").encode(),
+        ))
+        .await;
+
+    // The claim itself is perfectly valid and is acknowledged -- the two
+    // verdicts stay independent (§6.2) even though this gate is new.
+    assert_eq!(ack_on(&response), Some(ClaimAckOutcome::Accepted));
+    let reject = connector_domain::Reject::decode(&response.body).expect("a reject");
+    assert_eq!(reject.code.as_str(), "F06");
+    assert!(response.headers.get(PAYMENT_REQUIRED_PROTOCOL).is_some());
+}
+
+/// The boundary this gate exists to leave open: a claim whose advance
+/// exactly meets the route's price is admitted precisely as it was before
+/// this issue -- delivered to the app, no greeting.
+#[tokio::test]
+async fn a_covering_claim_is_admitted_exactly_as_today() {
+    let payer_signer = LocalSigner::generate("payer");
+    let identity_signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("payee-identity"));
+    let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+    let app_client = Arc::new(FakeAppClient::new());
+    let response_body = b"irrelevant".to_vec();
+    app_client.respond(
+        route.handler_url(),
+        connector_runtime::AppOutcome::Answered {
+            response: connector_domain::EnvelopeResponse {
+                status: 200,
+                headers: vec![],
+                body: response_body.clone(),
+            },
+        },
+    );
+    let counterparty = derive_evm_address(&payer_signer.public_key().unwrap());
+    let connector = Arc::new(
+        Connector::new(
+            vec![route],
+            vec![],
+            app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            clock(),
+        )
+        .with_channel_verification_key(channel_id(), counterparty)
+        .with_channel_domain(channel_id(), domain())
+        .expect("a bytes32 channel id")
+        .with_identity_signer(Arc::clone(&identity_signer)),
+    );
+    let peer = accepting(connector, bound_policy());
+    let claim = sign_claim(&payer_signer, 1, 25); // advances exactly the price
+
+    // A genuinely sealed envelope (ADR 0018/0019), so this termination can
+    // actually fulfil rather than being refused for want of sealing --
+    // orthogonal to this gate, but needed to prove delivery reached the app.
+    let envelope = connector_domain::EnvelopeRequest {
+        method: "POST".to_string(),
+        target: "/".to_string(),
+        headers: vec![],
+        body: b"hello".to_vec(),
+    };
+    let identity_public = identity_signer.public_key().expect("identity public key");
+    let (data, shared_secret) =
+        connector_signer::giftwrap::seal_request(&envelope.encode(), &identity_public)
+            .expect("seal");
+    let condition = connector_domain::derive_condition(
+        &connector_signer::giftwrap::derive_fulfillment(&shared_secret),
+    );
+    let prepare = Prepare {
+        amount: 25,
+        expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
+        execution_condition: condition,
+        destination: "g.example.app".to_string(),
+        data,
+    };
+
+    let response = peer
+        .handle(request(
+            Some((PEER_ID, SECRET)),
+            Some(&claim_as_json(&claim, &payer_signer)),
+            prepare.encode(),
+        ))
+        .await;
+
+    assert_eq!(ack_on(&response), Some(ClaimAckOutcome::Accepted));
+    assert!(
+        response.headers.get(PAYMENT_REQUIRED_PROTOCOL).is_none(),
+        "an admitted packet carries no greeting"
+    );
+    let fulfill = connector_domain::Fulfill::decode(&response.body).expect("a fulfil");
+    let opened = connector_signer::giftwrap::open_response(&shared_secret, &fulfill.data)
+        .expect("open the sealed fulfil");
+    let opened = connector_domain::EnvelopeResponse::decode(&opened).expect("decode envelope");
+    assert_eq!(opened.body, response_body);
+    assert_eq!(app_client.deliveries().len(), 1);
 }
 
 // ─── §7.2: the claim race, and its mitigation ───

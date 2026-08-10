@@ -59,12 +59,12 @@ use connector_btp::{
     OutboundRequests, ProtocolData, SessionGone, AUTH_PROTOCOL, BTP_ERROR, BTP_MESSAGE,
     BTP_RESPONSE, BTP_TRANSFER,
 };
-use connector_domain::{Fulfill, PacketResponse, Prepare, Reject, RejectCode};
+use connector_domain::{validate_price, Fulfill, PacketResponse, Prepare, Reject, RejectCode};
 use connector_peer_auth::{
     claim_ack_to_emit, decide_role, present_raw, PeerAuthPolicy, PeerAuthRefusalLog, SessionRole,
     SessionRoleBinding, PEER_AUTH_PROTOCOL_ENTRY,
 };
-use connector_runtime::{ClaimAckOutcome, Connector, WireClaim};
+use connector_runtime::{ClaimAckOutcome, ClientRouteKind, Connector, WireClaim};
 use tokio::sync::mpsc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -179,6 +179,28 @@ impl AcceptedClaims {
                 (peer_id.to_string(), claim.channel_id.clone()),
                 claim.clone(),
             );
+    }
+
+    /// This relation's watermark for `channel_id` (domain
+    /// [`connector_domain::Watermark`]), `None` if no claim has ever been
+    /// recorded for it -- the same "nothing to advance past" case
+    /// [`connector_domain::validate_price`] already treats as watermark
+    /// zero. Read *before* [`Self::record`] to get the watermark a fresh
+    /// claim must advance past, not the one it just became (issue #880).
+    #[must_use]
+    pub fn watermark(
+        &self,
+        peer_id: &str,
+        channel_id: &str,
+    ) -> Option<connector_domain::Watermark> {
+        self.at_watermark
+            .read()
+            .expect("accepted claims lock poisoned")
+            .get(&(peer_id.to_string(), channel_id.to_string()))
+            .map(|claim| connector_domain::Watermark {
+                nonce: claim.nonce,
+                cumulative_amount: claim.cumulative_amount,
+            })
     }
 
     /// Note the channel this peering identifies itself by.
@@ -509,6 +531,16 @@ impl PeerSession {
         protocol_data: &[ProtocolData],
         ilp_packet: &[u8],
     ) -> Result<(), SessionGone> {
+        // Peeked before `judge_claim` below may record this claim, so the
+        // price-coverage check further down judges the claim's own advance
+        // past the watermark it rode in on, not the one it just became
+        // (issue #880).
+        let prior_watermark = self.binding.role().peer_id().and_then(|peer_id| {
+            let raw = claim_json::from_protocol_data(protocol_data)?;
+            let claim = claim_json::parse(raw).ok()?;
+            self.state.accepted.watermark(peer_id, &claim.channel_id)
+        });
+
         // Claims are judged **inline, in arrival order** (§7.1) -- before
         // the packet is even decoded, and before anything is spawned.
         let judged = self.judge_claim(protocol_data);
@@ -570,6 +602,49 @@ impl PeerSession {
                     .await;
             }
         };
+
+        // Issue #880 (owner decision #868): a peer PREPARE to a route this
+        // connector terminates and prices MUST carry a claim that covers
+        // that price, or it is refused with the client edge's own x402
+        // greeting (`peer-carriage-spec.md` §3.1, corrected by this issue).
+        // Scoped to a terminated route's own price exactly like the
+        // existing amount check `handle_peer_prepare` still runs below this
+        // one: a `Forwarded` route is priced by the peering's own bilateral
+        // fee (`peer-wire-spec.md` §4), not by this gate (§3.1).
+        let price = self
+            .state
+            .connector
+            .client_route(&prepare.destination)
+            .filter(|route| route.kind == ClientRouteKind::Terminated)
+            .map_or(0, |route| route.price);
+        if price > 0 {
+            let claim = judged.as_ref().and_then(|judged| judged.claim.as_ref());
+            let covers = claim.is_some_and(|claim| {
+                validate_price(prior_watermark, claim.cumulative_amount, price).is_ok()
+            });
+            if !covers {
+                let advanced = claim.map_or(0, |claim| {
+                    claim
+                        .cumulative_amount
+                        .saturating_sub(prior_watermark.map_or(0, |w| w.cumulative_amount))
+                });
+                tracing::warn!(
+                    peer_id,
+                    destination = %prepare.destination,
+                    price,
+                    advanced,
+                    "peer PREPARE refused: no claim covers this packet's price"
+                );
+                return self
+                    .send(self.payment_required_response(
+                        request_id,
+                        &prepare.destination,
+                        price,
+                        ack,
+                    ))
+                    .await;
+            }
+        }
 
         let channel_id = self.state.accepted.channel_for(&peer_id);
         let permit = window_slot(&self.window).await;
@@ -659,6 +734,38 @@ impl PeerSession {
             PacketResponse::Reject(reject),
             ack,
         )
+    }
+
+    /// Issue #880: the same x402 greeting the client edge answers an
+    /// unpaid or under-covering request with
+    /// ([`connector_domain::x402::terms_body`], the one emitter every
+    /// carriage shares), `F06`-shaped exactly like the client edge's own
+    /// BTP carriage answers a claimless request (`connector-client-edge`'s
+    /// `btp` module) since BTP cannot answer HTTP `402`. The claim ack
+    /// still rides this same RESPONSE (§6.1) -- the packet's own refusal
+    /// and the claim's verdict are independent (§6.2).
+    fn payment_required_response(
+        &self,
+        request_id: u32,
+        destination: &str,
+        price: u64,
+        ack: ClaimAckOutcome,
+    ) -> Vec<u8> {
+        let terms =
+            connector_domain::x402::terms_body(destination, price, None, &[], &[], None, None, 0);
+        let reject = Reject {
+            code: RejectCode::f06_unexpected_payment(),
+            triggered_by: String::new(),
+            message: "no payment channel claim covers this packet's price".to_string(),
+            data: Vec::new(),
+            accumulated_cost: 0,
+        };
+        let mut entries = vec![
+            fields::accumulated_cost_protocol_data(reject.accumulated_cost),
+            fields::payment_required_protocol_data(terms),
+        ];
+        entries.extend(self.claim_ack_entry(ack));
+        encode_response(request_id, &entries, &reject.encode())
     }
 }
 

@@ -100,6 +100,19 @@ pub fn accumulated_cost_protocol_data(accumulated_cost: u64) -> ProtocolData {
     }
 }
 
+/// The `payment-required` entry a REJECT carries when a peer PREPARE is
+/// refused for want of a covering claim (issue #880): `terms` is
+/// [`connector_domain::x402::terms_body`]'s own bytes, raw UTF-8 JSON --
+/// the BTP twin of the HTTP peer carriage's base64 header, content
+/// identical, only the carriage differs.
+pub fn payment_required_protocol_data(terms: Vec<u8>) -> ProtocolData {
+    ProtocolData {
+        name: PAYMENT_REQUIRED_PROTOCOL.to_string(),
+        content_type: CONTENT_TYPE_TEXT,
+        data: terms,
+    }
+}
+
 /// Read a REJECT's accumulated cost back. **Absent means zero on receipt**
 /// (§5.2), and a relaying hop still adds its own fee to that zero before
 /// passing the REJECT upstream.
