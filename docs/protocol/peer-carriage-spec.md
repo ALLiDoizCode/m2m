@@ -154,8 +154,9 @@ configured via `Connector::with_outbound_client_hop` is covered proactively, fro
 client ledger (#873), for this node's own forwarded value -- before the first attempt is ever sent,
 not merely recovered by #875's retry arm after a refusal teaches this node it must pay. A hop with
 no such config keeps riding the peer ledger's `pending_claim` (ADR 0004's postpay convention),
-untouched: bilateral peer-to-peer forwarding is not what #868/#881 changed, per this section's own
-"a `Forwarded` route is priced by the peering's bilateral fee" note above.
+untouched: bilateral peer-to-peer forwarding is not what #868/#881 changed, per §3.1 below — "a
+**peer-role** PREPARE reaching this node's `Forwarded` routes is still priced by the claim exchange
+of §4 and `peer-wire-spec.md` §3 alone".
 
 #### Peer role is not a prerequisite for paid carriage
 

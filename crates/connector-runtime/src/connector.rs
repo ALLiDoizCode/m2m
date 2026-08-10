@@ -1153,6 +1153,15 @@ impl Connector {
     /// from its greeting -- the authoritative figure in a disagreement,
     /// where this hop's own idea of the forwarded value is not. A second
     /// greeting after that is a failure, not a second retry.
+    ///
+    /// Cost, since #881 moves it from the exception to the norm: a forward
+    /// to a COVERED hop now spends one watermark round trip to the receiver
+    /// and the one durable nonce reservation
+    /// [`OutboundClientLedger::next_claim`] makes, on every packet rather
+    /// than only on a greeted one (issue #879 measured the forwarded-packet
+    /// path at 3.00 `fdatasync`/packet with exposure accounting on; this is
+    /// a fourth). A forward to a hop with no client-role config spends
+    /// neither -- no extra call, no extra `fdatasync` -- exactly as before.
     async fn forward_via_peer_route(
         &self,
         peer_route: &PeerRoute,
@@ -1186,7 +1195,12 @@ impl Connector {
         // falling back to an uncovered send when it cannot be. A hop with
         // no such config keeps riding the peer ledger's `pending_claim`,
         // untouched.
-        let (mut covered, first_claim, pending_claim) =
+        //
+        // `riding_claim` is whatever goes out on this attempt; `pending_claim`
+        // is the subset of that the PEER book is waiting on an ack for, so
+        // it is `None` on a client-covered packet: that claim's authority is
+        // the receiver's watermark, and `self.claims` knows nothing of it.
+        let (mut covered, riding_claim, pending_claim) =
             match self.cover_forward(peer_id, forwarded_amount).await {
                 CoverOutcome::Covered(claim) => (true, Some(claim), None),
                 CoverOutcome::NotConfigured => {
@@ -1211,7 +1225,7 @@ impl Connector {
             };
         let mut answer = self
             .peer_transport
-            .forward(peer_id, outgoing.clone(), minimum_delivery, first_claim)
+            .forward(peer_id, outgoing.clone(), minimum_delivery, riding_claim)
             .await;
         if let Some(claim) = pending_claim {
             self.claims
@@ -3238,8 +3252,10 @@ mod tests {
             assert!(first_hop.claims()[0].pending);
         }
     }
-    /// Issue #875: a next hop that answers a forward with the x402 greeting
-    /// is paid and the packet retried **once**.
+    /// Issue #881: every packet forwarded to a hop configured for
+    /// client-role covering carries a claim of its own, minted before the
+    /// packet is sent -- plus issue #875's one bounded retry for the hop
+    /// that greets a covered packet anyway.
     ///
     /// The stand-ins here are the two real roles of that exchange, not
     /// mocks with expectations: [`GreetingPeer`] is a receiver that refuses
@@ -3249,7 +3265,7 @@ mod tests {
     /// claims on the channel stand, the same answer `HttpClaimState` reads
     /// off a real `POST /ilp/claim-state` (proven against a live HTTP
     /// receiver in `outbound_client`'s own tests).
-    mod covering_a_greeted_forward {
+    mod covering_a_forward {
         use super::*;
         use crate::outbound_client::{
             ClaimStateSource, ClaimWatermark, EvmDomain, OutboundClientError, OutboundClientLedger,
@@ -3804,8 +3820,9 @@ mod tests {
         /// by #881: it keeps riding the peer ledger's own postpay claim
         /// (ADR 0004), exactly as before this mechanism existed --
         /// bilateral peer-to-peer forwarding is not what #868/#881 changed
-        /// (`peer-carriage-spec.md` §3.1: a `Forwarded` route is priced by
-        /// the peering's bilateral fee, not a client edge's price).
+        /// (`peer-carriage-spec.md` §3.1: a peer-role PREPARE reaching a
+        /// `Forwarded` route is priced by the claim exchange of §4 alone,
+        /// not by a client edge's price).
         #[tokio::test]
         async fn a_hop_with_no_client_role_configured_is_unaffected_by_proactive_covering() {
             let (sealed, shared_secret) = sealed_prepare(b"hello");
