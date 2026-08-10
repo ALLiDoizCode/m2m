@@ -12,38 +12,30 @@
 //! `Connector` reached over [`InProcessPeerTransport`], and the outbound
 //! claim box 1 signs per forward is signed by a real [`LocalSigner`].
 //!
-//! Four modes, which together separate the journal's two writers:
+//! Two modes, which together separate the journal's two writers:
 //!
-//! | mode                   | inbound claim | exposure recorded | journal entries per packet              |
-//! | ---------------------- | ------------- | ----------------- | --------------------------------------- |
-//! | `baseline`             | no            | no                | `OutboundClaimSigned`                    |
-//! | `window`               | no            | yes               | `InboundFulfillmentRecorded` + outbound  |
-//! | `covering`             | yes           | yes               | `InboundClaimAccepted` + both above      |
-//! | `covering-no-exposure` | yes           | no                | `InboundClaimAccepted` + outbound        |
+//! | mode       | inbound claim | journal entries per packet     |
+//! | ---------- | ------------- | ------------------------------- |
+//! | `baseline` | no            | `OutboundClaimSigned`            |
+//! | `covering` | yes           | `InboundClaimAccepted` + outbound |
 //!
-//! `window` is the peer path as it ships today (issue #868's own reading of
-//! `handle_peer_prepare`: a claimless PREPARE is admitted, and only the
-//! exposure it opens is journalled). `covering` is #868's rule laid on top
-//! of the exposure machinery unchanged. `covering-no-exposure` is #868's
-//! rule with `record_inbound_delivery` retired, which is the choice its
-//! acceptance criteria leave open.
-//!
-//! # The ceiling is set explicitly, on purpose
-//!
-//! `PeerConfig::ceiling`'s doc claims `None` means "the runtime's own
-//! default"; there is no such default (`connector-cli/src/runtime.rs`
-//! configures a ceiling only when the config carries one), so an unset
-//! ceiling makes `is_over_ceiling` answer `false` without ever reading the
-//! projection. That is a different code path from a configured peering, so
-//! this harness always sets one (`--ceiling`, default large enough that no
-//! run trips it): what is measured is the **bounded** path.
+//! `covering` is what ships (ADR 0031, ADR 0033, issue #882): every peer
+//! PREPARE carries its own covering claim, and the exposure/ceiling
+//! accounting this file used to also measure (`record_inbound_delivery`,
+//! `is_over_ceiling`) is retired -- its own numbers, gathered here, are
+//! what showed retiring it costs nothing measurable over `baseline` while
+//! keeping it alongside covering claims cost a third `fdatasync`. The
+//! `window` (claimless, exposure-tracked) and `covering-no-exposure`
+//! modes this file used to also offer no longer exist to measure: the
+//! APIs behind them (`ClaimBook::set_ceiling`/`record_inbound_delivery`)
+//! are gone.
 //!
 //! # Counting the syscalls
 //!
 //! ```text
 //! cargo build --release --example peer_claim_journal_bench -p connector-runtime
 //! strace -c -f -e trace=fsync,fdatasync \
-//!   ./target/release/examples/peer_claim_journal_bench --mode window --packets 500 --rate 0
+//!   ./target/release/examples/peer_claim_journal_bench --mode covering --packets 500 --rate 0
 //! ```
 //!
 //! Divide the `fdatasync` count by `--packets`. Count with `--rate 0`
@@ -94,18 +86,14 @@ const AMOUNT: u64 = 1_000;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Baseline,
-    Window,
     Covering,
-    CoveringNoExposure,
 }
 
 impl Mode {
     fn parse(raw: &str) -> Option<Mode> {
         match raw {
             "baseline" => Some(Mode::Baseline),
-            "window" => Some(Mode::Window),
             "covering" => Some(Mode::Covering),
-            "covering-no-exposure" => Some(Mode::CoveringNoExposure),
             _ => None,
         }
     }
@@ -113,21 +101,13 @@ impl Mode {
     fn name(self) -> &'static str {
         match self {
             Mode::Baseline => "baseline",
-            Mode::Window => "window",
             Mode::Covering => "covering",
-            Mode::CoveringNoExposure => "covering-no-exposure",
         }
     }
 
     /// Whether a covering claim rides every inbound PREPARE.
     fn carries_claim(self) -> bool {
-        matches!(self, Mode::Covering | Mode::CoveringNoExposure)
-    }
-
-    /// Whether the arrival names its inbound channel, which is what makes
-    /// `handle_peer_prepare` record exposure on fulfilment.
-    fn records_exposure(self) -> bool {
-        matches!(self, Mode::Window | Mode::Covering)
+        matches!(self, Mode::Covering)
     }
 }
 
@@ -135,17 +115,13 @@ struct Args {
     mode: Mode,
     packets: usize,
     rate: f64,
-    ceiling: u64,
     journal_dir: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut mode = Mode::Window;
+    let mut mode = Mode::Covering;
     let mut packets = 500usize;
     let mut rate = 0.0f64;
-    // Large enough that no run in this harness trips it, small enough to
-    // read: 10^15 of the settlement asset's smallest unit.
-    let mut ceiling = 1_000_000_000_000_000u64;
     let mut journal_dir = None;
 
     let mut argv = std::env::args().skip(1);
@@ -158,13 +134,12 @@ fn parse_args() -> Result<Args, String> {
             }
             "--packets" => packets = value()?.parse().map_err(|_| "--packets is a number")?,
             "--rate" => rate = value()?.parse().map_err(|_| "--rate is a number")?,
-            "--ceiling" => ceiling = value()?.parse().map_err(|_| "--ceiling is a number")?,
             "--journal-dir" => journal_dir = Some(value()?),
             "--help" | "-h" => {
                 println!(
                     "peer_claim_journal_bench \
-                     --mode <baseline|window|covering|covering-no-exposure> \
-                     [--packets N] [--rate PACKETS_PER_SEC] [--ceiling UNITS] [--journal-dir DIR]"
+                     --mode <baseline|covering> \
+                     [--packets N] [--rate PACKETS_PER_SEC] [--journal-dir DIR]"
                 );
                 std::process::exit(0);
             }
@@ -175,7 +150,6 @@ fn parse_args() -> Result<Args, String> {
         mode,
         packets,
         rate,
-        ceiling,
         journal_dir,
     })
 }
@@ -302,7 +276,7 @@ async fn main() {
     let journal_path = journal_dir.join(format!("{}.journal", args.mode.name()));
     let _ = std::fs::remove_file(&journal_path);
 
-    let (box_1, divergences) = Connector::new(
+    let box_1 = Connector::new(
         vec![],
         vec![PeerRoute::new("g.bench", DOWNSTREAM_PEER, 0)],
         Arc::new(FakeAppClient::new()),
@@ -319,14 +293,10 @@ async fn main() {
     .with_channel_verification_key(channel_id(1), upstream_address)
     .with_channel_domain(channel_id(1), bench_channel_domain())
     .expect("channel 1 is a valid on-chain channel id")
-    // Explicit, so `is_over_ceiling` reads the projection per packet the
-    // way a configured peering makes it -- see this file's header.
-    .with_channel_ceiling(channel_id(1), args.ceiling)
     .with_journal(Arc::new(
         FileJournal::open(&journal_path).expect("open journal"),
     ))
     .expect("journal replay");
-    assert!(divergences.is_empty(), "a fresh journal cannot diverge");
 
     // Sender-side work, done up front so it is not inside the timed loop:
     // sealing a packet and signing the claim covering it both happen on
@@ -346,7 +316,6 @@ async fn main() {
         arrivals.push((sealed_prepare(identity.as_ref()), claim));
     }
 
-    let arrival_channel = args.mode.records_exposure().then(|| channel_id(1));
     let mut latencies: Vec<Duration> = Vec::with_capacity(args.packets);
     let mut fulfilled = 0usize;
     let interval = (args.rate > 0.0).then(|| Duration::from_secs_f64(1.0 / args.rate));
@@ -361,9 +330,7 @@ async fn main() {
             }
         }
         let started = Instant::now();
-        let (response, _ack) = box_1
-            .handle_peer_prepare(prepare, 0, claim, arrival_channel.clone())
-            .await;
+        let (response, _ack) = box_1.handle_peer_prepare(prepare, 0, claim).await;
         latencies.push(started.elapsed());
         if matches!(response, PacketResponse::Fulfill(_)) {
             fulfilled += 1;
@@ -393,7 +360,6 @@ async fn main() {
             "unpaced".to_string()
         }
     );
-    println!("ceiling               {}", args.ceiling);
     println!("wall_seconds          {:.3}", wall.as_secs_f64());
     println!(
         "achieved_rate         {:.1}/s",

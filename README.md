@@ -90,7 +90,7 @@ price       = 100
 | `[[children]]`        | array       | no        | `{ name, handler_url, price }` — sugar for a route at `<apex>.<name>`.                                |
 | `[operator]`          | table       | no        | Absent ⇒ the operator surface is not mounted at all.                                                  |
 | `peer_expose`         | string      | no        | `btp` / `http` / `both` / `neither` — which peer carriages this node listens for. Absent ⇒ `neither`. |
-| `[[peers]]`           | array       | no        | `{ id, endpoint, credential, ceiling, … }` — the peerings `routes.peer_id` may name.                  |
+| `[[peers]]`           | array       | no        | `{ id, endpoint, credential, … }` — the peerings `routes.peer_id` may name.                           |
 | `[[peer_channels]]`   | array       | no        | `{ peer_id, channel_id, counterparty_key, chain_id, token_network }` — required for every peering.    |
 | `[settlement]`        | table       | no        | Absent ⇒ every channel operation answers `503`.                                                       |
 | `[[client_channels]]` | array       | no        | Absent ⇒ the client edge has a record of no channel, so it refuses every claim.                       |
@@ -313,7 +313,7 @@ sides — see
 
 The carriage mapping is specified in
 [`docs/protocol/peer-carriage-spec.md`](docs/protocol/peer-carriage-spec.md). The semantics it
-carries — claim exchange, flush, fees, ceilings, minimum delivery, the refusal taxonomy — are
+carries — claim exchange, flush, fees, minimum delivery, the refusal taxonomy — are
 unchanged and still specified in [`docs/protocol/peer-wire-spec.md`](docs/protocol/peer-wire-spec.md)
 §3–§6; that document's §1–§2 (the deleted raw-TCP frame protocol) no longer describes anything
 this binary ships.

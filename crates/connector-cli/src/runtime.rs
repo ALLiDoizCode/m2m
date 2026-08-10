@@ -601,8 +601,7 @@ fn peer_claim_identity(config: &Config) -> Result<Option<PeerClaimIdentity>, Run
 /// Wire every `[[peer_channels]]` row into the claim ledger (issue #678,
 /// `peer-carriage-spec.md` §11): which channel this node claims against
 /// when it owes a peer, whose signature it accepts on a claim naming that
-/// channel, the EIP-712 domain both are judged under (ADR 0024), and the
-/// peering's exposure ceiling (§5.3).
+/// channel, and the EIP-712 domain both are judged under (ADR 0024).
 ///
 /// A peering with several rows claims against the **first**: an outbound
 /// ledger is per peer, so there is exactly one channel this node can owe on,
@@ -645,20 +644,6 @@ fn wire_peer_channels(
             .map_err(|_| RuntimeError::PeerChannelUnusable {
                 channel_id: channel.channel_id().to_string(),
             })?;
-        // §5.3/§6.4(3): the peering's ceiling is a property of the
-        // *relation*, and the ledger accounts exposure per channel -- so
-        // each of a relation's channels carries the relation's figure. A
-        // peering with no explicit ceiling has none here either, which is
-        // allowed only for one this node can dial (config load refuses the
-        // other shape as `AcceptOnlyPeerWithoutCeiling`).
-        if let Some(ceiling) = config
-            .peers()
-            .iter()
-            .find(|peer| peer.id() == channel.peer_id())
-            .and_then(|peer| peer.ceiling())
-        {
-            connector = connector.with_channel_ceiling(channel.channel_id(), ceiling);
-        }
     }
     Ok(connector)
 }
@@ -846,8 +831,8 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
             }
         }
     }
-    // The peer wire's own claim watermarks and exposure, made durable by
-    // the same `state_dir` the client edge's are (issue #605, and #556's
+    // The peer wire's own claim watermarks, made durable by the same
+    // `state_dir` the client edge's are (issue #605, and #556's
     // reconciliation row "Journal: `ClaimBook::new(None, ..)` installs the
     // in-memory journal ... watermarks reset on restart; spent nonces
     // respend"). Both surfaces are the same sentence -- a watermark must
@@ -856,20 +841,12 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     // the fix and the bug side by side.
     if let Some(state_dir) = config.state_dir() {
         let journal = open_journal(state_dir, PEER_CLAIM_JOURNAL)?;
-        let (armed, divergences) = connector.with_journal(journal).map_err(|source| {
+        connector = connector.with_journal(journal).map_err(|source| {
             RuntimeError::JournalUnreplayable {
                 path: state_dir.join(PEER_CLAIM_JOURNAL),
                 source,
             }
         })?;
-        connector = armed;
-        for divergence in divergences {
-            // Reported, never absorbed (issue #424). Not fatal: a
-            // divergence is an accounting disagreement inside a journal
-            // that replayed fine, not a journal this node cannot trust to
-            // have replayed at all.
-            tracing::error!(%divergence, "replaying the peer-wire journal found a divergence");
-        }
     }
     Ok(Runtime {
         connector: Arc::new(connector),
@@ -1234,7 +1211,6 @@ key_file = "{key_file}"
 [[peers]]
 id = "store"
 endpoint = "wss://store.example:443/ilp/btp"
-ceiling = 4200
 
 [peers.credential]
 secret = "a-real-peering-secret"

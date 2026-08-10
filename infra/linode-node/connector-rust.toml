@@ -231,12 +231,9 @@ endpoint = "wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp"
 # (PeerSecretFileNotFound / -Unreadable / -Empty), never a peering that
 # silently never establishes.
 credential = { secret_file = "/app/data/apex-store.secret" }
-# The most unclaimed value this node will carry for this peering before
-# refusing. 1 USDC.
-ceiling = 1000000
-# Send an unacknowledged claim after 5s of quiet, so value does not sit
-# unclaimed across an idle period.
-flush_interval_ms = 5000
+# `ceiling`/`flush_interval_ms` used to be set here -- retired along with
+# the credit window they bounded (ADR 0031, ADR 0033, issue #882): every
+# peer PREPARE now carries its own covering claim.
 
 # Role is decided by authentication AND a channel binding -- a peering with a
 # credential but no channel can only ever admit its counterparty as an
@@ -281,12 +278,8 @@ endpoint = "wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp"
 # -- gitignored, generated once and copied byte-identical to both boxes
 # (issue #820's live human step), never a literal in this public repo.
 credential = { secret_file = "/app/data/apex-relay.secret" }
-# 1 USDC, matching the store peering's own ceiling.
-ceiling = 1000000
-# Same flush cadence as the store peering, for the same reason (unclaimed
-# value should not sit across an idle period) -- if anything MORE load-
-# bearing here, since this route's traffic is per-audio-frame at 49 fps.
-flush_interval_ms = 5000
+# `ceiling`/`flush_interval_ms` used to be set here too, same removal as
+# the apex-store peering above (ADR 0031, ADR 0033, issue #882).
 
 [[peer_channels]]
 peer_id = "apex-relay"

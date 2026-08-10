@@ -78,11 +78,10 @@ peer_expose = "btp"
 [[peers]]
 id = "apex-relay"
 credential = { secret_file = "/app/data/apex-relay.secret" }
-# No `endpoint`: this node accepts and never dials -- exactly why `ceiling`
-# is REQUIRED rather than optional here (`AcceptOnlyPeerWithoutCeiling`, an
-# accept-only peering cannot flush on its own initiative). 1 USDC, matching
-# the store box's own accept-only peering.
-ceiling = 1000000
+# No `endpoint`: this node accepts and never dials. `ceiling` used to be
+# REQUIRED here (`AcceptOnlyPeerWithoutCeiling`) -- retired along with the
+# credit window it bounded (ADR 0031, ADR 0033, issue #882): every peer
+# PREPARE now carries its own covering claim.
 
 # Role is decided by authentication AND a channel binding (peer-carriage-spec
 # 1.2, ADR 0024). Without this row the g.toon proxy authenticates fine, is

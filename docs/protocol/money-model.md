@@ -1,7 +1,20 @@
 # The hop-by-hop money model
 
-How value actually moves across a forwarded packet, end to end: which claim is signed, by whom, on
-which channel, and at which instant. Written for issue #865, because the pieces existed in seven
+> **Superseded 2026-08-07 through 2026-08-10 by issue #868's children (ADR 0031, ADR 0033, issues
+> #880/#881/#882).** This document describes the pre-#868 **credit window**: a peer PREPARE forwarded
+> claimless, its claim riding the next packet or a FLUSH, bounded by a per-channel exposure ceiling.
+> That model is retired, not built on. Current behaviour: every peer PREPARE carries its own covering
+> claim or is refused with the x402 greeting (ADR 0031); there is no exposure, no ceiling, and no
+> `flush_interval_ms` (ADR 0033). This document's own "Decided, not yet built (#868)" section below,
+> written when the decision was new, is now history rather than a preview — everything it lists has
+> landed. Kept for the reasoning behind the _old_ model (why pay-in-arrears existed, why a claim used
+> to trail its fulfilment); do not read anything below as current runtime behaviour without checking
+> it against `docs/adr/0031-*.md`, `docs/adr/0033-*.md` and `docs/protocol/peer-carriage-spec.md`
+> first.
+
+How value actually moved across a forwarded packet, end to end, **under the pre-#868 credit
+window**: which claim was signed, by whom, on which channel, and at which instant. Written for
+issue #865, because the pieces existed in seven
 places — `peer-carriage-spec.md`, `peer-wire-spec.md`, ADR 0004, ADR 0028, `devnet-pricing.md`,
 `CONTEXT.md`, `README.md` — and nothing joined them, and the repo had no diagram at all.
 
@@ -344,17 +357,21 @@ For the `g.toon.relay` leg the same arithmetic lands on `1 − 0 = 1 >= 1`
 (`docs/devnet-pricing.md:84-90`) — a deliberate zero fee, because that prefix is billed per audio
 frame at 49 fps and any non-zero fee would have doubled the per-frame client cost.
 
-## Decided, not yet built (#868)
+## Decided, and now built (#868)
 
-> **Nothing in this section describes current behaviour.** No connector source has changed. Every
-> statement above about `claim: Option<WireClaim>`, claimless peer PREPAREs and the credit window is
-> what the code does today, at the citations given.
+> **Historical note, kept as originally written below.** This section was written the day of the
+> owner decision, before any of #868's children landed, and said so explicitly at the time ("nothing
+> in this section describes current behaviour... no connector source has changed"). Every item this
+> section lists as a future change has since landed: #880/#881 (ADR 0031) shipped the covering-claim
+> requirement on both the receive and send sides, and #882 (ADR 0033) retired the exposure machinery
+> outright rather than giving it a restated purpose. The bullets below are preserved for the
+> reasoning, not as an open question.
 
 An owner decision on 2026-08-07 (issue #868) **retires the claimless peer packet**: every peer packet
 must carry a covering claim, or get the 402 greeting — the same rule the client edge already
 enforces. Owner's framing: _"every packet needs paid claim. anything else gets the 402 greeting."_
 
-What that changes, relative to this document:
+What that changed, relative to this document:
 
 - **Both sides of the peer path move, not just the receiving side.** The receive side would refuse a
   claimless PREPARE where `handle_peer_prepare` (`connector.rs:667-673`) accepts one today. The
@@ -374,16 +391,20 @@ What that changes, relative to this document:
 - **The bearer credential loses its justification.** A claim is verified against the channel's
   configured counterparty key (`claim.rs:1055-1089`), so a claim on every packet proves the sender's
   identity cryptographically on every packet — strictly stronger than a bearer token.
-- **The fate of the exposure machinery is undecided.** `record_inbound_delivery`
-  (`claim.rs:844-849`), `ceiling` and `flush_interval_ms` (`peer.rs:454-462`) either go away or become
-  a residual safety bound with a restated purpose. #868 requires that to be decided and written down,
-  not left implicit.
-- **Unmeasured:** whether the credit window was doing throughput work as well as trust work. #710
-  records up to three fsyncs per forwarded packet on this path, and `record_inbound_delivery` journals
-  durably too (`claim.rs:842-843`), so both paths appear to hit disk — but this has not been measured,
-  and the `g.toon.relay` workload runs at 49 fps.
+- **The fate of the exposure machinery, decided: removed.** #882 (ADR 0033) retired
+  `record_inbound_delivery`, `ceiling` and `flush_interval_ms` outright rather than keeping either
+  as a residual bound. Issue #879/PR #895 measured the throughput question the next bullet left
+  open and that measurement settled it: keeping the machinery alongside a covering-claim requirement
+  cost a third `fdatasync` per packet (roughly +1.8 ms at p99 at the huddles rate) for a window that
+  no longer opens in normal operation, while retiring it cost nothing measurable versus what already
+  shipped.
+- **Measured (issue #879, PR #895):** the credit window was doing no throughput work the
+  covering-claim requirement didn't already also do. `record_inbound_delivery` journalled durably on
+  every fulfilment just as a claim's own acceptance did, so keeping both after #880/#881 landed was a
+  second sync for no benefit -- exactly what the bullet above's decision retired.
 
-Until #868 and #866 land, the model in the sections above is the model in the code.
+The model in the sections above described the code before #868; it is not the model in the code
+today. See the banner at the top of this document.
 
 ## Where the fragments live
 

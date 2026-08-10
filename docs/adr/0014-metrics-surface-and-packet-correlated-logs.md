@@ -20,12 +20,19 @@ so it is also where this gets decided.
 (`Connector::finish`), so no outcome can be reported without also being counted.
 `toon_fees_earned_total` is populated on fulfilment only, matching ADR 0010: a fee is earned
 when a forwarded packet fulfills, not when it is merely attempted. `toon_exposure` and
-`toon_settlement_total` are declared at their decided names now and report zero until the
-claim/exposure projection (#423, #424) and channel lifecycle (#422) exist to populate them —
+`toon_settlement_total` were declared at their decided names and reported zero until the
+claim/exposure projection (#423, #424) and channel lifecycle (#422) existed to populate them —
 the same shape-first, populate-later precedent `connector_runtime::operator_view` already set
 for `PeerView`/`ChannelView`/`ClaimView`/`ExposureView` in issue #420. A dashboard or alert
-built against these names today does not need to change when those tickets land; it starts
+built against these names did not need to change when those tickets landed; it started
 reporting non-zero.
+
+> **`toon_exposure` never reached that populate-later step.** [ADR 0033](0033-the-exposure-machinery-is-retired-not-restated.md)
+> (issue #882) retired the exposure projection this gauge was shaped for before it was ever wired
+> up; `ExposureView` and the operator surface's `GET /exposure` are gone with it. The gauge itself
+> is kept at its decided name for scrape-config stability, but it is now permanently zero with no
+> producer, not "zero until" -- the shape-first precedent held for `toon_settlement_total`, not for
+> this one.
 
 **Why metrics live behind the operator surface's bearer token rather than an unauthenticated
 port.** ADR 0008 already lists metrics as exactly the kind of thing a read-only dashboard

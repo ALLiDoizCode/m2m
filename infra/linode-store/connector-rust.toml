@@ -227,12 +227,10 @@ id = "apex-store"
 # unreadable or empty is a refuse-to-start by name (PeerSecretFileNotFound /
 # -Unreadable / -Empty), never a peering that silently never establishes.
 credential = { secret_file = "/app/data/apex-store.secret" }
-# No `endpoint`: this node accepts and never dials. That is exactly why
-# `ceiling` is REQUIRED rather than optional here -- an accept-only peering
-# cannot FLUSH on its own initiative, so the ceiling is its only bound on
-# unclaimed value, and a config omitting it is refused by name
-# (AcceptOnlyPeerWithoutCeiling). 1 USDC.
-ceiling = 1000000
+# No `endpoint`: this node accepts and never dials. `ceiling` used to be
+# REQUIRED here (AcceptOnlyPeerWithoutCeiling) -- retired along with the
+# credit window it bounded (ADR 0031, ADR 0033, issue #882): every peer
+# PREPARE now carries its own covering claim.
 
 # Role is decided by authentication AND a channel binding (peer-carriage-spec
 # 1.2, ADR 0024). Without this row the g.toon proxy authenticates fine, is

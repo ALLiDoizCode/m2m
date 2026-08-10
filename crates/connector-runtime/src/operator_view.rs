@@ -8,11 +8,12 @@
 //! gained real fields in #459, once a settlement backend existed for
 //! [`Connector`] to project channel state from. [`ClaimView`] gained real
 //! fields in #423, once `crate::claim::ClaimBook` existed to report on.
-//! [`ExposureView`] gained real fields in #424, once the exposure
-//! projection existed. [`Connector`]'s accessor for the still-empty
+//! [`Connector`]'s accessor for the still-empty
 //! [`PeerView`] returns an empty list until #676 lands; the operator
 //! surface is already complete as an interface; that ticket only needs to
-//! start populating it.
+//! start populating it. An `ExposureView` existed from #424 until ADR
+//! 0031/ADR 0033 (issue #882) retired the credit-window accounting it
+//! reported.
 
 use chrono::{DateTime, Utc};
 use connector_settlement::{ChannelState, ChannelStatus};
@@ -128,17 +129,4 @@ pub struct ClaimView {
 pub enum ClaimDirection {
     Outbound,
     Inbound,
-}
-
-/// A channel's exposure as seen by the operator surface (issue #424): value
-/// this connector has delivered on that channel's counterparty's behalf but
-/// does not yet hold a covering claim for. `ceiling` is `None` for a
-/// channel with no configured ceiling -- reported (never forwarding stops
-/// for it), but never `over_ceiling`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExposureView {
-    pub channel_id: String,
-    pub exposure: u64,
-    pub ceiling: Option<u64>,
-    pub over_ceiling: bool,
 }

@@ -18,8 +18,7 @@
 //! from that one sentence: debt flows with packets, packets flow only in the
 //! dialing direction, so on a one-way-dialed HTTP peering **the dialing side
 //! is structurally the payer**. This module is that side. The other side's
-//! consequences -- the exposure ceiling and the flush prompt -- are in
-//! [`crate::accept`].
+//! consequence -- the flush prompt -- is in [`crate::accept`].
 //!
 //! # Byte-identical retransmission (§6.3)
 //!

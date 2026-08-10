@@ -136,6 +136,10 @@ first.
 with a restated purpose. Issue #868 owns that call. What this ADR fixes is that the question is now
 asked out loud rather than left as the undocumented state issue #863 was filed about.
 
+**Resolved by [ADR 0033](0033-the-exposure-machinery-is-retired-not-restated.md)** (issue #882,
+child B5): removed, not restated. The measured throughput cost of keeping it (a third `fdatasync`
+per packet) settled what this paragraph left open.
+
 **The throughput question is open and must be measured before rollout reaches the huddles
 workload.** Issue #710 records up to three fsyncs per forwarded packet in the peer claim journal,
 and the mesh-compute prototype found a single fsync accounting for 99% of p99. Reading the doc

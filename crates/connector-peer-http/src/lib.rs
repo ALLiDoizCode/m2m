@@ -6,7 +6,7 @@
 //! # What this crate is, and what it deliberately is not
 //!
 //! It is the **carriage**: where the bytes ride. It is not the semantics.
-//! Claim exchange, flush, fees, ceilings, minimum delivery and the refusal
+//! Claim exchange, flush, fees, minimum delivery and the refusal
 //! taxonomy are `peer-wire-spec.md` §3--§6's and live above the
 //! [`connector_runtime::PeerTransport`] port, unchanged by which wire carried
 //! them. This crate maps §3's table onto requests and responses, and nothing
@@ -42,9 +42,11 @@
 //!    structurally the **payer** and the accept-only side is structurally the
 //!    **payee**. The consequence that bites is at *configuration* time and is
 //!    unidirectional packet flow -- not, as ADR 0027 originally put it, a lost
-//!    flush bound (§12.3). What replaces the bound is an explicit exposure
-//!    ceiling, refused at load when absent (#723's
-//!    `AcceptOnlyPeerWithoutCeiling`), plus §6.4's hint.
+//!    flush bound (§12.3). Before ADR 0031/ADR 0033 (issue #882) what
+//!    replaced the bound was an explicit exposure ceiling, refused at load
+//!    when absent (#723's `AcceptOnlyPeerWithoutCeiling`); that requirement
+//!    is retired along with the credit window it protected, leaving only
+//!    §6.4's hint.
 //! 2. **Claims can race** (§7.2). Parallel requests carrying nonces *n* and
 //!    *n+1* reach the payee's watermark lock in either order. The mitigation
 //!    is the client edge's: no more than one claim-bearing request in flight

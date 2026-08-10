@@ -6,13 +6,12 @@
 //!
 //! `exposure` and `settlement` are declared now but always report zero.
 //! `settlement`: nothing in the runtime tracks on-chain redemption yet
-//! (issue #425). `exposure`: the projection itself exists as of issue #424
-//! (see `crate::claim::ClaimBook::exposure_views`, the operator surface's
-//! `GET /exposure`) but this single unlabeled gauge has no sensible
-//! per-channel value to report as one number; a future ticket wanting it in
-//! Prometheus should shape it as a labeled gauge over `ClaimBook`'s own
-//! channels, the same read model `/exposure` already exposes, rather than
-//! force multiple channels' exposure into a single scalar.
+//! (issue #425). `exposure`: kept at its decided name for scrape-config
+//! stability, but the thing it named is gone -- the credit-window
+//! accounting issue #424 added (`ClaimBook::exposure_views`, `GET
+//! /exposure`) is retired (ADR 0031, ADR 0033, issue #882): every peer
+//! PREPARE now carries its own covering claim, so there is no trailing
+//! exposure left to report. This gauge has no producer and never will.
 
 use prometheus::{Encoder, IntCounter, IntCounterVec, IntGauge, Opts, Registry, TextEncoder};
 
@@ -53,7 +52,7 @@ impl Metrics {
         .expect("valid metric");
         let exposure = IntGauge::new(
             "toon_exposure",
-            "Unclaimed exposure to peers. Always 0: this single unlabeled gauge has no producer -- see `crate::claim::ClaimBook::exposure_views` and `GET /exposure` for the real, per-channel figures issue #424 added.",
+            "Unclaimed exposure to peers. Always 0 and has no producer: the credit-window accounting this named is retired (ADR 0031, ADR 0033, issue #882) -- every peer PREPARE now carries its own covering claim, so there is no trailing exposure to report.",
         )
         .expect("valid metric");
         let settlement_total = IntCounter::new(
