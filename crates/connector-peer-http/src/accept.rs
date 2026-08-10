@@ -72,7 +72,7 @@ use connector_peer_auth::{
     SessionRole, PEER_AUTH_HEADER,
 };
 use connector_peer_btp::claim_json::{self};
-use connector_peer_btp::price_gate::{self, PaymentRequired};
+use connector_peer_btp::price_gate::{self, ClaimEnforcementPolicy, PaymentRequired};
 use connector_peer_btp::{fields, AcceptedClaims};
 use connector_runtime::{ClaimAckOutcome, Connector, WireClaim};
 
@@ -151,6 +151,7 @@ pub struct PeerHttpState {
     connector: Arc<Connector>,
     auth: Arc<PeerAuthPolicy>,
     accepted: Arc<AcceptedClaims>,
+    enforcement: Arc<ClaimEnforcementPolicy>,
     hints: Arc<FlushHints>,
     refusals: Mutex<PeerAuthRefusalLog>,
     policy: PeerHttpPolicy,
@@ -160,12 +161,15 @@ impl PeerHttpState {
     /// `accepted` is deliberately shared with whatever other carriage serves
     /// the same peerings (§2.5, I6): one peering relation has one set of
     /// watermarks however many paths it has, and giving each carriage its own
-    /// would let one claim advance two independent watermarks.
+    /// would let one claim advance two independent watermarks. `enforcement`
+    /// (issue #883, child B6) is shared for the same reason `auth` is: one
+    /// peering has one migration state, whichever carriage it rides.
     #[must_use]
     pub fn new(
         connector: Arc<Connector>,
         auth: Arc<PeerAuthPolicy>,
         accepted: Arc<AcceptedClaims>,
+        enforcement: Arc<ClaimEnforcementPolicy>,
         hints: Arc<FlushHints>,
         policy: PeerHttpPolicy,
     ) -> Self {
@@ -173,6 +177,7 @@ impl PeerHttpState {
             connector,
             auth,
             accepted,
+            enforcement,
             hints,
             refusals: Mutex::new(PeerAuthRefusalLog::default()),
             policy,
@@ -315,6 +320,7 @@ impl PeerHttpState {
             ack,
             claim.as_ref(),
             prior_watermark,
+            self.enforcement.mode(&peer_id),
         ) {
             return self.finish(&role, payment_required_response(refusal), ack);
         }

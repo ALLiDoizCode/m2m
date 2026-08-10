@@ -68,7 +68,7 @@ use connector_runtime::{ClaimAckOutcome, Connector, WireClaim};
 use tokio::sync::mpsc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crate::price_gate::{self, PaymentRequired};
+use crate::price_gate::{self, ClaimEnforcementPolicy, PaymentRequired};
 use crate::{ack, claim_json, fields};
 
 /// How many completed replies may queue for the socket's writer before a
@@ -202,12 +202,14 @@ impl AcceptedClaims {
 }
 
 /// Everything a peer session needs that outlives it: the one pipeline
-/// below the port, the role policy, the per-relation ledger, and the
-/// rate-limited `peer_auth_refused` log.
+/// below the port, the role policy, the per-relation ledger, the price-gate
+/// enforcement policy (issue #883, child B6), and the rate-limited
+/// `peer_auth_refused` log.
 pub struct PeerCarriageState {
     connector: Arc<Connector>,
     auth: Arc<PeerAuthPolicy>,
     accepted: Arc<AcceptedClaims>,
+    enforcement: Arc<ClaimEnforcementPolicy>,
     refusals: Mutex<PeerAuthRefusalLog>,
     policy: PeerAcceptPolicy,
 }
@@ -218,12 +220,14 @@ impl PeerCarriageState {
         connector: Arc<Connector>,
         auth: Arc<PeerAuthPolicy>,
         accepted: Arc<AcceptedClaims>,
+        enforcement: Arc<ClaimEnforcementPolicy>,
         policy: PeerAcceptPolicy,
     ) -> Self {
         PeerCarriageState {
             connector,
             auth,
             accepted,
+            enforcement,
             refusals: Mutex::new(PeerAuthRefusalLog::default()),
             policy,
         }
@@ -596,6 +600,7 @@ impl PeerSession {
             ack,
             judged.as_ref().and_then(|judged| judged.claim.as_ref()),
             prior_watermark,
+            self.state.enforcement.mode(&peer_id),
         ) {
             return self
                 .send(self.payment_required_response(request_id, refusal, ack))

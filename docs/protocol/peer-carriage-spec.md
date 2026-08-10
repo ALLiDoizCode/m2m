@@ -1099,6 +1099,12 @@ Required surface:
   required here before [ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md)
   (issue #882); both are retired and now parsed only as removed-field traps
   (`PeerCeilingRemoved`/`PeerFlushIntervalRemoved`, below).
+- Per peer, **temporary** (issue #883, child B6 — see
+  [`docs/operators/claim-policy-rollout.md`](../operators/claim-policy-rollout.md)):
+  `claim_enforcement`, one of `"enforce"` (default) or `"observe"`. `"observe"` admits and logs an
+  uncovered peer PREPARE instead of refusing it with `F06_UNEXPECTED_PAYMENT` — the rollout's
+  canary step, not a permanent policy surface. Slated for deletion once the fleet-wide rollout
+  this document's §3.1 gate depends on is complete and confirmed.
 - The accepting mirror: configured credentials map to peer ids and thence to their channels.
 - `[[peer_channels]]` — EVM shape: `peer_id`, `channel_id`, `counterparty_key`, `chain_id`,
   `token_network`. Solana shape (issue #759): `peer_id`, `channel_account`, `counterparty_key`,
@@ -1126,6 +1132,7 @@ Named load-time errors this specification requires (spelling #677's, identity ou
 | `PeerChannelInvalidSolanaAccount`   | a Solana `[[peer_channels]]` row's `channel_account`/`counterparty_key`/`program_id` is not base58 of a 32-byte value                                                                                                                                               | #759               |
 | `PeerRouteUndeliverable`            | a route naming as next hop a peer this connector can never originate to                                                                                                                                                                                             | §2.2, §6.4         |
 | `DuplicatePeerId`                   | two `[[peers]]` entries with the same `id`                                                                                                                                                                                                                          | —                  |
+| `InvalidClaimEnforcement`           | `claim_enforcement` set to anything other than `"enforce"` or `"observe"` — a typo must not silently read as either                                                                                                                                                 | issue #883         |
 | removed-field errors                | `peer_wire_addr`, `addr` in its old `SocketAddr` shape, or `ceiling`/`flush_interval_ms` (ADR 0033, issue #882) — a **hard, named** error pointing at the bring-up doc, never a silent ignore, because the devnet boxes run bind-mounted configs that lead the repo | ADR 0027, ADR 0033 |
 
 `AcceptOnlyPeerWithoutCeiling` and the `claim_ack_timeout_ms > flush_interval_ms` load-time warning

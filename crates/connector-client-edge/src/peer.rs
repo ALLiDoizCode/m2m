@@ -51,7 +51,9 @@ use connector_peer_auth::{
     decide_role, present_base64, present_raw, PeerAuthPolicy, PeerAuthRefusal, PeerAuthRefusalLog,
     PEER_AUTH_HEADER, PEER_AUTH_PROTOCOL_ENTRY,
 };
-use connector_peer_btp::{AcceptedClaims, PeerAcceptPolicy, PeerCarriageState};
+use connector_peer_btp::{
+    AcceptedClaims, ClaimEnforcementPolicy, PeerAcceptPolicy, PeerCarriageState,
+};
 use connector_peer_http::{FlushHints, Headers, PeerHttpPolicy, PeerHttpState, PeerRequest};
 use connector_runtime::Connector;
 
@@ -118,11 +120,17 @@ impl PeerCarriages {
         ));
         // §2.5/I6: one ledger, both carriages.
         let accepted = Arc::new(AcceptedClaims::new());
+        // Issue #883 (B6): one migration state per peering, both carriages
+        // -- the same sharing reason `accepted` is shared, so a peering
+        // reachable over both is not `observe` on one and `enforce` on the
+        // other depending on which carriage a packet happened to arrive on.
+        let enforcement = Arc::new(ClaimEnforcementPolicy::from_peers(peers));
         let http = expose.exposes(PeerCarriage::Http).then(|| {
             Arc::new(PeerHttpState::new(
                 Arc::clone(&connector),
                 Arc::clone(&auth),
                 Arc::clone(&accepted),
+                Arc::clone(&enforcement),
                 Arc::new(FlushHints::new()),
                 // The shared listener reading of §1.10: this node serves
                 // clients on the same socket, so a failed credential is an
@@ -138,6 +146,7 @@ impl PeerCarriages {
                 connector,
                 Arc::clone(&auth),
                 accepted,
+                enforcement,
                 PeerAcceptPolicy {
                     mandatory_auth: false,
                     ..PeerAcceptPolicy::default()
