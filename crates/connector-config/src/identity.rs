@@ -7,12 +7,14 @@ use crate::error::ConfigError;
 /// A `[[client_identities]]` entry as written in the config file: a
 /// client-edge identity this node authenticates over HTTP
 /// (`docs/protocol/client-edge-spec.md` §1.2), distinct from `[[peers]]`
-/// (a peering relation this node *dials*, addressed by `SocketAddr`).
-/// A client identity has no network address of its own -- it is
-/// authenticated by `id` + `secret` alone, since the party presenting it
-/// (a registered buyer over `POST /ilp`) is never something this node
-/// connects out to.
+/// (a peering relation this node dials, addressed by `endpoint`) and from
+/// `[[client_channels]]` (which channel a claim is judged against, never
+/// who presented it). A client identity has no network address and no
+/// channel of its own -- it is authenticated by `id` + `secret` alone,
+/// since the party presenting it (a registered buyer over `POST /ilp`) is
+/// never something this node connects out to.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RawClientIdentity {
     id: String,
     #[serde(default)]
@@ -45,6 +47,11 @@ impl ClientIdentityConfig {
     }
 }
 
+/// Validate every `[[client_identities]]` entry (issue #502). An empty list
+/// is valid and means this node configures no peer identity -- every
+/// `ILP-Peer-Id` a request presents then fails to authenticate, and every
+/// request with no `ILP-Peer-Id` is anonymous, which is the intended
+/// default rather than a degenerate case: anonymity is a first-class path.
 pub(crate) fn resolve_client_identities(
     raw: Vec<RawClientIdentity>,
 ) -> Result<Vec<ClientIdentityConfig>, ConfigError> {
@@ -105,5 +112,29 @@ mod tests {
             result,
             Err(ConfigError::DuplicateClientIdentityId { id }) if id == "peer-a"
         ));
+    }
+
+    #[test]
+    fn no_client_identities_is_valid_and_records_nothing() {
+        assert!(resolve_client_identities(vec![]).expect("valid").is_empty());
+    }
+
+    #[test]
+    fn toml_deserializes_a_client_identity_entry() {
+        let raw: RawClientIdentity = toml::from_str(
+            r#"
+id = "peer-a"
+secret = "s3cr3t"
+"#,
+        )
+        .expect("valid TOML");
+        assert_eq!(raw.id, "peer-a");
+        assert_eq!(raw.secret, "s3cr3t");
+    }
+
+    #[test]
+    fn toml_defaults_a_missing_secret_field_to_empty() {
+        let raw: RawClientIdentity = toml::from_str(r#"id = "peer-a""#).expect("valid TOML");
+        assert_eq!(raw.secret, "");
     }
 }

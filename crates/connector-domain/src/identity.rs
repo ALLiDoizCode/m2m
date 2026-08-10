@@ -1,17 +1,18 @@
 //! Client-edge sender identity (`docs/protocol/client-edge-spec.md` §1.2,
 //! issue #502). Pure, no I/O: the client edge crate extracts the raw
-//! `ILP-Peer-Id` / `Authorization` / `ILP-Payment-Channel-Claim` strings off
-//! the HTTP request and hands them to [`resolve_identity`], which is the one
+//! `ILP-Peer-Id`/`Authorization` header values off the HTTP request, plus
+//! (when one is available) the already-parsed [`crate::client_claim::ClientClaim`]'s
+//! self-declared signer, and hands them to [`resolve_identity`], the one
 //! place the identity policy is decided.
 //!
-//! A request identifies its sender in exactly one of two ways: a configured
-//! peer authenticating with a bearer secret, or an anonymous sender given an
-//! ephemeral identity derived from a plaintext claim's signer (or a fixed
-//! one, absent that). Anonymity is a first-class path -- an unaffiliated
-//! buyer pays a terminated route without ever registering with the
-//! operator -- not a fallback for a request that merely omits credentials.
+//! A request identifies its sender in one of two ways: a configured peer
+//! authenticating with a bearer secret, or an anonymous sender given an
+//! ephemeral identity derived from a plaintext claim's already-parsed signer
+//! (or a fixed one, absent that). Anonymity is a first-class path -- an
+//! unaffiliated buyer pays a terminated route without ever registering with
+//! the operator -- not a fallback for a request that merely omits
+//! credentials.
 
-use serde_json::Value;
 use thiserror::Error;
 
 /// One configured client-edge identity: the id a request presents via
@@ -26,15 +27,14 @@ pub struct ConfiguredIdentity {
 }
 
 /// Who a client-edge request identifies as. Either variant names a payer:
-/// everything downstream that needs one (claim watermarks, rate limits,
-/// injected payer headers) keys its state off [`SenderIdentity::id`], never
-/// off which variant it is.
+/// everything downstream that needs one keys its state off
+/// [`SenderIdentity::id`], never off which variant it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SenderIdentity {
     /// A configured identity's own id, presented and authenticated.
     Peer(String),
     /// No identity was presented. Carries `http:<signer>` when a plaintext
-    /// claim named one, or the fixed `http:anon` otherwise.
+    /// claim named one, or the fixed [`ANONYMOUS`] otherwise.
     Anonymous(String),
 }
 
@@ -58,9 +58,10 @@ pub struct UnauthorizedIdentity {
     pub peer_id: String,
 }
 
-/// The fixed anonymous identity: no `ILP-Peer-Id` was presented and either
-/// no plaintext claim was present or none named a signer.
-const ANONYMOUS: &str = "http:anon";
+/// The fixed anonymous identity (client-edge-spec.md §1.2): no
+/// `ILP-Peer-Id` was presented and either no plaintext claim was present or
+/// none named a signer.
+pub const ANONYMOUS: &str = "http:anon";
 
 /// Resolve a client-edge request's [`SenderIdentity`]
 /// (`docs/protocol/client-edge-spec.md` §1.2).
@@ -71,21 +72,27 @@ const ANONYMOUS: &str = "http:anon";
 ///   header is absent. The two are deliberately not distinguished: an
 ///   absent `Authorization` is an empty bearer (mirrors BTP's `secret: ''`
 ///   auth frame), never a distinct "no credential" state.
-/// - `plaintext_claim` is the decoded `ILP-Payment-Channel-Claim` header's
-///   bytes, if present. Consulted only when no peer id is presented, to
-///   derive an anonymous sender's ephemeral identity from the claim's
-///   signer. A wrapped-only claim (`ILP-Payment-Channel-Claim-Wrapped`) is
-///   never passed here: unwrapping it would require already knowing the
-///   identity authenticating the request, so it plays no part in deriving
-///   one, and its absence from this signature is what enforces that.
+/// - `claim_signer` is a plaintext `ILP-Payment-Channel-Claim` header's
+///   already-parsed, self-declared signer (`ClientClaim::signer`), if the
+///   request presented one. Consulted only when no peer id is presented, to
+///   derive an anonymous sender's ephemeral identity -- never re-parsed from
+///   the claim JSON here, since the client edge has already done that
+///   parsing once to admit the claim. A wrapped-only claim
+///   (`ILP-Payment-Channel-Claim-Wrapped`) is never passed here: unwrapping
+///   it would require already knowing the identity authenticating the
+///   request, so it plays no part in deriving one, and its absence from
+///   this signature is what enforces that.
 pub fn resolve_identity(
     presented_peer_id: Option<&str>,
     presented_secret: &str,
-    plaintext_claim: Option<&[u8]>,
+    claim_signer: Option<&str>,
     configured: &[ConfiguredIdentity],
 ) -> Result<SenderIdentity, UnauthorizedIdentity> {
     let Some(peer_id) = presented_peer_id else {
-        return Ok(SenderIdentity::Anonymous(ephemeral_id(plaintext_claim)));
+        return Ok(SenderIdentity::Anonymous(match claim_signer {
+            Some(signer) => format!("http:{signer}"),
+            None => ANONYMOUS.to_string(),
+        }));
     };
 
     let authenticated = configured
@@ -98,28 +105,6 @@ pub fn resolve_identity(
         Err(UnauthorizedIdentity {
             peer_id: peer_id.to_string(),
         })
-    }
-}
-
-/// Best-effort extraction of a claim-bound identity for an anonymous
-/// request. Never fails: an absent, malformed, or signer-less claim all
-/// fall back to [`ANONYMOUS`], since this is identity derivation only --
-/// full claim validation is a separate concern (issue #504) that runs, if
-/// at all, only after identity is already resolved.
-fn ephemeral_id(plaintext_claim: Option<&[u8]>) -> String {
-    let signer = plaintext_claim
-        .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
-        .and_then(|claim| {
-            claim
-                .get("signerAddress")
-                .or_else(|| claim.get("signerPublicKey"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        });
-
-    match signer {
-        Some(signer) => format!("http:{signer}"),
-        None => ANONYMOUS.to_string(),
     }
 }
 
@@ -179,9 +164,8 @@ mod tests {
     }
 
     #[test]
-    fn an_anonymous_senders_ephemeral_identity_derives_from_the_plaintext_claims_signer_address() {
-        let claim = br#"{"signerAddress":"0xabc123"}"#;
-        let resolved = resolve_identity(None, "", Some(claim), &[]).unwrap();
+    fn an_anonymous_senders_ephemeral_identity_derives_from_the_already_parsed_claim_signer() {
+        let resolved = resolve_identity(None, "", Some("0xabc123"), &[]).unwrap();
         assert_eq!(
             resolved,
             SenderIdentity::Anonymous("http:0xabc123".to_string())
@@ -189,35 +173,21 @@ mod tests {
     }
 
     #[test]
-    fn an_anonymous_senders_ephemeral_identity_derives_from_the_plaintext_claims_signer_public_key()
-    {
-        let claim = br#"{"signerPublicKey":"abc123base58"}"#;
-        let resolved = resolve_identity(None, "", Some(claim), &[]).unwrap();
+    fn a_solana_signer_is_carried_through_unchanged() {
+        let resolved = resolve_identity(None, "", Some("abc123base58"), &[]).unwrap();
         assert_eq!(
             resolved,
             SenderIdentity::Anonymous("http:abc123base58".to_string())
         );
     }
 
-    #[test]
-    fn a_malformed_plaintext_claim_falls_back_to_the_fixed_anonymous_identity() {
-        let resolved = resolve_identity(None, "", Some(b"not json"), &[]).unwrap();
-        assert_eq!(resolved, SenderIdentity::Anonymous(ANONYMOUS.to_string()));
-    }
-
-    #[test]
-    fn a_plaintext_claim_naming_no_signer_falls_back_to_the_fixed_anonymous_identity() {
-        let claim = br#"{"messageId":"abc"}"#;
-        let resolved = resolve_identity(None, "", Some(claim), &[]).unwrap();
-        assert_eq!(resolved, SenderIdentity::Anonymous(ANONYMOUS.to_string()));
-    }
-
     /// AC: "A request carrying only a wrapped claim gets the fixed
     /// anonymous identity, not one derived from unwrapping." This function
-    /// never sees the wrapped claim header at all -- only `plaintext_claim`
-    /// -- so a caller that has only a wrapped claim to offer (and correctly
-    /// passes `None` here rather than attempting to unwrap it first) always
-    /// gets the fixed identity, by construction.
+    /// never sees a wrapped claim's contents at all -- only an already-
+    /// resolved plaintext `claim_signer` -- so a caller that has only a
+    /// wrapped claim to offer (and correctly passes `None` here rather than
+    /// unwrapping it first to find a signer) always gets the fixed
+    /// identity, by construction.
     #[test]
     fn only_a_wrapped_claim_present_is_equivalent_to_no_claim_at_all() {
         let resolved = resolve_identity(None, "", None, &[]).unwrap();
