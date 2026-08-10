@@ -610,4 +610,17 @@ pub enum ConfigError {
 
     #[error("[announce] identity_key_file does not exist or is not a file: {0}")]
     AnnounceIdentityKeyFileNotFound(PathBuf),
+
+    #[error(
+        "[announce] notice_id, notice_summary and notice_url must all be set together (or none \
+         at all) to configure an operator notice; notice_severity is optional and defaults to \
+         \"info\" (issue #912)"
+    )]
+    AnnounceNoticeIncomplete,
+
+    #[error(
+        "[announce] notice_severity must be \"info\" or \"action-required\", got \"{value}\" \
+         (issue #912)"
+    )]
+    AnnounceNoticeInvalidSeverity { value: String },
 }

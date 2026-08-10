@@ -27,7 +27,7 @@ mod route;
 mod secret;
 mod settlement;
 
-pub use announce::AnnounceConfig;
+pub use announce::{AnnounceConfig, AnnounceNotice};
 pub use client_channel::{ClientChannelConfig, EvmClientChannelConfig, SolanaClientChannelConfig};
 pub use config::Config;
 pub use error::ConfigError;
