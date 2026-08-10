@@ -771,9 +771,12 @@ impl Connector {
     /// on this PREPARE via the same `client_route` lookup the client edge
     /// prices with (ADR 0028), leaves the exposure ceiling (§5.3, `T04`,
     /// checked above) and the claim exchange itself (§3.2) untouched, and
-    /// carries no x402 greeting -- `peer-carriage-spec.md` §3.1 still holds
-    /// on a peer-role PREPARE. A route priced at `0` (an operator's
-    /// deliberate free termination, ADR 0020) never trips this check.
+    /// carries no x402 greeting of its own: since issue #880 that greeting
+    /// is emitted one layer up, by each accept pipeline's price-coverage
+    /// gate (`peer-carriage-spec.md` §3.1), which refuses a peer PREPARE
+    /// whose claim does not cover this same `price` before this method is
+    /// ever reached. A route priced at `0` (an operator's deliberate free
+    /// termination, ADR 0020) never trips either check.
     pub async fn handle_peer_prepare(
         &self,
         prepare: Prepare,

@@ -239,14 +239,17 @@ impl PeerHttpState {
             return PeerResponse::refused(401);
         }
 
-        // Peeked before `judge_claim` below may record this claim, so the
-        // price-coverage check further down judges the claim's own advance
-        // past the watermark it rode in on, not the one it just became
-        // (issue #880).
-        let prior_watermark = role.peer_id().and_then(|peer_id| {
-            let claim = claim_on(&request)?;
-            self.accepted.watermark(peer_id, &claim.channel_id)
-        });
+        // Decoded once, here, for the price-coverage check further down --
+        // and only for a peer, since §1.5 does not read a client's claim at
+        // all. Its watermark is read *before* `judge_claim` below may record
+        // this very claim, so that check judges the claim's own advance past
+        // the watermark it rode in on, not the one it just became (issue
+        // #880).
+        let claim = role.peer_id().and_then(|_| claim_on(&request));
+        let prior_watermark = role
+            .peer_id()
+            .zip(claim.as_ref())
+            .and_then(|(peer_id, claim)| self.accepted.watermark(peer_id, &claim.channel_id));
 
         let ack = self.judge_claim(&role, &request);
 
@@ -313,7 +316,6 @@ impl PeerHttpState {
             .filter(|route| route.kind == ClientRouteKind::Terminated)
             .map_or(0, |route| route.price);
         if price > 0 {
-            let claim = claim_on(&request);
             let covers = claim.as_ref().is_some_and(|claim| {
                 validate_price(prior_watermark, claim.cumulative_amount, price).is_ok()
             });
