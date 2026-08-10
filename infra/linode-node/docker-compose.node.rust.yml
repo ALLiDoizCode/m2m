@@ -4,28 +4,69 @@
 # ADDITIVE: adds the Rust connector alongside docker-compose.node.yml's
 # existing TypeScript fleet on this SAME box, WITHOUT editing that file.
 # Compose merges multiple `-f` files into one project, so this service joins
-# the SAME default network as `relay` (and the TypeScript `connector`) —
-# `handler_url = "http://relay:3100"` in ./connector-rust.toml resolves by
-# the same container-name DNS the TypeScript node already relies on. Neither
-# `relay` nor any other existing service is touched here.
+# the SAME default network as the TypeScript `connector` and `faucet` and can
+# reach them by container-name DNS. No existing service is touched here. (This
+# box ran a co-located `relay` container until issue #820 moved that app to
+# its own box; ./connector-rust.toml now FORWARDS `g.toon.relay` there over
+# the apex<->relay peering rather than naming a local `handler_url`.)
 #
-# Run alongside the existing stack (never on its own — it has no relay
-# service of its own to front):
+# Run alongside the existing stack (never on its own — nginx, TLS and the
+# faucet all live in the base file):
 #   docker compose -f infra/linode-node/docker-compose.node.yml \
 #                   -f infra/linode-node/docker-compose.node.rust.yml up -d
 #
 # Distinct from the TypeScript node in every way ADR 0013 requires:
-#   - image:  connector-rust (issue #487), pinned to an exact sha- tag, never
-#             `connector` or a floating tag
+#   - image:  the connector package's rust-* tags (issue #487 reversed in
+#             connector#633 now the TS node is retired), pinned to an exact
+#             rust-sha- tag, never a floating tag
 #   - ports:  4000 only (client edge + operator + /metrics — one port, unlike
 #             the TypeScript node's three), no collision with the TypeScript
 #             node's 3000/8080/8081. No 4001 published: ./connector-rust.toml
-#             sets no peer_wire_addr on this box (the apex only dials out to
-#             the store side; a container needs no published port to make an
-#             outbound connection) — see that file's own [[peers]] comment.
+#             serves no peer wire at all since #600 — the store leg is a
+#             TERMINATED route over the store box's public TLS front (see
+#             that file's header; the paid peer wire is #620/#623's work).
 #   - data:   ./signer-rust.key, a path distinct from the TypeScript node's
-#             `connector_data` volume; this service gets no named volume at
-#             all (connector-runtime holds no state beyond the signer key)
+#             `connector_data` volume
+#   - state:  ./connector-rust.toml sets state_dir = "/app/state", the
+#             directory this node writes its claim journals to (issue #605).
+#             It is a NAMED VOLUME, not a bind mount and not the container's
+#             writable layer: a watermark that dies with the container is
+#             the same defect one indirection down -- a restarted node with
+#             no watermark accepts every nonce a client has already spent.
+#             A named volume inherits uid 10001 from the /app/state the
+#             image itself ships (an image from before that path existed
+#             initializes the volume root-owned and the node refuses to
+#             start); a host bind mount inherits nothing and needs an
+#             explicit `chown 10001:10001` like ./signer-rust.key does.
+#
+# Generate ./signer-rust.key per deploy/connector-rust/README.md step 1 --
+# including its `chown 10001:10001`, without which this service restart-loops
+# on "failed to read signer key_file ... Permission denied" (#492).
+#
+# ── Why 4000 is bound to loopback (#492) ──────────────────────────────────
+# When this overlay was written the client edge implemented only §1.1 of
+# docs/protocol/client-edge-spec.md, so an unpriced connector in front of the
+# relay was an anonymous free-write gateway onto the public internet -- and a
+# ufw rule would not have contained it, because Docker's iptables chain runs
+# ahead of ufw (see docs/operators/parallel-fleet-comparison.md). Binding the
+# publish to 127.0.0.1 is what actually closes it: reach it with an SSH tunnel
+# or from the box.
+#
+# Two things have since changed, and NEITHER of them is a reason to widen this
+# on its own:
+#
+#   - §1.3 (payment claims) and §1.4 (the x402 greeting) are implemented, and
+#     connector-rust.toml now prices g.toon.relay at 1000 (#522, #526, #562).
+#     An unpaid request to that route is answered 402 rather than delivered.
+#   - The connector no longer injects X-TOON-Payer/-Amount/-Chain, or any
+#     header at all, into what it proxies (ADR 0020). The relay's POST /write
+#     enforces no payment itself and never did; it simply now has no headers
+#     to trust either way.
+#
+# Still unimplemented: §1.2 (identity/authentication -- every request is
+# anonymous) and §1.5 (request-request binding), and claim verification does
+# not yet check the signer against a channel counterparty (see §1.3 step 4).
+# Widen this ONLY once those land.
 # ═══════════════════════════════════════════════════════════════════════════
 
 services:
@@ -34,10 +75,48 @@ services:
     # this overlay was authored against — see
     # deploy/connector-rust/README.md's tag table for what sha- means.
     # Re-pin this alongside any future update to connector-rust.toml.
-    image: ghcr.io/toon-protocol/connector-rust:sha-0e45cef
+    # ORDERING (issue #605): ./connector-rust.toml now sets `state_dir`, and
+    # `RawConfig` is `deny_unknown_fields` -- so the tag below MUST be
+    # re-pinned to an image built from #605 or later BEFORE (or in the same
+    # `up -d` as) that file reaches a box. An older image reads `state_dir`
+    # as an unknown top-level key and exits 1 on config load.
+    #
+    # PIN OF RECORD (issue #848): this repo's infra compose files are the
+    # fleet's pin of record -- the live boxes follow them, not the reverse.
+    # Bumped from `rust-sha-33f10e2` (what all three boxes still run as of
+    # this change) to `rust-sha-440eab7` because 33f10e2 predates the
+    # announce-identity fix (issue #833, PR #839) that #848 requires the pin
+    # of record to carry. `rust-sha-440eab7` IS that fix's commit
+    # (440eab7b9ff610fb4914d65bb5cbbacb84f2a7ae), so it carries it by
+    # construction and no earlier tag can -- the earliest that qualifies.
+    # This is a forward move on every box, not a rollback -- the boxes have
+    # not moved yet; that cutover is a separate, human-gated ticket. See
+    # `crates/connector-bin/tests/devnet_configs_load.rs`'s
+    # `EXPECTED_CONNECTOR_TAG` for the single place this decision is recorded.
+    image: ghcr.io/toon-protocol/connector:rust-sha-440eab7
     volumes:
       - ./connector-rust.toml:/app/config/connector.toml:ro
       - ./signer-rust.key:/app/data/signer.key:ro
+      # The funded settlement account ([settlement.key] in the config) --
+      # separate material from the per-box signer key, same handling.
+      - ./settlement-rust.key:/app/data/settlement.key:ro
+      # The g.toon proxy<->store peering's shared secret (issue #750). Its
+      # `[[peers]]` entry names this path as `credential.secret_file`, so a
+      # missing or unreadable file here is a refuse-to-start, not a peering
+      # that quietly never establishes. Generated on the box
+      # (`openssl rand -hex 32`), gitignored as `*.secret`, and the SAME BYTES
+      # on both boxes -- the two sides authenticate against each other with it.
+      - ./apex-store.secret:/app/data/apex-store.secret:ro
+      # The g.toon proxy<->relay peering's shared secret (issue #820), same
+      # handling as apex-store.secret above.
+      - ./apex-relay.secret:/app/data/apex-relay.secret:ro
+      - ./settlement-solana-rust.key:/app/data/settlement-solana.key:ro
+      # Durable claim watermarks (issue #605) -- see the header.
+      - connector_rust_state:/app/state
     ports:
-      - '4000:4000'
+      # Loopback-only, deliberately — see the header. Not '4000:4000'.
+      - '127.0.0.1:4000:4000'
     restart: unless-stopped
+
+volumes:
+  connector_rust_state:

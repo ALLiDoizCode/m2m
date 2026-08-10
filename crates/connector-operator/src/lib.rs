@@ -2,9 +2,9 @@
 //!
 //! ADR 0008 splits the operator surface into a read half and a write
 //! half. The read half (issue #420) is `GET` endpoints -- peers, routes,
-//! channels, claims, exposure, node identity, this crate's own write
-//! audit log, and the metrics surface (`GET /metrics`, ADR 0014) -- gated
-//! by a bearer token and nothing else.
+//! channels, claims, node identity, this crate's own write audit log, and
+//! the metrics surface (`GET /metrics`, ADR 0014) -- gated by a bearer
+//! token and nothing else.
 //!
 //! This crate also carries the write half's authentication mechanism
 //! (issue #421): [`rfc9421`] verifies an RFC 9421 signature from a key on
@@ -38,6 +38,20 @@
 mod rfc9421;
 mod write_auth;
 
+/// Signing helpers for constructing a validly-signed operator write from
+/// outside this crate -- gated behind the `test-util` feature (rather than
+/// `#[cfg(test)]` alone) for the same reason `connector-settlement`'s own
+/// `contract` module is: a downstream crate's *own* tests (here,
+/// `connector-cli`'s real-chain settlement lifecycle test, issue #542,
+/// which needs a genuinely signed write against the operator surface
+/// `connector-cli::runtime::router` mounts) cannot see anything behind
+/// `#[cfg(test)]`, since that cfg is only active while this crate compiles
+/// its own test binary.
+#[cfg(feature = "test-util")]
+pub mod test_support {
+    pub use crate::rfc9421::{compute_content_digest, keyid_hex, sign_request};
+}
+
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -51,8 +65,8 @@ use serde::{Deserialize, Serialize};
 
 use connector_domain::{PacketResponse, Prepare};
 use connector_runtime::{
-    ChannelOperationError, ChannelView, ClaimView, Connector, ExposureView, LeaseRouteError,
-    LeasedRouteView, PeerView, RouteView,
+    ChannelOperationError, ChannelView, ClaimView, Connector, LeaseRouteError, LeasedRouteView,
+    PeerView, RouteView, SettlementChain,
 };
 use connector_settlement::Claim;
 use connector_signer::{derive_evm_address, to_hex, Signer, SignerError};
@@ -77,8 +91,8 @@ struct OperatorState {
 }
 
 /// Mount the operator surface's read-only half at `connector`: `GET`
-/// endpoints for peers, routes, channels, claims, exposure, node identity
-/// and the write audit log, each requiring the bearer token
+/// endpoints for peers, routes, channels, claims, node identity and the
+/// write audit log, each requiring the bearer token
 /// `bearer_token` and nothing more (ADR 0008). `write_keys` is the
 /// allowlist of ed25519 public keys permitted to sign a write once a
 /// write endpoint lands (issue #421); removing a key from this list and
@@ -106,7 +120,6 @@ pub fn router(
         .route("/routes/leased", get(leased_routes))
         .route("/channels", get(channels))
         .route("/claims", get(claims))
-        .route("/exposure", get(exposure))
         .route("/identity", get(identity))
         .route("/audit-log", get(audit_log))
         .route("/metrics", get(metrics))
@@ -192,10 +205,6 @@ async fn channels(State(state): State<OperatorState>) -> Json<Vec<ChannelView>> 
 
 async fn claims(State(state): State<OperatorState>) -> Json<Vec<ClaimView>> {
     Json(state.connector.claims())
-}
-
-async fn exposure(State(state): State<OperatorState>) -> Json<Vec<ExposureView>> {
-    Json(state.connector.exposure())
 }
 
 async fn audit_log(State(state): State<OperatorState>) -> Json<Vec<AuditRecord>> {
@@ -315,13 +324,19 @@ async fn create_leased_route(
 
 /// A `POST /channels` request body: open a channel to `counterparty_hex`
 /// (arbitrary bytes, hex-encoded -- an EVM backend expects a 20-byte
-/// address, but the port itself takes opaque bytes) with a
-/// `settlement_timeout_seconds`-second withdrawal-safety window (issue
-/// #459, ADR 0008).
+/// address, a Solana one a 32-byte pubkey, but the port itself takes
+/// opaque bytes) with a `settlement_timeout_seconds`-second
+/// withdrawal-safety window (issue #459, ADR 0008). `chain` names which
+/// configured settlement backend opens it (`"evm"` or `"solana"`, the
+/// config file's own chain names, issue #630); omitted, it means "the
+/// configured backend", which a node settling on more than one chain
+/// refuses as ambiguous rather than resolving silently.
 #[derive(Debug, Deserialize)]
 struct OpenChannelRequest {
     counterparty_hex: String,
     settlement_timeout_seconds: i64,
+    #[serde(default)]
+    chain: Option<String>,
 }
 
 /// A `POST /channels/:id/fund` request body: deposit `amount` into the
@@ -332,10 +347,13 @@ struct FundChannelRequest {
 }
 
 /// A `POST /channels/:id/redeem` request body: redeem a claim of
-/// `cumulative_amount`, authorized by `signature_hex` (opaque, hex-encoded
-/// -- this port does not verify it; see `connector_settlement::Claim`).
+/// `cumulative_amount` at `nonce` (issue #573 -- without it, nothing this
+/// submits is redeemable on any real chain), authorized by `signature_hex`
+/// (opaque, hex-encoded -- this port does not verify it; see
+/// `connector_settlement::Claim`).
 #[derive(Debug, Deserialize)]
 struct RedeemChannelRequest {
+    nonce: u64,
     cumulative_amount: u128,
     signature_hex: String,
 }
@@ -343,13 +361,17 @@ struct RedeemChannelRequest {
 fn channel_operation_response(result: Result<ChannelView, ChannelOperationError>) -> Response {
     match result {
         Ok(view) => Json(view).into_response(),
-        Err(ChannelOperationError::NoSettlementBackend) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            ChannelOperationError::NoSettlementBackend.to_string(),
-        )
-            .into_response(),
+        // Both "no backend at all" and "no backend on that chain" are the
+        // node's own configuration lacking what the request needs -- 503,
+        // not a caller error.
         Err(
-            error @ (ChannelOperationError::NoClaimToRedeem | ChannelOperationError::Settlement(_)),
+            error @ (ChannelOperationError::NoSettlementBackend
+            | ChannelOperationError::NoSettlementBackendForChain(_)),
+        ) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+        Err(
+            error @ (ChannelOperationError::NoClaimToRedeem
+            | ChannelOperationError::AmbiguousSettlementChain
+            | ChannelOperationError::Settlement(_)),
         ) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     }
 }
@@ -392,11 +414,17 @@ async fn open_channel(
             return (StatusCode::BAD_REQUEST, "counterparty_hex must be hex").into_response()
         }
     };
+    let chain = match request.chain.as_deref().map(str::parse::<SettlementChain>) {
+        None => None,
+        Some(Ok(chain)) => Some(chain),
+        Some(Err(error)) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    };
 
     channel_operation_response(
         state
             .connector
             .open_channel(
+                chain,
                 counterparty,
                 chrono::Duration::seconds(request.settlement_timeout_seconds),
             )
@@ -460,6 +488,7 @@ async fn redeem_channel(
             .redeem_channel(
                 &channel_id,
                 Claim {
+                    nonce: request.nonce,
                     cumulative_amount: request.cumulative_amount,
                     signature,
                 },
@@ -589,7 +618,7 @@ mod tests {
 
     #[tokio::test]
     async fn routes_reports_the_connectors_configured_static_routes() {
-        let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
         let app = test_router(vec![route], "correct-token");
 
         let response = get(app, "/routes", Some("correct-token")).await;
@@ -600,13 +629,14 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].prefix, "g.example.app");
         assert_eq!(routes[0].handler_url, "http://localhost:4000/");
+        assert_eq!(routes[0].price, 25);
     }
 
     #[tokio::test]
-    async fn peers_channels_claims_exposure_and_audit_log_read_as_empty_lists() {
+    async fn peers_channels_claims_and_audit_log_read_as_empty_lists() {
         let app = test_router(vec![], "correct-token");
 
-        for path in ["/peers", "/channels", "/claims", "/exposure", "/audit-log"] {
+        for path in ["/peers", "/channels", "/claims", "/audit-log"] {
             let response = get(app.clone(), path, Some("correct-token")).await;
             assert_eq!(response.status(), StatusCode::OK, "path {path}");
             let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
@@ -1305,9 +1335,10 @@ mod tests {
     mod channel_lifecycle {
         use super::*;
         use crate::rfc9421::sign_request;
-        use connector_domain::claim_digest;
-        use connector_runtime::{ChannelViewStatus, WireClaim};
+        use connector_runtime::{ChannelDomain, ChannelViewStatus, WireClaim};
+        use connector_settlement::SettlementBackend;
         use connector_settlement_evm::EvmSettlementBackend;
+        use connector_signer::{derive_evm_address, evm_balance_proof_digest, EvmBalanceProof};
         use ed25519_dalek::Keypair;
         use rand::rngs::OsRng;
         use std::process::{Child, Command, Stdio};
@@ -1403,7 +1434,7 @@ mod tests {
         /// channel against a real chain", "channel lifecycle is driven
         /// entirely through the operator surface". Every step below is a
         /// real, signed HTTP write against this crate's actual `router()`,
-        /// reaching a real `SettlementChannel` contract on a real (if
+        /// reaching a real `TokenNetwork` contract on a real (if
         /// disposable) chain -- nothing here is faked.
         #[tokio::test]
         async fn opening_funding_and_closing_a_channel_over_the_operator_surface_reaches_a_real_chain(
@@ -1416,9 +1447,17 @@ mod tests {
             }
 
             let anvil = Anvil::spawn().await;
-            let settlement = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY)
-                .await
-                .expect("deploy SettlementChannel");
+            let token = EvmSettlementBackend::deploy_mock_token(
+                &anvil.rpc_url,
+                DEPLOYER_PRIVATE_KEY,
+                1_000_000,
+            )
+            .await
+            .expect("deploy mock USDC");
+            let settlement =
+                EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
+                    .await
+                    .expect("deploy a TokenNetwork through a fresh registry");
 
             let app_client = Arc::new(FakeAppClient::new());
             let clock = Arc::new(TestClock::new(chrono::Utc::now()));
@@ -1430,7 +1469,7 @@ mod tests {
                     Arc::new(InProcessPeerTransport::new()),
                     clock,
                 )
-                .with_settlement(Arc::new(settlement)),
+                .with_settlement(SettlementChain::Evm, Arc::new(settlement)),
             );
             let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
             let keypair = keypair();
@@ -1443,7 +1482,7 @@ mod tests {
 
             // Open.
             let open_body = serde_json::to_vec(&serde_json::json!({
-                "counterparty_hex": "0x000000000000000000000000000000000000aa",
+                "counterparty_hex": "0x00000000000000000000000000000000000000aa",
                 "settlement_timeout_seconds": 3600,
             }))
             .unwrap();
@@ -1521,16 +1560,41 @@ mod tests {
             }
 
             let anvil = Anvil::spawn().await;
-            let settlement = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY)
-                .await
-                .expect("deploy SettlementChannel");
+            let token = EvmSettlementBackend::deploy_mock_token(
+                &anvil.rpc_url,
+                DEPLOYER_PRIVATE_KEY,
+                1_000_000,
+            )
+            .await
+            .expect("deploy mock USDC");
+            let settlement =
+                EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
+                    .await
+                    .expect("deploy a TokenNetwork through a fresh registry");
+            // The real EIP-712 domain a claim against this backend's own
+            // `TokenNetwork` must be signed under (issue #576) -- `anvil`'s
+            // own default chain id, and the real deployed contract address,
+            // not a Base Sepolia placeholder nothing here actually talks to.
+            let peer_channel_domain = ChannelDomain {
+                chain_id: 31_337,
+                token_network_address: settlement.address().to_fixed_bytes(),
+            };
 
-            // The first channel a freshly deployed `SettlementChannel`
-            // opens is always id "0" -- configuring the claim
-            // verification key against that id ahead of time, rather than
-            // after opening, means this Connector can accept an inbound
-            // claim for it the moment it exists.
+            // `TokenNetwork.claimFromChannel` verifies a real signature
+            // recovering to the channel's actual counterparty (issue #576),
+            // so that counterparty must be an address `peer_signer` holds
+            // the key for -- not an arbitrary placeholder. The channel is
+            // opened directly against the backend (rather than through this
+            // surface's own `/channels`, already covered by the lifecycle
+            // test above) so its real, keccak-derived id is known before
+            // configuring the claim verification key and domain against it.
             let peer_signer = LocalSigner::generate("peer-claim-key");
+            let peer_address = derive_evm_address(&peer_signer.public_key().unwrap());
+            let channel_id = settlement
+                .open(peer_address.to_vec(), chrono::Duration::seconds(3600))
+                .await
+                .expect("open a real channel directly against the backend");
+
             let app_client = Arc::new(FakeAppClient::new());
             let clock = Arc::new(TestClock::new(chrono::Utc::now()));
             let connector = Arc::new(
@@ -1541,8 +1605,10 @@ mod tests {
                     Arc::new(InProcessPeerTransport::new()),
                     clock,
                 )
-                .with_settlement(Arc::new(settlement))
-                .with_channel_verification_key("0", peer_signer.public_key().unwrap()),
+                .with_settlement(SettlementChain::Evm, Arc::new(settlement))
+                .with_channel_verification_key(channel_id.0.clone(), peer_address)
+                .with_channel_domain(channel_id.0.clone(), peer_channel_domain)
+                .unwrap(),
             );
             let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
             let keypair = keypair();
@@ -1553,24 +1619,11 @@ mod tests {
                 vec![keypair.public.to_bytes()],
             );
 
-            // Open and fund, exactly like the lifecycle test above.
-            let open_body = serde_json::to_vec(&serde_json::json!({
-                "counterparty_hex": "0x000000000000000000000000000000000000aa",
-                "settlement_timeout_seconds": 3600,
-            }))
-            .unwrap();
-            let response = app
-                .clone()
-                .oneshot(signed_post(&keypair, "/channels", open_body))
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
-            let opened: ChannelView = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(opened.id, "0");
-
+            // Fund, through the operator surface, exactly like the
+            // lifecycle test above -- the channel itself was already opened
+            // directly against the backend above.
             let fund_body = serde_json::to_vec(&serde_json::json!({ "amount": 1_000 })).unwrap();
-            let fund_path = format!("/channels/{}/fund", opened.id);
+            let fund_path = format!("/channels/{}/fund", channel_id.0);
             let response = app
                 .clone()
                 .oneshot(signed_post(&keypair, &fund_path, fund_body))
@@ -1580,13 +1633,39 @@ mod tests {
 
             // A genuine claim from the channel's counterparty, accepted
             // exactly as an inbound PREPARE's piggybacked claim would be.
-            let sign_claim = |nonce: u64, amount: u64| WireClaim {
-                channel_id: opened.id.clone(),
-                nonce,
-                cumulative_amount: amount,
-                signature: peer_signer
-                    .sign(&claim_digest(&opened.id, nonce, amount))
-                    .unwrap(),
+            let mut on_chain_id = [0u8; 32];
+            let hex_digits = channel_id.0.trim_start_matches("0x");
+            for (i, byte) in on_chain_id.iter_mut().enumerate() {
+                *byte = u8::from_str_radix(&hex_digits[i * 2..i * 2 + 2], 16)
+                    .expect("channel id is 0x-prefixed 64-hex");
+            }
+            let sign_claim = |nonce: u64, amount: u64| {
+                let proof = EvmBalanceProof {
+                    channel_id: on_chain_id,
+                    nonce,
+                    transferred_amount: u128::from(amount),
+                    locked_amount: 0,
+                    locks_root: [0u8; 32],
+                    chain_id: peer_channel_domain.chain_id,
+                    token_network_address: peer_channel_domain.token_network_address,
+                };
+                // `peer_signer.sign` produces a recovery id in
+                // `libsecp256k1`'s own `{0, 1}` convention
+                // (`connector_signer::crypto::sign_digest`), exactly what
+                // the wire carries (peer-wire-spec.md §3.5). No `+ 27`
+                // here: `EvmSettlementBackend::redeem` is the one place
+                // that gets normalized to the Ethereum-wallet `{27, 28}`
+                // range `TokenNetwork`'s on-chain `ECDSA.recover` requires
+                // (issue #590) -- this test proves that normalization by
+                // signing through the production path unmodified and
+                // still redeeming against the real chain below.
+                let signature = peer_signer.sign(&evm_balance_proof_digest(&proof)).unwrap();
+                WireClaim {
+                    channel_id: channel_id.0.clone(),
+                    nonce,
+                    cumulative_amount: amount,
+                    signature: connector_runtime::ClaimSignature::Evm(signature),
+                }
             };
             assert_eq!(
                 connector.handle_peer_claim(sign_claim(1, 400)),
@@ -1595,7 +1674,7 @@ mod tests {
 
             // Redeem the latest claim through the operator surface -- no
             // claim in the request body, unlike `POST /channels/:id/redeem`.
-            let redeem_latest_path = format!("/channels/{}/redeem-latest", opened.id);
+            let redeem_latest_path = format!("/channels/{}/redeem-latest", channel_id.0);
             let response = app
                 .clone()
                 .oneshot(signed_post(&keypair, &redeem_latest_path, Vec::new()))
@@ -1613,7 +1692,7 @@ mod tests {
                 connector.handle_peer_claim(sign_claim(2, 900)),
                 connector_runtime::ClaimAckOutcome::Accepted
             );
-            let cooperative_close_path = format!("/channels/{}/cooperative-close", opened.id);
+            let cooperative_close_path = format!("/channels/{}/cooperative-close", channel_id.0);
             let response = app
                 .clone()
                 .oneshot(signed_post(&keypair, &cooperative_close_path, Vec::new()))

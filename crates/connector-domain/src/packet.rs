@@ -134,7 +134,12 @@ impl Fulfill {
 pub struct RejectCode(String);
 
 impl RejectCode {
-    /// F00: Bad Request -- generic final error.
+    /// F00: Bad Request -- generic final error. Used (issue #596) when a
+    /// terminated envelope's `target` attempts to escape the route's
+    /// configured handler path -- refused before the app is ever called,
+    /// distinct from F01 (the envelope itself did not decode) and from an
+    /// app's own answer, including a 404, which never produces a reject at
+    /// all.
     pub fn f00_bad_request() -> RejectCode {
         RejectCode("F00".to_string())
     }
@@ -148,6 +153,26 @@ impl RejectCode {
     /// F02: Unreachable -- no route to the destination.
     pub fn f02_unreachable() -> RejectCode {
         RejectCode("F02".to_string())
+    }
+
+    /// F03: Invalid Amount -- a claim's value does not cover what it is
+    /// paying for: a locally-terminated route's configured price (issue
+    /// #522, `client-edge-spec.md` §1.3 step 3) or, later, a
+    /// request-request-bound route's price (§1.5). Distinct from F01: the
+    /// claim is structurally and cryptographically fine, it is simply not
+    /// enough value.
+    pub fn f03_invalid_amount() -> RejectCode {
+        RejectCode("F03".to_string())
+    }
+
+    /// F06: Unexpected Payment -- a payment arrived without the claim that
+    /// pays for it. The client edge's BTP carriage answers a claimless
+    /// PREPARE to a priced route with this code plus the route's x402 terms
+    /// as `payment-required` protocolData (client-edge-spec.md §1.9), since
+    /// BTP cannot answer HTTP 402; the HTTP carriage answers 402 itself and
+    /// never raises this code.
+    pub fn f06_unexpected_payment() -> RejectCode {
+        RejectCode("F06".to_string())
     }
 
     /// F99: Application Error -- the terminating app declined the delivery,
@@ -169,17 +194,45 @@ impl RejectCode {
         RejectCode("R01".to_string())
     }
 
+    /// T00: Internal Error -- this connector could not do its own part of
+    /// the work, through no fault of the packet. Retryable, and
+    /// deliberately temporary rather than final (issue #605): a claim this
+    /// connector could not durably record is refused under this code, so a
+    /// sender learns to retry rather than that its perfectly good claim was
+    /// invalid.
+    pub fn t00_internal_error() -> RejectCode {
+        RejectCode("T00".to_string())
+    }
+
     /// T01: Peer Unreachable -- the app could not be reached over HTTP.
+    /// Also used (issue #698) when a client-edge destination has no live
+    /// BTP session bound to it, or the session that would have carried the
+    /// delivery ended or was superseded mid-flight: in every case the
+    /// packet itself is fine and the only fact worth reporting is "there is
+    /// currently no way to reach this peer," so the sender should retry
+    /// rather than conclude anything about the packet.
     pub fn t01_peer_unreachable() -> RejectCode {
         RejectCode("T01".to_string())
     }
 
-    /// T04: Insufficient Liquidity -- this connector's exposure ceiling for
-    /// the inbound peering relation is exceeded (issue #424,
-    /// peer-wire-spec.md §5.1/§5.3). Retryable: the condition clears once
-    /// the peer's pending claim is acknowledged.
+    /// T04: Insufficient Liquidity (RFC-0027). Used until issue #424
+    /// (peer-wire-spec.md §5.1/§5.3) for this connector's own exposure
+    /// ceiling; that machinery is retired (ADR 0031, ADR 0033, issue #882)
+    /// and nothing in this codebase emits `T04` any more. Kept for wire
+    /// interop -- a standard ILPv4 code a counterparty may still send.
     pub fn t04_insufficient_liquidity() -> RejectCode {
         RejectCode("T04".to_string())
+    }
+
+    /// T05: Rate Limited -- this connector is deliberately withholding free
+    /// work from the sender rather than failing at it (issue #613,
+    /// RFC-0027's own gloss: "the connector is rate limiting the sender").
+    /// Retryable, and the distinction from `T00` is the whole point: `T00`
+    /// says this connector tried and could not, `T05` says it declined to
+    /// try, and a sender told the first would retry immediately while a
+    /// sender told the second should wait out a window.
+    pub fn t05_rate_limited() -> RejectCode {
+        RejectCode("T05".to_string())
     }
 
     pub fn as_str(&self) -> &str {
@@ -199,15 +252,20 @@ impl RejectCode {
 
 /// An ILP REJECT packet (RFC-0027 Section 3.3): a PREPARE was not honored.
 ///
-/// `accumulated_fee` is the running total of the fees of the hops this
-/// packet actually passed through before it was rejected (ADR 0011,
-/// `peer-wire-spec.md` §5.2) -- `0` when this connector originated the
-/// reject itself, since no fee applies to a hop the packet never used.
+/// `accumulated_cost` is the running total of what this packet's path has
+/// charged so far: the fees of every hop it actually passed through, plus
+/// the price of the route that terminates it, if it has reached one (ADR
+/// 0011, issue #523, `peer-wire-spec.md` §5.2) -- `0` when this connector
+/// originated the reject itself before forwarding or terminating the
+/// packet, since neither a fee nor a price applies to a hop the packet
+/// never used. It is a single sum -- never a per-hop breakdown, and never
+/// split between fees and price, since either would leak topology or
+/// pricing a probe has no need to know.
 /// Deliberately **not** part of this struct's OER wire encoding below: this
 /// type is ported byte-for-byte from RFC-0027 so an existing ILPv4-over-HTTP
 /// client can address this connector's client edge, and RFC-0027 has no such
-/// field. `accumulated_fee` instead rides beside the packet -- at the peer
-/// wire's frame level, or the client edge's `TOON-Accumulated-Fee` response
+/// field. `accumulated_cost` instead rides beside the packet -- at the peer
+/// wire's frame level, or the client edge's `TOON-Accumulated-Cost` response
 /// header (`docs/protocol/client-edge-spec.md` §1.6) -- never inside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reject {
@@ -215,11 +273,11 @@ pub struct Reject {
     pub triggered_by: String,
     pub message: String,
     pub data: Vec<u8>,
-    pub accumulated_fee: u64,
+    pub accumulated_cost: u64,
 }
 
 impl Reject {
-    /// Encodes exactly RFC-0027's REJECT fields -- `accumulated_fee` is
+    /// Encodes exactly RFC-0027's REJECT fields -- `accumulated_cost` is
     /// deliberately absent, see the struct's own doc.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -265,7 +323,7 @@ impl Reject {
             triggered_by,
             message,
             data,
-            accumulated_fee: 0,
+            accumulated_cost: 0,
         })
     }
 }
@@ -300,6 +358,24 @@ mod tests {
         assert_eq!(encoded[0], TYPE_PREPARE);
         let decoded = Prepare::decode(&encoded).expect("decode");
         assert_eq!(decoded, prepare);
+    }
+
+    /// Issue #546 tightens canonicality in the shared `oer.rs` primitives
+    /// rather than only in the envelope's own decode path (see that issue's
+    /// resolution note and `oer.rs::decode_var_uint`'s doc comment for why),
+    /// so a PREPARE's `amount` -- a VarUInt, like everything #546 describes --
+    /// is covered by the same fix without any change to this file.
+    #[test]
+    fn prepare_decode_rejects_a_non_canonical_amount_determinant() {
+        let mut encoded = sample_prepare().encode();
+        // `amount: 100` canonically encodes as the single byte 0x64
+        // (100 <= 127). Splice in the long-form alias 0x81 0x64 instead.
+        assert_eq!(encoded[1], 0x64);
+        encoded.splice(1..2, [0x81, 0x64]);
+        assert!(matches!(
+            Prepare::decode(&encoded),
+            Err(PacketError::NonCanonicalLength)
+        ));
     }
 
     #[test]
@@ -360,7 +436,7 @@ mod tests {
             triggered_by: "g.connector".to_string(),
             message: "no route".to_string(),
             data: vec![],
-            accumulated_fee: 0,
+            accumulated_cost: 0,
         };
         let encoded = reject.encode();
         assert_eq!(encoded[0], TYPE_REJECT);
@@ -374,28 +450,28 @@ mod tests {
             triggered_by: String::new(),
             message: "declined".to_string(),
             data: vec![],
-            accumulated_fee: 0,
+            accumulated_cost: 0,
         };
         let encoded = reject.encode();
         assert_eq!(Reject::decode(&encoded).expect("decode"), reject);
     }
 
-    /// ADR 0011 / peer-wire-spec.md §5.2: `accumulated_fee` rides beside the
+    /// ADR 0011 / peer-wire-spec.md §5.2: `accumulated_cost` rides beside the
     /// packet (frame level / response header), never inside RFC-0027's own
     /// REJECT encoding -- so a nonzero value never survives an encode/decode
     /// round trip through this struct's wire format alone.
     #[test]
-    fn accumulated_fee_does_not_ride_the_oer_wire_encoding() {
+    fn accumulated_cost_does_not_ride_the_oer_wire_encoding() {
         let reject = Reject {
             code: RejectCode::f02_unreachable(),
             triggered_by: String::new(),
             message: "no route".to_string(),
             data: vec![],
-            accumulated_fee: 42,
+            accumulated_cost: 42,
         };
         let encoded = reject.encode();
         let decoded = Reject::decode(&encoded).expect("decode");
-        assert_eq!(decoded.accumulated_fee, 0);
+        assert_eq!(decoded.accumulated_cost, 0);
         assert_eq!(decoded.code, reject.code);
         assert_eq!(decoded.message, reject.message);
     }
@@ -406,9 +482,11 @@ mod tests {
         assert_eq!(RejectCode::f99_application_error().as_str(), "F99");
         assert_eq!(RejectCode::t01_peer_unreachable().as_str(), "T01");
         assert_eq!(RejectCode::t04_insufficient_liquidity().as_str(), "T04");
+        assert_eq!(RejectCode::t05_rate_limited().as_str(), "T05");
         assert_eq!(RejectCode::f00_bad_request().as_str(), "F00");
         assert_eq!(RejectCode::r01_insufficient_source_amount().as_str(), "R01");
         assert_eq!(RejectCode::f01_invalid_packet().as_str(), "F01");
         assert_eq!(RejectCode::r00_transfer_timed_out().as_str(), "R00");
+        assert_eq!(RejectCode::f03_invalid_amount().as_str(), "F03");
     }
 }

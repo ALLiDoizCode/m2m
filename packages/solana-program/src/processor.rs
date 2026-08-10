@@ -76,6 +76,49 @@ fn derive_vault_pda(channel_pda: &Pubkey, program_id: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[b"vault", channel_pda.as_ref()], program_id)
 }
 
+/// Validate a settlement payout destination.
+///
+/// The vault signs its own outbound transfers, so SPL Token only checks that the
+/// source and destination share a mint — it places no constraint on *who* the
+/// destination belongs to. The program must therefore establish itself that a
+/// payout lands somewhere the intended participant controls. A destination is
+/// accepted only when it is an initialized SPL Token account that
+///
+///   * holds the channel's `token_mint`, and
+///   * is owned by the participant that leg of the settlement pays out to.
+///
+/// Note this is an owner+mint check on the supplied account rather than an
+/// equality check against the participant's associated token address: honest
+/// callers today supply either an ATA (the TypeScript settlement client derives
+/// one for each participant) or a plain participant-owned token account (what
+/// this crate's own tests supply), and both are equally safe under this rule.
+fn validate_settlement_destination(
+    destination: &AccountInfo,
+    expected_owner: &Pubkey,
+    expected_mint: &Pubkey,
+) -> ProgramResult {
+    // Must be an SPL Token account, not an arbitrary account that merely looks
+    // like one.
+    if destination.owner != &spl_token::id() {
+        return Err(PaymentChannelError::InvalidSettlementDestination.into());
+    }
+
+    let data = destination.try_borrow_data()?;
+    let token_account = spl_token::state::Account::unpack(&data)
+        .map_err(|_| ProgramError::from(PaymentChannelError::InvalidSettlementDestination))?;
+    drop(data);
+
+    if token_account.mint != *expected_mint {
+        return Err(PaymentChannelError::SettlementDestinationMintMismatch.into());
+    }
+
+    if token_account.owner != *expected_owner {
+        return Err(PaymentChannelError::InvalidSettlementDestination.into());
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // initialize_channel
 // ---------------------------------------------------------------------------
@@ -421,11 +464,17 @@ fn process_close_channel(program_id: &Pubkey, accounts: &[AccountInfo]) -> Progr
 //   0. [signer] caller
 //   1. [writable] channel_pda
 //   2. [writable] vault_token_account
-//   3. [writable] participant_a_token_account
-//   4. [writable] participant_b_token_account
+//   3. [writable] participant_a_token_account — must hold the channel's mint and
+//                 be owned by participant_a (checked when A is owed a payout)
+//   4. [writable] participant_b_token_account — likewise for participant_b
 //   5. [writable] rent_recipient
 //   6. [] token_program
 //   7. [] clock sysvar
+//
+// The caller is deliberately unconstrained: any signer may settle once the
+// challenge period has elapsed. That is a safety property — it stops a
+// counterparty stranding the vault by simply refusing to act — and it is safe
+// precisely because the payout destinations are pinned to the participants.
 
 fn process_settlement(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let account_iter = &mut accounts.iter();
@@ -509,6 +558,16 @@ fn process_settlement(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramR
 
     // Transfer balance_a to participant A's token account
     if balance_a > 0 {
+        // Establish that the payout lands in an account participant A controls,
+        // holding this channel's mint, before the vault signs the transfer.
+        // Only checked when a transfer actually happens: a participant owed
+        // nothing need not have a token account in existence at all.
+        validate_settlement_destination(
+            participant_a_token,
+            &channel.participant_a,
+            &channel.token_mint,
+        )?;
+
         invoke_signed(
             &spl_token::instruction::transfer(
                 &spl_token::id(),
@@ -530,6 +589,12 @@ fn process_settlement(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramR
 
     // Transfer balance_b to participant B's token account
     if balance_b > 0 {
+        validate_settlement_destination(
+            participant_b_token,
+            &channel.participant_b,
+            &channel.token_mint,
+        )?;
+
         invoke_signed(
             &spl_token::instruction::transfer(
                 &spl_token::id(),
@@ -700,6 +765,35 @@ fn process_claim_from_channel(
     };
     if transferred_amount < stored_transferred {
         return Err(PaymentChannelError::TransferredAmountDecreased.into());
+    }
+
+    // Bound transferred_amount above by the claiming participant's own deposit.
+    //
+    // Settlement pays out `deposit_x - transferred_amount_x + transferred_amount_y`
+    // and performs the subtraction first, so a stored transferred_amount above the
+    // deposit makes that `checked_sub` return None. Both SettleChannel and
+    // ForceCloseExpired would then fail with ArithmeticOverflow forever, and the
+    // channel has no other exit — the deposits would be stranded in the vault.
+    // Rejecting the claim keeps the channel settleable.
+    //
+    // The bound is against the deposit recorded *now*; a participant who intends
+    // to spend more can deposit first and resubmit the claim, since a rejected
+    // claim leaves the stored nonce untouched.
+    //
+    // Checking against the deposit at claim time is enough to make the stored
+    // state permanently settleable, because a live channel's deposit never
+    // shrinks: Deposit only adds (and only while Opened), and the sole
+    // instructions that move tokens out of the vault -- SettleChannel, reached
+    // directly or via ForceCloseExpired -- close the channel out entirely rather
+    // than returning it to a claimable state. So no later instruction can pull
+    // the deposit back below a transferred_amount this check already admitted.
+    let participant_deposit = if is_participant_a {
+        channel.deposit_a
+    } else {
+        channel.deposit_b
+    };
+    if transferred_amount > participant_deposit {
+        return Err(PaymentChannelError::TransferredAmountExceedsDeposit.into());
     }
 
     // Verify Ed25519 precompile instruction at index 0

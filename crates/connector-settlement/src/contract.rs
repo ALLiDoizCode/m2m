@@ -14,11 +14,78 @@
 //! tests instead.
 
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::Duration;
 
 use crate::port::{ChannelId, ChannelStatus, Claim, SettlementBackend, SettlementError};
+
+/// Everything a [`SettlementBackend`] implementation hands the suite about
+/// itself, beyond the backend value, so the suite can exercise it without
+/// hardcoding assumptions no real chain actually holds (issue #574,
+/// issue #576).
+pub struct ContractFixture {
+    pub backend: Arc<dyn SettlementBackend>,
+    /// A counterparty identity [`open`](SettlementBackend::open) is called
+    /// with -- a real signing address/pubkey on a chain that needs one
+    /// (issue #574), not a plain ASCII peer name.
+    pub counterparty: Vec<u8>,
+    /// A second, distinct counterparty identity, opened against but never
+    /// redeemed from.
+    pub other_counterparty: Vec<u8>,
+    /// A third, distinct counterparty identity for the instant-settlement
+    /// channel this suite drives all the way to
+    /// [`ChannelStatus::Settled`] (issue #567): the deployed Solana
+    /// `payment-channel` program holds exactly one live channel per
+    /// (participant pair, mint) -- its channel PDA is seeded
+    /// `["channel", min, max, mint]` and `InitializeChannel` rejects a
+    /// still-existing account with `ChannelAlreadyExists` -- so that
+    /// channel cannot reuse [`counterparty`](Self::counterparty) while the
+    /// first channel is still sitting in its challenge window. Like
+    /// `counterparty` (and unlike
+    /// [`other_counterparty`](Self::other_counterparty)) this channel is
+    /// funded and, post-settlement, redeemed against, so a backend whose
+    /// chain requires the depositing participant's own signature must hold
+    /// a real key for this identity too.
+    pub instant_counterparty: Vec<u8>,
+    /// Produces the bytes this suite puts in a [`Claim`]'s `signature`,
+    /// given the channel it redeems against and that claim's
+    /// `nonce`/`cumulative_amount` (issue #576): a backend whose chain
+    /// actually verifies a claim's signature (`TokenNetwork
+    /// .claimFromChannel`'s EIP-712 recovery, unlike the old, unverified
+    /// `SettlementChannel.sol` this port originally shipped with) needs a
+    /// real one produced by `counterparty`'s own key, not an arbitrary
+    /// literal nothing checks. A backend that does not verify the
+    /// signature at all (`InMemorySettlementBackend`) can return one that
+    /// ignores its arguments.
+    pub sign: SignFn,
+    /// The `settlement_timeout` [`open`](SettlementBackend::open) is called
+    /// with for the channel this suite proves [`settle`](SettlementBackend::settle)
+    /// eventually reaches [`ChannelStatus::Settled`] on (issue #576): some
+    /// chains enforce a protocol-level minimum no implementation can be
+    /// asked to skip (`TokenNetwork.sol`'s `MIN_SETTLEMENT_TIMEOUT`, one
+    /// hour), so this suite does not assume every backend can open a
+    /// channel with an arbitrarily short (or zero) one.
+    pub instant_settlement_timeout: Duration,
+    /// Called once, after that channel is closed and before this suite
+    /// asks it to settle, to make `instant_settlement_timeout` have
+    /// elapsed without this suite waiting out real wall-clock time itself
+    /// (issue #576): a real sleep for a backend with no meaningful
+    /// minimum, a chain-clock advance (e.g. `anvil`'s `evm_increaseTime`)
+    /// for one that has to open a channel with a long real timeout.
+    pub advance_past_instant_settlement_timeout: Box<dyn Fn() -> BoxFuture<'static, ()> + Send>,
+}
+
+/// A boxed, `'static`, `Send` future -- the shape
+/// [`ContractFixture::advance_past_instant_settlement_timeout`] returns,
+/// since a plain `async fn` cannot be named as a trait object field type.
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// The shape of [`ContractFixture::sign`], named so clippy's
+/// `type_complexity` lint (and any reader) sees one name rather than the
+/// spelled-out trait object at every use site.
+pub type SignFn = Box<dyn Fn(&ChannelId, u64, u128) -> Vec<u8> + Send>;
 
 /// Run every assertion the [`SettlementBackend`] port makes, against a
 /// freshly built implementation from `build`. A conforming implementation
@@ -27,13 +94,20 @@ use crate::port::{ChannelId, ChannelStatus, Claim, SettlementBackend, Settlement
 pub async fn assert_upholds_the_contract<F, Fut>(build: F)
 where
     F: FnOnce() -> Fut,
-    Fut: Future<Output = Arc<dyn SettlementBackend>>,
+    Fut: Future<Output = ContractFixture>,
 {
-    let backend = build().await;
+    let ContractFixture {
+        backend,
+        counterparty,
+        other_counterparty,
+        instant_counterparty,
+        sign,
+        instant_settlement_timeout,
+        advance_past_instant_settlement_timeout,
+    } = build().await;
     let timeout = Duration::seconds(3600);
 
     // Opening a channel reports it open, unfunded, to the counterparty given.
-    let counterparty = b"counterparty-a".to_vec();
     let channel = backend
         .open(counterparty.clone(), timeout)
         .await
@@ -60,8 +134,9 @@ where
         .redeem(
             &channel,
             Claim {
+                nonce: 1,
                 cumulative_amount: 60,
-                signature: vec![1],
+                signature: sign(&channel, 1, 60),
             },
         )
         .await
@@ -75,8 +150,9 @@ where
         .redeem(
             &channel,
             Claim {
+                nonce: 2,
                 cumulative_amount: 120,
-                signature: vec![2],
+                signature: sign(&channel, 2, 120),
             },
         )
         .await
@@ -85,13 +161,21 @@ where
 
     // A claim that does not supersede the highest one redeemed so far is
     // rejected outright (ADR 0005: only the highest-nonce claim is ever
-    // honored) rather than silently ignored or double-paid.
+    // honored) rather than silently ignored or double-paid. Same nonce as
+    // the claim just redeemed, matching the amount replay this asserts --
+    // `connector-settlement-evm`/`-solana` settle through contracts with no
+    // nonce field of their own yet (issue #566), so this exact replay is
+    // the one nonce/amount scenario this shared suite can hold every
+    // backend to identically; `InMemorySettlementBackend`'s own,
+    // additional nonce-ordering rule is exercised separately in
+    // `in_memory.rs`'s own tests.
     let err = backend
         .redeem(
             &channel,
             Claim {
+                nonce: 2,
                 cumulative_amount: 120,
-                signature: vec![3],
+                signature: sign(&channel, 2, 120),
             },
         )
         .await
@@ -110,8 +194,9 @@ where
         .redeem(
             &channel,
             Claim {
+                nonce: 3,
                 cumulative_amount: 1_000,
-                signature: vec![4],
+                signature: sign(&channel, 3, 1_000),
             },
         )
         .await
@@ -124,10 +209,41 @@ where
         }
     );
 
-    // Closing a channel is terminal: its own state reports Closed, that
-    // status is durable when queried back separately, and neither funding
-    // nor redemption is possible against it afterward -- nor can it be
-    // closed a second time.
+    // ...and that rejection is retryable, not terminal (issue #662). The
+    // refusal must leave the channel exactly as it found it -- in
+    // particular the nonce the refused claim was signed for must still be
+    // unused -- so that funding the channel up past the claimed amount
+    // makes the *identical* claim redeemable. Both real chains rely on
+    // this: `TokenNetwork.claimFromChannel` reverts before writing
+    // `participants[.][signer].nonce`, and `packages/solana-program`'s
+    // `ClaimFromChannel` returns `TransferredAmountExceedsDeposit` before
+    // writing `nonce_x`. If either consumed the nonce on refusal, bounding
+    // a claim by the deposit would burn an honest, already-signed proof
+    // rather than merely deferring it.
+    let state = backend.fund(&channel, 900).await.expect("fund");
+    assert_eq!(state.deposited, 1_050);
+    let state = backend
+        .redeem(
+            &channel,
+            Claim {
+                nonce: 3,
+                cumulative_amount: 1_000,
+                signature: sign(&channel, 3, 1_000),
+            },
+        )
+        .await
+        .expect("the refused claim redeems once the deposit covers it");
+    assert_eq!(state.redeemed, 1_000);
+
+    // Closing a channel starts its challenge period (issue #574): its own
+    // state reports Closed, that status is durable when queried back
+    // separately, funding is refused, and it cannot be closed a second
+    // time -- but redeeming during the window that follows still
+    // succeeds. Forfeiting that window (the old behaviour here) hands the
+    // whole outstanding balance back to whichever party closed the
+    // channel; `TokenNetwork.claimFromChannel` deliberately accepts both
+    // `Opened` and `Closed` for exactly this reason
+    // (`packages/contracts/src/TokenNetwork.sol:262-263`, `:273`).
     let state = backend.close(&channel).await.expect("close");
     assert_eq!(state.status, ChannelStatus::Closed);
 
@@ -140,26 +256,75 @@ where
     let err = backend.fund(&channel, 10).await.unwrap_err();
     assert_eq!(err, SettlementError::ChannelClosed(channel.clone()));
 
-    let err = backend
+    // A later, still-superseding claim redeems during the challenge
+    // window -- this is the window's whole point (issue #574).
+    let state = backend
         .redeem(
             &channel,
             Claim {
-                cumulative_amount: 121,
-                signature: vec![5],
+                nonce: 4,
+                cumulative_amount: 1_001,
+                signature: sign(&channel, 4, 1_001),
+            },
+        )
+        .await
+        .expect("redeem during the challenge window");
+    assert_eq!(state.redeemed, 1_001);
+
+    let err = backend.close(&channel).await.unwrap_err();
+    assert_eq!(err, SettlementError::ChannelClosed(channel.clone()));
+
+    // `timeout` above is a full hour and no real time has elapsed since
+    // `close` -- settling this channel now must fail with the named
+    // "not yet due" error (issue #574), not a generic backend string.
+    let err = backend.settle(&channel).await.unwrap_err();
+    assert_eq!(err, SettlementError::SettlementNotYetDue(channel.clone()));
+
+    // A channel becomes settleable once its own challenge period has
+    // genuinely elapsed -- proving `settle` reaches a terminal,
+    // no-longer-redeemable state (not just that it refuses early), without
+    // this suite waiting out `instant_settlement_timeout` in real
+    // wall-clock time itself (issue #576:
+    // `advance_past_instant_settlement_timeout` is how that elapsing is
+    // actually achieved, since a chain like `TokenNetwork` cannot be asked
+    // to open a channel with a shorter timeout than its own
+    // `MIN_SETTLEMENT_TIMEOUT`, one hour, and this suite is not going to
+    // sleep for one). Opened against its own dedicated counterparty
+    // identity rather than reusing `counterparty`, whose first channel is
+    // still sitting Closed in its challenge window -- see
+    // [`ContractFixture::instant_counterparty`]'s doc for the chain that
+    // makes that reuse impossible.
+    let immediate = backend
+        .open(instant_counterparty.clone(), instant_settlement_timeout)
+        .await
+        .expect("open the instant-settlement-proof channel");
+    backend.fund(&immediate, 200).await.expect("fund");
+    backend.close(&immediate).await.expect("close");
+    advance_past_instant_settlement_timeout().await;
+    let state = backend.settle(&immediate).await.expect("settle");
+    assert_eq!(state.status, ChannelStatus::Settled);
+
+    let err = backend
+        .redeem(
+            &immediate,
+            Claim {
+                nonce: 1,
+                cumulative_amount: 50,
+                signature: sign(&immediate, 1, 50),
             },
         )
         .await
         .unwrap_err();
-    assert_eq!(err, SettlementError::ChannelClosed(channel.clone()));
+    assert_eq!(err, SettlementError::ChannelSettled(immediate.clone()));
 
-    let err = backend.close(&channel).await.unwrap_err();
-    assert_eq!(err, SettlementError::ChannelClosed(channel.clone()));
+    let err = backend.settle(&immediate).await.unwrap_err();
+    assert_eq!(err, SettlementError::ChannelSettled(immediate));
 
     // A channel id from one open() call names only that channel -- a
     // second channel to a different counterparty has its own independent,
     // freshly-unfunded state.
     let other = backend
-        .open(b"counterparty-b".to_vec(), timeout)
+        .open(other_counterparty.clone(), timeout)
         .await
         .expect("open");
     assert_ne!(other, channel);
@@ -174,6 +339,8 @@ where
     let err = backend.fund(&missing, 1).await.unwrap_err();
     assert_eq!(err, SettlementError::ChannelNotFound(missing.clone()));
     let err = backend.close(&missing).await.unwrap_err();
+    assert_eq!(err, SettlementError::ChannelNotFound(missing.clone()));
+    let err = backend.settle(&missing).await.unwrap_err();
     assert_eq!(err, SettlementError::ChannelNotFound(missing));
 }
 
@@ -185,7 +352,22 @@ mod tests {
     #[tokio::test]
     async fn in_memory_settlement_backend_upholds_the_contract() {
         assert_upholds_the_contract(|| async {
-            Arc::new(InMemorySettlementBackend::new()) as Arc<dyn SettlementBackend>
+            ContractFixture {
+                backend: Arc::new(InMemorySettlementBackend::new()) as Arc<dyn SettlementBackend>,
+                counterparty: b"counterparty-a".to_vec(),
+                other_counterparty: b"counterparty-b".to_vec(),
+                instant_counterparty: b"counterparty-c".to_vec(),
+                // `InMemorySettlementBackend` never verifies a claim's
+                // signature, so any bytes suffice.
+                sign: Box::new(
+                    |_channel: &ChannelId, _nonce: u64, _cumulative_amount: u128| vec![0u8],
+                ),
+                // No real minimum, so a zero-length challenge period is
+                // already due the instant the channel closes -- no
+                // advancing needed.
+                instant_settlement_timeout: Duration::zero(),
+                advance_past_instant_settlement_timeout: Box::new(|| Box::pin(async {})),
+            }
         })
         .await;
     }

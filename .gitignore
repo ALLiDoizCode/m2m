@@ -14,12 +14,28 @@ target/
 coverage/
 *.lcov
 
-# Environment variables
+# Environment variables. The bare `.env` rule only matches that exact name, so
+# operator copies like `.env.bak-20260718-214722` or `.env.20260719` slipped
+# through and got committed. Match every `.env*` variant instead, and re-allow
+# the checked-in templates explicitly.
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+!.env.*.example
+!.env.template
 .env.dev  # Development environment variables (local overrides)
 .env.production  # Production environment variables (NEVER commit)
+
+# Editor/operator snapshot copies. These are point-in-time scratch artefacts
+# from live-box edits, never configuration the repo should carry; committing
+# them leaves stale copies of real deployment values behind forever.
+*.bak
+*.bak-*
+*.bak.*
+*.orig
+*.rej
+*.stale-drift-bak-*
+*.pre-*.bak
 
 # Deployer wallet (NEVER commit private keys)
 deployer-wallet.json
@@ -58,13 +74,6 @@ Thumbs.db
 
 # Test databases
 data/*.db
-packages/connector/data/*.db
-
-# Test runtime artifacts — ledger snapshots + claim DBs + anon SDK state.
-# These accumulate during test runs with randomized port-base suffixes and
-# must never be committed (contains transient state, not source).
-packages/connector/data/ledger-*.json
-packages/connector/terms-agreement
 
 # Playwright test artifacts
 .playwright-mcp/
@@ -82,6 +91,12 @@ packages/connector/terms-agreement
 # .claude/
 .auto-bmad-tmp/
 
+# Agent worktrees. `.claude/` itself is tracked (the BMAD commands above), so
+# this ignores only the checkouts agents create underneath it — currently
+# multiple GB on a working machine. Previously untracked via a local, uncommitted
+# `.git/info/exclude`, which a fresh clone does not inherit.
+**/.claude/worktrees/
+
 # Mina zkApp ESM build (faucet USDC-mint single-instance bundle) — built at image time
 packages/mina-zkapp/dist-esm/
 # Per-recreate lightnet zkApp deploy result (contains sensitive admin/token keys)
@@ -94,5 +109,40 @@ deploy/connector-rust/operator.pem
 
 # Rust connector devnet overlay (issue #490) — real per-box key material,
 # never committed; mirrors deploy/connector-rust/signer.key above.
-infra/linode-node/signer-rust.key
-infra/linode-store/signer-rust.key
+#
+# The SETTLEMENT keys are the ones that hold value and they were missing from
+# this list until 2026-08-04: only `signer-rust.key` was ignored, while
+# `settlement-rust.key` and `settlement-solana-rust.key` sat untracked in the
+# checkout on both live boxes. `git status` showed them as `??`, so a single
+# `git add -A` run on a box would have committed funded private keys to a
+# PUBLIC repository. The settlement keys are the higher-value of the two
+# kinds, not the lower: the signer is only this connector's ILP signing
+# identity (ADR 0012), while these control the on-chain settlement accounts —
+# ~50,000 devnet USDC each on Base Sepolia, plus the Solana identities the
+# whole fleet's channels are opened against.
+#
+# Wildcards rather than exact paths, so a new box or a re-derived key cannot
+# reintroduce the gap by being named slightly differently.
+infra/linode-node/*.key
+infra/linode-store/*.key
+infra/linode-relay/*.key
+deploy/connector-rust/*.key
+
+# Peering shared secrets (issue #750). A `[[peers]]` credential's
+# `secret_file` points at one of these; the config that points at it IS
+# committed, and this repo is public, so the file itself must never be. Same
+# wildcard rationale as the key rules above: a new peering must not need a new
+# ignore rule to stay out of the repo.
+infra/linode-node/*.secret
+infra/linode-store/*.secret
+infra/linode-relay/*.secret
+deploy/connector-rust/*.secret
+
+# Store-box gas-station Solana fee-payer — real key material (128-char hex
+# Ed25519), never committed. Was tracked until the rotation that removed it;
+# the pre-rotation key remains in git history, so the ROTATION (not this
+# ignore rule) is what closed that exposure.
+infra/linode-store/gas-station-solana.key
+
+# Local operator scratch notes — working files, never part of the repo.
+.connector-*-runbook.md

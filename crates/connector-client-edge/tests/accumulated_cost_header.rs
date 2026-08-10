@@ -1,0 +1,140 @@
+//! `TOON-Accumulated-Cost` at the client edge (issue #548,
+//! `docs/protocol/client-edge-spec.md` §1.6).
+//!
+//! ADR 0011 chose fee accumulation over a quoting protocol: a sender sends a
+//! packet it expects to be rejected, and the reject reports what the path
+//! would have charged. The packet plane has accumulated that figure since
+//! issue #426 and the peer wire has carried it beside the packet since; this
+//! file holds the client edge -- where the only clients are -- to reporting
+//! it too, over the surface a client actually speaks.
+//!
+//! Deliberately an integration test, driving the mounted router from
+//! outside the crate over nothing but its public API: what a client sees is
+//! precisely what this is about, and none of these assertions can be
+//! satisfied by anything short of the real response a real sender receives.
+
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use chrono::{TimeZone, Utc};
+use connector_domain::{Prepare, Reject};
+use connector_runtime::{Connector, FakeAppClient, InProcessPeerTransport, PeerRoute, TestClock};
+use connector_signer::{LocalSigner, Signer};
+use tower::ServiceExt;
+
+const ACCUMULATED_COST_HEADER: &str = "toon-accumulated-cost";
+
+fn test_clock() -> Arc<TestClock> {
+    Arc::new(TestClock::new(
+        Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+    ))
+}
+
+fn test_signer() -> Arc<dyn Signer> {
+    Arc::new(LocalSigner::generate("cost-header-test-signer"))
+}
+
+/// A PREPARE bound for `destination`, carrying nothing a termination could
+/// open -- every packet here is expected to be rejected, which is what a
+/// probe is.
+fn prepare(destination: &str) -> Prepare {
+    Prepare {
+        // Enough to cover a hop's fee, so a reject below is the one the
+        // path decided on rather than `R01` raised for want of value.
+        amount: 100,
+        expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
+        execution_condition: [9u8; 32],
+        destination: destination.to_string(),
+        data: vec![0xff; 40],
+    }
+}
+
+fn ilp_request(prepare: &Prepare) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/ilp")
+        .body(Body::from(prepare.encode()))
+        .expect("well-formed request")
+}
+
+/// The header a client actually reads, as a `u64` -- absent is `None`, which
+/// is what this edge answered with before #548 and what every assertion
+/// below distinguishes from a genuine `0`.
+async fn reject_and_reported_cost(
+    connector: Arc<Connector>,
+    prepare: &Prepare,
+) -> (Reject, Option<u64>) {
+    let response = connector_client_edge::router(connector, test_signer())
+        .oneshot(ilp_request(prepare))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let reported = response
+        .headers()
+        .get(ACCUMULATED_COST_HEADER)
+        .map(|value| {
+            value
+                .to_str()
+                .expect("the cost header is ASCII")
+                .parse::<u64>()
+                .expect("the cost header is a decimal uint64")
+        });
+    let body = hyper::body::to_bytes(response.into_body())
+        .await
+        .expect("a response body");
+    (Reject::decode(&body).expect("an OER REJECT"), reported)
+}
+
+/// client-edge-spec.md §1.6: "the header is present on every REJECT
+/// response, `0` when the packet never left this connector". A destination
+/// with no route at all is exactly that case -- and `0` present is a
+/// different answer from the header being absent, which is all a client
+/// could observe before #548.
+#[tokio::test]
+async fn a_reject_that_never_left_this_connector_reports_zero_rather_than_nothing() {
+    let connector = Arc::new(Connector::new(
+        vec![],
+        vec![],
+        Arc::new(FakeAppClient::new()),
+        Arc::new(InProcessPeerTransport::new()),
+        test_clock(),
+    ));
+
+    let (reject, reported) = reject_and_reported_cost(connector, &prepare("g.nowhere")).await;
+
+    assert_eq!(reject.code.as_str(), "F02");
+    assert_eq!(reported, Some(0));
+}
+
+/// The whole point of the header: a figure the packet plane computed and
+/// this edge previously discarded. One forwarding hop charging 7, relaying a
+/// reject its peer genuinely decided on, is the smallest path whose cost is
+/// not zero.
+#[tokio::test]
+async fn a_reject_relayed_through_a_paying_hop_reports_that_hops_fee() {
+    let second_hop = Arc::new(Connector::new(
+        vec![],
+        vec![],
+        Arc::new(FakeAppClient::new()),
+        Arc::new(InProcessPeerTransport::new()),
+        test_clock(),
+    ));
+    let mut peer_transport = InProcessPeerTransport::new();
+    peer_transport.add_peer("second-hop", second_hop);
+    let connector = Arc::new(Connector::new(
+        vec![],
+        vec![PeerRoute::new("g.example", "second-hop", 7)],
+        Arc::new(FakeAppClient::new()),
+        Arc::new(peer_transport),
+        test_clock(),
+    ));
+
+    let (reject, reported) =
+        reject_and_reported_cost(connector, &prepare("g.example.remote")).await;
+
+    // The far hop had no route either, so what comes back is its F02 plus
+    // this hop's own fee -- one figure, no breakdown (ADR 0011).
+    assert_eq!(reject.code.as_str(), "F02");
+    assert_eq!(reported, Some(7));
+}

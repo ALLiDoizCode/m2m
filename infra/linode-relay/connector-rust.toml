@@ -1,0 +1,254 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# TOON devnet — Rust connector, RELAY box (issue #816, Shape A: one connector
+# per box, each fronting its own app — decided on #714, tracked as #815)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# ── What this file is ───────────────────────────────────────────────────────
+# The relay app (`relay:3100`) used to sit on the apex box, fronted by the
+# apex's own connector as a LOCAL app route. It now runs on THIS box
+# (docker-compose.relay.yml), and this connector terminates `g.toon.relay`
+# against it — co-located, instead of reached across the apex's container
+# network — while the apex forwards that prefix here over the peering below.
+#
+# **`[[peers]]` and `[[peer_channels]]` below, as of issue #820.** Peering
+# this box to the apex needs a live on-chain payment channel between the two
+# boxes' settlement identities -- issue #821 opened and funded one -- and the
+# `[[peer_channels]]` row below carries the same clearly-marked PLACEHOLDER
+# `channel_id`/`counterparty_key` convention `infra/linode-node/
+# connector-rust.toml`'s `apex-store` row uses: this repo never commits a
+# peering's live facts (see that row's own comment for why), so the real
+# values #821 already produced are applied directly to both boxes' untracked
+# files as part of #820's live cutover, not committed here.
+#
+# The apex's `g.toon.relay` route is now a `peer_id` forward to this box
+# (issue #820), and `transport = "btp"` has moved down to this file's own
+# terminating route below -- a `peer_id` route cannot carry `transport`
+# (`ConfigError::PeerRouteHasTransport`); a persistent BTP session actually
+# terminates here now, which is why issue #701's rationale lives on this
+# route rather than the apex's any more.
+#
+# ── Settlement ─────────────────────────────────────────────────────────────
+# Deliberately identical to both other boxes' (infra/linode-node/,
+# infra/linode-store/): the same Base Sepolia `TokenNetworkRegistry` and USDC,
+# the same Solana payment-channel program and mint, both at 6 decimals. A
+# claim resolves against one deployment, so every node that might ever accept
+# one has to agree on which. That holds independently of the apex<->relay
+# `[[peer_channels]]` row above: this box's client edge already accepts
+# unaffiliated buyers' own on-chain channels (issue #556/#611), and those
+# buyers pick the deployment by what the fleet advertises, not by which box
+# answers — so this section was live from day one, before the peering existed.
+#
+# `decimals = 6` is checked against the token's own on-chain `decimals()` at
+# startup and a disagreement refuses the boot (#564), so a stale value here is
+# a loud failure rather than a mispriced route.
+#
+# ── Key provisioning ────────────────────────────────────────────────────────
+# Three key files, all this box's own, mounted read-only by the overlay
+# (docker-compose.relay.rust.yml). Unlike the store box, this is a genuinely
+# NEW box with no pre-existing TypeScript settlement identity to reproduce —
+# there is no legacy `connector.yaml` on this box to match addresses with —
+# so all three are FRESH material, provisioned per
+# deploy/connector-rust/README.md step 1 (`openssl rand -hex 32`) from this
+# box's own TOON_MNEMONIC, and funded once generated (#821, human: SSH, new
+# identity, funds, DNS, certs).
+# ═══════════════════════════════════════════════════════════════════════════
+
+client_edge_addr = "0.0.0.0:4000"
+
+# Durable claim watermarks (#605): the journals whose replay is what makes a
+# claim watermark survive a restart. Backed by the `connector_rust_state`
+# named volume in docker-compose.relay.rust.yml.
+state_dir = "/app/state"
+
+# ── The g.toon proxy<->relay peering (issue #820, Shape A -- #815) ────────
+# This box is the ACCEPTING half: it exposes a BTP listener and never dials.
+# The g.toon proxy is the dialing half and carries the `endpoint`
+# (infra/linode-node/connector-rust.toml).
+#
+# `peer_expose` is a bare top-level key, so it lives up here with
+# `client_edge_addr` and `state_dir` rather than next to the `[[peers]]`
+# table it configures -- written after any table header it would be read as
+# a key OF that table and refused. Mirrors
+# infra/linode-store/connector-rust.toml's identical placement.
+peer_expose = "btp"
+
+# The peering's shared secret is a FILE, same handling as the store peering:
+# `infra/linode-relay/*.secret` is gitignored, so the peering is tracked and
+# only the bytes stay on the box.
+[[peers]]
+id = "apex-relay"
+credential = { secret_file = "/app/data/apex-relay.secret" }
+# No `endpoint`: this node accepts and never dials. `ceiling` used to be
+# REQUIRED here (`AcceptOnlyPeerWithoutCeiling`) -- retired along with the
+# credit window it bounded (ADR 0031, ADR 0033, issue #882): every peer
+# PREPARE now carries its own covering claim.
+
+# Role is decided by authentication AND a channel binding (peer-carriage-spec
+# 1.2, ADR 0024). Without this row the g.toon proxy authenticates fine, is
+# admitted only as an ordinary client, and every claim it sends is refused
+# `unknown_channel`.
+[[peer_channels]]
+peer_id = "apex-relay"
+# PLACEHOLDER (issue #820) -- see infra/linode-node/connector-rust.toml's
+# matching row for the full explanation. Issue #821 already opened and
+# funded the real channel (channel_id 0x62c81d83bf0bda1af54233fa92cae0c287e
+# 34838fb3434e6911d289dba6fa3fa); its real facts are applied directly to
+# both boxes' untracked files as part of #820's live cutover, not committed
+# here.
+channel_id = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeadbeef"
+counterparty_key = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeadbeef"
+chain_id = 84532
+token_network = "0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478"
+
+[signer]
+key_file = "/app/data/signer.key"
+
+# ── Announce (issue #843, repo half of #815) ────────────────────────────────
+# This box's own kind:10032 publisher, so `g.toon.relay` is discoverable
+# under THIS node's identity -- the same `[signer]` key that answers `GET
+# /ilp/identity` and opens every gift wrap this node terminates (ADR 0018).
+# Mirrors the store's own publisher (issue #833,
+# infra/linode-store/connector-rust.toml's [announce] section), which fixed
+# the identical defect for `g.toon.ario`: a stock client that reads an
+# announce published under a FORWARDER's identity seals its gift wrap to a
+# key the TERMINATING node does not hold, pays at the client edge, and is
+# refused `F01 gift wrap could not be opened` -- after the money is spent.
+#
+# `identity_key_file` (issue #870, toon-meta#310's apex-retirement spec) now
+# CARRIES OVER the apex's own announce identity, reversing the reasoning
+# this comment used to give for leaving the field absent: the genesis peer
+# seed baked into published `@toon-protocol/core` pins the apex announcer
+# sidecar's pubkey (`30fdd01d…` -- the key that sidecar reads via
+# `ANNOUNCER_IDENTITY_SECRET_KEY_FILE`, whose in-container path
+# `/app/data/announce.key` is bind-mounted from the apex HOST's
+# `/root/keys/announce.key`; infra/linode-node/docker-compose.node.
+# announcer.yml), not this box's `[signer]`. Once the apex is retired this
+# box becomes the fleet's public front, so it must sign `g.toon.relay`'s
+# announce under that SAME pubkey -- docs/operators/announcing-a-node.md's
+# "carry over a durable Nostr identity" case exactly, and the reason every
+# already-deployed client can repair itself without an update: it already
+# trusts this author, and only needs to learn the new endpoints.
+#
+# `/app/data/announce.key` is a box-local file this line names but does not
+# supply -- like every other key_file in this section, real key material is
+# never committed (`infra/linode-relay/*.key` in .gitignore). It must hold
+# the EXACT bytes of the apex's `/root/keys/announce.key`, copied verbatim:
+# the Rust reader accepts either 64-hex or 32 raw bytes, so no reformatting
+# is needed. Provisioning that copy onto this box is the live, human,
+# reversible extraction step (toon-meta#310 Wave B, issue #311) -- proven
+# working BEFORE the apex is touched, per that spec's own sequencing rule --
+# not something this commit does. Until that copy lands, this box has no
+# file at that path and refuses to boot (`AnnounceIdentityKeyFileNotFound`),
+# which is why the compose overlays that mount it
+# (docker-compose.relay.rust.yml, docker-compose.relay.announce.yml) are
+# part of this same change: the mount and the config line must land
+# together or neither does anything. The key itself is set below, inside
+# the `[announce]` table proper -- a bare `key = value` up here, under the
+# `[signer]` header this comment block sits below, would be read as a
+# `[signer]` key instead and refused (the same trap `peer_expose`'s own
+# comment above notes in reverse: that one must go BEFORE any header, this
+# one AFTER its own).
+#
+# Unlike the store, `relay_url` IS set here: this box fronts the relay app
+# (docker-compose.relay.yml's `relay` service, port 7100 behind this box's
+# own nginx) and genuinely serves free reads, so the announce says so.
+# `relay-ws.devnet.toonprotocol.dev` is this box's OWN nginx's name for that
+# service (./nginx/conf.d/node.conf) -- the same public name the apex's
+# announcer sidecar advertises today (`ANNOUNCER_RELAY_PUBLIC_URL`,
+# infra/linode-node/docker-compose.node.announcer.yml), which still resolves
+# to the apex box until the DNS move (#815 constraint 4, #820/#821 --
+# NOT this file's scope, and NOT done by committing this section).
+#
+# `publish_to`, `publish_btp_url` and `pay_channel` are all deliberately
+# ABSENT -- and unlike the store's omissions above, this is not "not yet
+# provisioned", it is "does not apply". Those three fields describe PAYING
+# THROUGH somebody else's client edge to reach a prefix this node does not
+# terminate (the store's shape: it announces `g.toon.ario` by paying the
+# g.toon proxy, which does not terminate that prefix either). This node
+# terminates `g.toon.relay` itself (see `[[routes]]` below), so its
+# scheduled announce (docker-compose.relay.announce.yml) runs
+# `--via-own-routing --to g.toon.relay` against its OWN client edge instead
+# of the default pay-the-URL path -- the packet is handed straight to this
+# node's own `handle_prepare` rather than to `pay_the_through_url`
+# (`crates/connector-cli/src/announce.rs`'s `via_own_routing` branch), so it
+# never leaves this process: there is nobody to pay and no through-address to
+# name. Per docs/operators/announcing-a-node.md's "Routing it yourself",
+# `--via-own-routing` replaces the funded-channel requirement with "a
+# [[routes]] entry reaching the destination", which this file already has.
+#
+# This announce does not depend on the `[[peer_channels]]` row below either,
+# even though this file has one as of issue #820: that table funds the
+# apex<->relay PEERING, which is a separate fact from this announce's own
+# `--via-own-routing` path -- there is nobody to pay here regardless of
+# whether the peering is funded. Do not add a placeholder channel id to make
+# this section "complete" -- there is nothing for one to pay.
+#
+# `route_publish`/`route_store` are PINNED, not left to derive -- issue #845,
+# the same class of defect #841 pinned shut on the TypeScript sidecar's
+# ANNOUNCER_ROUTE_STORE. `derive_route_hints` (crates/connector-config/src/
+# announce.rs) first looks for a `.store`/`.ario` address in `addresses`
+# above; this box's list is just `["g.toon.relay"]`, so it falls through to
+# suffix surgery -- strip `.relay` off the one address it has and append
+# `.store` -- inventing `g.toon.store`, a prefix NOTHING on this fleet
+# routes (the store prefix is `g.toon.ario`). A client that takes that
+# unpinned `routes.store` hint at face value has nowhere to upload. Pinning
+# both here the way the store box's own address already does implicitly
+# (`g.toon.ario` matches the `.ario` branch directly, so it never reaches
+# the fallback) is load-bearing: do not remove either key without also
+# removing the reason `derive_route_hints` would misfire without it.
+[announce]
+addresses         = ["g.toon.relay"]
+http_endpoint     = "https://proxy.relay.devnet.toonprotocol.dev/ilp"
+btp_endpoint      = "wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp"
+relay_url         = "wss://relay-ws.devnet.toonprotocol.dev"
+identity_key_file = "/app/data/announce.key"
+route_publish     = "g.toon.relay"
+route_store       = "g.toon.ario"
+
+# ── Routes ─────────────────────────────────────────────────────────────────
+
+[[routes]]
+prefix = "g.toon.relay"
+# `/write`, not the bare origin: `HttpAppClient::deliver` POSTs here, and the
+# relay app serves only `POST /write` and `GET /health`. A bare
+# `http://relay:3100` -- the same gap the apex's own route hit on first
+# deploy (#492) -- does NOT come back as an F99 reject. Under ADR 0020 a
+# non-2xx from the app is a real answer that consumed real work, so it rides
+# home on a FULFILL with `status: 404` and the payer is charged in full for
+# nothing (`crates/connector-runtime/src/connector.rs`'s `AppOutcome::Answered`
+# arm; `crates/connector-bin/tests/local_stack_rehearsal.rs` spells this out).
+# There is no reject and no alarm -- misconfiguring this path silently
+# charges payers, it does not fail loudly.
+handler_url = "http://relay:3100/write"
+# 1 micro-USDC per relay write, matching the apex's live price for this
+# prefix (infra/linode-node/connector-rust.toml, owner decision 2026-08-04).
+# The relay carries the buzz huddles workload — per-audio-frame at 49 fps —
+# and 1 micro-USDC is the coherent per-frame price; a general-write price is
+# the wrong frame for this route. `docs/devnet-pricing.md` is the committed
+# source of truth for every route's price and rationale.
+price = 1
+# Issue #701 (toon-meta#262 decision 11): the relay is high-frequency and
+# latency-sensitive with an always-connected client — huddles already run
+# 49 fps over BTP, and a persistent session amortizes the handshake and claim
+# round trip an HTTP one-shot would pay on every write.
+transport = "btp"
+
+# ── Settlement ─────────────────────────────────────────────────────────────
+
+[settlement.evm]
+rpc_url = "https://base-sepolia-rpc.publicnode.com"
+contract_address = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1"
+token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "/app/data/settlement.key"
+
+[settlement.solana]
+rpc_url = "https://api.devnet.solana.com"
+program_id = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
+token_address = "xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "/app/data/settlement-solana.key"

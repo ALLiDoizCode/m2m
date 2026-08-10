@@ -1,38 +1,391 @@
 # ═══════════════════════════════════════════════════════════════════════════
-# TOON devnet — Rust connector, store side (issue #490, ADR 0013's parallel
-# fleet)
+# TOON devnet — Rust connector, STORE box (`toon-devnet-store`, 45.79.173.113,
+# DNS proxy.ario.devnet.toonprotocol.dev)
 # ═══════════════════════════════════════════════════════════════════════════
-# Mirrors infra/linode-node/connector-rust.toml's own header for the prefix
-# reasoning (`g.rust`, chosen there — NOT `g.proxy`, which is stale-comment
-# drift; the live TypeScript apex is `g.toon`). Runs ALONGSIDE
-# ./connector.yaml's TypeScript node on this box — see
-# docker-compose.store.rust.yml, an ADDITIVE overlay that never edits
-# docker-compose.store.yml.
 #
-# Terminates `g.rust.store` at the SAME running store (Arweave DVM) app this
-# box's TypeScript connector already fronts (store:3300) — payment-
-# oblivious per ADR 0013, and NOT modified by this file. Accepts the
-# node-side Rust connector's peer-wire connection (peer_wire_addr below); it
-# never dials out itself, so there is no [[peers]] section here.
+# > **Superseded 2026-08-04/05.** The header below describes the additive
+# > parallel-fleet era, when this file was an overlay beside a live TypeScript
+# > connector. Since then the cutover happened: the TypeScript connector on this
+# > box is stopped, THIS node serves the box's default public edge at `/`, and
+# > the edge was renamed `proxy.store.devnet` → `proxy.ario.devnet` (#774) to
+# > match the `g.toon.ario` prefix it serves. `proxy.store` survives only as a
+# > deprecated alias — same certificate, same upstream — and is slated for
+# > removal, so treat every `proxy.store` URL in the prose below as history.
+# Deployed by docker-compose.store.rust.yml as an ADDITIVE overlay beside the
+# TypeScript fleet in docker-compose.store.yml, mirroring how the g.toon proxy
+# box has run both connectors side by side since #601. It is NOT a cutover: the
+# TypeScript connector keeps serving the default public edge
+# (https://proxy.store.devnet.toonprotocol.dev/ → connector:3000, including its
+# half of the live BTP peering to the g.toon proxy), and this node is reachable
+# only under /rust/ilp and /rust/ilp/btp on this box's own nginx.
+#
+# Why this file grew from a stub into a deployable config: the g.toon proxy box
+# has run a Rust connector for weeks, the store box has never run one, and that
+# asymmetry is the hard blocker on retiring TypeScript — the store leg cannot
+# move to Rust while there is no Rust process on the store box to move it to.
+# Standing this up is step 1 of the cutover runbook, and on its own it changes
+# nothing about what serves production traffic.
+#
+# ── What this node terminates ──────────────────────────────────────────────
+# The same three prefixes this box's retired TypeScript connector terminated
+# (its config is deleted, issue #901), at the same prices, against the same
+# payment-oblivious store app on :3300:
+#
+#   g.toon.ario         this box's own advertised prefix
+#   g.toon.relay.ario   the relay-hop form (client → g.toon proxy → store)
+#   g.toon.store        the alias the proxy's own g.toon.store route forwards
+#                       to, kept here so a client arriving at this edge
+#                       directly is priced identically
+#
+# `http://store:3300/store` resolves by the same container-name DNS the
+# TypeScript node relied on — the overlay joins this compose project's
+# default network. The path is `/store` because that is the store app's
+# HTTP-backend endpoint (DVM_BACKEND_MODE=http, HANDLER_PORT=3300); it is also
+# what this box's nginx `location /store` hands it, so the g.toon proxy's public
+# forward (https://proxy.store…/store) and this node's private one land on the
+# identical handler.
+#
+# Prices are pinned at `1000` (0.001 USDC in 6-decimal base units). This
+# matched the retired TypeScript connector's own `price: '1000'` on all three
+# routes for as long as both fronted this box's app -- an unequal pair would
+# have been an arbitrage between two doors into one handler, with the cheaper
+# door taking every packet. That TypeScript config is deleted (issue #901);
+# this Rust node is now the box's only door. When the g.toon proxy's
+# g.toon.relay price was hand-cut on the box from 1000 to 1 (2026-08-03 02:01,
+# undocumented) it created exactly that hazard on the other box; the
+# underlying rule -- multiple doors into one handler must price identically --
+# still applies to any future second connector on this box.
+#
+# Transport is left at the default (`both`): a store write is a one-shot
+# request from an arbitrary buyer, so unlike the proxy's relay leg — pinned
+# `transport = "btp"` for huddles' persistent 49fps sessions (#701) — there is
+# nothing here to amortize a handshake against.
+#
+# ── No `peer_wire_addr`, and no `[[peers]]`, deliberately ──────────────────
+# The previous draft of this file bound ADR 0003's raw-TCP peer wire on :4001,
+# and the compose overlay demanded a `STORE_PEER_WIRE_BIND` VPC address to
+# publish it on. Both are removed:
+#
+#   * the VPC was never provisioned, and #600 settled that none is wanted —
+#     node↔node links on this fleet are public and TLS-terminated by each
+#     box's own nginx, like the TypeScript fleet's BTP-over-wss;
+#   * the peer wire cannot carry a public link (#623): raw-TCP custom framing
+#     nginx cannot TLS-terminate, no transport security of its own by ADR
+#     0003's design, and SocketAddr-only addressing — see
+#     crates/connector-config/src/peer.rs, where a peer is `{ id, addr }` and
+#     nothing else, with nothing to hang a handshake on;
+#   * the paid forwarded path was structurally unwired when this file was
+#     written (#620): a peer route was neither priced at the client edge nor
+#     charged on arrival at the terminating side, so a peer-forwarded
+#     `g.toon.store` would have served this store app FOR FREE, beside the
+#     g.toon proxy's paid door. ADR 0028 closed the first half -- a `peer_id`
+#     route now carries a `price` its client edge greets and charges, and
+#     cannot load without one -- so what remains open is arrival-side charging.
+#
+# Binding an unauthenticated plaintext listener on a box with no private
+# segment is a hazard with no upside while all three hold, so this node
+# accepts no inbound peer connection and dials no peer. It is a
+# client-edge-only connector — which is exactly what the g.toon proxy's Rust
+# node already is, and why the two are comparable.
+#
+# THE PEERING GOES HERE. When the inter-connector transport decision lands
+# (BTP over wss, or ILP-over-HTTP — not this file's call), the store leg gains
+# a peer entry below plus a route with a `peer_id` next hop, and the g.toon
+# proxy's `g.toon.ario` / `g.toon.store` routes stop being plain outbound
+# HTTPS POSTs to this box's nginx and become forwards over that peering. Until
+# then the proxy reaches the store app the way any client on the open internet
+# does.
+#
+# ── Settlement ─────────────────────────────────────────────────────────────
+# Live, and deliberately identical to the g.toon proxy's
+# (infra/linode-node/connector-rust.toml): the same Base Sepolia
+# `TokenNetworkRegistry` and USDC, the same Solana payment-channel program and
+# mint, both at 6 decimals. It has to be the same deployment — a claim this
+# node accepts is written against the channel the buyer opened on the shared
+# devnet contracts, and a node pointed at a different registry cannot resolve
+# it.
+#
+# DECISION (owner-confirmed 2026-08-03): this node settles on BOTH chains.
+#
+# Stating that plainly because it REVERSES the argument this same header used
+# to make. The old text argued for an EVM-only template on the grounds that a
+# store box is "the other end" of a payment and never a counterparty. That
+# held only while #600's topology did — the proxy terminated the store leg and
+# this box had no Rust node at all. It stopped being true the moment this file
+# gained a priced client edge: a node that accepts claims IS a counterparty,
+# on whichever chain the buyer chose, and the live fleet's peering already
+# settles on `solana:devnet` (both TypeScript peers carry
+# `chain: solana:devnet`). An EVM-only node here would refuse every
+# Solana-paid write that reached it.
+#
+# The old argument's cost is real and is accepted, not dismissed: a PRESENT
+# settlement table is fail-closed at startup by design (ADR 0009), so each leg
+# is one more chain this node must reach and one more key file to provision
+# before it will boot at all.
+#
+# If a future edit wants EVM-only again, change this comment in the same edit.
+# A header that argues the opposite of the values beneath it is not a
+# harmless stale note — the live g.toon proxy's `connector-rust.toml` carries a
+# comment asserting parity at `1000` above a `price = 1`, and that
+# contradiction is exactly why a 1000x price cut sat unnoticed for twenty
+# hours. Do not reproduce it here.
+#
+# ── Key provisioning, and the mnemonic-reuse decision ──────────────────────
+# Three key files, all this box's own, mounted read-only by the overlay. They
+# are NOT provisioned the same way, and the difference is the point:
+#
+#   ./signer-rust.key             FRESH RANDOM — `openssl rand -hex 32`, per
+#                                 deploy/connector-rust/README.md step 1.
+#                                 This is the connector's own ILP signing
+#                                 identity (ADR 0012) and must NOT collide
+#                                 with the TypeScript node's. The g.toon proxy
+#                                 does the same: its Rust signer resolves to
+#                                 0x8b0cb539f6b58d9fa1266faaec18555c4f8e598e,
+#                                 which is not any TypeScript settlement
+#                                 identity on that box.
+#
+#   ./settlement-rust.key         DERIVED from this box's TOON_MNEMONIC —
+#   ./settlement-solana-rust.key  deliberately reproducing the SAME addresses
+#                                 the TypeScript node already uses.
+#
+# DECISION (owner-confirmed 2026-08-03): the settlement keys are derived from
+# the existing mnemonic rather than freshly generated. Reusing the seed means
+# this node inherits settlement identities the fleet has already funded and
+# already advertises — `docker-compose.store.yml`'s store service publishes the
+# same pair as `SETTLE_EVM` / `SETTLE_SOL`. Fresh identities would each need
+# funding, and every client with an open channel would have to open a new one
+# against the new address.
+#
+# So for the settlement pair, matching the TypeScript node is the GOAL, not a
+# collision to avoid. Derive from `TOON_MNEMONIC` in this directory's `.env`
+# (the store box's own seed — `docker-compose.store.yml` calls it
+# STORE_TOON_MNEMONIC in prose) at **account index 0**, the index that
+# produced the two addresses that file's store service still advertises:
+#
+#   evm     m/44'/1237'/0'/0/0   → 0x6B6c2DACf7Ac1F1273F72beF2E6084F9Ee6D3bff
+#   solana  m/44'/501'/0'/0'     → W6yK72j365eK7t4Qj5An1AaYtUEJcJK7TBPvGeDk1LV
+#
+# The EVM path is NIP-06 `1237'`, the Nostr coin type — NOT the standard
+# `m/44'/60'`. This fleet settles with the same secp256k1 key it signs Nostr
+# events with. Deriving at `m/44'/60'/0'/0/0` yields a valid, funded-by-nobody
+# address and a node that cannot resolve a single existing channel, so verify
+# the derived addresses equal the two literals above BEFORE the first
+# `up -d` — that check, not the path string, is the real guard.
+#
+# CONSEQUENCES OF THE REUSE, both of which are accepted:
+#
+#   * Rotating this mnemonic now rotates BOTH connectors' settlement
+#     identities at once. There is no longer a way to re-key the Rust node
+#     alone, and a rotation is a fleet event requiring every counterparty
+#     channel to be re-opened. The signer key above is unaffected — it is not
+#     derived from the seed and can be rotated independently.
+#   * While both connectors run side by side (the whole additive phase, and
+#     the drain), TWO processes hold the SAME settlement private key. That is
+#     safe for accepting claims, which is a read against chain state, but two
+#     processes must never submit settlement transactions concurrently from
+#     one key — they would race the account nonce. Keep on-chain settlement
+#     driven by exactly one of the two connectors for the duration, and do not
+#     trigger a settle from the other.
+#
+# `decimals = 6` is checked against the token's own on-chain `decimals()` at
+# startup and a disagreement refuses the boot (#564), so a stale value here is
+# a loud failure rather than a mispriced route.
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Distinct from the TypeScript node's 3000/8080/8081, matching the node-side
-# connector-rust.toml's own port choice.
 client_edge_addr = "0.0.0.0:4000"
 
-# The accepting side of the peer wire — the node-side apex dials this. Port
-# matches that apex's [[peers]] entry for id = "store".
-peer_wire_addr = "0.0.0.0:4001"
+# Durable claim watermarks (#605): the journals whose replay is what makes a
+# claim watermark survive a restart. Backed by the `connector_rust_state`
+# named volume in the overlay. The image MUST be built from #614 or later for
+# a FRESH volume to be writable on first mount — that commit (63b8188a) ships
+# /app/state owned by the runtime user, and this box's volume will be fresh by
+# definition. Every `rust-sha-` tag published since is well past it, so this
+# constrains rolling BACK, not rolling forward.
+state_dir = "/app/state"
+
+# ── The g.toon proxy<->store peering (ADR 0027, issues #678/#750) ─────────
+# This box is the ACCEPTING half: it exposes a BTP listener and never dials.
+# The g.toon proxy is the dialing half and carries the `endpoint`
+# (infra/linode-node/connector-rust.toml).
+#
+# `peer_expose` is a bare top-level key, so it lives up here with
+# `client_edge_addr` and `state_dir` rather than next to the [[peers]] table
+# it configures -- written after any table header it would be read as a key
+# OF that table and refused.
+peer_expose = "btp"
+
+# The peering lived on the boxes only until #750 gave `credential` a
+# `secret_file`: this file is committed to a PUBLIC repository, so a peering
+# written with a literal could not be committed at all.
+[[peers]]
+# ONE string both operators write: the g.toon proxy puts this in its credential
+# and this node proves P1 by looking it up here. Same literal on both sides, or
+# nothing peers and there is no error anywhere.
+id = "apex-store"
+# The shared secret, as a FILE. `infra/linode-store/*.secret` is gitignored,
+# so the peering is tracked and only the bytes stay on the box. Missing,
+# unreadable or empty is a refuse-to-start by name (PeerSecretFileNotFound /
+# -Unreadable / -Empty), never a peering that silently never establishes.
+credential = { secret_file = "/app/data/apex-store.secret" }
+# No `endpoint`: this node accepts and never dials. `ceiling` used to be
+# REQUIRED here (AcceptOnlyPeerWithoutCeiling) -- retired along with the
+# credit window it bounded (ADR 0031, ADR 0033, issue #882): every peer
+# PREPARE now carries its own covering claim.
+
+# Role is decided by authentication AND a channel binding (peer-carriage-spec
+# 1.2, ADR 0024). Without this row the g.toon proxy authenticates fine, is
+# admitted only as an ordinary client, and every claim it sends is refused
+# `unknown_channel` -- which is exactly what happened before #678 wired this
+# table to `ClaimBook`.
+[[peer_channels]]
+peer_id = "apex-store"
+# PLACEHOLDER (issue #822) -- these two values are NOT a real channel and
+# must not be used as one. The retired channel (the real values this
+# replaced) still lives, unclosed, on the OLD TokenNetwork
+# (0x1E95493fEF46707E034b4a1945f25a8C76A1823D) until the live migration
+# proves a replacement against the new TokenNetwork below works end to
+# end; only then is the retired channel closed and settled, per
+# docs/operators/peer-channel-migration.md. That runbook opens the
+# replacement channel and overwrites both placeholders with its real
+# channel_id and the apex box's settlement address, on BOTH boxes
+# together.
+channel_id = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead"
+counterparty_key = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead"
+# The EIP-712 domain a claim on this channel is signed over
+# (EIP712("TokenNetwork","1"), ADR 0024). A claim signed under a different
+# domain recovers to a different address and is refused. Repointed to the
+# new ERC-2771 TokenNetwork (issue #822, #695/#811) -- both boxes must
+# agree, or a claim one accepts is unresolvable by the other.
+chain_id = 84532
+token_network = "0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478"
 
 [signer]
-# Real key material, generated per-box, never committed — see
-# infra/linode-node/connector-rust.toml's own [signer] comment.
 key_file = "/app/data/signer.key"
 
-[[routes]]
-prefix = "g.rust.store"
-handler_url = "http://store:3300"
+# ── Announce (issue #833) ───────────────────────────────────────────────────
+# This box's own kind:10032 publisher, so `g.toon.ario` is discoverable under
+# THIS node's identity -- the same `[signer]` key that answers `GET
+# /ilp/identity` and opens every gift wrap this node terminates.
+#
+# Before this section existed, the ONLY publisher of `g.toon.ario` was the
+# g.toon proxy's announcer sidecar (infra/linode-node/docker-compose.node.
+# announcer.yml), advertising the PROXY's identity for a prefix the proxy
+# FORWARDS rather than terminates (ADR 0028/#772). A stock client reads that
+# announce, seals its gift wrap to the proxy's key, pays at the client edge --
+# and the store box, which is the connector that actually holds the key the
+# wrap is sealed to (ADR 0018), cannot open it: `F01 gift wrap could not be
+# opened`, after the money is already spent. That defect is what issue #833
+# is. This section is the fix's terminating-side half; the proxy's stopgap
+# announce of this same prefix is retired in the same change (see that file's
+# own comment).
+#
+# `identity_key_file` is deliberately ABSENT. That field exists to carry a
+# PRIOR publisher's identity forward (issue #799) so a genesis seed already
+# pinning that pubkey does not go stale -- and it does not apply here: this
+# box has never had a kind:10032 publisher of its own (no sidecar, no prior
+# `connector announce`), and the genesis seed pins the g.toon proxy's
+# announcer pubkey, not this box's. Announcing under this node's own
+# `[signer]` is correct from the start and strands nobody.
+#
+# `relay_url` is deliberately ABSENT too: this box fronts no relay (see
+# docs/operators/announcing-a-node.md), and pointing it at the g.toon proxy's
+# relay would advertise free reads this node does not serve.
+[announce]
+addresses     = ["g.toon.ario"]
+http_endpoint = "https://proxy.ario.devnet.toonprotocol.dev/ilp"
+btp_endpoint  = "wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp"
+# The address of the route that terminates at the chosen relay's write
+# ingress. `g.toon.relay` is the RELAY BOX's own terminating route -- as of
+# issue #871 this node pays THROUGH THE RELAY's client edge directly, not
+# through the apex, per toon-meta#310 (retiring the apex: the relay box is
+# the fleet's only public write ingress once it goes). Still the same
+# address; only who terminates it, and who this box pays, changed.
+publish_to = "g.toon.relay"
+# The TARGET's BTP endpoint -- where THIS node pays the relay box, not
+# where clients pay this node (`btp_endpoint` above is that one; the two
+# point in opposite directions, which is why this one is spelled `publish_*`
+# alongside `publish_to`).
+#
+# Issue #871: repointed off the apex (`wss://proxy.devnet.toonprotocol.dev/
+# ilp/btp`, issue #820's value) onto the relay box's own advertised
+# `btp_endpoint` (infra/linode-relay/connector-rust.toml's `[announce]`
+# section). The relay's own `g.toon.relay` route is pinned
+# `transport = "btp"` (issue #701, the relay's high-frequency
+# always-connected traffic) -- `pay_the_through_url` reads that requirement
+# off the target's own greeting and refuses `NoBtpEndpoint` up front,
+# before anything is signed, with neither `--btp-url` nor this key set. The
+# scheduled command in docker-compose.store.announce.yml passes no
+# `--btp-url`, so this is where it comes from.
+publish_btp_url = "wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp"
+# `pay_channel` names a funded EVM channel this box PAYS THE RELAY BOX
+# from, as an ordinary client. It is deliberately NOT a
+# `[[client_channels]]` row: that table is channels this node RECEIVES on,
+# and one channel in both roles is the same collision `Config::load`
+# already refuses between the peer and client books
+# (`ConfigError::ChannelInBothNamespaces`). See ADR 0030.
+#
+# Opening and funding the real channel -- WITH THE RELAY BOX, replacing the
+# apex-funded channel issue #820's cutover made obsolete -- is a live,
+# human step (docs/operators/announcing-a-node.md's "What the node needs
+# before this can work"), not something a repo diff can supply, so -- per
+# the same #822 placeholder policy the `[[peer_channels]]` channel id above
+# already follows -- this commits a clearly-marked placeholder rather than
+# either the live value or an absent field. The real id lives only on the
+# box (issues #853/#871); the scheduled `connector announce` in
+# docker-compose.store.announce.yml reads whichever value the box's own
+# copy of this file carries.
+pay_channel = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeadc0de"
 
-# ── Operator surface (optional) ─────────────────────────────────────────
-# See infra/linode-node/connector-rust.toml's own note — omitted for the
-# same reason.
+# ── Routes ─────────────────────────────────────────────────────────────────
+
+[[routes]]
+prefix = "g.toon.ario"
+handler_url = "http://store:3300/store"
+price = 1000
+
+# ── `g.toon.store` is GONE (owner decision, 2026-08-05) ──────────────────
+# This box used to terminate a third prefix at the SAME store app and the
+# SAME price -- an alias, kept so a client arriving directly at this edge was
+# priced identically to one arriving via the g.toon proxy's `g.toon.store`
+# forward. The proxy dropped that forward, so this alias has nothing left to
+# mirror. One name for one app; `g.toon.ario` is the survivor because it is the
+# one compiled into a shipped client.
+
+# ── `g.toon.relay.ario` is ALSO GONE (issue #820) ─────────────────────────
+# This box used to terminate the relay-hop spelling too (client -> g.toon
+# proxy -> here) -- but it was never actually reachable that way, and
+# retiring it here (rather than the alternative docs/devnet-pricing.md's
+# "Known divergence" section named -- adding a dedicated apex forward row
+# for it at 1002/fee 2) is #820's resolution of that divergence.
+#
+# The apex's Rust route table has only ever declared `g.toon.relay` and
+# `g.toon.ario`, never this name, so longest-prefix matching always dropped
+# `g.toon.relay.ario` into the `g.toon.relay` route -- which the apex
+# TERMINATED against `relay:3100` until #820, so every arrival here 404'd
+# for free. #820 turns `g.toon.relay` into a peer_id forward to the relay
+# box, whose own route table also declares only `g.toon.relay`, never a
+# `.ario` child -- so the SAME longest-prefix match would keep landing
+# there, just after consuming a real signed claim on the apex<->relay
+# channel instead of failing for free. Retiring the name here (nothing in a
+# shipped client addresses it; buzz pins `storeDestination: "g.toon.ario"`
+# in compiled code) closes the gap rather than relocating and pricing it.
+
+# ── Settlement ─────────────────────────────────────────────────────────────
+
+[settlement.evm]
+rpc_url = "https://base-sepolia-rpc.publicnode.com"
+contract_address = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1"
+token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "/app/data/settlement.key"
+
+[settlement.solana]
+rpc_url = "https://api.devnet.solana.com"
+program_id = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
+token_address = "xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "/app/data/settlement-solana.key"

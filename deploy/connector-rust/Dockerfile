@@ -8,7 +8,7 @@
 # CONFIG_FILE"; this takes a TOML path as argv. Swapping what a tag means in
 # place is the one shape that cutover design rules out.
 #
-# Published to GHCR as ghcr.io/toon-protocol/connector-rust by
+# Published to GHCR as ghcr.io/toon-protocol/connector (rust-* tags) by
 # .github/workflows/publish-connector-rust-image.yml (issue #487), tagged by
 # content (`sha-<short-sha>`) rather than by version — no crate under crates/
 # has a release process yet (every Cargo.toml is still 0.1.0), so a semver tag
@@ -69,7 +69,14 @@ FROM alpine:3.22 AS runtime
 # verifies TLS against the system root store when an app's handler_url is
 # https.
 RUN apk add --no-cache ca-certificates && \
-    adduser -D -u 10001 connector
+    adduser -D -u 10001 connector && \
+    # /app/state must exist in the image, owned by the runtime user, BEFORE
+    # any volume is mounted over it: a named volume mounted on a path the
+    # image does not provide is created root-owned, uid 10001 cannot write
+    # it, and the connector refuses to start (state_dir fails closed, issue
+    # #605). Providing the path here is what makes a fresh named volume
+    # inherit 10001 ownership on first mount.
+    mkdir -p /app/state && chown connector:connector /app/state
 
 COPY --from=builder /workspace/target/release/connector /usr/local/bin/connector
 

@@ -30,6 +30,25 @@ pub enum JournalError {
 pub trait Journal: Send + Sync {
     fn append(&self, entry: &JournalEntry) -> Result<(), JournalError>;
 
+    /// Append `entries` in order, durably, as one operation -- the group
+    /// commit issue #686 amortizes the client edge's per-claim fsync over.
+    /// The contract is `append`'s, batched: when this returns `Ok`, every
+    /// entry in the batch is durable, in the order given, with nothing
+    /// interleaved between them from any concurrent append. An `Err` makes
+    /// no promise about any entry in the batch -- a caller must treat the
+    /// whole batch as not durably recorded, exactly as it would treat one
+    /// failed `append`.
+    ///
+    /// The default is a per-entry loop, correct for any implementation --
+    /// [`FileJournal`] overrides it to one write and one fsync, which is
+    /// the entire point.
+    fn append_batch(&self, entries: &[JournalEntry]) -> Result<(), JournalError> {
+        for entry in entries {
+            self.append(entry)?;
+        }
+        Ok(())
+    }
+
     /// Every entry ever appended, in the order they were written -- what a
     /// node folds into a [`connector_domain::Projection`] and replays into
     /// `ClaimBook` state on start.
@@ -187,6 +206,25 @@ impl Journal for FileJournal {
         Ok(())
     }
 
+    /// One buffered write and one `fsync` for the whole batch -- the fsync
+    /// is the per-entry cost issue #686 exists to amortize, and batching
+    /// `write` calls beside it keeps a batch's lines contiguous under the
+    /// one lock hold.
+    fn append_batch(&self, entries: &[JournalEntry]) -> Result<(), JournalError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut lines = String::new();
+        for entry in entries {
+            lines.push_str(&encode_line(entry));
+            lines.push('\n');
+        }
+        let mut file = self.file.lock().expect("file journal lock poisoned");
+        file.write_all(lines.as_bytes())?;
+        file.sync_data()?;
+        Ok(())
+    }
+
     fn read_all(&self) -> Result<Vec<JournalEntry>, JournalError> {
         let file = File::open(&self.path)?;
         BufReader::new(file)
@@ -257,6 +295,34 @@ mod tests {
         // entries a prior process instance wrote are still there.
         let reopened = FileJournal::open(&path).unwrap();
         assert_eq!(reopened.read_all().unwrap(), sample_entries());
+    }
+
+    #[test]
+    fn a_file_journal_batch_reads_back_in_order_beside_single_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = FileJournal::open(dir.path().join("journal.log")).unwrap();
+        let entries = sample_entries();
+        journal.append(&entries[0]).unwrap();
+        journal.append_batch(&entries[1..]).unwrap();
+
+        assert_eq!(journal.read_all().unwrap(), entries);
+    }
+
+    #[test]
+    fn an_empty_batch_appends_nothing_and_syncs_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = FileJournal::open(dir.path().join("journal.log")).unwrap();
+        journal.append_batch(&[]).unwrap();
+
+        assert!(journal.read_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_default_batch_is_the_per_entry_loop() {
+        let journal = InMemoryJournal::new();
+        journal.append_batch(&sample_entries()).unwrap();
+
+        assert_eq!(journal.read_all().unwrap(), sample_entries());
     }
 
     #[test]

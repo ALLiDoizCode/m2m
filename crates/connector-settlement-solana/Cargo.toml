@@ -4,20 +4,35 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+[features]
+test-util = ["dep:tempfile"]
+
 [dependencies]
 connector-settlement = { path = "../connector-settlement" }
-connector-settlement-solana-program = { path = "../connector-settlement-solana-program", default-features = false, features = [
-    "no-entrypoint",
-] }
 async-trait = "0.1"
 chrono = "0.4"
 thiserror = "2"
-sha2 = "0.10"
-solana-client = "=2.1.0"
+# solana-rpc-client, NOT the solana-client meta-crate: this backend only does
+# JSON-RPC over HTTP plus local transaction building/signing, and the meta-crate
+# drags in solana-quic-client/solana-udp-client/solana-streamer (TPU send
+# machinery) -- whose sendmmsg.rs constructs `libc::msghdr` with struct-literal
+# syntax and therefore fails to compile on musl targets, breaking the
+# connector-rust Docker image build (alpine builder). The one type this crate
+# uses, `nonblocking::rpc_client::RpcClient`, is defined here; solana-client
+# merely re-exported it.
+solana-rpc-client = "=2.1.0"
 solana-sdk = "=2.1.0"
+spl-token = { version = "=6.0.0", features = ["no-entrypoint"] }
+spl-associated-token-account = "=4.0.0"
 tokio = { version = "1", features = ["macros", "rt", "time"] }
+tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
+# This crate itself, with `test-util` on, so the integration tests reuse
+# the one `solana-test-validator` harness `src/test_support.rs` already
+# ships to downstream crates (`connector-cli`) instead of carrying a
+# duplicated copy under `tests/support/`.
+connector-settlement-solana = { path = ".", features = ["test-util"] }
 connector-settlement = { path = "../connector-settlement", features = ["test-util"] }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
 tempfile = "3"

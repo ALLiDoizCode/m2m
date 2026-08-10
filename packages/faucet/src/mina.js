@@ -26,6 +26,14 @@
 // with the old public-faucet link as the documented fallback, so an
 // unconfigured (e.g. EVM-only) deploy still boots and still points users at a
 // way to get MINA.
+//
+// NOT MOUNTED as of connector#898 (toon-meta#310 §4.6): the faucet is USDC
+// only, so `POST /api/mina/request` is gone from the service and nothing calls
+// `createMinaFaucet` / `minaInfo` / `minaFallbackLink` any more — the routes
+// and capability map they describe do not exist. `isValidMinaAddress` below is
+// the only export the service still uses (by the USDC route). The native-drip
+// code and its tests are kept as-is rather than deleted so a future native leg
+// has a working starting point; do not read them as describing a live route.
 
 import Client from 'mina-signer';
 

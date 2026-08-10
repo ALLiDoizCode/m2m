@@ -15,12 +15,28 @@ impl std::fmt::Display for ChannelId {
     }
 }
 
-/// Whether a channel can still be funded and redeemed against, or has been
-/// closed for good.
+/// Whether a channel can still be funded, is running its challenge period,
+/// or is permanently done.
+///
+/// `Closed` and `Settled` are deliberately distinct (issue #574): closing a
+/// channel starts a challenge period (`settlement_timeout`, given to
+/// [`SettlementBackend::open`]) during which [`SettlementBackend::redeem`]
+/// still works -- refusing to redeem in that window hands the whole
+/// outstanding balance back to whichever party closed the channel, which
+/// `TokenNetwork.claimFromChannel` deliberately does not do
+/// (`packages/contracts/src/TokenNetwork.sol:262-263`, `:273`). Only
+/// `Settled`, reached by a successful [`SettlementBackend::settle`] once
+/// that timeout has elapsed, is terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelStatus {
     Open,
+    /// Closed: its challenge period is running (or, once the timeout has
+    /// elapsed, is simply unclaimed). `fund` and a second `close` are
+    /// refused, but `redeem` still succeeds.
     Closed,
+    /// Settled: `settle` has run to completion. Terminal -- no further
+    /// `fund` or `redeem` is possible.
+    Settled,
 }
 
 /// A snapshot of a channel's state, as any [`SettlementBackend`] must be
@@ -38,20 +54,29 @@ pub struct ChannelState {
 
 /// A cumulative, superseding claim to a channel's funds (ADR 0004, ADR
 /// 0005): `cumulative_amount` is the total ever owed to the redeemer as of
-/// this claim, not an increment over the last one. `signature` is whatever
-/// proof a backend's chain requires that the channel's counterparty
-/// actually signed it -- opaque bytes here since the signature scheme is
-/// chain-specific (recoverable ECDSA for EVM, ed25519 for Solana) and this
-/// port does not verify it; only the on-chain (or in-memory) settlement
-/// logic that a real backend enforces does.
+/// this claim, not an increment over the last one. `nonce` is the
+/// strictly-increasing counter inside the signed material every chain this
+/// port settles on hashes and enforces (`TokenNetwork.claimFromChannel`'s
+/// `balanceProof.nonce > counterpartyState.nonce`, the deployed Solana
+/// program's per-participant nonce ratchet, issue #573) -- carried through
+/// unchanged from `connector_runtime::WireClaim`, whose own `nonce` is also
+/// `u64` (a value signed at one width and hashed at another does not
+/// recover, so this port settles on the wire's own width rather than
+/// widening it the way `cumulative_amount` already widens to a chain's
+/// `uint256`). `signature` is whatever proof a backend's chain requires
+/// that the channel's counterparty actually signed it -- opaque bytes here
+/// since the signature scheme is chain-specific (recoverable ECDSA for EVM,
+/// ed25519 for Solana) and this port does not verify it; only the on-chain
+/// (or in-memory) settlement logic that a real backend enforces does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Claim {
+    pub nonce: u64,
     pub cumulative_amount: u128,
     pub signature: Vec<u8>,
 }
 
-/// Errors a [`SettlementBackend`] implementation reports. The first four
-/// variants are ones the port itself defines the meaning of. [`Backend`]
+/// Errors a [`SettlementBackend`] implementation reports. Every variant but
+/// [`Backend`] is one the port itself defines the meaning of; [`Backend`]
 /// is the one variant a real, chain-backed implementation like
 /// `connector-settlement-evm` (issue #459) needs and the in-memory stand-in
 /// does not: an I/O-level failure (a reverted transaction the backend's own
@@ -65,8 +90,37 @@ pub enum SettlementError {
     #[error("channel '{0}' not found")]
     ChannelNotFound(ChannelId),
 
+    /// The channel is `Closed` (its challenge period is running, or has
+    /// elapsed but [`SettlementBackend::settle`] has not yet been called)
+    /// and the attempted operation requires it still be `Open` -- `fund`,
+    /// or a second `close`. Does *not* cover [`SettlementBackend::redeem`],
+    /// which still succeeds against a `Closed` channel (issue #574) --
+    /// see [`ChannelSettled`] for the error `redeem` does return once the
+    /// channel is actually settled.
+    ///
+    /// [`ChannelSettled`]: SettlementError::ChannelSettled
     #[error("channel '{0}' is already closed")]
     ChannelClosed(ChannelId),
+
+    /// The channel is `Settled` -- [`SettlementBackend::settle`] has run to
+    /// completion -- and the attempted operation (`fund`, `redeem`,
+    /// `close`, or a second `settle`) requires it not be. Distinct from
+    /// [`ChannelClosed`], which still permits `redeem`: nothing is possible
+    /// against a settled channel (issue #574).
+    ///
+    /// [`ChannelClosed`]: SettlementError::ChannelClosed
+    #[error("channel '{0}' is already settled")]
+    ChannelSettled(ChannelId),
+
+    /// [`SettlementBackend::settle`] was called before its channel's
+    /// challenge period -- `settlement_timeout`, given to
+    /// [`SettlementBackend::open`], counted from [`SettlementBackend::close`]
+    /// -- has elapsed (or before `close` was ever called at all). Named
+    /// distinctly rather than folded into [`SettlementError::Backend`], so a
+    /// caller can tell "try again once the window has passed" apart from a
+    /// genuine I/O failure (issue #574).
+    #[error("channel '{0}' is not yet due for settlement")]
+    SettlementNotYetDue(ChannelId),
 
     #[error("claim of {requested} exceeds the channel's funded balance of {deposited}")]
     InsufficientChannelBalance { requested: u128, deposited: u128 },
@@ -78,6 +132,34 @@ pub enum SettlementError {
         claimed: u128,
         already_redeemed: u128,
     },
+
+    /// A claim's `nonce` did not strictly exceed the highest one already
+    /// redeemed on this channel -- distinct from [`StaleClaim`], which is
+    /// about `cumulative_amount`, because the two can diverge: a claim can
+    /// name a higher amount than has ever been redeemed while still
+    /// carrying a nonce that does not advance (a stale or replayed claim
+    /// resent alongside a since-fabricated amount). Real chains enforce
+    /// nonce ordering directly (see [`Claim::nonce`]'s own doc); today only
+    /// [`crate::InMemorySettlementBackend`] enforces it here too --
+    /// `connector-settlement-evm` and `connector-settlement-solana` settle
+    /// through contracts with no nonce field of their own yet (issue #566's
+    /// retarget), so neither backend can enforce this rule client-side
+    /// until that lands.
+    ///
+    /// [`StaleClaim`]: SettlementError::StaleClaim
+    #[error(
+        "claim nonce {claimed} does not exceed the channel's already-redeemed nonce {already_redeemed}"
+    )]
+    StaleNonce { claimed: u64, already_redeemed: u64 },
+
+    /// A claim's `signature` could not be put into the form its chain's
+    /// verifier requires (issue #590) -- e.g. an EVM claim whose trailing
+    /// recovery-id byte is outside both libsecp256k1's `{0, 1}` and
+    /// Ethereum's `{27, 28}` conventions. Named distinctly so a malformed
+    /// claim is refused before it is ever submitted, rather than
+    /// discovered as a reverted on-chain transaction.
+    #[error("claim signature is invalid: {0}")]
+    InvalidClaimSignature(String),
 
     #[error("settlement backend error: {0}")]
     Backend(String),
@@ -130,9 +212,30 @@ pub trait SettlementBackend: Send + Sync {
         claim: Claim,
     ) -> Result<ChannelState, SettlementError>;
 
-    /// Close `channel`. No further funding or redemption is possible
-    /// against it afterward. Returns the channel's final state.
+    /// Close `channel`, starting its challenge period (issue #574): no
+    /// further funding is possible against it afterward, and it cannot be
+    /// closed a second time, but [`redeem`](SettlementBackend::redeem)
+    /// still works until [`settle`](SettlementBackend::settle) actually
+    /// runs. Returns the channel's state immediately after closing.
     async fn close(&self, channel: &ChannelId) -> Result<ChannelState, SettlementError>;
+
+    /// Settle `channel` once its challenge period -- `settlement_timeout`,
+    /// given to [`open`](SettlementBackend::open), counted from
+    /// [`close`](SettlementBackend::close) -- has elapsed: pays out its
+    /// final remainder and marks it permanently done, after which no
+    /// further funding or redemption is possible. Returns
+    /// [`SettlementError::SettlementNotYetDue`], not
+    /// [`SettlementError::Backend`], if the timeout has not yet elapsed (or
+    /// `close` has not yet been called at all).
+    ///
+    /// Permissionless (issue #574): any caller may invoke this once the
+    /// timeout has passed, not only a channel's own participants -- this is
+    /// what stops a counterparty stranding a channel's deposit by refusing
+    /// to ever settle it, matching `TokenNetwork.settleChannel`'s own
+    /// design (`packages/contracts/src/TokenNetwork.sol:366-374`, "Anyone
+    /// can call after the grace period"). No implementation of this port
+    /// should gate `settle` on the caller being a channel participant.
+    async fn settle(&self, channel: &ChannelId) -> Result<ChannelState, SettlementError>;
 
     /// The current state of `channel`, as last recorded by this backend.
     async fn channel_state(&self, channel: &ChannelId) -> Result<ChannelState, SettlementError>;

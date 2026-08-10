@@ -1,6 +1,10 @@
 //! A minimal, genuinely payment-oblivious HTTP app: it sees a POST request
 //! and returns success or failure -- nothing about channels, claims,
-//! settlement or ILP conditions enters this binary at all (issue #488).
+//! settlement or ILP conditions enters this binary at all (issue #488). It
+//! holds no secret and performs no cryptography, so it supplies nothing
+//! toward a packet's fulfilment either (issue #525) -- the terminating
+//! connector derives that itself from the sealed request, entirely above
+//! this app's own boundary.
 //!
 //! Built for the end-to-end test in `tests/two_connectors_and_a_stub_app.rs`,
 //! but it is an ordinary standalone process like the real connector binary:
@@ -14,14 +18,6 @@ use axum::routing::post;
 use axum::Router;
 use std::io::Write;
 
-/// Returned as the `TOON-Fulfillment` response header on every accepted
-/// delivery. This app has no notion of a per-packet execution condition --
-/// it is a fixed, hardcoded value, and whatever drives this app must derive
-/// its own condition from this same constant
-/// (`connector_domain::derive_condition`) for the delivery to be accepted
-/// upstream.
-const FULFILLMENT_HEX: &str = "0707070707070707070707070707070707070707070707070707070707070707";
-
 /// A request body equal to exactly this byte string is declined with a 402
 /// -- lets a driving test exercise both outcomes ("success or failure")
 /// without this app knowing anything about why.
@@ -33,12 +29,7 @@ async fn handle(body: Bytes) -> Response {
     }
     let mut reply = b"delivered by stub app: ".to_vec();
     reply.extend_from_slice(&body);
-    (
-        StatusCode::OK,
-        [("TOON-Fulfillment", FULFILLMENT_HEX)],
-        reply,
-    )
-        .into_response()
+    (StatusCode::OK, reply).into_response()
 }
 
 #[tokio::main]

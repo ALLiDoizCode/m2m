@@ -1,12 +1,22 @@
 //! The peer transport port: forwards a [`Prepare`] to another connector for
 //! the next hop, optionally carrying a claim (issue #423), and flushes a
 //! claim on its own when nothing else is going out (peer-wire-spec.md
-//! §3.3). See `docs/protocol/peer-wire-spec.md` §1.1 -- production peering
-//! is one persistent duplex stream per relation; [`InProcessPeerTransport`]
-//! here is the in-process stand-in that spec calls out for composing
-//! multi-connector tests without a socket. [`crate::NetworkPeerTransport`]
-//! (issue #416) is the network implementation of the same port; both are
-//! held to the contract suite in this module's `tests::contract`.
+//! §3.3).
+//!
+//! **This port is the seam ADR 0027 rests on.** The raw-TCP peer wire that
+//! used to implement it was deleted in issue #679 -- it never carried a
+//! production packet -- and the replacement carriages (BTP over `wss://`
+//! and ILP-over-HTTP over `https://`, issue #676) will be built behind this
+//! same trait. Everything above the port -- [`crate::Connector`]'s peer
+//! forwarding, [`crate::ClaimBook`], fees, routing -- is carriage-agnostic
+//! and was untouched by that deletion.
+//!
+//! Until a carriage lands, [`InProcessPeerTransport`] is the only
+//! implementation: the in-process stand-in for composing multi-connector
+//! tests without a socket, and -- registered with no peers -- what a
+//! production node holds, so a `peer_id`-targeted route answers `T01`
+//! rather than silently dropping. It is held to the contract suite in this
+//! module's `tests::contract`, which each new carriage joins.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,30 +24,105 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
 
+use connector_domain::x402::X402PaymentRequired;
 use connector_domain::{PacketResponse, Prepare, Reject, RejectCode};
 
 use crate::claim::{ClaimAckOutcome, WireClaim};
 use crate::connector::Connector;
 
-/// Forwards a [`Prepare`] to the connector reachable at `peer_id` and
-/// returns whatever [`PacketResponse`] it produces, unchanged -- a reject
-/// originated at the far end reaches the caller exactly as that peer sent
-/// it. `minimum_delivery` is the amount the original sender declared must
-/// reach the destination (ADR 0010) -- carried alongside `prepare` rather
-/// than inside it, and passed to the peer unchanged so every hop enforces
-/// it against the same figure. `claim` piggybacks whatever this connector
-/// currently owes `peer_id` (peer-wire-spec.md §3.2); the returned
-/// [`ClaimAckOutcome`] is [`ClaimAckOutcome::NotSent`] when `claim` was
-/// `None`, or when the peer could not be reached to answer at all.
+/// What one forward to a peer produced.
 ///
-/// The trailing `bool` is whether this peer was actually reached -- `true`
-/// for any real answer (fulfil or reject) the peer itself decided on,
-/// `false` when this transport could not deliver the PREPARE at all, in
-/// which case the accompanying [`PacketResponse`] is this transport's own
-/// synthesized `T01` (see [`peer_unreachable`]). The caller (issue #426,
-/// ADR 0011) needs this to decide whether its own fee belongs on an
-/// outgoing REJECT: only a hop that actually forwarded earns one
-/// (peer-wire-spec.md §5.2).
+/// A named struct rather than a tuple because of its fourth field: the
+/// terms a peer quoted when it refused to carry the packet unpaid (issue
+/// #874). A carriage that read a `payment-required` greeting and then
+/// flattened it into a bare [`PacketResponse::Reject`] would hand the
+/// forwarding path a refusal it cannot act on -- and acting on it, by
+/// covering the packet and retrying once, is exactly what issue #875 adds
+/// above this port.
+#[derive(Debug)]
+pub struct PeerForward {
+    /// Whatever the peer decided, unchanged -- a reject originated at the
+    /// far end reaches the caller exactly as that peer sent it.
+    pub response: PacketResponse,
+    /// [`ClaimAckOutcome::NotSent`] when no claim rode along, or when the
+    /// peer could not be reached to answer at all.
+    pub ack: ClaimAckOutcome,
+    /// Whether this peer was actually reached -- `true` for any real answer
+    /// (fulfil or reject) the peer itself decided on, `false` when this
+    /// transport could not deliver the PREPARE at all, in which case
+    /// `response` is this transport's own synthesized `T01` (see
+    /// [`peer_unreachable`]). The caller (issue #426, ADR 0011) needs this
+    /// to decide whether its own fee belongs on an outgoing REJECT: only a
+    /// hop that actually forwarded earns one (peer-wire-spec.md §5.2).
+    pub reached_peer: bool,
+    /// The x402 terms the peer quoted while refusing the packet (issue
+    /// #874), or `None` when it quoted none. **Absence means "no terms were
+    /// offered", never "the terms could not be read"**: a carriage that
+    /// found a greeting it could not parse must answer with its own reject
+    /// and no terms rather than degrade an unreadable greeting into a free
+    /// ride (see `connector_domain::x402::GreetingError`).
+    pub payment_required: Option<Box<X402PaymentRequired>>,
+}
+
+impl PeerForward {
+    /// The peer answered for itself, quoting no terms.
+    pub fn answered(response: PacketResponse, ack: ClaimAckOutcome) -> PeerForward {
+        PeerForward {
+            response,
+            ack,
+            reached_peer: true,
+            payment_required: None,
+        }
+    }
+
+    /// The peer refused the packet **and quoted terms** for carrying it.
+    pub fn quoted(
+        response: PacketResponse,
+        ack: ClaimAckOutcome,
+        terms: X402PaymentRequired,
+    ) -> PeerForward {
+        PeerForward {
+            response,
+            ack,
+            reached_peer: true,
+            payment_required: Some(Box::new(terms)),
+        }
+    }
+
+    /// This transport never delivered the PREPARE at all: a synthesized
+    /// `T01`, nothing acknowledged, and no fee of the caller's on it.
+    pub fn unreachable(peer_id: &str) -> PeerForward {
+        PeerForward {
+            response: peer_unreachable(peer_id),
+            ack: ClaimAckOutcome::NotSent,
+            reached_peer: false,
+            payment_required: None,
+        }
+    }
+
+    /// The peer answered something this carriage could not read as an ILP
+    /// packet -- a `T01` like [`PeerForward::unreachable`], except that an
+    /// acknowledgement may still have been read off the frame.
+    pub fn undecodable(peer_id: &str, ack: ClaimAckOutcome) -> PeerForward {
+        PeerForward {
+            ack,
+            ..PeerForward::unreachable(peer_id)
+        }
+    }
+}
+
+/// Forwards a [`Prepare`] to the connector reachable at `peer_id` and
+/// returns whatever that peer answered, unchanged -- a reject originated at
+/// the far end reaches the caller exactly as that peer sent it.
+/// `minimum_delivery` is the amount the original sender declared must reach
+/// the destination (ADR 0010) -- carried alongside `prepare` rather than
+/// inside it, and passed to the peer unchanged so every hop enforces it
+/// against the same figure. `claim` piggybacks whatever this connector
+/// currently owes `peer_id` (peer-wire-spec.md §3.2).
+///
+/// See [`PeerForward`] for what comes back, and in particular for why a
+/// carriage that read x402 terms off a refusal must report them rather than
+/// flatten them into the reject.
 #[async_trait]
 pub trait PeerTransport: Send + Sync {
     async fn forward(
@@ -46,7 +131,7 @@ pub trait PeerTransport: Send + Sync {
         prepare: Prepare,
         minimum_delivery: u64,
         claim: Option<WireClaim>,
-    ) -> (PacketResponse, ClaimAckOutcome, bool);
+    ) -> PeerForward;
 
     /// Send `claim` with no packet to ride -- the flush mechanism
     /// (peer-wire-spec.md §3.3) that covers the case traffic to `peer_id`
@@ -55,13 +140,17 @@ pub trait PeerTransport: Send + Sync {
     async fn flush(&self, peer_id: &str, claim: WireClaim) -> ClaimAckOutcome;
 }
 
+/// §2.2, §5.1 of `peer-wire-spec.md`: a peer this connector could not reach
+/// rejects `T01`. Never `T00`, and never a silent drop. Every carriage
+/// reaches this through [`PeerForward::unreachable`], so the refusal an
+/// unreachable peer produces has one definition rather than one per wire.
 pub(crate) fn peer_unreachable(peer_id: &str) -> PacketResponse {
     PacketResponse::Reject(Reject {
         code: RejectCode::t01_peer_unreachable(),
         triggered_by: String::new(),
         message: format!("peer '{peer_id}' unreachable"),
         data: Vec::new(),
-        accumulated_fee: 0,
+        accumulated_cost: 0,
     })
 }
 
@@ -91,15 +180,6 @@ enum PeerMessage {
 #[derive(Clone)]
 struct PeerLink {
     sender: mpsc::Sender<PeerMessage>,
-    /// The channel this link's counterparty is known to identify itself by
-    /// (issue #424) -- shared with the spawned task so
-    /// [`InProcessPeerTransport::set_peer_channel`] can configure it up
-    /// front, before any traffic, standing in for the identity a real
-    /// handshake would establish (#416, not yet built). Also updated by the
-    /// task itself the moment any claim or flush on this link names a
-    /// channel, so a link nobody pre-configured still learns its
-    /// counterparty's channel rather than never checking a ceiling at all.
-    known_channel_id: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl PeerLink {
@@ -111,8 +191,6 @@ impl PeerLink {
     /// identically.
     fn connect(connector: Arc<Connector>) -> PeerLink {
         let (sender, mut receiver) = mpsc::channel::<PeerMessage>(64);
-        let known_channel_id = Arc::new(std::sync::RwLock::new(None));
-        let known_channel_id_for_task = known_channel_id.clone();
         tokio::spawn(async move {
             while let Some(message) = receiver.recv().await {
                 match message {
@@ -122,46 +200,19 @@ impl PeerLink {
                         claim,
                         respond_to,
                     } => {
-                        if let Some(claim) = claim.as_ref() {
-                            *known_channel_id_for_task
-                                .write()
-                                .expect("known channel id lock poisoned") =
-                                Some(claim.channel_id.clone());
-                        }
-                        let channel_id = known_channel_id_for_task
-                            .read()
-                            .expect("known channel id lock poisoned")
-                            .clone();
                         let result = connector
-                            .handle_peer_prepare(prepare, minimum_delivery, claim, channel_id)
+                            .handle_peer_prepare(prepare, minimum_delivery, claim)
                             .await;
                         let _ = respond_to.send(result);
                     }
                     PeerMessage::Flush { claim, respond_to } => {
-                        *known_channel_id_for_task
-                            .write()
-                            .expect("known channel id lock poisoned") =
-                            Some(claim.channel_id.clone());
                         let ack = connector.handle_peer_claim(claim);
                         let _ = respond_to.send(ack);
                     }
                 }
             }
         });
-        PeerLink {
-            sender,
-            known_channel_id,
-        }
-    }
-
-    /// Configure the channel this link's counterparty identifies itself by,
-    /// ahead of any traffic (issue #424) -- standing in for what a real
-    /// peer-wire handshake would establish (#416).
-    fn set_known_channel(&self, channel_id: impl Into<String>) {
-        *self
-            .known_channel_id
-            .write()
-            .expect("known channel id lock poisoned") = Some(channel_id.into());
+        PeerLink { sender }
     }
 
     async fn forward(
@@ -170,7 +221,7 @@ impl PeerLink {
         prepare: Prepare,
         minimum_delivery: u64,
         claim: Option<WireClaim>,
-    ) -> (PacketResponse, ClaimAckOutcome, bool) {
+    ) -> PeerForward {
         let (respond_to, receiver) = oneshot::channel();
         if self
             .sender
@@ -183,11 +234,15 @@ impl PeerLink {
             .await
             .is_err()
         {
-            return (peer_unreachable(peer_id), ClaimAckOutcome::NotSent, false);
+            return PeerForward::unreachable(peer_id);
         }
         match receiver.await {
-            Ok((response, ack)) => (response, ack, true),
-            Err(_) => (peer_unreachable(peer_id), ClaimAckOutcome::NotSent, false),
+            // An in-process peer is a `Connector`, and a `Connector` quotes
+            // no terms of its own: greeting a claimless peer PREPARE is the
+            // client edge's job (issue #880), above this port on the
+            // receiving side.
+            Ok((response, ack)) => PeerForward::answered(response, ack),
+            Err(_) => PeerForward::unreachable(peer_id),
         }
     }
 
@@ -226,21 +281,6 @@ impl InProcessPeerTransport {
         self.peers
             .insert(peer_id.into(), PeerLink::connect(connector));
     }
-
-    /// Configure the channel `peer_id`'s link identifies itself by, ahead
-    /// of any traffic (issue #424, peer-wire-spec.md §5.3): without this,
-    /// the link only learns its counterparty's channel once a claim
-    /// happens to ride a frame over it (see `PeerLink::connect`'s own
-    /// doc), so the very first delivery before that point cannot be
-    /// checked against a ceiling or recorded as exposure. Configuring it
-    /// up front (what a real peer-wire handshake -- #416, not yet built --
-    /// would establish) closes that gap. Does nothing for a `peer_id` not
-    /// yet registered via [`InProcessPeerTransport::add_peer`].
-    pub fn set_peer_channel(&mut self, peer_id: &str, channel_id: impl Into<String>) {
-        if let Some(link) = self.peers.get(peer_id) {
-            link.set_known_channel(channel_id);
-        }
-    }
 }
 
 #[async_trait]
@@ -251,13 +291,13 @@ impl PeerTransport for InProcessPeerTransport {
         prepare: Prepare,
         minimum_delivery: u64,
         claim: Option<WireClaim>,
-    ) -> (PacketResponse, ClaimAckOutcome, bool) {
+    ) -> PeerForward {
         match self.peers.get(peer_id) {
             Some(link) => {
                 link.forward(peer_id, prepare, minimum_delivery, claim)
                     .await
             }
-            None => (peer_unreachable(peer_id), ClaimAckOutcome::NotSent, false),
+            None => PeerForward::unreachable(peer_id),
         }
     }
 
@@ -272,24 +312,51 @@ impl PeerTransport for InProcessPeerTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_client::{AppOutcome, FakeAppClient};
+    use crate::app_client::FakeAppClient;
     use crate::clock::TestClock;
+    use crate::test_support::{
+        answered, expected_fulfillment, fulfill_envelope, identity_signer, matching_condition,
+        open_sealed_envelope, sealed_envelope_request_data, sign_wire_claim, with_test_channel,
+    };
     use chrono::{TimeZone, Utc};
     use connector_config::StaticRoute;
-    use connector_domain::{claim_digest, derive_condition};
     use connector_signer::{LocalSigner, Signer};
 
-    const FULFILLMENT: [u8; 32] = [7u8; 32];
-
+    /// Seals a fixed body and sets `execution_condition` to match the
+    /// fulfilment its own (discarded) shared secret derives (ADR 0019,
+    /// issue #525) -- what a genuine sender does before ever transmitting a
+    /// packet, so this is, by construction, one that fulfils if it reaches
+    /// an app that answers at all. A test that also needs the secret back
+    /// uses [`sealed_prepare`] instead.
     fn prepare(destination: &str) -> Prepare {
+        let (data, shared_secret) = sealed_envelope_request_data(b"hello");
         Prepare {
             amount: 0,
             // Comfortably after `test_clock()`'s instant (2030-01-01).
             expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
-            execution_condition: derive_condition(&FULFILLMENT),
+            execution_condition: matching_condition(&shared_secret),
             destination: destination.to_string(),
-            data: b"hello".to_vec(),
+            data,
         }
+    }
+
+    /// A `Prepare` addressed to `"g.example.app"`, sealed to
+    /// [`identity_signer`]'s identity and carrying `body` (issue #524),
+    /// with `execution_condition` set to match the fulfilment this same
+    /// sealed secret derives (ADR 0019, issue #525). Returns the shared
+    /// secret alongside, to open the sealed `Fulfill`/termination-`Reject`
+    /// this produces, or to compute the expected fulfilment via
+    /// `expected_fulfillment`.
+    fn sealed_prepare(body: &[u8]) -> (Prepare, [u8; 32]) {
+        let (data, shared_secret) = sealed_envelope_request_data(body);
+        (
+            Prepare {
+                data,
+                execution_condition: matching_condition(&shared_secret),
+                ..prepare("g.example.app")
+            },
+            shared_secret,
+        )
     }
 
     fn test_clock() -> Arc<TestClock> {
@@ -302,34 +369,38 @@ mod tests {
     async fn forwards_to_the_registered_peer_and_returns_its_response() {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
-        app_client.respond(
-            route.handler_url(),
-            AppOutcome::Delivered {
-                data: b"delivered by the peer".to_vec(),
-                fulfillment: Some(FULFILLMENT),
-            },
+        app_client.respond(route.handler_url(), answered(b"delivered by the peer"));
+        let peer = Arc::new(
+            Connector::new(
+                vec![route],
+                vec![],
+                app_client,
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_identity_signer(identity_signer()),
         );
-        let peer = Arc::new(Connector::new(
-            vec![route],
-            vec![],
-            app_client,
-            Arc::new(InProcessPeerTransport::new()),
-            test_clock(),
-        ));
         let mut transport = InProcessPeerTransport::new();
         transport.add_peer("peer-b", peer);
+        let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-        let (response, ack, reached) = transport
-            .forward("peer-b", prepare("g.example.app"), 0, None)
-            .await;
-
-        assert_eq!(
+        let PeerForward {
             response,
-            PacketResponse::Fulfill(connector_domain::Fulfill {
-                fulfillment: FULFILLMENT,
-                data: b"delivered by the peer".to_vec(),
-            })
-        );
+            ack,
+            reached_peer: reached,
+            ..
+        } = transport.forward("peer-b", sealed, 0, None).await;
+
+        match response {
+            PacketResponse::Fulfill(fulfill) => {
+                assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
+                assert_eq!(
+                    open_sealed_envelope(&shared_secret, &fulfill.data),
+                    fulfill_envelope(b"delivered by the peer")
+                );
+            }
+            other => panic!("expected a fulfill, got {other:?}"),
+        }
         assert_eq!(ack, ClaimAckOutcome::NotSent);
         assert!(reached);
     }
@@ -338,7 +409,12 @@ mod tests {
     async fn returns_peer_unreachable_for_an_unregistered_peer_id() {
         let transport = InProcessPeerTransport::new();
 
-        let (response, ack, reached) = transport
+        let PeerForward {
+            response,
+            ack,
+            reached_peer: reached,
+            ..
+        } = transport
             .forward("nowhere", prepare("g.example.app"), 0, None)
             .await;
 
@@ -367,7 +443,11 @@ mod tests {
         let mut transport = InProcessPeerTransport::new();
         transport.add_peer("peer-b", peer);
 
-        let (response, _ack, reached) = transport
+        let PeerForward {
+            response,
+            reached_peer: reached,
+            ..
+        } = transport
             .forward("peer-b", prepare("g.nowhere-on-peer-b"), 0, None)
             .await;
 
@@ -387,27 +467,23 @@ mod tests {
     #[tokio::test]
     async fn a_piggybacked_claim_is_verified_and_acknowledged() {
         let signer = LocalSigner::generate("claim-key");
-        let peer = Arc::new(
+        let counterparty = connector_signer::derive_evm_address(&signer.public_key().unwrap());
+        let peer = Arc::new(with_test_channel(
             Connector::new(
                 vec![],
                 vec![],
                 Arc::new(FakeAppClient::new()),
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
-            )
-            .with_channel_verification_key("channel-a", signer.public_key().unwrap()),
-        );
+            ),
+            1,
+            counterparty,
+        ));
         let mut transport = InProcessPeerTransport::new();
         transport.add_peer("peer-b", peer);
-        let digest = claim_digest("channel-a", 1, 50);
-        let claim = WireClaim {
-            channel_id: "channel-a".to_string(),
-            nonce: 1,
-            cumulative_amount: 50,
-            signature: signer.sign(&digest).unwrap(),
-        };
+        let claim = sign_wire_claim(&signer, 1, 1, 50);
 
-        let (response, ack, _reached) = transport
+        let PeerForward { response, ack, .. } = transport
             .forward("peer-b", prepare("g.nowhere"), 0, Some(claim))
             .await;
 
@@ -427,11 +503,11 @@ mod tests {
             channel_id: "channel-a".to_string(),
             nonce: 1,
             cumulative_amount: 50,
-            signature: connector_signer::Signature {
+            signature: crate::claim::ClaimSignature::Evm(connector_signer::Signature {
                 r: [0u8; 32],
                 s: [0u8; 32],
                 recovery_id: 0,
-            },
+            }),
         };
 
         let ack = transport.flush("nowhere", claim).await;
@@ -447,20 +523,17 @@ mod tests {
     async fn a_single_peer_link_answers_several_concurrent_forwards() {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
-        app_client.respond(
-            route.handler_url(),
-            AppOutcome::Delivered {
-                data: b"ok".to_vec(),
-                fulfillment: Some(FULFILLMENT),
-            },
+        app_client.respond(route.handler_url(), answered(b"ok"));
+        let peer = Arc::new(
+            Connector::new(
+                vec![route],
+                vec![],
+                app_client,
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_identity_signer(identity_signer()),
         );
-        let peer = Arc::new(Connector::new(
-            vec![route],
-            vec![],
-            app_client,
-            Arc::new(InProcessPeerTransport::new()),
-            test_clock(),
-        ));
         let mut transport = InProcessPeerTransport::new();
         transport.add_peer("peer-b", peer);
         let transport = Arc::new(transport);
@@ -476,30 +549,34 @@ mod tests {
         }
 
         for handle in handles {
-            let (response, _ack, _reached) = handle.await.expect("task");
-            assert!(matches!(response, PacketResponse::Fulfill(_)));
+            let forward = handle.await.expect("task");
+            assert!(matches!(forward.response, PacketResponse::Fulfill(_)));
         }
     }
 
-    /// Contract suite (ADR 0007): [`InProcessPeerTransport`] and
-    /// [`crate::NetworkPeerTransport`] uphold the same statement about the
-    /// [`PeerTransport`] port -- a registered peer's response comes back
-    /// unchanged (fulfill or reject), and an unregistered peer id produces a
-    /// `T01` reject -- so nothing above this port can tell which
-    /// implementation is in use. Issue #426: both also agree on the
-    /// `reached` signal -- `true` for any registered peer's own answer,
-    /// `false` only when this transport never delivered the PREPARE at all.
+    /// Contract suite (ADR 0007): every [`PeerTransport`] implementation
+    /// upholds the same statement about the port -- a registered peer's
+    /// response comes back unchanged (fulfill or reject), and an
+    /// unregistered peer id produces a `T01` reject -- so nothing above
+    /// this port can tell which implementation is in use. Issue #426: all
+    /// also agree on the `reached` signal -- `true` for any registered
+    /// peer's own answer, `false` only when this transport never delivered
+    /// the PREPARE at all.
+    ///
+    /// The suite is deliberately generic over how a peer is wired up even
+    /// though [`InProcessPeerTransport`] is, since issue #679 deleted the
+    /// raw-TCP wire, its only member: ADR 0027's two carriages (#676) join
+    /// it by adding an arm, and the shared statement is what stops them
+    /// drifting from each other.
     mod contract {
         use super::*;
-        use crate::network_peer_transport::{NetworkPeerTransport, PeerWireServer};
         use std::future::Future;
 
         /// `deliverer` fulfills any destination under `g.example.app`;
         /// `rejecter` has no routes at all, so it produces the same F02 a
         /// direct client would get. Both are registered with `build`, which
-        /// wires each implementation up its own way (a direct `Arc<Connector>`
-        /// for the in-process case, a bound [`PeerWireServer`] for the
-        /// network case) and returns a transport that can reach both.
+        /// wires the implementation under test up its own way and returns a
+        /// transport that can reach both.
         async fn assert_upholds_the_contract<F, Fut>(build: F)
         where
             F: FnOnce(Vec<(&'static str, Arc<Connector>)>) -> Fut,
@@ -507,20 +584,17 @@ mod tests {
         {
             let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
             let app_client = Arc::new(FakeAppClient::new());
-            app_client.respond(
-                route.handler_url(),
-                AppOutcome::Delivered {
-                    data: b"delivered by the peer".to_vec(),
-                    fulfillment: Some(FULFILLMENT),
-                },
+            app_client.respond(route.handler_url(), answered(b"delivered by the peer"));
+            let deliverer = Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client,
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(identity_signer()),
             );
-            let deliverer = Arc::new(Connector::new(
-                vec![route],
-                vec![],
-                app_client,
-                Arc::new(InProcessPeerTransport::new()),
-                test_clock(),
-            ));
             let rejecter = Arc::new(Connector::new(
                 vec![],
                 vec![],
@@ -530,20 +604,30 @@ mod tests {
             ));
 
             let transport = build(vec![("peer-b", deliverer), ("peer-c", rejecter)]).await;
+            let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-            let (response, _ack, reached) = transport
-                .forward("peer-b", prepare("g.example.app"), 0, None)
-                .await;
-            assert_eq!(
+            let PeerForward {
                 response,
-                PacketResponse::Fulfill(connector_domain::Fulfill {
-                    fulfillment: FULFILLMENT,
-                    data: b"delivered by the peer".to_vec(),
-                })
-            );
+                reached_peer: reached,
+                ..
+            } = transport.forward("peer-b", sealed, 0, None).await;
+            match response {
+                PacketResponse::Fulfill(fulfill) => {
+                    assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
+                    assert_eq!(
+                        open_sealed_envelope(&shared_secret, &fulfill.data),
+                        fulfill_envelope(b"delivered by the peer")
+                    );
+                }
+                other => panic!("expected a fulfill, got {other:?}"),
+            }
             assert!(reached);
 
-            let (response, _ack, reached) = transport
+            let PeerForward {
+                response,
+                reached_peer: reached,
+                ..
+            } = transport
                 .forward("peer-c", prepare("g.nowhere-on-peer-c"), 0, None)
                 .await;
             match response {
@@ -555,7 +639,11 @@ mod tests {
             }
             assert!(reached);
 
-            let (response, _ack, reached) = transport
+            let PeerForward {
+                response,
+                reached_peer: reached,
+                ..
+            } = transport
                 .forward("nowhere", prepare("g.example.app"), 0, None)
                 .await;
             match response {
@@ -574,25 +662,6 @@ mod tests {
                 let mut transport = InProcessPeerTransport::new();
                 for (peer_id, connector) in peers {
                     transport.add_peer(peer_id, connector);
-                }
-                Arc::new(transport) as Arc<dyn PeerTransport>
-            })
-            .await;
-        }
-
-        #[tokio::test]
-        async fn network_peer_transport_upholds_the_contract() {
-            assert_upholds_the_contract(|peers| async move {
-                let mut transport = NetworkPeerTransport::new();
-                for (peer_id, connector) in peers {
-                    let server = PeerWireServer::bind("127.0.0.1:0".parse().unwrap(), connector)
-                        .await
-                        .unwrap();
-                    transport.add_peer(peer_id, server.local_addr());
-                    // Detach: the accept loop and per-connection tasks are
-                    // independent tokio tasks that keep running for the
-                    // test's duration even once `server` is dropped here.
-                    drop(server);
                 }
                 Arc::new(transport) as Arc<dyn PeerTransport>
             })

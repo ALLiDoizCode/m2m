@@ -9,8 +9,12 @@ cd "$ROOT"
 set -a; . "$HERE/.env"; set +a
 
 DC=(docker compose -f infra/linode-store/docker-compose.store.yml)
-PRIMARY="proxy.store.${DOMAIN}"
-DOMAINS=("proxy.store.${DOMAIN}" "dvm.${DOMAIN}")
+# `proxy.ario`, not `proxy.store` — this box's paid edge was renamed
+# 2026-08-05 (docker-compose.store.yml's PUBLIC_BTP_ENDPOINT comment). A
+# fresh box has no prior lineage to preserve, so its cert is issued under
+# the current name from the start.
+PRIMARY="proxy.ario.${DOMAIN}"
+DOMAINS=("proxy.ario.${DOMAIN}" "dvm.${DOMAIN}")
 CERT_PATH="/etc/letsencrypt/live/${PRIMARY}"
 RENEW_WINDOW_DAYS="${RENEW_WINDOW_DAYS:-30}"
 

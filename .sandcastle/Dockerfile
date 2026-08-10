@@ -13,6 +13,10 @@
 # variant, you MUST add `build-essential python3` before the USER switch.)
 FROM node:22-bookworm
 
+# Links the published GHCR package (ghcr.io/toon-protocol/sandcastle-connector,
+# see the pull step in .github/workflows/agent-implement.yml) to this repo.
+LABEL org.opencontainers.image.source="https://github.com/toon-protocol/connector"
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
   git \

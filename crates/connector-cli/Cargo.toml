@@ -5,15 +5,64 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# The BTP frame codec, for the announce's BTP carriage (issue #784): the ONE
+# codec both roles share (ADR 0027, issue #713) and the one
+# `connector-vectors` pins -- never a second implementation of a frame.
+connector-btp = { path = "../connector-btp" }
 connector-config = { path = "../connector-config" }
 connector-client-edge = { path = "../connector-client-edge" }
 connector-domain = { path = "../connector-domain" }
 connector-operator = { path = "../connector-operator" }
+# The two dial-side carriages (issue #678 gap 2): `[[peers]]` becomes a
+# transport here, dispatched by peer id, because this is the one place a
+# loaded `Config` and a `Connector` are both in scope.
+connector-peer-btp = { path = "../connector-peer-btp" }
+connector-peer-http = { path = "../connector-peer-http" }
 connector-runtime = { path = "../connector-runtime" }
+connector-settlement = { path = "../connector-settlement" }
+connector-settlement-evm = { path = "../connector-settlement-evm" }
+connector-settlement-solana = { path = "../connector-settlement-solana" }
 connector-signer = { path = "../connector-signer" }
+async-trait = "0.1"
 axum = "0.6"
+# The `ilp-payment-channel-claim` header is base64 of the claim JSON -- the
+# client send path of `connector announce` (issue #784).
+base64 = "0.22"
+# `connector announce` (issue #784): the free, unauthenticated negotiation
+# against the through-URL (its x402 greeting and its `/ilp/identity`), and
+# the clock the PREPARE's expiry and the event's `created_at` are read from.
+chrono = "0.4"
+ethers = { version = "2", default-features = false, features = ["rustls"] }
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+solana-sdk = "=2.1.0"
+tokio = { version = "1", features = ["net", "time"] }
+# The websocket under the announce's BTP carriage -- the same 0.20 the peer
+# carriage and the client edge's own BTP integration test already speak.
+tokio-tungstenite = { version = "0.20", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+tracing = "0.1"
 
 [dev-dependencies]
+base64 = "0.22"
+connector-operator = { path = "../connector-operator", features = ["test-util"] }
+connector-settlement-evm = { path = "../connector-settlement-evm", features = ["test-util"] }
+connector-settlement-solana = { path = "../connector-settlement-solana", features = ["test-util"] }
+chrono = "0.4"
+ed25519-dalek = "1"
+hyper = { version = "0.14", features = ["full"] }
+# Derives an announced pubkey INDEPENDENTLY of `connector_signer::nostr`
+# (issue #799's `identity_key_file` pubkey-pinning test), so a bug in that
+# module's own BIP-340 derivation could not make the test agree with it by
+# construction. Same version `connector-signer` itself uses.
+k256 = { version = "0.13", features = ["schnorr"] }
+libsecp256k1 = "0.6"
+rand = "0.7"
+serde_json = "1"
+# solana-rpc-client, not the solana-client meta-crate -- see
+# crates/connector-settlement-solana/Cargo.toml for why.
+solana-rpc-client = "=2.1.0"
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tower = { version = "0.4", features = ["util"] }

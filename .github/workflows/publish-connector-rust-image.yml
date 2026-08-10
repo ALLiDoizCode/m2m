@@ -1,22 +1,20 @@
 name: Publish connector-rust image
 
 # Publishes the Rust connector (crates/connector-bin, built via
-# deploy/connector-rust/Dockerfile) to GHCR under its OWN name -- issue #487,
-# ADR 0013's parallel-fleet cutover. Nothing published this image before:
-# #429 added the Dockerfile, #465 explicitly left "whether and how this gets
-# published to GHCR" to this ticket.
+# deploy/connector-rust/Dockerfile) to GHCR as ghcr.io/toon-protocol/connector,
+# tagged `rust-sha-<short-sha>` (immutable, content-pinned) and `rust-main`
+# (floating). #429 added the Dockerfile, #465 left publishing to #487.
 #
-# `ghcr.io/toon-protocol/connector:X.Y.Z` means "the TypeScript node,
-# YAML/CONFIG_FILE"; this binary takes a TOML path as argv and has no semver
-# release process of its own (every crate under crates/ is still 0.1.0). So
-# this ships as ghcr.io/toon-protocol/connector-rust, tagged by content
-# (sha-<short-sha>) rather than by an invented version -- exactly what a
-# deployment pinning an exact build needs (#490), without asserting a
-# stability contract this binary hasn't earned. See the Dockerfile header
-# and deploy/connector-rust/README.md for the full reasoning.
-#
-# ghcr.io/toon-protocol/connector is untouched by this workflow: no new
-# tags, no change to what :latest points at.
+# NAME HISTORY (reversal, connector#633): #487 originally shipped this as a
+# SEPARATE package `connector-rust`, to avoid colliding with the TypeScript
+# node that owned `connector:X.Y.Z` (semver + cosign, CONNECTOR_RELEASE_CONTRACT.md).
+# That TS image is retired (last tag 4.0.0, no longer published), so the Rust
+# binary -- now the only connector there is -- reclaims the canonical
+# `connector` package name. The `rust-` tag prefix keeps these builds disjoint
+# from any lingering TS-node tag (X.Y.Z / latest / main), and the binary still
+# has no semver of its own (crates/ are 0.1.0), so it is tagged by content, not
+# by an invented version. See the Dockerfile header and
+# deploy/connector-rust/README.md for the full reasoning.
 
 on:
   push:
@@ -33,14 +31,20 @@ on:
 
 concurrency:
   group: publish-connector-rust-image
-  cancel-in-progress: false
+  # Supersede an in-flight build when a newer commit lands on main. This image
+  # is published per-push and tagged by content, so only the newest is ever
+  # wanted -- and `false` meant a superseded build held the group while the
+  # build someone was actually waiting on sat queued behind it (46 minutes,
+  # observed 2026-07-29). An older run's `sha-` tag is not lost by being
+  # cancelled: it can be rebuilt by `workflow_dispatch` on that commit.
+  cancel-in-progress: true
 
 permissions:
   contents: read
   packages: write
 
 env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/connector-rust
+  IMAGE: ghcr.io/${{ github.repository_owner }}/connector
 
 jobs:
   build-and-push:
@@ -72,9 +76,11 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
+          # `rust-` prefix keeps these disjoint from any TS-node tag that ever
+          # lived in this package (semver X.Y.Z, latest, main). See header.
           tags: |
-            type=raw,value=sha-${{ steps.sha.outputs.short }}
-            type=raw,value=main,enable={{is_default_branch}}
+            type=raw,value=rust-sha-${{ steps.sha.outputs.short }}
+            type=raw,value=rust-main,enable={{is_default_branch}}
 
       - name: Build and push connector-rust image
         uses: docker/build-push-action@v5
@@ -86,7 +92,22 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          platforms: linux/amd64,linux/arm64
+          # amd64 ONLY. The arm64 half compiled the entire Rust workspace under
+          # QEMU emulation -- `cargo build` runs natively for whichever
+          # architecture buildx presents as the container's own (see the
+          # Dockerfile header), so emulated arm64 means an emulated rustc, and
+          # the two-platform build took 89 minutes against roughly 10 native.
+          #
+          # Nothing consumes arm64. Both devnet boxes are x86_64 (`uname -m` on
+          # 104.237.150.177 and 45.79.173.113), and no compose file, overlay or
+          # doc outside the Dockerfile's own example line references an arm
+          # target.
+          #
+          # This DOES reverse an acceptance criterion of #487, which asked for
+          # both platforms -- recorded here rather than quietly dropped. Restore
+          # the second platform the moment something actually runs on one; the
+          # Dockerfile needs no change, it is this line and a slower build.
+          platforms: linux/amd64
 
       # Make the package public so a deployment (e.g. #490's devnet overlay)
       # can `docker pull` without authenticating to GHCR -- GHCR defaults a
@@ -100,7 +121,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh api --method PATCH \
-            "/orgs/${{ github.repository_owner }}/packages/container/connector-rust" \
+            "/orgs/${{ github.repository_owner }}/packages/container/connector" \
             -f visibility=public \
             && echo "✓ Package visibility set to public" \
             || echo "::warning::Could not set package visibility — may need manual fix in GHCR UI"
@@ -114,7 +135,7 @@ jobs:
       - name: Verify image refuses to start without a valid config (ADR 0009)
         run: |
           set +e
-          OUTPUT=$(docker run --rm "${{ env.IMAGE }}:sha-${{ steps.sha.outputs.short }}" 2>&1)
+          OUTPUT=$(docker run --rm "${{ env.IMAGE }}:rust-sha-${{ steps.sha.outputs.short }}" 2>&1)
           STATUS=$?
           set -e
           echo "----- container output -----"
@@ -129,7 +150,7 @@ jobs:
       - name: Publish summary
         run: |
           {
-            echo "## connector-rust image published"
+            echo "## connector (rust) image published"
             echo ""
             echo "**Image:** \`${{ env.IMAGE }}\`"
             echo ""

@@ -124,7 +124,7 @@ async function main() {
       // not write code. (Structured output requires maxIterations: 1.)
       maxIterations: 1,
       // Opus for planning: dependency analysis benefits from deeper reasoning.
-      agent: sandcastle.claudeCode('claude-opus-4-8'),
+      agent: sandcastle.claudeCode('claude-opus-5'),
       promptFile: './.sandcastle/plan-prompt.md',
       // Extract and validate the <plan> JSON into a typed object. Throws
       // StructuredOutputError if the tag is missing, the JSON is malformed, or
@@ -179,13 +179,22 @@ async function main() {
 
           // Only review if the implementer produced commits
           if (implement.commits.length > 0) {
+            // review-prompt.md now requires ISSUE_NUMBER/ISSUE_TITLE (the Spec
+            // axis, toon-meta#275) — an unresolved {{...}} placeholder fails the
+            // run, so pass them here too. This reserved autonomous loop does not
+            // yet CONSUME the reviewer's <review> verdict; the label runners
+            // (agent-implement-issue.ts / agent-review-pr.ts) enforce it via
+            // ./review-verdict.ts, and wiring it into this merge phase is part
+            // of the auto-merge work (toon-meta#270).
             const review = await sandbox.run({
               name: 'reviewer',
               maxIterations: 1,
-              agent: sandcastle.claudeCode('claude-sonnet-5'),
+              agent: sandcastle.claudeCode('claude-opus-5'),
               promptFile: './.sandcastle/review-prompt.md',
               promptArgs: {
                 BRANCH: issue.branch,
+                ISSUE_NUMBER: issue.id,
+                ISSUE_TITLE: issue.title,
               },
             });
 
@@ -247,7 +256,7 @@ async function main() {
       sandbox: docker({ env: sandboxEnv }),
       name: 'merger',
       maxIterations: 1,
-      agent: sandcastle.claudeCode('claude-opus-4-8'),
+      agent: sandcastle.claudeCode('claude-opus-5'),
       promptFile: './.sandcastle/merge-prompt.md',
       promptArgs: {
         // A markdown list of branch names, one per line.

@@ -19,6 +19,10 @@ Crate names track the [glossary](../../CONTEXT.md) rather than generic layer nam
 - `connector-config` — the typed configuration file, validated once into an immutable value
   (ADR 0009). Its own crate because the binary and the CLI both need it and the domain crate
   must not.
+- `connector-btp` — the BTP frame codec and session framing (RFC-0023), transport- and
+  role-neutral. Its own crate, below the client edge and below the runtime, because both
+  carriages of ADR 0027 must speak one grammar and neither may reach the other's policy
+  (issue #713). Depends on no other connector crate.
 - `connector-client-edge` — the client edge, exposed as
   `pub fn router(Arc<Connector>) -> axum::Router`.
 - `connector-operator` — the operator surface, likewise a `Router`.

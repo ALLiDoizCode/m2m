@@ -9,8 +9,14 @@ cd "$ROOT"
 set -a; . "$HERE/.env"; set +a
 
 DC=(docker compose -f infra/linode-node/docker-compose.node.yml)
-PRIMARY="relay-ws.${DOMAIN}"
-DOMAINS=("relay-ws.${DOMAIN}" "proxy.${DOMAIN}" "faucet.${DOMAIN}")
+PRIMARY="proxy.${DOMAIN}"
+# relay-ws.${DOMAIN} is NOT requested here (issue #820): the relay app this
+# box used to front moved to its own box (infra/linode-relay/), whose own
+# nginx (and own init-letsencrypt.sh) serves relay-ws.${DOMAIN} now --
+# ./nginx/conf.d/node.conf on THIS box no longer names it in server_name at
+# all, so a SAN naming it here would request a cert for a hostname this
+# box's nginx never answers for.
+DOMAINS=("proxy.${DOMAIN}" "faucet.${DOMAIN}")
 CERT_PATH="/etc/letsencrypt/live/${PRIMARY}"
 RENEW_WINDOW_DAYS="${RENEW_WINDOW_DAYS:-30}"
 

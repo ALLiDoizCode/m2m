@@ -1,35 +1,15 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# TOON store (Arweave DVM) node — connector apex + DVM + TLS.
-# Mirrors infra/linode-node/docker-compose.node.yml but for a store-only box:
-# no relay, no faucet, no Mina lightnet (this box settles against the existing
-# devnet chain boxes). The connector apex serves g.toon.ario -> store:3300.
+# TOON store (Arweave DVM) node — DVM + TLS. The connector that proxies
+# g.toon.ario -> store:3300 is the Rust node in the sibling
+# docker-compose.store.rust.yml overlay (issue #901 deleted this file's own
+# retired TypeScript `connector` service, which the box has not run since the
+# Rust cutover).
 # Run from the CONNECTOR REPO ROOT:
-#   docker compose -f infra/linode-store/docker-compose.store.yml up -d
+#   docker compose -f infra/linode-store/docker-compose.store.yml \
+#                  -f infra/linode-store/docker-compose.store.rust.yml up -d
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 services:
-  connector:
-    image: ghcr.io/toon-protocol/connector:3.36.1
-    environment:
-      CONFIG_FILE: /app/config/connector.yaml
-      TOON_MNEMONIC: ${TOON_MNEMONIC}
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      NODE_TLS_REJECT_UNAUTHORIZED: '0'
-    volumes:
-      - ./connector.yaml:/app/config/connector.yaml:ro
-      - connector_data:/app/data
-    ports:
-      - '3000:3000'
-      - '8080:8080'
-    restart: unless-stopped
-    healthcheck:
-      # wget (not curl): the connector slim image has no curl. Mirrors the node box.
-      test: ['CMD-SHELL', 'wget -q --spider http://localhost:8080/health || exit 1']
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
-
   store:
     # Arweave store/DVM (kind:5094). Built from store repo Dockerfile.store,
     # published as ghcr.io/toon-protocol/store (renamed from dvm). HTTP-backend
@@ -52,8 +32,6 @@ services:
       # NODE_NOSTR_SECRET_KEY, not TOON_MNEMONIC). Deterministic devnet key,
       # distinct from the relay's (…0002).
       NODE_NOSTR_SECRET_KEY: ${STORE_NOSTR_SECRET_KEY:-0000000000000000000000000000000000000000000000000000000000000003}
-      # Standalone-mode connector this DVM announces through + receives jobs from.
-      CONNECTOR_URL: http://connector:3000
       # Advertised kind:10032 ILP address — MUST equal the connector route's
       # ilpAddress (g.toon.ario) or discovery and routing disagree.
       ILP_ADDRESS: g.toon.ario
@@ -63,10 +41,12 @@ services:
       # fee path is g.toon.relay.ario (separate). Settlement addrs are the store
       # connector's distinct identity (STORE_TOON_MNEMONIC acct 0).
       RELAY_PUBLISH_DEST: g.toon.relay
-      PUBLIC_BTP_ENDPOINT: wss://proxy.store.devnet.toonprotocol.dev:443
-      SETTLE_EVM: '0x1f4E12A9357a3c46477F95F6f9813eeBF49f106e'
-      SETTLE_SOL: '4AhgNKLgXi9NygSL85xrA1hcm3beHtXTHiEWQMhUMBvt'
-      SETTLE_MINA: 'B62qn3RVqmEqg8k27yND4692JVTdaTAKdebCspSKck23WoDudFEbWbt'
+      # `proxy.ario`, not `proxy.store` — this box's paid edge was renamed on
+      # 2026-08-05 (#774); the old name is a deprecated alias slated for removal.
+      PUBLIC_BTP_ENDPOINT: wss://proxy.ario.devnet.toonprotocol.dev:443
+      SETTLE_EVM: '0x6B6c2DACf7Ac1F1273F72beF2E6084F9Ee6D3bff'
+      SETTLE_SOL: 'W6yK72j365eK7t4Qj5An1AaYtUEJcJK7TBPvGeDk1LV'
+      SETTLE_MINA: 'B62qkWSoKW4ewE2Wn7ibgtXz6TV72L22YVGoz2bL5x3yu4FsUipdQG8'
       # NOTE (Stage 5): the DVM advertises per-byte pricing (basePricePerByte,
       # default 10 µUSDC/byte) while the connector route pins a flat price '1000'.
       # Reconcile these — set FEE_PER_JOB / KIND_PRICING_5094 here to match the
@@ -85,10 +65,6 @@ services:
   nginx:
     image: nginx:alpine
     restart: unless-stopped
-    depends_on:
-      connector:
-        condition: service_healthy
-        required: false
     ports:
       - '80:80'
       - '443:443'
@@ -109,7 +85,6 @@ services:
       sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"
 
 volumes:
-  connector_data:
   store_data:
   store_certbot_conf:
   store_certbot_www:

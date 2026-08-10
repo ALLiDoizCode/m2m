@@ -1,0 +1,47 @@
+[package]
+name = "connector-peer-btp"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+
+# The one BTP codec (issue #713, ADR 0027). This crate encodes and decodes
+# *nothing* itself -- every frame it puts on a wire goes through these
+# functions, so the peer carriage cannot fork the client edge's grammar.
+connector-btp = { path = "../connector-btp" }
+# The peering relation's configured shape: credential, endpoint scheme,
+# timeouts, `[[peer_channels]]` (issue #723).
+connector-config = { path = "../connector-config" }
+# The role decision (issue #726). Called, never re-implemented.
+connector-peer-auth = { path = "../connector-peer-auth" }
+connector-domain = { path = "../connector-domain" }
+connector-runtime = { path = "../connector-runtime" }
+connector-signer = { path = "../connector-signer" }
+async-trait = "0.1"
+base64 = "0.22"
+# Solana peer-claim identities render as base58 (issue #742), the same
+# encoding `connector-runtime`'s `ClaimBook` already decodes channel
+# accounts and counterparty keys through.
+bs58 = "0.5"
+chrono = "0.4"
+hex = "0.4"
+serde_json = "1"
+# `sync` for the session's reply channel and the per-relation ledgers;
+# `time` for §6.3's two deadlines. No runtime is started here -- whoever
+# owns the socket owns the runtime.
+tokio = { version = "1", features = ["sync", "time"] }
+tracing = "0.1"
+# The one place this crate touches a socket (`ws`): the same 0.20 the
+# client edge's own BTP integration test speaks, and the same rustls +
+# webpki roots already in the lockfile. `wss://` only -- a peering carries
+# signed balance proofs, so `ws://` selects no carriage at all.
+tokio-tungstenite = { version = "0.20", features = ["rustls-tls-webpki-roots"] }
+# `split` on the dialed websocket: one writer task owns the send half while
+# the read loop correlates answers and serves the far side's requests.
+futures-util = "0.3"
+url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+libsecp256k1 = "0.6"

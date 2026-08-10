@@ -46,14 +46,14 @@ jobs:
 
       - name: Run Foundry tests
         working-directory: packages/contracts
-        # DeployMainnet.fork.t.sol hits a live Base-mainnet RPC and runs in its own
-        # mainnet-fork-test job below, so this hermetic job doesn't depend on network access.
-        run: forge test --no-match-test "testGas_" --no-match-path "test/DeployMainnet.fork.t.sol"
+        # *.fork.t.sol suites hit a live RPC and run in their own fork-test jobs below, so this
+        # hermetic job doesn't depend on network access.
+        run: forge test --no-match-test "testGas_" --no-match-path "*.fork.t.sol"
         continue-on-error: false
 
       - name: Generate coverage report
         working-directory: packages/contracts
-        run: forge coverage --ir-minimum --report summary --no-match-test "testGas_" --no-match-path "test/DeployMainnet.fork.t.sol" > coverage-report.txt 2>&1 || true
+        run: forge coverage --ir-minimum --report summary --no-match-test "testGas_" --no-match-path "*.fork.t.sol" > coverage-report.txt 2>&1 || true
 
       - name: Check coverage threshold
         working-directory: packages/contracts
@@ -95,3 +95,32 @@ jobs:
         # No PRIVATE_KEY, no --broadcast — proves the eventual human broadcast without
         # touching real funds.
         run: forge test --match-path "test/DeployMainnet.fork.t.sol" --fork-url https://mainnet.base.org -vvv
+
+  testnet-cutover-fork-test:
+    name: Base Sepolia Fork Test (DeployTestnetCutover, no broadcast)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+        env:
+          # foundryup curls api.github.com unauthenticated and gets 403 when the
+          # runner IP is rate-limited. Exporting the workflow's auto-provisioned
+          # GITHUB_TOKEN bumps the limit from 60 → 5000 req/hr and makes the
+          # install path resilient to noisy neighbors.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run DeployTestnetCutover fork test against Base Sepolia (no broadcast, no secrets)
+        working-directory: packages/contracts
+        # --fork-url is the public https://sepolia.base.org RPC -- not a secret, no repo
+        # variable required. Proves the devnet ERC-2771 cutover (issue #695) against real forked
+        # chain state -- including the real, already-deployed devnet mock USDC and a real funded
+        # distributor balance impersonated via vm.prank -- with no PRIVATE_KEY and no --broadcast.
+        run: forge test --match-path "test/DeployTestnetCutover.fork.t.sol" --fork-url https://sepolia.base.org -vvv

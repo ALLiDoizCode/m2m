@@ -4,8 +4,36 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Exposes `giftwrap::seal_request_with_randomness`/`seal_response_with_randomness`
+# outside this crate's own tests -- both take the AEAD nonce and shared secret
+# as caller-supplied arguments, and reusing a (key, nonce) pair under
+# ChaCha20-Poly1305 is catastrophic, so they stay out of this crate's ordinary
+# public surface. `connector-vectors` (issue #527/#587) is the one real
+# consumer: vector generation needs the real sealing logic to reproduce
+# exactly what a genuine seal produces for a fixed fixture, not a second
+# implementation of it.
+test-util = []
+
 [dependencies]
 libsecp256k1 = "0.6"
+# BIP-340 Schnorr, for the ONE thing this connector signs that is not an
+# ECDSA claim or a settlement transaction: its own kind:10032 announce
+# (issue #784). A Nostr signature is Schnorr over the event's SHA-256 id
+# under an x-only key, which `libsecp256k1` 0.6 does not do at all -- see
+# `src/nostr.rs`. `connector-bin`'s devnet probes already pull the same
+# crate for the same reason; this is the production copy they stop being.
+k256 = { version = "0.13", features = ["schnorr"] }
+sha2 = "0.10"
 sha3 = "0.10"
+ed25519-dalek = "1"
 rand = "0.7"
 thiserror = "2"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+proptest = "1"

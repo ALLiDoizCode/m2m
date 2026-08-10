@@ -24,7 +24,7 @@ contract TokenNetworkTest is Test {
         token = new MockERC20("Test Token", "TEST", 18);
 
         // Deploy TokenNetwork with 1M token deposit limit
-        tokenNetwork = new TokenNetwork(address(token), 1_000_000 * 10 ** 18, 365 days);
+        tokenNetwork = new TokenNetwork(address(token), 1_000_000 * 10 ** 18, 365 days, address(0));
 
         // Create test accounts with private keys for EIP-712 signing
         alicePrivateKey = 0xA11CE;
@@ -621,7 +621,7 @@ contract TokenNetworkTest is Test {
     // Test: Deposit limit prevents excessive deposit
     function testDepositLimitPreventsExcessiveDeposit() public {
         // Deploy TokenNetwork with 1000 token deposit limit for testing
-        TokenNetwork testNetwork = new TokenNetwork(address(token), 1000 * 10 ** 18, 365 days);
+        TokenNetwork testNetwork = new TokenNetwork(address(token), 1000 * 10 ** 18, 365 days, address(0));
 
         // Open channel
         vm.startPrank(alice);
@@ -640,7 +640,7 @@ contract TokenNetworkTest is Test {
     // Test: Deposit limit allows multiple deposits under limit
     function testDepositLimitAllowsMultipleDepositsUnderLimit() public {
         // Deploy TokenNetwork with 1000 token deposit limit for testing
-        TokenNetwork testNetwork = new TokenNetwork(address(token), 1000 * 10 ** 18, 365 days);
+        TokenNetwork testNetwork = new TokenNetwork(address(token), 1000 * 10 ** 18, 365 days, address(0));
 
         // Open channel
         vm.startPrank(alice);
@@ -667,7 +667,7 @@ contract TokenNetworkTest is Test {
         MockERC20WithFee feeToken = new MockERC20WithFee("Fee Token", "FEE", 18, 10);
 
         // Deploy TokenNetwork for fee token with 1M token deposit limit
-        TokenNetwork feeTokenNetwork = new TokenNetwork(address(feeToken), 1_000_000 * 10 ** 18, 365 days);
+        TokenNetwork feeTokenNetwork = new TokenNetwork(address(feeToken), 1_000_000 * 10 ** 18, 365 days, address(0));
 
         // Mint tokens to alice
         feeToken.transfer(alice, 10000 * 10 ** 18);
@@ -906,6 +906,129 @@ contract TokenNetworkTest is Test {
         vm.prank(bob);
         vm.expectRevert(TokenNetwork.InsufficientChannelBalance.selector);
         tokenNetwork.claimFromChannel(channelId, balanceProof, aliceSignature);
+    }
+
+    // Test: an over-deposit claim cannot brick an EVM channel (connector#662)
+    //
+    // The Solana program's ClaimFromChannel/SettleChannel pair had a gap where a
+    // recorded transferred_amount above the depositor's deposit made settlement's
+    // `deposit - transferred` underflow forever, with no time-based force-close to
+    // fall back to. TokenNetwork is structurally immune, and this test pins the two
+    // properties that make it so, so the asymmetry cannot silently drift:
+    //
+    //   1. `claimFromChannel` performs the `deposit < transferredAmount` check
+    //      BEFORE any state write, and the whole call reverts, so a refused claim
+    //      leaves `participants[.][signer]` and `claimedAmounts[.][claimer]`
+    //      untouched. There is no way to *record* an over-deposit state at all.
+    //   2. `settleChannel` subtracts `claimedAmounts`, never `transferredAmount`,
+    //      and `claimedAmounts` is only ever assigned a value that just passed
+    //      check (1). Since deposits are monotonic while a channel is Opened
+    //      (`setTotalDeposit` reverts on a decrease and there is no withdrawal),
+    //      `deposit - claimed` can never underflow.
+    function testOverDepositClaimLeavesNoStateAndChannelStillSettles() public {
+        bytes32 channelId = createAndFundChannel(alice, bob, 500 * 10 ** 18, 0);
+
+        uint256 aliceBalanceBefore = token.balanceOf(alice);
+        uint256 bobBalanceBefore = token.balanceOf(bob);
+
+        TokenNetwork.BalanceProof memory overProof = TokenNetwork.BalanceProof({
+            channelId: channelId,
+            nonce: 1,
+            transferredAmount: 600 * 10 ** 18,
+            lockedAmount: 0,
+            locksRoot: bytes32(0)
+        });
+        bytes memory overSig = signBalanceProof(alicePrivateKey, channelId, 1, 600 * 10 ** 18, 0, bytes32(0));
+
+        vm.prank(bob);
+        vm.expectRevert(TokenNetwork.InsufficientChannelBalance.selector);
+        tokenNetwork.claimFromChannel(channelId, overProof, overSig);
+
+        // Property (1): nothing was recorded. Unlike the pre-fix Solana program,
+        // the channel cannot even hold the unsettleable state.
+        (uint256 aliceDeposit, uint256 aliceNonce, uint256 aliceTransferred) = tokenNetwork.participants(channelId, alice);
+        assertEq(aliceDeposit, 500 * 10 ** 18, "deposit untouched by the refused claim");
+        assertEq(aliceNonce, 0, "nonce untouched by the refused claim");
+        assertEq(aliceTransferred, 0, "transferredAmount untouched by the refused claim");
+        assertEq(tokenNetwork.claimedAmounts(channelId, bob), 0, "claimedAmounts untouched");
+        assertEq(token.balanceOf(bob), bobBalanceBefore, "no tokens moved");
+
+        // Boundary: a claim for exactly the deposit is still legitimate.
+        TokenNetwork.BalanceProof memory capProof = TokenNetwork.BalanceProof({
+            channelId: channelId,
+            nonce: 1,
+            transferredAmount: 500 * 10 ** 18,
+            lockedAmount: 0,
+            locksRoot: bytes32(0)
+        });
+        bytes memory capSig = signBalanceProof(alicePrivateKey, channelId, 1, 500 * 10 ** 18, 0, bytes32(0));
+        vm.prank(bob);
+        tokenNetwork.claimFromChannel(channelId, capProof, capSig);
+        assertEq(token.balanceOf(bob), bobBalanceBefore + 500 * 10 ** 18, "bob is paid the full deposit");
+
+        // Property (2): the channel settles at the deposit cap rather than
+        // underflowing. Alice's remaining balance is 500 - 500 = 0, not a revert.
+        vm.prank(alice);
+        tokenNetwork.closeChannel(channelId);
+        vm.warp(block.timestamp + 1 hours + 1);
+        tokenNetwork.settleChannel(channelId);
+
+        (, TokenNetwork.ChannelState state,,,,) = tokenNetwork.channels(channelId);
+        assertEq(uint256(state), uint256(TokenNetwork.ChannelState.Settled), "channel settles normally");
+        assertEq(token.balanceOf(alice), aliceBalanceBefore, "alice gets nothing back, and loses nothing extra");
+        assertEq(token.balanceOf(bob), bobBalanceBefore + 500 * 10 ** 18, "bob keeps exactly the claimed amount");
+    }
+
+    // Test: refusing an over-deposit claim is not terminal on EVM either — the
+    // identical signed proof clears once the depositor tops up (connector#662).
+    //
+    // `claimFromChannel` reverts before writing `participants[.][counterparty].nonce`,
+    // so the nonce the proof was signed for is still unused and the proof stays
+    // submittable verbatim. This is the same non-terminality the Solana program
+    // relies on, so "refuse at claim time" is a retryable rejection on both chains
+    // rather than a burned proof.
+    function testOverDepositClaimAcceptedAfterTopUp() public {
+        bytes32 channelId = createAndFundChannel(alice, bob, 500 * 10 ** 18, 0);
+
+        uint256 bobBalanceBefore = token.balanceOf(bob);
+
+        TokenNetwork.BalanceProof memory proof = TokenNetwork.BalanceProof({
+            channelId: channelId,
+            nonce: 1,
+            transferredAmount: 600 * 10 ** 18,
+            lockedAmount: 0,
+            locksRoot: bytes32(0)
+        });
+        bytes memory sig = signBalanceProof(alicePrivateKey, channelId, 1, 600 * 10 ** 18, 0, bytes32(0));
+
+        vm.prank(bob);
+        vm.expectRevert(TokenNetwork.InsufficientChannelBalance.selector);
+        tokenNetwork.claimFromChannel(channelId, proof, sig);
+
+        // Alice tops the channel up past the claimed amount.
+        vm.startPrank(alice);
+        token.approve(address(tokenNetwork), 200 * 10 ** 18);
+        tokenNetwork.setTotalDeposit(channelId, alice, 700 * 10 ** 18);
+        vm.stopPrank();
+
+        // The very same proof and signature, replayed, now succeeds.
+        vm.prank(bob);
+        tokenNetwork.claimFromChannel(channelId, proof, sig);
+
+        (, uint256 aliceNonce, uint256 aliceTransferred) = tokenNetwork.participants(channelId, alice);
+        assertEq(aliceNonce, 1, "the refused nonce was still available");
+        assertEq(aliceTransferred, 600 * 10 ** 18);
+        assertEq(tokenNetwork.claimedAmounts(channelId, bob), 600 * 10 ** 18);
+        assertEq(token.balanceOf(bob), bobBalanceBefore + 600 * 10 ** 18);
+
+        // And the channel still settles, returning alice's unspent 100.
+        vm.prank(alice);
+        tokenNetwork.closeChannel(channelId);
+        vm.warp(block.timestamp + 1 hours + 1);
+        tokenNetwork.settleChannel(channelId);
+
+        (, TokenNetwork.ChannelState state,,,,) = tokenNetwork.channels(channelId);
+        assertEq(uint256(state), uint256(TokenNetwork.ChannelState.Settled));
     }
 
     // Test: claimFromChannel - Reverts on wrong signer

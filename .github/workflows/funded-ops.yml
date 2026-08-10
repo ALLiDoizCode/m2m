@@ -1,0 +1,378 @@
+# Funded operations — EVM channel work that needs a funded key, run as a
+# workflow rather than as an agent (toon-meta#312).
+#
+# ── WHY A WORKFLOW AND NOT AN AGENT ─────────────────────────────────────────
+# A class of devnet tickets is blocked on nothing but a key that can sign and
+# pay: depositing into a channel, inspecting on-chain channel state, checking
+# what the CI identity actually controls. Those are not design decisions and
+# not judgement calls — they are deterministic operations that a human has been
+# doing by hand at a terminal.
+#
+# They still must not run inside the agent sandbox. `.sandcastle/sandbox-
+# secrets.ts` forwards exactly two values into the container
+# (CLAUDE_CODE_OAUTH_TOKEN, GH_TOKEN) and says of this very secret:
+#
+#   DELIBERATELY ABSENT: E2E_DEV_MNEMONIC. […] It is ONE BIP-39 phrase deriving
+#   keys on EVERY chain (NIP-06 m/44'/1237'/0'/0/i), so it is not testnet-
+#   scoped, and this repository is public.
+#
+# That boundary is unchanged here. The secret reaches a GitHub-hosted runner
+# executing THIS file — reviewed, committed, deterministic — and never reaches
+# a container running agent-authored code. Same shape as
+# `mina-treasury-info.yml`, which is the precedent this follows.
+#
+# ── THE IDEMPOTENCE RULE (toon-meta#312 / connector#907) ────────────────────
+# `POST /channels` and `POST /channels/:id/fund` have been observed returning
+# `400 settlement backend error: transaction was dropped before mining` while
+# BOTH transactions mined (connector#907). Retrying either would have double
+# spent. This workflow is built so that a retry after an ambiguous failure is
+# always safe:
+#
+#   * `deposit` takes a TARGET TOTAL (`total_base_units`), not an increment,
+#     because `TokenNetwork.setTotalDeposit(channelId, participant, total)`
+#     sets an absolute total and reverts on a decrease. Running it twice with
+#     the same total is a no-op on the second run — it cannot double-deposit.
+#     An increment-shaped API is what makes a dropped-tx lie dangerous; this
+#     one removes the hazard rather than documenting it.
+#   * Every write RE-READS the on-chain slot afterwards and fails the job if it
+#     did not reach the requested total. The transaction receipt is not trusted
+#     as the source of truth; the contract is.
+#
+# ── WHICH SIDE OF A CHANNEL A DEPOSIT LANDS ON ──────────────────────────────
+# `setTotalDeposit(channelId, participant, total)` pulls tokens from the CALLER
+# and credits the `participant` PARAMETER. `claimFromChannel` then bounds a
+# claim against the deposit of whoever SIGNED the balance proof — the payer
+# (`TokenNetwork.sol:348`). So a payer must fund its OWN slot; funding the
+# counterparty produces a channel that holds tokens and cannot pay.
+#
+# This is a real trap: the connector's own `SettlementBackend::fund` credits
+# `counterparty` (`crates/connector-settlement-evm/src/lib.rs:710`), which is
+# correct for its receiver-side reading of `deposited` but is the opposite of
+# what "fund my channel" suggests. toon-meta#312 lost 1 USDC to exactly this.
+# `participant` is therefore a REQUIRED, explicit input here — never defaulted,
+# never inferred from the signer — and `channel-status` prints both sides so
+# the operator can see which slot moved.
+#
+# ── SAFETY ──────────────────────────────────────────────────────────────────
+#   * `apply` defaults to false. A dry run reads chain state, prints exactly
+#     what it would send, and writes nothing.
+#   * The derived private key is registered with `::add-mask::` before use and
+#     is never printed, logged, or written to the summary. Only addresses are.
+#   * A self-test derives a PUBLIC BIP-39 test vector and cross-checks the SDK
+#     against ethers on the same path before the real secret is touched, so a
+#     broken derivation lib fails the job instead of producing a wrong address.
+#   * Read-only operations (`whoami`, `channel-status`) never request the write
+#     path and are safe to run at any time.
+
+name: funded-ops
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "whoami (read) | channel-status (read) | deposit (write)"
+        type: choice
+        required: true
+        default: whoami
+        options: [whoami, channel-status, deposit]
+      account_index:
+        description: "NIP-06 account index to act as (m/44'/1237'/0'/0/i)"
+        type: string
+        required: false
+        default: "0"
+      scan_count:
+        description: "whoami: how many indices to scan from 0"
+        type: string
+        required: false
+        default: "8"
+      channel_id:
+        description: "channel-status/deposit: 0x-prefixed 32-byte channel id"
+        type: string
+        required: false
+        default: ""
+      participant:
+        description: "deposit: the address whose slot is credited. THE PAYER FUNDS ITS OWN SLOT."
+        type: string
+        required: false
+        default: ""
+      total_base_units:
+        description: "deposit: TARGET TOTAL deposit in token base units (6dp USDC). Absolute, not an increment."
+        type: string
+        required: false
+        default: ""
+      apply:
+        description: "Perform the write. false = dry run, reads and prints only."
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # One funded operation at a time. Two concurrent runs could interleave an
+  # approve with another run's deposit against the same allowance.
+  group: funded-ops
+  cancel-in-progress: false
+
+jobs:
+  funded-ops:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RPC_URL: https://base-sepolia-rpc.publicnode.com
+      CHAIN_ID: "84532"
+      # The stable TokenNetworkRegistry. The TokenNetwork itself is RESOLVED
+      # from it at run time (getTokenNetwork(token)) rather than pinned, which
+      # is what `[settlement.evm] contract_address` means — the registry, not
+      # whichever TokenNetwork it currently resolves to.
+      REGISTRY: "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1"
+      TOKEN: "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+      DECIMALS: "6"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+
+      - name: Install derivation and chain libs
+        run: |
+          mkdir -p "$RUNNER_TEMP/ops"
+          cd "$RUNNER_TEMP/ops"
+          echo '{ "type": "module" }' > package.json
+          npm install --no-audit --no-fund \
+            @toon-protocol/sdk@0.6.0 \
+            ethers@^6.0.0
+
+      - name: Write operations script
+        run: |
+          cat > "$RUNNER_TEMP/ops/ops.mjs" <<'SCRIPT'
+          import { fromMnemonicFull } from '@toon-protocol/sdk';
+          import {
+            Contract, HDNodeWallet, JsonRpcProvider, Mnemonic, Wallet, formatUnits,
+          } from 'ethers';
+
+          const fail = (m) => { console.error(`::error::${m}`); process.exit(1); };
+          const mask = (v) => console.log(`::add-mask::${v}`);
+          const out = [];
+          const say = (l = '') => { console.log(l); out.push(l); };
+
+          const {
+            E2E_DEV_MNEMONIC: MNEMONIC, RPC_URL, REGISTRY, TOKEN, DECIMALS,
+            OPERATION, ACCOUNT_INDEX, SCAN_COUNT, CHANNEL_ID, PARTICIPANT,
+            TOTAL_BASE_UNITS, APPLY,
+          } = process.env;
+
+          if (!MNEMONIC || !MNEMONIC.trim()) {
+            fail('E2E_DEV_MNEMONIC is empty or not set. Nothing can be derived.');
+          }
+          const apply = APPLY === 'true';
+          const dec = Number(DECIMALS);
+          const fmt = (v) => `${formatUnits(v, dec)} (${v.toString()} base units)`;
+
+          // ── SELF-TEST ────────────────────────────────────────────────────
+          // Public test vector only; the real secret is untouched here. Proves
+          // the SDK and ethers agree on NIP-06 m/44'/1237'/0'/0/i before any
+          // address derived from the real mnemonic is trusted.
+          const TEST = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
+          for (const i of [0, 2]) {
+            const a = await fromMnemonicFull(TEST, { accountIndex: i });
+            const b = HDNodeWallet.fromMnemonic(Mnemonic.fromPhrase(TEST), `m/44'/1237'/0'/0/${i}`);
+            if (a.evmAddress.toLowerCase() !== b.address.toLowerCase()) {
+              fail(`Self-test FAILED at index ${i}: SDK ${a.evmAddress} != ethers ${b.address}.`);
+            }
+          }
+          console.error('Self-test passed: SDK and ethers agree on the NIP-06 EVM path.');
+
+          const provider = new JsonRpcProvider(RPC_URL);
+          const erc20 = new Contract(TOKEN, [
+            'function balanceOf(address) view returns (uint256)',
+            'function allowance(address,address) view returns (uint256)',
+            'function approve(address,uint256) returns (bool)',
+          ], provider);
+          const registry = new Contract(REGISTRY, [
+            'function getTokenNetwork(address) view returns (address)',
+          ], provider);
+
+          const tnAddr = await registry.getTokenNetwork(TOKEN);
+          if (!tnAddr || /^0x0+$/.test(tnAddr)) {
+            fail(`Registry ${REGISTRY} resolves no TokenNetwork for token ${TOKEN}.`);
+          }
+          const tn = new Contract(tnAddr, [
+            'function channels(bytes32) view returns (uint256 settlementTimeout, uint8 state, uint256 closedAt, uint256 openedAt, address participant1, address participant2)',
+            'function participants(bytes32,address) view returns (uint256 deposit, uint256 nonce, uint256 transferredAmount)',
+            'function setTotalDeposit(bytes32,address,uint256)',
+          ], provider);
+          say(`TokenNetwork resolved from registry: ${tnAddr}`);
+          say(`Token: ${TOKEN} (${dec} dp)   chain: base-sepolia`);
+          say('');
+
+          const STATES = ['NonExistent', 'Opened', 'Closed', 'Settled'];
+
+          const derive = async (i) => {
+            const id = await fromMnemonicFull(MNEMONIC, { accountIndex: i });
+            return id;
+          };
+
+          // ── whoami ───────────────────────────────────────────────────────
+          if (OPERATION === 'whoami') {
+            const n = Number.parseInt(SCAN_COUNT ?? '8', 10);
+            if (!Number.isInteger(n) || n < 1 || n > 32) fail(`Bad scan_count: ${SCAN_COUNT}`);
+            say(`## Identities this CI secret controls (NIP-06 m/44'/1237'/0'/0/i)`);
+            say('');
+            say('| i | EVM address | ETH | USDC |');
+            say('|---|---|---|---|');
+            for (let i = 0; i < n; i++) {
+              const id = await derive(i);
+              const [eth, usdc] = await Promise.all([
+                provider.getBalance(id.evmAddress),
+                erc20.balanceOf(id.evmAddress),
+              ]);
+              say(`| ${i} | \`${id.evmAddress}\` | ${formatUnits(eth, 18)} | ${formatUnits(usdc, dec)} |`);
+            }
+            say('');
+            say('Compare these against the settlement addresses the boxes publish in their');
+            say('`kind:10032` announces. An address that appears here CAN be signed for by');
+            say('CI; one that does not is a box-local key and stays a manual operation.');
+          }
+
+          // ── channel-status ───────────────────────────────────────────────
+          else if (OPERATION === 'channel-status') {
+            if (!/^0x[0-9a-fA-F]{64}$/.test(CHANNEL_ID ?? '')) {
+              fail(`channel_id must be a 0x-prefixed 32-byte hex string, got: ${CHANNEL_ID}`);
+            }
+            const c = await tn.channels(CHANNEL_ID);
+            if (Number(c.state) === 0) fail(`Channel ${CHANNEL_ID} does not exist in ${tnAddr}.`);
+            say(`## Channel \`${CHANNEL_ID}\``);
+            say('');
+            say(`state: **${STATES[Number(c.state)] ?? c.state}**   settlementTimeout: ${c.settlementTimeout}s`);
+            say('');
+            say('| participant | deposit | nonce | transferred |');
+            say('|---|---|---|---|');
+            for (const p of [c.participant1, c.participant2]) {
+              const s = await tn.participants(CHANNEL_ID, p);
+              say(`| \`${p}\` | ${fmt(s.deposit)} | ${s.nonce} | ${fmt(s.transferredAmount)} |`);
+            }
+            say('');
+            say('A participant can only PAY up to its OWN deposit — `claimFromChannel`');
+            say('bounds a claim against the balance-proof signer\'s slot. A side showing');
+            say('zero cannot send value no matter what the other side holds.');
+          }
+
+          // ── deposit ──────────────────────────────────────────────────────
+          else if (OPERATION === 'deposit') {
+            if (!/^0x[0-9a-fA-F]{64}$/.test(CHANNEL_ID ?? '')) {
+              fail(`channel_id must be a 0x-prefixed 32-byte hex string, got: ${CHANNEL_ID}`);
+            }
+            if (!/^0x[0-9a-fA-F]{40}$/.test(PARTICIPANT ?? '')) {
+              fail(`participant must be a 0x address — the slot to credit. Got: ${PARTICIPANT}`);
+            }
+            let total;
+            try { total = BigInt(TOTAL_BASE_UNITS); } catch { total = null; }
+            if (total === null || total <= 0n) {
+              fail(`total_base_units must be a positive integer (absolute TARGET total), got: ${TOTAL_BASE_UNITS}`);
+            }
+
+            const idx = Number.parseInt(ACCOUNT_INDEX ?? '0', 10);
+            if (!Number.isInteger(idx) || idx < 0) fail(`Bad account_index: ${ACCOUNT_INDEX}`);
+            const id = await derive(idx);
+            const pk = id.evmPrivateKey ?? id.evm?.privateKey;
+            if (!pk) fail('Derived identity exposes no EVM private key; cannot sign.');
+            mask(pk);
+            const signer = new Wallet(pk, provider);
+            if (signer.address.toLowerCase() !== id.evmAddress.toLowerCase()) {
+              fail('Derived key does not match its own address. Refusing to sign.');
+            }
+
+            const c = await tn.channels(CHANNEL_ID);
+            if (Number(c.state) !== 1) {
+              fail(`Channel is ${STATES[Number(c.state)] ?? c.state}, not Opened. setTotalDeposit would revert.`);
+            }
+            const parts = [c.participant1.toLowerCase(), c.participant2.toLowerCase()];
+            if (!parts.includes(PARTICIPANT.toLowerCase())) {
+              fail(`${PARTICIPANT} is not a participant of this channel (${parts.join(', ')}).`);
+            }
+            const before = (await tn.participants(CHANNEL_ID, PARTICIPANT)).deposit;
+
+            say(`## Deposit — ${apply ? 'APPLY' : 'DRY RUN'}`);
+            say('');
+            say(`| | |`);
+            say(`|---|---|`);
+            say(`| channel | \`${CHANNEL_ID}\` |`);
+            say(`| credited slot (\`participant\`) | \`${PARTICIPANT}\` |`);
+            say(`| paying signer (index ${idx}) | \`${signer.address}\` |`);
+            say(`| deposit now | ${fmt(before)} |`);
+            say(`| target total | ${fmt(total)} |`);
+            say(`| delta to transfer | ${fmt(total > before ? total - before : 0n)} |`);
+            say('');
+            if (signer.address.toLowerCase() !== PARTICIPANT.toLowerCase()) {
+              say(`> ⚠️ The signer is NOT the credited slot. This spends the signer's tokens to`);
+              say(`> raise **someone else's** ability to pay. That is legitimate only if you`);
+              say(`> intend it — it is the mistake toon-meta#312 made. Re-read before applying.`);
+              say('');
+            }
+            if (before >= total) {
+              say(`Nothing to do: the slot already holds ${fmt(before)} >= the target. \`setTotalDeposit\``);
+              say('reverts on a decrease, so this run is a deliberate no-op rather than an error.');
+            } else if (!apply) {
+              const [eth, usdc] = await Promise.all([
+                provider.getBalance(signer.address), erc20.balanceOf(signer.address),
+              ]);
+              say(`Signer holds ${formatUnits(eth, 18)} ETH (gas) and ${formatUnits(usdc, dec)} USDC.`);
+              if (usdc < total - before) say('> ❌ Signer USDC balance is below the delta — an apply run would revert.');
+              say('');
+              say('Dry run: nothing was sent. Re-run with `apply: true` to execute.');
+            } else {
+              const needed = total - before;
+              const allowance = await erc20.allowance(signer.address, tnAddr);
+              if (allowance < needed) {
+                say(`Approving TokenNetwork for the delta…`);
+                const a = await erc20.connect(signer).approve(tnAddr, needed);
+                say(`approve tx: \`${a.hash}\``);
+                await a.wait();
+              } else {
+                say(`Existing allowance ${fmt(allowance)} already covers the delta; skipping approve.`);
+              }
+              say('Sending setTotalDeposit…');
+              const t = await tn.connect(signer).setTotalDeposit(CHANNEL_ID, PARTICIPANT, total);
+              say(`setTotalDeposit tx: \`${t.hash}\``);
+              await t.wait();
+
+              // The contract, not the receipt, is the authority (connector#907:
+              // a call reported failure while its transaction mined).
+              const after = (await tn.participants(CHANNEL_ID, PARTICIPANT)).deposit;
+              say('');
+              say(`Verified on chain: slot now holds ${fmt(after)}.`);
+              if (after < total) {
+                fail(`Post-write verification FAILED: expected >= ${total}, chain says ${after}.`);
+              }
+              say('');
+              say('✅ Deposit confirmed by reading the contract back.');
+            }
+          } else {
+            fail(`Unknown operation: ${OPERATION}`);
+          }
+
+          const summary = process.env.GITHUB_STEP_SUMMARY;
+          if (summary) {
+            const { appendFileSync } = await import('node:fs');
+            appendFileSync(summary, out.join('\n') + '\n');
+          }
+          SCRIPT
+
+      - name: Run operation
+        env:
+          E2E_DEV_MNEMONIC: ${{ secrets.E2E_DEV_MNEMONIC }}
+          OPERATION: ${{ inputs.operation }}
+          ACCOUNT_INDEX: ${{ inputs.account_index }}
+          SCAN_COUNT: ${{ inputs.scan_count }}
+          CHANNEL_ID: ${{ inputs.channel_id }}
+          PARTICIPANT: ${{ inputs.participant }}
+          TOTAL_BASE_UNITS: ${{ inputs.total_base_units }}
+          APPLY: ${{ inputs.apply }}
+        run: |
+          cd "$RUNNER_TEMP/ops"
+          node ops.mjs

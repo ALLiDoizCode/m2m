@@ -1,70 +1,98 @@
 # Source Code Structure
 
-## Overview
+The connector is a Cargo workspace. The npm-workspace layout this page used to describe
+(`packages/connector`, `packages/shared`, `tools/send-packet`) was deleted with the TypeScript
+prototype — [ADR 0017](../adr/0017-the-typescript-connector-is-a-prototype.md).
 
-The Connector is organized as an npm workspace monorepo with domain-driven source organization.
-
-## Top-Level Structure
+## Top level
 
 ```
 connector/
-  packages/
-    connector/     # Main connector package
-    shared/        # Shared types and encoding
-    contracts/     # Solidity smart contracts
-    faucet/        # Token faucet for local development
-  tools/
-    send-packet/   # CLI tool for sending test packets
-    fund-peers/    # CLI tool for funding peer accounts
+  crates/          # the connector — see below
+  packages/        # not the connector: contracts, and devnet faucet tooling
+  vectors/         # wire-vectors.json, the cross-repo contract (ADR 0021)
+  docs/            # ADRs, protocol specs, operator docs
+  deploy/          # container image and deployment recipes
+  infra/           # devnet overlays (Linode boxes, local chain compose files)
+  tools/           # fund-peers, and chain-specific scripts
+  Cargo.toml       # the workspace manifest
 ```
 
-## Packages
+## `crates/` — the connector
 
-### packages/connector
-
-The core connector implementation, organized by domain:
-
-```
-src/
-  btp/            # BTP transport (WebSocket-based)
-  core/           # Core routing and packet forwarding
-  settlement/     # On-chain settlement engines
-  routing/        # Route management and propagation
-  config/         # YAML config loading and Zod validation
-  security/       # Key management and authentication
-  telemetry/      # Metrics and observability
-  transport/      # TransportProvider: Direct TCP + ILP-over-HTTP egress
-  utils/          # Shared utilities
-  agent/          # AI agent integration
-  cli/            # Command-line interface
-  lib.ts          # Public API exports
-  index.ts        # Re-exports from lib.ts
-```
-
-The `transport/` directory houses the `TransportProvider` abstraction used for outbound BTP WebSocket connections (`DirectTransportProvider` — direct TCP) and the ILP-over-HTTP egress client (`http-peer-transport.ts`).
-
-### packages/shared
-
-Shared types and encoding utilities used across packages:
+Layered, and the layering is enforced by which crate may depend on which
+([ADR 0001](../adr/0001-rust-workspace-library-first.md)). Nothing below depends on anything
+above it.
 
 ```
-src/
-  types/          # ILP packet types and interfaces
-  encoding/       # OER (Octet Encoding Rules) codec
-  index.ts        # Package exports
+connector-domain                 pure logic: no async, no I/O, no clock, no keys
+  ├─ packet.rs, oer.rs           ILPv4 packets and their canonical OER encoding (ADR 0023)
+  ├─ address.rs, route.rs        ILP addresses; longest-prefix selection
+  ├─ fee.rs                      flat per-packet fee and minimum-delivery arithmetic (ADR 0010)
+  ├─ condition.rs                condition/fulfilment/expiry rules
+  ├─ claim.rs, client_claim.rs   nonce, watermark and value rules
+  └─ envelope.rs                 the request/response envelope a terminated packet carries
+
+connector-signer                 the only crate that touches key material (ADR 0012)
+  ├─ signer.rs, local.rs, kms.rs the Signer port and its backends
+  ├─ giftwrap.rs                 seal/open, and the derived fulfilment (ADRs 0018, 0019)
+  ├─ claim_signature.rs          EIP-712 and Ed25519 balance-proof verification (ADR 0024)
+  └─ treasury.rs, address.rs
+
+connector-config                 one typed TOML file and every refuse-to-start error (ADR 0009)
+
+connector-settlement             the chain-agnostic settlement port + its contract suite
+  ├─ port.rs, contract.rs        the port, and the one suite every backend is run against
+  └─ in_memory.rs                the fake
+connector-settlement-evm         real EVM backend: TokenNetworkRegistry → TokenNetwork
+connector-settlement-solana      real Solana backend — drives packages/solana-program (the deployed payment-channel program)
+
+connector-runtime                the packet plane and its ports
+  ├─ connector.rs                Connector — routing, delivery, fees, rejects
+  ├─ peer_transport.rs           the peer transport port (ADR 0027's seam); the raw-TCP wire behind it was deleted in #679
+  ├─ app_client.rs               the port to the app behind a terminated route
+  ├─ claim.rs, journal.rs        ClaimBook, exposure and the projection (ADR 0005)
+  ├─ route.rs                    leased routes; the swapped snapshot (ADR 0015)
+  └─ metrics.rs, operator_view.rs
+
+connector-btp                    the BTP frame codec and session framing (RFC-0023); transport-
+                                  and role-neutral, knows nothing of claims, routes or prices
+connector-peer-auth              role-by-authentication: peer vs. client, decided from
+                                  credential and config alone (ADR 0027's stop-ship invariant)
+connector-peer-btp               the BTP peer carriage: dial/accept a peering over wss://
+connector-peer-http              the ILP-over-HTTP peer carriage: dial/accept over https://
+
+connector-client-edge            axum Router: POST /ilp, POST /ilp/probe, POST /ilp/claim-state,
+                                  GET /ilp/btp, GET /ilp/identity, GET /ilp/routes/price
+connector-operator               axum Router: bearer-gated reads, RFC 9421-signed writes
+connector-cli                    config → runtime → merged routers → bound listeners
+connector-bin                    bin/connector, bin/stub-app
+connector-vectors                bin/generate-vectors → vectors/wire-vectors.json
 ```
 
-### packages/contracts
+## `packages/` — not the connector
 
-Solidity smart contracts for on-chain settlement (Foundry-based).
+| Directory              | What it is                                                                                                                                                  |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `contracts`            | Solidity (Foundry). `TokenNetwork`, `TokenNetworkRegistry`, `RollingSwapChannel`. The repository's only git submodules (OpenZeppelin, forge-std) live here. |
+| `solana-program`       | The legacy SPL-token payment-channel program. A workspace member, excluded from the main gate.                                                              |
+| `faucet`               | Devnet faucet service (plain JavaScript).                                                                                                                   |
+| `mina-zkapp`           | Mina zkApp (TypeScript, o1js).                                                                                                                              |
+| `mina-usdc-faucet-web` | Faucet browser dApp (TypeScript, Vite).                                                                                                                     |
+| `announcer`            | Standalone `kind:10032` announcer sidecar for the client edge (TypeScript). Never links against connector crates or touches connector config (ADR 0022).    |
 
-## Test Structure
+## Test layout
 
-```
-packages/connector/
-  src/**/*.test.ts           # Unit tests (co-located)
-  test/
-    integration/             # Integration tests
-    acceptance/              # Acceptance tests (ATDD)
-    helpers/                 # Test utilities
-```
+There is no separate test tree for unit tests. Following Rust convention:
+
+- **Unit tests** live in a `#[cfg(test)] mod tests` at the bottom of the module they test.
+  `proptest` properties live beside them.
+- **Integration tests** are their own binaries under `crates/<crate>/tests/`. Several drive a real
+  chain (`anvil`, `solana-test-validator`) and are skipped when it is absent locally, but
+  **panic** when `CI` is set, so the gate cannot go green without one.
+- **Contract suites** — the one place a port's behaviour is defined — live with the port and are
+  run against every implementation, fake and real
+  ([ADR 0007](../adr/0007-testing-doctrine-fakes-yes-mocks-no.md)).
+- **Vectors** are generated, not written: `crates/connector-vectors` emits
+  `vectors/wire-vectors.json`, and `crates/connector-vectors/tests/vectors_up_to_date.rs` fails
+  the gate if the committed file is stale.

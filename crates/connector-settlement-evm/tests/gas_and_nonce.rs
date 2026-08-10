@@ -12,8 +12,13 @@ use std::sync::Arc;
 use chrono::Duration;
 use connector_settlement::{Claim, SettlementBackend};
 use connector_settlement_evm::EvmSettlementBackend;
+use connector_signer::{derive_evm_address, evm_balance_proof_digest, EvmBalanceProof};
+use ethers::signers::Signer as EvmSigner;
+use libsecp256k1::{PublicKey, SecretKey};
 
-use support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
+use support::{
+    channel_id_bytes, require_anvil, sign_evm, Anvil, ANVIL_CHAIN_ID, DEPLOYER_PRIVATE_KEY,
+};
 
 /// `open`, `fund`, `redeem` and `close` are all real transactions against
 /// a real chain with no manually-specified gas limit anywhere in
@@ -29,23 +34,42 @@ async fn every_channel_operation_estimates_its_own_gas_and_succeeds() {
     }
 
     let anvil = Anvil::spawn().await;
-    let backend = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY)
+    let token =
+        EvmSettlementBackend::deploy_mock_token(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, 1_000_000)
+            .await
+            .expect("deploy mock USDC");
+    let backend = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
         .await
-        .expect("deploy SettlementChannel");
+        .expect("deploy a TokenNetwork through a fresh registry");
+    let token_network_address = backend.address().to_fixed_bytes();
+
+    let counterparty_secret = SecretKey::parse(&[3u8; 32]).expect("valid secret key");
+    let counterparty_public = PublicKey::from_secret_key(&counterparty_secret);
+    let counterparty = derive_evm_address(&counterparty_public.serialize()).to_vec();
 
     let channel = backend
-        .open(b"gas-estimation-peer".to_vec(), Duration::seconds(3600))
+        .open(counterparty, Duration::seconds(3600))
         .await
         .expect("open");
     let state = backend.fund(&channel, 1_000).await.expect("fund");
     assert_eq!(state.deposited, 1_000);
 
+    let proof = EvmBalanceProof {
+        channel_id: channel_id_bytes(&channel.0),
+        nonce: 1,
+        transferred_amount: 400,
+        locked_amount: 0,
+        locks_root: [0u8; 32],
+        chain_id: ANVIL_CHAIN_ID,
+        token_network_address,
+    };
     let state = backend
         .redeem(
             &channel,
             Claim {
+                nonce: 1,
                 cumulative_amount: 400,
-                signature: vec![9],
+                signature: sign_evm(&counterparty_secret, &evm_balance_proof_digest(&proof)),
             },
         )
         .await
@@ -74,18 +98,31 @@ async fn concurrent_calls_from_the_same_signer_do_not_conflict_on_nonce() {
     }
 
     let anvil = Anvil::spawn().await;
-    let backend = Arc::new(
-        EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY)
+    let token =
+        EvmSettlementBackend::deploy_mock_token(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, 1_000_000)
             .await
-            .expect("deploy SettlementChannel"),
+            .expect("deploy mock USDC");
+    let backend = Arc::new(
+        EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
+            .await
+            .expect("deploy a TokenNetwork through a fresh registry"),
     );
 
+    let peer_one = ethers::signers::LocalWallet::new(&mut ethers::core::rand::thread_rng())
+        .address()
+        .as_bytes()
+        .to_vec();
+    let peer_two = ethers::signers::LocalWallet::new(&mut ethers::core::rand::thread_rng())
+        .address()
+        .as_bytes()
+        .to_vec();
+
     let first = backend
-        .open(b"peer-one".to_vec(), Duration::seconds(3600))
+        .open(peer_one, Duration::seconds(3600))
         .await
         .expect("open first channel");
     let second = backend
-        .open(b"peer-two".to_vec(), Duration::seconds(3600))
+        .open(peer_two, Duration::seconds(3600))
         .await
         .expect("open second channel");
 

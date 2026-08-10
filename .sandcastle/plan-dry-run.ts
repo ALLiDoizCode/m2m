@@ -64,7 +64,7 @@ async function main() {
     sandbox: docker({ env: sandboxSecrets() }),
     name: 'planner-dry-run',
     maxIterations: 1,
-    agent: sandcastle.claudeCode('claude-opus-4-8'),
+    agent: sandcastle.claudeCode('claude-opus-5'),
     promptFile: './.sandcastle/plan-prompt.md',
     output: sandcastle.Output.object({ tag: 'plan', schema: planSchema }),
   });

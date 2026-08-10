@@ -1,0 +1,23 @@
+[package]
+name = "connector-peer-auth"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The configured side of the credential: `PeerCredential` and its
+# constant-time compare (issue #723). Reused rather than reimplemented --
+# a second comparison is a second place for the empty-secret rule to be
+# forgotten.
+connector-config = { path = "../connector-config" }
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+# Test-only, and only so `PEER_AUTH_NAMES` cannot fork from the frame
+# grammar's own spelling of the entry name (spec I2). A dev-dependency
+# because this crate must not be able to name a frame, a socket or a
+# session in anything it ships.
+connector-btp = { path = "../connector-btp" }
