@@ -131,6 +131,15 @@ packets stops being served the moment the receive side lands. What happens to su
 rollout — migration and sequencing — is issue #868's to state; it is not left to whoever notices
 first.
 
+**Resolved by issue #883** (child B6): senders (the B3 covering behaviour) roll to every box before
+receivers (the B2 refusal behaviour) roll to any — a receiver that refuses before its counterparties
+can cover is a hard outage, and the safe order is stated and justified, not assumed. A temporary
+per-peering `claim_enforcement` config knob (`connector-config::peer::ClaimEnforcement`, default
+`Enforce`) lets a receiver `Observe` — admit and log an uncovered PREPARE rather than refuse it — as
+a canary step before a box is flipped to enforce; it is dated for removal once the fleet-wide
+rollout is confirmed. The three-box fleet runbook, its config dry-run recipe and its positive-evidence
+checks are `docs/operators/claim-policy-rollout.md`.
+
 **The exposure machinery's remaining purpose is undecided here.** `record_inbound_delivery`
 (`claim.rs:844`), `ceiling` and `flush_interval_ms` either go away or become a residual safety bound
 with a restated purpose. Issue #868 owns that call. What this ADR fixes is that the question is now

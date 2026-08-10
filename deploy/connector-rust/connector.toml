@@ -171,6 +171,16 @@ write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STE
 # claim_ack_timeout_ms = 30000
 # peer_answer_timeout_ms = 30000
 #
+# # TEMPORARY migration knob (issue #883, child B6) -- do not set this on a
+# # config expected to outlive the fleet's own claim-policy rollout
+# # (docs/operators/claim-policy-rollout.md). Omit for the default,
+# # "enforce": an uncovered peer PREPARE is refused (F06_UNEXPECTED_PAYMENT
+# # + the x402 greeting). "observe" admits it instead and logs it the same
+# # way a refusal would be logged, so an operator can watch this peering's
+# # logs for admissions before flipping it to enforce. A mistyped value is a
+# # named load-time error, not a silent default.
+# # claim_enforcement = "observe"
+#
 # # Every peering needs at least one channel binding, or it can never take
 # # the peer role at all: the role rule needs BOTH a proven credential and
 # # a channel. This is the table whose absence left ADR 0024's peer-claim

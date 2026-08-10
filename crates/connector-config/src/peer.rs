@@ -150,6 +150,64 @@ impl std::str::FromStr for PeerExposure {
     }
 }
 
+/// Whether an uncovered peer PREPARE (issue #880, owner decision #868: every
+/// peer PREPARE carries a covering claim, or it is refused with the client
+/// edge's own x402 greeting) is actually refused, or admitted and logged.
+///
+/// **Temporary migration knob (issue #883, child B6).** `Enforce` is the
+/// permanent behaviour and the default -- omitting the field, or writing
+/// nothing, means refuse exactly as issue #880 shipped. `Observe` exists only
+/// for the fleet rollout's canary step: it logs the same
+/// `peer PREPARE ... no claim covers this packet's price` line but does not
+/// refuse the packet, so an operator can watch a box's logs for admissions
+/// before flipping it to enforce (`docs/operators/claim-policy-rollout.md`).
+///
+/// **Dated for removal.** Once every `[[peers]]` row across the fleet reads
+/// `Enforce` (the default, so in practice once no config sets `Observe`
+/// anymore) and the rollout's own runbook confirms it, this variant and the
+/// field that selects it should be deleted -- the same removed-field-trap
+/// convention `ceiling`/`flush_interval_ms` now use (`ConfigError::
+/// PeerCeilingRemoved`, `resolve_peers`). Target: no later than the two-node
+/// fleet epic (toon-meta#316) closing, or 2026-11-01, whichever is first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClaimEnforcement {
+    /// Refuse an uncovered peer PREPARE (`F06_UNEXPECTED_PAYMENT` + the x402
+    /// greeting). The permanent, default behaviour.
+    #[default]
+    Enforce,
+    /// Admit an uncovered peer PREPARE, logging it the same way a refusal
+    /// would be logged. Migration-only; see the type's own documentation.
+    Observe,
+}
+
+impl ClaimEnforcement {
+    /// The spelling an operator writes.
+    pub fn name(self) -> &'static str {
+        match self {
+            ClaimEnforcement::Enforce => "enforce",
+            ClaimEnforcement::Observe => "observe",
+        }
+    }
+}
+
+impl fmt::Display for ClaimEnforcement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl std::str::FromStr for ClaimEnforcement {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "enforce" => Ok(ClaimEnforcement::Enforce),
+            "observe" => Ok(ClaimEnforcement::Observe),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Parse the top-level `peer_expose` field, defaulting to
 /// [`PeerExposure::Neither`] when the operator wrote nothing -- and
 /// refusing a written-but-unrecognized spelling by name, the same way
@@ -392,6 +450,13 @@ pub(crate) struct RawPeer {
     claim_ack_timeout_ms: Option<u64>,
     #[serde(default)]
     peer_answer_timeout_ms: Option<u64>,
+    /// The B6 migration knob (issue #883): `"observe"` admits and logs an
+    /// uncovered peer PREPARE instead of refusing it. Omitted, or written
+    /// `"enforce"`, is [`ClaimEnforcement::Enforce`] -- the default and the
+    /// permanent behaviour. See [`ClaimEnforcement`]'s own documentation for
+    /// why this field is temporary.
+    #[serde(default)]
+    claim_enforcement: Option<String>,
 }
 
 /// A fully validated peering relation. Constructed only by
@@ -412,6 +477,7 @@ pub struct PeerConfig {
     can_originate: bool,
     claim_ack_timeout_ms: u64,
     peer_answer_timeout_ms: u64,
+    claim_enforcement: ClaimEnforcement,
 }
 
 impl PeerConfig {
@@ -461,6 +527,14 @@ impl PeerConfig {
     /// to 30 000 ms.
     pub fn peer_answer_timeout_ms(&self) -> u64 {
         self.peer_answer_timeout_ms
+    }
+
+    /// Whether an uncovered peer PREPARE from this peering is refused or
+    /// admitted-and-logged. Defaults to [`ClaimEnforcement::Enforce`]; see
+    /// that type for why the [`ClaimEnforcement::Observe`] alternative
+    /// exists and is temporary (issue #883).
+    pub fn claim_enforcement(&self) -> ClaimEnforcement {
+        self.claim_enforcement
     }
 }
 
@@ -542,6 +616,22 @@ pub(crate) fn resolve_peers(
             None => return Err(ConfigError::PeerCredentialMissing { id: peer.id }),
         };
 
+        // Issue #883 (B6): a mistyped `claim_enforcement` is refused by
+        // name, the same convention `peer_expose` uses -- a value this
+        // build does not recognize is not the same as the field being
+        // absent, and treating it as "enforce" by falling through would
+        // hide a typo that meant "observe" behind the strictest behaviour
+        // ever going unnoticed on a receiver that never actually observed.
+        let claim_enforcement = match peer.claim_enforcement {
+            None => ClaimEnforcement::default(),
+            Some(value) => value
+                .parse()
+                .map_err(|()| ConfigError::InvalidClaimEnforcement {
+                    id: peer.id.clone(),
+                    value,
+                })?,
+        };
+
         // A peering with nothing to dial, on a connector with nothing to
         // dial into, can never establish -- and no amount of retrying
         // changes that (§2.2).
@@ -561,6 +651,7 @@ pub(crate) fn resolve_peers(
             peer_answer_timeout_ms: peer
                 .peer_answer_timeout_ms
                 .unwrap_or(DEFAULT_PEER_TIMEOUT_MS),
+            claim_enforcement,
         });
     }
 
@@ -605,6 +696,7 @@ mod tests {
             flush_interval_ms: None,
             claim_ack_timeout_ms: None,
             peer_answer_timeout_ms: None,
+            claim_enforcement: None,
         }
     }
 
@@ -623,6 +715,57 @@ mod tests {
         assert!(peers[0].can_originate());
         assert_eq!(peers[0].claim_ack_timeout_ms(), 30_000);
         assert_eq!(peers[0].peer_answer_timeout_ms(), 30_000);
+        assert_eq!(peers[0].claim_enforcement(), ClaimEnforcement::Enforce);
+    }
+
+    /// Issue #883 (B6): a peer that writes nothing gets the permanent
+    /// behaviour, not the migration-only one -- the same "omit for the
+    /// default" convention `peer_expose` uses.
+    #[test]
+    fn claim_enforcement_defaults_to_enforce() {
+        let peers =
+            resolve_peers(vec![raw("peer-b")], PeerExposure::Neither, false).expect("resolve");
+
+        assert_eq!(peers[0].claim_enforcement(), ClaimEnforcement::Enforce);
+    }
+
+    /// The migration's whole point: a peer explicitly opted into the canary
+    /// step resolves to `Observe`.
+    #[test]
+    fn claim_enforcement_observe_is_parsed_by_name() {
+        let mut entry = raw("peer-b");
+        entry.claim_enforcement = Some("observe".to_string());
+
+        let peers = resolve_peers(vec![entry], PeerExposure::Neither, false).expect("resolve");
+
+        assert_eq!(peers[0].claim_enforcement(), ClaimEnforcement::Observe);
+    }
+
+    /// Writing the default out explicitly is the same as omitting it.
+    #[test]
+    fn claim_enforcement_enforce_is_parsed_by_name() {
+        let mut entry = raw("peer-b");
+        entry.claim_enforcement = Some("enforce".to_string());
+
+        let peers = resolve_peers(vec![entry], PeerExposure::Neither, false).expect("resolve");
+
+        assert_eq!(peers[0].claim_enforcement(), ClaimEnforcement::Enforce);
+    }
+
+    /// A mistyped value is refused by name, not silently read as the
+    /// default -- the same reasoning `exposure_refuses_an_unrecognized_spelling_by_name`
+    /// documents for `peer_expose`: a typo that meant "observe" must not
+    /// silently become the strictest behaviour there is.
+    #[test]
+    fn claim_enforcement_refuses_an_unrecognized_spelling_by_name() {
+        let mut entry = raw("peer-b");
+        entry.claim_enforcement = Some("log-only".to_string());
+
+        assert!(matches!(
+            resolve_peers(vec![entry], PeerExposure::Neither, false),
+            Err(ConfigError::InvalidClaimEnforcement { ref id, ref value })
+                if id == "peer-b" && value == "log-only"
+        ));
     }
 
     #[test]

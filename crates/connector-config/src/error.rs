@@ -170,6 +170,18 @@ pub enum ConfigError {
     )]
     InvalidPeerExposure { value: String },
 
+    /// Issue #883 (B6): the migration knob, spelled wrong. A mistyped value
+    /// must not silently read as the default -- see
+    /// [`crate::peer::ClaimEnforcement`]'s own documentation for why the
+    /// field is temporary.
+    #[error(
+        "invalid claim_enforcement value '{value}' for peer '{id}': a peer sets 'enforce' \
+         (refuse an uncovered peer PREPARE, the default) or 'observe' (admit and log it -- the \
+         rollout's own migration-only canary step, issue #883). Omit the field for the default \
+         ('enforce'); see docs/operators/claim-policy-rollout.md"
+    )]
+    InvalidClaimEnforcement { id: String, value: String },
+
     #[error(
         "invalid endpoint '{value}' for peer '{id}': {source} -- a peer endpoint is a URL \
          ('wss://host:port/path' for BTP, 'https://host:port/path' for ILP-over-HTTP), not a \

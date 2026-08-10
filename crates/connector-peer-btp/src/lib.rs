@@ -73,5 +73,5 @@ pub mod ws;
 pub use accept::{AcceptedClaims, PeerAcceptPolicy, PeerCarriageState, PeerSession};
 pub use claim_json::{ClaimDecodeError, PeerClaimDomain};
 pub use dial::{decode_answer, BtpPeerTransport, DialError, PeerAnswer, PeerDialer, PeerRelation};
-pub use price_gate::PaymentRequired;
+pub use price_gate::{ClaimEnforcementPolicy, PaymentRequired};
 pub use ws::TungsteniteDialer;
