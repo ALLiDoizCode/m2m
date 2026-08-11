@@ -23,7 +23,7 @@ use connector_config::{
 };
 use connector_runtime::{
     ChannelDomain, Connector, FileJournal, HttpAppClient, InMemoryJournal, Journal, JournalError,
-    PeerRoute, SystemClock,
+    PeerRoute, PeerRouteStore, PeerRouteStoreError, SystemClock,
 };
 use connector_settlement::{SettlementBackend, SettlementError};
 use connector_settlement_evm::EvmSettlementBackend;
@@ -92,6 +92,15 @@ pub enum RuntimeError {
     /// watermarks this node cannot vouch for, which is exactly the defect
     /// issue #605 describes.
     JournalUnreplayable { path: PathBuf, source: JournalError },
+    /// Issue #884's runtime peer/route table under `state_dir` exists but
+    /// could not be read (unreadable, or corrupt JSON) -- refusing to
+    /// start rather than serve with a table this node cannot vouch for,
+    /// the same reasoning `JournalUnreplayable` applies to a claim
+    /// journal.
+    RuntimePeerRouteTableUnusable {
+        path: PathBuf,
+        source: PeerRouteStoreError,
+    },
     /// A `[[peer_channels]]` row's `channel_id` is not a shape
     /// [`connector_runtime::ClaimBook`] can file a watermark under (issue
     /// #678). Unreachable through `Config::load`, which canonicalizes the
@@ -172,6 +181,12 @@ impl fmt::Display for RuntimeError {
                 f,
                 "failed to replay the claim journal at {}: {source} -- the connector \
                  refuses to start rather than resume from watermarks it cannot vouch for",
+                path.display()
+            ),
+            RuntimeError::RuntimePeerRouteTableUnusable { path, source } => write!(
+                f,
+                "failed to read the runtime peer/route table at {}: {source} -- the connector \
+                 refuses to start rather than serve with a peer/route table it cannot vouch for",
                 path.display()
             ),
             RuntimeError::AnnounceIdentityKeyFileUnreadable { path, source } => write!(
@@ -518,6 +533,10 @@ impl ClientChannelSource for SolanaChannelSource {
 /// the same path.
 const PEER_CLAIM_JOURNAL: &str = "peer-claims.log";
 const CLIENT_EDGE_JOURNAL: &str = "client-edge-claims.log";
+/// Issue #884's runtime peer/route table -- a whole-table JSON snapshot,
+/// not an append-only journal line format like the two above (see
+/// `connector_runtime::PeerRouteStore`'s own docs for why).
+const RUNTIME_PEER_ROUTE_TABLE: &str = "runtime-peers.json";
 
 /// Open `name` under this node's configured `state_dir`, creating the
 /// directory if it is not there yet.
@@ -753,7 +772,14 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
         peer_transport,
         Arc::new(SystemClock),
     )
-    .with_identity_signer(signer.clone());
+    .with_identity_signer(signer.clone())
+    // Issue #884: the routing table IS the relationship set enforced at
+    // load (`connector-config`'s `UnknownPeerId` check), so a runtime
+    // write must never be able to add, update or remove a peer id the
+    // config file already owns. `Connector` needs every config peer id
+    // to enforce that, even though it stores nothing else about a
+    // config peer (see `PeerView`'s own docs).
+    .with_config_peer_ids(config.peers().iter().map(|peer| peer.id().to_string()));
     // `[[peer_channels]]` reaching `ClaimBook` at last (§11: "it MUST
     // actually wire `ClaimBook`'s signer, verification key and EIP-712
     // domain, with no code-only setters left on the config path"). Before
@@ -847,6 +873,21 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
                 source,
             }
         })?;
+        // Issue #884: replay this node's durable runtime peer/route table,
+        // and arm the connector to persist future writes back to the same
+        // file -- the same `state_dir` scoping as the two journals above,
+        // so an operator restoring a node from `state_dir` alone restores
+        // this table too. `open_journal` just created `state_dir` itself,
+        // so a node with nowhere writable has already failed above with
+        // the path in the message.
+        let table_path = state_dir.join(RUNTIME_PEER_ROUTE_TABLE);
+        let (store, runtime_peers, runtime_peer_routes) = PeerRouteStore::open(&table_path)
+            .map_err(|source| RuntimeError::RuntimePeerRouteTableUnusable {
+                path: table_path,
+                source,
+            })?;
+        connector =
+            connector.with_runtime_peer_route_store(store, runtime_peers, runtime_peer_routes);
     }
     Ok(Runtime {
         connector: Arc::new(connector),

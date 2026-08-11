@@ -35,6 +35,12 @@ provided — a peer that stops being refreshed loses its routes — without the 
 why. A controller that dies causes routes to expire rather than to rot, and a stale route
 pointing value at a peer that can no longer deliver is the failure this prevents.
 
+**Extended, not replaced, by issue #884.** A sold peering (#867) is a deliberate, paid
+relationship rather than an automated controller's push, so it needs a third shape beside
+"static, from config" and "leased, TTL-bound": runtime-mutable AND durable. ADR 0034 adds it
+without disturbing either existing one — "static routes... always win" still holds; a runtime
+row can never take a key the config file owns.
+
 **Nothing announces any more, and that gap is now external.** An empty bootstrap seed
 previously produced hardcoded address literals and 404s for new users. Self-announcement and
 route learning are moved, not dropped, and the component that owns them has to exist
