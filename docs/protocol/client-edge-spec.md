@@ -560,33 +560,27 @@ freshness must never exceed this connector's own lease. Wiring `buzz#84`'s
 connector's obligation is that the value is on the wire and provably tied to the enforced constant
 (pinned by a same-crate test), not that every consumer has been updated yet.
 
-### 1.5 Request-request binding (RFC 9421)
+### 1.5 Request-request binding — decided against
 
-**Not yet implemented.** No `requireRequestBinding` config field, `RouteTermination` type or RFC
-9421 verification exists anywhere in `crates/`; this section specifies the intended design, not
-current behavior. This subsection describes what the route-**termination** feature — see
-`CLAUDE.md`'s terminology note on `RouteTermination`/`checkRequestBinding` — does once it exists in
-the Rust connector.
-
-For a locally-terminated route configured with `requireRequestBinding: true`, the connector binds
-the _inner_ HTTP request it will proxy to the app (the literal HTTP envelope carried verbatim in
-the PREPARE's `data` field) to the claim that pays for it, using an RFC 9421 HTTP Message
-Signature over that inner request with an RFC 9530 `Content-Digest`, plus a `TOON-Price` header
-compared byte-exact against the route's configured price:
-
-- **Signature present** (on the inner envelope's `signature`/`signature-input` headers) — ALWAYS
-  verified, regardless of the route's enforcement setting. Verification failure rejects the
-  PREPARE (never proxies it) with `F01_INVALID_PACKET` for a structural/cryptographic failure or
-  `F03_INVALID_AMOUNT` for a price mismatch; the underlying RFC 9421 failure code rides in the
-  reject `message` for debuggability.
-- **Signature absent** — rejected (`F01`) only when the route's `requireRequestBinding` is `true`;
-  otherwise the request proceeds unchanged (do-no-harm default, preserving the claim-only flow for
-  routes that have not opted in).
-- A route with no `RouteTermination` (an ordinary forwarding destination) never performs this
-  check.
-
-This binds a captured claim to the specific request it paid for — a replay of the same claim
-against a different request or a different route's price fails the digest/price check.
+**Not implemented, and not going to be.** No `requireRequestBinding` config field,
+`RouteTermination` type or RFC 9421 verification of a client's request exists anywhere in `crates/`,
+and none is planned — the RFC 9421 verification `connector-operator` does carry is the operator
+surface's write authentication ([ADR 0008](../adr/0008-operator-surface-splits-read-from-write.md)),
+a different mechanism on a different surface. This section previously specified an intended design — an RFC 9421 HTTP Message Signature over the
+inner envelope, an RFC 9530 `Content-Digest`, and a `TOON-Price` header compared byte-exact against
+the route's price, verified by the terminating connector before proxying to the app.
+[ADR 0035](../adr/0035-request-request-binding-ships-no-new-mechanism.md) decided against building
+it: the threat it targeted — a captured claim replayed against different work or a cheaper route —
+is already closed, partly by construction (a payload is sealed to the terminating connector,
+[ADR 0018](../adr/0018-a-payload-is-sealed-to-the-terminating-connector.md); a packet's condition is
+already bound to a secret only that connector can open,
+[ADR 0019](../adr/0019-a-terminating-connector-derives-the-fulfilment.md)) and partly by §1.3's
+existing claim gate, whose watermark (step 2) and value binding (step 3) refuse a replayed or
+underpaying claim before the app is ever contacted. The party a binding mechanism would need to
+verify it is the terminating connector itself — the one party ADR 0035 finds it structurally cannot
+defend against, since that party also controls whether the check runs at all. See ADR 0035 for the
+full analysis, including the parties who do remain and why binding would not have defended against
+them either.
 
 ### 1.6 Probing for cost
 
