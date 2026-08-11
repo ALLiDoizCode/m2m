@@ -563,8 +563,10 @@ connector's obligation is that the value is on the wire and provably tied to the
 ### 1.5 Request-request binding — decided against
 
 **Not implemented, and not going to be.** No `requireRequestBinding` config field,
-`RouteTermination` type or RFC 9421 verification exists anywhere in `crates/`, and none is planned.
-This section previously specified an intended design — an RFC 9421 HTTP Message Signature over the
+`RouteTermination` type or RFC 9421 verification of a client's request exists anywhere in `crates/`,
+and none is planned — the RFC 9421 verification `connector-operator` does carry is the operator
+surface's write authentication ([ADR 0008](../adr/0008-operator-surface-splits-read-from-write.md)),
+a different mechanism on a different surface. This section previously specified an intended design — an RFC 9421 HTTP Message Signature over the
 inner envelope, an RFC 9530 `Content-Digest`, and a `TOON-Price` header compared byte-exact against
 the route's price, verified by the terminating connector before proxying to the app.
 [ADR 0035](../adr/0035-request-request-binding-ships-no-new-mechanism.md) decided against building

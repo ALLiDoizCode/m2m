@@ -2,7 +2,7 @@
 
 Issue #508 asked whether a claim must be cryptographically bound to the specific request it paid
 for, so that a captured claim cannot be replayed against different work or a cheaper route. It
-must not. The threat the binding was designed against is already closed — mostly by construction,
+need not. The threat the binding was designed against is already closed — mostly by construction,
 the rest by the claim gate that predates this question — and the one party a binding mechanism
 could still constrain is the party that would be trusted to verify it.
 
@@ -10,12 +10,12 @@ could still constrain is the party that would be trusted to verify it.
 
 ### The original design and why it stalled
 
-Issue #508's original body (2026-07-27, restated 2026-08-10) specified request-request binding as
+Issue #508's original body (2026-07-27, rewritten 2026-08-10) specified request-request binding as
 an RFC 9421 HTTP Message Signature over the _inner_ envelope a terminated route proxies to its
 app, plus an RFC 9530 `Content-Digest` and a `TOON-Price` header compared byte-exact against the
 route's price — signed by the client, verified by the terminating connector before it proxies.
-`docs/protocol/client-edge-spec.md` §1.5 still carries that design under a `**Not yet
-implemented.**` banner; it was written against a plaintext envelope and a v1 wire that
+`docs/protocol/client-edge-spec.md` §1.5 carried that design under a `**Not yet implemented.**`
+banner until this decision; it was written against a plaintext envelope and a v1 wire that
 [ADR 0017](0017-the-typescript-connector-is-a-prototype.md) retired, and neither shipped nor was
 attempted. The original nine acceptance criteria (preserved in issue #508's edit history) named
 the property the mechanism was meant to buy: a captured claim, replayed against a different
@@ -65,12 +65,6 @@ the original nine acceptance criteria on their own, independently of ADR 0018 an
   route's configured flat price, read from the same longest-prefix lookup `GET /ilp/routes/price`
   and the x402 terms (§1.4) use. A claim that does not cover the route it is actually presented
   against is refused; there is no second source of truth for price to disagree with.
-- **Ordering.** "A claim that fails any check is a validation failure and the PREPARE is rejected
-  before it reaches the terminating app or advances any watermark." Every refusal reason in §1.3 —
-  structural, freshness, value, unverifiable signature, unknown channel, an unreachable
-  settlement endpoint, an over-deposit claim — is its own distinguishable reason, stated as such at
-  each step ("distinguishable from a bad signature and from an underpayment", "refused under a
-  third, separate reason").
 - **Step 4, signer authority.** The signature MUST recover to the counterparty _recorded for the
   channel the claim names_, never to the claim's own declared `signerAddress`/`signerPublicKey`.
   `crates/connector-client-edge/src/channels.rs`'s module doc states this plainly: "a claim gets no
@@ -78,6 +72,12 @@ the original nine acceptance criteria on their own, independently of ADR 0018 an
   and never out of the claim." This is what makes step 4 a check against a fact the connector
   itself holds, not a self-attestation a forger could satisfy by signing with a key of their own
   choosing.
+- **Ordering**, which is a property of the gate rather than a step of it. "A claim that fails any
+  check is a validation failure and the PREPARE is rejected before it reaches the terminating app
+  or advances any watermark." Every refusal reason in §1.3 — structural, freshness, value,
+  unverifiable signature, unknown channel, an unreachable settlement endpoint, an over-deposit
+  claim — is its own distinguishable reason, stated as such at each step ("distinguishable from a
+  bad signature and from an underpayment", "refused under a third, separate reason").
 
 ### Correction to the premise: no hop occupies the observer's position
 
@@ -89,11 +89,11 @@ A client-edge claim is a per-hop artifact: it travels from the client directly t
 connector that verifies it, and stops there. `docs/protocol/money-model.md` states this as the
 model's own foundation: "The client's claim never leaves box 1. Box 1's claim to box 2 is box 1's
 own money." The value a claim carries is consumed into that connector's own accounting the moment
-its watermark advances — it is never re-presented, re-signed, or
-forwarded to the next hop as evidence of anything. A peer-wire claim is per-peering for the same
-structural reason: [ADR 0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md)
-requires every peer PREPARE to arrive with its own covering claim, signed fresh on the channel
-between that one pair of connectors, and a claim covering a forward is never itself forwarded onward.
+its watermark advances — it is never re-presented, re-signed, or forwarded to the next hop as
+evidence of anything. A peer-wire claim is per-peering for the same structural reason:
+[ADR 0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md) requires every
+peer PREPARE to arrive with its own covering claim, signed fresh on the channel between that one
+pair of connectors, and a claim covering a forward is never itself forwarded onward.
 
 So on both surfaces a claim moves exactly once, from its signer to the single party checking it,
 and the payload it accompanies is unreadable to everyone else on the path in any case (ADR 0018).
@@ -185,8 +185,8 @@ defence; it confirms that nothing request-request binding would have added survi
 who actually holds the verifying position.
 
 Issue #498's re-scoping is answered: "the residual threat needs restating before a mechanism is
-chosen" is restated above (parties (a)–(c)), and the restatement concludes no mechanism. The epic
-no longer points at an open question on this ticket.
+chosen" is restated above (parties (a)–(c)), and the restatement concludes no mechanism. The
+epic's "See #508" now resolves to a decision rather than to an open question.
 
 **This decision is reopened, not merely revisited, if any of the following becomes true:**
 
@@ -205,14 +205,14 @@ Issue #508's original nine acceptance criteria (preserved in its edit history) a
 mechanism this ADR declines to build. Each is recorded below as satisfied by an existing mechanism,
 or vacated along with the mechanism it presumed:
 
-| Original acceptance criterion                                                                      | Disposition                    | Mechanism                                                                                                                                                          |
-| -------------------------------------------------------------------------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| A request whose signature covers its envelope, digest and price is accepted                        | Vacated                        | no binding signature is defined; §1.3 alone decides acceptance                                                                                                     |
-| A claim replayed against a different request is refused                                            | **Satisfied**                  | §1.3 step 2, the watermark: a non-advancing nonce is refused regardless of which request accompanies it                                                            |
-| A claim replayed against a route with a different price is refused                                 | **Satisfied**                  | §1.3 step 3, value binding, against the same longest-prefix price lookup §1.4/§1.7 use                                                                             |
-| A structural or cryptographic binding failure and a price mismatch produce distinct reject codes   | Vacated, property already held | §1.3's existing refusal taxonomy already gives structural, freshness, value, signature, unknown-channel and deposit failures each their own distinguishable reason |
-| The underlying failure reason travels in the reject message                                        | Vacated, property already held | each §1.3 step states its own refusal reason; nothing here changes how those reasons are reported                                                                  |
-| A present signature is verified even on a route that does not require binding                      | Vacated                        | no binding signature exists to verify                                                                                                                              |
-| An absent signature is refused only where the route requires binding, otherwise proceeds unchanged | Vacated                        | no route requires a binding signature                                                                                                                              |
-| A route that does not terminate locally never performs this check                                  | Vacated                        | there is no check; a forwarding route was never in scope for the claim gate either                                                                                 |
-| A packet failing binding is rejected before the app is contacted                                   | Vacated, property already held | §1.3's own ordering already rejects any claim failure before the app is reached                                                                                    |
+| Original acceptance criterion                                                                      | Disposition                    | Mechanism                                                                                                                                                                          |
+| -------------------------------------------------------------------------------------------------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A request whose signature covers its envelope, digest and price is accepted                        | Vacated                        | no binding signature is defined; §1.3 alone decides acceptance                                                                                                                     |
+| A claim replayed against a different request is refused                                            | **Satisfied**                  | §1.3 step 2, the watermark: a non-advancing nonce is refused regardless of which request accompanies it                                                                            |
+| A claim replayed against a route with a different price is refused                                 | **Satisfied**                  | §1.3 step 3, value binding, against the same longest-prefix price lookup §1.4/§1.7 use                                                                                             |
+| A structural or cryptographic binding failure and a price mismatch produce distinct reject codes   | Vacated, property already held | §1.3's existing refusal taxonomy already gives structural, freshness, value, signature, unknown-channel and deposit failures each their own distinguishable reason                 |
+| The underlying failure reason travels in the reject message                                        | Vacated, property already held | each §1.3 step states its own refusal reason; nothing here changes how those reasons are reported                                                                                  |
+| A present signature is verified even on a route that does not require binding                      | Vacated                        | no binding signature exists to verify                                                                                                                                              |
+| An absent signature is refused only where the route requires binding, otherwise proceeds unchanged | Vacated                        | no route requires a binding signature                                                                                                                                              |
+| A route that does not terminate locally never performs this check                                  | Vacated                        | there is no such check to skip; the claim gate itself deliberately does not tell the two kinds of route apart ([ADR 0028](0028-a-forwarded-route-is-priced-at-the-client-edge.md)) |
+| A packet failing binding is rejected before the app is contacted                                   | Vacated, property already held | §1.3's own ordering already rejects any claim failure before the app is reached                                                                                                    |
