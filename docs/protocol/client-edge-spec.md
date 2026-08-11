@@ -65,8 +65,8 @@ application/octet-stream`. An ILP-level outcome — fulfilled or rejected — is
   | Status | Meaning                                                                         |
   | ------ | ------------------------------------------------------------------------------- |
   | `400`  | Malformed request: not a PREPARE, undecodable OER, oversized body.              |
-  | `401`  | An `ILP-Peer-Id` was presented but authentication failed (§1.2 — not yet        |
-  |        | implemented; no request is refused on this ground today).                       |
+  | `401`  | An `ILP-Peer-Id` was presented but authentication failed. Answered before       |
+  |        | the route is looked up, so it never arrives as a `402` instead. See §1.2.       |
   | `402`  | Unpaid request to a route this connector terminates and prices: x402 v2         |
   |        | payment-required terms, JSON body (not OER). See §1.4.                          |
   | `403`  | A probe (`POST /ilp/probe`) from a sender not authorized to probe: no           |
@@ -78,11 +78,13 @@ application/octet-stream`. An ILP-level outcome — fulfilled or rejected — is
 
 ### 1.2 Identity
 
-**Not yet implemented.** No code in `crates/connector-client-edge` reads `ILP-Peer-Id` or
-`Authorization` today; every request is handled identically regardless of what it presents on
-either header, and the `401` this section describes is never returned. `GET /ilp/identity` (§1.7)
-answers a different question — the connector's own key, not who is asking — and ships today. This
-section specifies the intended design for the rest:
+`GET /ilp/identity` (§1.7) answers a different question — the connector's own key, not who is
+asking. This section is who is asking, and ships today (issue #502): `POST /ilp` reads
+`ILP-Peer-Id` and `Authorization`, resolves the sender, and refuses a presented identity that does
+not authenticate with `401`. The identities a node recognises are the `[[client_identities]]`
+section of its config file (`id` + `secret`); a node that configures none — the default — treats
+every request that presents no `ILP-Peer-Id` as anonymous and refuses every one that presents an
+`ILP-Peer-Id` at all.
 
 A request identifies its sender in one of two ways:
 
@@ -781,9 +783,10 @@ silently dropped exactly as it was before TRANSFER existed.
 **Session flow, in order of what a frame carries:**
 
 1. **Auth**: a MESSAGE whose protocolData contains an `auth` entry (JSON `{peerId, secret}`) is
-   answered with an empty RESPONSE (same requestId). The contents are not verified — §1.2 is not
-   yet implemented on the HTTP carriage either, and an empty `secret` is the documented
-   permissionless mirror. Authorization to _write_ comes from the claim, never the session.
+   answered with an empty RESPONSE (same requestId). The contents are not verified — §1.2's
+   authentication is `POST /ilp`'s only, deliberately not extended to this carriage, where an
+   empty `secret` is the documented permissionless mirror and a BTP session is admitted whatever
+   it presents. Authorization to _write_ comes from the claim, never the session.
 
    **Update (issue #698):** a non-empty `peerId` also binds this session into the client session
    registry, keyed by that value — see "Session registry: the socket is the lease" below. Binding

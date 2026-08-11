@@ -1130,6 +1130,19 @@ pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError
                 ilp_addresses: announce.addresses().to_vec(),
                 btp_endpoint: announce.btp_endpoint().to_string(),
             }),
+        // Issue #502: every `[[client_identities]]` entry, as the
+        // `id`/`secret` pair `resolve_identity` authenticates an
+        // `ILP-Peer-Id` against. Empty is every node before this config
+        // section existed -- every request is anonymous or, if it presents
+        // an `ILP-Peer-Id`, refused `401`.
+        config
+            .client_identities()
+            .iter()
+            .map(|identity| connector_domain::identity::ConfiguredIdentity {
+                id: identity.id().to_string(),
+                secret: identity.secret().to_string(),
+            })
+            .collect(),
     );
     Ok(match config.operator() {
         Some(operator) => app.merge(connector_operator::router(
@@ -1386,6 +1399,44 @@ key_file = "{}"
                 "{path} must not be served without an [operator] section"
             );
         }
+    }
+
+    /// Issue #502, wired end to end: `router` reads `[[client_identities]]`
+    /// off the same [`Config`] `build` validated and threads it into the
+    /// client edge, so a request presenting an `ILP-Peer-Id` this node
+    /// configures but the wrong secret is refused `401` by the router this
+    /// crate actually serves -- not just the library-level unit tests in
+    /// `connector-client-edge` that construct a `ConfiguredIdentity` by
+    /// hand.
+    #[tokio::test]
+    async fn router_refuses_an_unauthenticated_client_identity() {
+        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+
+[[client_identities]]
+id = "peer-a"
+secret = "s3cr3t"
+"#,
+                key_path.display()
+            )
+        });
+        let runtime = build(&config).await.expect("build");
+        let app = router(&runtime, &config).expect("router");
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .header("ilp-peer-id", "peer-a")
+            .header("authorization", "Bearer wrong")
+            .body(Body::from(vec![0u8; 4]))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     /// Issue #807, wired end to end: `router` reads `[announce]` off the
