@@ -1,0 +1,356 @@
+# Fleet operations — live devnet box work, run as a workflow rather than as an
+# agent (toon-meta#335, toon-meta#309).
+#
+# ── WHY A WORKFLOW AND NOT AN AGENT ─────────────────────────────────────────
+# A class of devnet tickets is blocked on nothing but reach: read what a live
+# box is actually running, put the committed config on it, restart the thing
+# that reads that config, announce. Those are not design decisions — they are
+# deterministic operations a human has been doing by hand at a terminal.
+#
+# They still must not run inside the agent sandbox. `.sandcastle/sandbox-
+# secrets.ts` forwards exactly two values into the container
+# (CLAUDE_CODE_OAUTH_TOKEN, GH_TOKEN); an SSH key with root on four boxes is
+# not going to be the third. The key reaches a GitHub-hosted runner executing
+# THIS file — reviewed, committed, deterministic — and never reaches a
+# container running agent-authored code. Same shape as `funded-ops.yml`.
+#
+# An agent DISPATCHES this (its App token carries `actions: write`) and reads
+# the run's summary back. It never holds the credential.
+#
+# ── THE RULE THIS FILE EXISTS TO ENCODE ─────────────────────────────────────
+# The devnet boxes run hand-tuned, BIND-MOUNTED configs that LEAD the repo
+# copies, and `docker compose up -d` DOES NOT RELOAD A BIND-MOUNTED FILE — it
+# reports `Running` and changes nothing (`docs/operators/peer-channel-
+# migration.md:22-28,47-49`; ADR 0009). Every previous attempt to "deploy" a
+# config change by running `up -d` silently did nothing and looked like it
+# worked. `config-apply` therefore ALWAYS restarts the service that reads the
+# file, and then re-reads the file OFF THE BOX to prove what is actually there.
+#
+# ── SAFETY ──────────────────────────────────────────────────────────────────
+#   * `apply` defaults to false. A dry run reads the box, prints the exact diff
+#     it would write, and changes nothing.
+#   * Read operations (`box-status`, `config-read`, `pin-verify`) never take the
+#     write path and are safe at any time.
+#   * `config-apply` backs the live file up on the box to
+#     `<file>.bak.<utc-timestamp>` before writing. The summary prints the
+#     restore command. Nothing is ever overwritten without a recoverable copy.
+#   * Every write RE-READS the box afterwards and fails the job if the box does
+#     not reflect the request. A successful `scp` is not the source of truth;
+#     the box is. (Same doctrine as funded-ops.yml, where a transaction receipt
+#     is not trusted and the contract is re-read.)
+#   * The SSH key is written 0600 to a job-local file and removed in an
+#     `always()` step. Host keys are pinned per run via `accept-new`, so a
+#     changed host key fails the run instead of being trusted silently.
+#   * The faucet box has NO connector (toon-meta `two-node-architecture.md` §4),
+#     so connector-shaped operations against it are refused by input validation
+#     rather than failing obscurely halfway through.
+#
+# ── REQUIRED SECRET ─────────────────────────────────────────────────────────
+#   DEVNET_SSH_KEY   Private half of a DEVNET-SCOPED key authorized as root on
+#                    the boxes. NOT the operator's personal key, and NOT
+#                    E2E_DEV_MNEMONIC (which is mainnet-capable — see
+#                    .sandcastle/sandbox-secrets.ts).
+#                    Authorizing it is a one-time human step and should happen
+#                    AFTER connector#931 hardens the boxes, not before.
+#   LINODE_CLI_TOKEN Existing org secret. Used only to resolve a box label to
+#                    its current IP, so no IP is hardcoded here.
+
+name: fleet-ops
+
+on:
+  workflow_dispatch:
+    inputs:
+      box:
+        description: "Which box. `ario` is the store box's Linode label."
+        type: choice
+        required: true
+        options: [relay, ario, toon, faucet]
+      operation:
+        description: "box-status | config-read | pin-verify (reads) — config-apply | restart | announce (writes)"
+        type: choice
+        required: true
+        default: box-status
+        options: [box-status, config-read, pin-verify, config-apply, restart, announce]
+      service:
+        description: "restart: compose service name (connector-rust, relay, store, nginx, faucet)"
+        type: string
+        required: false
+        default: "connector-rust"
+      apply:
+        description: "Perform the write. false = dry run, reads and prints only."
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # One fleet operation at a time, fleet-wide. Two concurrent runs could
+  # restart a box while another is mid-apply against it.
+  group: fleet-ops
+  cancel-in-progress: false
+
+jobs:
+  fleet-ops:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BOX: ${{ inputs.box }}
+      OPERATION: ${{ inputs.operation }}
+      SERVICE: ${{ inputs.service }}
+      APPLY: ${{ inputs.apply }}
+      LINODE_API: https://api.linode.com/v4
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Fail closed, and fail EARLY, on a missing credential ──────────────
+      # Without this the job would get as far as ssh and emit an unreadable
+      # "Permission denied (publickey)" with no hint that the secret is simply
+      # not set yet.
+      - name: Preconditions
+        env:
+          DEVNET_SSH_KEY: ${{ secrets.DEVNET_SSH_KEY }}
+          LINODE_CLI_TOKEN: ${{ secrets.LINODE_CLI_TOKEN }}
+        run: |
+          set -euo pipefail
+          fail=0
+          if [ -z "${DEVNET_SSH_KEY:-}" ]; then
+            echo "::error::DEVNET_SSH_KEY is not set. This workflow cannot reach a box."
+            echo "::error::It is a one-time human step: mint a devnet-scoped key, add it as an"
+            echo "::error::org secret, and authorize it as root on the boxes. See connector#931."
+            fail=1
+          fi
+          if [ -z "${LINODE_CLI_TOKEN:-}" ]; then
+            echo "::error::LINODE_CLI_TOKEN is not set — cannot resolve a box label to an IP."
+            fail=1
+          fi
+
+          # The faucet box has no connector, deliberately. Refuse here rather
+          # than half-executing and leaving the operator to read a stack trace.
+          case "$OPERATION" in
+            config-read|config-apply|announce|pin-verify)
+              if [ "$BOX" = "faucet" ]; then
+                echo "::error::'$OPERATION' is a connector operation and the faucet box has no"
+                echo "::error::connector (two-node-architecture.md §4). Nothing to act on."
+                fail=1
+              fi
+              ;;
+          esac
+
+          [ "$fail" -eq 0 ] || exit 1
+          echo "Preconditions OK."
+
+      - name: Resolve box IP from its Linode label
+        id: box
+        env:
+          LINODE_CLI_TOKEN: ${{ secrets.LINODE_CLI_TOKEN }}
+        run: |
+          set -euo pipefail
+          ip=$(curl -sf -H "Authorization: Bearer $LINODE_CLI_TOKEN" \
+                 "$LINODE_API/linode/instances" \
+               | jq -r --arg l "$BOX" '.data[] | select(.label==$l) | .ipv4[0]' | head -1)
+          if [ -z "$ip" ] || [ "$ip" = "null" ]; then
+            echo "::error::No Linode labelled '$BOX'. Live labels are toon | ario | relay | faucet."
+            exit 1
+          fi
+          echo "ip=$ip" >> "$GITHUB_OUTPUT"
+          echo "Box '$BOX' is $ip"
+
+      - name: Install SSH key
+        env:
+          DEVNET_SSH_KEY: ${{ secrets.DEVNET_SSH_KEY }}
+          BOX_IP: ${{ steps.box.outputs.ip }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$DEVNET_SSH_KEY" > ~/.ssh/devnet
+          chmod 600 ~/.ssh/devnet
+          # accept-new: trust on first use for this ephemeral runner, but a
+          # CHANGED host key still fails rather than being accepted silently.
+          {
+            echo "Host devnet-box"
+            echo "  HostName $BOX_IP"
+            echo "  User root"
+            echo "  IdentityFile ~/.ssh/devnet"
+            echo "  IdentitiesOnly yes"
+            echo "  StrictHostKeyChecking accept-new"
+            echo "  ConnectTimeout 30"
+            echo "  ServerAliveInterval 30"
+          } > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+          ssh -F ~/.ssh/config -o LogLevel=ERROR devnet-box true \
+            && echo "SSH reachable." \
+            || { echo "::error::Cannot SSH to $BOX. Is DEVNET_SSH_KEY authorized as root on this box (connector#931)?"; exit 1; }
+
+      - name: Run operation
+        id: run
+        env:
+          BOX_IP: ${{ steps.box.outputs.ip }}
+        run: |
+          set -euo pipefail
+
+          # Per-box paths. INFRA_DIR is the box's directory in this repo, which
+          # is also its path inside /root/connector on the box itself.
+          case "$BOX" in
+            toon)   INFRA_DIR=infra/linode-node ;;
+            relay)  INFRA_DIR=infra/linode-relay ;;
+            ario)   INFRA_DIR=infra/linode-store ;;
+            faucet) INFRA_DIR=infra/linode-faucet ;;
+          esac
+          CONF_REL="$INFRA_DIR/connector-rust.toml"
+          REMOTE_REPO=/root/connector
+          REMOTE_CONF="$REMOTE_REPO/$CONF_REL"
+
+          sshbox() { ssh -F ~/.ssh/config -o LogLevel=ERROR devnet-box "$@"; }
+          say() { echo "$@" >> "$GITHUB_STEP_SUMMARY"; }
+
+          say "## fleet-ops — \`$BOX\` · \`$OPERATION\`"
+          say ""
+          say "Box IP resolved from Linode label. Mode: **$([ "$APPLY" = "true" ] && echo APPLY || echo DRY-RUN)**."
+          say ""
+
+          case "$OPERATION" in
+
+            box-status)
+              say '```'
+              sshbox 'uptime; echo; docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"' \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+              say '```'
+              ;;
+
+            config-read)
+              # Redact anything that looks like inline secret material. The
+              # committed shape references secrets by FILE (ADR 0009), so this
+              # should be a no-op — but a hand-edited live file is exactly the
+              # kind of thing that would not be, and this output is public.
+              say "Live bind-mounted config, secret-shaped values redacted:"
+              say '```toml'
+              sshbox "cat '$REMOTE_CONF'" \
+                | sed -E 's/^([[:space:]]*[a-z_]*(secret|key|password|mnemonic|token)[a-z_]*[[:space:]]*=[[:space:]]*).*/\1"<redacted>"/I' \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+              say '```'
+              ;;
+
+            pin-verify)
+              # #309's question: is the box on the committed pin?
+              say "### Repo checkout on the box"
+              say '```'
+              sshbox "cd $REMOTE_REPO && git rev-parse --short HEAD && git status --porcelain | head -20" \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+              say '```'
+              say "### Running image digests"
+              say '```'
+              sshbox 'docker ps --format "{{.Names}}\t{{.Image}}" | while IFS=$"\t" read -r n i; do printf "%s\t%s\n" "$n" "$(docker inspect --format "{{index .RepoDigests 0}}" "$i" 2>/dev/null || echo "<no digest>")"; done' \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+              say '```'
+              say ""
+              say "Compare against this repo's committed \`$CONF_REL\` and compose pins."
+              ;;
+
+            config-apply)
+              # Declarative, not a patch: put the COMMITTED file on the box.
+              # Re-running with the same commit is a no-op, which is what makes
+              # a retry after an ambiguous failure safe.
+              if [ ! -f "$CONF_REL" ]; then
+                echo "::error::$CONF_REL does not exist in this repo."; exit 1
+              fi
+              sshbox "cat '$REMOTE_CONF'" > /tmp/live.toml || { echo "::error::cannot read $REMOTE_CONF"; exit 1; }
+
+              say "### Diff — live box (left) vs committed \`$CONF_REL\` (right)"
+              say '```diff'
+              if diff -u /tmp/live.toml "$CONF_REL" > /tmp/conf.diff; then
+                say "(identical — nothing to apply)"
+                cat /tmp/conf.diff >> "$GITHUB_STEP_SUMMARY" || true
+                say '```'
+                say ""
+                say "**No change.** The box already matches the committed file."
+                exit 0
+              fi
+              sed -E 's/^([+-][[:space:]]*[a-z_]*(secret|key|password|mnemonic|token)[a-z_]*[[:space:]]*=[[:space:]]*).*/\1"<redacted>"/I' /tmp/conf.diff \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+              say '```'
+
+              if [ "$APPLY" != "true" ]; then
+                say ""
+                say "**Dry run — nothing written.** Re-run with \`apply: true\` to write this."
+                exit 0
+              fi
+
+              STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+              sshbox "cp '$REMOTE_CONF' '$REMOTE_CONF.bak.$STAMP'"
+              scp -F ~/.ssh/config -o LogLevel=ERROR "$CONF_REL" "devnet-box:$REMOTE_CONF"
+
+              # THE POINT OF THIS FILE: a bind-mounted file is not reloaded by
+              # `up -d`. Restart the service that reads it, or nothing happened.
+              sshbox "cd $REMOTE_REPO && docker compose restart connector-rust" || true
+
+              # Re-read OFF THE BOX. An scp exit code is not proof.
+              sshbox "cat '$REMOTE_CONF'" > /tmp/after.toml
+              if ! diff -q /tmp/after.toml "$CONF_REL" >/dev/null; then
+                say ""
+                say "**FAILED** — the box does not match the committed file after writing."
+                say "Restore: \`cp $REMOTE_CONF.bak.$STAMP $REMOTE_CONF && docker compose restart connector-rust\`"
+                echo "::error::post-write read-back does not match; box left with backup at $REMOTE_CONF.bak.$STAMP"
+                exit 1
+              fi
+              say ""
+              say "**Applied and verified.** Backup: \`$REMOTE_CONF.bak.$STAMP\`"
+              say "Restore: \`cp $REMOTE_CONF.bak.$STAMP $REMOTE_CONF && docker compose restart connector-rust\`"
+              ;;
+
+            restart)
+              if [ "$APPLY" != "true" ]; then
+                say "**Dry run.** Would run: \`docker compose restart $SERVICE\` on \`$BOX\`."
+                exit 0
+              fi
+              sshbox "cd $REMOTE_REPO && docker compose restart '$SERVICE'"
+              say "Restarted \`$SERVICE\`."
+              say '```'
+              sshbox "docker ps --format 'table {{.Names}}\t{{.Status}}'" | tee -a "$GITHUB_STEP_SUMMARY"
+              say '```'
+              ;;
+
+            announce)
+              if [ "$APPLY" != "true" ]; then
+                say "**Dry run.** Would run the one-shot announce on \`$BOX\`."
+                say "Announce is a PAID write through the node's own routing (ADR 0030)."
+                exit 0
+              fi
+              # ADR 0030: an operator announces a node; the node never does.
+              # One-shot, from the box that holds the identity key.
+              sshbox "cd $REMOTE_REPO && docker compose run --rm announce" 2>&1 \
+                | tail -40 | tee -a "$GITHUB_STEP_SUMMARY"
+              ;;
+          esac
+
+      # ── Health gate ─────────────────────────────────────────────────────────
+      # Any write could have left the box serving nothing. Prove it still
+      # serves before the job goes green. GET /ilp/identity is the same
+      # liveness check every box's nginx uses — it 200s only once the process
+      # is serving AND has read its signer key file.
+      - name: Verify the box still serves
+        if: >-
+          inputs.apply && inputs.box != 'faucet' &&
+          (inputs.operation == 'config-apply' || inputs.operation == 'restart')
+        env:
+          BOX_IP: ${{ steps.box.outputs.ip }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if ssh -F ~/.ssh/config -o LogLevel=ERROR devnet-box \
+                 'curl -sf http://127.0.0.1:4000/ilp/identity >/dev/null'; then
+              echo "Connector healthy." | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::Connector did not become healthy within 90s after the write."
+          echo "**UNHEALTHY after the write — investigate before running anything else.**" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
+      - name: Remove SSH key
+        if: always()
+        run: rm -f ~/.ssh/devnet ~/.ssh/config

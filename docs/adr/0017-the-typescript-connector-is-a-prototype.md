@@ -1,5 +1,7 @@
 # The TypeScript connector is a prototype, not a reference implementation
 
+**Scope:** fleet and operations — not connector-internal, not wire law. See the [ADR index](README.md).
+
 The Rust connector implements a wire of its own design and never client edge version 1. ADR 0016's
 ruling that it must implement v1 as written is superseded. That ADR's other half — opacity is a
 property of carriage — stands, and ADR 0018 strengthens it.

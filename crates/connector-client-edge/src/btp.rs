@@ -1104,6 +1104,7 @@ mod tests {
             session_registry: Arc::new(crate::session_registry::SessionRegistry::new()),
             peers: None,
             bootstrap_identity: None,
+            identities: Arc::from([]),
         }
     }
 

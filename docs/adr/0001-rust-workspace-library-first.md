@@ -1,5 +1,7 @@
 # The connector is a Rust library first, a binary second
 
+**Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
+
 The TypeScript connector's real problem is structural, not performance: `connector-node.ts`
 (169 KB), `admin-api.ts` (111 KB) and `packet-handler.ts` (65 KB) are god objects, and peer
 and route logic is duplicated across two surfaces that must be kept byte-identical. We are

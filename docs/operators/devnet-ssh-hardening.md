@@ -1,0 +1,104 @@
+# Devnet SSH hardening, and the root-password exposure
+
+**Status:** the repository half is done (this PR). **The live boxes are not fixed until a human
+runs §2 on each of them.**
+
+---
+
+## 1. What happened
+
+`infra/devnet-manage.sh` defined the root passwords for all four devnet boxes — `toon`, `ario`,
+`relay`, `faucet` — as cleartext literals in a `NODE_PASSWORDS` map. That file is in this
+**public** repository, and the map was committed on `main` from **2026-06-23** (`f9ac0bc9`) until
+it was removed.
+
+Two things made that exploitable rather than merely untidy:
+
+- **Nothing turned password authentication off.** No `PasswordAuthentication no`, no
+  `PermitRootLogin prohibit-password` — in any of the five `bootstrap.sh` scripts, or anywhere
+  else under `infra/`. Linode's Ubuntu images accept password SSH by default when `root_pass` is
+  set at create or rebuild, and every box was created that way.
+- **Port 22 is open to the internet.** `firewall.sh` on each box allows `22/tcp` from anywhere,
+  by design.
+
+So for roughly seven weeks the boxes accepted `ssh root@<ip>` with a password published in git.
+
+### What rotating does not fix
+
+Changing the values in the file fixes nothing on its own. **Git history keeps the old passwords
+forever** — they are recoverable from any clone, and rewriting public history is not a remedy you
+can rely on, because anyone who fetched in that window already has them.
+
+The only durable fix is to make the boxes **stop accepting passwords at all**, which is what
+`infra/harden-ssh.sh` does. Rotation is still worth doing, but it is the second line of defence,
+not the first.
+
+---
+
+## 2. Fixing a live box
+
+Bootstrap only runs at provision time, so an already-running box is unaffected by the repository
+change. Do this on each of `toon`, `ario`, `relay`, `faucet`.
+
+**Before you start:** confirm you can reach the box by key. If key auth is broken and you disable
+passwords, the only way back in is Linode's LISH console.
+
+```bash
+# 1. Prove key auth works. This must succeed WITHOUT prompting for a password.
+ssh -i ~/.ssh/id_rsa -o PasswordAuthentication=no root@<box-ip> true && echo "key auth OK"
+
+# 2. Rotate the root password to something not in git (Linode dashboard, or the API).
+#    Do this even though step 3 disables password login — defence in depth, and it
+#    closes the console login path too.
+
+# 3. Harden. The script refuses to run if root has no authorized key, so it
+#    cannot lock you out of a box in an unexpected state.
+scp -i ~/.ssh/id_rsa infra/harden-ssh.sh root@<box-ip>:/tmp/
+ssh -i ~/.ssh/id_rsa root@<box-ip> 'bash /tmp/harden-ssh.sh && rm /tmp/harden-ssh.sh'
+```
+
+The script prints what `sshd -T` **actually resolved** — not what the file says — and exits
+non-zero if `passwordauthentication` is anything but `no`. Treat its `✅ sshd is key-only.` as the
+acceptance signal.
+
+### Verify from outside
+
+```bash
+# Expect: "Permission denied (publickey)." — NOT a password prompt.
+ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no root@<box-ip>
+```
+
+---
+
+## 3. What the repository change does
+
+| Change                      | Effect                                                                                                                                                                                                   |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `infra/harden-ssh.sh` (new) | Idempotent, lockout-guarded. Writes a drop-in at `/etc/ssh/sshd_config.d/10-toon-hardening.conf`, validates with `sshd -t`, reloads, then re-reads the effective config to prove it took.                |
+| All five `bootstrap.sh`     | Call it immediately after `firewall.sh`, so every newly provisioned or rebuilt box is key-only from birth.                                                                                               |
+| `infra/devnet-manage.sh`    | `NODE_PASSWORDS` deleted. `create_box` now generates a throwaway root password per create (`new_root_pass`) purely to satisfy the Linode API, which requires one. It is never printed, stored or reused. |
+
+### Why a drop-in rather than editing `sshd_config`
+
+It survives package upgrades that rewrite the main file, and it is one file to inspect or remove.
+The script checks that `sshd_config` actually carries the `Include /etc/ssh/sshd_config.d/*.conf`
+line and **fails loudly if it does not** — otherwise the drop-in would be silently ignored and the
+box would look hardened while still accepting passwords.
+
+### Why the lockout guard is not optional
+
+`harden-ssh.sh` counts non-comment lines in `/root/.ssh/authorized_keys` and refuses to proceed if
+there are none. Provisioning installs the operator's key via the Linode `authorized_keys` field, so
+a freshly created box passes; a box in an unexpected state fails closed and is left unchanged.
+
+---
+
+## 4. Follow-on
+
+- **Access for CI.** There is currently no CI path to a _running_ box: `devnet-manage.sh` uses the
+  operator's personal `~/.ssh/id_rsa`, and `devnet-deploy.yml` injects an ephemeral key only at
+  rebuild time, which wipes the disk. Any workflow that operates live boxes needs a dedicated
+  devnet-scoped key authorized on them — a separate, deliberate step, and one that should land
+  _after_ the hardening above, not before.
+- **Consider dropping public port 22** in favour of Linode's private networking or a bastion, once
+  a CI path exists that does not depend on it.

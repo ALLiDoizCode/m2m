@@ -1,5 +1,7 @@
 # The peer wire is redesigned freely; the client edge is versioned
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
 > **Partly superseded (2026-08-03) by
 > [ADR 0027](0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md).** The
 > **peer-wire half** of this ADR is reversed: connectors peer over BTP (RFC-0023) on `wss://`
