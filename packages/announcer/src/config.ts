@@ -11,6 +11,8 @@
 
 import { readFileSync } from 'node:fs';
 
+import type { OperatorNotice } from './event';
+
 export interface AnnouncerConfig {
   /** Base URL of the Rust client edge to POLL. NEVER advertised — internal only. */
   rustEdgeUrl: string;
@@ -39,6 +41,13 @@ export interface AnnouncerConfig {
   publishTimeoutMs: number;
 
   healthPort: number;
+
+  /**
+   * Operator notice (toon#183's `IlpPeerInfo.notice`) — configuration only,
+   * never derived. Absent unless every one of `ANNOUNCER_NOTICE_ID`,
+   * `ANNOUNCER_NOTICE_SUMMARY` and `ANNOUNCER_NOTICE_URL` is set.
+   */
+  notice?: OperatorNotice;
 }
 
 /** The full set of environment variables this sidecar reads, for `--help`-style documentation. */
@@ -63,6 +72,10 @@ export const ENV_VARS = [
   'ANNOUNCER_EDGE_POLL_TIMEOUT_MS',
   'ANNOUNCER_PUBLISH_TIMEOUT_MS',
   'ANNOUNCER_HEALTH_PORT',
+  'ANNOUNCER_NOTICE_ID',
+  'ANNOUNCER_NOTICE_SEVERITY',
+  'ANNOUNCER_NOTICE_SUMMARY',
+  'ANNOUNCER_NOTICE_URL',
   'LOG_LEVEL',
 ] as const;
 
@@ -134,6 +147,39 @@ function deriveRouteHints(
   return { publish: publish ?? primary, store: storeAddr ?? primary };
 }
 
+/**
+ * Resolve the operator notice from env, or `undefined` when unconfigured —
+ * the overwhelmingly common case, which must cost the announce nothing (no
+ * key, no default). `id`/`summary`/`url` are all required by toon#183's
+ * schema, so a partial set is a startup error rather than a silently
+ * dropped notice; an unrecognized severity is likewise a startup error
+ * rather than being announced as-is (core's *parsers* degrade an unknown
+ * severity to `info` for lenience on the READ side — this is the WRITE
+ * side, where the operator can simply be told to fix it).
+ */
+function resolveNotice(env: NodeJS.ProcessEnv): OperatorNotice | undefined {
+  const id = env.ANNOUNCER_NOTICE_ID;
+  const summary = env.ANNOUNCER_NOTICE_SUMMARY;
+  const url = env.ANNOUNCER_NOTICE_URL;
+  const severity = env.ANNOUNCER_NOTICE_SEVERITY;
+
+  if (id === undefined && summary === undefined && url === undefined && severity === undefined) {
+    return undefined;
+  }
+  if (id === undefined || summary === undefined || url === undefined) {
+    throw new Error(
+      'ANNOUNCER_NOTICE_ID, ANNOUNCER_NOTICE_SUMMARY and ANNOUNCER_NOTICE_URL must all be set together (or none at all) to configure an operator notice; ANNOUNCER_NOTICE_SEVERITY is optional and defaults to "info"'
+    );
+  }
+  const resolvedSeverity = severity ?? 'info';
+  if (resolvedSeverity !== 'info' && resolvedSeverity !== 'action-required') {
+    throw new Error(
+      `ANNOUNCER_NOTICE_SEVERITY must be "info" or "action-required", got "${resolvedSeverity}"`
+    );
+  }
+  return { id, severity: resolvedSeverity, summary, url };
+}
+
 /** Load and validate the full config from `process.env` (or an injected map, for tests). */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AnnouncerConfig {
   const ilpAddress = env.ANNOUNCER_ILP_ADDRESS ?? DEFAULT_ILP_ADDRESS;
@@ -196,5 +242,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AnnouncerConfi
       : 5000,
 
     healthPort: env.ANNOUNCER_HEALTH_PORT ? Number(env.ANNOUNCER_HEALTH_PORT) : 8090,
+
+    notice: resolveNotice(env),
   };
 }

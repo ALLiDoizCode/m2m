@@ -117,6 +117,15 @@ btp_endpoint  = "wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp"
 # solana_chain_id = "solana:devnet"      # default; qualifies the greeting's bare "solana"
 # ttl_secs = 600                         # default; NIP-40 expiration
 # identity_key_file = "/root/keys/announce.key"  # carry over a durable Nostr identity; see below
+
+# An operator notice (toon#183, issue #912) -- config only, never composed
+# or inferred here. Omit all four for no notice, the default and the
+# common case. notice_id/notice_summary/notice_url must all be set
+# together; notice_severity is optional and defaults to "info".
+# notice_id = "2026-08-relay-migration"
+# notice_severity = "action-required"    # "info" (default) | "action-required"
+# notice_summary = "Read the migration notes before Friday"
+# notice_url = "https://example.com/notices/1"
 ```
 
 ### The Nostr identity: `[signer]` by default, `identity_key_file` to carry one over

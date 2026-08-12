@@ -82,3 +82,12 @@ node <toon-client>/packages/rig/dist/cli/rig.js issue list
 genesis seed sends bootstrap to the devnet relay. rig's settlement wallet
 (`rig identity show`) needs gas and USDC on the local chain before the first
 paid write — it opens a real payment channel.
+
+### Operator notice (toon#183)
+
+`publish-announces.mjs` sets `IlpPeerInfo.notice` on the announce's schema
+field — never merged into the `content` ride-along block — when `NOTICE_ID`,
+`NOTICE_SUMMARY` and `NOTICE_URL` are all set (`NOTICE_SEVERITY` is optional,
+`info` or `action-required`, defaulting to `info`). Configuration only: the
+script never composes a notice. Leave all four unset for the common case — no
+`notice` key at all, byte-identical to today.

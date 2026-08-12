@@ -158,6 +158,7 @@ export class AnnouncerService {
         routePublish: this._config.routePublish,
         routeStore: this._config.routeStore,
         solanaChainId: this._config.solanaChainId,
+        notice: this._config.notice,
       },
       identity,
       greetings
