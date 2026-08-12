@@ -55,6 +55,17 @@
 //! `[signer]` because it overrides the SIGNATURE on one event, not this
 //! node's identity generally: `GET /ilp/identity` and every gift wrap this
 //! node opens still use `[signer]`.
+//!
+//! # The `notice_*` fields are not one of those facts either, and belong here for the same reason
+//!
+//! `notice_id`/`notice_severity`/`notice_summary`/`notice_url` (toon#183,
+//! issue #912) are not something a node cannot introspect -- they are
+//! something a node must never invent. This crate composes nothing about
+//! them and infers nothing: `resolve_notice` only checks that the four are
+//! set consistently, never what they say. An absent notice costs nothing
+//! (no key on the wire at all, not a null one); a partial one is refused at
+//! load, the same "loud failure over a silent wrong announce" the rest of
+//! this section already applies to `relay_url` and the two endpoints.
 
 use std::path::{Path, PathBuf};
 
@@ -98,6 +109,14 @@ pub(crate) struct RawAnnounceConfig {
     ttl_secs: Option<u64>,
     #[serde(default)]
     identity_key_file: Option<PathBuf>,
+    #[serde(default)]
+    notice_id: Option<String>,
+    #[serde(default)]
+    notice_severity: Option<String>,
+    #[serde(default)]
+    notice_summary: Option<String>,
+    #[serde(default)]
+    notice_url: Option<String>,
 }
 
 /// `USDC` at 6 decimals is what every route on this fleet is priced in, and
@@ -121,6 +140,28 @@ const DEFAULT_SOLANA_CHAIN_ID: &str = "solana:devnet";
 /// a longer one should write it down.
 const DEFAULT_TTL_SECS: u64 = 600;
 
+/// An operator notice (toon#183's `IlpPeerInfo.notice`, issue #912) -- a
+/// pointer, not the payload. The durable text lives at `url`; this carries
+/// only enough for a consumer to decide whether to go read it.
+///
+/// Configuration only: nothing in this crate ever composes one, infers one,
+/// or defaults one in. `resolve_announce` is the only constructor, so a
+/// value that exists has `id`/`summary`/`url` all set together and a
+/// `severity` already checked against the two the wire schema allows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnnounceNotice {
+    pub id: String,
+    pub severity: String,
+    pub summary: String,
+    pub url: String,
+}
+
+/// `resolveNotice`'s default in every other announce path this issue
+/// touches (`packages/announcer/src/config.ts`,
+/// `deploy/connector-rust/local-stack/publish-announces.mjs`) -- an
+/// operator who sets a notice but no severity gets the least alarming one.
+const DEFAULT_NOTICE_SEVERITY: &str = "info";
+
 /// The facts a node cannot introspect about itself, fully validated.
 /// Constructed only by [`resolve_announce`], so a value that exists has at
 /// least one syntactically valid ILP address (primary first), endpoints
@@ -143,6 +184,7 @@ pub struct AnnounceConfig {
     solana_chain_id: String,
     ttl_secs: u64,
     identity_key_file: Option<PathBuf>,
+    notice: Option<AnnounceNotice>,
 }
 
 impl AnnounceConfig {
@@ -277,6 +319,50 @@ impl AnnounceConfig {
     pub fn identity_key_file(&self) -> Option<&Path> {
         self.identity_key_file.as_deref()
     }
+
+    /// The operator notice (issue #912), or `None` -- the overwhelmingly
+    /// common case, and the one that must cost the announce nothing: no
+    /// key, no default, byte-identical to a config with no notice fields at
+    /// all.
+    pub fn notice(&self) -> Option<&AnnounceNotice> {
+        self.notice.as_ref()
+    }
+}
+
+/// Resolve the operator notice from its four raw fields, or `None` when
+/// none of them are set -- the overwhelmingly common case. Config plumbing
+/// only: this never composes, infers or defaults the CONTENT of a notice,
+/// only whether one was configured at all and whether its severity is one
+/// of the two the wire schema allows.
+///
+/// Mirrors `resolveNotice` in `packages/announcer/src/config.ts` and
+/// `deploy/connector-rust/local-stack/publish-announces.mjs`'s identical
+/// function, field for field: `id`/`summary`/`url` must all be set
+/// together (or none at all), and an unrecognized `severity` is a load
+/// error on this, the WRITE side -- unlike core's *parser*, which degrades
+/// an unknown severity to `info` for lenience on the READ side.
+fn resolve_notice(
+    id: Option<String>,
+    severity: Option<String>,
+    summary: Option<String>,
+    url: Option<String>,
+) -> Result<Option<AnnounceNotice>, ConfigError> {
+    if id.is_none() && severity.is_none() && summary.is_none() && url.is_none() {
+        return Ok(None);
+    }
+    let (Some(id), Some(summary), Some(url)) = (id, summary, url) else {
+        return Err(ConfigError::AnnounceNoticeIncomplete);
+    };
+    let severity = severity.unwrap_or_else(|| DEFAULT_NOTICE_SEVERITY.to_string());
+    if severity != "info" && severity != "action-required" {
+        return Err(ConfigError::AnnounceNoticeInvalidSeverity { value: severity });
+    }
+    Ok(Some(AnnounceNotice {
+        id,
+        severity,
+        summary,
+        url,
+    }))
 }
 
 /// Derive the publish/store route hints, mirroring the retired sidecar's
@@ -516,6 +602,13 @@ pub(crate) fn resolve_announce(
         })
         .transpose()?;
 
+    let notice = resolve_notice(
+        raw.notice_id,
+        raw.notice_severity,
+        raw.notice_summary,
+        raw.notice_url,
+    )?;
+
     Ok(Some(AnnounceConfig {
         addresses: raw.addresses,
         http_endpoint,
@@ -533,6 +626,7 @@ pub(crate) fn resolve_announce(
             .unwrap_or_else(|| DEFAULT_SOLANA_CHAIN_ID.into()),
         ttl_secs,
         identity_key_file,
+        notice,
     }))
 }
 
@@ -556,6 +650,10 @@ mod tests {
             solana_chain_id: None,
             ttl_secs: None,
             identity_key_file: None,
+            notice_id: None,
+            notice_severity: None,
+            notice_summary: None,
+            notice_url: None,
         }
     }
 
@@ -787,6 +885,99 @@ mod tests {
             resolve_announce(Some(missing)),
             Err(ConfigError::AnnounceIdentityKeyFileNotFound(path))
                 if path.as_path() == std::path::Path::new("/nonexistent/announce.key")
+        ));
+    }
+
+    /// The overwhelmingly common case, and the one that must cost nothing:
+    /// with no `notice_*` field written, `notice()` is `None` -- byte
+    /// identical to a config written before this field existed.
+    #[test]
+    fn with_no_notice_fields_the_announce_carries_no_notice() {
+        let announce = resolve_announce(Some(raw(None)))
+            .expect("load")
+            .expect("present");
+        assert_eq!(announce.notice(), None);
+    }
+
+    /// `id`/`summary`/`url` all set, `severity` omitted, resolves with the
+    /// default severity -- mirroring `resolveNotice` in
+    /// `packages/announcer/src/config.ts` and the local-stack script's copy.
+    #[test]
+    fn a_full_notice_resolves_and_defaults_its_severity_to_info() {
+        let mut with_notice = raw(None);
+        with_notice.notice_id = Some("2026-08-relay-migration".to_string());
+        with_notice.notice_summary = Some("Read the migration notes before Friday".to_string());
+        with_notice.notice_url = Some("https://example.com/notices/1".to_string());
+
+        let announce = resolve_announce(Some(with_notice))
+            .expect("load")
+            .expect("present");
+        let notice = announce.notice().expect("notice present");
+        assert_eq!(notice.id, "2026-08-relay-migration");
+        assert_eq!(notice.severity, "info");
+        assert_eq!(notice.summary, "Read the migration notes before Friday");
+        assert_eq!(notice.url, "https://example.com/notices/1");
+    }
+
+    /// An explicit `action-required` severity is carried through unchanged.
+    #[test]
+    fn an_explicit_severity_is_carried_through() {
+        let mut with_notice = raw(None);
+        with_notice.notice_id = Some("id".to_string());
+        with_notice.notice_severity = Some("action-required".to_string());
+        with_notice.notice_summary = Some("summary".to_string());
+        with_notice.notice_url = Some("https://example.com".to_string());
+
+        let announce = resolve_announce(Some(with_notice))
+            .expect("load")
+            .expect("present");
+        assert_eq!(
+            announce.notice().expect("present").severity,
+            "action-required"
+        );
+    }
+
+    /// `id`/`summary`/`url` must all be set together -- a partial notice
+    /// fails loudly at load rather than silently announcing nothing or
+    /// announcing a half-formed notice.
+    #[test]
+    fn a_partial_notice_is_refused_at_load() {
+        for (id, severity, summary, url) in [
+            (Some("id"), None, None, None),
+            (None, Some("info"), None, None),
+            (Some("id"), None, Some("summary"), None),
+            (Some("id"), None, None, Some("https://example.com")),
+        ] {
+            let mut partial = raw(None);
+            partial.notice_id = id.map(str::to_string);
+            partial.notice_severity = severity.map(str::to_string);
+            partial.notice_summary = summary.map(str::to_string);
+            partial.notice_url = url.map(str::to_string);
+            assert!(
+                matches!(
+                    resolve_announce(Some(partial)),
+                    Err(ConfigError::AnnounceNoticeIncomplete)
+                ),
+                "{id:?} {severity:?} {summary:?} {url:?}"
+            );
+        }
+    }
+
+    /// An unrecognized severity is refused at load on this, the WRITE side
+    /// -- unlike core's parser, which degrades an unknown severity to
+    /// `info` for lenience on the READ side.
+    #[test]
+    fn an_unrecognized_severity_is_refused_at_load() {
+        let mut bad = raw(None);
+        bad.notice_id = Some("id".to_string());
+        bad.notice_severity = Some("critical".to_string());
+        bad.notice_summary = Some("summary".to_string());
+        bad.notice_url = Some("https://example.com".to_string());
+
+        assert!(matches!(
+            resolve_announce(Some(bad)),
+            Err(ConfigError::AnnounceNoticeInvalidSeverity { value })
+                if value == "critical"
         ));
     }
 }

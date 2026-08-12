@@ -17,7 +17,7 @@
 
 import type { ClientEdgeIdentity, RouteGreeting } from './edge-client';
 import { isEvmSettlementTerms, isSolanaSettlementTerms } from './edge-client';
-import type { IlpPeerInfo } from './event';
+import type { IlpPeerInfo, OperatorNotice } from './event';
 
 /** Static (never edge-derived) parts of the announcement — sidecar config. */
 export interface AnnounceStaticConfig {
@@ -45,6 +45,12 @@ export interface AnnounceStaticConfig {
    * matching this fleet's only deployed cluster).
    */
   solanaChainId: string;
+  /**
+   * Operator notice (toon#183's `IlpPeerInfo.notice`), sourced straight from
+   * config — never composed or inferred here. `undefined` (the overwhelming
+   * common case) omits the key entirely; see {@link buildAnnouncementInfo}.
+   */
+  notice?: OperatorNotice;
 }
 
 /**
@@ -102,6 +108,7 @@ export function buildAnnouncementInfo(
     ...(Object.keys(routePrices).length > 0 ? { routePrices } : {}),
     ...(identity ? { edgeIdentity: { keyId: identity.keyId, publicKey: identity.publicKey } } : {}),
     routes: { publish: config.routePublish, store: config.routeStore },
+    ...(config.notice ? { notice: config.notice } : {}),
   };
 
   return info;

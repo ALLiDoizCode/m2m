@@ -113,6 +113,27 @@ test('AnnouncerService.buildEvent: mocked /ilp/identity + greeting produce the e
   });
 });
 
+test('AnnouncerService.buildEvent: a configured operator notice appears on the announce schema field', async () => {
+  const config = loadConfig({
+    ANNOUNCER_IDENTITY_SECRET_KEY_HEX: SECRET_KEY_HEX,
+    ANNOUNCER_RELAY_URLS: 'wss://relay.devnet.toonprotocol.dev',
+    ANNOUNCER_NOTICE_ID: 'maintenance-2026-08',
+    ANNOUNCER_NOTICE_SUMMARY: 'Scheduled maintenance this weekend',
+    ANNOUNCER_NOTICE_URL: 'https://example.com/notices/maintenance-2026-08',
+  });
+  const fetchImpl = (async () => new Response('boom', { status: 500 })) as unknown as typeof fetch;
+  const service = new AnnouncerService({ config, logger, fetchImpl });
+
+  const event = await service.buildEvent();
+  const content: unknown = JSON.parse(event.content);
+  assert.deepEqual((content as { notice?: unknown }).notice, {
+    id: 'maintenance-2026-08',
+    severity: 'info',
+    summary: 'Scheduled maintenance this weekend',
+    url: 'https://example.com/notices/maintenance-2026-08',
+  });
+});
+
 test('AnnouncerService.buildEvent: still produces a valid (minimal) event when every edge poll fails', async () => {
   const config = loadConfig({
     ANNOUNCER_IDENTITY_SECRET_KEY_HEX: SECRET_KEY_HEX,
