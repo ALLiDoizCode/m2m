@@ -491,6 +491,34 @@ pub struct IlpPeerInfo {
     #[serde(rename = "edgeIdentity", skip_serializing_if = "Option::is_none")]
     pub edge_identity: Option<EdgeIdentity>,
     pub routes: RouteHints,
+    /// The operator notice (toon#183, issue #912) -- config-only, and
+    /// absent whenever `[announce]` carries no `notice_*` fields, so an
+    /// unconfigured node's announce is byte-identical to before this field
+    /// existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<Notice>,
+}
+
+/// The wire shape of an operator notice, field-for-field
+/// `packages/announcer/src/event.ts`'s `OperatorNotice` -- a pointer, not
+/// the payload.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Notice {
+    pub id: String,
+    pub severity: String,
+    pub summary: String,
+    pub url: String,
+}
+
+impl From<&connector_config::AnnounceNotice> for Notice {
+    fn from(notice: &connector_config::AnnounceNotice) -> Self {
+        Notice {
+            id: notice.id.clone(),
+            severity: notice.severity.clone(),
+            summary: notice.summary.clone(),
+            url: notice.url.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -597,6 +625,7 @@ pub fn build_announcement(config: &Config, runtime: &Runtime) -> IlpPeerInfo {
             publish: announce.route_publish().to_string(),
             store: announce.route_store().to_string(),
         },
+        notice: announce.notice().map(Notice::from),
     }
 }
 
@@ -1776,5 +1805,85 @@ btp_endpoint = "wss://proxy.ario.example/ilp/btp"
         assert!(decode_public_key(&format!("0x{hex}")).is_some());
         assert!(decode_public_key(&"ab".repeat(33)).is_none());
         assert!(decode_public_key(&format!("zz{}", "ab".repeat(64))).is_none());
+    }
+
+    /// Minimal `IlpPeerInfo`, for pinning `notice`'s wire shape without
+    /// building a full `Runtime` -- `build_announcement` itself just maps
+    /// `AnnounceConfig::notice()` through [`Notice::from`], which is the
+    /// part worth testing directly.
+    fn minimal_info(notice: Option<Notice>) -> IlpPeerInfo {
+        IlpPeerInfo {
+            ilp_address: "g.toon.ario".to_string(),
+            ilp_addresses: None,
+            btp_endpoint: "wss://proxy.ario.example/ilp/btp".to_string(),
+            http_endpoint: "https://proxy.ario.example/ilp".to_string(),
+            relay_url: None,
+            asset_code: "USDC".to_string(),
+            asset_scale: 6,
+            supported_chains: Vec::new(),
+            settlement_addresses: BTreeMap::new(),
+            token_networks: BTreeMap::new(),
+            preferred_tokens: BTreeMap::new(),
+            route_prices: BTreeMap::new(),
+            edge_identity: None,
+            routes: RouteHints {
+                publish: "g.toon.ario".to_string(),
+                store: "g.toon.ario".to_string(),
+            },
+            notice,
+        }
+    }
+
+    /// AC (issue #912): with no notice configured, the announce is
+    /// byte-identical to today -- no `notice` key at all, not a null one.
+    #[test]
+    fn an_unconfigured_notice_is_omitted_from_the_wire_content_entirely() {
+        let content = serde_json::to_string(&minimal_info(None)).expect("serialize");
+        assert!(
+            !content.contains("notice"),
+            "content must carry no `notice` key at all: {content}"
+        );
+    }
+
+    /// A configured notice appears on the announce's own schema field, in
+    /// the shape `packages/announcer/src/event.ts`'s `OperatorNotice` and
+    /// the local-stack script's `NOTICE` object both already publish.
+    #[test]
+    fn a_configured_notice_appears_on_the_wire_verbatim() {
+        let notice = Notice {
+            id: "2026-08-relay-migration".to_string(),
+            severity: "action-required".to_string(),
+            summary: "Read the migration notes before Friday".to_string(),
+            url: "https://example.com/notices/1".to_string(),
+        };
+        let content = serde_json::to_string(&minimal_info(Some(notice))).expect("serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("parse");
+        assert_eq!(
+            parsed["notice"],
+            serde_json::json!({
+                "id": "2026-08-relay-migration",
+                "severity": "action-required",
+                "summary": "Read the migration notes before Friday",
+                "url": "https://example.com/notices/1",
+            })
+        );
+    }
+
+    /// [`Notice::from`] carries every field through unchanged -- the
+    /// conversion `build_announcement` uses between `AnnounceConfig`'s
+    /// validated notice and the wire struct.
+    #[test]
+    fn notice_from_announce_notice_carries_every_field() {
+        let announce_notice = connector_config::AnnounceNotice {
+            id: "id".to_string(),
+            severity: "info".to_string(),
+            summary: "summary".to_string(),
+            url: "https://example.com".to_string(),
+        };
+        let notice = Notice::from(&announce_notice);
+        assert_eq!(notice.id, "id");
+        assert_eq!(notice.severity, "info");
+        assert_eq!(notice.summary, "summary");
+        assert_eq!(notice.url, "https://example.com");
     }
 }

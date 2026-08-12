@@ -100,6 +100,22 @@ test('buildAnnouncementInfo: degrades gracefully when identity and every greetin
   });
 });
 
+test('buildAnnouncementInfo: sets notice on the schema field when configured', () => {
+  const notice = {
+    id: 'maintenance-2026-08',
+    severity: 'info' as const,
+    summary: 'Scheduled maintenance this weekend',
+    url: 'https://example.com/notices/maintenance-2026-08',
+  };
+  const info = buildAnnouncementInfo({ ...CONFIG, notice }, null, []);
+  assert.deepEqual(info.notice, notice);
+});
+
+test('buildAnnouncementInfo: omits notice entirely when not configured — no key, no default', () => {
+  const info = buildAnnouncementInfo(CONFIG, null, []);
+  assert.equal('notice' in info, false);
+});
+
 test('buildAnnouncementInfo: omits ilpAddresses/relayUrl when there is only one address / no relayUrl configured', () => {
   const info = buildAnnouncementInfo(
     { ...CONFIG, ilpAddresses: ['g.toon'], relayUrl: undefined },
