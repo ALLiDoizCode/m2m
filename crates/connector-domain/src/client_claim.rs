@@ -151,6 +151,21 @@ impl ClientClaim {
             }
         }
     }
+
+    /// The claim's self-declared signer, exactly as written -- unnamespaced
+    /// and uncanonicalized, unlike [`ClientClaim::signer_key`]. Its one
+    /// consumer is [`crate::identity::resolve_identity`]'s anonymous-sender
+    /// ephemeral identity (client-edge-spec.md §1.2, issue #502): a label
+    /// derived from whatever this claim already parsed out, not a second
+    /// parse of the claim JSON. **This is a self-declared value and it is
+    /// not authority for anything** -- the same caveat [`ClientClaim::signer_key`]
+    /// documents applies here unchanged.
+    pub fn signer(&self) -> &str {
+        match self {
+            ClientClaim::Evm(claim) => &claim.signer_address,
+            ClientClaim::Solana(claim) => &claim.signer_public_key,
+        }
+    }
 }
 
 /// The chain namespace [`ClientClaim::channel_key`] prefixes an EVM
@@ -624,6 +639,26 @@ mod tests {
             .expect("parses")
             .signer_key()
             .starts_with("solana:"));
+    }
+
+    /// Unlike `signer_key`, `signer` carries the claim's self-declared
+    /// value exactly as written -- no chain namespace, no case
+    /// canonicalization -- since its one consumer (`identity::resolve_identity`)
+    /// formats it into `http:<signer>` itself (client-edge-spec.md §1.2).
+    #[test]
+    fn signer_is_the_self_declared_value_unnamespaced_and_uncanonicalized() {
+        assert_eq!(
+            parse_client_claim(&evm_claim_json())
+                .expect("parses")
+                .signer(),
+            "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1"
+        );
+        assert_eq!(
+            parse_client_claim(solana_claim_json())
+                .expect("parses")
+                .signer(),
+            "So11111111111111111111111111111111111111112"
+        );
     }
 
     /// An address's casing is notation, not identity (the same rule #643

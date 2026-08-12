@@ -1,5 +1,7 @@
 # A price is flat, attaches to a handler, and buys an answer
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
 A price is flat per packet, as a fee is. Pricing granularity is handler granularity: one handler,
 one price, and an app that wants to charge differently exposes more handlers. The app is told
 nothing about the payment that bought its work. A price accumulates into a reject's running total

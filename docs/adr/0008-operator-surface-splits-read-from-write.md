@@ -1,5 +1,7 @@
 # The operator surface splits read authority from write authority
 
+**Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
+
 Reads on the operator surface — inspection, metrics, anything a dashboard needs — are
 authenticated with a bearer token. Writes — route CRUD, payment-channel operations, and
 originating a packet — require an RFC 9421 HTTP Message Signature from a key on an operator

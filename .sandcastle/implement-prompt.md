@@ -40,6 +40,63 @@ Here are the last 10 commits:
 
 </recent-commits>
 
+# DECIDING THINGS
+
+Most questions that feel like they need a human have already been answered in this repository.
+Look before you escalate.
+
+**`docs/adr/README.md` is the decision authority.** It groups every ADR by scope, so you can go
+to the right ones instead of reading all of them:
+
+- **Connector architecture** — how this codebase is built. Read these when changing structure,
+  config, the operator surface, testing approach, or state handling.
+- **Protocol law** — binds every implementation, not just this one. Read these when touching the
+  wire, pricing, claims, payloads, or anything another implementation could observe. If your
+  change would make a client SDK wrong, it is in this group.
+- **Fleet and operations** — deployment, migration, and how other repos are regarded.
+
+**The tiebreaker is ADR 0021: vectors are normative, prose is not.** When a spec document and the
+committed vectors disagree, the vectors win, and the prose is the thing to fix. `docs/protocol/`
+is explicitly non-normative — it is the readable account of decisions the ADRs own.
+
+**Line numbers in older documents drift.** A `file.rs:123` citation in an issue or spec may point
+somewhere else by the time you read it. Verify the reference resolves to what the text claims
+before you rely on it; if it does not, find the current location and say so in your PR rather
+than following the stale one.
+
+## When a ticket needs a live box, a funded key, or an on-chain write
+
+You cannot do those from this sandbox, and that is deliberate — no credential for a box, a
+treasury, or a chain is ever passed into a container running agent-authored code. **This does not
+mean the ticket needs a human.** Two reviewed workflows exist to perform exactly this class of
+operation, and your token can dispatch them:
+
+- **`.github/workflows/fleet-ops.yml`** — live devnet box work: `box-status`, `config-read`,
+  `pin-verify` (reads), and `config-apply`, `restart`, `announce` (writes).
+- **`.github/workflows/funded-ops.yml`** — EVM channel work needing a key that can sign and pay:
+  `whoami`, `channel-status` (reads), and `deposit` (write).
+
+Dispatch with `gh workflow run <file> -f key=value …`, then read the run's summary back with
+`gh run view --log`. **Both default to `apply: false`** — run the dry run first, read what it says
+it would do, and only then re-dispatch with `apply: true`. Quote the dry-run output in your PR
+description so a reviewer can see what you checked before writing.
+
+If a needed operation has no verb, the right move is to add the verb to the workflow in a PR —
+that is a reviewable change — not to ask for a credential.
+
+## When escalation IS right
+
+Add `needs:human` and stop when, and only when:
+
+- the decision is genuinely new — nothing in the ADRs covers it, and reasonable engineers would
+  disagree about the answer;
+- the action is **irreversible** and no rollback exists;
+- it involves **mainnet or real funds** — devnet and testnet do not count;
+- it needs a credential or physical access that no reviewed workflow exposes.
+
+"This looks risky" or "I am not sure" is not escalation-worthy on its own. Say what you checked,
+what the ADRs say, and what you concluded.
+
 # EXPLORATION
 
 Explore the repo and fill your context window with relevant information that will allow you to complete the task.

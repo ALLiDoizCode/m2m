@@ -65,8 +65,8 @@ application/octet-stream`. An ILP-level outcome — fulfilled or rejected — is
   | Status | Meaning                                                                         |
   | ------ | ------------------------------------------------------------------------------- |
   | `400`  | Malformed request: not a PREPARE, undecodable OER, oversized body.              |
-  | `401`  | An `ILP-Peer-Id` was presented but authentication failed (§1.2 — not yet        |
-  |        | implemented; no request is refused on this ground today).                       |
+  | `401`  | An `ILP-Peer-Id` was presented but authentication failed. Answered before       |
+  |        | the route is looked up, so it never arrives as a `402` instead. See §1.2.       |
   | `402`  | Unpaid request to a route this connector terminates and prices: x402 v2         |
   |        | payment-required terms, JSON body (not OER). See §1.4.                          |
   | `403`  | A probe (`POST /ilp/probe`) from a sender not authorized to probe: no           |
@@ -78,11 +78,13 @@ application/octet-stream`. An ILP-level outcome — fulfilled or rejected — is
 
 ### 1.2 Identity
 
-**Not yet implemented.** No code in `crates/connector-client-edge` reads `ILP-Peer-Id` or
-`Authorization` today; every request is handled identically regardless of what it presents on
-either header, and the `401` this section describes is never returned. `GET /ilp/identity` (§1.7)
-answers a different question — the connector's own key, not who is asking — and ships today. This
-section specifies the intended design for the rest:
+`GET /ilp/identity` (§1.7) answers a different question — the connector's own key, not who is
+asking. This section is who is asking, and ships today (issue #502): `POST /ilp` reads
+`ILP-Peer-Id` and `Authorization`, resolves the sender, and refuses a presented identity that does
+not authenticate with `401`. The identities a node recognises are the `[[client_identities]]`
+section of its config file (`id` + `secret`); a node that configures none — the default — treats
+every request that presents no `ILP-Peer-Id` as anonymous and refuses every one that presents an
+`ILP-Peer-Id` at all.
 
 A request identifies its sender in one of two ways:
 
@@ -558,33 +560,27 @@ freshness must never exceed this connector's own lease. Wiring `buzz#84`'s
 connector's obligation is that the value is on the wire and provably tied to the enforced constant
 (pinned by a same-crate test), not that every consumer has been updated yet.
 
-### 1.5 Request-request binding (RFC 9421)
+### 1.5 Request-request binding — decided against
 
-**Not yet implemented.** No `requireRequestBinding` config field, `RouteTermination` type or RFC
-9421 verification exists anywhere in `crates/`; this section specifies the intended design, not
-current behavior. This subsection describes what the route-**termination** feature — see
-`CLAUDE.md`'s terminology note on `RouteTermination`/`checkRequestBinding` — does once it exists in
-the Rust connector.
-
-For a locally-terminated route configured with `requireRequestBinding: true`, the connector binds
-the _inner_ HTTP request it will proxy to the app (the literal HTTP envelope carried verbatim in
-the PREPARE's `data` field) to the claim that pays for it, using an RFC 9421 HTTP Message
-Signature over that inner request with an RFC 9530 `Content-Digest`, plus a `TOON-Price` header
-compared byte-exact against the route's configured price:
-
-- **Signature present** (on the inner envelope's `signature`/`signature-input` headers) — ALWAYS
-  verified, regardless of the route's enforcement setting. Verification failure rejects the
-  PREPARE (never proxies it) with `F01_INVALID_PACKET` for a structural/cryptographic failure or
-  `F03_INVALID_AMOUNT` for a price mismatch; the underlying RFC 9421 failure code rides in the
-  reject `message` for debuggability.
-- **Signature absent** — rejected (`F01`) only when the route's `requireRequestBinding` is `true`;
-  otherwise the request proceeds unchanged (do-no-harm default, preserving the claim-only flow for
-  routes that have not opted in).
-- A route with no `RouteTermination` (an ordinary forwarding destination) never performs this
-  check.
-
-This binds a captured claim to the specific request it paid for — a replay of the same claim
-against a different request or a different route's price fails the digest/price check.
+**Not implemented, and not going to be.** No `requireRequestBinding` config field,
+`RouteTermination` type or RFC 9421 verification of a client's request exists anywhere in `crates/`,
+and none is planned — the RFC 9421 verification `connector-operator` does carry is the operator
+surface's write authentication ([ADR 0008](../adr/0008-operator-surface-splits-read-from-write.md)),
+a different mechanism on a different surface. This section previously specified an intended design — an RFC 9421 HTTP Message Signature over the
+inner envelope, an RFC 9530 `Content-Digest`, and a `TOON-Price` header compared byte-exact against
+the route's price, verified by the terminating connector before proxying to the app.
+[ADR 0035](../adr/0035-request-request-binding-ships-no-new-mechanism.md) decided against building
+it: the threat it targeted — a captured claim replayed against different work or a cheaper route —
+is already closed, partly by construction (a payload is sealed to the terminating connector,
+[ADR 0018](../adr/0018-a-payload-is-sealed-to-the-terminating-connector.md); a packet's condition is
+already bound to a secret only that connector can open,
+[ADR 0019](../adr/0019-a-terminating-connector-derives-the-fulfilment.md)) and partly by §1.3's
+existing claim gate, whose watermark (step 2) and value binding (step 3) refuse a replayed or
+underpaying claim before the app is ever contacted. The party a binding mechanism would need to
+verify it is the terminating connector itself — the one party ADR 0035 finds it structurally cannot
+defend against, since that party also controls whether the check runs at all. See ADR 0035 for the
+full analysis, including the parties who do remain and why binding would not have defended against
+them either.
 
 ### 1.6 Probing for cost
 
@@ -781,9 +777,10 @@ silently dropped exactly as it was before TRANSFER existed.
 **Session flow, in order of what a frame carries:**
 
 1. **Auth**: a MESSAGE whose protocolData contains an `auth` entry (JSON `{peerId, secret}`) is
-   answered with an empty RESPONSE (same requestId). The contents are not verified — §1.2 is not
-   yet implemented on the HTTP carriage either, and an empty `secret` is the documented
-   permissionless mirror. Authorization to _write_ comes from the claim, never the session.
+   answered with an empty RESPONSE (same requestId). The contents are not verified — §1.2's
+   authentication is `POST /ilp`'s only, deliberately not extended to this carriage, where an
+   empty `secret` is the documented permissionless mirror and a BTP session is admitted whatever
+   it presents. Authorization to _write_ comes from the claim, never the session.
 
    **Update (issue #698):** a non-empty `peerId` also binds this session into the client session
    registry, keyed by that value — see "Session registry: the socket is the lease" below. Binding

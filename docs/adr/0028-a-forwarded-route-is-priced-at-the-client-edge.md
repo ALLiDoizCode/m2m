@@ -1,5 +1,7 @@
 # A forwarded route is priced at the client edge, and carries no more than it was paid
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
 A `[[routes]]` entry naming a `peer_id` may — and must — carry a `price`. `price` is what this
 connector's own client edge charges a client for a packet to that prefix; `fee` remains what this
 hop retains for carriage. The client edge greets, gates and journals a forwarded destination on
