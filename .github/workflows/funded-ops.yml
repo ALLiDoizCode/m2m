@@ -38,6 +38,28 @@
 #     did not reach the requested total. The transaction receipt is not trusted
 #     as the source of truth; the contract is.
 #
+# ── WHY `open-channel` NEEDS A DIFFERENT GUARD ──────────────────────────────
+# `deposit` is safe to retry because the contract's own API is absolute.
+# `openChannel` is not, and cannot be made so by choosing arguments carefully:
+#
+#     channelId = keccak256(abi.encodePacked(p1, p2, channelCounter));
+#     channelCounter++;                        // TokenNetwork.sol
+#
+# The id depends on a GLOBAL COUNTER, not on the participant pair. So a second
+# call for the same two addresses does NOT revert with `ChannelAlreadyExists`
+# — it mints a different id and opens a SECOND live channel. A blind retry
+# after an ambiguous failure leaves the pair with two channels and the
+# connector holding a config row against one of them, with nothing on chain to
+# say which is the real one.
+#
+# The guard is therefore built in this file rather than inherited from the
+# contract: `participant1` and `participant2` are both indexed on
+# `ChannelOpened`, so before opening we query that event for this exact
+# (normalised) pair, read each result's state, and REFUSE if any is still
+# Opened — printing the ids so the operator can use one instead. That makes a
+# retry after an ambiguous failure safe in the only way available: it finds
+# the channel that actually opened and declines to make another.
+#
 # ── WHICH SIDE OF A CHANNEL A DEPOSIT LANDS ON ──────────────────────────────
 # `setTotalDeposit(channelId, participant, total)` pulls tokens from the CALLER
 # and credits the `participant` PARAMETER. `claimFromChannel` then bounds a
@@ -70,11 +92,11 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: "whoami (read) | channel-status (read) | deposit (write)"
+        description: "whoami (read) | channel-status (read) | deposit (write) | open-channel (write)"
         type: choice
         required: true
         default: whoami
-        options: [whoami, channel-status, deposit]
+        options: [whoami, channel-status, deposit, open-channel]
       account_index:
         description: "NIP-06 account index to act as (m/44'/1237'/0'/0/i)"
         type: string
@@ -95,6 +117,16 @@ on:
         type: string
         required: false
         default: ""
+      counterparty:
+        description: "open-channel: the OTHER participant's 0x address"
+        type: string
+        required: false
+        default: ""
+      settlement_timeout:
+        description: "open-channel: settlement timeout in seconds (contract enforces a minimum)"
+        type: string
+        required: false
+        default: "86400"
       total_base_units:
         description: "deposit: TARGET TOTAL deposit in token base units (6dp USDC). Absolute, not an increment."
         type: string
@@ -205,6 +237,8 @@ jobs:
             'function channels(bytes32) view returns (uint256 settlementTimeout, uint8 state, uint256 closedAt, uint256 openedAt, address participant1, address participant2)',
             'function participants(bytes32,address) view returns (uint256 deposit, uint256 nonce, uint256 transferredAmount)',
             'function setTotalDeposit(bytes32,address,uint256)',
+            'function openChannel(address,uint256) returns (bytes32)',
+            'event ChannelOpened(bytes32 indexed channelId, address indexed participant1, address indexed participant2, uint256 settlementTimeout)',
           ], provider);
           say(`TokenNetwork resolved from registry: ${tnAddr}`);
           say(`Token: ${TOKEN} (${dec} dp)   chain: base-sepolia`);
@@ -352,6 +386,103 @@ jobs:
               say('');
               say('✅ Deposit confirmed by reading the contract back.');
             }
+          }
+
+          // ── open-channel ─────────────────────────────────────────────────
+          // NOT idempotent by construction, unlike deposit. The contract
+          // computes `channelId = keccak256(p1, p2, channelCounter++)`, so the
+          // id depends on a global counter, NOT on the participant pair — a
+          // second call for the same pair does not revert with
+          // ChannelAlreadyExists, it opens a SECOND channel. A blind retry
+          // after an ambiguous failure therefore double-opens, and the
+          // connector would then hold one config row against one of two live
+          // channels with no way to tell which.
+          //
+          // The guard is built here instead: both participants are indexed on
+          // ChannelOpened, so we ask the chain whether this pair already has
+          // an Opened channel and refuse if it does.
+          else if (OPERATION === 'open-channel') {
+            if (!COUNTERPARTY || !/^0x[0-9a-fA-F]{40}$/.test(COUNTERPARTY)) {
+              fail('open-channel needs `counterparty` — a 0x-prefixed 20-byte address.');
+            }
+            const timeout = BigInt(SETTLEMENT_TIMEOUT || '0');
+            if (timeout <= 0n) fail('open-channel needs a positive `settlement_timeout` (seconds).');
+
+            const signer = await derive(Number(ACCOUNT_INDEX || '0'));
+            const me = await signer.getAddress();
+            if (me.toLowerCase() === COUNTERPARTY.toLowerCase()) {
+              fail('A channel needs two distinct participants; counterparty equals the signer.');
+            }
+
+            // Normalised exactly as the contract does.
+            const [p1, p2] = me.toLowerCase() < COUNTERPARTY.toLowerCase()
+              ? [me, COUNTERPARTY] : [COUNTERPARTY, me];
+
+            say(`Signer:       \`${me}\` (account index ${ACCOUNT_INDEX || '0'})`);
+            say(`Counterparty: \`${COUNTERPARTY}\``);
+            say(`Normalised:   p1=\`${p1}\`  p2=\`${p2}\``);
+            say('');
+
+            // Existence guard: every ChannelOpened for this exact pair.
+            const logs = await tn.queryFilter(tn.filters.ChannelOpened(null, p1, p2), 0, 'latest');
+            const live = [];
+            for (const l of logs) {
+              const id = l.args.channelId;
+              const c = await tn.channels(id);
+              if (Number(c.state) === 1) live.push(id); // Opened
+            }
+
+            if (live.length > 0) {
+              say(`### Refusing — this pair already has ${live.length} open channel(s)`);
+              say('');
+              for (const id of live) say(`- \`${id}\``);
+              say('');
+              say('The contract would NOT stop a second open: `channelId` includes a global');
+              say('counter, so opening again yields a DIFFERENT id and both would be live.');
+              say('Use the existing channel, or close it first.');
+              fail('open-channel refused: an Opened channel already exists for this pair.');
+            }
+
+            say(`No open channel exists for this pair. Settlement timeout: ${timeout}s.`);
+
+            if (APPLY !== 'true') {
+              say('');
+              say('**Dry run — nothing sent.** Re-run with `apply: true` to open.');
+            } else {
+              say('');
+              say('Sending openChannel…');
+              const t = await tn.connect(signer).openChannel(COUNTERPARTY, timeout);
+              say(`openChannel tx: \`${t.hash}\``);
+              const rc = await t.wait();
+
+              // Read the id out of the event, then verify against the contract.
+              // The receipt is not the authority (connector#907).
+              let newId = null;
+              for (const l of rc.logs) {
+                try {
+                  const parsed = tn.interface.parseLog(l);
+                  if (parsed && parsed.name === 'ChannelOpened') { newId = parsed.args.channelId; break; }
+                } catch { /* not our event */ }
+              }
+              if (!newId) fail('openChannel mined but no ChannelOpened event was found in the receipt.');
+
+              const c = await tn.channels(newId);
+              if (Number(c.state) !== 1) {
+                fail(`Post-write verification FAILED: channel ${newId} is ${STATES[Number(c.state)] ?? c.state}, not Opened.`);
+              }
+              say('');
+              say(`✅ Channel opened and confirmed by reading the contract back.`);
+              say('');
+              say(`| channel_id | \`${newId}\` |`);
+              say('|---|---|');
+              say(`| participant1 | \`${c.participant1}\` |`);
+              say(`| participant2 | \`${c.participant2}\` |`);
+              say(`| settlementTimeout | ${c.settlementTimeout} |`);
+              say('');
+              say('**Next:** both sides must fund their OWN slot before either can pay —');
+              say('run `deposit` once per participant. See this file\'s header on which');
+              say('slot a deposit lands in.');
+            }
           } else {
             fail(`Unknown operation: ${OPERATION}`);
           }
@@ -370,6 +501,8 @@ jobs:
           ACCOUNT_INDEX: ${{ inputs.account_index }}
           SCAN_COUNT: ${{ inputs.scan_count }}
           CHANNEL_ID: ${{ inputs.channel_id }}
+          COUNTERPARTY: ${{ inputs.counterparty }}
+          SETTLEMENT_TIMEOUT: ${{ inputs.settlement_timeout }}
           PARTICIPANT: ${{ inputs.participant }}
           TOTAL_BASE_UNITS: ${{ inputs.total_base_units }}
           APPLY: ${{ inputs.apply }}
