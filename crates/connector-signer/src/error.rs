@@ -15,16 +15,3 @@ pub enum SignerError {
     #[error("key rotation failed: {0}")]
     RotationFailed(String),
 }
-
-/// Errors raised by a [`crate::Treasury`] or its [`crate::ChainClient`] port.
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum TreasuryError {
-    #[error(transparent)]
-    Signer(#[from] SignerError),
-
-    #[error("chain client rejected the request: {0}")]
-    ChainRejected(String),
-
-    #[error("insufficient balance: have {have}, need {need}")]
-    InsufficientBalance { have: u128, need: u128 },
-}
