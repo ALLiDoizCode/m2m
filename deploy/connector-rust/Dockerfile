@@ -61,13 +61,23 @@ RUN cargo install cargo-chef --locked
 WORKDIR /workspace
 
 # ============================================
-# Stage 1b: planner -- computes a recipe (issue #609) naming exactly the
-# manifests `-p connector`'s dependency graph touches. `--bin connector`
-# (the binary crates/connector-bin's Cargo.toml declares, not a package
-# name) drops the recipe to just that closure, the same scoping `-p
-# connector` below already applies to the real build -- so unrelated
-# workspace members (e.g. connector-vectors' fixture binaries) can't bloat
-# the dependency layer or falsely widen its cache key.
+# Stage 1b: planner -- computes the recipe (issue #609): every workspace
+# manifest plus the locked dependency graph, and nothing else. A commit
+# that touches only crate *sources* leaves this byte-identical, which is
+# what makes the cook layer below reusable.
+#
+# Deliberately NOT `cargo chef prepare --bin connector`. Narrowing the
+# recipe to one binary's closure also prunes the workspace members that
+# closure does not reach, and the `Cargo.lock` chef writes beside that
+# reduced workspace no longer matches it -- cargo re-resolves (against this
+# repo's lock it drops a second `rand_core` and a second `webpki-roots`)
+# and then refuses: `error: cannot update the lock file ... because
+# --locked was passed`, aborting the build at the cook step below.
+# `--locked` is an acceptance criterion of this issue, so the recipe stays
+# whole. Nothing is lost by that: `-p connector` on the cook is what
+# actually narrows *what gets compiled*, exactly as it narrows the real
+# build, and a whole-workspace recipe still only changes when a manifest
+# or the lock file does.
 # ============================================
 FROM chef AS planner
 
@@ -75,7 +85,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY packages/solana-program ./packages/solana-program
 
-RUN cargo chef prepare --recipe-path recipe.json --bin connector
+RUN cargo chef prepare --recipe-path recipe.json
 
 # ============================================
 # Stage 1c: builder -- `cook` builds every third-party dependency the recipe
@@ -91,7 +101,9 @@ RUN cargo chef prepare --recipe-path recipe.json --bin connector
 # `cargo chef cook` fails loudly (a stub build error, not a silent skip) if
 # a crate's manifest is unreadable or malformed -- e.g. a new crate added
 # under `crates/` without a Cargo.toml the workspace can resolve -- rather
-# than quietly falling back to a full rebuild.
+# than quietly falling back to a full rebuild. `--locked` makes the same
+# true of a crate added without `Cargo.lock` being regenerated: cargo
+# refuses rather than silently re-resolving.
 # ============================================
 FROM chef AS builder
 
