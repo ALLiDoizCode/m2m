@@ -161,19 +161,25 @@ write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STE
 # # ...or, only for a config that is never committed, the literal:
 # # credential = { secret = "CHANGE-ME-generate-with-openssl-rand-hex-32" }
 #
-# # The most unclaimed value this node will carry for this peering before
-# # refusing, in the settlement asset's smallest unit. Optional for a peer
-# # this node dials; REQUIRED for an accept-only one (no `endpoint`),
-# # because such a node cannot originate, cannot prompt a payer that has
-# # stopped sending, and has no other bound at all.
-# ceiling = 1000000
+# # `ceiling`/`flush_interval_ms` used to be set here -- retired along with
+# # the credit window they bounded (ADR 0031, ADR 0033, issue #882): every
+# # peer PREPARE now carries its own covering claim, whether or not this
+# # node dials. Setting either is a named load-time error, not a default.
 #
-# # How often this node promises to flush a pending claim to this peer, and
-# # how long it waits for the acknowledgement and for an answer. The two
-# # timeouts default to 30000 ms each.
-# flush_interval_ms = 5000
+# # How long this node waits for a claim's acknowledgement and for an
+# # answer. Both default to 30000 ms each.
 # claim_ack_timeout_ms = 30000
 # peer_answer_timeout_ms = 30000
+#
+# # TEMPORARY migration knob (issue #883, child B6) -- do not set this on a
+# # config expected to outlive the fleet's own claim-policy rollout
+# # (docs/operators/claim-policy-rollout.md). Omit for the default,
+# # "enforce": an uncovered peer PREPARE is refused (F06_UNEXPECTED_PAYMENT
+# # + the x402 greeting). "observe" admits it instead and logs it the same
+# # way a refusal would be logged, so an operator can watch this peering's
+# # logs for admissions before flipping it to enforce. A mistyped value is a
+# # named load-time error, not a silent default.
+# # claim_enforcement = "observe"
 #
 # # Every peering needs at least one channel binding, or it can never take
 # # the peer role at all: the role rule needs BOTH a proven credential and

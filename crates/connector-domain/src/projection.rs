@@ -1,24 +1,22 @@
-//! Balances and exposure as a projection over a durable journal (ADR 0005,
-//! `docs/protocol/peer-wire-spec.md` §5.3, issue #424). Pure, no I/O -- the
-//! journal itself (a file, in `connector-runtime`) is an infrastructure
-//! concern; folding its entries into a balance/exposure figure is not, so it
-//! lives here where it can be property-tested without a filesystem.
+//! Balances as a projection over a durable journal (ADR 0005, issue #424).
+//! Pure, no I/O -- the journal itself (a file, in `connector-runtime`) is an
+//! infrastructure concern; folding its entries into a balance figure is not,
+//! so it lives here where it can be property-tested without a filesystem.
 //!
 //! [`JournalEntry`] is deliberately the exact alphabet named in the issue's
 //! own acceptance criteria -- "claims sent, claims received with their
 //! watermarks, and fulfilments not yet covered by a claim" -- and nothing
-//! more. Balances are never themselves an entry: per ADR 0005 they are
-//! arithmetic on the entries above, recomputed by [`Projection::apply`]
-//! rather than stored.
+//! more. The last of those, `InboundFulfillmentRecorded`, backed the
+//! exposure/ceiling accounting ADR 0033 (issue #882) retired; it stays in
+//! the alphabet only so a pre-#882 journal still decodes. Balances are
+//! never themselves an entry: per ADR 0005 they are arithmetic on the
+//! entries above, recomputed by [`Projection::apply`] rather than stored.
 
 use std::collections::BTreeMap;
 
-use thiserror::Error;
-
 /// One durably-recorded fact about money state (ADR 0005). Everything else
-/// -- a peer's owed balance, a channel's exposure -- is re-derived by
-/// folding a sequence of these with [`Projection::apply`], never stored
-/// directly.
+/// -- a peer's owed balance -- is re-derived by folding a sequence of these
+/// with [`Projection::apply`], never stored directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JournalEntry {
     /// This connector signed an outbound claim owed to `peer_id` on
@@ -47,37 +45,21 @@ pub enum JournalEntry {
         cumulative_amount: u64,
         signature: Vec<u8>,
     },
-    /// A packet arriving on `channel_id` fulfilled for `amount`, extending
-    /// this connector's exposure to that channel's counterparty until a
-    /// covering claim is accepted (`CONTEXT.md` "Exposure",
-    /// peer-wire-spec.md §5.3). Additive: exposure accumulates across every
-    /// such entry since the last accepted claim.
+    /// Historical entry kind, no longer produced (ADR 0031, ADR 0033, issue
+    /// #882): a packet arriving on `channel_id` fulfilled for `amount`,
+    /// extending this connector's exposure to that channel's counterparty
+    /// until a covering claim was accepted -- the credit-window accounting
+    /// this connector kept before every peer PREPARE carried its own
+    /// covering claim. Kept in the alphabet, not removed, so a journal a
+    /// pre-#882 build already wrote still decodes; [`Projection::apply`]
+    /// folds it into nothing.
     InboundFulfillmentRecorded { channel_id: String, amount: u64 },
 }
 
-/// A rebuild found the projection disagreeing with the claims it derives
-/// from (issue #424's acceptance criteria: "reports divergence rather than
-/// absorbing it"). The one invariant checkable from this journal alone: a
-/// channel's accepted claim can never assert more was delivered than this
-/// connector's own journal ever recorded fulfilling on that channel -- if it
-/// does, either a fulfilment failed to journal before its claim did, or a
-/// counterparty's claim was accepted beyond what was actually owed.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum ProjectionDivergence {
-    #[error(
-        "channel {channel_id}: accepted claim cumulative {claimed} exceeds this connector's own recorded fulfilled total {fulfilled}"
-    )]
-    ClaimedExceedsFulfilled {
-        channel_id: String,
-        claimed: u64,
-        fulfilled: u64,
-    },
-}
-
-/// Balances and exposure, derived in memory by folding a journal (ADR
-/// 0005). Never a source of truth, always rebuildable from
-/// [`Projection::from_entries`] -- the same result whether folded
-/// incrementally as entries occur or all at once after a restart.
+/// Balances, derived in memory by folding a journal (ADR 0005). Never a
+/// source of truth, always rebuildable from [`Projection::from_entries`] --
+/// the same result whether folded incrementally as entries occur or all at
+/// once after a restart.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Projection {
     /// `peer_id` -> the cumulative amount this connector's latest signed
@@ -98,9 +80,6 @@ pub struct Projection {
     /// truth -- both fields are written from, and only from, the same
     /// `InboundClaimAccepted` entry (issue #425: what a redemption submits).
     inbound_claim_signature: BTreeMap<String, Vec<u8>>,
-    /// `channel_id` -> the running total this connector has itself recorded
-    /// fulfilling on that channel.
-    inbound_fulfilled: BTreeMap<String, u64>,
 }
 
 impl Projection {
@@ -127,13 +106,10 @@ impl Projection {
                 self.inbound_claim_signature
                     .insert(channel_id.clone(), signature.clone());
             }
-            JournalEntry::InboundFulfillmentRecorded { channel_id, amount } => {
-                let total = self
-                    .inbound_fulfilled
-                    .entry(channel_id.clone())
-                    .or_insert(0);
-                *total = total.saturating_add(*amount);
-            }
+            // Historical entry kind (ADR 0031, ADR 0033, issue #882): a
+            // pre-#882 journal may still carry these, but nothing is
+            // tracked from them any more.
+            JournalEntry::InboundFulfillmentRecorded { .. } => {}
         }
     }
 
@@ -154,39 +130,6 @@ impl Projection {
         self.outbound_owed.get(peer_id).copied().unwrap_or(0)
     }
 
-    /// `channel_id`'s exposure: value this connector has delivered on that
-    /// channel's counterparty's behalf but does not yet hold a covering
-    /// claim for (`CONTEXT.md` "Exposure"). Never negative -- an accepted
-    /// claim can only ever cover what was actually recorded fulfilled;
-    /// [`Projection::divergences`] is where an accepted claim exceeding
-    /// that is reported, not here.
-    pub fn exposure(&self, channel_id: &str) -> u64 {
-        let fulfilled = self.inbound_fulfilled.get(channel_id).copied().unwrap_or(0);
-        let claimed = self.inbound_claimed.get(channel_id).copied().unwrap_or(0);
-        fulfilled.saturating_sub(claimed)
-    }
-
-    /// Whether `channel_id`'s current exposure exceeds `ceiling`
-    /// (peer-wire-spec.md §5.3) -- the pure predicate a connector checks
-    /// before continuing to forward for that channel's counterparty.
-    pub fn is_over_ceiling(&self, channel_id: &str, ceiling: u64) -> bool {
-        self.exposure(channel_id) > ceiling
-    }
-
-    /// Every channel this projection has ever recorded a fulfilment or an
-    /// accepted claim for, in a stable order -- what a caller enumerates to
-    /// report exposure per channel (the operator surface's read model)
-    /// without needing to already know every channel id in advance.
-    pub fn known_channels(&self) -> Vec<String> {
-        self.inbound_fulfilled
-            .keys()
-            .chain(self.inbound_claimed.keys())
-            .cloned()
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect()
-    }
-
     /// The highest-nonce claim ever accepted on `channel_id`, as
     /// `(nonce, cumulative_amount, signature)` -- exactly what an on-chain
     /// redemption submits (issue #425, widened by #573 to carry the nonce
@@ -199,26 +142,6 @@ impl Projection {
         let cumulative_amount = *self.inbound_claimed.get(channel_id)?;
         let signature = self.inbound_claim_signature.get(channel_id)?.clone();
         Some((nonce, cumulative_amount, signature))
-    }
-
-    /// Check this projection against the claims it derives from (issue
-    /// #424's acceptance criteria), reporting every channel where an
-    /// accepted claim asserts more than this connector ever recorded
-    /// fulfilling on it -- a divergence between the journal and the claims
-    /// replayed from it, rather than something a rebuild should silently
-    /// absorb.
-    pub fn divergences(&self) -> Vec<ProjectionDivergence> {
-        self.inbound_claimed
-            .iter()
-            .filter_map(|(channel_id, &claimed)| {
-                let fulfilled = self.inbound_fulfilled.get(channel_id).copied().unwrap_or(0);
-                (claimed > fulfilled).then(|| ProjectionDivergence::ClaimedExceedsFulfilled {
-                    channel_id: channel_id.clone(),
-                    claimed,
-                    fulfilled,
-                })
-            })
-            .collect()
     }
 }
 
@@ -234,10 +157,6 @@ mod tests {
             nonce,
             cumulative_amount,
         }
-    }
-
-    fn accepted(channel_id: &str, nonce: u64, cumulative_amount: u64) -> JournalEntry {
-        accepted_with_signature(channel_id, nonce, cumulative_amount, &[])
     }
 
     fn accepted_with_signature(
@@ -262,11 +181,9 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_projection_owes_and_exposes_nothing() {
+    fn an_empty_projection_owes_nothing() {
         let projection = Projection::default();
         assert_eq!(projection.outbound_owed("peer-b"), 0);
-        assert_eq!(projection.exposure("channel-a"), 0);
-        assert!(!projection.is_over_ceiling("channel-a", 0));
     }
 
     #[test]
@@ -284,107 +201,20 @@ mod tests {
         assert_eq!(projection.outbound_owed("peer-b"), 150);
     }
 
+    /// ADR 0031/ADR 0033, issue #882: a pre-#882 journal may still carry
+    /// `InboundFulfillmentRecorded` entries. They must still decode and
+    /// replay without error -- they simply contribute nothing.
     #[test]
-    fn a_fulfilment_with_no_claim_yet_is_full_exposure() {
+    fn a_historical_fulfillment_recorded_entry_replays_as_a_no_op() {
         let projection = Projection::from_entries(&[fulfilled("channel-a", 60)]);
-        assert_eq!(projection.exposure("channel-a"), 60);
+        assert_eq!(projection, Projection::default());
     }
 
     #[test]
-    fn fulfilments_accumulate_across_entries() {
-        let projection =
-            Projection::from_entries(&[fulfilled("channel-a", 60), fulfilled("channel-a", 40)]);
-        assert_eq!(projection.exposure("channel-a"), 100);
-    }
-
-    #[test]
-    fn an_accepted_claim_covers_exposure_up_to_its_cumulative_amount() {
-        let projection = Projection::from_entries(&[
-            fulfilled("channel-a", 60),
-            fulfilled("channel-a", 40),
-            accepted("channel-a", 1, 100),
-        ]);
-        assert_eq!(projection.exposure("channel-a"), 0);
-    }
-
-    #[test]
-    fn a_partial_claim_leaves_the_remainder_exposed() {
-        let projection = Projection::from_entries(&[
-            fulfilled("channel-a", 60),
-            fulfilled("channel-a", 40),
-            accepted("channel-a", 1, 70),
-        ]);
-        assert_eq!(projection.exposure("channel-a"), 30);
-    }
-
-    #[test]
-    fn exposure_resumes_accumulating_after_a_claim_covers_it() {
-        let projection = Projection::from_entries(&[
-            fulfilled("channel-a", 60),
-            accepted("channel-a", 1, 60),
-            fulfilled("channel-a", 25),
-        ]);
-        assert_eq!(projection.exposure("channel-a"), 25);
-    }
-
-    #[test]
-    fn exposure_over_the_ceiling_is_reported_as_such() {
-        let projection = Projection::from_entries(&[fulfilled("channel-a", 101)]);
-        assert!(projection.is_over_ceiling("channel-a", 100));
-        assert!(!projection.is_over_ceiling("channel-a", 101));
-        assert!(!projection.is_over_ceiling("channel-a", 200));
-    }
-
-    #[test]
-    fn known_channels_lists_every_channel_seen_by_a_fulfilment_or_a_claim() {
-        let projection = Projection::from_entries(&[
-            fulfilled("channel-a", 10),
-            accepted("channel-b", 1, 5),
-            signed("peer-x", "channel-c", 1, 5),
-        ]);
-        assert_eq!(
-            projection.known_channels(),
-            vec!["channel-a".to_string(), "channel-b".to_string()]
-        );
-    }
-
-    #[test]
-    fn different_channels_and_peers_are_tracked_independently() {
-        let projection = Projection::from_entries(&[
-            signed("peer-b", "channel-a", 1, 100),
-            fulfilled("channel-c", 30),
-        ]);
+    fn different_peers_are_tracked_independently() {
+        let projection = Projection::from_entries(&[signed("peer-b", "channel-a", 1, 100)]);
         assert_eq!(projection.outbound_owed("peer-b"), 100);
         assert_eq!(projection.outbound_owed("peer-d"), 0);
-        assert_eq!(projection.exposure("channel-c"), 30);
-        assert_eq!(projection.exposure("channel-a"), 0);
-    }
-
-    #[test]
-    fn a_claim_exceeding_recorded_fulfilments_is_a_divergence() {
-        let projection =
-            Projection::from_entries(&[fulfilled("channel-a", 40), accepted("channel-a", 1, 100)]);
-        assert_eq!(
-            projection.divergences(),
-            vec![ProjectionDivergence::ClaimedExceedsFulfilled {
-                channel_id: "channel-a".to_string(),
-                claimed: 100,
-                fulfilled: 40,
-            }]
-        );
-    }
-
-    #[test]
-    fn a_claim_covered_by_recorded_fulfilments_has_no_divergence() {
-        let projection =
-            Projection::from_entries(&[fulfilled("channel-a", 100), accepted("channel-a", 1, 100)]);
-        assert!(projection.divergences().is_empty());
-    }
-
-    #[test]
-    fn no_claims_accepted_means_no_divergence_possible() {
-        let projection = Projection::from_entries(&[fulfilled("channel-a", 100)]);
-        assert!(projection.divergences().is_empty());
     }
 
     #[test]
@@ -451,8 +281,8 @@ mod tests {
 
         /// Folding the same journal twice (e.g. a restart that replays an
         /// already-fully-applied journal once more) is idempotent: the
-        /// exposure and owed figures it reports depend only on the journal
-        /// content, not on how many times it has been rebuilt from.
+        /// owed figures it reports depend only on the journal content, not
+        /// on how many times it has been rebuilt from.
         #[test]
         fn rebuilding_the_same_journal_twice_yields_the_same_projection(
             entries in proptest::collection::vec(arbitrary_entry(), 0..64)

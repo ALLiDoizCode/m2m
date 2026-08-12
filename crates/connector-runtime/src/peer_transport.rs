@@ -180,16 +180,6 @@ enum PeerMessage {
 #[derive(Clone)]
 struct PeerLink {
     sender: mpsc::Sender<PeerMessage>,
-    /// The channel this link's counterparty is known to identify itself by
-    /// (issue #424) -- shared with the spawned task so
-    /// [`InProcessPeerTransport::set_peer_channel`] can configure it up
-    /// front, before any traffic, standing in for the identity a real
-    /// handshake would establish (ADR 0027, #676 -- not yet built). Also
-    /// updated by the
-    /// task itself the moment any claim or flush on this link names a
-    /// channel, so a link nobody pre-configured still learns its
-    /// counterparty's channel rather than never checking a ceiling at all.
-    known_channel_id: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl PeerLink {
@@ -201,8 +191,6 @@ impl PeerLink {
     /// identically.
     fn connect(connector: Arc<Connector>) -> PeerLink {
         let (sender, mut receiver) = mpsc::channel::<PeerMessage>(64);
-        let known_channel_id = Arc::new(std::sync::RwLock::new(None));
-        let known_channel_id_for_task = known_channel_id.clone();
         tokio::spawn(async move {
             while let Some(message) = receiver.recv().await {
                 match message {
@@ -212,46 +200,19 @@ impl PeerLink {
                         claim,
                         respond_to,
                     } => {
-                        if let Some(claim) = claim.as_ref() {
-                            *known_channel_id_for_task
-                                .write()
-                                .expect("known channel id lock poisoned") =
-                                Some(claim.channel_id.clone());
-                        }
-                        let channel_id = known_channel_id_for_task
-                            .read()
-                            .expect("known channel id lock poisoned")
-                            .clone();
                         let result = connector
-                            .handle_peer_prepare(prepare, minimum_delivery, claim, channel_id)
+                            .handle_peer_prepare(prepare, minimum_delivery, claim)
                             .await;
                         let _ = respond_to.send(result);
                     }
                     PeerMessage::Flush { claim, respond_to } => {
-                        *known_channel_id_for_task
-                            .write()
-                            .expect("known channel id lock poisoned") =
-                            Some(claim.channel_id.clone());
                         let ack = connector.handle_peer_claim(claim);
                         let _ = respond_to.send(ack);
                     }
                 }
             }
         });
-        PeerLink {
-            sender,
-            known_channel_id,
-        }
-    }
-
-    /// Configure the channel this link's counterparty identifies itself by,
-    /// ahead of any traffic (issue #424) -- standing in for what a real
-    /// peer handshake would establish (ADR 0027, #676).
-    fn set_known_channel(&self, channel_id: impl Into<String>) {
-        *self
-            .known_channel_id
-            .write()
-            .expect("known channel id lock poisoned") = Some(channel_id.into());
+        PeerLink { sender }
     }
 
     async fn forward(
@@ -319,22 +280,6 @@ impl InProcessPeerTransport {
     pub fn add_peer(&mut self, peer_id: impl Into<String>, connector: Arc<Connector>) {
         self.peers
             .insert(peer_id.into(), PeerLink::connect(connector));
-    }
-
-    /// Configure the channel `peer_id`'s link identifies itself by, ahead
-    /// of any traffic (issue #424, peer-wire-spec.md §5.3): without this,
-    /// the link only learns its counterparty's channel once a claim
-    /// happens to ride a frame over it (see `PeerLink::connect`'s own
-    /// doc), so the very first delivery before that point cannot be
-    /// checked against a ceiling or recorded as exposure. Configuring it
-    /// up front (what a real peer handshake -- ADR 0027, #676, not yet
-    /// built --
-    /// would establish) closes that gap. Does nothing for a `peer_id` not
-    /// yet registered via [`InProcessPeerTransport::add_peer`].
-    pub fn set_peer_channel(&mut self, peer_id: &str, channel_id: impl Into<String>) {
-        if let Some(link) = self.peers.get(peer_id) {
-            link.set_known_channel(channel_id);
-        }
     }
 }
 

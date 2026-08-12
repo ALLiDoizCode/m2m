@@ -1,5 +1,7 @@
 # Client BTP rides the client edge; peers stay on the peer wire
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
 > **Conclusion partly superseded, architecture reaffirmed (2026-08-03) by
 > [ADR 0027](0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md).** Peers
 > now use both carriages too, so the title's second clause and the "every BTP session is a client

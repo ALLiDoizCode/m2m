@@ -8,6 +8,7 @@ mod journal;
 mod metrics;
 mod operator_view;
 mod outbound_client;
+mod peer_route_store;
 mod peer_transport;
 mod route;
 #[cfg(test)]
@@ -21,7 +22,7 @@ pub use claim::{
 pub use clock::{Clock, SystemClock, TestClock};
 pub use connector::{
     ChannelOperationError, ClientRouteFacts, ClientRouteKind, Connector, LeaseRouteError,
-    ProbeDenied,
+    PeerRouteTableError, ProbeDenied,
 };
 // Re-exported for callers that hold a `Connector` but not a config-crate
 // dependency of their own (`connector-operator`): the chain key
@@ -31,8 +32,8 @@ pub use connector_config::{SettlementChain, UnknownSettlementChain};
 pub use journal::{FileJournal, InMemoryJournal, Journal, JournalError};
 pub use metrics::Metrics;
 pub use operator_view::{
-    ChannelView, ChannelViewStatus, ClaimDirection, ClaimView, ExposureView, LeasedRouteView,
-    PeerView, RouteView,
+    ChannelView, ChannelViewStatus, ClaimDirection, ClaimView, LeasedRouteView, PeerRouteView,
+    PeerView, RouteSource, RouteView,
 };
 // The OUTBOUND client ledger (issue #873) -- what this node signs to pay a
 // next hop, deliberately a different book from `ClaimBook`'s inbound
@@ -42,5 +43,6 @@ pub use outbound_client::{
     ClaimStateSource, ClaimWatermark, EvmDomain, HttpClaimState, OutboundClaim,
     OutboundClientError, OutboundClientLedger,
 };
+pub use peer_route_store::{PeerRouteStore, PeerRouteStoreError};
 pub use peer_transport::{InProcessPeerTransport, PeerForward, PeerTransport};
 pub use route::{LeasedRoute, PeerRoute};

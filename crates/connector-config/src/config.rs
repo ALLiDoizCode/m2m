@@ -9,6 +9,7 @@ use url::Url;
 use crate::announce::{resolve_announce, AnnounceConfig, RawAnnounceConfig};
 use crate::client_channel::{resolve_client_channels, ClientChannelConfig, RawClientChannel};
 use crate::error::ConfigError;
+use crate::identity::{resolve_client_identities, ClientIdentityConfig, RawClientIdentity};
 use crate::operator::{resolve_operator, OperatorConfig, RawOperatorConfig};
 use crate::peer::{parse_peer_exposure, resolve_peers, PeerConfig, PeerExposure, RawPeer};
 use crate::peer_channel::{resolve_peer_channels, PeerChannelConfig, RawPeerChannel};
@@ -109,6 +110,15 @@ struct RawConfig {
     /// so every claim presented at its client edge is refused as unknown.
     #[serde(default)]
     client_channels: Vec<RawClientChannel>,
+    /// The client-edge identities this node authenticates over HTTP (issue
+    /// #502, `docs/protocol/client-edge-spec.md` §1.2): an `id` a request
+    /// presents via `ILP-Peer-Id` and the `Authorization: Bearer <secret>`
+    /// it must match. Absent -- or empty -- means this node configures no
+    /// peer identity, so every request is either anonymous (no
+    /// `ILP-Peer-Id` presented) or refused `401` (one presented, matching
+    /// nothing); anonymity stays a first-class path either way.
+    #[serde(default)]
+    client_identities: Vec<RawClientIdentity>,
     /// The directory this node keeps its durable money state in (issue
     /// #605): the journals whose replay is what makes a claim watermark
     /// survive a restart. Absent means this node writes none -- allowed
@@ -234,6 +244,7 @@ pub struct Config {
     announce: Option<AnnounceConfig>,
     settlements: Vec<SettlementConfig>,
     client_channels: Vec<ClientChannelConfig>,
+    client_identities: Vec<ClientIdentityConfig>,
     state_dir: Option<PathBuf>,
     channel_liveness_ttl: Option<Duration>,
     channel_serve_stale: Option<Duration>,
@@ -331,6 +342,7 @@ impl Config {
         let announce = resolve_announce(raw.announce)?;
         let settlements = resolve_settlement(raw.settlement)?;
         let client_channels = resolve_client_channels(raw.client_channels)?;
+        let client_identities = resolve_client_identities(raw.client_identities)?;
         // Namespace disjointness (`peer-carriage-spec.md` §1.8). Peer and
         // client watermarks are separate records by design, which is only
         // safe while no channel is in both: two namespaces over one
@@ -524,6 +536,7 @@ impl Config {
             announce,
             settlements,
             client_channels,
+            client_identities,
             state_dir,
             channel_liveness_ttl,
             channel_serve_stale,
@@ -715,6 +728,15 @@ impl Config {
         &self.client_channels
     }
 
+    /// The client-edge identities this node authenticates over HTTP (issue
+    /// #502, `docs/protocol/client-edge-spec.md` §1.2). Empty means this
+    /// node configures no peer identity -- every request is either
+    /// anonymous or refused `401` for presenting an `ILP-Peer-Id` that
+    /// matches nothing.
+    pub fn client_identities(&self) -> &[ClientIdentityConfig] {
+        &self.client_identities
+    }
+
     /// The directory this node keeps its durable money state in -- the
     /// claim journals whose replay is what makes a watermark survive a
     /// restart (issue #605). `None` means this node writes none, which
@@ -894,8 +916,6 @@ key_file = "{key_file}"
 id = "store"
 endpoint = "wss://store.example:443/btp"
 credential = {{ secret = "shared-secret" }}
-ceiling = 1000000
-flush_interval_ms = 5000
 
 [[peer_channels]]
 peer_id = "store"
@@ -950,8 +970,6 @@ price = 1000
         assert_eq!(peer.dial(), Some(PeerCarriage::Btp));
         assert!(peer.credential().matches("shared-secret"));
         assert!(!peer.credential().matches("wrong"));
-        assert_eq!(peer.ceiling(), Some(1_000_000));
-        assert_eq!(peer.flush_interval_ms(), Some(5_000));
         assert_eq!(peer.claim_ack_timeout_ms(), 30_000);
         assert_eq!(peer.peer_answer_timeout_ms(), 30_000);
         assert!(peer.can_originate());
@@ -1370,7 +1388,6 @@ key_file = "{key_file}"
 id = "store"
 endpoint = "wss://store.example:443/btp"
 credential = {{ secret = "shared-secret" }}
-ceiling = 1000000
 
 [[peer_channels]]
 peer_id = "store"
@@ -1489,35 +1506,60 @@ token_network_address = "{PEER_TOKEN_NETWORK}"
         );
     }
 
-    /// §11 `AcceptOnlyPeerWithoutCeiling` (§6.4(3)): the accept-only side
-    /// has no other bound, so a defaulted ceiling there is an unowned
-    /// credit decision.
+    /// ADR 0031/ADR 0033, issue #882: an accept-only peering used to be
+    /// refused with no explicit `ceiling` (§6.4(3)) -- the credit window's
+    /// only real bound for a side that cannot originate a flush. That bound
+    /// is retired along with the ceiling itself; an accept-only peering now
+    /// loads with no ceiling-shaped config at all.
     #[test]
-    fn rejects_an_accept_only_peering_with_no_explicit_ceiling() {
-        let result = load_peering(|text| {
-            text.replace("endpoint = \"wss://store.example:443/btp\"\n", "")
-                .replace("ceiling = 1000000\n", "")
-        });
-
-        let message = expect_error(
-            result,
-            |error| matches!(error, ConfigError::AcceptOnlyPeerWithoutCeiling { id } if id == "store"),
-        );
-        assert!(
-            message.contains("only real bound") && message.contains(BRINGUP_DOC),
-            "got: {message}"
-        );
-    }
-
-    /// The same accept-only peering *with* a ceiling loads.
-    #[test]
-    fn an_accept_only_peering_with_an_explicit_ceiling_loads() {
+    fn an_accept_only_peering_loads_with_no_ceiling() {
         let config =
             load_peering(|text| text.replace("endpoint = \"wss://store.example:443/btp\"\n", ""))
                 .expect("load");
 
         assert_eq!(config.peers()[0].dial(), None);
-        assert_eq!(config.peers()[0].ceiling(), Some(1_000_000));
+    }
+
+    /// §11's removed-field row, `ceiling` half (ADR 0031, ADR 0033, issue
+    /// #882): a devnet box's bind-mounted TOML that still sets it gets a
+    /// named error, not a silent unknown-field drop.
+    #[test]
+    fn rejects_a_peering_that_still_sets_ceiling() {
+        let result = load_peering(|text| {
+            text.replace(
+                "credential = { secret = \"shared-secret\" }\n",
+                "credential = { secret = \"shared-secret\" }\nceiling = 1000000\n",
+            )
+        });
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::PeerCeilingRemoved { id } if id == "store"),
+        );
+        assert!(
+            message.contains("ADR 0031") && message.contains(BRINGUP_DOC),
+            "got: {message}"
+        );
+    }
+
+    /// §11's removed-field row, `flush_interval_ms` half.
+    #[test]
+    fn rejects_a_peering_that_still_sets_flush_interval_ms() {
+        let result = load_peering(|text| {
+            text.replace(
+                "credential = { secret = \"shared-secret\" }\n",
+                "credential = { secret = \"shared-secret\" }\nflush_interval_ms = 5000\n",
+            )
+        });
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::PeerFlushIntervalRemoved { id } if id == "store"),
+        );
+        assert!(
+            message.contains("ADR 0031") && message.contains(BRINGUP_DOC),
+            "got: {message}"
+        );
     }
 
     /// §11 `PeerRouteUndeliverable` (§2.2, §6.4(1)): accept-only, and this
@@ -2378,6 +2420,70 @@ key_file = "{}"
         .expect("load");
 
         assert_eq!(config.state_dir(), None);
+    }
+
+    // -- client_identities (issue #502) --
+
+    /// `[[client_identities]]` needs no `state_dir` -- it is an HTTP-layer
+    /// credential, not a payment channel, and carries no watermark to lose.
+    #[test]
+    fn client_identities_load_and_need_no_state_dir() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[[client_identities]]
+id = "peer-a"
+secret = "s3cr3t"
+
+[[client_identities]]
+id = "peer-b"
+"#,
+                key_path.display()
+            )
+        })
+        .expect("load");
+
+        assert_eq!(config.state_dir(), None);
+        let identities = config.client_identities();
+        assert_eq!(identities.len(), 2);
+        assert_eq!(identities[0].id(), "peer-a");
+        assert_eq!(identities[0].secret(), "s3cr3t");
+        assert_eq!(identities[1].id(), "peer-b");
+        assert_eq!(identities[1].secret(), "");
+    }
+
+    /// AC: "a duplicate identity is refused at load."
+    #[test]
+    fn a_duplicate_client_identity_id_is_refused_at_load() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[[client_identities]]
+id = "peer-a"
+secret = "one"
+
+[[client_identities]]
+id = "peer-a"
+secret = "two"
+"#,
+                key_path.display()
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::DuplicateClientIdentityId { id }) if id == "peer-a"
+        ));
     }
 
     /// Issue #649: how long a chain-resolved channel's liveness may be

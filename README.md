@@ -81,20 +81,21 @@ handler_url = "http://app:3100"
 price       = 100
 ```
 
-| Key                   | Type        | Required  | Meaning                                                                                               |
-| --------------------- | ----------- | --------- | ----------------------------------------------------------------------------------------------------- |
-| `client_edge_addr`    | `host:port` | yes       | Where `POST /ilp`, `GET /ilp/btp` (and, if configured, the operator surface) listen.                  |
-| `[signer]`            | table       | yes       | Exactly one of `key_file` or `kms_key_id` — a location, never a key value.                            |
-| `[[routes]]`          | array       | no        | See below.                                                                                            |
-| `apex`                | ILP address | no        | Required only if `[[children]]` is used.                                                              |
-| `[[children]]`        | array       | no        | `{ name, handler_url, price }` — sugar for a route at `<apex>.<name>`.                                |
-| `[operator]`          | table       | no        | Absent ⇒ the operator surface is not mounted at all.                                                  |
-| `peer_expose`         | string      | no        | `btp` / `http` / `both` / `neither` — which peer carriages this node listens for. Absent ⇒ `neither`. |
-| `[[peers]]`           | array       | no        | `{ id, endpoint, credential, ceiling, … }` — the peerings `routes.peer_id` may name.                  |
-| `[[peer_channels]]`   | array       | no        | `{ peer_id, channel_id, counterparty_key, chain_id, token_network }` — required for every peering.    |
-| `[settlement]`        | table       | no        | Absent ⇒ every channel operation answers `503`.                                                       |
-| `[[client_channels]]` | array       | no        | Absent ⇒ the client edge has a record of no channel, so it refuses every claim.                       |
-| `state_dir`           | path        | see below | Where this node writes its claim journals. Required whenever `[[client_channels]]` is set.            |
+| Key                     | Type        | Required  | Meaning                                                                                                       |
+| ----------------------- | ----------- | --------- | ------------------------------------------------------------------------------------------------------------- |
+| `client_edge_addr`      | `host:port` | yes       | Where `POST /ilp`, `GET /ilp/btp` (and, if configured, the operator surface) listen.                          |
+| `[signer]`              | table       | yes       | Exactly one of `key_file` or `kms_key_id` — a location, never a key value.                                    |
+| `[[routes]]`            | array       | no        | See below.                                                                                                    |
+| `apex`                  | ILP address | no        | Required only if `[[children]]` is used.                                                                      |
+| `[[children]]`          | array       | no        | `{ name, handler_url, price }` — sugar for a route at `<apex>.<name>`.                                        |
+| `[operator]`            | table       | no        | Absent ⇒ the operator surface is not mounted at all.                                                          |
+| `peer_expose`           | string      | no        | `btp` / `http` / `both` / `neither` — which peer carriages this node listens for. Absent ⇒ `neither`.         |
+| `[[peers]]`             | array       | no        | `{ id, endpoint, credential, … }` — the peerings `routes.peer_id` may name.                                   |
+| `[[peer_channels]]`     | array       | no        | `{ peer_id, channel_id, counterparty_key, chain_id, token_network }` — required for every peering.            |
+| `[settlement]`          | table       | no        | Absent ⇒ every channel operation answers `503`.                                                               |
+| `[[client_channels]]`   | array       | no        | Absent ⇒ the client edge has a record of no channel, so it refuses every claim.                               |
+| `[[client_identities]]` | array       | no        | `{ id, secret }` — the client-edge identities `POST /ilp` authenticates. Absent ⇒ every request is anonymous. |
+| `state_dir`             | path        | see below | Where this node writes its claim journals. Required whenever `[[client_channels]]` is set.                    |
 
 A `[[routes]]` entry sets **exactly one** of `handler_url` (terminate here) or `peer_id` (forward
 there). A terminated route **must** carry a `price` — write `price = 0` if free is deliberate,
@@ -145,6 +146,18 @@ is checked against that recorded counterparty and never against the signer the c
 itself, and a claim naming a channel with no entry here is refused as unknown. A node configuring
 none therefore accepts no paid write at all — deliberately, since the only alternative to "no
 record of this channel" is believing what a claim says about itself.
+
+`[[client_identities]]` names the senders `POST /ilp` recognises by credential rather than by
+claim: each entry is an `id` a request presents in `ILP-Peer-Id` and the `secret` it must present
+in `Authorization: Bearer <secret>` (an empty or omitted `secret` makes that identity
+permissionless — the header may then be absent, mirroring BTP's `secret: ""` frame). A duplicated
+`id` is refused at load. This is **not** what admits a request: a request presenting no
+`ILP-Peer-Id` is anonymous, which is a first-class path — an unaffiliated buyer pays for a route
+without registering with the operator first — so a node configuring none of these serves clients
+exactly as it did before the section existed. What it changes is that an `ILP-Peer-Id` presented
+and _not_ authenticated is refused **401**, before the route is looked up. Distinct from
+`[[peers]]` (a peering this node dials, which has an endpoint) and from `[[client_channels]]`
+(which channel a claim is judged against, never who presented it).
 
 `state_dir` is where a claim's replay watermark is written down. Without it the watermarks live
 only in process memory, so a restart resets every channel to "no claim ever seen" — and a channel
@@ -210,7 +223,9 @@ is accepted and stays a client, its contents unverified. Nothing about the hands
 What authorizes a **write** is the signed payment-channel claim on each frame, exactly as on
 `POST /ilp` ([`client-edge-spec.md`](docs/protocol/client-edge-spec.md) §1.9 step 1: _"Authorization
 to write comes from the claim, never the session"_). The `credential` in `[[peers]]` upgrades an
-already-admitted session from client to peer; it is not what admits it.
+already-admitted session from client to peer; it is not what admits it. `[[client_identities]]` is
+`POST /ilp`'s own authentication and does not gate this handshake either — the `auth` frame's
+contents stay unverified.
 
 ### `POST /ilp`
 
@@ -219,6 +234,9 @@ OER-encoded FULFILL or REJECT, also `application/octet-stream`, at HTTP **200** 
 outcome is never an HTTP-level one.
 
 - **400** — the body did not decode as a PREPARE.
+- **401** — the request presented an `ILP-Peer-Id` that named no `[[client_identities]]` entry, or
+  named one but did not present its secret. Answered before the route is looked up, so an
+  unauthorised caller is never quoted a price instead.
 - **402** — the request carried no claim header and addressed a route this connector both
   terminates and prices. The body is an x402 v2 `PaymentRequired` document
   (`application/json`), repeated base64-encoded in a `Payment-Required` response header, with a
@@ -258,16 +276,24 @@ no second port. The split is read from write
 ([ADR 0008](docs/adr/0008-operator-surface-splits-read-from-write.md)):
 
 - **Reads** need `Authorization: Bearer <bearer_token>` and nothing else:
-  `GET /peers`, `/routes`, `/routes/leased`, `/channels`, `/claims`, `/exposure`, `/identity`,
+  `GET /peers`, `/routes`, `/routes/leased`, `/routes/peers`, `/channels`, `/claims`, `/identity`,
   `/audit-log`, and `/metrics` (Prometheus text: `toon_packets_total`,
-  `toon_packets_rejected_total`, `toon_fees_earned_total`, `toon_exposure`,
+  `toon_packets_rejected_total`, `toon_fees_earned_total`, `toon_exposure` (always zero; kept for
+  scrape-config stability, [ADR 0033](docs/adr/0033-the-exposure-machinery-is-retired-not-restated.md)),
   `toon_settlement_total`).
 - **Writes** need an RFC 9421 HTTP Message Signature from an ed25519 key on `write_keys`, with
   the body bound by an RFC 9530 `Content-Digest`. A bearer token is never sufficient to move
-  value. `POST /packets`, `/routes/leased`, `/channels`, and — all under the channel they act on
-  — `/channels/:id/fund`, `/channels/:id/redeem`, `/channels/:id/redeem-latest`,
-  `/channels/:id/close`, `/channels/:id/cooperative-close`. Channel operations answer `503` when
-  no `[settlement]` backend is configured.
+  value. `POST /packets`, `/routes/leased`, `/peers`, `/routes/peers`, `/channels`, and — all
+  under the channel they act on — `/channels/:id/fund`, `/channels/:id/redeem`,
+  `/channels/:id/redeem-latest`, `/channels/:id/close`, `/channels/:id/cooperative-close` — plus
+  `DELETE /peers/:id` and `DELETE /routes/peers/:prefix` (issue #884). Channel operations answer
+  `503` when no `[settlement]` backend is configured.
+
+`POST`/`DELETE /peers*` and `/routes/peers*` (issue #884) are the runtime-mutable, durable
+peer/route table: unlike `/routes/leased` (a TTL-bound push that lapses on its own and never
+survives a restart, ADR 0006), these persist to `state_dir` and are refused outright — never
+silently accepted as a shadow — when they'd collide with a row the config file already owns
+([ADR 0034](docs/adr/0034-a-runtime-peer-route-table-never-shadows-the-config-file.md)).
 
 There is **no health endpoint** on either surface, and **no unauthenticated metrics path** on
 either. `[operator]` is how a node opts into metrics at all: absent, `/metrics` is not mounted and
@@ -313,7 +339,7 @@ sides — see
 
 The carriage mapping is specified in
 [`docs/protocol/peer-carriage-spec.md`](docs/protocol/peer-carriage-spec.md). The semantics it
-carries — claim exchange, flush, fees, ceilings, minimum delivery, the refusal taxonomy — are
+carries — claim exchange, flush, fees, minimum delivery, the refusal taxonomy — are
 unchanged and still specified in [`docs/protocol/peer-wire-spec.md`](docs/protocol/peer-wire-spec.md)
 §3–§6; that document's §1–§2 (the deleted raw-TCP frame protocol) no longer describes anything
 this binary ships.

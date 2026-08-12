@@ -237,7 +237,6 @@ async fn an_inbound_claim_and_an_outbound_client_claim_never_move_each_others_le
         INBOUND_NONCE,
         "the inbound watermark on this very channel must be untouched by the outbound claim"
     );
-    assert_eq!(book.exposure(CHANNEL_HEX), 0);
 
     // ── and the two files are two files ──────────────────────────────────
     let ledger_bytes = std::fs::read(&ledger_path).expect("read the ledger file");

@@ -23,7 +23,7 @@ use connector_config::{
 };
 use connector_runtime::{
     ChannelDomain, Connector, FileJournal, HttpAppClient, InMemoryJournal, Journal, JournalError,
-    PeerRoute, SystemClock,
+    PeerRoute, PeerRouteStore, PeerRouteStoreError, SystemClock,
 };
 use connector_settlement::{SettlementBackend, SettlementError};
 use connector_settlement_evm::EvmSettlementBackend;
@@ -92,6 +92,15 @@ pub enum RuntimeError {
     /// watermarks this node cannot vouch for, which is exactly the defect
     /// issue #605 describes.
     JournalUnreplayable { path: PathBuf, source: JournalError },
+    /// Issue #884's runtime peer/route table under `state_dir` exists but
+    /// could not be read (unreadable, or corrupt JSON) -- refusing to
+    /// start rather than serve with a table this node cannot vouch for,
+    /// the same reasoning `JournalUnreplayable` applies to a claim
+    /// journal.
+    RuntimePeerRouteTableUnusable {
+        path: PathBuf,
+        source: PeerRouteStoreError,
+    },
     /// A `[[peer_channels]]` row's `channel_id` is not a shape
     /// [`connector_runtime::ClaimBook`] can file a watermark under (issue
     /// #678). Unreachable through `Config::load`, which canonicalizes the
@@ -172,6 +181,12 @@ impl fmt::Display for RuntimeError {
                 f,
                 "failed to replay the claim journal at {}: {source} -- the connector \
                  refuses to start rather than resume from watermarks it cannot vouch for",
+                path.display()
+            ),
+            RuntimeError::RuntimePeerRouteTableUnusable { path, source } => write!(
+                f,
+                "failed to read the runtime peer/route table at {}: {source} -- the connector \
+                 refuses to start rather than serve with a peer/route table it cannot vouch for",
                 path.display()
             ),
             RuntimeError::AnnounceIdentityKeyFileUnreadable { path, source } => write!(
@@ -518,6 +533,10 @@ impl ClientChannelSource for SolanaChannelSource {
 /// the same path.
 const PEER_CLAIM_JOURNAL: &str = "peer-claims.log";
 const CLIENT_EDGE_JOURNAL: &str = "client-edge-claims.log";
+/// Issue #884's runtime peer/route table -- a whole-table JSON snapshot,
+/// not an append-only journal line format like the two above (see
+/// `connector_runtime::PeerRouteStore`'s own docs for why).
+const RUNTIME_PEER_ROUTE_TABLE: &str = "runtime-peers.json";
 
 /// Open `name` under this node's configured `state_dir`, creating the
 /// directory if it is not there yet.
@@ -601,8 +620,7 @@ fn peer_claim_identity(config: &Config) -> Result<Option<PeerClaimIdentity>, Run
 /// Wire every `[[peer_channels]]` row into the claim ledger (issue #678,
 /// `peer-carriage-spec.md` §11): which channel this node claims against
 /// when it owes a peer, whose signature it accepts on a claim naming that
-/// channel, the EIP-712 domain both are judged under (ADR 0024), and the
-/// peering's exposure ceiling (§5.3).
+/// channel, and the EIP-712 domain both are judged under (ADR 0024).
 ///
 /// A peering with several rows claims against the **first**: an outbound
 /// ledger is per peer, so there is exactly one channel this node can owe on,
@@ -645,20 +663,6 @@ fn wire_peer_channels(
             .map_err(|_| RuntimeError::PeerChannelUnusable {
                 channel_id: channel.channel_id().to_string(),
             })?;
-        // §5.3/§6.4(3): the peering's ceiling is a property of the
-        // *relation*, and the ledger accounts exposure per channel -- so
-        // each of a relation's channels carries the relation's figure. A
-        // peering with no explicit ceiling has none here either, which is
-        // allowed only for one this node can dial (config load refuses the
-        // other shape as `AcceptOnlyPeerWithoutCeiling`).
-        if let Some(ceiling) = config
-            .peers()
-            .iter()
-            .find(|peer| peer.id() == channel.peer_id())
-            .and_then(|peer| peer.ceiling())
-        {
-            connector = connector.with_channel_ceiling(channel.channel_id(), ceiling);
-        }
     }
     Ok(connector)
 }
@@ -768,7 +772,14 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
         peer_transport,
         Arc::new(SystemClock),
     )
-    .with_identity_signer(signer.clone());
+    .with_identity_signer(signer.clone())
+    // Issue #884: the routing table IS the relationship set enforced at
+    // load (`connector-config`'s `UnknownPeerId` check), so a runtime
+    // write must never be able to add, update or remove a peer id the
+    // config file already owns. `Connector` needs every config peer id
+    // to enforce that, even though it stores nothing else about a
+    // config peer (see `PeerView`'s own docs).
+    .with_config_peer_ids(config.peers().iter().map(|peer| peer.id().to_string()));
     // `[[peer_channels]]` reaching `ClaimBook` at last (§11: "it MUST
     // actually wire `ClaimBook`'s signer, verification key and EIP-712
     // domain, with no code-only setters left on the config path"). Before
@@ -846,8 +857,8 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
             }
         }
     }
-    // The peer wire's own claim watermarks and exposure, made durable by
-    // the same `state_dir` the client edge's are (issue #605, and #556's
+    // The peer wire's own claim watermarks, made durable by the same
+    // `state_dir` the client edge's are (issue #605, and #556's
     // reconciliation row "Journal: `ClaimBook::new(None, ..)` installs the
     // in-memory journal ... watermarks reset on restart; spent nonces
     // respend"). Both surfaces are the same sentence -- a watermark must
@@ -856,20 +867,27 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     // the fix and the bug side by side.
     if let Some(state_dir) = config.state_dir() {
         let journal = open_journal(state_dir, PEER_CLAIM_JOURNAL)?;
-        let (armed, divergences) = connector.with_journal(journal).map_err(|source| {
+        connector = connector.with_journal(journal).map_err(|source| {
             RuntimeError::JournalUnreplayable {
                 path: state_dir.join(PEER_CLAIM_JOURNAL),
                 source,
             }
         })?;
-        connector = armed;
-        for divergence in divergences {
-            // Reported, never absorbed (issue #424). Not fatal: a
-            // divergence is an accounting disagreement inside a journal
-            // that replayed fine, not a journal this node cannot trust to
-            // have replayed at all.
-            tracing::error!(%divergence, "replaying the peer-wire journal found a divergence");
-        }
+        // Issue #884: replay this node's durable runtime peer/route table,
+        // and arm the connector to persist future writes back to the same
+        // file -- the same `state_dir` scoping as the two journals above,
+        // so an operator restoring a node from `state_dir` alone restores
+        // this table too. `open_journal` just created `state_dir` itself,
+        // so a node with nowhere writable has already failed above with
+        // the path in the message.
+        let table_path = state_dir.join(RUNTIME_PEER_ROUTE_TABLE);
+        let (store, runtime_peers, runtime_peer_routes) = PeerRouteStore::open(&table_path)
+            .map_err(|source| RuntimeError::RuntimePeerRouteTableUnusable {
+                path: table_path,
+                source,
+            })?;
+        connector =
+            connector.with_runtime_peer_route_store(store, runtime_peers, runtime_peer_routes);
     }
     Ok(Runtime {
         connector: Arc::new(connector),
@@ -1112,6 +1130,19 @@ pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError
                 ilp_addresses: announce.addresses().to_vec(),
                 btp_endpoint: announce.btp_endpoint().to_string(),
             }),
+        // Issue #502: every `[[client_identities]]` entry, as the
+        // `id`/`secret` pair `resolve_identity` authenticates an
+        // `ILP-Peer-Id` against. Empty is every node before this config
+        // section existed -- every request is anonymous or, if it presents
+        // an `ILP-Peer-Id`, refused `401`.
+        config
+            .client_identities()
+            .iter()
+            .map(|identity| connector_domain::identity::ConfiguredIdentity {
+                id: identity.id().to_string(),
+                secret: identity.secret().to_string(),
+            })
+            .collect(),
     );
     Ok(match config.operator() {
         Some(operator) => app.merge(connector_operator::router(
@@ -1234,7 +1265,6 @@ key_file = "{key_file}"
 [[peers]]
 id = "store"
 endpoint = "wss://store.example:443/ilp/btp"
-ceiling = 4200
 
 [peers.credential]
 secret = "a-real-peering-secret"
@@ -1369,6 +1399,44 @@ key_file = "{}"
                 "{path} must not be served without an [operator] section"
             );
         }
+    }
+
+    /// Issue #502, wired end to end: `router` reads `[[client_identities]]`
+    /// off the same [`Config`] `build` validated and threads it into the
+    /// client edge, so a request presenting an `ILP-Peer-Id` this node
+    /// configures but the wrong secret is refused `401` by the router this
+    /// crate actually serves -- not just the library-level unit tests in
+    /// `connector-client-edge` that construct a `ConfiguredIdentity` by
+    /// hand.
+    #[tokio::test]
+    async fn router_refuses_an_unauthenticated_client_identity() {
+        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+
+[[client_identities]]
+id = "peer-a"
+secret = "s3cr3t"
+"#,
+                key_path.display()
+            )
+        });
+        let runtime = build(&config).await.expect("build");
+        let app = router(&runtime, &config).expect("router");
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .header("ilp-peer-id", "peer-a")
+            .header("authorization", "Bearer wrong")
+            .body(Body::from(vec![0u8; 4]))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     /// Issue #807, wired end to end: `router` reads `[announce]` off the

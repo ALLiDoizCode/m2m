@@ -400,6 +400,7 @@ mod tests {
             // audience session routing has.
             peers: None,
             bootstrap_identity: None,
+            identities: Arc::from([]),
         }
     }
 

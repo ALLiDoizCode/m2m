@@ -129,20 +129,23 @@ advances.
 **Watermark**:
 The highest nonce a payee has accepted on a channel.
 
-**Exposure**:
-Value a payee has delivered but does not yet hold a claim for. One packet under normal flow;
-more only when a payer has fulfilled packets and stopped claiming. Why it exists at all — it is
-what makes pay-in-arrears work across a hop — is in
-[`docs/protocol/money-model.md`](docs/protocol/money-model.md).
+**Exposure** _(retired term, [ADR 0033](docs/adr/0033-the-exposure-machinery-is-retired-not-restated.md), issue #882)_:
+Value a payee had delivered but did not yet hold a claim for, under the pre-#868 credit window.
+One packet under normal flow; more only when a payer had fulfilled packets and stopped claiming.
+With a covering claim mandatory on every peer PREPARE (ADR 0031), this state no longer arises in
+normal operation and nothing tracks it. Kept here because the term still appears in historical
+prose (`docs/protocol/peer-wire-spec.md` §3.2–§3.4, §5.3; [`docs/protocol/money-model.md`](docs/protocol/money-model.md)).
 
-**Ceiling**:
-The exposure a peering relation tolerates before the connector stops forwarding for that
-peer.
+**Ceiling** _(retired term, ADR 0033, issue #882)_:
+The exposure a peering relation tolerated before the connector stopped forwarding for that
+peer. Retired along with exposure, above.
 _Avoid_: credit limit, debt limit
 
-**Flush**:
+**Flush** _(retired term, ADR 0033, issue #882)_:
 Sending a claim that would otherwise have waited to travel with the next packet to that peer.
-Bounds how long a payee's trailing exposure can persist when traffic stops.
+Bounded how long a payee's trailing exposure could persist when traffic stopped; retired along
+with exposure, above. Not to be confused with `peer-carriage-spec.md` §6.4's still-live
+`Toon-Flush-Requested` hint, which prompts a payer but binds nothing.
 
 **In flight**:
 The state of a packet that has been forwarded but has neither fulfilled nor been rejected nor

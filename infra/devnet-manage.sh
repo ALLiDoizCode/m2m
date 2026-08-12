@@ -61,7 +61,30 @@ PORKBUN_API="https://api.porkbun.com/api/json/v3"
 # a SECOND store box.
 declare -A NODE_LABELS=( [toon]=toon [store]=ario [relay]=relay [faucet]=faucet )
 declare -A NODE_TYPES=(  [toon]=g6-standard-2 [store]=g6-standard-2 [relay]=g6-standard-2 [faucet]=g6-standard-2 )
-declare -A NODE_PASSWORDS=( [toon]="T00nDevN3t!N0DE2026" [store]="T00nDevN3t!ST0RE2026" [relay]="T00nDevN3t!RELAY2026" [faucet]="T00nDevN3t!FAUCET2026" )
+# Root passwords are GENERATED PER CREATE and thrown away — never committed,
+# never printed, never reused. Nothing needs them: every path into a box in this
+# file is `ssh -i "$SSH_KEY"` (see ssh_run below), and infra/harden-ssh.sh turns
+# password authentication off on the box during bootstrap. The Linode API
+# requires *a* root_pass on create, so we satisfy it with entropy.
+#
+# This replaces a hardcoded map of four passwords that lived in this file, in
+# this PUBLIC repository, from 2026-06-23. Those values are in git history
+# forever, so the boxes that were created with them MUST be rotated on the box
+# — changing this file is not sufficient. See
+# docs/operators/devnet-ssh-hardening.md.
+#
+# Linode rejects a password that does not span at least three of {lowercase,
+# uppercase, digit, punctuation}. A purely random alphanumeric string misses a
+# class often enough to matter (~1 create in 200), and the resulting API error
+# would be baffling, so one of each is placed by construction and the rest is
+# entropy.
+new_root_pass() {
+  local body
+  body=$(openssl rand -base64 48 | tr -d '\n/+=' | head -c 29)
+  # One guaranteed lowercase, uppercase and digit, then shuffle so the fixed
+  # classes are not always in the same position.
+  printf '%s\n' "a" "R" "7" "$body" | tr -d '\n' | fold -w1 | shuf | tr -d '\n'
+}
 
 # ── Linode helpers ─────────────────────────────────────────────────────────
 linode_get() { curl -sf -H "Authorization: Bearer $LINODE_CLI_TOKEN" "$LINODE_API/$1"; }
@@ -90,7 +113,7 @@ wait_box_running() {
 }
 
 create_box() {  # key: toon|store|relay|faucet
-  local key=$1 label="${NODE_LABELS[$1]}" type="${NODE_TYPES[$1]}"
+  local label="${NODE_LABELS[$1]}" type="${NODE_TYPES[$1]}"
   existing_ip="$(get_box_ip "$label")"
   if [ -n "$existing_ip" ]; then
     echo "  $label already exists ($existing_ip) — skipping create"
@@ -99,7 +122,7 @@ create_box() {  # key: toon|store|relay|faucet
   echo "  Creating $label ($type)..."
   linode_post "linode/instances" -d "{
     \"type\": \"$type\", \"region\": \"us-east\", \"image\": \"linode/ubuntu24.04\",
-    \"root_pass\": \"${NODE_PASSWORDS[$key]}\",
+    \"root_pass\": \"$(new_root_pass)\",
     \"authorized_keys\": [\"$(cat "$SSH_KEY.pub")\"],
     \"label\": \"$label\", \"tags\": [\"toon-devnet\"], \"booted\": true
   }" | jq -r '"  Created \(.label) → \(.ipv4[0])"'

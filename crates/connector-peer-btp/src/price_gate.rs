@@ -24,9 +24,65 @@
 //! than something a greeting quotes, and a route deliberately priced at `0`
 //! (ADR 0020) is free on the peer path exactly as it is on the client edge.
 
+use std::collections::BTreeMap;
+
+use connector_config::{ClaimEnforcement, PeerConfig};
 use connector_domain::x402::GreetingTerms;
 use connector_domain::{validate_price, Reject, RejectCode, Watermark};
 use connector_runtime::{ClaimAckOutcome, ClientRouteKind, Connector, WireClaim};
+
+/// Which peerings are in [`ClaimEnforcement::Observe`], the rest reading as
+/// [`ClaimEnforcement::Enforce`] -- including an id neither carriage's role
+/// decision could actually hand this function, since a policy built from
+/// every configured peer has an entry for every peer id `payment_required`
+/// can ever be called with.
+///
+/// Deliberately as narrow as [`connector_peer_auth::PeerAuthPolicy`]: this
+/// is not the role decision and holds nothing that is (`peer.rs`'s own
+/// narrowness note) -- one fact per peer, read only by [`payment_required`],
+/// built once from configuration and shared by every interaction.
+#[derive(Debug, Clone, Default)]
+pub struct ClaimEnforcementPolicy {
+    by_peer: BTreeMap<String, ClaimEnforcement>,
+}
+
+impl ClaimEnforcementPolicy {
+    /// A policy over every configured peering's own [`ClaimEnforcement`].
+    #[must_use]
+    pub fn from_peers(peers: &[PeerConfig]) -> Self {
+        ClaimEnforcementPolicy {
+            by_peer: peers
+                .iter()
+                .map(|peer| (peer.id().to_string(), peer.claim_enforcement()))
+                .collect(),
+        }
+    }
+
+    /// A policy over explicit `(peer id, mode)` pairs, for a caller that has
+    /// no [`PeerConfig`] to build from -- a test standing up a policy
+    /// [`connector_config::Config::load`]'s validation would not otherwise
+    /// let it construct directly.
+    #[must_use]
+    pub fn new<'a>(entries: impl IntoIterator<Item = (&'a str, ClaimEnforcement)>) -> Self {
+        ClaimEnforcementPolicy {
+            by_peer: entries
+                .into_iter()
+                .map(|(id, mode)| (id.to_string(), mode))
+                .collect(),
+        }
+    }
+
+    /// `peer_id`'s configured enforcement, or [`ClaimEnforcement::Enforce`]
+    /// for an id this policy has no entry for -- the safe default holds even
+    /// if this is ever asked about a peer id no `[[peers]]` row named.
+    #[must_use]
+    pub fn mode(&self, peer_id: &str) -> ClaimEnforcement {
+        self.by_peer
+            .get(peer_id)
+            .copied()
+            .unwrap_or(ClaimEnforcement::Enforce)
+    }
+}
 
 /// The refusal an uncovered peer PREPARE gets: an `F06` REJECT plus the
 /// x402 terms that ride it. Built once here so the two carriages cannot
@@ -59,7 +115,10 @@ pub struct PaymentRequired {
 /// Refusing is logged rather than silent (Pattern 34): the peer, the
 /// destination, the price, the shortfall, and the claim's own verdict --
 /// which is what distinguishes "paid too little" from "paid with a claim
-/// this connector would not accept".
+/// this connector would not accept". Admitting an uncovered packet under
+/// [`ClaimEnforcement::Observe`] is logged the same way, at the same level,
+/// so an operator grepping for shortfalls sees every one whether or not this
+/// peering has been flipped to enforce (issue #883, child B6).
 #[must_use]
 pub fn payment_required(
     connector: &Connector,
@@ -68,6 +127,7 @@ pub fn payment_required(
     ack: ClaimAckOutcome,
     claim: Option<&WireClaim>,
     prior_watermark: Option<Watermark>,
+    enforcement: ClaimEnforcement,
 ) -> Option<PaymentRequired> {
     let price = connector
         .client_route(destination)
@@ -94,12 +154,31 @@ pub fn payment_required(
             .saturating_sub(prior_watermark.map_or(0, |watermark| watermark.cumulative_amount)),
         _ => 0,
     };
+    let shortfall = price.saturating_sub(advanced);
+
+    if enforcement == ClaimEnforcement::Observe {
+        // Migration-only (issue #883): the packet is admitted exactly as it
+        // was before issue #880, but logged so an operator can confirm
+        // real admissions before flipping this peering to enforce.
+        tracing::warn!(
+            peer_id,
+            destination,
+            price,
+            advanced,
+            shortfall,
+            claim_ack = ?ack,
+            "peer PREPARE admitted without a covering claim (claim_enforcement = observe; \
+             issue #883 -- this peering is not yet enforcing)"
+        );
+        return None;
+    }
+
     tracing::warn!(
         peer_id,
         destination,
         price,
         advanced,
-        shortfall = price.saturating_sub(advanced),
+        shortfall,
         claim_ack = ?ack,
         "peer PREPARE refused: no claim covers this packet's price"
     );

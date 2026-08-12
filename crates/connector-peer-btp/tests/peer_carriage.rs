@@ -29,7 +29,9 @@ use connector_domain::{
 use connector_peer_auth::{encode_raw, PeerAuthPolicy, PresentedCredential};
 use connector_peer_btp::accept::{PeerAcceptPolicy, PeerSession, SessionEnd};
 use connector_peer_btp::dial::{DialError, PeerDialer, PeerRelation};
-use connector_peer_btp::{ack, AcceptedClaims, BtpPeerTransport, PeerCarriageState};
+use connector_peer_btp::{
+    ack, AcceptedClaims, BtpPeerTransport, ClaimEnforcementPolicy, PeerCarriageState,
+};
 use connector_runtime::{
     ChannelDomain, ClaimAckOutcome, ClaimRejectReason, ClaimSignature, Clock, Connector,
     FakeAppClient, InProcessPeerTransport, PeerForward, PeerTransport, TestClock, WireClaim,
@@ -143,10 +145,27 @@ fn bound_policy() -> Arc<PeerAuthPolicy> {
 }
 
 fn carriage(connector: Arc<Connector>, policy: Arc<PeerAuthPolicy>) -> Arc<PeerCarriageState> {
+    carriage_with_enforcement(
+        connector,
+        policy,
+        Arc::new(ClaimEnforcementPolicy::default()),
+    )
+}
+
+/// [`carriage`], with an explicit [`ClaimEnforcementPolicy`] (issue #883,
+/// child B6) rather than the default (empty, so every peer reads
+/// `ClaimEnforcement::Enforce` -- the same hard-refuse behaviour issue #880
+/// shipped, unaffected by the migration knob existing).
+fn carriage_with_enforcement(
+    connector: Arc<Connector>,
+    policy: Arc<PeerAuthPolicy>,
+    enforcement: Arc<ClaimEnforcementPolicy>,
+) -> Arc<PeerCarriageState> {
     Arc::new(PeerCarriageState::new(
         connector,
         policy,
         Arc::new(AcceptedClaims::new()),
+        enforcement,
         PeerAcceptPolicy::default(),
     ))
 }
@@ -878,6 +897,7 @@ async fn a_dedicated_peer_listener_refuses_rather_than_downgrades() {
         payee(&payer_signer),
         bound_policy(),
         Arc::new(AcceptedClaims::new()),
+        Arc::new(ClaimEnforcementPolicy::default()),
         PeerAcceptPolicy {
             mandatory_auth: true,
             ..PeerAcceptPolicy::default()
@@ -1090,6 +1110,135 @@ async fn a_covering_claim_is_admitted_exactly_as_today() {
     assert_eq!(app_client.deliveries().len(), 1);
 }
 
+// ─── issue #883 (child B6): the `claim_enforcement = "observe"` migration
+// knob admits and logs an uncovered peer PREPARE instead of refusing it ───
+
+/// The migration's whole point: a peering flipped to `Observe` admits a
+/// claimless PREPARE to a priced route -- delivered to the app, no `F06`,
+/// no x402 greeting -- where issue #880's default (`Enforce`, proven by
+/// [`a_claimless_peer_prepare_to_a_priced_route_is_refused_with_the_x402_greeting`])
+/// would have refused it.
+#[tokio::test]
+async fn observe_admits_a_claimless_peer_prepare_the_default_would_refuse() {
+    let payer_signer = LocalSigner::generate("payer");
+    let identity_signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("payee-identity"));
+    let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+    let app_client = Arc::new(FakeAppClient::new());
+    let response_body = b"irrelevant".to_vec();
+    app_client.respond(
+        route.handler_url(),
+        connector_runtime::AppOutcome::Answered {
+            response: EnvelopeResponse {
+                status: 200,
+                headers: vec![],
+                body: response_body.clone(),
+            },
+        },
+    );
+    let counterparty = derive_evm_address(&payer_signer.public_key().unwrap());
+    let connector = Arc::new(
+        Connector::new(
+            vec![route],
+            vec![],
+            app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            clock(),
+        )
+        .with_channel_verification_key(channel_id(), counterparty)
+        .with_channel_domain(channel_id(), domain())
+        .expect("a bytes32 channel id")
+        .with_identity_signer(Arc::clone(&identity_signer)),
+    );
+    let enforcement = Arc::new(ClaimEnforcementPolicy::new(vec![(
+        PEER_ID,
+        connector_config::ClaimEnforcement::Observe,
+    )]));
+    let state = carriage_with_enforcement(connector, bound_policy(), enforcement);
+    let dialer = LoopbackDialer::new(state);
+    let transport = transport(Arc::clone(&dialer) as Arc<dyn PeerDialer>, &payer_signer);
+
+    // A genuinely sealed envelope, so a route this gate lets through can
+    // actually fulfil -- proving delivery reached the app, not merely that
+    // no reject fired.
+    let envelope = EnvelopeRequest {
+        method: "POST".to_string(),
+        target: "/".to_string(),
+        headers: vec![],
+        body: b"hello".to_vec(),
+    };
+    let identity_public = identity_signer.public_key().expect("identity public key");
+    let (data, shared_secret) =
+        connector_signer::giftwrap::seal_request(&envelope.encode(), &identity_public)
+            .expect("seal");
+    let condition = derive_condition(&connector_signer::giftwrap::derive_fulfillment(
+        &shared_secret,
+    ));
+    let sealed_prepare = Prepare {
+        amount: 25,
+        expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
+        execution_condition: condition,
+        destination: "g.example.app".to_string(),
+        data,
+    };
+
+    let PeerForward {
+        response,
+        payment_required,
+        ..
+    } = transport
+        // No claim at all -- the shape `Enforce` refuses.
+        .forward(PEER_ID, sealed_prepare, 0, None)
+        .await;
+
+    assert!(
+        payment_required.is_none(),
+        "an admitted packet carries no greeting"
+    );
+    let fulfill = match response {
+        PacketResponse::Fulfill(fulfill) => fulfill,
+        other => panic!("expected a fulfil, got {other:?}"),
+    };
+    let opened = connector_signer::giftwrap::open_response(&shared_secret, &fulfill.data)
+        .expect("open the sealed fulfil");
+    let opened = EnvelopeResponse::decode(&opened).expect("decode envelope");
+    assert_eq!(opened.body, response_body);
+    assert_eq!(app_client.deliveries().len(), 1);
+}
+
+/// A migration is per peering, not global: a second peer id this policy has
+/// no `Observe` entry for still reads `Enforce` -- the safe default -- even
+/// though `ClaimEnforcementPolicy` is non-empty.
+#[tokio::test]
+async fn observe_for_one_peer_does_not_widen_to_a_peer_with_no_entry() {
+    let payer_signer = LocalSigner::generate("payer");
+    let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+    let enforcement = Arc::new(ClaimEnforcementPolicy::new(vec![(
+        "some-other-peer",
+        connector_config::ClaimEnforcement::Observe,
+    )]));
+    let state = carriage_with_enforcement(
+        payee_with_route(&payer_signer, route),
+        bound_policy(),
+        enforcement,
+    );
+    let dialer = LoopbackDialer::new(state);
+    let transport = transport(Arc::clone(&dialer) as Arc<dyn PeerDialer>, &payer_signer);
+
+    let PeerForward {
+        response,
+        payment_required,
+        ..
+    } = transport
+        .forward(PEER_ID, prepare("g.example.app"), 0, None)
+        .await;
+
+    match response {
+        PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "F06"),
+        other => panic!("expected an F06 reject, got {other:?}"),
+    }
+    assert!(payment_required.is_some());
+}
+
 /// PR #913 review finding: a claim signed by a non-counterparty key still
 /// *decodes* and can declare any `cumulative_amount` it likes -- coverage
 /// judged off that declared amount, ignoring the claim book's own verdict,
@@ -1175,6 +1324,7 @@ async fn a_claim_replayed_at_a_used_nonce_never_buys_coverage() {
         connector,
         bound_policy(),
         Arc::clone(&accepted),
+        Arc::new(ClaimEnforcementPolicy::default()),
         PeerAcceptPolicy::default(),
     ));
     let dialer = LoopbackDialer::new(state);
@@ -1380,25 +1530,6 @@ async fn the_accepting_side_can_originate_on_the_session_it_accepted() {
     assert_eq!(answer.ilp_packet, b"answered".to_vec());
     counterparty.await.expect("the counterparty task");
     drop(driver);
-}
-
-// ─── §6.3, §11: the load-time warning #723 handed off ───
-
-/// §6.3's SHOULD, warned where a subscriber exists: `connector-config` has
-/// no logging seam, so it exposed both values and left the warning to a
-/// carriage.
-#[test]
-fn a_claim_ack_timeout_outliving_the_flush_interval_warns() {
-    assert!(connector_peer_btp::warn_if_claim_ack_outlives(
-        PEER_ID, 30_000, 5_000
-    ));
-    assert!(!connector_peer_btp::warn_if_claim_ack_outlives(
-        PEER_ID, 5_000, 30_000
-    ));
-    assert!(
-        !connector_peer_btp::warn_if_claim_ack_outlives(PEER_ID, 5_000, 5_000),
-        "equal is the SHOULD satisfied, not violated"
-    );
 }
 
 // ─── the port's own contract (spec I5) ───

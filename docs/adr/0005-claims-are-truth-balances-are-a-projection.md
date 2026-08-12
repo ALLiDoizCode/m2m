@@ -1,5 +1,7 @@
 # Claims are the source of truth; balances are a projection
 
+**Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
+
 The connector durably persists only what is signed or otherwise irreversible — claims sent,
 claims received with their watermarks, and fulfilments not yet covered by a claim. Per-peer
 balances and credit-limit positions are an in-memory projection rebuilt from that journal on

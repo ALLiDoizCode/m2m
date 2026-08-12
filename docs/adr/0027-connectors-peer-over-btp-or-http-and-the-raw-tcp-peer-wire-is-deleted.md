@@ -1,5 +1,17 @@
 # Connectors peer over BTP or ILP-over-HTTP; the raw-TCP peer wire is deleted
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
+> **The flush timer and the exposure ceiling this ADR reasons with throughout are retired** by
+> [ADR 0033](0033-the-exposure-machinery-is-retired-not-restated.md) (issue #882), on top of
+> [ADR 0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md)'s retirement of
+> the credit window itself. This ADR's own decision — the two carriages, role-by-auth, and the
+> configuration-time asymmetry of a one-way-dialed HTTP peering — is untouched and still stands. What
+> is now historical is every clause that treats `flushIntervalMs` or an explicit `ceiling` as live
+> configuration, in particular the accept-only side's "MUST carry an explicit exposure ceiling"
+> below: `AcceptOnlyPeerWithoutCeiling` no longer exists, and every peering, accept-only or not, is
+> bounded instead by ADR 0031's covering-claim requirement.
+
 A connector speaks to another connector over one of the two carriages it already serves clients on:
 **BTP (RFC-0023) over `wss://`**, or **ILP-over-HTTP over `https://`**. Which of them a given
 connector exposes, and which it dials for a given peer, is **operator policy**, not a protocol

@@ -66,6 +66,12 @@ peer's word reintroduces exactly the forgeable-payment hole this rule closes.
 
 ### 3.2 A claim rides the next packet to that peer
 
+> **Superseded 2026-08-07 by [ADR 0031](../adr/0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md)
+> (issue #868).** A peer PREPARE now arrives **with** its covering claim or is refused with the
+> x402 greeting; a claim no longer trails the fulfilment it covers, as this section describes. Kept
+> for historical record, not current behaviour — ADR 0031 explains why the trailing model was
+> right for the world it was written in.
+
 Value is owed only on fulfilment ([ADR 0004](../adr/0004-value-moves-on-fulfilment.md)). When
 connector A forwards a PREPARE to connector B and later receives a matching FULFILL from B, A now
 owes B the PREPARE's `amount`. A does not open a new stream write for this alone; instead:
@@ -98,6 +104,13 @@ the bound the flush interval (§3.3) exists to keep short, not a violation of "o
 packet."
 
 ### 3.3 Flush
+
+> **Retired 2026-08-10 by [ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md)
+> (issue #882), on top of ADR 0031's supersession of §3.2 above.** `flushIntervalMs` no longer
+> exists as live configuration: a claim no longer trails the fulfilment it covers, so there is no
+> pending claim left to flush on a timer. `PeerConfig`/`RawPeer` keep the field name only as a
+> parsed-and-rejected trap, so a config that still sets it gets a named load-time error rather than
+> a silent drop. Kept for historical record.
 
 If a claim is pending for a channel and no outbound frame to that peer occurs within the
 peering relation's configured `flushIntervalMs`, the payer MUST send a FLUSH frame carrying only
@@ -231,8 +244,12 @@ Peer-wire REJECTs use the existing RFC-0027 §3.3 codes:
 | `R02`             | `expiresAt` leaves insufficient time for this hop to forward and get a reply.                                                                     |
 | `T00`             | Internal error at this connector (retryable).                                                                                                     |
 | `T01`             | The configured next-hop peer is unreachable (stream down).                                                                                        |
-| `T04`             | This connector's exposure ceiling for the inbound peer is exceeded (§5.3).                                                                        |
 | `F99`/`T99`/`R99` | Application-level reject from the terminating app, passed through unchanged.                                                                      |
+
+`T04_INSUFFICIENT_LIQUIDITY` had exactly one use here — the exposure ceiling (§5.3) — and is
+retired along with it ([ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md),
+issue #882). `connector_domain::RejectCode::t04_insufficient_liquidity` still exists for wire
+interop (RFC-0027), but nothing in this codebase emits it any more.
 
 `F06_UNEXPECTED_PAYMENT` has exactly one peer use, and it is not this table's: a PREPARE addressed
 to one of this node's own priced **terminated** routes is refused `F06` with the x402 greeting
@@ -251,7 +268,7 @@ and issue #523 -- the fees of the hops the packet actually passed through, plus 
 route that terminated it, if it reached one. The field starts at `0`:
 
 - When a connector **originates** a REJECT for a reason that added no value to the packet at all
-  (no route, expired, ceiling exceeded, cannot meet minimum delivery, an underpriced peer-wire
+  (no route, expired, cannot meet minimum delivery, an underpriced peer-wire
   arrival at a priced terminated route (§5.4, issue #752), the terminating app itself unreachable,
   or an envelope target that attempted to escape the route's handler path), it sets
   `accumulatedCost = 0` on the REJECT it sends upstream — it never forwarded or terminated this
@@ -290,6 +307,13 @@ describe as forward-looking.
 
 ### 5.3 Ceiling enforcement
 
+> **Retired 2026-08-10 by [ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md)
+> (issue #882).** `ceiling` no longer exists as live configuration or as a runtime check: with a
+> covering claim mandatory on every peer PREPARE (ADR 0031), there is no trailing exposure left to
+> bound. `PeerConfig`/`RawPeer` keep the field name only as a parsed-and-rejected trap. `T04` is
+> kept in `connector_domain::RejectCode` for wire interop (RFC-0027) but this connector no longer
+> emits it. Kept below for historical record.
+
 A connector tracks, per peering relation, the exposure it has extended (fulfilled but not yet
 covered by an acknowledged claim, §3.2–§3.4). A PREPARE that would push that exposure over the
 relation's configured ceiling MUST be rejected with `T04_INSUFFICIENT_LIQUIDITY` — retryable,
@@ -309,16 +333,17 @@ consulting the app. If `amount < price`, it MUST reject with `F03_INVALID_AMOUNT
 never triggers this check.
 
 This is a per-packet check answered from the amount already on the PREPARE, not a relation-wide
-throttle — it needs no new state, leaves the claim exchange (§3.2–§3.4) and the exposure ceiling
-(§5.3, `T04`) exactly as they were, and requires no x402 greeting or negotiation
-(`peer-carriage-spec.md` §3.1 stands: a peer-role PREPARE is never greeted). It composes with the
-existing mechanisms rather than replacing any of them: an arrival that clears this check is
-delivered, and on fulfilment its full `amount` — never less than `price` by construction — becomes
-the exposure the sending peer owes this connector (§3.2), so the ordinary claim exchange that later
-covers that exposure is guaranteed to cover at least this route's price too. A peer that never
-advances a claim, or advances one by less than it owes, is still bounded by the pre-existing ceiling
-and claim-ack rules (§3.4, §5.3) exactly as before — this section only ensures that what accrues as
-exposure in the first place was never less than the route's own price.
+throttle — it needs no new state and leaves the claim exchange (§3.2–§3.4) untouched. It requires no
+x402 greeting of its own: since issue #880 (ADR 0031) a peer-role PREPARE with no covering claim, or
+with one that does not cover this route's price, is greeted one layer up by the accept pipeline's
+own price-coverage gate (`peer-carriage-spec.md` §3.1) before this check is ever reached.
+
+> `peer-carriage-spec.md` §3.1 stands as originally written above only for its own subject — a
+> claim-bearing peer-role PREPARE is never negotiated with, only accepted or refused outright. Its
+> claim about "a peer-role PREPARE is never greeted" is itself superseded by ADR 0031/issue #880: a
+> claimless one now is. The exposure-ceiling reference this paragraph made (§5.3, `T04`) is retired
+> by [ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md); every peering is
+> now bounded by the covering-claim requirement itself, not by a residual ceiling on top of it.
 
 ## 6. Consistency
 

@@ -1,5 +1,7 @@
 # A connector answers when asked; it still never announces
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
 A connector tells whoever asks what its own configuration already says — its identity, and what a
 route of its costs. It still never pushes that into a network unprompted. A sender **asks directly
 and pays through the network**, which is what makes the answer trustworthy.

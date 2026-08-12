@@ -2,9 +2,9 @@
 //!
 //! ADR 0008 splits the operator surface into a read half and a write
 //! half. The read half (issue #420) is `GET` endpoints -- peers, routes,
-//! channels, claims, exposure, node identity, this crate's own write
-//! audit log, and the metrics surface (`GET /metrics`, ADR 0014) -- gated
-//! by a bearer token and nothing else.
+//! channels, claims, node identity, this crate's own write audit log, and
+//! the metrics surface (`GET /metrics`, ADR 0014) -- gated by a bearer
+//! token and nothing else.
 //!
 //! This crate also carries the write half's authentication mechanism
 //! (issue #421): [`rfc9421`] verifies an RFC 9421 signature from a key on
@@ -59,14 +59,14 @@ use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, Method, Request, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use connector_domain::{PacketResponse, Prepare};
 use connector_runtime::{
-    ChannelOperationError, ChannelView, ClaimView, Connector, ExposureView, LeaseRouteError,
-    LeasedRouteView, PeerView, RouteView, SettlementChain,
+    ChannelOperationError, ChannelView, ClaimView, Connector, LeaseRouteError, LeasedRouteView,
+    PeerRouteTableError, PeerRouteView, PeerView, RouteView, SettlementChain,
 };
 use connector_settlement::Claim;
 use connector_signer::{derive_evm_address, to_hex, Signer, SignerError};
@@ -91,8 +91,8 @@ struct OperatorState {
 }
 
 /// Mount the operator surface's read-only half at `connector`: `GET`
-/// endpoints for peers, routes, channels, claims, exposure, node identity
-/// and the write audit log, each requiring the bearer token
+/// endpoints for peers, routes, channels, claims, node identity and the
+/// write audit log, each requiring the bearer token
 /// `bearer_token` and nothing more (ADR 0008). `write_keys` is the
 /// allowlist of ed25519 public keys permitted to sign a write once a
 /// write endpoint lands (issue #421); removing a key from this list and
@@ -118,9 +118,9 @@ pub fn router(
         .route("/peers", get(peers))
         .route("/routes", get(routes))
         .route("/routes/leased", get(leased_routes))
+        .route("/routes/peers", get(peer_routes))
         .route("/channels", get(channels))
         .route("/claims", get(claims))
-        .route("/exposure", get(exposure))
         .route("/identity", get(identity))
         .route("/audit-log", get(audit_log))
         .route("/metrics", get(metrics))
@@ -132,6 +132,10 @@ pub fn router(
     let writes = Router::new()
         .route("/packets", post(originate_packet))
         .route("/routes/leased", post(create_leased_route))
+        .route("/peers", post(upsert_peer))
+        .route("/peers/:id", delete(remove_peer))
+        .route("/routes/peers", post(upsert_peer_route))
+        .route("/routes/peers/:prefix", delete(remove_peer_route))
         .route("/channels", post(open_channel))
         .route("/channels/:id/fund", post(fund_channel))
         .route("/channels/:id/redeem", post(redeem_channel))
@@ -206,10 +210,6 @@ async fn channels(State(state): State<OperatorState>) -> Json<Vec<ChannelView>> 
 
 async fn claims(State(state): State<OperatorState>) -> Json<Vec<ClaimView>> {
     Json(state.connector.claims())
-}
-
-async fn exposure(State(state): State<OperatorState>) -> Json<Vec<ExposureView>> {
-    Json(state.connector.exposure())
 }
 
 async fn audit_log(State(state): State<OperatorState>) -> Json<Vec<AuditRecord>> {
@@ -324,6 +324,162 @@ async fn create_leased_route(
             format!("invalid ILP address: '{prefix}'"),
         )
             .into_response(),
+    }
+}
+
+/// `GET /routes/peers`: every peer-forwarding route this node knows (issue
+/// #884) -- config-file and runtime alike, each tagged with its
+/// [`connector_runtime::RouteSource`]. Deliberately distinct from
+/// `GET /routes/leased`: a lease carries no price and does not survive a
+/// restart, so it is not part of this table.
+async fn peer_routes(State(state): State<OperatorState>) -> Json<Vec<PeerRouteView>> {
+    Json(state.connector.peer_routes_view())
+}
+
+/// Map a [`PeerRouteTableError`] to the response `POST`/`DELETE`
+/// `/peers*` and `/routes/peers*` answer with. `OwnedByConfig` and
+/// `PeerInUse` are `409 Conflict` -- the request is refused because of the
+/// table's *current state*, not because the request itself is malformed.
+/// `UnknownPeerId`/`InvalidPrefix`/`InvalidPeerId` are `400 Bad Request` --
+/// the request names something that cannot resolve to a valid row no
+/// matter the table's state. `PeerNotFound`/`RouteNotFound` are `404`.
+/// `Persistence` is `500` -- the durable write itself failed, so the
+/// mutation was refused rather than applied in memory only.
+fn peer_route_table_error_response(error: PeerRouteTableError) -> Response {
+    match error {
+        PeerRouteTableError::OwnedByConfig(_) | PeerRouteTableError::PeerInUse(_) => {
+            (StatusCode::CONFLICT, error.to_string()).into_response()
+        }
+        PeerRouteTableError::UnknownPeerId { .. }
+        | PeerRouteTableError::InvalidPrefix(_)
+        | PeerRouteTableError::InvalidPeerId => {
+            (StatusCode::BAD_REQUEST, error.to_string()).into_response()
+        }
+        PeerRouteTableError::PeerNotFound(_) | PeerRouteTableError::RouteNotFound(_) => {
+            (StatusCode::NOT_FOUND, error.to_string()).into_response()
+        }
+        PeerRouteTableError::Persistence(_) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        }
+    }
+}
+
+/// A `POST /peers` request body: add or update a runtime peer row (issue
+/// #884). Refused (`409`) when `id` is already defined by the config
+/// file -- see
+/// `docs/adr/0034-a-runtime-peer-route-table-never-shadows-the-config-file.md`.
+#[derive(Debug, Deserialize)]
+struct UpsertPeerRequest {
+    id: String,
+}
+
+/// `POST /peers`: issue #884's runtime peer-table write. Authenticated
+/// exactly like every other write on this surface --
+/// [`authenticate_write`] first, nothing else in this handler accepts the
+/// request until that succeeds.
+async fn upsert_peer(
+    State(state): State<OperatorState>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = require_write_auth(&state, &method, &uri, &headers, &body) {
+        return error.into_response();
+    }
+
+    let request: UpsertPeerRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    };
+
+    match state.connector.upsert_runtime_peer(request.id) {
+        Ok(view) => Json(view).into_response(),
+        Err(error) => peer_route_table_error_response(error),
+    }
+}
+
+/// `DELETE /peers/:id`: remove a runtime peer row (issue #884). No request
+/// body; authenticated over the path and method exactly like every other
+/// write, since `authenticate_write` binds the signature to the whole
+/// request rather than to a body a `DELETE` need not carry.
+async fn remove_peer(
+    State(state): State<OperatorState>,
+    Path(id): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = require_write_auth(&state, &method, &uri, &headers, &body) {
+        return error.into_response();
+    }
+
+    match state.connector.remove_runtime_peer(&id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => peer_route_table_error_response(error),
+    }
+}
+
+/// A `POST /routes/peers` request body: add or update a runtime
+/// peer-forwarding route (issue #884), keyed by `prefix` exactly like
+/// `POST /routes/leased` -- posting the same prefix again updates the row
+/// rather than adding a duplicate.
+#[derive(Debug, Deserialize)]
+struct UpsertPeerRouteRequest {
+    prefix: String,
+    peer_id: String,
+    fee: u64,
+    price: u64,
+}
+
+/// `POST /routes/peers`: issue #884's runtime peer-route write.
+/// Authenticated exactly like every other write on this surface.
+async fn upsert_peer_route(
+    State(state): State<OperatorState>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = require_write_auth(&state, &method, &uri, &headers, &body) {
+        return error.into_response();
+    }
+
+    let request: UpsertPeerRouteRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    };
+
+    match state.connector.upsert_runtime_peer_route(
+        request.prefix,
+        request.peer_id,
+        request.fee,
+        request.price,
+    ) {
+        Ok(view) => Json(view).into_response(),
+        Err(error) => peer_route_table_error_response(error),
+    }
+}
+
+/// `DELETE /routes/peers/:prefix`: remove a runtime peer-forwarding route
+/// (issue #884). No request body, authenticated exactly like
+/// `DELETE /peers/:id`.
+async fn remove_peer_route(
+    State(state): State<OperatorState>,
+    Path(prefix): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = require_write_auth(&state, &method, &uri, &headers, &body) {
+        return error.into_response();
+    }
+
+    match state.connector.remove_runtime_peer_route(&prefix) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => peer_route_table_error_response(error),
     }
 }
 
@@ -578,7 +734,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use connector_config::StaticRoute;
-    use connector_runtime::{FakeAppClient, InProcessPeerTransport, TestClock};
+    use connector_runtime::{FakeAppClient, InProcessPeerTransport, RouteSource, TestClock};
     use connector_signer::LocalSigner;
     use tower::ServiceExt;
 
@@ -638,10 +794,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn peers_channels_claims_exposure_and_audit_log_read_as_empty_lists() {
+    async fn peers_channels_claims_and_audit_log_read_as_empty_lists() {
         let app = test_router(vec![], "correct-token");
 
-        for path in ["/peers", "/channels", "/claims", "/exposure", "/audit-log"] {
+        for path in ["/peers", "/channels", "/claims", "/audit-log"] {
             let response = get(app.clone(), path, Some("correct-token")).await;
             assert_eq!(response.status(), StatusCode::OK, "path {path}");
             let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
@@ -1328,6 +1484,270 @@ mod tests {
             let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
             let reject = connector_domain::Reject::decode(&bytes).expect("decode reject");
             assert_eq!(reject.code, RejectCode::t01_peer_unreachable());
+        }
+    }
+
+    /// Issue #884's runtime peer/route table writes: `POST`/`DELETE`
+    /// `/peers*` and `/routes/peers*`. Same authentication contract as
+    /// every other write on this surface (ADR 0008), exercised end to end
+    /// over real HTTP against the actual production `router()`.
+    mod runtime_peer_route_writes {
+        use super::*;
+        use crate::rfc9421::sign_request;
+        use connector_runtime::PeerRouteView;
+        use ed25519_dalek::Keypair;
+        use rand::rngs::OsRng;
+
+        fn keypair() -> Keypair {
+            Keypair::generate(&mut OsRng)
+        }
+
+        fn router_with(write_keys: Vec<[u8; 32]>) -> Router {
+            let app_client = Arc::new(FakeAppClient::new());
+            let clock = Arc::new(TestClock::new(chrono::Utc::now()));
+            let connector = Arc::new(Connector::new(
+                vec![],
+                vec![],
+                app_client,
+                Arc::new(InProcessPeerTransport::new()),
+                clock,
+            ));
+            let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
+            router(connector, signer, "correct-token".to_string(), write_keys)
+        }
+
+        fn signed(keypair: &Keypair, method: &str, path: &str, body: Vec<u8>) -> Request<Body> {
+            let (sig_input, sig, digest) =
+                sign_request(keypair, method, path, &body, 1_000, Some(9_999_999_999));
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header("signature-input", sig_input)
+                .header("signature", sig)
+                .header("content-digest", digest)
+                .body(Body::from(body))
+                .unwrap()
+        }
+
+        fn unsigned(method: &str, path: &str, body: Vec<u8>) -> Request<Body> {
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .body(Body::from(body))
+                .unwrap()
+        }
+
+        #[tokio::test]
+        async fn upserting_a_peer_requires_a_valid_write_signature() {
+            let app = router_with(vec![]);
+            let body = serde_json::to_vec(&serde_json::json!({"id": "runtime-hop"})).unwrap();
+
+            let response = app.oneshot(unsigned("POST", "/peers", body)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        #[tokio::test]
+        async fn a_validly_signed_write_creates_a_peer_visible_over_the_read_surface() {
+            let keypair = keypair();
+            let app = router_with(vec![keypair.public.to_bytes()]);
+            let body = serde_json::to_vec(&serde_json::json!({"id": "runtime-hop"})).unwrap();
+
+            let write_response = app
+                .clone()
+                .oneshot(signed(&keypair, "POST", "/peers", body))
+                .await
+                .unwrap();
+            assert_eq!(write_response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(write_response.into_body())
+                .await
+                .unwrap();
+            let created: PeerView = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(created.id, "runtime-hop");
+            assert_eq!(created.source, RouteSource::Runtime);
+
+            let read_response = get(app, "/peers", Some("correct-token")).await;
+            assert_eq!(read_response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(read_response.into_body())
+                .await
+                .unwrap();
+            let peers: Vec<PeerView> = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(peers, vec![created]);
+        }
+
+        #[tokio::test]
+        async fn a_validly_signed_write_creates_a_peer_route_visible_over_the_read_surface() {
+            let keypair = keypair();
+            let app = router_with(vec![keypair.public.to_bytes()]);
+            let peer_body = serde_json::to_vec(&serde_json::json!({"id": "runtime-hop"})).unwrap();
+            app.clone()
+                .oneshot(signed(&keypair, "POST", "/peers", peer_body))
+                .await
+                .unwrap();
+            let route_body = serde_json::to_vec(&serde_json::json!({
+                "prefix": "g.example.runtime",
+                "peer_id": "runtime-hop",
+                "fee": 3,
+                "price": 25,
+            }))
+            .unwrap();
+
+            let write_response = app
+                .clone()
+                .oneshot(signed(&keypair, "POST", "/routes/peers", route_body))
+                .await
+                .unwrap();
+            assert_eq!(write_response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(write_response.into_body())
+                .await
+                .unwrap();
+            let created: PeerRouteView = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(created.prefix, "g.example.runtime");
+            assert_eq!(created.peer_id, "runtime-hop");
+            assert_eq!(created.fee, 3);
+            assert_eq!(created.price, 25);
+            assert_eq!(created.source, RouteSource::Runtime);
+
+            let read_response = get(app, "/routes/peers", Some("correct-token")).await;
+            assert_eq!(read_response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(read_response.into_body())
+                .await
+                .unwrap();
+            let routes: Vec<PeerRouteView> = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(routes, vec![created]);
+        }
+
+        /// A route naming a peer id nothing recognizes -- the runtime
+        /// analogue of `connector-config`'s load-time `UnknownPeerId` --
+        /// is `400`, not silently accepted as an orphaned row.
+        #[tokio::test]
+        async fn a_peer_route_naming_an_unknown_peer_id_is_a_bad_request() {
+            let keypair = keypair();
+            let app = router_with(vec![keypair.public.to_bytes()]);
+            let body = serde_json::to_vec(&serde_json::json!({
+                "prefix": "g.example.runtime",
+                "peer_id": "nobody",
+                "fee": 0,
+                "price": 0,
+            }))
+            .unwrap();
+
+            let response = app
+                .oneshot(signed(&keypair, "POST", "/routes/peers", body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+
+        /// A validly signed `DELETE /peers/:id` removes a runtime peer
+        /// (issue #884); it no longer appears over `GET /peers`.
+        #[tokio::test]
+        async fn a_validly_signed_delete_removes_a_peer() {
+            let keypair = keypair();
+            let app = router_with(vec![keypair.public.to_bytes()]);
+            let peer_body = serde_json::to_vec(&serde_json::json!({"id": "runtime-hop"})).unwrap();
+            app.clone()
+                .oneshot(signed(&keypair, "POST", "/peers", peer_body))
+                .await
+                .unwrap();
+
+            let delete_response = app
+                .clone()
+                .oneshot(signed(&keypair, "DELETE", "/peers/runtime-hop", Vec::new()))
+                .await
+                .unwrap();
+            assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+            let read_response = get(app, "/peers", Some("correct-token")).await;
+            let bytes = hyper::body::to_bytes(read_response.into_body())
+                .await
+                .unwrap();
+            let peers: Vec<PeerView> = serde_json::from_slice(&bytes).unwrap();
+            assert!(peers.is_empty());
+        }
+
+        #[tokio::test]
+        async fn deleting_a_peer_requires_a_valid_write_signature() {
+            let app = router_with(vec![]);
+
+            let response = app
+                .oneshot(unsigned("DELETE", "/peers/runtime-hop", Vec::new()))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        /// A validly signed `DELETE /routes/peers/:prefix` removes a
+        /// runtime peer route; it no longer appears over
+        /// `GET /routes/peers`.
+        #[tokio::test]
+        async fn a_validly_signed_delete_removes_a_peer_route() {
+            let keypair = keypair();
+            let app = router_with(vec![keypair.public.to_bytes()]);
+            let peer_body = serde_json::to_vec(&serde_json::json!({"id": "runtime-hop"})).unwrap();
+            app.clone()
+                .oneshot(signed(&keypair, "POST", "/peers", peer_body))
+                .await
+                .unwrap();
+            let route_body = serde_json::to_vec(&serde_json::json!({
+                "prefix": "g.example.runtime",
+                "peer_id": "runtime-hop",
+                "fee": 0,
+                "price": 0,
+            }))
+            .unwrap();
+            app.clone()
+                .oneshot(signed(&keypair, "POST", "/routes/peers", route_body))
+                .await
+                .unwrap();
+
+            let delete_response = app
+                .clone()
+                .oneshot(signed(
+                    &keypair,
+                    "DELETE",
+                    "/routes/peers/g.example.runtime",
+                    Vec::new(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+            let read_response = get(app, "/routes/peers", Some("correct-token")).await;
+            let bytes = hyper::body::to_bytes(read_response.into_body())
+                .await
+                .unwrap();
+            let routes: Vec<PeerRouteView> = serde_json::from_slice(&bytes).unwrap();
+            assert!(routes.is_empty());
+        }
+
+        /// A `DELETE /peers/:id` naming a peer still referenced by a
+        /// runtime route is `409`, not a silently orphaned route.
+        #[tokio::test]
+        async fn deleting_a_peer_still_referenced_by_a_route_is_a_conflict() {
+            let keypair = keypair();
+            let app = router_with(vec![keypair.public.to_bytes()]);
+            let peer_body = serde_json::to_vec(&serde_json::json!({"id": "runtime-hop"})).unwrap();
+            app.clone()
+                .oneshot(signed(&keypair, "POST", "/peers", peer_body))
+                .await
+                .unwrap();
+            let route_body = serde_json::to_vec(&serde_json::json!({
+                "prefix": "g.example.runtime",
+                "peer_id": "runtime-hop",
+                "fee": 0,
+                "price": 0,
+            }))
+            .unwrap();
+            app.clone()
+                .oneshot(signed(&keypair, "POST", "/routes/peers", route_body))
+                .await
+                .unwrap();
+
+            let response = app
+                .oneshot(signed(&keypair, "DELETE", "/peers/runtime-hop", Vec::new()))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
         }
     }
 

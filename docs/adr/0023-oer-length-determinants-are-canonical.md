@@ -1,5 +1,7 @@
 # OER length determinants are canonical, for every consumer of `oer.rs`
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
 `decode_var_uint` (`crates/connector-domain/src/oer.rs`) now rejects any length determinant
 that is not the exact bytes `encode_var_uint` would produce for the value it decodes to: a
 non-minimal long form (`0x81 0x03` for the value `3`, canonically the single byte `0x03`), a

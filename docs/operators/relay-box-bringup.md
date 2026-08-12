@@ -134,9 +134,10 @@ every other infra-touching ticket in this repo's history records when it applies
    example's `[[peer_channels]]` row needs, one row on each side.
 
 8. **Peering flip.** A repo PR (#820), deployed in the same window it merges:
-   - **Relay box.** Add `[[peers]]` (accept-only — no `endpoint`, since the apex dials in — with an
-     explicit `ceiling` per `AcceptOnlyPeerWithoutCeiling`) and the matching `[[peer_channels]]` row
-     from step 7 to `infra/linode-relay/connector-rust.toml`.
+   - **Relay box.** Add `[[peers]]` (accept-only — no `endpoint`, since the apex dials in) and the
+     matching `[[peer_channels]]` row from step 7 to `infra/linode-relay/connector-rust.toml`. (An
+     explicit `ceiling` was required here per `AcceptOnlyPeerWithoutCeiling` before ADR 0033, issue
+     #882, retired both.)
    - **Apex box.** Add `[[peers]]` (the relay's `wss://proxy.relay.${DOMAIN}/ilp/btp` endpoint +
      credential) and the matching `[[peer_channels]]` row to
      `infra/linode-node/connector-rust.toml`. Change the existing

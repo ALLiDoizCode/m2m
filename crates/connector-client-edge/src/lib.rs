@@ -70,6 +70,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use connector_config::TransportPolicy;
+use connector_domain::identity::{anonymous_identity, resolve_identity, ConfiguredIdentity};
 use connector_domain::{condition_is_present, PacketResponse, Prepare, Reject, RejectCode};
 use connector_runtime::{ClientRouteKind, Connector, ProbeDenied};
 use connector_signer::nip59::{unwrap_claim, WrappedClaim};
@@ -129,6 +130,10 @@ const PAYMENT_REQUIRED_HEADER: &str = connector_btp::PAYMENT_REQUIRED_HEADER;
 /// payload. Decimal `uint64`, present on every REJECT this edge answers
 /// with (issue #548).
 const ACCUMULATED_COST_HEADER: &str = connector_btp::ACCUMULATED_COST_HEADER;
+/// client-edge-spec.md §1.2: a configured peer names itself with this
+/// header. Its absence is what makes a request anonymous -- a first-class
+/// path, not a fallback.
+const PEER_ID_HEADER: &str = "ilp-peer-id";
 
 struct ClientEdgeState {
     connector: Arc<Connector>,
@@ -178,6 +183,15 @@ struct ClientEdgeState {
     /// zero-condition greeting still fires (see [`handle_ilp`]) but omits
     /// `ilpAddresses`/`btpEndpoint`, same shape as before this existed.
     bootstrap_identity: Option<BootstrapIdentity>,
+    /// The client-edge identities this node authenticates over HTTP (issue
+    /// #502, client-edge-spec.md §1.2): what an `ILP-Peer-Id` header must
+    /// name, and the secret its `Authorization: Bearer <secret>` must
+    /// match, to be recognised as that identity rather than refused `401`.
+    /// Empty -- the default -- means this node configures no peer
+    /// identity: every presented `ILP-Peer-Id` fails to authenticate, and
+    /// every request that presents none is anonymous, which stays a
+    /// first-class path either way.
+    identities: Arc<[ConfiguredIdentity]>,
 }
 
 /// Mount the client edge at `connector`, signing/answering identity with
@@ -243,6 +257,31 @@ pub fn router_with_gate(
         claim_gate,
         None,
         Vec::new(),
+    )
+}
+
+/// As [`router_with_gate`], but also naming the client-edge identities this
+/// node authenticates over HTTP (issue #502, client-edge-spec.md §1.2).
+/// `identities` empty is [`router_with_gate`] exactly -- every request is
+/// anonymous or, if it presents an `ILP-Peer-Id`, refused `401`.
+pub fn router_with_identities(
+    connector: Arc<Connector>,
+    signer: Arc<dyn Signer>,
+    wrap_receiver_secret: Option<[u8; 32]>,
+    claim_gate: ClientClaimGate,
+    identities: Arc<[ConfiguredIdentity]>,
+) -> Router {
+    router_with_bootstrap_identity(
+        connector,
+        signer,
+        wrap_receiver_secret,
+        claim_gate,
+        None,
+        Vec::new(),
+        DEFAULT_BTP_SESSION_WINDOW,
+        None,
+        None,
+        identities,
     )
 }
 
@@ -342,6 +381,7 @@ pub fn router_with_peer_carriages(
         btp_session_window,
         peers,
         None,
+        Arc::from([]),
     )
 }
 
@@ -351,7 +391,9 @@ pub fn router_with_peer_carriages(
 /// against a reachable edge without knowing either in advance. Sourced from
 /// `[announce]` -- the config section that already holds exactly these
 /// facts for `connector announce` (issue #784) -- `None` for a node that
-/// does not configure it.
+/// does not configure it. `identities` is `connector_config::Config::client_identities`'s
+/// value (issue #502): every `ILP-Peer-Id` this node recognises and the
+/// secret it authenticates with.
 #[allow(clippy::too_many_arguments)]
 pub fn router_with_bootstrap_identity(
     connector: Arc<Connector>,
@@ -363,6 +405,7 @@ pub fn router_with_bootstrap_identity(
     btp_session_window: NonZeroU32,
     peers: Option<Arc<PeerCarriages>>,
     bootstrap_identity: Option<BootstrapIdentity>,
+    identities: Arc<[ConfiguredIdentity]>,
 ) -> Router {
     let state = Arc::new(ClientEdgeState {
         connector,
@@ -375,6 +418,7 @@ pub fn router_with_bootstrap_identity(
         session_registry: Arc::new(session_registry::SessionRegistry::new()),
         peers,
         bootstrap_identity,
+        identities,
     });
     Router::new()
         .route("/ilp", post(handle_ilp))
@@ -715,6 +759,23 @@ fn decode_claim_header(
     })
 }
 
+/// A claim that cleared [`extract_and_validate_claim`].
+struct AdmittedClaim {
+    /// The channel it validated on -- the evidence, and the only evidence
+    /// this connector ever gets, that an unaffiliated sender holds a
+    /// payment channel with it (issue #548).
+    channel_key: String,
+    /// This claim's self-declared signer (`ClientClaim::signer`,
+    /// client-edge-spec.md §1.2), present only when the claim header that
+    /// carried it arrived plaintext. `None` for a claim that arrived
+    /// wrapped (`ILP-Payment-Channel-Claim-Wrapped`) -- deriving an
+    /// anonymous sender's ephemeral identity from it would require
+    /// unwrapping before the identity authenticating the request is known,
+    /// so a wrapped-only claim is never a source for one, by construction:
+    /// this field is the one place that rule is enforced.
+    plaintext_signer: Option<String>,
+}
+
 /// Extract and fully validate whatever claim header `headers` carries, per
 /// client-edge-spec.md §1.3, against `price` -- the matched route's price,
 /// `0` for an unpriced or unmatched destination, since routing itself (not
@@ -724,18 +785,15 @@ fn decode_claim_header(
 /// only when the destination is unpriced or unmatched, since `handle_ilp`
 /// answers the x402 greeting instead of calling this at all for an unpaid
 /// request to a priced route (issue #526) -- so the request proceeds
-/// unchanged, exactly as it always has. `Ok(Some(channel_key))` means a
-/// present claim validated cleanly, and names the channel it validated on:
-/// the evidence, and the only evidence this connector ever gets, that an
-/// unaffiliated sender holds a payment channel with it (issue #548). A
-/// plaintext header takes precedence when both are present, since a client
-/// presenting both is presenting the same claim twice, not two different
-/// ones.
+/// unchanged, exactly as it always has. `Ok(Some(admitted))` means a
+/// present claim validated cleanly. A plaintext header takes precedence
+/// when both are present, since a client presenting both is presenting the
+/// same claim twice, not two different ones.
 async fn extract_and_validate_claim(
     headers: &HeaderMap,
     price: u64,
     state: &ClientEdgeState,
-) -> Result<Option<String>, ClaimIngestRejection> {
+) -> Result<Option<AdmittedClaim>, ClaimIngestRejection> {
     let (header_value, wrapped) = if let Some(value) = headers.get(CLAIM_HEADER) {
         (value, false)
     } else if let Some(value) = headers.get(CLAIM_WRAPPED_HEADER) {
@@ -751,11 +809,15 @@ async fn extract_and_validate_claim(
     )?;
     let claim = state.claim_gate.ingest(&claim_json, price).await?;
     let channel_key = claim.channel_key();
+    let plaintext_signer = (!wrapped).then(|| claim.signer().to_string());
     // Best-effort liveness bookkeeping for issue #693's claim-state
     // endpoint (`ClientClaimGate::note_claim_time`'s own doc): happens only
     // after `ingest` has already returned durable, never inside it.
     state.claim_gate.note_claim_time(&channel_key, now_unix());
-    Ok(Some(channel_key))
+    Ok(Some(AdmittedClaim {
+        channel_key,
+        plaintext_signer,
+    }))
 }
 
 /// Answer an ILP-level outcome the way client-edge-spec.md §1.1 and §1.6
@@ -910,6 +972,29 @@ fn claim_rejection_reject(rejection: ClaimIngestRejection, price: u64) -> Reject
     }
 }
 
+/// The bearer credential a request presented via `Authorization`
+/// (client-edge-spec.md §1.2): `Bearer <secret>`, scheme matched
+/// case-insensitively and a bare credential with no scheme tolerated --
+/// mirrors BTP's own tolerant `secret: ''` auth frame. An absent
+/// `Authorization` header is an empty credential, deliberately not
+/// distinguished from a header present with an empty value: this is what
+/// lets a configured identity with an empty secret authenticate a request
+/// that omits the header entirely.
+fn extract_bearer(headers: &HeaderMap) -> String {
+    let Some(value) = headers.get(header::AUTHORIZATION) else {
+        return String::new();
+    };
+    let Ok(value) = value.to_str() else {
+        return String::new();
+    };
+    match value.split_once(' ') {
+        Some((scheme, credential)) if scheme.eq_ignore_ascii_case("bearer") => {
+            credential.to_string()
+        }
+        _ => value.to_string(),
+    }
+}
+
 async fn handle_ilp(
     State(state): State<Arc<ClientEdgeState>>,
     headers: HeaderMap,
@@ -926,6 +1011,35 @@ async fn handle_ilp(
             return response;
         }
     }
+
+    // client-edge-spec.md §1.2: authentication outranks the greeting -- a
+    // presented `ILP-Peer-Id` that fails to authenticate is refused `401`
+    // before the route is even looked up, so an unauthorised caller is
+    // never told a priced route's terms (`402`) and a credential failure
+    // is never reported as a payment outcome. A request presenting no
+    // `ILP-Peer-Id` is unaffected here -- it is anonymous, resolved once
+    // the claim (if any) has been admitted, below.
+    let presented_peer_id = headers
+        .get(PEER_ID_HEADER)
+        .and_then(|value| value.to_str().ok());
+    let authenticated_peer = match presented_peer_id.map(|peer_id| {
+        resolve_identity(
+            Some(peer_id),
+            &extract_bearer(&headers),
+            None,
+            &state.identities,
+        )
+    }) {
+        None => None,
+        Some(Ok(identity)) => Some(identity),
+        Some(Err(rejection)) => {
+            tracing::warn!(
+                peer_id = %rejection.peer_id,
+                "client-edge identity presented but failed to authenticate"
+            );
+            return (StatusCode::UNAUTHORIZED, rejection.to_string()).into_response();
+        }
+    };
 
     let prepare = match Prepare::decode(&body) {
         Ok(prepare) => prepare,
@@ -1011,14 +1125,29 @@ async fn handle_ilp(
     // A claim header's validation failure rejects the packet before it is
     // routed at all (client-edge-spec.md §1.3) -- the app is never asked to
     // do work that was never validly paid for.
+    let mut plaintext_claim_signer = None;
     match extract_and_validate_claim(&headers, price, &state).await {
         Err(rejection) => return claim_rejected_response(rejection, price),
         // A claim that cleared the gate is this connector's evidence that
         // the sender holds the channel it names (issue #548), which is what
         // makes that sender eligible to probe at `POST /ilp/probe` later.
-        Ok(Some(channel_key)) => state.connector.recognize_channel(&channel_key),
+        Ok(Some(admitted)) => {
+            state.connector.recognize_channel(&admitted.channel_key);
+            plaintext_claim_signer = admitted.plaintext_signer;
+        }
         Ok(None) => {}
     }
+
+    // client-edge-spec.md §1.2: the sender's identity, resolved and made
+    // available to everything downstream that needs a payer (issue #502).
+    // A presented `ILP-Peer-Id` was already resolved -- and authenticated,
+    // or this request would have been refused `401` -- above, before the
+    // claim was looked at; the claim signer is consulted only for a
+    // request that presented none, and never a wrapped-only claim's, since
+    // `plaintext_claim_signer` is `None` for one by construction.
+    let identity =
+        authenticated_peer.unwrap_or_else(|| anonymous_identity(plaintext_claim_signer.as_deref()));
+    tracing::debug!(identity = %identity.id(), "client-edge request identity resolved");
 
     // client-edge-spec.md v1 carries no minimum-delivery field (§4 of
     // peer-wire-spec.md scopes it to the peer wire) -- a client-originated
@@ -1061,7 +1190,7 @@ async fn handle_probe(
     };
 
     let channel_key = match extract_and_validate_claim(&headers, 0, &state).await {
-        Ok(Some(channel_key)) => channel_key,
+        Ok(Some(admitted)) => admitted.channel_key,
         Ok(None) => {
             return (
                 StatusCode::FORBIDDEN,
@@ -1484,7 +1613,6 @@ mod tests {
         );
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
-        peer_transport.set_peer_channel("second-hop", channel_a());
         let first_hop = Arc::new(
             Connector::new(
                 vec![],
@@ -2328,6 +2456,7 @@ mod tests {
                 ilp_addresses: vec!["g.toon.apex".to_string(), "g.toon.apex.alt".to_string()],
                 btp_endpoint: "wss://apex.example/ilp/btp".to_string(),
             }),
+            Arc::from([]),
         );
 
         let request = Request::builder()
@@ -4039,6 +4168,288 @@ mod tests {
                 StatusCode::NOT_FOUND,
                 "a destination this connector serves no route for is still 404"
             );
+        }
+    }
+
+    /// Client-edge sender identity (issue #502, client-edge-spec.md §1.2):
+    /// a configured peer authenticating with a bearer secret, or an
+    /// anonymous sender. Exercised at this crate's real HTTP seam, the same
+    /// way `claim_headers` exercises claim ingest.
+    mod identity_headers {
+        use super::*;
+        use libsecp256k1::{PublicKey, SecretKey};
+
+        fn identity(id: &str, secret: &str) -> ConfiguredIdentity {
+            ConfiguredIdentity {
+                id: id.to_string(),
+                secret: secret.to_string(),
+            }
+        }
+
+        fn router_over(
+            connector: Arc<Connector>,
+            signer: Arc<dyn Signer>,
+            identities: Vec<ConfiguredIdentity>,
+        ) -> Router {
+            router_with_identities(
+                connector,
+                signer,
+                None,
+                test_gate(ClientChannelRegistry::new()),
+                Arc::from(identities),
+            )
+        }
+
+        fn request_with_identity(
+            prepare: &Prepare,
+            peer_id: Option<&str>,
+            authorization: Option<&str>,
+        ) -> Request<Body> {
+            let mut builder = Request::builder().method("POST").uri("/ilp");
+            if let Some(peer_id) = peer_id {
+                builder = builder.header(PEER_ID_HEADER, peer_id);
+            }
+            if let Some(authorization) = authorization {
+                builder = builder.header(header::AUTHORIZATION, authorization);
+            }
+            builder.body(Body::from(prepare.encode())).unwrap()
+        }
+
+        #[tokio::test]
+        async fn a_configured_peer_presenting_correct_credentials_still_reaches_the_app() {
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"ok"));
+            let signer = test_signer();
+            let connector = Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone()),
+            );
+            let (prepare, _shared_secret) =
+                sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
+            let app = router_over(connector, signer, vec![identity("peer-a", "s3cr3t")]);
+
+            let request = request_with_identity(&prepare, Some("peer-a"), Some("Bearer s3cr3t"));
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(app_client.deliveries().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn an_empty_configured_secret_authenticates_with_no_authorization_header() {
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"ok"));
+            let signer = test_signer();
+            let connector = Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone()),
+            );
+            let (prepare, _shared_secret) =
+                sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
+            let app = router_over(connector, signer, vec![identity("peer-a", "")]);
+
+            let request = request_with_identity(&prepare, Some("peer-a"), None);
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(app_client.deliveries().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_wrong_secret_is_401_before_a_priced_routes_terms_are_answered() {
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            let connector = Arc::new(Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+            let app = router_over(connector, test_signer(), vec![identity("peer-a", "s3cr3t")]);
+
+            let request = request_with_identity(
+                &sample_prepare("g.example.app"),
+                Some("peer-a"),
+                Some("Bearer wrong"),
+            );
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(app_client.deliveries().is_empty());
+        }
+
+        #[tokio::test]
+        async fn an_identity_naming_no_configured_peer_is_401_not_anonymous() {
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"ok"));
+            let connector = Arc::new(Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+            let app = router_over(connector, test_signer(), vec![]);
+
+            let request =
+                request_with_identity(&sample_prepare("g.example.app"), Some("peer-a"), None);
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(
+                app_client.deliveries().is_empty(),
+                "a request naming an unrecognised identity must not be treated as anonymous"
+            );
+        }
+
+        /// AC: neither the x402 answer, claim ingest, nor envelope delivery
+        /// changes behaviour for a request that presents no identity --
+        /// configuring `[[client_identities]]` at all must not perturb an
+        /// anonymous request's outcome.
+        #[tokio::test]
+        async fn an_anonymous_request_is_unaffected_by_configured_identities_existing() {
+            let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"ok"));
+            let signer = test_signer();
+            let connector = Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone()),
+            );
+            let (prepare, shared_secret) =
+                sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
+            let app = router_over(connector, signer, vec![identity("peer-a", "s3cr3t")]);
+
+            let request = request_with_identity(&prepare, None, None);
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let fulfill = Fulfill::decode(&bytes).expect("decode fulfill");
+            assert_eq!(
+                open_sealed_envelope(&shared_secret, &fulfill.data),
+                fulfill_envelope(b"ok")
+            );
+        }
+
+        #[test]
+        fn extract_bearer_tolerates_a_bare_credential_with_no_scheme() {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::AUTHORIZATION, "s3cr3t".parse().unwrap());
+            assert_eq!(extract_bearer(&headers), "s3cr3t");
+        }
+
+        #[test]
+        fn extract_bearer_matches_the_bearer_scheme_case_insensitively() {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::AUTHORIZATION, "bearer s3cr3t".parse().unwrap());
+            assert_eq!(extract_bearer(&headers), "s3cr3t");
+        }
+
+        #[test]
+        fn extract_bearer_is_empty_with_no_authorization_header() {
+            assert_eq!(extract_bearer(&HeaderMap::new()), "");
+        }
+
+        fn state_with_claim_gate(
+            claim_gate: crate::claim_gate::ClientClaimGate,
+        ) -> ClientEdgeState {
+            ClientEdgeState {
+                connector: Arc::new(Connector::new(
+                    vec![],
+                    vec![],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )),
+                signer: test_signer(),
+                claim_gate,
+                wrap_receiver_secret: Some([2u8; 32]),
+                settlement_terms: None,
+                settlements: Vec::new(),
+                btp_session_window: DEFAULT_BTP_SESSION_WINDOW,
+                session_registry: Arc::new(session_registry::SessionRegistry::new()),
+                peers: None,
+                bootstrap_identity: None,
+                identities: Arc::from([]),
+            }
+        }
+
+        /// AC: "its ephemeral identity derives from the signer of the
+        /// claim `ClientClaimGate` already parsed, not from a second parse
+        /// of the claim JSON" -- a plaintext claim's already-verified
+        /// self-declared signer is threaded out as `plaintext_signer`.
+        #[tokio::test]
+        async fn a_plaintext_claim_admits_with_its_self_declared_signer() {
+            let state = state_with_claim_gate(test_gate(super::claim_headers::test_channels()));
+            let claim_json = super::claim_headers::evm_claim_json(1, 100);
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                CLAIM_HEADER,
+                BASE64.encode(claim_json.as_bytes()).parse().unwrap(),
+            );
+
+            let admitted = extract_and_validate_claim(&headers, 0, &state)
+                .await
+                .expect("claim admits")
+                .expect("claim header present");
+            assert_eq!(
+                admitted.plaintext_signer.as_deref(),
+                Some("0x58da990a8f4a3a6ca7cb6315d68a140105917352")
+            );
+        }
+
+        /// AC: "a request carrying only a wrapped claim gets the fixed
+        /// anonymous identity, even though the connector unwraps it" -- a
+        /// wrapped claim's signer must never surface as `plaintext_signer`,
+        /// however successfully it unwraps and admits.
+        #[tokio::test]
+        async fn a_wrapped_claim_admits_with_no_plaintext_signer() {
+            let state = state_with_claim_gate(test_gate(super::claim_headers::test_channels()));
+            let sender_secret = SecretKey::parse(&[1u8; 32]).unwrap();
+            let receiver_secret = SecretKey::parse(&[2u8; 32]).unwrap();
+            let receiver_public = PublicKey::from_secret_key(&receiver_secret);
+            let claim_json = super::claim_headers::evm_claim_json(1, 100);
+            let wrapped = connector_signer::wrap_claim(
+                claim_json.as_bytes(),
+                &sender_secret,
+                &receiver_public.serialize(),
+            )
+            .expect("wrap");
+            let envelope_json = format!(
+                r#"{{"ephemeralPublicKey":"{}","encryptedPayload":"{}","timestamp":0,"version":"1.0"}}"#,
+                hex_encode(&wrapped.ephemeral_public_key),
+                BASE64.encode(&wrapped.encrypted_payload),
+            );
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                CLAIM_WRAPPED_HEADER,
+                BASE64.encode(envelope_json.as_bytes()).parse().unwrap(),
+            );
+
+            let admitted = extract_and_validate_claim(&headers, 0, &state)
+                .await
+                .expect("claim admits")
+                .expect("claim header present");
+            assert_eq!(admitted.plaintext_signer, None);
         }
     }
 }

@@ -38,6 +38,12 @@ fi
 echo "==> [2/7] Firewall (public = 22/80/443 only; raw RPC ports blocked)"
 "$HERE/firewall.sh"
 
+echo "==> SSH hardening (key-only; no password auth)"
+# Runs AFTER the firewall and AFTER provisioning has installed the operator's
+# key, because harden-ssh.sh refuses to disable password auth on a box with no
+# usable authorized key. See infra/harden-ssh.sh for why this is mandatory.
+"$HERE/../harden-ssh.sh"
+
 echo "==> [3/7] Build the Solana program + ensure host CLIs (solana, spl-token)"
 # `make solana-build` compiles packages/solana-program into target/deploy so the
 # entrypoint can deploy it at its deterministic id. The host also needs the

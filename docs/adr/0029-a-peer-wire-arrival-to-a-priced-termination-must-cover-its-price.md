@@ -1,5 +1,13 @@
 # A peer-wire arrival to a priced termination must cover its price, per packet, before delivery
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
+> **The exposure ceiling and `T04` this ADR references throughout as already-existing, unaffected
+> machinery are retired** by [ADR 0033](0033-the-exposure-machinery-is-retired-not-restated.md)
+> (issue #882). This ADR's own decision — the per-packet `F03` price-coverage check — is untouched
+> and still stands; only its citations of the ceiling as a _separate, still-live_ mechanism are now
+> historical.
+
 A peer-role PREPARE that resolves to one of this connector's own priced `handler_url` routes is
 now checked against that route's `price` before the app is ever consulted: `amount >= price`, or
 the connector rejects `F03_INVALID_AMOUNT` with `accumulatedCost = 0` and never opens the wrap.

@@ -18,6 +18,7 @@ mod condition;
 mod envelope;
 mod error;
 mod fee;
+pub mod identity;
 mod oer;
 mod packet;
 mod projection;
@@ -32,6 +33,9 @@ pub use condition::{
 pub use envelope::{EnvelopeError, EnvelopeRequest, EnvelopeResponse};
 pub use error::PacketError;
 pub use fee::amount_after_fee;
+pub use identity::{
+    anonymous_identity, resolve_identity, ConfiguredIdentity, SenderIdentity, UnauthorizedIdentity,
+};
 pub use packet::{Fulfill, PacketResponse, Prepare, Reject, RejectCode};
-pub use projection::{JournalEntry, Projection, ProjectionDivergence};
+pub use projection::{JournalEntry, Projection};
 pub use route::select_route;
