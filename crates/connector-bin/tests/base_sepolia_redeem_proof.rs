@@ -164,16 +164,11 @@ fn now_nonce() -> u64 {
         .as_secs()
 }
 
-fn hex_decode(s: &str) -> Vec<u8> {
-    let s = s.trim_start_matches("0x");
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
-        .collect()
-}
-
 fn parse_channel_id(id: &str) -> [u8; 32] {
-    hex_decode(id).try_into().expect("32-byte channel id")
+    hex::decode(id.trim_start_matches("0x"))
+        .expect("channel id is hex")
+        .try_into()
+        .expect("32-byte channel id")
 }
 
 /// A real `EvmSettlementBackend`, connected exactly the way a deployed
@@ -232,10 +227,10 @@ fn wire_round_trip(
 #[tokio::test]
 async fn a_production_signed_claim_redeems_on_the_deployed_token_network_and_a_wrong_domain_does_not(
 ) {
-    let Some(_) = receiver_key() else {
+    if receiver_key().is_none() {
         eprintln!("BASE_SEPOLIA_PROOF_KEY not set -- skipping (see this file's module doc)");
         return;
-    };
+    }
 
     let rpc = rpc_url();
     let backend = receiver_backend(&rpc).await;
