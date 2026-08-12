@@ -80,6 +80,11 @@
 //! hash -- everything issue #577's AC asks a reader who was not present to
 //! be able to reconstruct: what was funded, what was signed, and the
 //! transaction it produced.
+//!
+//! That last hash is read off the `ChannelClaimed` log this channel's claim
+//! emitted, not off the latest block, so it always names the redeem itself
+//! rather than whatever unrelated transaction shared its block -- see
+//! `redeeming_transaction` below.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -92,14 +97,27 @@ use connector_signer::{
     derive_evm_address, evm_balance_proof_digest, to_hex, verify_evm_balance_proof,
     EvmBalanceProof, LocalSigner, Signer,
 };
-use ethers::contract::abigen;
+use ethers::contract::{abigen, LogMeta};
 use ethers::providers::{Http, Middleware, Provider};
-use ethers::types::{Address as EvmAddress, BlockNumber, U256};
+use ethers::types::{Address as EvmAddress, U256, U64};
 
 abigen!(
     Erc20,
     r#"[
         function balanceOf(address account) external view returns (uint256)
+    ]"#
+);
+
+// `TokenNetwork`'s claim event, declared here rather than reused from
+// `connector_settlement_evm`'s generated bindings because those are
+// `pub(crate)` (`connector-settlement-evm/src/bindings.rs`) -- the same
+// reason `Erc20` above is redeclared. Its shape is
+// `packages/contracts/src/TokenNetwork.sol:171`, and it is what pins the
+// transaction this run actually produced: see `redeeming_transaction`.
+abigen!(
+    TokenNetworkClaims,
+    r#"[
+        event ChannelClaimed(bytes32 indexed channelId, address indexed claimant, uint256 claimedAmount, uint256 totalClaimed)
     ]"#
 );
 
@@ -224,6 +242,38 @@ fn wire_round_trip(
     }
 }
 
+/// The transaction that actually redeemed `channel_id` -- located by the
+/// one artefact only this redeem could have produced.
+///
+/// [`SettlementBackend::redeem`] hands back a `ChannelState` and no
+/// transaction hash, and Base Sepolia produces a block every ~2s that this
+/// redeem shares with unrelated third-party traffic. So "the last
+/// transaction of the latest block" is almost never the redeem -- printing
+/// it under the words CLAIM REDEEMED would put a stranger's hash in the
+/// record issue #577's AC asks a reader who was not present to reconstruct
+/// from, which is worse than printing nothing. Instead the claim is found
+/// by the `ChannelClaimed` log `claimFromChannel` emits for exactly this
+/// channel id and this claimant (`TokenNetwork.sol:364`), searched from a
+/// block number captured before the redeem was sent.
+async fn redeeming_transaction(
+    provider: &Provider<Http>,
+    token_network: EvmAddress,
+    from_block: U64,
+    channel_id: [u8; 32],
+    claimant: EvmAddress,
+) -> (ChannelClaimedFilter, LogMeta) {
+    let contract = TokenNetworkClaims::new(token_network, Arc::new(provider.clone()));
+    let logs = contract
+        .channel_claimed_filter()
+        .from_block(from_block)
+        .query_with_meta()
+        .await
+        .expect("read this TokenNetwork's ChannelClaimed logs");
+    logs.into_iter()
+        .find(|(event, _)| event.channel_id == channel_id && event.claimant == claimant)
+        .expect("redeem confirmed, so its own ChannelClaimed log must be on chain")
+}
+
 #[tokio::test]
 async fn a_production_signed_claim_redeems_on_the_deployed_token_network_and_a_wrong_domain_does_not(
 ) {
@@ -345,6 +395,14 @@ async fn a_production_signed_claim_redeems_on_the_deployed_token_network_and_a_w
         .await
         .expect("balance before");
 
+    // Captured BEFORE the redeem is sent, so the log search below has a
+    // floor that cannot include an earlier claim on this channel and
+    // cannot miss this one -- see `redeeming_transaction`.
+    let search_from = provider
+        .get_block_number()
+        .await
+        .expect("block number before the redeem");
+
     let state = backend
         .redeem(&channel, claim)
         .await
@@ -358,16 +416,22 @@ async fn a_production_signed_claim_redeems_on_the_deployed_token_network_and_a_w
     assert_eq!(state.redeemed, TRANSFERRED);
     assert_eq!(after - before, U256::from(TRANSFERRED), "real value moved");
 
-    let block = provider
-        .get_block_with_txs(BlockNumber::Latest)
-        .await
-        .expect("latest block")
-        .expect("block");
-    println!(
-        "CLAIM REDEEMED -- TokenNetwork {:?} channel {channel} block {} tx {:?}; \
-         receiver USDC {before} -> {after} (+{TRANSFERRED})",
+    let (event, meta) = redeeming_transaction(
+        &provider,
         real_token_network,
-        block.number.expect("number"),
-        block.transactions.last().map(|tx| tx.hash),
+        search_from,
+        channel_id_bytes,
+        receiver_address,
+    )
+    .await;
+    assert_eq!(
+        event.claimed_amount,
+        U256::from(TRANSFERRED),
+        "the located ChannelClaimed log must be this claim, not another"
+    );
+    println!(
+        "CLAIM REDEEMED -- TokenNetwork {real_token_network:?} channel {channel} \
+         block {} tx {:?}; receiver USDC {before} -> {after} (+{TRANSFERRED})",
+        meta.block_number, meta.transaction_hash,
     );
 }

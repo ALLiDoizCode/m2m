@@ -109,6 +109,12 @@ jobs:
           ACCOUNT_INDEX: ${{ inputs.account_index }}
         run: |
           cat > "$RUNNER_TEMP/ops/whoami.mjs" <<'SCRIPT'
+          // This file is ESM (`.mjs`, and the package.json written above says
+          // `"type": "module"`), so `require` does not exist here -- reaching
+          // for it throws `ReferenceError: require is not defined in ES module
+          // scope` on the first line that runs, which is why every appendFile
+          // below goes through this static import.
+          import { appendFileSync } from 'node:fs';
           import { fromMnemonicFull } from '@toon-protocol/sdk';
           import { Contract, HDNodeWallet, JsonRpcProvider, Mnemonic, formatUnits } from 'ethers';
 
@@ -154,7 +160,7 @@ jobs:
           const [eth, usdc] = await Promise.all([provider.getBalance(id.evmAddress), erc20.balanceOf(id.evmAddress)]);
 
           const summary = process.env.GITHUB_STEP_SUMMARY;
-          const say = (l) => { console.log(l); if (summary) require('node:fs').appendFileSync(summary, l + '\n'); };
+          const say = (l) => { console.log(l); if (summary) appendFileSync(summary, l + '\n'); };
           say(`## base-sepolia-redeem-gate -- receiver (index ${idx})`);
           say('');
           say(`TokenNetwork resolved from registry: ${tnAddr}`);
@@ -167,16 +173,23 @@ jobs:
           // leaves the runner and is not the same thing as a workflow
           // artifact (see this file's "ONE JOB, DELIBERATELY" note above).
           const outEnv = process.env.GITHUB_ENV;
-          if (outEnv) require('node:fs').appendFileSync(outEnv, `RECEIVER_KEY=${pk}\n`);
+          if (outEnv) appendFileSync(outEnv, `RECEIVER_KEY=${pk}\n`);
           SCRIPT
           node "$RUNNER_TEMP/ops/whoami.mjs"
 
+      # `apply` is declared `type: boolean`, and the `inputs` context keeps a
+      # workflow_dispatch boolean AS a boolean (only the legacy
+      # `github.event.inputs` stringifies it). Comparing it to the string
+      # `'true'` therefore makes GitHub cast both sides to a number --
+      # `true` -> 1, `'true'` -> NaN -- so `inputs.apply == 'true'` is ALWAYS
+      # false and every step behind it is dead. The boolean is used directly
+      # below for exactly that reason; do not reintroduce a string compare.
       - name: Install Rust toolchain
-        if: inputs.apply == 'true'
+        if: ${{ inputs.apply }}
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo registry and workspace target
-        if: inputs.apply == 'true'
+        if: ${{ inputs.apply }}
         uses: actions/cache@v4
         with:
           path: |
@@ -188,7 +201,7 @@ jobs:
             base-sepolia-redeem-gate-${{ runner.os }}-
 
       - name: cargo test base_sepolia_redeem_proof
-        if: inputs.apply == 'true'
+        if: ${{ inputs.apply }}
         env:
           BASE_SEPOLIA_PROOF_KEY: ${{ env.RECEIVER_KEY }}
           BASE_SEPOLIA_PROOF_RPC: ${{ env.RPC_URL }}
@@ -199,6 +212,6 @@ jobs:
           cargo test -p connector --test base_sepolia_redeem_proof -- --nocapture
 
       - name: Dry run -- nothing sent
-        if: inputs.apply != 'true'
+        if: ${{ !inputs.apply }}
         run: |
           echo "Dry run only -- re-dispatch with apply=true to actually redeem."
