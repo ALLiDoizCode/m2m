@@ -1092,10 +1092,18 @@ fn client_payout_ledger(config: &Config, signer: Arc<dyn Signer>) -> Arc<ClientP
 pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError> {
     let connector = runtime.connector.clone();
     let signer = runtime.signer.clone();
+    // Issue #556: the NIP-59 receiver key a privacy-wrapped claim
+    // (`ILP-Payment-Channel-Claim-Wrapped`, client-edge-spec.md §1.3) is
+    // opened with is this node's `[signer]` key, not a second key of its
+    // own -- `connector-config/src/announce.rs`'s stated rule is that
+    // `GET /ilp/identity` and every gift wrap this node opens both use
+    // `[signer]`, and a wrap's receiver is discoverable only through the
+    // former. No new config section exists or is needed for this.
+    let wrap_receiver_secret = Some(read_signer_secret(config.signer_key())?);
     let app = connector_client_edge::router_with_bootstrap_identity(
         connector.clone(),
         signer.clone(),
-        None,
+        wrap_receiver_secret,
         client_claim_gate(
             config,
             signer.clone(),
@@ -1495,6 +1503,222 @@ btp_endpoint = "wss://apex.example/ilp/btp"
         let extra = &terms["accepts"][0]["extra"];
         assert_eq!(extra["ilpAddresses"], serde_json::json!(["g.toon.apex"]));
         assert_eq!(extra["btpEndpoint"], "wss://apex.example/ilp/btp");
+    }
+
+    /// A structurally-valid EVM claim naming a channel this node has no
+    /// record of -- built once and reused both plaintext and wrapped, so
+    /// the only difference between the two requests below is the header
+    /// carrying it.
+    fn undeclared_channel_claim_json() -> String {
+        format!(
+            r#"{{
+                "version": "1.0",
+                "blockchain": "evm",
+                "messageId": "msg-1",
+                "timestamp": "2026-02-02T12:00:00.000Z",
+                "senderId": "peer-bob",
+                "channelId": "0x{channel}",
+                "nonce": 1,
+                "transferredAmount": "0",
+                "lockedAmount": "0",
+                "locksRoot": "0x{zeros}",
+                "signature": "0xabcdef",
+                "signerAddress": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1"
+            }}"#,
+            channel = "ab".repeat(32),
+            zeros = "0".repeat(64),
+        )
+    }
+
+    fn hex_encode_bytes(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn base64_encode_bytes(bytes: &[u8]) -> String {
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine;
+        BASE64.encode(bytes)
+    }
+
+    /// A well-formed `ILP-Payment-Channel-Claim-Wrapped` envelope, NIP-59
+    /// sealing `claim_json` to `receiver_public`.
+    fn wrapped_claim_header_value(claim_json: &str, receiver_public: &[u8; 65]) -> String {
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine;
+        use libsecp256k1::SecretKey;
+
+        let sender_secret = SecretKey::parse(&[3u8; 32]).expect("valid secret key");
+        let wrapped =
+            connector_signer::wrap_claim(claim_json.as_bytes(), &sender_secret, receiver_public)
+                .expect("wrap claim");
+        let envelope_json = format!(
+            r#"{{"ephemeralPublicKey":"{}","encryptedPayload":"{}","timestamp":0,"version":"1.0"}}"#,
+            hex_encode_bytes(&wrapped.ephemeral_public_key),
+            BASE64.encode(&wrapped.encrypted_payload),
+        );
+        BASE64.encode(envelope_json.as_bytes())
+    }
+
+    fn unmatched_destination_prepare_body() -> Vec<u8> {
+        connector_domain::Prepare {
+            amount: 0,
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(30),
+            execution_condition: [1u8; 32],
+            destination: "g.example.unmatched".to_string(),
+            data: Vec::new(),
+        }
+        .encode()
+    }
+
+    /// Issue #556, item 1: `router` now passes the `[signer]` key as
+    /// `wrap_receiver_secret` instead of `None`, so a claim wrapped to this
+    /// node's own signer key is unwrapped rather than refused
+    /// `WrapUnsupported` -- and then runs the exact same client-edge gate a
+    /// plaintext claim runs, unwrapping granting no exemption at the step
+    /// that follows it. Proven by wrapping a claim that names a channel
+    /// this node has no record of, and getting back the identical
+    /// `UnknownChannel` rejection a plaintext claim for the same channel
+    /// gets -- see the next test.
+    #[tokio::test]
+    async fn router_unwraps_a_claim_wrapped_to_the_signer_key_and_runs_the_identical_gate() {
+        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+"#,
+                key_path.display()
+            )
+        });
+        let runtime = build(&config).await.expect("build");
+        let receiver_public = runtime.signer.public_key().expect("signer public key");
+        let app = router(&runtime, &config).expect("router");
+
+        let claim_json = undeclared_channel_claim_json();
+        let wrapped_header = wrapped_claim_header_value(&claim_json, &receiver_public);
+
+        let plaintext_request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .header(
+                "ilp-payment-channel-claim",
+                base64_encode_bytes(claim_json.as_bytes()),
+            )
+            .body(Body::from(unmatched_destination_prepare_body()))
+            .unwrap();
+        let plaintext_response = app.clone().oneshot(plaintext_request).await.unwrap();
+        assert_eq!(plaintext_response.status(), StatusCode::OK);
+        let plaintext_bytes = hyper::body::to_bytes(plaintext_response.into_body())
+            .await
+            .unwrap();
+        let plaintext_reject =
+            connector_domain::Reject::decode(&plaintext_bytes).expect("decode reject");
+
+        let wrapped_request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .header("ilp-payment-channel-claim-wrapped", wrapped_header)
+            .body(Body::from(unmatched_destination_prepare_body()))
+            .unwrap();
+        let wrapped_response = app.oneshot(wrapped_request).await.unwrap();
+        assert_eq!(wrapped_response.status(), StatusCode::OK);
+        let wrapped_bytes = hyper::body::to_bytes(wrapped_response.into_body())
+            .await
+            .unwrap();
+        let wrapped_reject =
+            connector_domain::Reject::decode(&wrapped_bytes).expect("decode reject");
+
+        assert!(
+            wrapped_reject.message.contains("no record of"),
+            "expected an UnknownChannel rejection, got {wrapped_reject:?}"
+        );
+        assert_eq!(
+            wrapped_reject.code, plaintext_reject.code,
+            "a wrapped claim must run the identical gate a plaintext claim runs"
+        );
+        assert_eq!(
+            wrapped_reject.message, plaintext_reject.message,
+            "unwrapping must grant no exemption -- the same claim rejected the same way \
+             whichever header carried it"
+        );
+    }
+
+    /// Issue #556's other acceptance criterion for the receiver key: a wrap
+    /// addressed to a key that is not this node's `[signer]` key fails to
+    /// unwrap -- refused `WrapFailed` -- distinguishably both from a
+    /// malformed wrap (`Malformed`) and from the plaintext `UnknownChannel`
+    /// rejection the previous test established.
+    #[tokio::test]
+    async fn router_refuses_a_wrap_addressed_to_a_different_receiver_distinguishably() {
+        use libsecp256k1::{PublicKey, SecretKey};
+
+        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+"#,
+                key_path.display()
+            )
+        });
+        let runtime = build(&config).await.expect("build");
+        let app = router(&runtime, &config).expect("router");
+
+        // A key that is deliberately NOT this node's own [signer] key.
+        let other_receiver_secret = SecretKey::parse(&[9u8; 32]).expect("valid secret key");
+        let other_receiver_public = PublicKey::from_secret_key(&other_receiver_secret).serialize();
+        let claim_json = undeclared_channel_claim_json();
+        let wrong_receiver_header = wrapped_claim_header_value(&claim_json, &other_receiver_public);
+
+        let wrong_receiver_request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .header("ilp-payment-channel-claim-wrapped", wrong_receiver_header)
+            .body(Body::from(unmatched_destination_prepare_body()))
+            .unwrap();
+        let wrong_receiver_response = app.clone().oneshot(wrong_receiver_request).await.unwrap();
+        assert_eq!(wrong_receiver_response.status(), StatusCode::OK);
+        let wrong_receiver_bytes = hyper::body::to_bytes(wrong_receiver_response.into_body())
+            .await
+            .unwrap();
+        let wrong_receiver_reject =
+            connector_domain::Reject::decode(&wrong_receiver_bytes).expect("decode reject");
+        assert!(
+            wrong_receiver_reject
+                .message
+                .contains("failed to unwrap claim"),
+            "expected a WrapFailed rejection, got {wrong_receiver_reject:?}"
+        );
+
+        let malformed_request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .header("ilp-payment-channel-claim-wrapped", "not-valid-base64!!")
+            .body(Body::from(unmatched_destination_prepare_body()))
+            .unwrap();
+        let malformed_response = app.oneshot(malformed_request).await.unwrap();
+        assert_eq!(malformed_response.status(), StatusCode::OK);
+        let malformed_bytes = hyper::body::to_bytes(malformed_response.into_body())
+            .await
+            .unwrap();
+        let malformed_reject =
+            connector_domain::Reject::decode(&malformed_bytes).expect("decode reject");
+
+        assert_ne!(
+            wrong_receiver_reject.message, malformed_reject.message,
+            "a wrap addressed to the wrong receiver is a different failure from a malformed wrap"
+        );
+        assert_ne!(
+            wrong_receiver_reject.message,
+            "claim rejected: names a channel this connector has no record of, so there is no \
+             counterparty to verify its signature against",
+            "a wrap addressed to the wrong receiver must fail to unwrap, not fall through to an \
+             UnknownChannel rejection"
+        );
     }
 
     /// The one narrowing in this crate that guards a false-accept boundary

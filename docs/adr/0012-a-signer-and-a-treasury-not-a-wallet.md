@@ -41,3 +41,18 @@ channel collateral, and can spend from the treasury. Keeping the treasury in-pro
 chosen over an external funder because a connector that cannot open a channel cannot peer
 without human intervention, which defeats the point of leased routes and an automated
 controller.
+
+> **The treasury component this ADR names never shipped, and is now removed.** Issue #556
+> (2026-08) deleted `connector-signer::treasury` (`Treasury`, `ChainClient`,
+> `TreasuryError` and the rest) outright: outside its own `#[cfg(test)]` module, it had
+> exactly two references in the entire workspace — a `pub use` and a doc comment — and no
+> caller on any running node in the Rust connector's life. The collateral job this section
+> describes is done, and has been since #559/#542, by `connector-settlement`'s
+> `SettlementBackend` (`fund`/`redeem`/`channel_state`), constructed in
+> `connector-cli::runtime` and integration-tested against a real chain. Keeping an unwired
+> second implementation of the same concern is exactly the "undocumented, unjustified
+> machinery" [ADR 0033](0033-the-exposure-machinery-is-retired-not-restated.md) was written
+> to stop accumulating, and that ADR's precedent — remove a component whose job is already
+> done elsewhere, rather than restate it — is the one applied here. The **signer** half of
+> this ADR's title is unaffected: `connector-signer::Signer`/`LocalSigner`/`KmsSigner` are
+> unchanged.
