@@ -467,6 +467,12 @@ pub enum ConfigError {
     )]
     ClientChannelInvalidSolanaAccount { field: &'static str, value: String },
 
+    #[error("[[client_identities]] entry has an empty 'id'")]
+    ClientIdentityIdEmpty,
+
+    #[error("[[client_identities]] names identity '{id}' more than once")]
+    DuplicateClientIdentityId { id: String },
+
     #[error(
         "[[client_channels]] is configured but 'state_dir' is not: this node would accept \
          claims and keep their replay watermarks only in memory, so every claim a client \

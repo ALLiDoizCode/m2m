@@ -1,5 +1,7 @@
 # The Rust fleet runs in parallel under its own address space
 
+**Scope:** fleet and operations — not connector-internal, not wire law. See the [ADR index](README.md).
+
 The Rust connectors are deployed alongside the TypeScript ones, under a different ILP prefix,
 fronting the same running relay and store apps. Both networks are live at once. Traffic moves
 by changing a destination address, one client at a time, and the TypeScript prefix is deleted

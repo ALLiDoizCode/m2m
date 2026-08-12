@@ -1,5 +1,7 @@
 # Connectors peer over BTP or ILP-over-HTTP; the raw-TCP peer wire is deleted
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
 > **The flush timer and the exposure ceiling this ADR reasons with throughout are retired** by
 > [ADR 0033](0033-the-exposure-machinery-is-retired-not-restated.md) (issue #882), on top of
 > [ADR 0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md)'s retirement of

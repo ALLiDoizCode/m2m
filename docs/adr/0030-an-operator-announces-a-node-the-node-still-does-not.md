@@ -1,5 +1,7 @@
 # An operator announces a node; the node still does not
 
+**Scope:** fleet and operations — not connector-internal, not wire law. See the [ADR index](README.md).
+
 A running connector never pushes facts about itself into a network. An **operator** may, by running
 `connector announce <relay-discovery-url>` on the node being announced — a one-shot command, from the
 box that holds the identity key, paid for through that node's own routing like any other write.

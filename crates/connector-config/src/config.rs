@@ -9,6 +9,7 @@ use url::Url;
 use crate::announce::{resolve_announce, AnnounceConfig, RawAnnounceConfig};
 use crate::client_channel::{resolve_client_channels, ClientChannelConfig, RawClientChannel};
 use crate::error::ConfigError;
+use crate::identity::{resolve_client_identities, ClientIdentityConfig, RawClientIdentity};
 use crate::operator::{resolve_operator, OperatorConfig, RawOperatorConfig};
 use crate::peer::{parse_peer_exposure, resolve_peers, PeerConfig, PeerExposure, RawPeer};
 use crate::peer_channel::{resolve_peer_channels, PeerChannelConfig, RawPeerChannel};
@@ -109,6 +110,15 @@ struct RawConfig {
     /// so every claim presented at its client edge is refused as unknown.
     #[serde(default)]
     client_channels: Vec<RawClientChannel>,
+    /// The client-edge identities this node authenticates over HTTP (issue
+    /// #502, `docs/protocol/client-edge-spec.md` §1.2): an `id` a request
+    /// presents via `ILP-Peer-Id` and the `Authorization: Bearer <secret>`
+    /// it must match. Absent -- or empty -- means this node configures no
+    /// peer identity, so every request is either anonymous (no
+    /// `ILP-Peer-Id` presented) or refused `401` (one presented, matching
+    /// nothing); anonymity stays a first-class path either way.
+    #[serde(default)]
+    client_identities: Vec<RawClientIdentity>,
     /// The directory this node keeps its durable money state in (issue
     /// #605): the journals whose replay is what makes a claim watermark
     /// survive a restart. Absent means this node writes none -- allowed
@@ -234,6 +244,7 @@ pub struct Config {
     announce: Option<AnnounceConfig>,
     settlements: Vec<SettlementConfig>,
     client_channels: Vec<ClientChannelConfig>,
+    client_identities: Vec<ClientIdentityConfig>,
     state_dir: Option<PathBuf>,
     channel_liveness_ttl: Option<Duration>,
     channel_serve_stale: Option<Duration>,
@@ -331,6 +342,7 @@ impl Config {
         let announce = resolve_announce(raw.announce)?;
         let settlements = resolve_settlement(raw.settlement)?;
         let client_channels = resolve_client_channels(raw.client_channels)?;
+        let client_identities = resolve_client_identities(raw.client_identities)?;
         // Namespace disjointness (`peer-carriage-spec.md` §1.8). Peer and
         // client watermarks are separate records by design, which is only
         // safe while no channel is in both: two namespaces over one
@@ -524,6 +536,7 @@ impl Config {
             announce,
             settlements,
             client_channels,
+            client_identities,
             state_dir,
             channel_liveness_ttl,
             channel_serve_stale,
@@ -713,6 +726,15 @@ impl Config {
     /// than trusted about who signed it.
     pub fn client_channels(&self) -> &[ClientChannelConfig] {
         &self.client_channels
+    }
+
+    /// The client-edge identities this node authenticates over HTTP (issue
+    /// #502, `docs/protocol/client-edge-spec.md` §1.2). Empty means this
+    /// node configures no peer identity -- every request is either
+    /// anonymous or refused `401` for presenting an `ILP-Peer-Id` that
+    /// matches nothing.
+    pub fn client_identities(&self) -> &[ClientIdentityConfig] {
+        &self.client_identities
     }
 
     /// The directory this node keeps its durable money state in -- the
@@ -2398,6 +2420,70 @@ key_file = "{}"
         .expect("load");
 
         assert_eq!(config.state_dir(), None);
+    }
+
+    // -- client_identities (issue #502) --
+
+    /// `[[client_identities]]` needs no `state_dir` -- it is an HTTP-layer
+    /// credential, not a payment channel, and carries no watermark to lose.
+    #[test]
+    fn client_identities_load_and_need_no_state_dir() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[[client_identities]]
+id = "peer-a"
+secret = "s3cr3t"
+
+[[client_identities]]
+id = "peer-b"
+"#,
+                key_path.display()
+            )
+        })
+        .expect("load");
+
+        assert_eq!(config.state_dir(), None);
+        let identities = config.client_identities();
+        assert_eq!(identities.len(), 2);
+        assert_eq!(identities[0].id(), "peer-a");
+        assert_eq!(identities[0].secret(), "s3cr3t");
+        assert_eq!(identities[1].id(), "peer-b");
+        assert_eq!(identities[1].secret(), "");
+    }
+
+    /// AC: "a duplicate identity is refused at load."
+    #[test]
+    fn a_duplicate_client_identity_id_is_refused_at_load() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[[client_identities]]
+id = "peer-a"
+secret = "one"
+
+[[client_identities]]
+id = "peer-a"
+secret = "two"
+"#,
+                key_path.display()
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::DuplicateClientIdentityId { id }) if id == "peer-a"
+        ));
     }
 
     /// Issue #649: how long a chain-resolved channel's liveness may be
