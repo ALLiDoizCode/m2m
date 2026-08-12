@@ -1,6 +1,6 @@
 # Architecture decision records
 
-33 records, and they do **three different jobs**. Most readers only need one group.
+35 records, and they do **three different jobs**. Most readers only need one group.
 
 The numbers are permanent and are never reused or renumbered — they are cited over a thousand
 times across this repo and from `toon-meta`, `relay` and `store`. This index groups them by
@@ -8,8 +8,8 @@ scope; it does not move them.
 
 | If you are…                                                                 | Read                                                               |
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| changing the connector's code or structure                                  | **[Connector architecture](#connector-architecture)** — 10 records |
-| writing or fixing another implementation (a client SDK, a second connector) | **[Protocol law](#protocol-law)** — 20 records                     |
+| changing the connector's code or structure                                  | **[Connector architecture](#connector-architecture)** — 11 records |
+| writing or fixing another implementation (a client SDK, a second connector) | **[Protocol law](#protocol-law)** — 21 records                     |
 | deploying, migrating or operating the fleet                                 | **[Fleet and operations](#fleet-and-operations)** — 3 records      |
 
 > **Scope note.** A record's group says _who is bound by it_, not where it is implemented.
@@ -24,18 +24,19 @@ scope; it does not move them.
 Internal to this codebase. Changing one of these changes how the connector is built; it does
 not change what anything else must do.
 
-| #                                                          | Decision                                                               | Status  |
-| ---------------------------------------------------------- | ---------------------------------------------------------------------- | ------- |
-| [0001](0001-rust-workspace-library-first.md)               | The connector is a Rust library first, a binary second                 | current |
-| [0002](0002-drop-mina-from-the-rust-connector.md)          | Settles on EVM and Solana only; Mina is dropped                        | current |
-| [0005](0005-claims-are-truth-balances-are-a-projection.md) | Claims are the source of truth; balances are a projection              | current |
-| [0006](0006-the-connector-is-mechanism-not-policy.md)      | The connector is mechanism; discovery and route policy live outside it | current |
-| [0007](0007-testing-doctrine-fakes-yes-mocks-no.md)        | Property tests over a pure core; fakes are allowed, mocks are not      | current |
-| [0008](0008-operator-surface-splits-read-from-write.md)    | The operator surface splits read authority from write authority        | current |
-| [0009](0009-one-typed-config-file-no-environment-layer.md) | Configuration is one typed file with no environment-variable layer     | current |
-| [0012](0012-a-signer-and-a-treasury-not-a-wallet.md)       | The connector holds a signer and a treasury, not a wallet              | current |
-| [0014](0014-metrics-surface-and-packet-correlated-logs.md) | The metrics surface is decided, not accreted                           | current |
-| [0015](0015-read-mostly-state-is-a-swapped-snapshot.md)    | Read-mostly state is a swapped snapshot; the packet path never locks   | current |
+| #                                                                        | Decision                                                               | Status                 |
+| ------------------------------------------------------------------------ | ---------------------------------------------------------------------- | ---------------------- |
+| [0001](0001-rust-workspace-library-first.md)                             | The connector is a Rust library first, a binary second                 | current                |
+| [0002](0002-drop-mina-from-the-rust-connector.md)                        | Settles on EVM and Solana only; Mina is dropped                        | current                |
+| [0005](0005-claims-are-truth-balances-are-a-projection.md)               | Claims are the source of truth; balances are a projection              | current                |
+| [0006](0006-the-connector-is-mechanism-not-policy.md)                    | The connector is mechanism; discovery and route policy live outside it | current                |
+| [0007](0007-testing-doctrine-fakes-yes-mocks-no.md)                      | Property tests over a pure core; fakes are allowed, mocks are not      | current                |
+| [0008](0008-operator-surface-splits-read-from-write.md)                  | The operator surface splits read authority from write authority        | current                |
+| [0009](0009-one-typed-config-file-no-environment-layer.md)               | Configuration is one typed file with no environment-variable layer     | current                |
+| [0012](0012-a-signer-and-a-treasury-not-a-wallet.md)                     | The connector holds a signer and a treasury, not a wallet              | current                |
+| [0014](0014-metrics-surface-and-packet-correlated-logs.md)               | The metrics surface is decided, not accreted                           | current                |
+| [0015](0015-read-mostly-state-is-a-swapped-snapshot.md)                  | Read-mostly state is a swapped snapshot; the packet path never locks   | current                |
+| [0034](0034-a-runtime-peer-route-table-never-shadows-the-config-file.md) | A runtime peer/route table never shadows the config file               | current — extends 0009 |
 
 ---
 
@@ -58,6 +59,7 @@ outside this repository.
 | [0029](0029-a-peer-wire-arrival-to-a-priced-termination-must-cover-its-price.md) | A peer-wire arrival to a priced termination must cover its price                     | **partly retired** — its `F03` price check stands; the exposure ceiling and `T04` it references are retired by 0033 |
 | [0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md)  | A peer PREPARE arrives with its covering claim, or it is greeted                     | current — **retires the credit window**                                                                             |
 | [0033](0033-the-exposure-machinery-is-retired-not-restated.md)                   | The exposure machinery is retired, not restated                                      | current — **retires `ceiling` and `flush_interval_ms`**                                                             |
+| [0035](0035-request-request-binding-ships-no-new-mechanism.md)                   | Request-request binding ships no new mechanism                                       | current — the claim gate already closes the threat                                                                  |
 
 ### The wire and its carriage
 

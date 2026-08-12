@@ -1,5 +1,7 @@
 # A runtime peer/route table never shadows the config file
 
+**Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
+
 Issue #884 (toon-meta#316, child C1 of #867 "sell peering") makes the peer/route table mutable and
 durable at runtime for the first time: `POST`/`DELETE /peers*` and `POST`/`DELETE /routes/peers*`
 over the operator surface. This ADR states the precedence rule between a config-file row and a

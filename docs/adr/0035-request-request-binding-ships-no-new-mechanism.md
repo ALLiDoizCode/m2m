@@ -1,5 +1,7 @@
 # Request-request binding ships no new mechanism
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
 Issue #508 asked whether a claim must be cryptographically bound to the specific request it paid
 for, so that a captured claim cannot be replayed against different work or a cheaper route. It
 need not. The threat the binding was designed against is already closed — mostly by construction,
