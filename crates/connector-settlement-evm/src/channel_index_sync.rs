@@ -14,7 +14,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ethers::contract::ContractError;
+use ethers::contract::{ContractError, EthEvent};
 use ethers::providers::{Http, Middleware, Provider, ProviderError};
 use ethers::types::Address;
 
@@ -111,90 +111,78 @@ impl EvmChannelIndexSyncer {
         Ok(end - start + 1)
     }
 
+    /// Every log this index folds in, over `from..=to`. One `eth_getLogs`
+    /// per event type -- the four topics have nothing in common to filter
+    /// on in a single query -- gathered unordered, since
+    /// [`EvmChannelIndex::apply`] sorts the whole batch into chain order
+    /// before applying any of it.
     async fn query_range(
         &self,
         from: u64,
         to: u64,
     ) -> Result<Vec<OrderedChannelIndexEvent>, ChannelIndexSyncError> {
         let mut events = Vec::new();
-
-        let opened = self
-            .contract
-            .event::<ChannelOpenedFilter>()
-            .from_block(from)
-            .to_block(to)
-            .query_with_meta()
-            .await
-            .map_err(decode_error)?;
-        for (log, meta) in opened {
-            events.push(OrderedChannelIndexEvent {
-                block_number: meta.block_number.as_u64(),
-                log_index: meta.log_index.as_u64(),
-                event: ChannelIndexEvent::Opened {
-                    channel_id: log.channel_id,
-                    participant1: log.participant_1,
-                    participant2: log.participant_2,
-                },
-            });
-        }
-
-        let deposits = self
-            .contract
-            .event::<ChannelNewDepositFilter>()
-            .from_block(from)
-            .to_block(to)
-            .query_with_meta()
-            .await
-            .map_err(decode_error)?;
-        for (log, meta) in deposits {
-            events.push(OrderedChannelIndexEvent {
-                block_number: meta.block_number.as_u64(),
-                log_index: meta.log_index.as_u64(),
-                event: ChannelIndexEvent::NewDeposit {
-                    channel_id: log.channel_id,
-                    participant: log.participant,
-                    total_deposit: log.total_deposit,
-                },
-            });
-        }
-
-        let settled = self
-            .contract
-            .event::<ChannelSettledFilter>()
-            .from_block(from)
-            .to_block(to)
-            .query_with_meta()
-            .await
-            .map_err(decode_error)?;
-        for (log, meta) in settled {
-            events.push(OrderedChannelIndexEvent {
-                block_number: meta.block_number.as_u64(),
-                log_index: meta.log_index.as_u64(),
-                event: ChannelIndexEvent::Settled {
-                    channel_id: log.channel_id,
-                },
-            });
-        }
-
-        let closed_by_expiry = self
-            .contract
-            .event::<ChannelClosedByExpiryFilter>()
-            .from_block(from)
-            .to_block(to)
-            .query_with_meta()
-            .await
-            .map_err(decode_error)?;
-        for (log, meta) in closed_by_expiry {
-            events.push(OrderedChannelIndexEvent {
-                block_number: meta.block_number.as_u64(),
-                log_index: meta.log_index.as_u64(),
-                event: ChannelIndexEvent::ClosedByExpiry {
-                    channel_id: log.channel_id,
-                },
-            });
-        }
-
+        self.collect_logs(from, to, &mut events, |log: ChannelOpenedFilter| {
+            ChannelIndexEvent::Opened {
+                channel_id: log.channel_id,
+                participant1: log.participant_1,
+                participant2: log.participant_2,
+            }
+        })
+        .await?;
+        self.collect_logs(from, to, &mut events, |log: ChannelNewDepositFilter| {
+            ChannelIndexEvent::NewDeposit {
+                channel_id: log.channel_id,
+                participant: log.participant,
+                total_deposit: log.total_deposit,
+            }
+        })
+        .await?;
+        self.collect_logs(from, to, &mut events, |log: ChannelSettledFilter| {
+            ChannelIndexEvent::Settled {
+                channel_id: log.channel_id,
+            }
+        })
+        .await?;
+        self.collect_logs(from, to, &mut events, |log: ChannelClosedByExpiryFilter| {
+            ChannelIndexEvent::ClosedByExpiry {
+                channel_id: log.channel_id,
+            }
+        })
+        .await?;
         Ok(events)
+    }
+
+    /// One event type's logs over `from..=to`, decoded by `into` and tagged
+    /// with the `(block_number, log_index)` position the chain gave them.
+    async fn collect_logs<E, F>(
+        &self,
+        from: u64,
+        to: u64,
+        events: &mut Vec<OrderedChannelIndexEvent>,
+        into: F,
+    ) -> Result<(), ChannelIndexSyncError>
+    where
+        E: EthEvent,
+        F: Fn(E) -> ChannelIndexEvent,
+    {
+        let logs = self
+            .contract
+            .event::<E>()
+            .from_block(from)
+            .to_block(to)
+            .query_with_meta()
+            .await
+            .map_err(decode_error)?;
+        events.extend(
+            logs.into_iter()
+                .map(|(log, meta)| OrderedChannelIndexEvent {
+                    block_number: meta.block_number.as_u64(),
+                    log_index: meta.log_index.as_u64(),
+                    event: into(log),
+                }),
+        );
+        Ok(())
     }
 
     /// Backfill-then-poll forever: never returns except by being dropped.

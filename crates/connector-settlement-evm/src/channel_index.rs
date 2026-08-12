@@ -60,12 +60,12 @@
 //! This index only ever applies a log once it is
 //! `channel_index_confirmations` blocks deep (issue #661 decision point 4).
 //! There is no unwind path, on purpose: nothing this index answers needs
-//! head liveness (the case it serves -- a buyer whose channel-open has been
-//! sitting on chain for a while -- already tolerates the same confirmation
-//! delay the existing direct read does not impose, but also does not need
-//! not to), and a channel opened inside the confirmation window is a
-//! [`ChannelIndexLookup::Miss`] here, which falls through to the direct
-//! `eth_call` read exactly as it does today.
+//! head liveness. The case it serves is a buyer whose channel-open has been
+//! sitting on chain for a while, so waiting out a confirmation depth costs
+//! that buyer nothing; and a channel opened *inside* the window -- the only
+//! case the delay could hurt -- is a [`ChannelIndexLookup::Miss`] here,
+//! which falls through to the direct `eth_call` read and is served exactly
+//! as fast as it is today.
 
 use std::collections::HashMap;
 use std::fs;
@@ -73,7 +73,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
-use ethers::types::{Address, U256};
+use ethers::types::{Address, H256, U256};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -264,13 +264,11 @@ fn parse_address(value: &str, path: &Path) -> Result<Address, EvmChannelIndexErr
         })
 }
 
+/// The same `{:#x}` idiom [`format_address`] uses -- `H256`'s `LowerHex`
+/// prints all 32 bytes (its `Display` abbreviates, so `{:#x}` rather than
+/// `{}` is load-bearing here).
 fn format_channel_id(id: [u8; 32]) -> String {
-    let mut hex = String::with_capacity(2 + 64);
-    hex.push_str("0x");
-    for byte in id {
-        hex.push_str(&format!("{byte:02x}"));
-    }
-    hex
+    format!("{:#x}", H256::from(id))
 }
 
 fn parse_channel_id(value: &str, path: &Path) -> Result<[u8; 32], EvmChannelIndexError> {
@@ -317,6 +315,20 @@ pub struct EvmChannelIndex {
 }
 
 impl EvmChannelIndex {
+    /// No checkpoint and no channels, writing through to `path` from the
+    /// first [`Self::apply`] on. The three ways to start from nothing --
+    /// no `state_dir` at all, a snapshot file not written yet, and one
+    /// truncated to empty -- differ only in that `path`.
+    fn empty(path: Option<PathBuf>) -> Self {
+        EvmChannelIndex {
+            path,
+            state: RwLock::new(IndexState {
+                last_indexed_block: None,
+                channels: HashMap::new(),
+            }),
+        }
+    }
+
     /// Open the durable snapshot at `path` (or start empty if it does not
     /// exist yet), falling back to an in-memory-only index when `path` is
     /// `None`. `from_block` is the cold-start floor: it is only consulted by
@@ -326,35 +338,17 @@ impl EvmChannelIndex {
     /// accurate figure to resume from.
     pub fn open(path: Option<&Path>) -> Result<Self, EvmChannelIndexError> {
         let Some(path) = path else {
-            return Ok(EvmChannelIndex {
-                path: None,
-                state: RwLock::new(IndexState {
-                    last_indexed_block: None,
-                    channels: HashMap::new(),
-                }),
-            });
+            return Ok(EvmChannelIndex::empty(None));
         };
         if !path.exists() {
-            return Ok(EvmChannelIndex {
-                path: Some(path.to_path_buf()),
-                state: RwLock::new(IndexState {
-                    last_indexed_block: None,
-                    channels: HashMap::new(),
-                }),
-            });
+            return Ok(EvmChannelIndex::empty(Some(path.to_path_buf())));
         }
         let text = fs::read_to_string(path).map_err(|source| EvmChannelIndexError::Io {
             path: path.to_path_buf(),
             source,
         })?;
         if text.trim().is_empty() {
-            return Ok(EvmChannelIndex {
-                path: Some(path.to_path_buf()),
-                state: RwLock::new(IndexState {
-                    last_indexed_block: None,
-                    channels: HashMap::new(),
-                }),
-            });
+            return Ok(EvmChannelIndex::empty(Some(path.to_path_buf())));
         }
         let snapshot: Snapshot =
             serde_json::from_str(&text).map_err(|source| EvmChannelIndexError::Corrupt {
@@ -513,37 +507,46 @@ impl EvmChannelIndex {
         let Some(path) = &self.path else {
             return Ok(());
         };
-        let mut stored_channels: Vec<StoredChannel> = state
-            .channels
-            .iter()
-            .map(|(channel_id, channel)| {
-                let mut deposits: Vec<StoredDeposit> = channel
-                    .deposits
-                    .iter()
-                    .map(|(participant, amount)| StoredDeposit {
-                        participant: format_address(*participant),
-                        deposit: amount.to_string(),
-                    })
-                    .collect();
-                deposits.sort_by(|a, b| a.participant.cmp(&b.participant));
-                StoredChannel {
-                    channel_id: format_channel_id(*channel_id),
-                    participant1: format_address(channel.participant1),
-                    participant2: format_address(channel.participant2),
-                    deposits,
-                    status: channel.status.into(),
-                }
-            })
-            .collect();
-        stored_channels.sort_by(|a, b| a.channel_id.cmp(&b.channel_id));
-        let snapshot = Snapshot {
-            last_indexed_block: state.last_indexed_block,
-            channels: stored_channels,
-        };
+        let snapshot = snapshot_of(&state);
         // Dropped before any I/O: persisting must not hold up a lookup
         // racing in on the read side.
         drop(state);
         persist_snapshot(path, &snapshot)
+    }
+}
+
+/// `state` in the durable snapshot's own shape. Channels, and each
+/// channel's deposits, are sorted by their string key so two runs over the
+/// same state produce byte-identical files -- a `HashMap`'s iteration order
+/// is not stable across runs, and an operator diffing this file (or reading
+/// it under `jq`) should see the table change only when the table changed.
+fn snapshot_of(state: &IndexState) -> Snapshot {
+    let mut channels: Vec<StoredChannel> = state
+        .channels
+        .iter()
+        .map(|(channel_id, channel)| {
+            let mut deposits: Vec<StoredDeposit> = channel
+                .deposits
+                .iter()
+                .map(|(participant, amount)| StoredDeposit {
+                    participant: format_address(*participant),
+                    deposit: amount.to_string(),
+                })
+                .collect();
+            deposits.sort_by(|a, b| a.participant.cmp(&b.participant));
+            StoredChannel {
+                channel_id: format_channel_id(*channel_id),
+                participant1: format_address(channel.participant1),
+                participant2: format_address(channel.participant2),
+                deposits,
+                status: channel.status.into(),
+            }
+        })
+        .collect();
+    channels.sort_by(|a, b| a.channel_id.cmp(&b.channel_id));
+    Snapshot {
+        last_indexed_block: state.last_indexed_block,
+        channels,
     }
 }
 
