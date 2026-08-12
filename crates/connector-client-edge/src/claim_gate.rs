@@ -170,6 +170,16 @@ pub enum ClaimIngestRejection {
     /// be checked against. Matches the peer wire's own
     /// `connector_runtime::ClaimRejectReason::UnknownChannel`.
     UnknownChannel,
+    /// The claim names a channel a [`crate::ClientChannelSource`] has a
+    /// durable, definitive record of having settled or closed by expiry
+    /// (issue #661's local channel index) -- reported without a chain read,
+    /// and kept distinct from [`ClaimIngestRejection::UnknownChannel`] for
+    /// the same reason every variant here is kept distinct from its
+    /// neighbours: "this channel is done" is a stronger, more actionable
+    /// fact than "this connector has no record of it", and conflating the
+    /// two would send an operator investigating a buyer's genuinely spent
+    /// channel to go looking for a registration problem instead.
+    ChannelTerminal(String),
     /// This connector could not find out who the claim's channel belongs
     /// to (issue #556) -- its [`crate::ClientChannelSource`] failed, e.g.
     /// an unreachable RPC endpoint. Distinct from
@@ -281,6 +291,10 @@ impl ClaimIngestRejection {
                  connector has no record of, so there is no counterparty to verify its \
                  signature against"
                 .to_string(),
+            ClaimIngestRejection::ChannelTerminal(reason) => format!(
+                "claim rejected: this channel has settled or closed by expiry and can never be \
+                 redeemed again: {reason}"
+            ),
             ClaimIngestRejection::ChannelLookupFailed(reason) => format!(
                 "claim rejected: this connector could not look up the channel's counterparty, \
                  so the claim cannot be verified -- retry once the lookup succeeds: {reason}"
@@ -1170,6 +1184,9 @@ fn resolution_refusal(error: ChannelResolutionError) -> ClaimIngestRejection {
                 window_secs: exhausted.window.as_secs(),
                 max_wait_ms: exhausted.max_wait.as_millis() as u64,
             }
+        }
+        ChannelResolutionError::Terminal(terminal) => {
+            ClaimIngestRejection::ChannelTerminal(terminal.0)
         }
     }
 }

@@ -14,6 +14,9 @@ chrono = "0.4"
 thiserror = "2"
 ethers = { version = "2", default-features = false, features = ["rustls"] }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
 
 [dev-dependencies]
 connector-settlement = { path = "../connector-settlement", features = ["test-util"] }
@@ -21,3 +24,4 @@ connector-signer = { path = "../connector-signer" }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
 libsecp256k1 = "0.6"
 serde_json = "1"
+tempfile = "3"

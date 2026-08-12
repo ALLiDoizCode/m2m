@@ -26,7 +26,10 @@ use connector_runtime::{
     PeerRoute, PeerRouteStore, PeerRouteStoreError, SystemClock,
 };
 use connector_settlement::{SettlementBackend, SettlementError};
-use connector_settlement_evm::EvmSettlementBackend;
+use connector_settlement_evm::{
+    ChannelIndexLookup, EvmChannelIndex, EvmChannelIndexSyncer, EvmSettlementBackend,
+    DEFAULT_POLL_INTERVAL,
+};
 use connector_settlement_solana::SolanaSettlementBackend;
 use connector_signer::{derive_evm_address, LocalSigner, Signer, SignerError};
 
@@ -100,6 +103,16 @@ pub enum RuntimeError {
     RuntimePeerRouteTableUnusable {
         path: PathBuf,
         source: PeerRouteStoreError,
+    },
+    /// The local EVM channel index's durable snapshot under `state_dir`
+    /// exists but could not be read (unreadable, or corrupt JSON) -- issue
+    /// #661, same reasoning as [`RuntimeError::RuntimePeerRouteTableUnusable`]:
+    /// this index is rebuildable from chain, but a corrupt file on disk is
+    /// still refused rather than silently discarded, so an operator sees
+    /// the problem instead of an unexplained full re-backfill.
+    EvmChannelIndexUnusable {
+        path: PathBuf,
+        source: connector_settlement_evm::EvmChannelIndexError,
     },
     /// A `[[peer_channels]]` row's `channel_id` is not a shape
     /// [`connector_runtime::ClaimBook`] can file a watermark under (issue
@@ -187,6 +200,14 @@ impl fmt::Display for RuntimeError {
                 f,
                 "failed to read the runtime peer/route table at {}: {source} -- the connector \
                  refuses to start rather than serve with a peer/route table it cannot vouch for",
+                path.display()
+            ),
+            RuntimeError::EvmChannelIndexUnusable { path, source } => write!(
+                f,
+                "failed to read the local EVM channel index at {}: {source} -- the connector \
+                 refuses to start rather than serve with a channel index it cannot vouch for. \
+                 Since this index is rebuildable from chain, removing the file lets the node \
+                 start and re-backfill from channel_index_from_block instead",
                 path.display()
             ),
             RuntimeError::AnnounceIdentityKeyFileUnreadable { path, source } => write!(
@@ -469,6 +490,78 @@ impl ClientChannelSource for SettlementChannelSource {
     }
 }
 
+/// Wraps [`SettlementChannelSource`] with the local EVM channel index
+/// (issue #661): a channel the index has caught up to answers from a
+/// `HashMap` probe -- no `eth_call` at all -- and a channel the index has
+/// not caught up to (never opened, opened inside the confirmation window,
+/// or the index's subscription is lagging/down) falls through to exactly
+/// the direct chain read [`SettlementChannelSource`] always performed,
+/// unchanged. This is what makes shipping the index safe incrementally: a
+/// node whose sync has never once succeeded behaves byte-identically to a
+/// node built before this issue landed.
+///
+/// `EvmChannel::chain_id`/`token_network_address` (the EIP-712 domain) come
+/// from `self.fallback.backend` rather than from a field the index itself
+/// stores per channel: every channel this index ever indexes belongs to the
+/// one `TokenNetwork` this node's `[settlement.evm]` names, so the domain is
+/// one constant for the whole index, not a per-channel fact -- storing it
+/// once on the backend this source already holds is the same information,
+/// without repeating an invariant on every record.
+struct IndexedEvmChannelSource {
+    index: Arc<EvmChannelIndex>,
+    fallback: SettlementChannelSource,
+}
+
+impl fmt::Debug for IndexedEvmChannelSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IndexedEvmChannelSource")
+            .field("fallback", &self.fallback)
+            .field("index_last_indexed_block", &self.index.last_indexed_block())
+            .finish()
+    }
+}
+
+#[async_trait]
+impl ClientChannelSource for IndexedEvmChannelSource {
+    async fn evm_channel(
+        &self,
+        channel_id: &[u8; 32],
+    ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
+        match self
+            .index
+            .lookup(channel_id, self.fallback.backend.own_address())
+        {
+            ChannelIndexLookup::Active {
+                counterparty,
+                deposit,
+            } => Ok(Some(EvmChannel {
+                counterparty: counterparty.to_fixed_bytes(),
+                chain_id: self.fallback.backend.chain_id(),
+                token_network_address: self.fallback.backend.address().to_fixed_bytes(),
+                deposit_floor: DepositFloor::AtLeast(saturating_u64(deposit)),
+            })),
+            // Reported `None` here -- "not a channel this connector can be
+            // paid on" -- and refined to a distinguishable refusal by
+            // `evm_channel_terminal` below, which the registry consults
+            // only after seeing this `None`. Never falls through to the
+            // chain: the index has already seen the terminal log, so a
+            // chain read could only confirm what is already known.
+            ChannelIndexLookup::Terminal => Ok(None),
+            // The one case that costs an RPC, exactly as it always has:
+            // this index has nothing to say, one way or the other.
+            ChannelIndexLookup::Miss => self.fallback.evm_channel(channel_id).await,
+        }
+    }
+
+    async fn evm_channel_terminal(&self, channel_id: &[u8; 32]) -> bool {
+        matches!(
+            self.index
+                .lookup(channel_id, self.fallback.backend.own_address()),
+            ChannelIndexLookup::Terminal
+        )
+    }
+}
+
 /// A `U256` narrowed to `u64`, clamped rather than wrapped or panicking
 /// (`ethers`' own `U256::as_u64` panics on overflow). Only ever used for a
 /// deposit that bounds a `u64` claim amount from above, where clamping to
@@ -537,6 +630,11 @@ const CLIENT_EDGE_JOURNAL: &str = "client-edge-claims.log";
 /// not an append-only journal line format like the two above (see
 /// `connector_runtime::PeerRouteStore`'s own docs for why).
 const RUNTIME_PEER_ROUTE_TABLE: &str = "runtime-peers.json";
+/// Issue #661's local EVM channel index -- a whole-table JSON snapshot for
+/// the same reason [`RUNTIME_PEER_ROUTE_TABLE`] is one rather than an
+/// append-only log: a settled channel is marked terminal in place, not
+/// appended over (see `connector_settlement_evm::channel_index`'s own doc).
+const EVM_CHANNEL_INDEX: &str = "evm-channel-index.json";
 
 /// Open `name` under this node's configured `state_dir`, creating the
 /// directory if it is not there yet.
@@ -562,6 +660,24 @@ fn open_journal(state_dir: &Path, name: &str) -> Result<Arc<dyn Journal>, Runtim
         },
     })?;
     Ok(Arc::new(journal))
+}
+
+/// Open the local EVM channel index's durable snapshot under `state_dir`
+/// (issue #661), or start an in-memory-only index when this node names no
+/// `state_dir` at all -- the same degrade issue #884's runtime peer/route
+/// table already established (ADR 0034): a node with no `state_dir` still
+/// saves every RPC call the index avoids within a run, it just re-backfills
+/// from `channel_index_from_block` on every restart rather than resuming
+/// from a checkpoint.
+fn open_evm_channel_index(state_dir: Option<&Path>) -> Result<Arc<EvmChannelIndex>, RuntimeError> {
+    let path = state_dir.map(|state_dir| state_dir.join(EVM_CHANNEL_INDEX));
+    let index = EvmChannelIndex::open(path.as_deref()).map_err(|source| {
+        RuntimeError::EvmChannelIndexUnusable {
+            path: path.unwrap_or_default(),
+            source,
+        }
+    })?;
+    Ok(Arc::new(index))
 }
 
 /// Name every plaintext peering at startup, loudly (issue #678, gap 3).
@@ -819,8 +935,35 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
                 settlements.push(connector_client_edge::X402ChainSettlementTerms::Evm(
                     evm_terms,
                 ));
-                client_channel_source_evm = Some(Arc::new(SettlementChannelSource {
-                    backend: backend.clone(),
+                // Issue #661: the local channel index answers a resolution
+                // from a `HashMap` probe once it has caught up to a
+                // channel, and falls through to exactly the direct chain
+                // read `SettlementChannelSource` always performed for
+                // everything it has not (see `IndexedEvmChannelSource`'s
+                // own doc). Opened -- and, on a durable failure, refused --
+                // before any traffic is served, same as every other
+                // `state_dir`-scoped store (ADR 0009).
+                let channel_index = open_evm_channel_index(config.state_dir())?;
+                let syncer = EvmChannelIndexSyncer::new(
+                    evm.rpc_url(),
+                    backend.address(),
+                    evm.channel_index_confirmations(),
+                    evm.channel_index_from_block(),
+                )
+                .map_err(|source| {
+                    RuntimeError::Settlement(SettlementError::Backend(source.to_string()))
+                })?;
+                // Backfill-then-poll runs for the life of the process,
+                // never blocking startup (issue #661's own acceptance
+                // criterion) -- a lagging or never-connecting sync logs at
+                // `warn` (`EvmChannelIndexSyncer::run`'s own doc) and the
+                // fallback below keeps serving exactly as it does today.
+                tokio::spawn(syncer.run(Arc::clone(&channel_index), DEFAULT_POLL_INTERVAL));
+                client_channel_source_evm = Some(Arc::new(IndexedEvmChannelSource {
+                    index: channel_index,
+                    fallback: SettlementChannelSource {
+                        backend: backend.clone(),
+                    },
                 }));
                 connector = connector
                     .with_settlement(SettlementChain::Evm, backend as Arc<dyn SettlementBackend>);
@@ -2275,6 +2418,7 @@ write_keys = ["{key}"]
         use connector_settlement_evm::test_support::{
             anvil_available, Anvil, DEPLOYER_PRIVATE_KEY,
         };
+        use connector_settlement_evm::{ChannelIndexEvent, OrderedChannelIndexEvent};
         use connector_settlement_solana::test_support::{
             fund, require_solana_test_validator, SolanaValidator, LOCAL_TEST_PROGRAM_ID,
         };
@@ -2379,6 +2523,108 @@ key_file = "{key_path}"
                 .await
                 .expect("a settlement backend was constructed and attached");
             assert_eq!(opened.deposited, 0);
+        }
+
+        fn channel_id_bytes(id: &str) -> [u8; 32] {
+            let hex_digits = id.trim_start_matches("0x");
+            let mut out = [0u8; 32];
+            for (i, byte) in out.iter_mut().enumerate() {
+                *byte = u8::from_str_radix(&hex_digits[i * 2..i * 2 + 2], 16)
+                    .expect("channel id is 0x-prefixed 64-hex");
+            }
+            out
+        }
+
+        /// Issue #661's own acceptance criterion, proven at the seam
+        /// `connector-cli` actually wires: "an EVM channel the index holds
+        /// resolves with zero RPC calls on the packet path -- asserted by a
+        /// test that counts provider calls, not by inspection". Rather than
+        /// build a call-counting RPC proxy, this kills the fallback's own
+        /// path to the chain outright (the anvil process backing it is
+        /// dropped) after the index has been populated -- if
+        /// `IndexedEvmChannelSource::evm_channel` ever consulted the
+        /// fallback for this channel, the lookup would fail with a
+        /// connection error instead of answering correctly.
+        #[tokio::test]
+        async fn an_index_resolved_channel_answers_correctly_with_the_chain_unreachable() {
+            if !anvil_available() {
+                eprintln!(
+                    "skipping: `anvil` not found on PATH (install via https://getfoundry.sh)"
+                );
+                return;
+            }
+
+            let anvil = Anvil::spawn(ANVIL_BASE_PORT).await;
+            let token = EvmSettlementBackend::deploy_mock_token(
+                &anvil.rpc_url,
+                DEPLOYER_PRIVATE_KEY,
+                1_000_000,
+            )
+            .await
+            .expect("deploy mock USDC");
+            let backend = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
+                .await
+                .expect("deploy a TokenNetwork through a fresh registry");
+
+            let counterparty_address =
+                ethers::signers::LocalWallet::new(&mut ethers::core::rand::thread_rng()).address();
+            let channel = backend
+                .open(
+                    counterparty_address.as_bytes().to_vec(),
+                    Duration::seconds(3601),
+                )
+                .await
+                .expect("open a channel");
+            backend.fund(&channel, 750).await.expect("fund the channel");
+
+            let channel_id = channel_id_bytes(&channel.0);
+            let index = Arc::new(EvmChannelIndex::open(None).expect("open in-memory index"));
+            index
+                .apply(
+                    vec![
+                        OrderedChannelIndexEvent {
+                            block_number: 1,
+                            log_index: 0,
+                            event: ChannelIndexEvent::Opened {
+                                channel_id,
+                                participant1: backend.own_address(),
+                                participant2: counterparty_address,
+                            },
+                        },
+                        OrderedChannelIndexEvent {
+                            block_number: 2,
+                            log_index: 0,
+                            event: ChannelIndexEvent::NewDeposit {
+                                channel_id,
+                                participant: counterparty_address,
+                                total_deposit: ethers::types::U256::from(750u64),
+                            },
+                        },
+                    ],
+                    2,
+                )
+                .expect("apply");
+
+            let source = IndexedEvmChannelSource {
+                index,
+                fallback: SettlementChannelSource {
+                    backend: Arc::new(backend),
+                },
+            };
+
+            // Kill the chain the fallback would otherwise read from -- a
+            // subsequent `eth_call` through it fails with a connection
+            // error, so a wrong answer here (or an error) proves the
+            // index was bypassed.
+            drop(anvil);
+
+            let resolved = source
+                .evm_channel(&channel_id)
+                .await
+                .expect("the index answered without touching the (now-dead) chain")
+                .expect("the channel is active in the index");
+            assert_eq!(resolved.counterparty, counterparty_address.to_fixed_bytes());
+            assert_eq!(resolved.deposit_floor, DepositFloor::AtLeast(750));
         }
 
         /// Issue #632's EVM-only acceptance criterion: "EVM-only node:
