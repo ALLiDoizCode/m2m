@@ -1,5 +1,6 @@
 //! `pub struct Connector` -- the packet plane. See ADR 0001.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -25,8 +26,11 @@ use crate::claim::{
 use crate::clock::Clock;
 use crate::journal::{Journal, JournalError};
 use crate::metrics::Metrics;
-use crate::operator_view::{ChannelView, ClaimView, LeasedRouteView, PeerView, RouteView};
+use crate::operator_view::{
+    ChannelView, ClaimView, LeasedRouteView, PeerRouteView, PeerView, RouteSource, RouteView,
+};
 use crate::outbound_client::{ClaimStateSource, EvmDomain, OutboundClientLedger};
+use crate::peer_route_store::{PeerRouteStore, PeerRouteStoreError};
 use crate::peer_transport::PeerTransport;
 use crate::route::{LeasedRoute, PeerRoute};
 
@@ -52,6 +56,49 @@ fn unsealed_termination_reject(message: &str) -> Reject {
 pub enum LeaseRouteError {
     #[error("invalid ILP address: '{0}'")]
     InvalidPrefix(String),
+}
+
+/// What can go wrong mutating issue #884's runtime peer/route table
+/// through [`Connector::upsert_runtime_peer`],
+/// [`Connector::remove_runtime_peer`],
+/// [`Connector::upsert_runtime_peer_route`] or
+/// [`Connector::remove_runtime_peer_route`]. See
+/// `docs/adr/0034-a-runtime-peer-route-table-never-shadows-the-config-file.md`
+/// for the precedence rule these variants enforce.
+#[derive(Debug, Error)]
+pub enum PeerRouteTableError {
+    #[error("invalid ILP address: '{0}'")]
+    InvalidPrefix(String),
+    #[error("peer id must not be empty")]
+    InvalidPeerId,
+    /// The config file already names this peer id or route prefix
+    /// (`[[peers]]` / `[[routes]]`). A runtime write can never add,
+    /// change or remove a config-file row -- config always wins, and it
+    /// wins by refusing the write outright rather than by silently
+    /// shadowing or being shadowed.
+    #[error("'{0}' is defined in this node's config file and cannot be changed at runtime")]
+    OwnedByConfig(String),
+    /// A runtime route named a `peer_id` that resolves to no known peer --
+    /// neither the config file nor the runtime peer table -- the runtime
+    /// analogue of `connector-config`'s load-time `UnknownPeerId` check,
+    /// enforced continuously here rather than once at boot.
+    #[error("route '{prefix}' names unknown peer '{peer_id}'")]
+    UnknownPeerId { prefix: String, peer_id: String },
+    /// A runtime peer cannot be removed while a runtime route still
+    /// forwards to it -- the same orphaned-row shape `UnknownPeerId`
+    /// guards against at load, refused here rather than left to produce a
+    /// route with a peer id nothing recognizes.
+    #[error("peer '{0}' is still referenced by a runtime route")]
+    PeerInUse(String),
+    #[error("no such runtime peer '{0}'")]
+    PeerNotFound(String),
+    #[error("no such runtime route '{0}'")]
+    RouteNotFound(String),
+    /// The durable write itself failed (disk full, permissions, etc.) --
+    /// the mutation is refused rather than applied in memory only, so the
+    /// in-memory table and the durable copy can never diverge.
+    #[error("could not persist the runtime peer/route table: {0}")]
+    Persistence(#[from] PeerRouteStoreError),
 }
 
 /// What can go wrong driving a payment channel's lifecycle through
@@ -176,19 +223,47 @@ enum RouteTarget {
     /// leased routes, not `Connector::leased_routes` directly -- see
     /// [`Connector::leased_routes_snapshot`].
     Leased(usize),
+    /// A runtime peer-forwarding route (issue #884), owned rather than
+    /// indexed: unlike `leased_routes_snapshot`'s caller-held `Vec`, the
+    /// snapshot this was matched out of is loaded and dropped inside
+    /// `select_configured_route` itself, so the one matched
+    /// [`PeerRoute`] is cloned out of it rather than borrowed -- a single,
+    /// bounded-size clone per packet, not the whole-collection copy ADR
+    /// 0015 warns against.
+    RuntimePeer(PeerRoute),
+}
+
+/// How permanent a matched routing-table entry is, least to most -- the
+/// one place route precedence is written down, read by both
+/// [`RouteTarget`] and [`ConfiguredTarget`] so what the router prefers and
+/// what the client edge prices can never drift apart.
+///
+/// A lease (issue #427) is TTL-bound and pushed by an automated
+/// controller, so it is outranked by everything durable. A runtime
+/// peer-forwarding route (issue #884) IS durable -- a deliberate, paid
+/// relationship, not an automated push -- so it outranks a lease at the
+/// same prefix, but a config-file row always wins over anything written at
+/// runtime, which `upsert_runtime_peer_route` enforces by refusing a
+/// runtime write that collides with a config-file prefix in the first
+/// place, rather than by ranking them here. Peer routes (config or
+/// runtime) fall between leases and app routes: also forwarding rather
+/// than terminating, but static.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RouteRank {
+    Leased = 0,
+    RuntimePeer = 1,
+    Peer = 2,
+    App = 3,
 }
 
 impl RouteTarget {
-    /// Break a tie in matched prefix length: a static route always
-    /// outranks a leased route for the same prefix (issue #427) -- an
-    /// operator's explicit configuration cannot be overridden by an
-    /// automated controller. Peer routes from configuration fall in
-    /// between: also static, but forwarding rather than terminating.
-    fn priority(&self) -> u8 {
+    /// Break a tie in matched prefix length -- see [`RouteRank`].
+    fn rank(&self) -> RouteRank {
         match self {
-            RouteTarget::Leased(_) => 0,
-            RouteTarget::Peer(_) => 1,
-            RouteTarget::App(_) => 2,
+            RouteTarget::Leased(_) => RouteRank::Leased,
+            RouteTarget::RuntimePeer(_) => RouteRank::RuntimePeer,
+            RouteTarget::Peer(_) => RouteRank::Peer,
+            RouteTarget::App(_) => RouteRank::App,
         }
     }
 }
@@ -211,25 +286,38 @@ fn correlation_id(execution_condition: &[u8; 32]) -> String {
 /// [`RouteTarget`] that exists in configuration, so a caller reading
 /// configured routes alone (the client edge) needs no arm for a leased
 /// route it can never be handed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ConfiguredTarget {
     App(usize),
     Peer(usize),
+    /// A runtime peer-forwarding route (issue #884) -- "configured" in the
+    /// sense this type means it (priced, static, unlike a lease), even
+    /// though its row lives in the runtime table rather than the config
+    /// file. See [`RouteTarget::RuntimePeer`] for why this is owned
+    /// rather than indexed.
+    RuntimePeer(PeerRoute),
 }
 
 impl ConfiguredTarget {
-    fn as_route_target(self) -> RouteTarget {
+    fn into_route_target(self) -> RouteTarget {
         match self {
             ConfiguredTarget::App(index) => RouteTarget::App(index),
             ConfiguredTarget::Peer(index) => RouteTarget::Peer(index),
+            ConfiguredTarget::RuntimePeer(route) => RouteTarget::RuntimePeer(route),
         }
     }
 
-    /// The same tie-break [`RouteTarget::priority`] applies, read off the
-    /// same table rather than restated, so configured-route precedence
-    /// cannot drift between the router and the client edge.
-    fn priority(self) -> u8 {
-        self.as_route_target().priority()
+    /// The same tie-break [`RouteTarget::rank`] applies, off the same
+    /// [`RouteRank`] ordering rather than one restated here, so
+    /// configured-route precedence cannot drift between the router and the
+    /// client edge -- and read without cloning the matched route to reach
+    /// it.
+    fn rank(&self) -> RouteRank {
+        match self {
+            ConfiguredTarget::App(_) => RouteRank::App,
+            ConfiguredTarget::Peer(_) => RouteRank::Peer,
+            ConfiguredTarget::RuntimePeer(_) => RouteRank::RuntimePeer,
+        }
     }
 }
 
@@ -372,6 +460,51 @@ pub struct Connector {
     /// -- the same "degrade to just empty" shape `settlements` and
     /// `leased_routes` take.
     outbound_client_hops: HashMap<String, OutboundClientHop>,
+    /// Peer ids this node's config file names (`[[peers]]`), threaded in
+    /// via [`Connector::with_config_peer_ids`) purely as a reservation
+    /// list (issue #884): the routing table IS the relationship set
+    /// enforced at load (`connector-config`'s `UnknownPeerId` check), so a
+    /// runtime write must never be able to add, update or remove a peer id
+    /// the config file already owns -- config wins, and never silently.
+    /// `Connector` otherwise has no reason to know these ids; it never
+    /// stored peer identity before #884 (see [`PeerView`]'s history) and
+    /// still stores nothing about a config peer beyond its id here.
+    config_peer_ids: HashSet<String>,
+    /// Peer ids added at runtime over the operator surface (issue #884):
+    /// `POST /peers` / `DELETE /peers/:id`. Read-mostly, like
+    /// `leased_routes` (ADR 0015) -- an `ArcSwap` so `handle_prepare`'s
+    /// hot path (which consults this only indirectly, through
+    /// `runtime_peer_routes`' referential integrity already having been
+    /// checked at write time) never locks. Unlike `leased_routes`, this
+    /// is durable: every write is persisted to `runtime_store` before
+    /// being published here, so it survives a restart -- the whole point
+    /// of #884 versus #427's lease mechanism.
+    runtime_peers: ArcSwap<HashSet<String>>,
+    /// Peer-forwarding routes added at runtime over the operator surface
+    /// (issue #884), keyed by prefix like `leased_routes` -- but durable,
+    /// and stored as a plain [`PeerRoute`] with no expiry, since a runtime
+    /// row is a deliberate, paid relationship rather than an automated
+    /// controller's TTL-bound push (ADR 0006). Participates in
+    /// `select_configured_route`/`client_route` exactly like a
+    /// config-file peer route: matching is still longest-prefix-first
+    /// with the same priority tie-break (issue #884's acceptance
+    /// criterion "no change to how packets are matched") -- only the data
+    /// source is new.
+    runtime_peer_routes: ArcSwap<HashMap<String, PeerRoute>>,
+    /// Serializes every runtime peer/route table WRITE (never taken by a
+    /// read) so persisting to `runtime_store` and publishing the new
+    /// `ArcSwap` snapshot happen exactly once per write. Deliberately not
+    /// `ArcSwap::rcu` here (unlike `leased_routes`' `upsert_leased_route`):
+    /// `rcu`'s closure may run more than once under contention, and this
+    /// closure would perform a disk write -- rcu is only safe for a pure
+    /// in-memory transform, which persisting to disk is not.
+    runtime_table_lock: Mutex<()>,
+    /// Where the runtime peer/route table is written durably (issue #884).
+    /// `None` on a node with no `state_dir` configured -- the table is
+    /// still mutable, exactly like `leased_routes` always is, it simply
+    /// does not survive a restart, the same "degrade to in-memory-only"
+    /// every other `state_dir`-scoped store on this connector takes.
+    runtime_store: Option<PeerRouteStore>,
 }
 
 /// One next hop this connector can pay as a client (issue #875).
@@ -455,7 +588,39 @@ impl Connector {
             recognized_channels: RwLock::new(HashSet::new()),
             outbound_client: None,
             outbound_client_hops: HashMap::new(),
+            config_peer_ids: HashSet::new(),
+            runtime_peers: ArcSwap::from_pointee(HashSet::new()),
+            runtime_peer_routes: ArcSwap::from_pointee(HashMap::new()),
+            runtime_table_lock: Mutex::new(()),
+            runtime_store: None,
         }
+    }
+
+    /// Reserve every peer id this node's config file names (issue #884):
+    /// the routing table IS the relationship set enforced at load
+    /// (`connector-config`'s `UnknownPeerId` check), so a runtime write
+    /// naming one of these ids is refused rather than allowed to shadow
+    /// or be shadowed by the config-file row of the same id.
+    pub fn with_config_peer_ids(mut self, ids: impl IntoIterator<Item = String>) -> Self {
+        self.config_peer_ids = ids.into_iter().collect();
+        self
+    }
+
+    /// Replay a durable runtime peer/route table (issue #884) into this
+    /// connector and arm it to persist future writes back to the same
+    /// store -- the two must always be given together, since a table
+    /// replayed from `peers`/`routes` but not armed to persist further
+    /// writes would silently stop being durable after the first mutation.
+    pub fn with_runtime_peer_route_store(
+        mut self,
+        store: PeerRouteStore,
+        peers: HashSet<String>,
+        routes: HashMap<String, PeerRoute>,
+    ) -> Self {
+        self.runtime_peers = ArcSwap::from_pointee(peers);
+        self.runtime_peer_routes = ArcSwap::from_pointee(routes);
+        self.runtime_store = Some(store);
+        self
     }
 
     /// Give this node an outbound client ledger (issue #873) so the
@@ -690,6 +855,209 @@ impl Connector {
             .filter(|route| !is_expired(route.expires_at(), now))
             .map(leased_route_view)
             .collect()
+    }
+
+    /// The current runtime-peer set, snapshotted as of this call -- see
+    /// [`Self::leased_routes_snapshot`]'s identical reasoning (issue
+    /// #452/ADR 0015): a single atomic `Arc` clone, no lock, no copy of
+    /// the set's contents.
+    fn runtime_peers_snapshot(&self) -> Arc<HashSet<String>> {
+        self.runtime_peers.load_full()
+    }
+
+    fn runtime_peer_routes_snapshot(&self) -> Arc<HashMap<String, PeerRoute>> {
+        self.runtime_peer_routes.load_full()
+    }
+
+    /// Persist `peers`/`routes` to `runtime_store` if this node has one
+    /// configured, otherwise a no-op -- the same "no `state_dir`, no
+    /// durability, still mutable" degrade every other `state_dir`-scoped
+    /// store on this connector takes. Called with the write lock already
+    /// held, before the corresponding `ArcSwap` is published, so the
+    /// durable copy and the in-memory table can never disagree about
+    /// which write is current.
+    fn persist_runtime_table(
+        &self,
+        peers: &HashSet<String>,
+        routes: &HashMap<String, PeerRoute>,
+    ) -> Result<(), PeerRouteTableError> {
+        match &self.runtime_store {
+            Some(store) => store
+                .persist(peers, routes)
+                .map_err(PeerRouteTableError::from),
+            None => Ok(()),
+        }
+    }
+
+    /// Add or update a runtime peer row (issue #884): `POST /peers`.
+    /// Refused by name -- never silently accepted as a no-op -- when `id`
+    /// is empty or already belongs to the config file
+    /// (`docs/adr/0034-a-runtime-peer-route-table-never-shadows-the-config-file.md`).
+    /// Calling this again for an id already in the runtime table is an
+    /// update (there is nothing to update yet beyond the id itself, but
+    /// the write still persists and still returns `Ok`, matching
+    /// `upsert_leased_route`'s own renew-by-reinsertion shape).
+    pub fn upsert_runtime_peer(
+        &self,
+        id: impl Into<String>,
+    ) -> Result<PeerView, PeerRouteTableError> {
+        let id = id.into();
+        if id.trim().is_empty() {
+            return Err(PeerRouteTableError::InvalidPeerId);
+        }
+        if self.config_peer_ids.contains(&id) {
+            return Err(PeerRouteTableError::OwnedByConfig(id));
+        }
+        let _write_guard = self
+            .runtime_table_lock
+            .lock()
+            .expect("runtime peer/route table lock poisoned");
+        let mut peers = (*self.runtime_peers_snapshot()).clone();
+        peers.insert(id.clone());
+        self.persist_runtime_table(&peers, &self.runtime_peer_routes_snapshot())?;
+        self.runtime_peers.store(Arc::new(peers));
+        Ok(PeerView {
+            id,
+            source: RouteSource::Runtime,
+        })
+    }
+
+    /// Remove a runtime peer row (issue #884): `DELETE /peers/:id`.
+    /// Refused when `id` belongs to the config file (config rows are
+    /// never removable at runtime, the same "config always wins" rule
+    /// `upsert_runtime_peer` enforces on insert), when no such runtime
+    /// peer exists, or when a runtime route still forwards to it -- the
+    /// orphaned-row shape `connector-config`'s `UnknownPeerId` check
+    /// exists to prevent at load, enforced here instead at mutation time.
+    pub fn remove_runtime_peer(&self, id: &str) -> Result<(), PeerRouteTableError> {
+        if self.config_peer_ids.contains(id) {
+            return Err(PeerRouteTableError::OwnedByConfig(id.to_string()));
+        }
+        let _write_guard = self
+            .runtime_table_lock
+            .lock()
+            .expect("runtime peer/route table lock poisoned");
+        let peers = self.runtime_peers_snapshot();
+        if !peers.contains(id) {
+            return Err(PeerRouteTableError::PeerNotFound(id.to_string()));
+        }
+        let routes = self.runtime_peer_routes_snapshot();
+        if routes.values().any(|route| route.peer_id() == id) {
+            return Err(PeerRouteTableError::PeerInUse(id.to_string()));
+        }
+        let mut next_peers = (*peers).clone();
+        next_peers.remove(id);
+        self.persist_runtime_table(&next_peers, &routes)?;
+        self.runtime_peers.store(Arc::new(next_peers));
+        Ok(())
+    }
+
+    /// Whether `prefix` is defined by the config file, as either an app
+    /// route or a peer-forwarding route -- the set of prefixes a runtime
+    /// write may never add, update or remove.
+    fn config_owns_prefix(&self, prefix: &str) -> bool {
+        self.routes.iter().any(|route| route.prefix() == prefix)
+            || self
+                .peer_routes
+                .iter()
+                .any(|route| route.prefix() == prefix)
+    }
+
+    /// Add or update a runtime peer-forwarding route (issue #884):
+    /// `POST /routes/peers`, keyed by `prefix` exactly like
+    /// `upsert_leased_route`, so posting the same prefix again updates
+    /// the row rather than adding a duplicate. Refused when `prefix` is
+    /// not a valid ILP address, when it is defined by the config file
+    /// (app route or peer route alike), or when `peer_id` resolves to no
+    /// known peer -- the config file's or the runtime table's --
+    /// mirroring `connector-config`'s load-time `UnknownPeerId` check.
+    pub fn upsert_runtime_peer_route(
+        &self,
+        prefix: impl Into<String>,
+        peer_id: impl Into<String>,
+        fee: u64,
+        price: u64,
+    ) -> Result<PeerRouteView, PeerRouteTableError> {
+        let prefix = prefix.into();
+        let peer_id = peer_id.into();
+        if !is_valid_ilp_address(&prefix) {
+            return Err(PeerRouteTableError::InvalidPrefix(prefix));
+        }
+        if self.config_owns_prefix(&prefix) {
+            return Err(PeerRouteTableError::OwnedByConfig(prefix));
+        }
+        let _write_guard = self
+            .runtime_table_lock
+            .lock()
+            .expect("runtime peer/route table lock poisoned");
+        if !self.config_peer_ids.contains(&peer_id)
+            && !self.runtime_peers_snapshot().contains(&peer_id)
+        {
+            return Err(PeerRouteTableError::UnknownPeerId { prefix, peer_id });
+        }
+        let route = PeerRoute::new_priced(prefix.clone(), peer_id.clone(), fee, price);
+        let mut routes = (*self.runtime_peer_routes_snapshot()).clone();
+        routes.insert(prefix.clone(), route);
+        self.persist_runtime_table(&self.runtime_peers_snapshot(), &routes)?;
+        self.runtime_peer_routes.store(Arc::new(routes));
+        Ok(PeerRouteView {
+            prefix,
+            peer_id,
+            fee,
+            price,
+            source: RouteSource::Runtime,
+        })
+    }
+
+    /// Remove a runtime peer-forwarding route (issue #884):
+    /// `DELETE /routes/peers/:prefix`. Refused when `prefix` is defined by
+    /// the config file, or when no such runtime route exists.
+    pub fn remove_runtime_peer_route(&self, prefix: &str) -> Result<(), PeerRouteTableError> {
+        if self.config_owns_prefix(prefix) {
+            return Err(PeerRouteTableError::OwnedByConfig(prefix.to_string()));
+        }
+        let _write_guard = self
+            .runtime_table_lock
+            .lock()
+            .expect("runtime peer/route table lock poisoned");
+        let mut routes = (*self.runtime_peer_routes_snapshot()).clone();
+        if routes.remove(prefix).is_none() {
+            return Err(PeerRouteTableError::RouteNotFound(prefix.to_string()));
+        }
+        self.persist_runtime_table(&self.runtime_peers_snapshot(), &routes)?;
+        self.runtime_peer_routes.store(Arc::new(routes));
+        Ok(())
+    }
+
+    /// Every peer-forwarding route this node knows, config-file and
+    /// runtime alike (issue #884), for the operator surface's
+    /// `GET /routes/peers`. Deliberately excludes a leased route --
+    /// `GET /routes/leased` already reports those, on a different
+    /// lifecycle (a TTL, not a durable row).
+    pub fn peer_routes_view(&self) -> Vec<PeerRouteView> {
+        let mut views: Vec<PeerRouteView> = self
+            .peer_routes
+            .iter()
+            .map(|route| PeerRouteView {
+                prefix: route.prefix().to_string(),
+                peer_id: route.peer_id().to_string(),
+                fee: route.fee(),
+                price: route.price(),
+                source: RouteSource::Config,
+            })
+            .collect();
+        views.extend(
+            self.runtime_peer_routes_snapshot()
+                .values()
+                .map(|route| PeerRouteView {
+                    prefix: route.prefix().to_string(),
+                    peer_id: route.peer_id().to_string(),
+                    fee: route.fee(),
+                    price: route.price(),
+                    source: RouteSource::Runtime,
+                }),
+        );
+        views
     }
 
     /// This connector's own metrics (ADR 0014), for the operator surface's
@@ -997,7 +1365,7 @@ impl Connector {
         // never come from two different answers to the same question.
         let configured_match = self
             .select_configured_route(&prepare.destination)
-            .map(|(len, target)| (len, target.as_route_target()));
+            .map(|(len, target)| (len, target.into_route_target()));
         let leased_match = select_route(&prepare.destination, &leased_prefixes).map(|index| {
             (
                 active_leased[index].prefix().len(),
@@ -1008,7 +1376,7 @@ impl Connector {
         let Some((_, target)) = [configured_match, leased_match]
             .into_iter()
             .flatten()
-            .max_by_key(|(len, target)| (*len, target.priority()))
+            .max_by_key(|(len, target)| (*len, target.rank()))
         else {
             return self.finish(PacketResponse::Reject(Reject {
                 code: RejectCode::f02_unreachable(),
@@ -1019,18 +1387,26 @@ impl Connector {
             }));
         };
 
-        let peer_route = match target {
+        // A `Cow`, not a plain clone (issue #884): the `RuntimePeer` arm
+        // owns its [`PeerRoute`] already -- cloned once out of the runtime
+        // snapshot inside `select_configured_route`, which drops that
+        // snapshot before returning -- while the other two arms still
+        // borrow straight out of the table that holds them, so a forwarded
+        // packet allocates nothing here it did not before this route
+        // source existed (ADR 0015).
+        let peer_route: Cow<'_, PeerRoute> = match target {
             RouteTarget::App(index) => {
                 tracing::debug!(handler_url = %self.routes[index].handler_url(), "routed to app");
                 let response = self.deliver_to_app(&self.routes[index], prepare).await;
                 return self.finish(response);
             }
-            RouteTarget::Peer(index) => &self.peer_routes[index],
-            RouteTarget::Leased(index) => active_leased[index].as_peer_route(),
+            RouteTarget::Peer(index) => Cow::Borrowed(&self.peer_routes[index]),
+            RouteTarget::Leased(index) => Cow::Borrowed(active_leased[index].as_peer_route()),
+            RouteTarget::RuntimePeer(route) => Cow::Owned(route),
         };
         tracing::debug!(peer_id = %peer_route.peer_id(), "routed to peer");
         let response = self
-            .forward_via_peer_route(peer_route, prepare, minimum_delivery)
+            .forward_via_peer_route(&peer_route, prepare, minimum_delivery)
             .await;
         if matches!(response, PacketResponse::Fulfill(_)) {
             self.metrics.record_fee_earned(peer_route.fee());
@@ -1552,6 +1928,11 @@ impl Connector {
     /// (issue #522) and x402 greeting must price the route the router will
     /// actually use, and a forwarded route being priced at all (issue #620)
     /// makes "app routes only" no longer a safe simplification for either.
+    ///
+    /// Includes runtime peer-forwarding routes (issue #884) alongside the
+    /// config file's own: both are static, priced, durable rows, so both
+    /// belong in "configured" as this method means it -- only a lease
+    /// (issue #427), with no price and no durability, is excluded.
     fn select_configured_route(&self, destination: &str) -> Option<(usize, ConfiguredTarget)> {
         let app_match = self.select_app_route(destination).map(|index| {
             (
@@ -1566,10 +1947,19 @@ impl Connector {
                 ConfiguredTarget::Peer(index),
             )
         });
-        [app_match, peer_match]
+        let runtime_peer_routes = self.runtime_peer_routes_snapshot();
+        let runtime_list: Vec<&PeerRoute> = runtime_peer_routes.values().collect();
+        let runtime_prefixes: Vec<&str> = runtime_list.iter().map(|route| route.prefix()).collect();
+        let runtime_match = select_route(destination, &runtime_prefixes).map(|index| {
+            (
+                runtime_list[index].prefix().len(),
+                ConfiguredTarget::RuntimePeer(runtime_list[index].clone()),
+            )
+        });
+        [app_match, peer_match, runtime_match]
             .into_iter()
             .flatten()
-            .max_by_key(|(len, target)| (*len, target.priority()))
+            .max_by_key(|(len, target)| (*len, target.rank()))
     }
 
     /// Price, transport policy and route kind for the configured route
@@ -1601,6 +1991,11 @@ impl Connector {
                     transport_policy: TransportPolicy::Both,
                     kind: ClientRouteKind::Forwarded,
                 },
+                ConfiguredTarget::RuntimePeer(route) => ClientRouteFacts {
+                    price: route.price(),
+                    transport_policy: TransportPolicy::Both,
+                    kind: ClientRouteKind::Forwarded,
+                },
             })
     }
 
@@ -1623,10 +2018,24 @@ impl Connector {
             .collect()
     }
 
-    /// This node's peers. Always empty: no peer transport exists yet
-    /// (ADR 0027, #676).
+    /// This node's peers (issue #884): every peer id from the config file
+    /// plus every runtime-added one, for the operator surface's
+    /// `GET /peers`. Peer carriage details -- endpoint, credential,
+    /// exposure -- are not reported here; see [`PeerView`]'s own docs.
     pub fn peers(&self) -> Vec<PeerView> {
-        Vec::new()
+        let mut views: Vec<PeerView> = self
+            .config_peer_ids
+            .iter()
+            .map(|id| PeerView {
+                id: id.clone(),
+                source: RouteSource::Config,
+            })
+            .collect();
+        views.extend(self.runtime_peers_snapshot().iter().map(|id| PeerView {
+            id: id.clone(),
+            source: RouteSource::Runtime,
+        }));
+        views
     }
 
     /// This node's payment channels (issue #459) -- every channel this
@@ -2969,8 +3378,9 @@ mod tests {
         let clock = test_clock();
         let connector = connector_with(vec![], app_client, clock);
 
-        // `peers()` is always empty: there is no peer identity handshake
-        // yet (ADR 0027, #676).
+        // `peers()` reports the config file's peer ids plus any added at
+        // runtime (issue #884) -- empty here because this connector was
+        // built with neither.
         assert!(connector.peers().is_empty());
         assert!(connector.channels().await.is_empty());
         // No signer or peer claim channel configured, and no traffic sent:
@@ -5254,6 +5664,465 @@ mod tests {
                     elapsed / ITERATIONS as u32
                 );
             }
+        }
+    }
+
+    /// Issue #884: the runtime-mutable, durable peer/route table.
+    mod runtime_peer_route_table {
+        use super::*;
+
+        /// A round trip through the exact shape
+        /// `forwards_a_packet_matching_a_peer_route_to_the_next_hop`
+        /// exercises for a config-file peer route, except the peer and the
+        /// route are both added at runtime over the operator surface
+        /// instead of read from configuration -- proving "no change to
+        /// how packets are matched" (issue #884's acceptance criterion):
+        /// the same longest-prefix match and the same forwarding path
+        /// carry a runtime-added row exactly as they would a config one.
+        #[tokio::test]
+        async fn a_runtime_peer_route_forwards_a_packet_to_the_next_hop() {
+            let second_hop_route =
+                StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let second_hop_app_client = Arc::new(FakeAppClient::new());
+            second_hop_app_client.respond(
+                second_hop_route.handler_url(),
+                answered(b"delivered by the second hop"),
+            );
+            let second_hop = Arc::new(
+                Connector::new(
+                    vec![second_hop_route],
+                    vec![],
+                    second_hop_app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(identity_signer()),
+            );
+            let mut peer_transport = InProcessPeerTransport::new();
+            peer_transport.add_peer("runtime-hop", second_hop);
+            let first_hop = Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(peer_transport),
+                test_clock(),
+            );
+            first_hop.upsert_runtime_peer("runtime-hop").unwrap();
+            first_hop
+                .upsert_runtime_peer_route("g.example.app", "runtime-hop", 0, 0)
+                .unwrap();
+            let (sealed, shared_secret) = sealed_prepare(b"hello");
+
+            let response = first_hop.handle_prepare(sealed, 0).await;
+
+            match response {
+                PacketResponse::Fulfill(fulfill) => {
+                    assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
+                    assert_eq!(
+                        open_sealed_envelope(&shared_secret, &fulfill.data),
+                        fulfill_envelope(b"delivered by the second hop")
+                    );
+                }
+                other => panic!("expected a fulfill, got {other:?}"),
+            }
+            assert_eq!(second_hop_app_client.deliveries().len(), 1);
+        }
+
+        /// The client edge prices a runtime peer route exactly like a
+        /// config one (ADR 0028) -- it is priced and durable, unlike a
+        /// lease, so it belongs in `client_route`'s answer.
+        #[test]
+        fn client_route_prices_a_runtime_peer_route() {
+            let connector = Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            );
+            connector.upsert_runtime_peer("runtime-hop").unwrap();
+            connector
+                .upsert_runtime_peer_route("g.example.app", "runtime-hop", 3, 25)
+                .unwrap();
+
+            let facts = connector.client_route("g.example.app").unwrap();
+            assert_eq!(facts.price, 25);
+            assert_eq!(facts.kind, ClientRouteKind::Forwarded);
+        }
+
+        /// The precedence rule (issue #884): a runtime write can never add,
+        /// update or remove a peer id the config file already owns --
+        /// config wins, and it wins by refusing the write outright rather
+        /// than silently shadowing or being shadowed.
+        #[test]
+        fn a_runtime_peer_id_colliding_with_a_config_peer_id_is_refused() {
+            let connector = Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_config_peer_ids(["apex-store".to_string()]);
+
+            let error = connector.upsert_runtime_peer("apex-store").unwrap_err();
+            assert!(matches!(error, PeerRouteTableError::OwnedByConfig(id) if id == "apex-store"));
+
+            // Not removable at runtime either -- the same rule, checked on
+            // the other write path.
+            let error = connector.remove_runtime_peer("apex-store").unwrap_err();
+            assert!(matches!(error, PeerRouteTableError::OwnedByConfig(id) if id == "apex-store"));
+        }
+
+        /// Same rule, the route-prefix half: a runtime route can never
+        /// take a prefix the config file already routes, whether that
+        /// config row terminates (an app route) or forwards (a peer
+        /// route) -- this is the interaction with `connector-config`'s
+        /// load-time `UnknownPeerId`/precedence story issue #884 asks to
+        /// be tested, restated as a runtime-checked invariant.
+        #[test]
+        fn a_runtime_route_colliding_with_a_config_prefix_is_refused() {
+            let app_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let connector = Connector::new(
+                vec![app_route],
+                vec![PeerRoute::new("g.example.peer", "configured-peer", 0)],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_config_peer_ids(["configured-peer".to_string()]);
+
+            let error = connector
+                .upsert_runtime_peer_route("g.example.app", "configured-peer", 0, 0)
+                .unwrap_err();
+            assert!(
+                matches!(error, PeerRouteTableError::OwnedByConfig(prefix) if prefix == "g.example.app")
+            );
+
+            let error = connector
+                .upsert_runtime_peer_route("g.example.peer", "configured-peer", 0, 0)
+                .unwrap_err();
+            assert!(
+                matches!(error, PeerRouteTableError::OwnedByConfig(prefix) if prefix == "g.example.peer")
+            );
+        }
+
+        /// The runtime analogue of `connector-config`'s load-time
+        /// `UnknownPeerId` check (`config.rs:283-301`): a route naming a
+        /// peer id nothing recognizes -- neither the config file nor the
+        /// runtime peer table -- is refused rather than accepted as an
+        /// orphaned row that would answer `T01` forever.
+        #[test]
+        fn a_runtime_route_naming_an_unknown_peer_id_is_refused() {
+            let connector = Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            );
+
+            let error = connector
+                .upsert_runtime_peer_route("g.example.app", "nobody", 0, 0)
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                PeerRouteTableError::UnknownPeerId { prefix, peer_id }
+                    if prefix == "g.example.app" && peer_id == "nobody"
+            ));
+        }
+
+        /// A runtime route's `peer_id` may resolve to a CONFIG peer, not
+        /// only a runtime one -- referential integrity is checked against
+        /// the union of both tables, matching how a sold peering
+        /// (issue #867) might route traffic through a peering this node
+        /// already had before any runtime mutation existed.
+        #[test]
+        fn a_runtime_route_may_name_a_config_peer_id() {
+            let connector = Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_config_peer_ids(["configured-peer".to_string()]);
+
+            let view = connector
+                .upsert_runtime_peer_route("g.example.new", "configured-peer", 2, 10)
+                .unwrap();
+            assert_eq!(view.peer_id, "configured-peer");
+            assert_eq!(view.source, RouteSource::Runtime);
+        }
+
+        /// A runtime peer cannot be removed while a runtime route still
+        /// forwards to it -- the orphaned-row shape `UnknownPeerId`
+        /// exists to prevent at load, enforced here at mutation time
+        /// instead.
+        #[test]
+        fn removing_a_runtime_peer_still_referenced_by_a_runtime_route_is_refused() {
+            let connector = Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            );
+            connector.upsert_runtime_peer("runtime-hop").unwrap();
+            connector
+                .upsert_runtime_peer_route("g.example.app", "runtime-hop", 0, 0)
+                .unwrap();
+
+            let error = connector.remove_runtime_peer("runtime-hop").unwrap_err();
+            assert!(matches!(error, PeerRouteTableError::PeerInUse(id) if id == "runtime-hop"));
+
+            connector
+                .remove_runtime_peer_route("g.example.app")
+                .unwrap();
+            connector
+                .remove_runtime_peer("runtime-hop")
+                .expect("no longer referenced, now removable");
+        }
+
+        /// Priority ordering (issue #884): a runtime peer route is durable
+        /// -- a deliberate, paid relationship, not an automated
+        /// controller's TTL-bound push -- so it outranks a lease at the
+        /// same prefix, the same way a config peer route always did.
+        #[tokio::test]
+        async fn a_runtime_peer_route_outranks_a_lease_at_the_same_prefix() {
+            let leased_hop_route =
+                StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+            let leased_hop_app_client = Arc::new(FakeAppClient::new());
+            leased_hop_app_client
+                .respond(leased_hop_route.handler_url(), answered(b"via the lease"));
+            let leased_hop = Arc::new(
+                Connector::new(
+                    vec![leased_hop_route],
+                    vec![],
+                    leased_hop_app_client,
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(identity_signer()),
+            );
+            let runtime_hop_route =
+                StaticRoute::new("g.example.app", "http://localhost:5000").unwrap();
+            let runtime_hop_app_client = Arc::new(FakeAppClient::new());
+            runtime_hop_app_client.respond(
+                runtime_hop_route.handler_url(),
+                answered(b"via the runtime route"),
+            );
+            let runtime_hop = Arc::new(
+                Connector::new(
+                    vec![runtime_hop_route],
+                    vec![],
+                    runtime_hop_app_client,
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(identity_signer()),
+            );
+            let mut peer_transport = InProcessPeerTransport::new();
+            peer_transport.add_peer("leased-hop", leased_hop);
+            peer_transport.add_peer("runtime-hop", runtime_hop);
+            let connector = Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(peer_transport),
+                test_clock(),
+            );
+            connector
+                .upsert_leased_route("g.example.app", "leased-hop", 0, Duration::seconds(60))
+                .unwrap();
+            connector.upsert_runtime_peer("runtime-hop").unwrap();
+            connector
+                .upsert_runtime_peer_route("g.example.app", "runtime-hop", 0, 0)
+                .unwrap();
+            let (sealed, shared_secret) = sealed_prepare(b"hello");
+
+            let response = connector.handle_prepare(sealed, 0).await;
+
+            match response {
+                PacketResponse::Fulfill(fulfill) => assert_eq!(
+                    open_sealed_envelope(&shared_secret, &fulfill.data),
+                    fulfill_envelope(b"via the runtime route")
+                ),
+                other => panic!("expected a fulfill via the runtime route, got {other:?}"),
+            }
+        }
+
+        /// Durability (issue #884): unlike a leased route
+        /// (`leased_routes_do_not_survive_a_restart`), a runtime peer and
+        /// its route survive a restart when a `PeerRouteStore` backs the
+        /// table -- two independent `Connector` instances opening the
+        /// same store stand in for "before" and "after" a restart.
+        #[test]
+        fn a_runtime_peer_and_route_survive_a_restart() {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join("runtime_peers.json");
+
+            let (store, peers, routes) = PeerRouteStore::open(&path).expect("open");
+            let before_restart = Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_runtime_peer_route_store(store, peers, routes);
+            before_restart.upsert_runtime_peer("apex-relay-2").unwrap();
+            before_restart
+                .upsert_runtime_peer_route("g.example.relay2", "apex-relay-2", 3, 25)
+                .unwrap();
+            assert_eq!(before_restart.peers().len(), 1);
+
+            let (store, peers, routes) = PeerRouteStore::open(&path).expect("re-open");
+            let after_restart = Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_runtime_peer_route_store(store, peers, routes);
+
+            let peers = after_restart.peers();
+            assert_eq!(peers.len(), 1);
+            assert_eq!(peers[0].id, "apex-relay-2");
+            assert_eq!(peers[0].source, RouteSource::Runtime);
+            let routes = after_restart.peer_routes_view();
+            assert_eq!(routes.len(), 1);
+            assert_eq!(routes[0].prefix, "g.example.relay2");
+            assert_eq!(routes[0].peer_id, "apex-relay-2");
+            assert_eq!(routes[0].fee, 3);
+            assert_eq!(routes[0].price, 25);
+        }
+
+        /// A node with no `state_dir` (no `PeerRouteStore` attached) still
+        /// has a mutable runtime table -- it just does not survive a
+        /// restart, the same "degrade to in-memory-only" every other
+        /// `state_dir`-scoped store on this connector takes.
+        #[test]
+        fn with_no_store_the_table_is_still_mutable_but_only_in_memory() {
+            let connector = Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            );
+
+            connector.upsert_runtime_peer("runtime-hop").unwrap();
+            assert_eq!(connector.peers().len(), 1);
+        }
+
+        /// `GET /peers`/`GET /routes/peers`' merged view (issue #884)
+        /// tags every row with where it came from, so precedence is
+        /// something an operator can actually verify rather than infer.
+        #[test]
+        fn peers_and_peer_routes_report_config_and_runtime_rows_with_their_source() {
+            let connector = Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.configured", "configured-peer", 1)],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_config_peer_ids(["configured-peer".to_string()]);
+            connector.upsert_runtime_peer("runtime-peer").unwrap();
+            connector
+                .upsert_runtime_peer_route("g.example.runtime", "runtime-peer", 2, 5)
+                .unwrap();
+
+            let mut peers = connector.peers();
+            peers.sort_by(|a, b| a.id.cmp(&b.id));
+            assert_eq!(
+                peers,
+                vec![
+                    PeerView {
+                        id: "configured-peer".to_string(),
+                        source: RouteSource::Config,
+                    },
+                    PeerView {
+                        id: "runtime-peer".to_string(),
+                        source: RouteSource::Runtime,
+                    },
+                ]
+            );
+
+            let mut routes = connector.peer_routes_view();
+            routes.sort_by(|a, b| a.prefix.cmp(&b.prefix));
+            assert_eq!(
+                routes,
+                vec![
+                    PeerRouteView {
+                        prefix: "g.example.configured".to_string(),
+                        peer_id: "configured-peer".to_string(),
+                        fee: 1,
+                        price: 0,
+                        source: RouteSource::Config,
+                    },
+                    PeerRouteView {
+                        prefix: "g.example.runtime".to_string(),
+                        peer_id: "runtime-peer".to_string(),
+                        fee: 2,
+                        price: 5,
+                        source: RouteSource::Runtime,
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn upsert_runtime_peer_route_rejects_an_invalid_prefix() {
+            let connector = Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            );
+            connector.upsert_runtime_peer("runtime-hop").unwrap();
+
+            let error = connector
+                .upsert_runtime_peer_route("not an ilp address", "runtime-hop", 0, 0)
+                .unwrap_err();
+            assert!(matches!(error, PeerRouteTableError::InvalidPrefix(_)));
+        }
+
+        #[test]
+        fn upsert_runtime_peer_rejects_an_empty_id() {
+            let connector = Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            );
+
+            let error = connector.upsert_runtime_peer("").unwrap_err();
+            assert!(matches!(error, PeerRouteTableError::InvalidPeerId));
+        }
+
+        #[test]
+        fn removing_a_peer_or_route_that_does_not_exist_is_a_named_error() {
+            let connector = Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            );
+
+            assert!(matches!(
+                connector.remove_runtime_peer("nobody"),
+                Err(PeerRouteTableError::PeerNotFound(id)) if id == "nobody"
+            ));
+            assert!(matches!(
+                connector.remove_runtime_peer_route("g.nowhere"),
+                Err(PeerRouteTableError::RouteNotFound(prefix)) if prefix == "g.nowhere"
+            ));
         }
     }
 }

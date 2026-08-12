@@ -101,6 +101,24 @@
 //!   [`ClaimIngestRejection::NotDurable`] -- so the refusal's contract is
 //!   unchanged, and the same claim resubmitted once the journal is
 //!   writable again is still good.
+//!
+//! **The watermark key deliberately does not include the client-edge
+//! sender identity `resolve_identity` produces (issue #502).**
+//! client-edge-spec.md §1.3 describes the freshness rule as keyed by a
+//! "(peer, blockchain, channel) tuple", and this gate keys it by
+//! `(blockchain, channel)` alone (the *canonical* [`ClientClaim::channel_key`]
+//! discussed above) -- reading "peer" there as the channel's own recorded
+//! counterparty ([`crate::ClientChannelRegistry`], issue #558), not as the
+//! HTTP-layer identity #502 resolves. The channel already names its one
+//! counterparty; there is no second "peer" dimension a channel's watermark
+//! could vary over. Folding the resolved `SenderIdentity` into this key
+//! instead would let one channel hold a distinct watermark per identity
+//! that happened to present it, which is not a second layer of safety --
+//! it *reopens* the replay this watermark exists to close: a nonce this
+//! gate already accepted under one presented `ILP-Peer-Id` (or anonymously)
+//! would read as fresh again under a different one, since a self-declared
+//! HTTP header, unlike the channel a claim cryptographically names, proves
+//! nothing about who is presenting it.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{mpsc, Arc, RwLock};

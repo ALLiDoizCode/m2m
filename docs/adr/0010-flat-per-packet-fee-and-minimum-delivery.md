@@ -1,5 +1,7 @@
 # A hop charges a flat per-packet fee, and packets declare a minimum delivery
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
 Each peering relation has a flat fee charged once per forwarded packet, replacing the
 percentage spread. Every packet declares the amount that must reach its destination, and a hop
 that cannot meet that figure after taking its fee rejects the packet rather than forwarding a

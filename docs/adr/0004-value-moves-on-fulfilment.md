@@ -1,5 +1,7 @@
 # Value moves on fulfilment, one claim per packet
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
 A packet's value is owed only when the packet fulfils. The claim covering it follows the
 fulfilment rather than riding the outgoing PREPARE, which reverses the existing prepay model
 in which the payer paid for the forward _attempt_. Claims remain one per packet: they are not

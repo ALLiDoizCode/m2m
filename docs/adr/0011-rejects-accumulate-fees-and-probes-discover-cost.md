@@ -1,5 +1,7 @@
 # Rejects accumulate fees; a probe is how cost is discovered
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
 Every reject carries a running total of the fees of the hops it has passed through: each hop
 adds its own fee before passing the reject upstream. Cost discovery is then a packet you expect
 to be rejected — a probe — and the reject that comes back states what the path costs. Probes

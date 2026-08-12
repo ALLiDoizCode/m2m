@@ -1,5 +1,7 @@
 # The connector is mechanism; discovery and route policy live outside it
 
+**Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
+
 The connector forwards what it is told to forward and settles what it is told to settle. It
 does not decide who its peers are, does not learn routes, and does not announce itself.
 Discovery is removed entirely; the operator surface exposes CRUD over the routing table and
@@ -34,6 +36,12 @@ with a TTL and lapse unless renewed. This keeps the safety property that route l
 provided — a peer that stops being refreshed loses its routes — without the connector knowing
 why. A controller that dies causes routes to expire rather than to rot, and a stale route
 pointing value at a peer that can no longer deliver is the failure this prevents.
+
+**Extended, not replaced, by issue #884.** A sold peering (#867) is a deliberate, paid
+relationship rather than an automated controller's push, so it needs a third shape beside
+"static, from config" and "leased, TTL-bound": runtime-mutable AND durable. ADR 0034 adds it
+without disturbing either existing one — "static routes... always win" still holds; a runtime
+row can never take a key the config file owns.
 
 **Nothing announces any more, and that gap is now external.** An empty bootstrap seed
 previously produced hardcoded address literals and 404s for new users. Self-announcement and

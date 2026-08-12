@@ -1,5 +1,7 @@
 # Vectors are normative; prose is not
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
 The Rust implementation is the definition of the wire. A committed set of vectors, generated from
 property tests over the invariants, is the contract every client SDK is held to. Prose describing
 the wire still exists and is marked non-normative.

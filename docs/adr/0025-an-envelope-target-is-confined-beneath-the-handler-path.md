@@ -1,5 +1,7 @@
 # An envelope target is confined beneath the route's handler path, never in place of it
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
 `HttpAppClient::deliver` (`crates/connector-runtime/src/app_client.rs`) resolved a sealed
 envelope's `target` against a route's `handler_url` with plain RFC 3986 reference resolution
 (`Url::join`). An **absolute** path in `target` replaces the base's own path under that algorithm
