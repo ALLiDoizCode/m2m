@@ -1092,13 +1092,14 @@ fn client_payout_ledger(config: &Config, signer: Arc<dyn Signer>) -> Arc<ClientP
 pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError> {
     let connector = runtime.connector.clone();
     let signer = runtime.signer.clone();
-    // Issue #556: the NIP-59 receiver key a privacy-wrapped claim
+    // Issue #556: a privacy-wrapped claim
     // (`ILP-Payment-Channel-Claim-Wrapped`, client-edge-spec.md §1.3) is
-    // opened with is this node's `[signer]` key, not a second key of its
-    // own -- `connector-config/src/announce.rs`'s stated rule is that
+    // opened with this node's `[signer]` key, not with a second receiver
+    // key of its own. `connector-config/src/announce.rs` states the rule:
     // `GET /ilp/identity` and every gift wrap this node opens both use
-    // `[signer]`, and a wrap's receiver is discoverable only through the
-    // former. No new config section exists or is needed for this.
+    // `[signer]` -- and since that endpoint is the only surface publishing
+    // a receiver public key, a sender can wrap to no other one. No new
+    // config section exists or is needed for this.
     let wrap_receiver_secret = Some(read_signer_secret(config.signer_key())?);
     let app = connector_client_edge::router_with_bootstrap_identity(
         connector.clone(),
@@ -1543,8 +1544,6 @@ btp_endpoint = "wss://apex.example/ilp/btp"
     /// A well-formed `ILP-Payment-Channel-Claim-Wrapped` envelope, NIP-59
     /// sealing `claim_json` to `receiver_public`.
     fn wrapped_claim_header_value(claim_json: &str, receiver_public: &[u8; 65]) -> String {
-        use base64::engine::general_purpose::STANDARD as BASE64;
-        use base64::Engine;
         use libsecp256k1::SecretKey;
 
         let sender_secret = SecretKey::parse(&[3u8; 32]).expect("valid secret key");
@@ -1554,9 +1553,9 @@ btp_endpoint = "wss://apex.example/ilp/btp"
         let envelope_json = format!(
             r#"{{"ephemeralPublicKey":"{}","encryptedPayload":"{}","timestamp":0,"version":"1.0"}}"#,
             hex_encode_bytes(&wrapped.ephemeral_public_key),
-            BASE64.encode(&wrapped.encrypted_payload),
+            base64_encode_bytes(&wrapped.encrypted_payload),
         );
-        BASE64.encode(envelope_json.as_bytes())
+        base64_encode_bytes(envelope_json.as_bytes())
     }
 
     fn unmatched_destination_prepare_body() -> Vec<u8> {
@@ -1714,8 +1713,9 @@ key_file = "{}"
         );
         assert_ne!(
             wrong_receiver_reject.message,
-            "claim rejected: names a channel this connector has no record of, so there is no \
-             counterparty to verify its signature against",
+            // The gate's own wording, not a copy of it: a reworded
+            // `UnknownChannel` must not quietly make this assertion vacuous.
+            connector_client_edge::ClaimIngestRejection::UnknownChannel.message(),
             "a wrap addressed to the wrong receiver must fail to unwrap, not fall through to an \
              UnknownChannel rejection"
         );
