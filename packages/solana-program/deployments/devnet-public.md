@@ -56,8 +56,15 @@ using the mock-USDC SPL mint below.
 
 ## Cost
 
-- Program rent (held in ProgramData account): ~0.733 SOL for the 105 KB binary.
+- Program rent (held in ProgramData account): ~0.733 SOL for the 105,128-byte binary deployed
+  2026-07-18. Reconciles exactly with Solana's rent-exemption formula:
+  `(105,128 + 45-byte ProgramData header + 128) * 6,960 lamports/byte = 732,894,960 lamports`.
 - Total deploy + mint spend: ~0.74 SOL (deployer went 2.0 → 1.2619 SOL).
+- This figure describes the 2026-07-18 deploy only, not the current source: per the "Provenance
+  amendment" below, `packages/solana-program/src` has since grown to a 109,401-byte binary,
+  which implies `(109,401 + 45 + 128) * 6,960 = 762,635,040` lamports, i.e. ~0.76 SOL. See
+  `docs/solana-deployment.md`'s "Deployment Cost Estimates" for the up-to-date figure and the
+  formula to recompute it after any future size change.
 
 ## Verification
 
