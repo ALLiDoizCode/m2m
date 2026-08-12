@@ -1,5 +1,7 @@
 # Peer-wire claims sign the EIP-712 balance-proof digest, not a connector-internal SHA-256 tuple
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
 `ClaimBook` (`crates/connector-runtime/src/claim.rs`) now signs and verifies every EVM peer-wire
 claim over `connector_signer::evm_balance_proof_digest` -- the same EIP-712 `BalanceProof` digest
 `packages/contracts/src/TokenNetwork.sol` recovers on redemption -- instead of

@@ -1,5 +1,7 @@
 # A peer PREPARE arrives with its covering claim, or it is greeted
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
 **Owner decision, 2026-08-07 (issue #868):** a peer-role PREPARE may not arrive without a covering
 claim. Every packet is paid, or it gets the x402 greeting — the same rule the client edge already
 enforces. **The credit window is retired** as the peer path's operating mode.

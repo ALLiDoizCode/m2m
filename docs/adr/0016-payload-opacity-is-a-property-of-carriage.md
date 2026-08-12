@@ -1,5 +1,7 @@
 # Payload opacity is a property of carriage, so a terminating connector reads the envelope
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
 > **Partially superseded.** The first half of this ADR — opacity is a property of carriage, and a
 > terminating connector reads the envelope — stands, and ADR 0018 makes it structural: a payload is
 > now sealed to the terminating connector, so a forwarding hop _cannot_ read it rather than being

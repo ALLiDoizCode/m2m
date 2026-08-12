@@ -1,5 +1,7 @@
 # The metrics surface is decided, not accreted, and logs correlate a packet by its condition
 
+**Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
+
 The Rust connector exposes exactly five decided metrics — `toon_packets_total`,
 `toon_packets_rejected_total`, `toon_fees_earned_total`, `toon_exposure` and
 `toon_settlement_total` — as `GET /metrics` on the operator surface, in Prometheus text

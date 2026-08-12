@@ -1,5 +1,7 @@
 # A client destination is never a route termination
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
 ADR 0018's "sealed to the terminating connector" and ADR 0019's "the terminating connector derives
 the fulfilment" describe a **route termination** -- a `[[routes]]` entry with a `handler_url`, the
 store and relay pattern. They do not extend to a destination that resolves to a live **client

@@ -1,5 +1,7 @@
 # Configuration is one typed file with no environment-variable layer
 
+**Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
+
 The connector reads a single configuration file, deserializes and validates it once at boot,
 and holds the result as an immutable value for the process lifetime. There is no
 environment-variable override layer. Secrets are referenced by location — a file path or a key

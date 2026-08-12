@@ -1,5 +1,7 @@
 # The connector holds a signer and a treasury, not a wallet
 
+**Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
+
 Key handling collapses to one crate exposing a `Signer` — a local key or a key management
 service backend, with rotation — and a treasury account that funds payment channels and pays
 gas. Mnemonic recovery, seed management, human wallet authentication, the wallet database and
