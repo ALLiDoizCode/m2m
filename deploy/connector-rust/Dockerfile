@@ -39,12 +39,10 @@
 # no BUILDPLATFORM pinning to work around here.
 #
 # Dependency layer (issue #609): the builder is split into `chef` / `planner`
-# / `builder` stages using cargo-chef so a source-only commit reuses the
-# compiled dependency graph from `cache-from: type=gha` instead of paying for
-# `ethers`, `solana-*`, `axum` and `tokio` again on every push. See the
-# per-stage comments below for how the recipe keys the cache and what makes
-# a broken/missing manifest fail the build rather than silently rebuild
-# everything.
+# / `builder` stages using cargo-chef, so a source-only commit reuses the
+# compiled dependency graph instead of recompiling it. The per-stage comments
+# below carry the detail -- how the recipe keys the cache, and what makes an
+# unresolvable manifest fail the build rather than silently rebuild everything.
 # =============================================================================
 
 # ============================================
@@ -98,12 +96,12 @@ RUN cargo chef prepare --recipe-path recipe.json
 # thing that changes on every commit is also the only thing that recompiles
 # on every commit.
 #
-# `cargo chef cook` fails loudly (a stub build error, not a silent skip) if
-# a crate's manifest is unreadable or malformed -- e.g. a new crate added
-# under `crates/` without a Cargo.toml the workspace can resolve -- rather
-# than quietly falling back to a full rebuild. `--locked` makes the same
-# true of a crate added without `Cargo.lock` being regenerated: cargo
-# refuses rather than silently re-resolving.
+# A crate the workspace cannot resolve -- one added under `crates/` without
+# a Cargo.toml, or with a malformed one -- fails the build loudly at the
+# planner's `cargo chef prepare`, which cannot run `cargo metadata` over it.
+# `--locked` does the same for a crate added without `Cargo.lock` being
+# regenerated: cargo refuses rather than silently re-resolving. Neither
+# degrades quietly into a full rebuild.
 # ============================================
 FROM chef AS builder
 
