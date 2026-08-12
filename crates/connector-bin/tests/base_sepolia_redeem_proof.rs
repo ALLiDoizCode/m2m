@@ -20,15 +20,17 @@
 //!
 //! - **Sign**: [`connector_signer::LocalSigner::sign`] over
 //!   [`connector_signer::evm_balance_proof_digest`] -- the exact call
-//!   `connector_runtime::ClaimBook`'s outbound-claim path makes
-//!   (`connector-runtime/src/claim.rs:736`), not a hand-rolled digest.
+//!   `connector_runtime::ClaimBook::record_fulfillment` makes when it signs
+//!   an outbound claim (`connector-runtime/src/claim.rs:881`), not a
+//!   hand-rolled digest.
 //! - **Wire**: [`connector_runtime::WireClaim::encode`]/`decode` -- the
 //!   exact peer-wire byte shape (peer-wire-spec.md §3.5), round-tripped
 //!   before anything is submitted, so a bug in the wire codec would show up
 //!   here as a decode failure rather than being silently bypassed.
 //! - **Verify**: [`connector_signer::verify_evm_balance_proof`] -- the
-//!   exact check `ClaimBook::accept_inbound_inner` runs
-//!   (`connector-runtime/src/claim.rs:1020`) before ever handing a claim to
+//!   exact check `ClaimBook::verify_signature`
+//!   (`connector-runtime/src/claim.rs:1020`) runs -- the first thing
+//!   `accept_inbound_inner` does -- before a claim is ever handed to
 //!   settlement.
 //! - **Redeem**: [`connector_settlement_evm::EvmSettlementBackend::redeem`]
 //!   -- which normalises the wire's raw libsecp256k1 `{0,1}` recovery id to
@@ -342,10 +344,14 @@ async fn a_production_signed_claim_redeems_on_the_deployed_token_network_and_a_w
                 locked_amount: 0,
                 locks_root: [0u8; 32],
                 chain_id: real_chain_id,
-                // Not the zero address (which `redeem`/`open` refuse before
-                // ever reaching the chain) -- a real, different, funded
-                // address, so this is genuinely wrong rather than
-                // structurally invalid.
+                // A real, differently-deployed address rather than the zero
+                // address, so what the chain rejects is a signature bound to
+                // the wrong `verifyingContract` and not one that is
+                // structurally degenerate. This field never leaves the
+                // signer: `redeem` rebuilds the on-chain `BalanceProof` from
+                // the channel id, nonce and amount alone, so the only trace
+                // of it on chain is the digest the signature recovers
+                // against.
                 token_network_address: payer_address,
             },
         ),
