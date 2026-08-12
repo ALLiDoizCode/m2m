@@ -76,16 +76,40 @@ const { ToonClient, HttpIlpClient } = await import(
   join(TOON_CLIENT, 'packages/client/dist/index.js')
 );
 const { buildIlpPeerInfoEvent } = await importFrom('@toon-protocol/core');
-const { finalizeEvent, getPublicKey } = await importFrom(
-  'nostr-tools',
-  './pure'
-);
+const { finalizeEvent, getPublicKey } = await importFrom('nostr-tools', './pure');
 const { privateKeyToAccount } = await importFrom('viem', './accounts');
 
 const EDGE = process.env.EDGE ?? 'http://127.0.0.1:3000';
 const DEST = process.env.DEST ?? 'g.local.relay';
 const RELAY_WS = process.env.RELAY_WS ?? 'ws://127.0.0.1:7100';
 const REPO_ID = process.env.REPO_ID ?? 'local-rehearsal';
+
+// Operator notice (toon#183's IlpPeerInfo.notice) — configuration only, never
+// composed here. Absent unless NOTICE_ID/NOTICE_SUMMARY/NOTICE_URL are ALL
+// set, matching the common case: no key, no default on the announce.
+function resolveNotice() {
+  const id = process.env.NOTICE_ID;
+  const summary = process.env.NOTICE_SUMMARY;
+  const url = process.env.NOTICE_URL;
+  const severity = process.env.NOTICE_SEVERITY;
+  if (id === undefined && summary === undefined && url === undefined && severity === undefined) {
+    return undefined;
+  }
+  if (id === undefined || summary === undefined || url === undefined) {
+    throw new Error(
+      'NOTICE_ID, NOTICE_SUMMARY and NOTICE_URL must all be set together (or none at all); ' +
+        'NOTICE_SEVERITY is optional and defaults to "info"'
+    );
+  }
+  const resolvedSeverity = severity ?? 'info';
+  if (resolvedSeverity !== 'info' && resolvedSeverity !== 'action-required') {
+    throw new Error(
+      `NOTICE_SEVERITY must be "info" or "action-required", got "${resolvedSeverity}"`
+    );
+  }
+  return { id, severity: resolvedSeverity, summary, url };
+}
+const NOTICE = resolveNotice();
 
 // The local anvil settlement topology (see docker-compose.local.yml).
 const CHAIN = 'evm:31337';
@@ -180,9 +204,7 @@ async function publish(label, event) {
     // absolute path replaces the base's -- so "/" would land on `/` and 404.
     proxyPath: '/write',
   });
-  const body = result.response
-    ? new TextDecoder().decode(result.response.body)
-    : '';
+  const body = result.response ? new TextDecoder().decode(result.response.body) : '';
   console.log(
     `${result.success ? 'PUBLISHED' : 'FAILED   '} kind:${event.kind} ${label} ` +
       `id=${event.id.slice(0, 16)}… ${body || result.error || ''}`
@@ -216,6 +238,9 @@ const announce = buildIlpPeerInfoEvent(
     settlementAddresses: { [CHAIN]: PAYER.address },
     preferredTokens: { [CHAIN]: USDC },
     tokenNetworks: { [CHAIN]: TOKEN_NETWORK },
+    // A real schema field (toon#183), not a content ride-along — set here,
+    // never merged into the `announce.content = {...}` block below.
+    ...(NOTICE ? { notice: NOTICE } : {}),
   },
   OPERATOR_SK
 );
@@ -223,9 +248,7 @@ const announce = buildIlpPeerInfoEvent(
 announce.content = JSON.stringify({
   ...JSON.parse(announce.content),
   routes: { publish: DEST, store: DEST },
-  capabilities: [
-    { capability: 'os.publish', address: DEST, price: String(price.price) },
-  ],
+  capabilities: [{ capability: 'os.publish', address: DEST, price: String(price.price) }],
   chainRpcUrls: { [CHAIN]: process.env.RPC_URL ?? 'http://127.0.0.1:8545' },
 });
 await publish(
