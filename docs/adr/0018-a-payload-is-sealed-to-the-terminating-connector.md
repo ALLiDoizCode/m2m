@@ -1,5 +1,7 @@
 # A packet's payload is sealed to the terminating connector
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
 A packet's `data` is always a gift wrap addressed to the identity of the connector that terminates
 its route. Inside sits a structured envelope and the secret that packet's fulfilment derives from.
 Opacity in carriage stops being a rule hops are asked to keep and becomes one they cannot break.

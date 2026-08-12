@@ -1,5 +1,7 @@
 # A terminating connector derives the fulfilment it is paid against
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
 At a route termination the connector derives the packet's fulfilment from the secret in the gift
 wrap, rather than receiving it from the app. Issue #417's rule — that a connector never produces a
 fulfilment itself — is kept for forwarding hops and dropped at terminations.

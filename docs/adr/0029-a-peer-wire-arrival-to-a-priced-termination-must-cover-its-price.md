@@ -1,5 +1,7 @@
 # A peer-wire arrival to a priced termination must cover its price, per packet, before delivery
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
 > **The exposure ceiling and `T04` this ADR references throughout as already-existing, unaffected
 > machinery are retired** by [ADR 0033](0033-the-exposure-machinery-is-retired-not-restated.md)
 > (issue #882). This ADR's own decision — the per-packet `F03` price-coverage check — is untouched

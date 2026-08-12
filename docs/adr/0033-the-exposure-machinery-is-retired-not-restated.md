@@ -1,5 +1,7 @@
 # The exposure machinery is retired, not restated
 
+**Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
 ADR 0031 (issue #868/B1) retired the credit window as the peer path's operating mode — every peer
 PREPARE now carries its own covering claim, or is greeted — but explicitly left one question open:
 "the exposure machinery's remaining purpose is undecided here... `record_inbound_delivery`, `ceiling`

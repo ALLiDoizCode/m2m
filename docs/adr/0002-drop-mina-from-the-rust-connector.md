@@ -1,5 +1,7 @@
 # The Rust connector settles on EVM and Solana only; Mina is dropped
 
+**Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
+
 Mina is the only chain with no Rust path for the work that matters: its five zkApp methods
 (`initializeChannel`, `deposit`, `initiateClose`, `settle`, `claimFromChannel`) require proof
 generation through o1js, which exists only in JavaScript. Supporting Mina would mean shipping

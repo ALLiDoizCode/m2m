@@ -1,5 +1,7 @@
 # Read-mostly state is a swapped snapshot; the packet path never locks
 
+**Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
+
 Routes, peers and configuration are read on every packet and written rarely, if ever. That
 state is held as an immutable snapshot, published as a whole and swapped atomically, so the
 packet path reads it with no lock and no per-read copy. State that is genuinely mutable —

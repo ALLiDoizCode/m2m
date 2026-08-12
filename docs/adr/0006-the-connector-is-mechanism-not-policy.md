@@ -1,5 +1,7 @@
 # The connector is mechanism; discovery and route policy live outside it
 
+**Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
+
 The connector forwards what it is told to forward and settles what it is told to settle. It
 does not decide who its peers are, does not learn routes, and does not announce itself.
 Discovery is removed entirely; the operator surface exposes CRUD over the routing table and

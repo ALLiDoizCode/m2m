@@ -1,5 +1,7 @@
 # Property tests over a pure core; fakes are allowed, mocks are not
 
+**Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
+
 Testing runs in three tiers: property tests over `connector-core`, which has no I/O at all;
 contract tests defined once per port and run against every implementation of it; and
 integration tests against real chains, only where a chain is genuinely involved. An
