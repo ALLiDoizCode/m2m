@@ -33,6 +33,12 @@ apt-get install -y git jq gettext-base openssl ufw curl iptables
 echo "==> [2/5] Firewall (public = 22/80/443 only)"
 "$HERE/firewall.sh"
 
+echo "==> SSH hardening (key-only; no password auth)"
+# Runs AFTER the firewall and AFTER provisioning has installed the operator's
+# key, because harden-ssh.sh refuses to disable password auth on a box with no
+# usable authorized key. See infra/harden-ssh.sh for why this is mandatory.
+"$HERE/../harden-ssh.sh"
+
 echo "==> [3/5] Pull images (store + nginx/TLS)"
 ( cd "$ROOT" && "${COMPOSE[@]}" pull --ignore-pull-failures )
 
