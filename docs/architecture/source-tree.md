@@ -37,7 +37,7 @@ connector-signer                 the only crate that touches key material (ADR 0
   ├─ signer.rs, local.rs, kms.rs the Signer port and its backends
   ├─ giftwrap.rs                 seal/open, and the derived fulfilment (ADRs 0018, 0019)
   ├─ claim_signature.rs          EIP-712 and Ed25519 balance-proof verification (ADR 0024)
-  └─ treasury.rs, address.rs
+  └─ address.rs
 
 connector-config                 one typed TOML file and every refuse-to-start error (ADR 0009)
 

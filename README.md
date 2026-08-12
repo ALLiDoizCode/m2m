@@ -395,7 +395,7 @@ cargo run -p connector-vectors --bin generate-vectors
 | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | `connector-domain`                          | Pure logic, no I/O and no clock: packets, OER encoding, addresses, route selection, fee arithmetic, claim rules, the app envelope. |
 | `connector-runtime`                         | The packet plane and its ports: the `Connector`, peer transport, claim book, leased routes, metrics.                               |
-| `connector-signer`                          | The only crate that touches key material: the `Signer` port, the treasury, gift wrap, claim-signature verification.                |
+| `connector-signer`                          | The only crate that touches key material: the `Signer` port, gift wrap, claim-signature verification.                              |
 | `connector-config`                          | The one typed config file and every refuse-to-start error it can raise.                                                            |
 | `connector-btp`                             | The BTP frame codec and session framing (RFC-0023), transport-neutral — knows nothing about claims, routes or prices.              |
 | `connector-peer-auth`                       | Role-by-authentication: whether an interaction is a peer or a client, decided from credential and config alone (ADR 0027).         |
