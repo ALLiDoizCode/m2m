@@ -371,6 +371,12 @@ price = 1000
 # in compiled code) closes the gap rather than relocating and pricing it.
 
 # ── Settlement ─────────────────────────────────────────────────────────────
+# Same registry/token/decimals the apex names, and the same custody facts:
+# `TokenNetwork.owner()` is the registry below, which forwards no call into
+# a `TokenNetwork` and never calls `transferOwnership` -- so `pause`/
+# `emergencyWithdraw` are unreachable here too (see the apex's
+# `infra/linode-node/connector-rust.toml` for the full citation, issue
+# #577).
 
 [settlement.evm]
 rpc_url = "https://base-sepolia-rpc.publicnode.com"
