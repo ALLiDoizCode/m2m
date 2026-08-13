@@ -210,6 +210,25 @@
 //! never a [`ChannelLookupFailed`] and never an absent channel: "the chain
 //! said no", "the chain did not answer" and "I declined to ask" are three
 //! different things an operator has to act on differently.
+//!
+//! # The fast path: a local channel index (issue #661)
+//!
+//! Everything above bounds the *cost* of an `eth_call`-per-lookup; it does
+//! not remove the call. `connector-cli` wires a [`ClientChannelSource`] over
+//! `connector-settlement-evm`'s `EvmChannelIndex` -- a durable local index of
+//! `TokenNetwork`'s own `ChannelOpened`/`ChannelNewDeposit`/`ChannelSettled`
+//! logs -- as its EVM source, so that a channel the index has caught up to
+//! resolves from a `HashMap` probe with no RPC at all, and reports a settled
+//! channel as [`ChannelResolutionError::Terminal`] the same way,
+//! distinguishably from a channel this registry has simply never heard of.
+//! The chain-reading path this module implements is the **fall-through**,
+//! not the primary path: a channel the index has not caught up to (never
+//! opened, opened inside its confirmation window, or its sync lagging or
+//! down) is a plain [`ClientChannelSource::evm_channel`] miss, resolved
+//! exactly as before -- so a node whose index has never once caught up
+//! behaves byte-identically to a node built before issue #661, and every
+//! mitigation in this module (liveness, the lookup budget) still governs
+//! every lookup the index cannot yet answer.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -415,23 +434,55 @@ impl std::fmt::Display for ChannelLookupFailed {
 
 impl std::error::Error for ChannelLookupFailed {}
 
-/// Why a channel could not be resolved -- the two refusals a lookup can
-/// produce, kept apart because they are not the same event (issue #613).
+/// A [`ClientChannelSource`] has a definitive, known-without-a-chain-read
+/// answer that a channel can never be paid on again -- it settled (issue
+/// #661). A *closed* channel is deliberately not this: `claimFromChannel`
+/// accepts a channel in `Closed` as readily as one in `Opened`, so closing
+/// -- however it was closed -- ends nothing this connector can still be
+/// paid for. Kept distinct from [`ChannelLookupFailed`] (this connector
+/// could not find out) and from a plain `Ok(None)` (this connector has no
+/// information either way): a source that can report this reliably -- the
+/// local `TokenNetwork` event index, which has itself seen the terminal log
+/// -- lets a refusal say "this channel is done" rather than the weaker "I
+/// have no record of it", without spending a chain read to upgrade the
+/// answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelTerminal(pub String);
+
+impl std::fmt::Display for ChannelTerminal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for ChannelTerminal {}
+
+/// Why a channel could not be resolved -- the refusals a lookup can produce,
+/// kept apart because they are not the same event (issue #613, extended by
+/// #661).
 ///
 /// [`ChannelResolutionError::LookupFailed`] is a failure: this connector
 /// asked and did not get an answer. [`ChannelResolutionError::Budgeted`] is
 /// a decision: this connector declined to ask, because the sender (or the
 /// node as a whole) has already spent its allowance of lookups for channels
-/// that turn out not to exist. Both refuse the claim; conflating them would
-/// tell an operator whose endpoint is down to go looking for an attacker,
-/// and an operator being walked to go looking at their endpoint.
+/// that turn out not to exist. [`ChannelResolutionError::Terminal`] is a
+/// known fact reported without asking anything at all: a source that keeps
+/// its own durable record of settlement (issue #661's local channel index)
+/// can say a channel is done without either touching the chain or waiting
+/// to be asked twice. All three refuse the claim; conflating them would
+/// tell an operator whose endpoint is down to go looking for an attacker, an
+/// operator being walked to go looking at their endpoint, and an operator
+/// whose buyer's channel genuinely settled to go looking for either.
 ///
-/// Both are also distinct from `Ok(None)` -- "there is no such channel" --
-/// which is a fact about the world rather than about this connector.
+/// All three are also distinct from `Ok(None)` -- "there is no such
+/// channel" -- which is a fact about the world rather than about this
+/// connector, and the answer for a channel this connector has never heard
+/// of at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChannelResolutionError {
     LookupFailed(ChannelLookupFailed),
     Budgeted(LookupBudgetExhausted),
+    Terminal(ChannelTerminal),
 }
 
 impl From<ChannelLookupFailed> for ChannelResolutionError {
@@ -446,11 +497,18 @@ impl From<LookupBudgetExhausted> for ChannelResolutionError {
     }
 }
 
+impl From<ChannelTerminal> for ChannelResolutionError {
+    fn from(terminal: ChannelTerminal) -> ChannelResolutionError {
+        ChannelResolutionError::Terminal(terminal)
+    }
+}
+
 impl std::fmt::Display for ChannelResolutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ChannelResolutionError::LookupFailed(failure) => write!(f, "{failure}"),
             ChannelResolutionError::Budgeted(exhausted) => write!(f, "{exhausted}"),
+            ChannelResolutionError::Terminal(terminal) => write!(f, "{terminal}"),
         }
     }
 }
@@ -494,6 +552,39 @@ pub trait ClientChannelSource: Send + Sync + std::fmt::Debug {
     ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
         let _ = channel_id;
         Ok(None)
+    }
+
+    /// The record for `channel_id`, read from this source's own authority
+    /// -- for a caching source, the chain its cache is built from -- never
+    /// from a cache it keeps. The registry calls this instead of
+    /// [`evm_channel`](Self::evm_channel) when a claim has **breached** the
+    /// memoised deposit floor: the floor is a lower bound, and a cache can
+    /// legitimately hold a stale or partial one (a deposit top-up whose log
+    /// is not yet confirmation-deep), so re-serving the cache would refuse
+    /// a claim the chain would honour. A source that already answers from
+    /// the chain (the default) has nothing fresher to say than
+    /// [`evm_channel`](Self::evm_channel).
+    async fn evm_channel_fresh(
+        &self,
+        channel_id: &[u8; 32],
+    ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
+        self.evm_channel(channel_id).await
+    }
+
+    /// Whether this source has a durable, definitive record that
+    /// `channel_id` has settled -- without touching a chain to find out
+    /// (issue #661; a merely closed channel is not terminal, see
+    /// [`ChannelTerminal`]). Only ever consulted after
+    /// [`evm_channel`](Self::evm_channel) has already answered `Ok(None)`
+    /// for the same lookup, and only to decide how to *report* that
+    /// refusal: it never overrides a positive answer, and a source with no
+    /// such record (the default, and every source that predates issue #661)
+    /// simply answers `false`, which reproduces today's behaviour -- the
+    /// refusal reports as [`crate::ClaimIngestRejection::UnknownChannel`]
+    /// exactly as it always has.
+    async fn evm_channel_terminal(&self, channel_id: &[u8; 32]) -> bool {
+        let _ = channel_id;
+        false
     }
 
     /// The Solana twin of [`evm_channel`](Self::evm_channel) (issue #631):
@@ -957,7 +1048,7 @@ impl ClientChannelRegistry {
             Plan::Serve(channel) => Ok(Some(channel)),
             Plan::Refuse(failure) => Err(failure.into()),
             Plan::Ask { fallback, unseen } => {
-                self.resolve_evm(channel_id, fallback, unseen, requester)
+                self.resolve_evm(channel_id, fallback, unseen, requester, Trigger::Age)
                     .await
             }
         }
@@ -997,7 +1088,7 @@ impl ClientChannelRegistry {
             Plan::Serve(channel) => Ok(Some(channel)),
             Plan::Refuse(failure) => Err(failure.into()),
             Plan::Ask { fallback, unseen } => {
-                self.resolve_evm(channel_id, fallback, unseen, requester)
+                self.resolve_evm(channel_id, fallback, unseen, requester, Trigger::Breach)
                     .await
             }
         }
@@ -1007,13 +1098,19 @@ impl ClientChannelRegistry {
     /// one place [`Self::resolved`] is written. `fallback` is the memoised
     /// reading to answer with if the lookup fails, and `unseen` says this
     /// registry held no entry for the channel at all -- see [`Plan::Ask`]
-    /// for why the two are not the same thing.
+    /// for why the two are not the same thing. `trigger` decides which of
+    /// the source's two reads this is: a [`Trigger::Breach`] must reach the
+    /// source's authority ([`ClientChannelSource::evm_channel_fresh`]) --
+    /// the whole reason a breach re-reads is that a cached floor may be
+    /// stale -- while an ageing re-read is content with whatever the source
+    /// considers current.
     async fn resolve_evm(
         &self,
         channel_id: &[u8; 32],
         fallback: Option<EvmChannel>,
         unseen: bool,
         requester: &str,
+        trigger: Trigger,
     ) -> Result<Option<EvmChannel>, ChannelResolutionError> {
         let Some(source) = self.sources.get(&ClaimChain::Evm) else {
             return Ok(None);
@@ -1032,7 +1129,11 @@ impl ClientChannelRegistry {
             memo: &self.resolved,
             key: *channel_id,
         };
-        let resolved = match source.evm_channel(channel_id).await {
+        let lookup = match trigger {
+            Trigger::Age => source.evm_channel(channel_id).await,
+            Trigger::Breach => source.evm_channel_fresh(channel_id).await,
+        };
+        let resolved = match lookup {
             Ok(resolved) => {
                 self.record_lookup_outcome(ClaimChain::Evm, None);
                 resolved
@@ -1062,6 +1163,31 @@ impl ClientChannelRegistry {
                 };
             }
         };
+        // A source that itself keeps a durable record of settlement (issue
+        // #661's local channel index) can say more than `Ok(None)` --
+        // "no such channel" -- normally means: it can say the channel is
+        // *known and done*, without a chain read either way. Checked here,
+        // once, rather than folded into `evm_channel` itself, so every
+        // existing source (which answers `false` by default) is completely
+        // unaffected and this stays additive.
+        if resolved.is_none() && source.evm_channel_terminal(channel_id).await {
+            // A known fact, not an unresolvable walk (issue #613): refund
+            // rather than charge, and drop any stale positive memo entry so
+            // the next lookup is refused the same way instead of served
+            // from a reading that predates the settlement.
+            if let Some(reservation) = reservation {
+                self.lookup_budget.refund(reservation);
+            }
+            self.resolved
+                .write()
+                .expect("resolved client channels lock poisoned")
+                .remove(channel_id);
+            return Err(ChannelTerminal(format!(
+                "channel {} has settled and can never be redeemed again",
+                hex::encode(channel_id)
+            ))
+            .into());
+        }
         // The lookup found a channel, so it was not an unresolvable one and
         // must not be charged for -- otherwise a node onboarding real
         // anonymous buyers throttles itself for doing exactly what #611
@@ -1359,6 +1485,7 @@ pub(crate) mod test_source {
     //! RPC endpoint does.
 
     use super::*;
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
@@ -1375,6 +1502,13 @@ pub(crate) mod test_source {
         /// lives through is the whole subject of the availability tests and
         /// cannot be expressed by a source that failed from the start.
         failure: Mutex<Option<String>>,
+        /// Channels this source has a durable, definitive record of having
+        /// settled (issue #661) -- a stand-in for the local channel index's
+        /// own terminal record, answered by
+        /// [`ClientChannelSource::evm_channel_terminal`] and never counted
+        /// against [`Self::lookups`], since the real index answers it from
+        /// memory rather than a chain read.
+        terminal: Mutex<HashSet<[u8; 32]>>,
         /// How long a lookup takes. Non-zero lets a test put several
         /// lookups genuinely in flight at once, which is what a stampede
         /// is; zero would let each future complete before the next is
@@ -1388,6 +1522,7 @@ pub(crate) mod test_source {
             FakeChannelSource {
                 channels: Mutex::new(channels.into_iter().collect()),
                 failure: Mutex::new(None),
+                terminal: Mutex::new(HashSet::new()),
                 latency: Duration::ZERO,
                 lookups: AtomicUsize::new(0),
             }
@@ -1397,9 +1532,27 @@ pub(crate) mod test_source {
             FakeChannelSource {
                 channels: Mutex::new(HashMap::new()),
                 failure: Mutex::new(Some(reason.to_string())),
+                terminal: Mutex::new(HashSet::new()),
                 latency: Duration::ZERO,
                 lookups: AtomicUsize::new(0),
             }
+        }
+
+        /// This source now has a durable, definitive record that
+        /// `channel_id` has settled (issue #661) -- the stand-in for the
+        /// local channel index having observed the terminal log. Also
+        /// removes any positive `now_says` entry, the same way a real index
+        /// drops a channel's active record once it sees the terminal
+        /// event.
+        pub(crate) fn now_terminal(&self, channel_id: [u8; 32]) {
+            self.terminal
+                .lock()
+                .expect("fake source lock poisoned")
+                .insert(channel_id);
+            self.channels
+                .lock()
+                .expect("fake source lock poisoned")
+                .remove(&channel_id);
         }
 
         /// Every lookup from now on takes `latency` -- see the field's own
@@ -1456,6 +1609,17 @@ pub(crate) mod test_source {
                 .expect("fake source lock poisoned")
                 .get(channel_id)
                 .copied())
+        }
+
+        async fn evm_channel_terminal(&self, channel_id: &[u8; 32]) -> bool {
+            // Deliberately does not touch `self.lookups` -- the whole point
+            // of issue #661's terminal check is that it costs no chain read
+            // at all, so a test asserting `lookups() == 0` on a terminal
+            // channel must see exactly that.
+            self.terminal
+                .lock()
+                .expect("fake source lock poisoned")
+                .contains(channel_id)
         }
     }
 
@@ -1773,6 +1937,75 @@ mod tests {
         );
     }
 
+    /// Issue #661: a source that keeps its own durable record of settlement
+    /// (the local channel index) reports a terminal channel distinguishably
+    /// from a channel it has simply never heard of, and does so without a
+    /// chain read -- `lookups()` never counts it, unlike the unknown-channel
+    /// case above.
+    #[tokio::test]
+    async fn a_terminal_channel_is_refused_distinguishably_from_an_unknown_one() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![]));
+        source.now_terminal([0x07; 32]);
+        let registry = ClientChannelRegistry::new().with_source(source.clone());
+
+        assert_eq!(
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Err(ChannelTerminal(
+                "channel 0707070707070707070707070707070707070707070707070707070707070707 has \
+                 settled and can never be redeemed again"
+                    .to_string()
+            )
+            .into())
+        );
+        assert_ne!(
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Ok(None),
+            "a terminal channel must not be reported the same way as a channel this registry \
+             has simply never heard of"
+        );
+        assert_eq!(
+            source.lookups(),
+            2,
+            "the terminal check itself is not counted as a chain-reading lookup, but \
+             evm_channel is still asked (and answers None) each time"
+        );
+    }
+
+    /// A positive resolution that later turns terminal (issue #649's
+    /// settle-while-cached case, now served by the index instead of a
+    /// refresh) is dropped from the memo rather than kept alive: the very
+    /// next lookup is refused, not served from a reading that predates the
+    /// settlement.
+    #[tokio::test]
+    async fn a_channel_that_turns_terminal_after_being_resolved_stops_being_served_from_cache() {
+        let source = Arc::new(FakeChannelSource::knowing(vec![(
+            [0x07; 32],
+            evm_channel(),
+        )]));
+        let registry = ClientChannelRegistry::new()
+            .with_source(source.clone())
+            .with_liveness_policy(ChannelLivenessPolicy::reverify_every_lookup());
+
+        assert_eq!(
+            registry.evm(&[0x07; 32], A_BUYER).await,
+            Ok(Some(evm_channel()))
+        );
+
+        source.now_terminal([0x07; 32]);
+        // A refresh -- what a deposit-floor breach drives -- re-asks the
+        // source regardless of age under `reverify_every_lookup`, the same
+        // path issue #649's settle-while-cached case exercises.
+        assert_eq!(
+            registry.refresh_evm(&[0x07; 32], A_BUYER).await,
+            Err(ChannelTerminal(
+                "channel 0707070707070707070707070707070707070707070707070707070707070707 has \
+                 settled and can never be redeemed again"
+                    .to_string()
+            )
+            .into())
+        );
+    }
+
     /// A lookup this connector could not complete is a failure of its own,
     /// never silently "no such channel" and never a reason to believe what
     /// the claim says about itself.
@@ -2014,6 +2247,84 @@ mod tests {
             DepositFloor::AtLeast(5_000)
         );
         assert_eq!(source.lookups(), 2);
+    }
+
+    /// A source that answers `evm_channel` from a cache of its own (the
+    /// issue #661 channel index) can hold a deposit floor the chain has
+    /// since raised -- a top-up whose log is not yet confirmation-deep. A
+    /// breach re-read that consulted the same cache again would refuse a
+    /// claim the chain would honour, so the breach path must go through
+    /// [`ClientChannelSource::evm_channel_fresh`], never
+    /// [`ClientChannelSource::evm_channel`].
+    #[tokio::test]
+    async fn a_breach_re_read_bypasses_a_source_s_own_cache() {
+        /// `evm_channel` plays the cache (stale floor); `evm_channel_fresh`
+        /// plays the chain (the floor after the top-up).
+        #[derive(Debug)]
+        struct CachingSource;
+
+        #[async_trait]
+        impl ClientChannelSource for CachingSource {
+            async fn evm_channel(
+                &self,
+                _channel_id: &[u8; 32],
+            ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
+                Ok(Some(evm_channel_depositing(DepositFloor::AtLeast(1_000))))
+            }
+
+            async fn evm_channel_fresh(
+                &self,
+                _channel_id: &[u8; 32],
+            ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
+                Ok(Some(evm_channel_depositing(DepositFloor::AtLeast(5_000))))
+            }
+        }
+
+        // A long refresh window, so the ageing path serves the memo (which
+        // is what lets the final assertion below see the write-through
+        // rather than another cached read), and no re-attempt suppression,
+        // so the breach re-read is observable immediately.
+        let registry = ClientChannelRegistry::new()
+            .with_source(Arc::new(CachingSource))
+            .with_liveness_policy(ChannelLivenessPolicy {
+                refresh_after: Duration::from_secs(3_600),
+                serve_stale_until: Duration::from_secs(7_200),
+                min_reattempt_interval: Duration::ZERO,
+            });
+
+        // An ordinary resolve is content with the source's cached answer.
+        assert_eq!(
+            registry
+                .evm(&[0x07; 32], A_BUYER)
+                .await
+                .unwrap()
+                .unwrap()
+                .deposit_floor,
+            DepositFloor::AtLeast(1_000)
+        );
+
+        // A breach is not: it reaches the source's authority.
+        assert_eq!(
+            registry
+                .refresh_evm(&[0x07; 32], A_BUYER)
+                .await
+                .unwrap()
+                .unwrap()
+                .deposit_floor,
+            DepositFloor::AtLeast(5_000)
+        );
+
+        // And the fresh floor writes through the memo, so the next packet
+        // is served the corrected figure without another read.
+        assert_eq!(
+            registry
+                .evm(&[0x07; 32], A_BUYER)
+                .await
+                .unwrap()
+                .unwrap()
+                .deposit_floor,
+            DepositFloor::AtLeast(5_000)
+        );
     }
 
     /// Issue #649: a channel resolved while it was payable, which the chain

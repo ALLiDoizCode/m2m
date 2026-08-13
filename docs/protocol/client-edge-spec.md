@@ -394,11 +394,21 @@ signer is the best that can be done:
 - **Per-address rate limiting at the reverse proxy** a connector is deployed behind. That is the only
   sybil-resistant axis available at this layer — an address costs something, a keypair does not — and
   it is the right place for it, since the proxy is the only component that sees the real peer.
-- **A local channel index built from the settlement contract's own `ChannelOpened` events.** A
-  connector subscribed to those logs answers "is this a channel I can be paid on?" from a local map
-  rather than an RPC round trip, at which point an unknown-channel lookup costs a hashmap probe and
-  this entire step has nothing left to bound. That is the fix that dissolves the problem rather than
-  rationing it.
+- **A local channel index built from the settlement contract's own logs** (issue #661, shipped as
+  `connector-settlement-evm`'s `EvmChannelIndex`/`EvmChannelIndexSyncer`, wired in by
+  `connector-cli::runtime`'s `IndexedEvmChannelSource`). A connector backfills, then polls,
+  `ChannelOpened`/`ChannelNewDeposit`/`ChannelSettled` from `TokenNetwork` (the close events change
+  nothing about claimability — `claimFromChannel` accepts a `Closed` channel — so they are not indexed)
+  once each log is a configured confirmation depth behind chain head, and answers "is this a channel
+  I can be paid on, and for how much?" from a local map rather than an RPC round trip. Once the index
+  has caught up to a channel, an unknown- or settled-channel lookup costs a hashmap probe instead of
+  an `eth_call` and this step's rates and wait have nothing left to bound _for that channel_ — that is
+  the fix that dissolves the problem rather than rationing it. It is not a replacement for the axes
+  above: a channel the index has not caught up to yet (never opened, opened inside the confirmation
+  window, or the index's own sync lagging or down) falls through to exactly the RPC-reading,
+  budget-shaped resolution this section describes, unchanged — so a connector whose index has never
+  once caught up behaves exactly as one with no index at all, and the rates and wait above remain the
+  bound for every lookup this index cannot yet answer.
 
 The rates and the wait are a **deployment** choice for the same reason the three durations above are
 — what a connector can afford to spend discovering channels that do not exist depends on the

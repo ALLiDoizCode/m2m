@@ -71,6 +71,14 @@ pub(crate) struct RawKeyedSettlementConfig {
 
 /// `[settlement.evm]`: the same fields the legacy flat shape carries, minus
 /// `chain` -- the table's own key already says which chain this is.
+///
+/// `channel_index_from_block`/`channel_index_confirmations` (issue #661) are
+/// new, additive knobs for the local `ChannelOpened`/`ChannelNewDeposit`/
+/// `ChannelSettled` index built from this same `TokenNetwork`: the block to
+/// backfill from on a cold start with no checkpoint, and the depth behind
+/// chain head logs are applied at. Both default when omitted -- see
+/// [`resolve_evm_fields`] -- so an existing `[settlement.evm]` table keeps
+/// parsing with unchanged behaviour.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawEvmSettlementTable {
@@ -79,6 +87,10 @@ pub(crate) struct RawEvmSettlementTable {
     token_address: String,
     decimals: u8,
     key: RawSettlementKeyConfig,
+    #[serde(default)]
+    channel_index_from_block: Option<u64>,
+    #[serde(default)]
+    channel_index_confirmations: Option<u64>,
 }
 
 /// `[settlement.solana]`: `contract_address` (an EVM `TokenNetworkRegistry`)
@@ -185,7 +197,18 @@ pub struct EvmSettlementConfig {
     token_address: [u8; 20],
     decimals: u8,
     key: SecretLocation,
+    channel_index_from_block: u64,
+    channel_index_confirmations: u64,
 }
+
+/// How many blocks behind chain head a `ChannelOpened`/`ChannelNewDeposit`/
+/// `ChannelSettled` log must be before the local channel index applies it
+/// (issue #661), when `channel_index_confirmations` is not set. Deep enough
+/// that an ordinary chain reorg cannot un-confirm a log this index has
+/// already applied -- there is deliberately no unwind path, so this default
+/// has to actually hold rather than merely look safe on a chain that has not
+/// reorged yet.
+pub const DEFAULT_CHANNEL_INDEX_CONFIRMATIONS: u64 = 5;
 
 impl EvmSettlementConfig {
     /// The RPC endpoint this backend connects through.
@@ -220,6 +243,24 @@ impl EvmSettlementConfig {
     /// Where this backend's signing key material lives.
     pub fn key(&self) -> &SecretLocation {
         &self.key
+    }
+
+    /// The block the local channel index (issue #661) backfills from on a
+    /// cold start with no durable checkpoint. `0` (scan from genesis) unless
+    /// `channel_index_from_block` is set -- an operator who knows their
+    /// `TokenNetwork`'s deploy block should set it, since scanning a public
+    /// chain from genesis is the cold-start cost this field exists to avoid.
+    pub fn channel_index_from_block(&self) -> u64 {
+        self.channel_index_from_block
+    }
+
+    /// How many blocks behind chain head a channel-index log must be before
+    /// it is applied (issue #661) -- always at least 1, enforced at load
+    /// time by [`resolve_evm_fields`], since indexing at head has nothing to
+    /// fall back on when the head reorgs and this index ships no unwind
+    /// path.
+    pub fn channel_index_confirmations(&self) -> u64 {
+        self.channel_index_confirmations
     }
 }
 
@@ -369,12 +410,21 @@ fn resolve_evm_fields(table: RawEvmSettlementTable) -> Result<EvmSettlementConfi
 
     let key = resolve_settlement_key(table.key)?;
 
+    let channel_index_confirmations = table
+        .channel_index_confirmations
+        .unwrap_or(DEFAULT_CHANNEL_INDEX_CONFIRMATIONS);
+    if channel_index_confirmations == 0 {
+        return Err(ConfigError::SettlementChannelIndexConfirmationsZero);
+    }
+
     Ok(EvmSettlementConfig {
         rpc_url,
         contract_address,
         token_address,
         decimals: table.decimals,
         key,
+        channel_index_from_block: table.channel_index_from_block.unwrap_or(0),
+        channel_index_confirmations,
     })
 }
 
@@ -438,6 +488,11 @@ pub(crate) fn resolve_settlement(
                 token_address: raw.token_address,
                 decimals: raw.decimals,
                 key: raw.key,
+                // The legacy flat shape is frozen (issue #628): it has no
+                // channel_index_* fields of its own, so both default exactly
+                // as an omitted keyed [settlement.evm] table would.
+                channel_index_from_block: None,
+                channel_index_confirmations: None,
             })?;
             Ok(vec![SettlementConfig::Evm(evm)])
         }
@@ -862,6 +917,99 @@ key_file = "{}"
             result,
             Err(ConfigError::SettlementMissingProgramId)
         ));
+    }
+
+    #[test]
+    fn an_evm_table_with_no_channel_index_fields_gets_the_default_confirmation_depth() {
+        let key_file = temp_key_file();
+        let text = format!(
+            r#"
+[evm]
+rpc_url = "http://127.0.0.1:8545"
+contract_address = "{CONTRACT}"
+token_address = "{TOKEN}"
+decimals = 6
+
+[evm.key]
+key_file = "{}"
+"#,
+            key_file.path().display()
+        );
+        let resolved = resolve_settlement(Some(keyed_toml(&text))).expect("resolve");
+        let resolved = expect_single_evm(resolved);
+        assert_eq!(resolved.channel_index_from_block(), 0);
+        assert_eq!(
+            resolved.channel_index_confirmations(),
+            DEFAULT_CHANNEL_INDEX_CONFIRMATIONS
+        );
+    }
+
+    #[test]
+    fn an_evm_table_can_set_the_channel_index_from_block_and_confirmations() {
+        let key_file = temp_key_file();
+        let text = format!(
+            r#"
+[evm]
+rpc_url = "http://127.0.0.1:8545"
+contract_address = "{CONTRACT}"
+token_address = "{TOKEN}"
+decimals = 6
+channel_index_from_block = 123456
+channel_index_confirmations = 12
+
+[evm.key]
+key_file = "{}"
+"#,
+            key_file.path().display()
+        );
+        let resolved = resolve_settlement(Some(keyed_toml(&text))).expect("resolve");
+        let resolved = expect_single_evm(resolved);
+        assert_eq!(resolved.channel_index_from_block(), 123456);
+        assert_eq!(resolved.channel_index_confirmations(), 12);
+    }
+
+    #[test]
+    fn a_channel_index_confirmations_of_zero_is_rejected_at_load_time() {
+        let key_file = temp_key_file();
+        let text = format!(
+            r#"
+[evm]
+rpc_url = "http://127.0.0.1:8545"
+contract_address = "{CONTRACT}"
+token_address = "{TOKEN}"
+decimals = 6
+channel_index_confirmations = 0
+
+[evm.key]
+key_file = "{}"
+"#,
+            key_file.path().display()
+        );
+        let result = resolve_settlement(Some(keyed_toml(&text)));
+        assert!(matches!(
+            result,
+            Err(ConfigError::SettlementChannelIndexConfirmationsZero)
+        ));
+    }
+
+    #[test]
+    fn the_legacy_flat_shape_gets_the_default_channel_index_confirmations() {
+        let key_file = temp_key_file();
+        let resolved = resolve_settlement(Some(raw(
+            "evm",
+            "http://127.0.0.1:8545",
+            CONTRACT,
+            TOKEN,
+            6,
+            Some(key_file.path().to_path_buf()),
+        )))
+        .expect("resolve");
+        let resolved = expect_single_evm(resolved);
+        assert_eq!(resolved.channel_index_from_block(), 0);
+        assert_eq!(
+            resolved.channel_index_confirmations(),
+            DEFAULT_CHANNEL_INDEX_CONFIRMATIONS
+        );
     }
 
     #[test]
