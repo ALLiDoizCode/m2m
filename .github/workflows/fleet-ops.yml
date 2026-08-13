@@ -66,18 +66,18 @@ on:
         required: true
         options: [relay, ario, toon, faucet]
       operation:
-        description: 'box-status | config-read | pin-verify (reads) — config-apply | restart | deploy | announce (writes)'
+        description: "box-status | config-read | pin-verify (reads) — config-apply | restart | deploy | announce (writes)"
         type: choice
         required: true
         default: box-status
         options: [box-status, config-read, pin-verify, config-apply, restart, deploy, announce]
       service:
-        description: 'restart/deploy: compose service name (connector-rust, relay, store, nginx, faucet)'
+        description: "restart/deploy: compose service name (connector-rust, relay, store, nginx, faucet)"
         type: string
         required: false
-        default: 'connector-rust'
+        default: "connector-rust"
       apply:
-        description: 'Perform the write. false = dry run, reads and prints only.'
+        description: "Perform the write. false = dry run, reads and prints only."
         type: boolean
         required: false
         default: false

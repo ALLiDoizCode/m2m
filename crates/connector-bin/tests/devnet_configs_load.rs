@@ -1213,11 +1213,13 @@ fn the_relay_devnet_config_announces_only_prefixes_it_terminates() {
 
 /// The two-box-cutover operator notice (issue #948, re-homed from
 /// toon-meta#335), exactly as published at
-/// `toon-meta`'s `docs/operators/2026-08-13-two-box-cutover.md`. This crate
-/// composes nothing about a notice's content (`connector-config/src/
-/// announce.rs`'s own doc) -- these four literals are the one place that
-/// content is transcribed into this repo, so a typo here is the only way it
-/// would ever drift from what toon-meta actually published.
+/// `toon-meta`'s `docs/operators/2026-08-13-two-box-cutover.md`. Nothing
+/// composes a notice's content (`connector-config/src/announce.rs`'s own
+/// doc) -- it reaches the wire only by being TRANSCRIBED, twice and
+/// independently: once into each box's committed `connector-rust.toml`, and
+/// once into these four literals. A slip on either side is the only way what
+/// the fleet announces can drift from what toon-meta actually published,
+/// which is exactly what asserting one against the other catches.
 const NOTICE_ID: &str = "2026-08-13-two-box-cutover";
 const NOTICE_SEVERITY: &str = "action-required";
 const NOTICE_SUMMARY: &str = "The devnet apex is being retired; reads and relay publishing repair themselves, but store uploads need a client released after the cutover.";
