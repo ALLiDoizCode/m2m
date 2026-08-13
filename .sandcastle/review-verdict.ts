@@ -29,6 +29,7 @@
 import { execFileSync } from 'node:child_process';
 import * as sandcastle from '@ai-hero/sandcastle';
 import { z } from 'zod';
+import { shouldClearNeedsHuman } from './needs-human-evaluator.mjs';
 
 // ---------------------------------------------------------------------------
 // Schema + Output declaration
@@ -444,6 +445,44 @@ function factoryOpsApprovalBody(issue: TargetIssue | null): string {
  * The `needs:human` label logic lives HERE and only here (toon-meta#282 seam:
  * the pre-#282 COMMENT-review path applied it too; that path is gone).
  */
+/**
+ * Whether a CLEAN verdict should clear `needs:human` from this PR
+ * (toon-meta#352).
+ *
+ * The decision itself is pure and lives in
+ * `.sandcastle/needs-human-evaluator.mjs`, unit-tested by
+ * `npm run test:factory` — this is only the I/O that feeds it. That split is
+ * this repo's convention (see the reap/unblock/dispatch evaluators), and it is
+ * the reason the ownership rule is testable at all.
+ *
+ * Reads the TIMELINE, not the label list: the label list says only THAT the
+ * label is present, never WHO applied it, and ownership is the whole
+ * distinction — a machine-applied label is stale state, a human-applied one is
+ * a decision.
+ *
+ * Fails closed on any read error: leaving the label costs a manual edit,
+ * clearing it wrongly overrules a person.
+ */
+function clearsNeedsHuman(prNumber: string, approverLogin: string, token: string): boolean {
+  try {
+    const raw = execFileSync(
+      'gh',
+      ['api', '--paginate', `repos/${repoNwo()}/issues/${prNumber}/timeline`],
+      { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GH_TOKEN: token } }
+    ).toString();
+
+    // `--paginate` concatenates one JSON array per page; normalise to one array.
+    const events = raw
+      .split('\n')
+      .filter((line) => line.trim().startsWith('['))
+      .flatMap((line) => JSON.parse(line) as unknown[]);
+
+    return shouldClearNeedsHuman(events, approverLogin);
+  } catch {
+    return false;
+  }
+}
+
 export function submitFactoryOpsVerdict(
   prNumber: string,
   verdict: ReviewVerdict,
@@ -515,6 +554,42 @@ export function submitFactoryOpsVerdict(
     );
     console.log(
       `Requested changes with the findings and applied '${NEEDS_HUMAN_LABEL}' on PR #${prNumber}.`
+    );
+  } else if (clearsNeedsHuman(prNumber, approver.login, approver.token)) {
+    // The machine clears what the machine applied, and only that (toon-meta#352).
+    //
+    // The blocking branch above applies `needs:human` as a side effect. Nothing
+    // used to remove it, so a PR that went blocking -> fixed -> clean ended
+    // APPROVED *and* carrying the label — and `auto-merge.yml` refuses on it
+    // ("needs-human: PR carries needs:human"). Once blocked, gated forever.
+    // On 2026-08-12 that held three approved PRs at once, including #333, the
+    // fix for the sibling dead-`agent:implement` wedge.
+    //
+    // The guard is the whole point: `needs:human` is a HUMAN control point
+    // (FACTORY.md). Clearing it unconditionally on a clean verdict would let a
+    // machine overrule a person who applied it deliberately — trading one bug
+    // for a worse one. So we remove it ONLY when the most recent application
+    // was by the approver identity itself. A human's label is never touched,
+    // and a human who re-applies it after a clean verdict keeps it.
+    execFileSync(
+      'gh',
+      [
+        'api',
+        '-X',
+        'DELETE',
+        // The colon MUST stay percent-encoded. `gh api` does not encode path
+        // segments, and an unencoded `needs:human` silently no-ops (200, no
+        // change) rather than erroring.
+        `repos/${nwo}/issues/${prNumber}/labels/${encodeURIComponent(NEEDS_HUMAN_LABEL)}`,
+      ],
+      {
+        stdio: ['ignore', 'ignore', 'inherit'],
+        env: { ...process.env, GH_TOKEN: approver.token },
+      }
+    );
+    console.log(
+      `Cleared '${NEEDS_HUMAN_LABEL}' on PR #${prNumber} — it was applied by ` +
+        `${approver.login} on a previous blocking verdict, and this verdict is clean.`
     );
   }
 }
