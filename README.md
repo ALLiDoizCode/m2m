@@ -130,6 +130,15 @@ same fields as the legacy shape, minus `chain`) and/or `[settlement.solana]` (`r
 one is a startup failure — `connector-cli` constructs a real backend for every chain configured,
 EVM or Solana, before the node serves anything.
 
+`[settlement.evm]` takes two further optional knobs, both for the local channel index a node builds
+from its own `TokenNetwork`'s logs so that resolving an unfamiliar channel is a map hit rather than
+an RPC call (issue #661): `channel_index_from_block`, the block a cold start with no checkpoint
+backfills from — it defaults to `0`, so an operator who knows their `TokenNetwork`'s deploy block
+should set it rather than scan a public chain from genesis — and `channel_index_confirmations`,
+how many blocks behind head a log must be before the index applies it (default `5`; `0` is refused
+at load time, since there is deliberately no reorg-unwind path). Omitting both keeps today's
+behaviour: a channel the index has not caught up to falls through to the direct chain read.
+
 `decimals` is a declaration, not a conversion. Nothing scales by it: every amount on the value
 path — route prices, claim amounts, channel deposits — is already in the settlement token's base
 units, and [`docs/usdc-cross-chain-settlement.md`](docs/usdc-cross-chain-settlement.md)'s

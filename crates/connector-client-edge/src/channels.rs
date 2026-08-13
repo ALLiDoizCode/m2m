@@ -217,19 +217,18 @@
 //! not remove the call. `connector-cli` wires a [`ClientChannelSource`] over
 //! `connector-settlement-evm`'s `EvmChannelIndex` -- a durable local index of
 //! `TokenNetwork`'s own `ChannelOpened`/`ChannelNewDeposit`/`ChannelSettled`
-//! logs -- as its EVM source, so that a channel the
-//! index has caught up to resolves from a `HashMap` probe with no RPC at
-//! all, and reports a settled channel as
-//! [`ChannelResolutionError::Terminal`] the same way, distinguishably from a
-//! channel this registry has simply never heard of. The chain-reading path
-//! this module implements is the **fall-through**, not the primary path: a
-//! channel the index has not caught up to (never opened, opened inside its
-//! confirmation window, or its sync lagging or down) is a plain
-//! [`ClientChannelSource::evm_channel`] miss, resolved exactly as before --
-//! so a node whose index has never once caught up behaves byte-identically
-//! to a node built before issue #661, and every mitigation in this module
-//! (liveness, the lookup budget) still governs every lookup the index cannot
-//! yet answer.
+//! logs -- as its EVM source, so that a channel the index has caught up to
+//! resolves from a `HashMap` probe with no RPC at all, and reports a settled
+//! channel as [`ChannelResolutionError::Terminal`] the same way,
+//! distinguishably from a channel this registry has simply never heard of.
+//! The chain-reading path this module implements is the **fall-through**,
+//! not the primary path: a channel the index has not caught up to (never
+//! opened, opened inside its confirmation window, or its sync lagging or
+//! down) is a plain [`ClientChannelSource::evm_channel`] miss, resolved
+//! exactly as before -- so a node whose index has never once caught up
+//! behaves byte-identically to a node built before issue #661, and every
+//! mitigation in this module (liveness, the lookup budget) still governs
+//! every lookup the index cannot yet answer.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -440,13 +439,13 @@ impl std::error::Error for ChannelLookupFailed {}
 /// #661). A *closed* channel is deliberately not this: `claimFromChannel`
 /// accepts a channel in `Closed` as readily as one in `Opened`, so closing
 /// -- however it was closed -- ends nothing this connector can still be
-/// paid for. Kept distinct from [`ChannelLookupFailed`]
-/// (this connector could not find out) and from a plain `Ok(None)` (this
-/// connector has no information either way): a source that can report this
-/// reliably -- the local `TokenNetwork` event index, which has itself seen
-/// the terminal log -- lets a refusal say "this channel is done" rather than
-/// the weaker "I have no record of it", without spending a chain read to
-/// upgrade the answer.
+/// paid for. Kept distinct from [`ChannelLookupFailed`] (this connector
+/// could not find out) and from a plain `Ok(None)` (this connector has no
+/// information either way): a source that can report this reliably -- the
+/// local `TokenNetwork` event index, which has itself seen the terminal log
+/// -- lets a refusal say "this channel is done" rather than the weaker "I
+/// have no record of it", without spending a chain read to upgrade the
+/// answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelTerminal(pub String);
 
@@ -1486,6 +1485,7 @@ pub(crate) mod test_source {
     //! RPC endpoint does.
 
     use super::*;
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
@@ -1503,12 +1503,12 @@ pub(crate) mod test_source {
         /// cannot be expressed by a source that failed from the start.
         failure: Mutex<Option<String>>,
         /// Channels this source has a durable, definitive record of having
-        /// settled (issue #661) -- a stand-in for the
-        /// local channel index's own terminal record, answered by
+        /// settled (issue #661) -- a stand-in for the local channel index's
+        /// own terminal record, answered by
         /// [`ClientChannelSource::evm_channel_terminal`] and never counted
         /// against [`Self::lookups`], since the real index answers it from
         /// memory rather than a chain read.
-        terminal: Mutex<std::collections::HashSet<[u8; 32]>>,
+        terminal: Mutex<HashSet<[u8; 32]>>,
         /// How long a lookup takes. Non-zero lets a test put several
         /// lookups genuinely in flight at once, which is what a stampede
         /// is; zero would let each future complete before the next is
@@ -1522,7 +1522,7 @@ pub(crate) mod test_source {
             FakeChannelSource {
                 channels: Mutex::new(channels.into_iter().collect()),
                 failure: Mutex::new(None),
-                terminal: Mutex::new(std::collections::HashSet::new()),
+                terminal: Mutex::new(HashSet::new()),
                 latency: Duration::ZERO,
                 lookups: AtomicUsize::new(0),
             }
@@ -1532,18 +1532,18 @@ pub(crate) mod test_source {
             FakeChannelSource {
                 channels: Mutex::new(HashMap::new()),
                 failure: Mutex::new(Some(reason.to_string())),
-                terminal: Mutex::new(std::collections::HashSet::new()),
+                terminal: Mutex::new(HashSet::new()),
                 latency: Duration::ZERO,
                 lookups: AtomicUsize::new(0),
             }
         }
 
         /// This source now has a durable, definitive record that
-        /// `channel_id` has settled (issue #661) -- the
-        /// stand-in for the local channel index having observed the
-        /// terminal log. Also removes any positive `now_says` entry, the
-        /// same way a real index drops a channel's active record once it
-        /// sees the terminal event.
+        /// `channel_id` has settled (issue #661) -- the stand-in for the
+        /// local channel index having observed the terminal log. Also
+        /// removes any positive `now_says` entry, the same way a real index
+        /// drops a channel's active record once it sees the terminal
+        /// event.
         pub(crate) fn now_terminal(&self, channel_id: [u8; 32]) {
             self.terminal
                 .lock()

@@ -8,8 +8,8 @@
 //! (`closeChannel` and `forceCloseExpiredChannel` each set
 //! `ChannelState.Closed`), and `claimFromChannel` accepts `Opened` and
 //! `Closed` alike, so neither event changes whether a claim is still
-//! payable. The one transition that does — `settleChannel`, the only path
-//! out of `Closed` — emits `ChannelSettled`, which this index does track.
+//! payable. The one transition that does -- `settleChannel`, the only path
+//! out of `Closed` -- emits `ChannelSettled`, which this index does track.
 //!
 //! # What this is a fix for
 //!
@@ -135,11 +135,11 @@ pub enum ChannelIndexLookup {
         counterparty: Address,
         deposit: U256,
     },
-    /// This index has seen the channel settle. Distinct
-    /// from [`Miss`](Self::Miss): this is a known, definitive fact rather
-    /// than an absence of information, and it is reported as such so a
-    /// caller can refuse the claim distinguishably from an unknown channel,
-    /// without a chain read.
+    /// This index has seen the channel settle. Distinct from
+    /// [`Miss`](Self::Miss): this is a known, definitive fact rather than an
+    /// absence of information, and it is reported as such so a caller can
+    /// refuse the claim distinguishably from an unknown channel, without a
+    /// chain read.
     Terminal,
 }
 
@@ -327,11 +327,11 @@ impl EvmChannelIndex {
 
     /// Open the durable snapshot at `path` (or start empty if it does not
     /// exist yet), falling back to an in-memory-only index when `path` is
-    /// `None`. `from_block` is the cold-start floor: it is only consulted by
-    /// the caller when this index has no checkpoint of its own yet (i.e.
-    /// [`Self::last_indexed_block`] is `None`), which is why it is not
-    /// stored here -- the checkpoint, once it exists, is always the more
-    /// accurate figure to resume from.
+    /// `None`. No cold-start `from_block` is taken or stored here: that
+    /// floor is the syncer's, consulted only while this index has no
+    /// checkpoint of its own ([`Self::last_indexed_block`] is `None`), since
+    /// the checkpoint -- once it exists -- is always the more accurate
+    /// figure to resume from.
     pub fn open(path: Option<&Path>) -> Result<Self, EvmChannelIndexError> {
         let Some(path) = path else {
             return Ok(EvmChannelIndex::empty(None));

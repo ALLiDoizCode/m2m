@@ -521,16 +521,24 @@ impl fmt::Debug for IndexedEvmChannelSource {
     }
 }
 
+impl IndexedEvmChannelSource {
+    /// What the index alone says about `channel_id` -- every one of the
+    /// three reads below starts here, and all three ask it about the same
+    /// address: this node's own signing address, which is what lets an
+    /// `Active` answer name the *other* participant as the counterparty.
+    fn lookup(&self, channel_id: &[u8; 32]) -> ChannelIndexLookup {
+        self.index
+            .lookup(channel_id, self.fallback.backend.own_address())
+    }
+}
+
 #[async_trait]
 impl ClientChannelSource for IndexedEvmChannelSource {
     async fn evm_channel(
         &self,
         channel_id: &[u8; 32],
     ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
-        match self
-            .index
-            .lookup(channel_id, self.fallback.backend.own_address())
-        {
+        match self.lookup(channel_id) {
             ChannelIndexLookup::Active {
                 counterparty,
                 deposit,
@@ -566,10 +574,7 @@ impl ClientChannelSource for IndexedEvmChannelSource {
         &self,
         channel_id: &[u8; 32],
     ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
-        match self
-            .index
-            .lookup(channel_id, self.fallback.backend.own_address())
-        {
+        match self.lookup(channel_id) {
             ChannelIndexLookup::Terminal => Ok(None),
             ChannelIndexLookup::Active { .. } | ChannelIndexLookup::Miss => {
                 self.fallback.evm_channel(channel_id).await
@@ -578,11 +583,7 @@ impl ClientChannelSource for IndexedEvmChannelSource {
     }
 
     async fn evm_channel_terminal(&self, channel_id: &[u8; 32]) -> bool {
-        matches!(
-            self.index
-                .lookup(channel_id, self.fallback.backend.own_address()),
-            ChannelIndexLookup::Terminal
-        )
+        matches!(self.lookup(channel_id), ChannelIndexLookup::Terminal)
     }
 }
 
