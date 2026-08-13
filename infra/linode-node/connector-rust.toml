@@ -322,6 +322,21 @@ token_network = "0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478"
 # node with no config edit (issue #611), and the accepted claim's
 # watermark is journaled under `state_dir` like a declared channel's
 # (issue #605).
+#
+# Custody, an operator should not have to discover later (issue #577):
+# `TokenNetwork` is both `Ownable` and `Pausable` -- it has an owner that
+# CAN call `pause()` (TokenNetwork.sol:480) and `emergencyWithdraw()`
+# (TokenNetwork.sol:464-475), which would freeze new operations or pull a
+# channel's funds out from under its participants. On THIS deployment
+# `TokenNetwork.owner()` reads back the `TokenNetworkRegistry` contract
+# below (`contract_address`), not an EOA -- verified on chain, not assumed
+# from source -- and `TokenNetworkRegistry` exposes no function that
+# forwards a call into a `TokenNetwork` it created, and never calls
+# `transferOwnership` on one. So `pause`/`emergencyWithdraw` are
+# unreachable on this deployment: nothing holds a key that could call
+# them. That is a property of THIS deployment, not a guarantee of the
+# source -- a `TokenNetwork` created by a future registry, or transferred
+# to a different owner, would not inherit it.
 
 [settlement.evm]
 # The same known-good public endpoint ./connector.yaml already uses.

@@ -113,6 +113,14 @@ see the note at the end of this section.
 | `ILP-Payment-Channel-Claim`         | `base64(JSON.stringify(claim))`, plaintext.                  |
 | `ILP-Payment-Channel-Claim-Wrapped` | `base64(NIP-59-wrapped claim)`, for a privacy-wrapped claim. |
 
+A wrapped claim is sealed to the same public key `GET /ilp/identity` (§1.7) reports — the
+connector's own signing key, the one §1.8's payload sealing already uses — because that endpoint is
+the only surface publishing a receiver key a sender could wrap to
+([issue #556](https://github.com/toon-protocol/connector/issues/556)). Unwrapping grants no
+exemption: the claim inside runs every step below exactly as a plaintext one does. A wrap this
+connector cannot open is refused under its own reason, distinguishable both from a malformed header
+and from a claim naming an unknown channel.
+
 Required fields on every claim, regardless of chain: `version` (`'1.0'`), `blockchain`,
 `messageId` (idempotency), `timestamp` (ISO 8601), `senderId`. Chain-specific fields:
 
