@@ -1759,6 +1759,82 @@ price = 1000
         assert!(matches!(result, Err(ConfigError::UnknownPeerId { .. })));
     }
 
+    /// Issue #885: `[peer_sale]` is a singleton table, and a node that
+    /// writes one reaches the runtime with both halves of the offer.
+    #[test]
+    fn loads_a_peer_sale_section() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[peer_sale]
+prefix = "g.example.node.peer-sale"
+price = 5000
+"#,
+                key_path.display()
+            )
+        })
+        .expect("load");
+
+        let sale = config.peer_sale().expect("the section is present");
+        assert_eq!(sale.prefix(), "g.example.node.peer-sale");
+        assert_eq!(sale.price(), 5000);
+    }
+
+    #[test]
+    fn a_config_with_no_peer_sale_section_sells_no_peering() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+"#,
+                key_path.display()
+            )
+        })
+        .expect("load");
+
+        assert!(config.peer_sale().is_none());
+    }
+
+    /// Prefixes share one namespace (issue #885): a peer-sale prefix that
+    /// silently doubled as an app route would resolve to whichever entry
+    /// matched first, so the ambiguity is refused at load.
+    #[test]
+    fn rejects_a_peer_sale_prefix_that_collides_with_an_app_route() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[[routes]]
+prefix = "g.example.node.peer-sale"
+handler_url = "http://localhost:4000"
+price = 10
+
+[peer_sale]
+prefix = "g.example.node.peer-sale"
+price = 5000
+"#,
+                key_path.display()
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::PeerSalePrefixCollision { .. })
+        ));
+    }
+
     /// ADR 0027 / issue #679: the raw-TCP peer wire is deleted, so a
     /// config still naming its bind address must stop the node by name.
     /// Silently ignoring it is the failure mode that matters -- the devnet

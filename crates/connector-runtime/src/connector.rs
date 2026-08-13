@@ -232,10 +232,12 @@ enum RouteTarget {
     /// bounded-size clone per packet, not the whole-collection copy ADR
     /// 0015 warns against.
     RuntimePeer(PeerRoute),
-    /// The single priced peer-sale route (issue #885), when this
-    /// connector has one configured. Unit-like `PeerSale`, not indexed:
-    /// there is at most one, held as `Connector::peer_sale`.
-    PeerSale,
+    /// The single priced peer-sale route (issue #885), carrying its own
+    /// price rather than an index: there is at most one such route, so
+    /// there is nothing to index into, and carrying the price here means
+    /// no arm downstream has to reach back into `Connector::peer_sale`
+    /// and assert it is still `Some`.
+    PeerSale(u64),
 }
 
 /// How permanent a matched routing-table entry is, least to most -- the
@@ -271,7 +273,7 @@ impl RouteTarget {
             // A config-file entry, like an app route -- durable and
             // priced, never shadowed by a lease or a runtime peer route
             // at the same prefix length.
-            RouteTarget::App(_) | RouteTarget::PeerSale => RouteRank::App,
+            RouteTarget::App(_) | RouteTarget::PeerSale(_) => RouteRank::App,
         }
     }
 }
@@ -304,9 +306,9 @@ enum ConfiguredTarget {
     /// file. See [`RouteTarget::RuntimePeer`] for why this is owned
     /// rather than indexed.
     RuntimePeer(PeerRoute),
-    /// The single priced peer-sale route (issue #885). See
-    /// [`RouteTarget::PeerSale`].
-    PeerSale,
+    /// The single priced peer-sale route (issue #885), carrying its price.
+    /// See [`RouteTarget::PeerSale`].
+    PeerSale(u64),
 }
 
 impl ConfiguredTarget {
@@ -315,7 +317,7 @@ impl ConfiguredTarget {
             ConfiguredTarget::App(index) => RouteTarget::App(index),
             ConfiguredTarget::Peer(index) => RouteTarget::Peer(index),
             ConfiguredTarget::RuntimePeer(route) => RouteTarget::RuntimePeer(route),
-            ConfiguredTarget::PeerSale => RouteTarget::PeerSale,
+            ConfiguredTarget::PeerSale(price) => RouteTarget::PeerSale(price),
         }
     }
 
@@ -326,7 +328,7 @@ impl ConfiguredTarget {
     /// it.
     fn rank(&self) -> RouteRank {
         match self {
-            ConfiguredTarget::App(_) | ConfiguredTarget::PeerSale => RouteRank::App,
+            ConfiguredTarget::App(_) | ConfiguredTarget::PeerSale(_) => RouteRank::App,
             ConfiguredTarget::Peer(_) => RouteRank::Peer,
             ConfiguredTarget::RuntimePeer(_) => RouteRank::RuntimePeer,
         }
@@ -1025,8 +1027,8 @@ impl Connector {
     /// segment; a sibling like `g.appx` beside `g.app` does not count).
     /// Route selection ranks matched prefix length first, so a durable row
     /// inserted here would outrank the configured route for that whole
-    /// subtree -- the review's second finding on issue #885's PR, where one
-    /// purchase permanently diverted the seller's own app route.
+    /// subtree: without this guard, one peer-sale purchase (issue #885,
+    /// ADR 0037) permanently diverts the seller's own app route.
     fn config_owns_ancestor_of(&self, prefix: &str) -> bool {
         self.routes
             .iter()
@@ -1511,9 +1513,11 @@ impl Connector {
                 let response = self.deliver_to_app(&self.routes[index], prepare).await;
                 return self.finish(response);
             }
-            RouteTarget::PeerSale => {
+            RouteTarget::PeerSale(price) => {
                 tracing::debug!("routed to peer-sale");
-                let response = self.deliver_peer_sale(prepare, client_channel_id).await;
+                let response = self
+                    .deliver_peer_sale(prepare, client_channel_id, price)
+                    .await;
                 return self.finish(response);
             }
             RouteTarget::Peer(index) => Cow::Borrowed(&self.peer_routes[index]),
@@ -2056,13 +2060,9 @@ impl Connector {
         &self,
         prepare: Prepare,
         client_channel_id: Option<&str>,
+        price: u64,
     ) -> PacketResponse {
         let condition = prepare.execution_condition;
-        let price = self
-            .peer_sale
-            .as_ref()
-            .expect("only reached when select_configured_route matched PeerSale")
-            .price();
 
         let (envelope_bytes, shared_secret) = match self.open_termination_request(&prepare.data) {
             Ok(opened) => opened,
@@ -2142,11 +2142,11 @@ impl Connector {
             return refuse(format!("'{}' is not a valid ILP address", purchase.prefix));
         }
 
-        // Config-owned address space is not for sale (the review's second
-        // finding on this PR): a purchased row is durable with no expiry,
-        // and longest-prefix selection would hand the buyer every packet
-        // for a subtree of the seller's own routes. Refused before
-        // anything is inserted. Exact collisions are already refused by
+        // Config-owned address space is not for sale (ADR 0037): a
+        // purchased row is durable with no expiry, and longest-prefix
+        // selection would hand the buyer every packet for a subtree of
+        // the seller's own routes. Refused before anything is inserted.
+        // Exact collisions are already refused by
         // `upsert_runtime_peer_route`'s `config_owns_prefix` guard; this
         // is the strict-containment case that guard deliberately does not
         // cover, opened only when the write became purchasable. #887's
@@ -2188,48 +2188,8 @@ impl Connector {
             ));
         }
 
-        // The raw on-chain id, stripped of the `evm:`/`solana:` namespace
-        // `ClientClaim::channel_key` prefixes it with -- `settlement_for_channel`
-        // and `ChannelId` both expect the bare id, matching every other
-        // per-channel operation on this connector (`open_channel`,
-        // `redeem_channel`, ...).
-        let raw_channel_id = channel_id.split_once(':').map_or(channel_id, |(_, id)| id);
-        let settlement = match self.settlement_for_channel(raw_channel_id) {
-            Ok(settlement) => settlement,
-            Err(error) => {
-                tracing::warn!(
-                    channel_id,
-                    %error,
-                    "peer-sale purchase refused: no settlement backend for this channel"
-                );
-                return refuse(format!(
-                    "channel '{channel_id}' names no settlement backend"
-                ));
-            }
-        };
-        let state = match settlement
-            .channel_state(&ChannelId(raw_channel_id.to_string()))
-            .await
-        {
-            Ok(state) => state,
-            Err(error) => {
-                tracing::warn!(
-                    channel_id,
-                    %error,
-                    "peer-sale purchase refused: channel does not exist on chain"
-                );
-                return refuse(format!(
-                    "channel '{channel_id}' does not exist on chain: {error}"
-                ));
-            }
-        };
-        if state.status != ChannelStatus::Open {
-            tracing::warn!(
-                channel_id,
-                status = ?state.status,
-                "peer-sale purchase refused: channel is not open"
-            );
-            return refuse(format!("channel '{channel_id}' is not open"));
+        if let Err(message) = self.verify_purchasing_channel_open(channel_id).await {
+            return refuse(message);
         }
 
         // The channel that paid for this packet IS the peer being bought
@@ -2288,6 +2248,52 @@ impl Connector {
         )
     }
 
+    /// Re-read the channel that paid for a peer-sale purchase from its own
+    /// settlement backend and confirm it is still open (issue #885), or
+    /// return the message the purchase is refused with. Every failure is
+    /// logged with the channel it names and the reason it failed, so a
+    /// refused purchase leaves positive evidence rather than silence.
+    ///
+    /// `channel_id` is `ClientClaim::channel_key`'s chain-namespaced form
+    /// (`evm:<id>` / `solana:<account>`); the namespace is stripped before
+    /// the backend is asked, since `settlement_for_channel` and
+    /// [`ChannelId`] both take the bare on-chain id, matching every other
+    /// per-channel operation on this connector (`open_channel`,
+    /// `redeem_channel`, ...).
+    async fn verify_purchasing_channel_open(&self, channel_id: &str) -> Result<(), String> {
+        let raw_channel_id = channel_id.split_once(':').map_or(channel_id, |(_, id)| id);
+        let settlement = self
+            .settlement_for_channel(raw_channel_id)
+            .map_err(|error| {
+                tracing::warn!(
+                    channel_id,
+                    %error,
+                    "peer-sale purchase refused: no settlement backend for this channel"
+                );
+                format!("channel '{channel_id}' names no settlement backend")
+            })?;
+        let state = settlement
+            .channel_state(&ChannelId(raw_channel_id.to_string()))
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    channel_id,
+                    %error,
+                    "peer-sale purchase refused: channel does not exist on chain"
+                );
+                format!("channel '{channel_id}' does not exist on chain: {error}")
+            })?;
+        if state.status != ChannelStatus::Open {
+            tracing::warn!(
+                channel_id,
+                status = ?state.status,
+                "peer-sale purchase refused: channel is not open"
+            );
+            return Err(format!("channel '{channel_id}' is not open"));
+        }
+        Ok(())
+    }
+
     /// The index into `self.routes` that `destination` longest-prefix
     /// matches against, if any.
     fn select_app_route(&self, destination: &str) -> Option<usize> {
@@ -2334,8 +2340,12 @@ impl Connector {
             )
         });
         let peer_sale_match = self.peer_sale.as_ref().and_then(|sale| {
-            select_route(destination, &[sale.prefix()])
-                .map(|_| (sale.prefix().len(), ConfiguredTarget::PeerSale))
+            select_route(destination, &[sale.prefix()]).map(|_| {
+                (
+                    sale.prefix().len(),
+                    ConfiguredTarget::PeerSale(sale.price()),
+                )
+            })
         });
         [app_match, peer_match, runtime_match, peer_sale_match]
             .into_iter()
@@ -2381,12 +2391,8 @@ impl Connector {
                 // (issue #885): buying peering is the terminating app's
                 // work, done by this connector itself rather than an
                 // HTTP handler.
-                ConfiguredTarget::PeerSale => ClientRouteFacts {
-                    price: self
-                        .peer_sale
-                        .as_ref()
-                        .expect("select_configured_route only returns PeerSale when configured")
-                        .price(),
+                ConfiguredTarget::PeerSale(price) => ClientRouteFacts {
+                    price,
                     transport_policy: TransportPolicy::Both,
                     kind: ClientRouteKind::Terminated,
                 },
@@ -5249,13 +5255,12 @@ mod tests {
                 .any(|peer| peer.id == client_channel_id));
         }
 
-        /// The review's second finding on this PR: with an app route on
-        /// `g.example.node.app`, one purchase of `g.example.node.app.sub`
-        /// used to insert a durable, longer-prefix row that outranked the
-        /// seller's own route for that whole subtree. Config-owned address
-        /// space is not for sale — and containment is per `.`-separated
-        /// segment, so a sibling that merely shares the string start stays
-        /// purchasable.
+        /// Config-owned address space is not for sale (ADR 0037): with an
+        /// app route on `g.example.node.app`, a purchase of
+        /// `g.example.node.app.sub` would otherwise insert a durable,
+        /// longer-prefix row outranking the seller's own route for that
+        /// whole subtree. Containment is per `.`-separated segment, so a
+        /// sibling that merely shares the string start stays purchasable.
         #[tokio::test]
         async fn a_purchase_under_a_configured_routes_prefix_is_refused() {
             let backend = Arc::new(InMemorySettlementBackend::new());
