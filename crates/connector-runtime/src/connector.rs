@@ -161,12 +161,17 @@ pub enum ProbeDenied {
     RateLimited,
 }
 
-/// A fixed-window rate limiter for probe traffic, keyed by sender identity
-/// (issue #426, ADR 0011's consequence: "a probe traverses the network and
-/// pays nothing ... so it is ... rate-limited per that identity"). Counted
-/// against this connector's own injected [`Clock`] rather than wall time, so
-/// tests control it deterministically instead of racing real elapsed time.
-struct ProbeRateLimiter {
+/// A fixed-window rate limiter, keyed by sender identity. Counted against
+/// this connector's own injected [`Clock`] rather than wall time, so tests
+/// control it deterministically instead of racing real elapsed time.
+///
+/// One instance per budget, never one shared across budgets: this
+/// connector holds two (probe traffic, issue #426 / ADR 0011's "a probe
+/// traverses the network and pays nothing ... so it is ... rate-limited
+/// per that identity"; and peer-sale purchase attempts, issue #887's
+/// "rate limit on purchase attempts per identity"), and a flood against
+/// one must not starve the other's.
+struct FixedWindowRateLimiter {
     max_per_window: u32,
     window: Duration,
     /// A plain [`Mutex`] rather than [`RwLock`] like `known_channels`
@@ -176,71 +181,22 @@ struct ProbeRateLimiter {
     windows: Mutex<HashMap<String, (DateTime<Utc>, u32)>>,
 }
 
-impl ProbeRateLimiter {
-    fn new(max_per_window: u32, window: Duration) -> ProbeRateLimiter {
-        ProbeRateLimiter {
+impl FixedWindowRateLimiter {
+    fn new(max_per_window: u32, window: Duration) -> FixedWindowRateLimiter {
+        FixedWindowRateLimiter {
             max_per_window,
             window,
             windows: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Record one probe attempt from `identity` at `now`, returning whether
-    /// it is allowed. A window starts on an identity's first attempt (or
-    /// its first attempt after its previous window elapsed) and admits up
-    /// to `max_per_window` attempts before refusing the rest until the next
+    /// Record one attempt from `identity` at `now`, returning whether it
+    /// is allowed. A window starts on an identity's first attempt (or its
+    /// first attempt after its previous window elapsed) and admits up to
+    /// `max_per_window` attempts before refusing the rest until the next
     /// window starts.
     fn allow(&self, identity: &str, now: DateTime<Utc>) -> bool {
-        let mut windows = self
-            .windows
-            .lock()
-            .expect("probe rate limiter lock poisoned");
-        match windows.get_mut(identity) {
-            Some((started_at, count)) if now < *started_at + self.window => {
-                if *count >= self.max_per_window {
-                    false
-                } else {
-                    *count += 1;
-                    true
-                }
-            }
-            _ => {
-                windows.insert(identity.to_string(), (now, 1));
-                true
-            }
-        }
-    }
-}
-
-/// A fixed-window rate limiter for peer-sale purchase attempts (issue
-/// #887, C4: "rate limit on purchase attempts per identity"), keyed by the
-/// payer's chain-verified channel id. The same shape [`ProbeRateLimiter`]
-/// already takes for probe traffic, kept as its own type rather than
-/// reused: the two bound unrelated resources, and sharing one instance
-/// would let a flood against one budget starve the other's.
-struct PurchaseRateLimiter {
-    max_per_window: u32,
-    window: Duration,
-    windows: Mutex<HashMap<String, (DateTime<Utc>, u32)>>,
-}
-
-impl PurchaseRateLimiter {
-    fn new(max_per_window: u32, window: Duration) -> PurchaseRateLimiter {
-        PurchaseRateLimiter {
-            max_per_window,
-            window,
-            windows: Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// Record one purchase attempt from `identity` at `now`, returning
-    /// whether it is allowed -- [`ProbeRateLimiter::allow`]'s identical
-    /// fixed-window shape, applied to a different budget.
-    fn allow(&self, identity: &str, now: DateTime<Utc>) -> bool {
-        let mut windows = self
-            .windows
-            .lock()
-            .expect("purchase rate limiter lock poisoned");
+        let mut windows = self.windows.lock().expect("rate limiter lock poisoned");
         match windows.get_mut(identity) {
             Some((started_at, count)) if now < *started_at + self.window => {
                 if *count >= self.max_per_window {
@@ -465,12 +421,14 @@ pub struct Connector {
     /// node (issue #885). `None` on a node that sells no peering, in
     /// which case its would-be prefix simply matches nothing here.
     peer_sale: Option<PeerSaleRoute>,
-    /// Issue #887 (C4): abuse bounds on a purchased peering -- row caps
-    /// and the purchased-prefix length cap. Always populated
-    /// ([`PeerSaleBounds::default`] until [`Self::with_peer_sale_bounds`]
-    /// overrides it), the same "a bound exists even if nobody configured
-    /// one" shape `probe_rate_limiter` below already takes; consulted only
-    /// when `peer_sale` is `Some` and a purchase is actually attempted.
+    /// Issue #887 (C4): abuse bounds on a purchased peering -- row caps,
+    /// the purchased-prefix length cap, and the purchase-attempt rate
+    /// limit `peer_sale_rate_limiter` below is sized from. Always
+    /// populated ([`PeerSaleBounds::default`] until
+    /// [`Self::with_peer_sale_bounds`] overrides it), the same "a bound
+    /// exists even if nobody configured one" shape `probe_rate_limiter`
+    /// below already takes; consulted only when `peer_sale` is `Some` and
+    /// a purchase is actually attempted.
     peer_sale_bounds: PeerSaleBounds,
     /// Issue #887 (C4): the purchase-attempt rate limit half of
     /// `peer_sale_bounds` -- kept apart because it needs mutable
@@ -478,7 +436,7 @@ pub struct Connector {
     /// are. Rebuilt by [`Self::with_peer_sale_bounds`] whenever the bounds
     /// it is sized from change, so the two can never disagree about the
     /// limit currently in force.
-    peer_sale_rate_limiter: PurchaseRateLimiter,
+    peer_sale_rate_limiter: FixedWindowRateLimiter,
     /// Routes pushed at runtime over the operator surface with a time
     /// limit (ADR 0006, issue #427), keyed by prefix so pushing the same
     /// prefix again renews it rather than adding a duplicate entry. Lives
@@ -542,7 +500,7 @@ pub struct Connector {
     /// above, this fails *closed* rather than open: probing pays nothing,
     /// so a node that never configures a limit still gets one rather than
     /// unbounded free traversal.
-    probe_rate_limiter: ProbeRateLimiter,
+    probe_rate_limiter: FixedWindowRateLimiter,
     /// Payment channels this connector has seen a valid claim on at its own
     /// client edge (issue #548), and therefore recognizes as belonging to a
     /// sender that holds a channel with it -- the other half of
@@ -709,14 +667,15 @@ impl Connector {
         peer_transport: Arc<dyn PeerTransport>,
         clock: Arc<dyn Clock>,
     ) -> Connector {
+        let peer_sale_bounds = PeerSaleBounds::default();
         Connector {
             routes,
             peer_routes,
             peer_sale: None,
-            peer_sale_bounds: PeerSaleBounds::default(),
-            peer_sale_rate_limiter: PurchaseRateLimiter::new(
-                PeerSaleBounds::default().purchase_rate_limit(),
-                PeerSaleBounds::default().purchase_rate_window(),
+            peer_sale_bounds,
+            peer_sale_rate_limiter: FixedWindowRateLimiter::new(
+                peer_sale_bounds.purchase_rate_limit(),
+                peer_sale_bounds.purchase_rate_window(),
             ),
             leased_routes: ArcSwap::from_pointee(HashMap::new()),
             app_client,
@@ -727,7 +686,10 @@ impl Connector {
             known_channels: RwLock::new(Vec::new()),
             claims: ClaimBook::new(None, HashMap::new(), HashMap::new()),
             identity_signer: None,
-            probe_rate_limiter: ProbeRateLimiter::new(DEFAULT_PROBE_LIMIT, default_probe_window()),
+            probe_rate_limiter: FixedWindowRateLimiter::new(
+                DEFAULT_PROBE_LIMIT,
+                default_probe_window(),
+            ),
             recognized_channels: RwLock::new(HashSet::new()),
             outbound_client: None,
             outbound_client_hops: HashMap::new(),
@@ -769,8 +731,10 @@ impl Connector {
     /// calls this still has bounds -- [`PeerSaleBounds::default`] applies
     /// as soon as [`Self::new`] returns.
     pub fn with_peer_sale_bounds(mut self, bounds: PeerSaleBounds) -> Self {
-        self.peer_sale_rate_limiter =
-            PurchaseRateLimiter::new(bounds.purchase_rate_limit(), bounds.purchase_rate_window());
+        self.peer_sale_rate_limiter = FixedWindowRateLimiter::new(
+            bounds.purchase_rate_limit(),
+            bounds.purchase_rate_window(),
+        );
         self.peer_sale_bounds = bounds;
         self
     }
@@ -876,7 +840,7 @@ impl Connector {
     /// `max_per_window` probe attempts per sender identity within `window`,
     /// checked against this connector's own injected clock.
     pub fn with_probe_rate_limit(mut self, max_per_window: u32, window: Duration) -> Self {
-        self.probe_rate_limiter = ProbeRateLimiter::new(max_per_window, window);
+        self.probe_rate_limiter = FixedWindowRateLimiter::new(max_per_window, window);
         self
     }
 
@@ -2382,21 +2346,22 @@ impl Connector {
         // malformed or not, not only successful purchases, and doing this
         // first means a flood of garbage bodies from one identity is
         // throttled rather than parsed and judged every time.
+        let bounds = self.peer_sale_bounds;
         if !self
             .peer_sale_rate_limiter
             .allow(channel_id, self.clock.now())
         {
             tracing::warn!(
                 channel_id,
-                limit = self.peer_sale_bounds.purchase_rate_limit(),
-                window_seconds = self.peer_sale_bounds.purchase_rate_window().num_seconds(),
+                limit = bounds.purchase_rate_limit(),
+                window_seconds = bounds.purchase_rate_window().num_seconds(),
                 "peer-sale purchase refused: purchase rate limit exceeded"
             );
             return refuse(format!(
                 "purchase rate limit exceeded for '{channel_id}': at most {} attempts per {} \
                  seconds",
-                self.peer_sale_bounds.purchase_rate_limit(),
-                self.peer_sale_bounds.purchase_rate_window().num_seconds()
+                bounds.purchase_rate_limit(),
+                bounds.purchase_rate_window().num_seconds()
             ));
         }
 
@@ -2466,7 +2431,6 @@ impl Connector {
         // Issue #887 (C4): the prefix-length bound, checked before any
         // table read -- an oversized prefix is refused for its own shape
         // regardless of how much room is left in the table.
-        let bounds = self.peer_sale_bounds;
         if purchase.prefix.len() > bounds.max_prefix_length() {
             tracing::warn!(
                 channel_id,

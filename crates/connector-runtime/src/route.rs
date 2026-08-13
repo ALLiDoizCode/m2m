@@ -4,6 +4,10 @@
 //! most specific prefix across both kinds without caring which one it is.
 
 use chrono::{DateTime, Duration, Utc};
+use connector_config::{
+    DEFAULT_MAX_PREFIX_LENGTH, DEFAULT_MAX_PURCHASED_ROWS, DEFAULT_MAX_ROUTES_PER_PAYER,
+    DEFAULT_PURCHASE_RATE_LIMIT, DEFAULT_PURCHASE_RATE_WINDOW_SECONDS,
+};
 
 /// A route whose traffic this connector forwards to a peer's connector for
 /// the next hop, rather than terminating it at an app of its own.
@@ -252,17 +256,19 @@ impl PeerSaleBounds {
 }
 
 impl Default for PeerSaleBounds {
-    /// Mirrors `connector_config::peer_sale`'s own defaults exactly --
-    /// this is what a `Connector` starts with before any `[peer_sale]`
-    /// section is read, and what `with_peer_sale_bounds` overrides from
-    /// that section's fields precisely like price and lease already are.
+    /// Reads `connector_config`'s own `[peer_sale]` defaults rather than
+    /// restating them, so a node with no `[peer_sale]` section is bounded
+    /// exactly like one whose section leaves every bound unwritten. This
+    /// is what a `Connector` starts with before any section is read, and
+    /// what `with_peer_sale_bounds` overrides from that section's fields
+    /// precisely like price and lease already are.
     fn default() -> PeerSaleBounds {
         PeerSaleBounds {
-            max_purchased_rows: 32,
-            max_routes_per_payer: 4,
-            max_prefix_length: 128,
-            purchase_rate_limit: 5,
-            purchase_rate_window: Duration::seconds(60),
+            max_purchased_rows: DEFAULT_MAX_PURCHASED_ROWS,
+            max_routes_per_payer: DEFAULT_MAX_ROUTES_PER_PAYER,
+            max_prefix_length: DEFAULT_MAX_PREFIX_LENGTH as usize,
+            purchase_rate_limit: DEFAULT_PURCHASE_RATE_LIMIT,
+            purchase_rate_window: Duration::seconds(DEFAULT_PURCHASE_RATE_WINDOW_SECONDS as i64),
         }
     }
 }

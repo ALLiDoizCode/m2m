@@ -79,10 +79,13 @@ target) by adding `Connector::envelope_target_would_be_refused`, consulted **bef
 That pre-admission mechanism does not extend to this issue's bounds, for a structural reason
 `envelope_target_would_be_refused`'s own doc already states for its own scope: it repeats only
 work that needs no payer identity (opening the gift wrap, decoding the envelope, matching a
-route). Two of #887's four bounds are identity-free in exactly that sense — the prefix-length cap
-and the total-row cap could, in principle, be evaluated the same way before admission. The other
-two — the per-payer route cap and the purchase rate limit — are irreducibly about _this payer's_
-history, and the payer's identity does not exist as a checkable fact until
+route). Exactly one of #887's four bounds is identity-free in that sense — the prefix-length cap,
+which judges the requested prefix's own shape and could in principle be evaluated the same way
+before admission. The other three are all about _this payer's_ history: the per-payer route cap
+and the purchase rate limit obviously so, and the total-row cap because it is deliberately not
+applied to a payer that already holds a row (a renewal never grows the table), which is a fact
+about the payer's identity like the other two. And the payer's identity does not exist as a
+checkable fact until
 `connector-client-edge::ClientClaimGate::admit` has verified the claim's signature against its
 channel, which is the same operation that advances the watermark. There is no cheaper "peek the
 verified identity" step to call first — this codebase's one precedent for judging identity ahead
@@ -102,8 +105,8 @@ refused after this packet's claim has been admitted — charged, in the sense th
 claim now exists at a higher cumulative amount, exactly as #885's own pre-existing checks already
 were before this issue. This is not a new gap #887 introduces; it is the same one, now also true
 of four more refusal reasons. Closing it for every peer-sale refusal reason at once — not just the
-identity-free half — needs either the credit-refund ledger (#709) or a purpose-built pre-admission
-identity peek carried through both carriages, and either is a separable, security-relevant change
+identity-free prefix-length cap — needs either the credit-refund ledger (#709) or a purpose-built
+pre-admission identity peek carried through both carriages, and either is a separable, security-relevant change
 better scoped on its own ticket than folded into a bounds-and-defaults issue.
 
 ## Consequences

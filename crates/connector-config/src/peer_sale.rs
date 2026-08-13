@@ -39,11 +39,16 @@ pub(crate) struct RawPeerSale {
 /// on purpose -- the issue's own instruction is "err toward tight
 /// defaults; loosening later is easy" -- and sized for the 3-box devnet
 /// fleet this ships to, not a production multi-tenant node.
-const DEFAULT_MAX_PURCHASED_ROWS: u64 = 32;
-const DEFAULT_MAX_ROUTES_PER_PAYER: u64 = 4;
-const DEFAULT_MAX_PREFIX_LENGTH: u32 = 128;
-const DEFAULT_PURCHASE_RATE_LIMIT: u32 = 5;
-const DEFAULT_PURCHASE_RATE_WINDOW_SECONDS: u64 = 60;
+///
+/// Public so the runtime's own `PeerSaleBounds::default` reads the same
+/// numbers rather than restating them: a connector that never sees a
+/// `[peer_sale]` section is bounded exactly as one whose section leaves
+/// every bound unwritten, and the two can never drift apart.
+pub const DEFAULT_MAX_PURCHASED_ROWS: u64 = 32;
+pub const DEFAULT_MAX_ROUTES_PER_PAYER: u64 = 4;
+pub const DEFAULT_MAX_PREFIX_LENGTH: u32 = 128;
+pub const DEFAULT_PURCHASE_RATE_LIMIT: u32 = 5;
+pub const DEFAULT_PURCHASE_RATE_WINDOW_SECONDS: u64 = 60;
 
 /// A fully validated `[peer_sale]` section. Constructed only by
 /// [`resolve_peer_sale`], so a value that exists has already had its
