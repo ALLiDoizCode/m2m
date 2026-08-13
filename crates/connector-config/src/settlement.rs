@@ -74,7 +74,7 @@ pub(crate) struct RawKeyedSettlementConfig {
 ///
 /// `channel_index_from_block`/`channel_index_confirmations` (issue #661) are
 /// new, additive knobs for the local `ChannelOpened`/`ChannelNewDeposit`/
-/// `ChannelSettled`/`ChannelClosedByExpiry` index built from this same
+/// `ChannelSettled` index built from this same
 /// `TokenNetwork`: the block to backfill from on a cold start with no
 /// checkpoint, and the depth behind chain head logs are applied at. Both
 /// default when omitted -- see [`resolve_evm_fields`] -- so an existing
@@ -202,7 +202,7 @@ pub struct EvmSettlementConfig {
 }
 
 /// How many blocks behind chain head a `ChannelOpened`/`ChannelNewDeposit`/
-/// `ChannelSettled`/`ChannelClosedByExpiry` log must be before the local
+/// `ChannelSettled` log must be before the local
 /// channel index applies it (issue #661), when `channel_index_confirmations`
 /// is not set. Deep enough that an ordinary chain reorg cannot un-confirm a
 /// log this index has already applied -- there is deliberately no unwind

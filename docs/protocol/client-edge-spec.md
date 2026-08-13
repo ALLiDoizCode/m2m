@@ -397,7 +397,8 @@ signer is the best that can be done:
 - **A local channel index built from the settlement contract's own logs** (issue #661, shipped as
   `connector-settlement-evm`'s `EvmChannelIndex`/`EvmChannelIndexSyncer`, wired in by
   `connector-cli::runtime`'s `IndexedEvmChannelSource`). A connector backfills, then polls,
-  `ChannelOpened`/`ChannelNewDeposit`/`ChannelSettled`/`ChannelClosedByExpiry` from `TokenNetwork`
+  `ChannelOpened`/`ChannelNewDeposit`/`ChannelSettled` from `TokenNetwork` (the close events change
+  nothing about claimability — `claimFromChannel` accepts a `Closed` channel — so they are not indexed)
   once each log is a configured confirmation depth behind chain head, and answers "is this a channel
   I can be paid on, and for how much?" from a local map rather than an RPC round trip. Once the index
   has caught up to a channel, an unknown- or settled-channel lookup costs a hashmap probe instead of

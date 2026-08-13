@@ -1,7 +1,15 @@
 //! A durable local index of `TokenNetwork`'s own `ChannelOpened` /
-//! `ChannelNewDeposit` / `ChannelSettled` / `ChannelClosedByExpiry` logs
-//! (issue #661), so that resolving a channel this index has caught up to is
-//! a `HashMap` probe rather than an `eth_call`.
+//! `ChannelNewDeposit` / `ChannelSettled` logs (issue #661), so that
+//! resolving a channel this index has caught up to is a `HashMap` probe
+//! rather than an `eth_call`.
+//!
+//! `ChannelClosed` and `ChannelClosedByExpiry` are deliberately not in that
+//! alphabet: both mark the *start* of a channel's challenge period
+//! (`closeChannel` and `forceCloseExpiredChannel` each set
+//! `ChannelState.Closed`), and `claimFromChannel` accepts `Opened` and
+//! `Closed` alike, so neither event changes whether a claim is still
+//! payable. The one transition that does — `settleChannel`, the only path
+//! out of `Closed` — emits `ChannelSettled`, which this index does track.
 //!
 //! # What this is a fix for
 //!
@@ -85,23 +93,18 @@ pub enum IndexedChannelStatus {
     /// `Opened` or `Closed` (`TokenNetwork.sol:273`), so a claim against a
     /// settled channel can never be redeemed.
     Settled,
-    /// Seen `ChannelClosedByExpiry`: the challenge period lapsed with
-    /// nobody claiming, and the contract's own bookkeeping treats this the
-    /// same as settled for redemption purposes.
-    ClosedByExpiry,
 }
 
 impl IndexedChannelStatus {
     /// Whether a claim against a channel in this status can ever be
-    /// redeemed. A merely `Closed` (but not yet settled/expired) channel
-    /// still redeems during its challenge period (issue #574) -- this index
-    /// does not track `ChannelClosed` at all for exactly that reason, since
-    /// closing changes nothing about whether a claim is still payable.
+    /// redeemed. A merely closed (but not yet settled) channel still
+    /// redeems during its challenge period (issue #574) -- this index does
+    /// not track `ChannelClosed` *or* `ChannelClosedByExpiry` at all for
+    /// exactly that reason: both set `ChannelState.Closed`, a state
+    /// `claimFromChannel` accepts, so neither changes whether a claim is
+    /// still payable (see the module doc).
     pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            IndexedChannelStatus::Settled | IndexedChannelStatus::ClosedByExpiry
-        )
+        matches!(self, IndexedChannelStatus::Settled)
     }
 }
 
@@ -126,14 +129,13 @@ pub enum ChannelIndexLookup {
     /// existing way: a direct chain read, budgeted as before (issue #661
     /// decision point 5 -- a miss is never treated as "no such channel").
     Miss,
-    /// A channel `own_address` is a participant of and that has not settled
-    /// or closed by expiry, and what its counterparty has deposited in
-    /// total.
+    /// A channel `own_address` is a participant of and that has not
+    /// settled, and what its counterparty has deposited in total.
     Active {
         counterparty: Address,
         deposit: U256,
     },
-    /// This index has seen the channel settle or close by expiry. Distinct
+    /// This index has seen the channel settle. Distinct
     /// from [`Miss`](Self::Miss): this is a known, definitive fact rather
     /// than an absence of information, and it is reported as such so a
     /// caller can refuse the claim distinguishably from an unknown channel,
@@ -158,9 +160,6 @@ pub enum ChannelIndexEvent {
         total_deposit: U256,
     },
     Settled {
-        channel_id: [u8; 32],
-    },
-    ClosedByExpiry {
         channel_id: [u8; 32],
     },
 }
@@ -202,7 +201,6 @@ struct StoredDeposit {
 enum StoredStatus {
     Open,
     Settled,
-    ClosedByExpiry,
 }
 
 impl From<IndexedChannelStatus> for StoredStatus {
@@ -210,7 +208,6 @@ impl From<IndexedChannelStatus> for StoredStatus {
         match status {
             IndexedChannelStatus::Open => StoredStatus::Open,
             IndexedChannelStatus::Settled => StoredStatus::Settled,
-            IndexedChannelStatus::ClosedByExpiry => StoredStatus::ClosedByExpiry,
         }
     }
 }
@@ -220,7 +217,6 @@ impl From<StoredStatus> for IndexedChannelStatus {
         match status {
             StoredStatus::Open => IndexedChannelStatus::Open,
             StoredStatus::Settled => IndexedChannelStatus::Settled,
-            StoredStatus::ClosedByExpiry => IndexedChannelStatus::ClosedByExpiry,
         }
     }
 }
@@ -451,7 +447,7 @@ impl EvmChannelIndex {
     /// for the same channel).
     ///
     /// An event for a channel this index has not seen `Opened` for yet (a
-    /// `NewDeposit`/`Settled`/`ClosedByExpiry` with no matching `Opened` in
+    /// `NewDeposit`/`Settled` with no matching `Opened` in
     /// this or an earlier batch) is dropped rather than applied -- it cannot
     /// happen against a correctly-ordered, complete log stream, since
     /// `TokenNetwork` itself refuses every one of those calls before a
@@ -493,11 +489,6 @@ impl EvmChannelIndex {
                 ChannelIndexEvent::Settled { channel_id } => {
                     if let Some(channel) = state.channels.get_mut(&channel_id) {
                         channel.status = IndexedChannelStatus::Settled;
-                    }
-                }
-                ChannelIndexEvent::ClosedByExpiry { channel_id } => {
-                    if let Some(channel) = state.channels.get_mut(&channel_id) {
-                        channel.status = IndexedChannelStatus::ClosedByExpiry;
                     }
                 }
             }
@@ -725,33 +716,6 @@ mod tests {
                     block_number: 20,
                     log_index: 0,
                     event: ChannelIndexEvent::Settled {
-                        channel_id: channel_id(1),
-                    },
-                }],
-                20,
-            )
-            .expect("apply");
-
-        assert_eq!(
-            index.lookup(&channel_id(1), own),
-            ChannelIndexLookup::Terminal
-        );
-    }
-
-    #[test]
-    fn a_channel_closed_by_expiry_is_also_reported_terminal() {
-        let index = EvmChannelIndex::open(None).expect("open");
-        let own = address(0xAA);
-        let counterparty = address(0xBB);
-        index
-            .apply(vec![opened(10, channel_id(1), own, counterparty)], 10)
-            .expect("apply");
-        index
-            .apply(
-                vec![OrderedChannelIndexEvent {
-                    block_number: 20,
-                    log_index: 0,
-                    event: ChannelIndexEvent::ClosedByExpiry {
                         channel_id: channel_id(1),
                     },
                 }],

@@ -19,8 +19,8 @@ use ethers::providers::{Http, Middleware, Provider, ProviderError};
 use ethers::types::Address;
 
 use crate::bindings::token_network::{
-    ChannelClosedByExpiryFilter, ChannelNewDepositFilter, ChannelOpenedFilter,
-    ChannelSettledFilter, TokenNetwork as TokenNetworkContract,
+    ChannelNewDepositFilter, ChannelOpenedFilter, ChannelSettledFilter,
+    TokenNetwork as TokenNetworkContract,
 };
 use crate::channel_index::{
     ChannelIndexEvent, EvmChannelIndex, EvmChannelIndexError, OrderedChannelIndexEvent,
@@ -50,7 +50,8 @@ pub enum ChannelIndexSyncError {
 }
 
 /// Reads `TokenNetwork`'s own `ChannelOpened`/`ChannelNewDeposit`/
-/// `ChannelSettled`/`ChannelClosedByExpiry` logs and folds them into an
+/// `ChannelSettled` logs (the close events are deliberately not indexed --
+/// see [`crate::channel_index`]'s module doc) and folds them into an
 /// [`EvmChannelIndex`]. Holds no signing key and sends no transaction -- a
 /// plain `Provider<Http>`, never [`crate::EvmSettlementBackend`]'s signing
 /// client, since this syncer only ever reads.
@@ -140,12 +141,6 @@ impl EvmChannelIndexSyncer {
         .await?;
         self.collect_logs(from, to, &mut events, |log: ChannelSettledFilter| {
             ChannelIndexEvent::Settled {
-                channel_id: log.channel_id,
-            }
-        })
-        .await?;
-        self.collect_logs(from, to, &mut events, |log: ChannelClosedByExpiryFilter| {
-            ChannelIndexEvent::ClosedByExpiry {
                 channel_id: log.channel_id,
             }
         })

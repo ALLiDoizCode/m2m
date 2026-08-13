@@ -216,10 +216,10 @@
 //! Everything above bounds the *cost* of an `eth_call`-per-lookup; it does
 //! not remove the call. `connector-cli` wires a [`ClientChannelSource`] over
 //! `connector-settlement-evm`'s `EvmChannelIndex` -- a durable local index of
-//! `TokenNetwork`'s own `ChannelOpened`/`ChannelNewDeposit`/`ChannelSettled`/
-//! `ChannelClosedByExpiry` logs -- as its EVM source, so that a channel the
+//! `TokenNetwork`'s own `ChannelOpened`/`ChannelNewDeposit`/`ChannelSettled`
+//! logs -- as its EVM source, so that a channel the
 //! index has caught up to resolves from a `HashMap` probe with no RPC at
-//! all, and reports a settled or closed-by-expiry channel as
+//! all, and reports a settled channel as
 //! [`ChannelResolutionError::Terminal`] the same way, distinguishably from a
 //! channel this registry has simply never heard of. The chain-reading path
 //! this module implements is the **fall-through**, not the primary path: a
