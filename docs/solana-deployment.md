@@ -201,7 +201,8 @@ separate file so neither record can clobber the other -- see the
 ```
 
 `tokenMint` and `maxLen` are `null` unless set: on devnet only when `--token-mint` /
-`--max-len` are passed explicitly, on mainnet-beta `tokenMint` always (it defaults to
+`--max-len` are given explicitly (as a flag or via the `TOKEN_MINT` / `MAX_LEN` env
+fallback, which apply on every network), on mainnet-beta `tokenMint` always (it defaults to
 Circle's USDC mint) and `maxLen` on an initial deploy (it defaults to the binary size plus
 headroom; an upgrade reuses the existing account's `max_len` and records `null`).
 

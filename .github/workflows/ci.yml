@@ -365,7 +365,10 @@ jobs:
       - name: Ensure platform-tools cache directory exists
         run: mkdir -p ~/.cache/solana
 
-      - name: Build #1 (clean)
+      # Quoted: an unquoted YAML scalar treats " #1 (clean)" as a comment, which
+      # collapsed these four step names to "Build"/"Hash build" in the run log and
+      # hid which of the two builds a failure came from.
+      - name: "Build #1 (clean)"
         working-directory: packages/solana-program
         run: |
           n=0
@@ -385,7 +388,7 @@ jobs:
       # and the SBF target dir makes build #2 recompile the program from source
       # instead of re-copying build #1's artifact; host-side build artifacts are left
       # alone because nothing from them lands in the .so.
-      - name: Hash build #1 and reset build output
+      - name: "Hash build #1 and reset build output"
         run: |
           sha256sum target/deploy/payment_channel.so | awk '{print $1}' > /tmp/build1.sha256
           echo "Build #1 sha256: $(cat /tmp/build1.sha256)"
@@ -412,11 +415,11 @@ jobs:
           fi
           rm -rf target/deploy
 
-      - name: Build #2 (clean)
+      - name: "Build #2 (clean)"
         working-directory: packages/solana-program
         run: cargo build-sbf --tools-version v1.52
 
-      - name: Hash build #2 and assert reproducibility
+      - name: "Hash build #2 and assert reproducibility"
         run: |
           sha256sum target/deploy/payment_channel.so | awk '{print $1}' > /tmp/build2.sha256
           echo "Build #2 sha256: $(cat /tmp/build2.sha256)"
