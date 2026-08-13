@@ -30,6 +30,13 @@
 // Everything here is OPTIONAL: if SOLANA_FAUCET_KEYPAIR / the RPC are not
 // configured (e.g. an EVM-only deploy), `createSolanaFaucet` returns null and
 // the route answers a clear 503 instead of crashing the whole service.
+//
+// `drip()` (SOL + USDC, described above) has had no HTTP route since
+// connector#898 retired the combined and native-SOL-only routes in favour of
+// USDC-only (toon-meta#310 §4.6) — index.js now only ever calls
+// `dripUsdcOnly()`. `drip()`/`dripInner()` are kept as library surface
+// deliberately (#898's own commit message), so the SOL leg's correctness
+// below still matters even though nothing currently serves it over HTTP.
 import fs from 'fs';
 import {
   Connection,
@@ -51,6 +58,10 @@ const SOLANA_USDC_DECIMALS = Number(process.env.SOLANA_USDC_DECIMALS || '6');
 // Conservative default — see the treasury-balance note above (toon-meta#258).
 const SOLANA_SOL_AMOUNT = Number(process.env.SOLANA_SOL_AMOUNT || '0.03'); // SOL per drip
 const SOLANA_USDC_AMOUNT = Number(process.env.SOLANA_USDC_AMOUNT || '1000'); // USDC per drip
+// Solana's base fee is 5,000 lamports/signature; a treasury→recipient
+// transfer signs once. Reserved on top of the drip amount when pre-checking
+// the treasury can actually cover a transfer (issue #691).
+const SOL_TRANSFER_FEE_BUFFER_LAMPORTS = 5000;
 // Per-address cooldown (default 24h) — protects the low-balance SOL treasury
 // from being drained by repeat requests from a single address. Mirrors
 // BASE_SEPOLIA_COOLDOWN_MS / MINA_USDC_COOLDOWN_HOURS.
@@ -124,6 +135,41 @@ export function withDeadline(promise, ms, label) {
   // pending it SHOULD keep the process alive (a deadline that silently never
   // fires because the loop drained would defeat the guard).
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+// Confirms a SOL delivery actually landed, rather than trusting a confirmed
+// signature alone (issue #691): a live funding run saw the devnet faucet
+// report success WITH a real transaction signature for 8 of 20 addresses
+// while delivering 0 lamports. `sendAndConfirmTransaction`/
+// `confirmTransaction` resolving does not, by itself, prove the recipient's
+// balance moved -- on the public devnet RPC (a load-balanced, multi-node
+// endpoint since the self-hosted validator was retired 2026-07-19) the
+// confirmation read and a balance read immediately after can be served by
+// different backend nodes, so a fresh read can still lag the write it just
+// confirmed. Polls briefly to absorb that lag before concluding the delivery
+// genuinely did not happen. `getBalance` is an async () => number, injected
+// so this is testable without a live RPC (mirrors `assertSlotAdvancing`
+// above). Exported for tests.
+export async function verifyDelivered(
+  getBalance,
+  floorLamports,
+  { attempts = 5, intervalMs = 500 } = {}
+) {
+  let balance = await getBalance();
+  for (let i = 1; i < attempts && balance < floorLamports; i++) {
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    balance = await getBalance();
+  }
+  if (balance < floorLamports) {
+    const err = new Error(
+      `Transaction reported success but the recipient's balance is still ${balance} lamports, ` +
+        `short of the expected ${floorLamports}-lamport floor -- treating the delivery as ` +
+        'unverified rather than reporting success.'
+    );
+    err.code = 'SOL_DELIVERY_UNVERIFIED';
+    throw err;
+  }
+  return balance;
 }
 
 function loadKeypair(path) {
@@ -218,7 +264,10 @@ export function createSolanaFaucet() {
   // Transfer SOL from the treasury to the recipient — the primary SOL-funding
   // path (issue #379). The TREASURY pays the tx fee, so this works regardless
   // of the public devnet airdrop's rate limits, mirroring `transferUsdc` below.
-  async function transferSol(recipient) {
+  // `startBalance` is the recipient's pre-transfer balance (read by the
+  // caller); delivery is verified against it before the signature is trusted
+  // (issue #691).
+  async function transferSol(recipient, startBalance) {
     const lamports = Math.round(SOLANA_SOL_AMOUNT * LAMPORTS_PER_SOL);
     const latest = await connection.getLatestBlockhash('confirmed');
     const tx = new Transaction({
@@ -235,6 +284,10 @@ export function createSolanaFaucet() {
     const signature = await sendAndConfirmTransaction(connection, tx, [authority], {
       commitment: 'confirmed',
     });
+    await verifyDelivered(
+      () => connection.getBalance(recipient, 'confirmed'),
+      startBalance + lamports
+    );
     console.log(`  📤 Transferred ${SOLANA_SOL_AMOUNT} SOL from treasury: ${signature}`);
     return signature;
   }
@@ -242,7 +295,8 @@ export function createSolanaFaucet() {
   // Airdrop SOL to the recipient and confirm it (blockhash/lastValidBlockHeight
   // strategy — tied to actual chain progress, not a 30s wall clock; issue #277).
   // Fallback only: used when the treasury itself can't cover the SOL transfer.
-  async function airdropSol(recipient) {
+  // Delivery is verified the same way as the treasury path (issue #691).
+  async function airdropSol(recipient, startBalance) {
     const lamports = Math.round(SOLANA_SOL_AMOUNT * LAMPORTS_PER_SOL);
     const latest = await connection.getLatestBlockhash('confirmed');
     const airdropSig = await connection.requestAirdrop(recipient, lamports);
@@ -253,6 +307,10 @@ export function createSolanaFaucet() {
         lastValidBlockHeight: latest.lastValidBlockHeight,
       },
       'confirmed'
+    );
+    await verifyDelivered(
+      () => connection.getBalance(recipient, 'confirmed'),
+      startBalance + lamports
     );
     console.log(`  📤 Airdropped ${SOLANA_SOL_AMOUNT} SOL: ${airdropSig}`);
     return airdropSig;
@@ -293,6 +351,36 @@ export function createSolanaFaucet() {
     };
   }
 
+  // Shared by both places dripInner falls back to requestAirdrop (treasury
+  // pre-check failed, or the treasury transfer itself threw): attempts the
+  // airdrop and reports either a verified delivery or an honest skip. Never
+  // throws — the USDC leg below must still run regardless of this leg's
+  // outcome. `treasuryBalanceLamports`, when given, surfaces WHY the
+  // treasury path was skipped (issue #691's "surface treasury-low as an
+  // explicit error") on both branches, not just the failure one.
+  async function fallbackToAirdrop(recipient, startBalance, reason, treasuryBalanceLamports) {
+    const treasuryKnown = treasuryBalanceLamports !== undefined;
+    try {
+      const signature = await airdropSol(recipient, startBalance);
+      return {
+        signature,
+        amount: String(SOLANA_SOL_AMOUNT),
+        source: 'airdrop-fallback',
+        ...(treasuryKnown ? { fallbackReason: reason, treasuryBalanceLamports } : {}),
+      };
+    } catch (airdropErr) {
+      // Neither path worked (e.g. treasury underfunded AND the public airdrop
+      // is dry, or confirmed but undelivered on both). Do NOT throw — the
+      // USDC leg is treasury-funded and independent of this leg.
+      return {
+        skipped: true,
+        reason,
+        error: String(airdropErr.message || airdropErr),
+        ...(treasuryKnown ? { treasuryBalanceLamports } : {}),
+      };
+    }
+  }
+
   // Full drip: SOL + USDC — but the USDC leg is DECOUPLED from the SOL leg. The
   // SOL leg is SKIPPED when the recipient is already funded, and a FAILED SOL
   // leg no longer aborts the request: the USDC transfer still runs (it is
@@ -316,27 +404,34 @@ export function createSolanaFaucet() {
         balanceSol: String(startBalance / LAMPORTS_PER_SOL),
       };
     } else {
-      try {
-        // Primary: a treasury→recipient SOL transfer, immune to the public
-        // devnet airdrop's per-IP rate limit (issue #379).
-        const signature = await transferSol(recipient);
-        sol = { signature, amount: String(SOLANA_SOL_AMOUNT), source: 'treasury' };
-      } catch (err) {
+      const lamports = Math.round(SOLANA_SOL_AMOUNT * LAMPORTS_PER_SOL);
+      // Pre-flight: the treasury does not self-replenish (toon-meta#258), so
+      // check it can actually cover this drip + its own fee BEFORE attempting
+      // the transfer, rather than letting an underfunded treasury surface as
+      // an opaque RPC error (issue #691).
+      const treasuryBalance = await connection.getBalance(authority.publicKey, 'confirmed');
+      if (treasuryBalance < lamports + SOL_TRANSFER_FEE_BUFFER_LAMPORTS) {
         console.log(
-          `  ⚠️  Treasury SOL transfer failed (${err.message}); falling back to requestAirdrop`
+          `  ⚠️  Treasury SOL balance (${treasuryBalance} lamports) can't cover a ` +
+            `${lamports}-lamport drip + fee — skipping the treasury transfer, trying requestAirdrop`
         );
+        sol = await fallbackToAirdrop(
+          recipient,
+          startBalance,
+          'treasury sol balance too low',
+          treasuryBalance
+        );
+      } else {
         try {
-          const signature = await airdropSol(recipient);
-          sol = { signature, amount: String(SOLANA_SOL_AMOUNT), source: 'airdrop-fallback' };
-        } catch (airdropErr) {
-          // Neither path worked (e.g. treasury underfunded AND the public
-          // airdrop is dry). Do NOT abort — the USDC leg is treasury-funded
-          // and independent of this leg.
-          sol = {
-            skipped: true,
-            reason: 'sol funding unavailable',
-            error: String(airdropErr.message || airdropErr),
-          };
+          // Primary: a treasury→recipient SOL transfer, immune to the public
+          // devnet airdrop's per-IP rate limit (issue #379).
+          const signature = await transferSol(recipient, startBalance);
+          sol = { signature, amount: String(SOLANA_SOL_AMOUNT), source: 'treasury' };
+        } catch (err) {
+          console.log(
+            `  ⚠️  Treasury SOL transfer failed (${err.message}); falling back to requestAirdrop`
+          );
+          sol = await fallbackToAirdrop(recipient, startBalance, 'sol funding unavailable');
         }
       }
     }
