@@ -23,7 +23,7 @@ use connector_config::{
 };
 use connector_runtime::{
     ChannelDomain, Connector, FileJournal, HttpAppClient, InMemoryJournal, Journal, JournalError,
-    PeerRoute, PeerRouteStore, PeerRouteStoreError, SystemClock,
+    PeerRoute, PeerRouteStore, PeerRouteStoreError, PeerSaleBounds, SystemClock,
 };
 use connector_settlement::{SettlementBackend, SettlementError};
 use connector_settlement_evm::{
@@ -926,11 +926,22 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     // the connector exactly as it was before this section existed. Issue
     // #886: the lease a purchase actually buys, alongside the price.
     if let Some(peer_sale) = config.peer_sale() {
-        connector = connector.with_peer_sale(
-            peer_sale.prefix(),
-            peer_sale.price(),
-            chrono::Duration::seconds(peer_sale.lease_seconds() as i64),
-        );
+        connector = connector
+            .with_peer_sale(
+                peer_sale.prefix(),
+                peer_sale.price(),
+                chrono::Duration::seconds(peer_sale.lease_seconds() as i64),
+            )
+            // Issue #887 (C4): abuse bounds, straight from `[peer_sale]`'s
+            // own fields -- defaulted at the config layer
+            // (`connector_config::peer_sale`), so this is never a guess.
+            .with_peer_sale_bounds(PeerSaleBounds::new(
+                peer_sale.max_purchased_rows(),
+                peer_sale.max_routes_per_payer(),
+                peer_sale.max_prefix_length() as usize,
+                peer_sale.purchase_rate_limit(),
+                chrono::Duration::seconds(peer_sale.purchase_rate_window_seconds() as i64),
+            ));
     }
     // `[[peer_channels]]` reaching `ClaimBook` at last (§11: "it MUST
     // actually wire `ClaimBook`'s signer, verification key and EIP-712
