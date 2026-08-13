@@ -68,7 +68,7 @@ Before deploying the Solana payment channel program, ensure the following are in
 
 4. **Program source** -- the Rust program at `packages/solana-program/` must compile:
    ```bash
-   cd packages/solana-program && cargo build-sbf
+   cd packages/solana-program && cargo build-sbf --tools-version v1.52
    ```
 
 ---
@@ -82,7 +82,7 @@ Before deploying the Solana payment channel program, ensure the following are in
 make solana-build
 
 # Or directly
-cd packages/solana-program && cargo build-sbf
+cd packages/solana-program && cargo build-sbf --tools-version v1.52
 ```
 
 This produces the compiled BPF binary at `target/deploy/payment_channel.so` (size varies by build -- ~109KB for the current source; see [Deployment Cost Estimates](#deployment-cost-estimates) for the rent this implies) -- `packages/solana-program` is a member of the repository's root Cargo workspace, so build output lands in the workspace-root `target/`, not a per-crate one.
@@ -118,7 +118,7 @@ The deploy script (`tools/solana/deploy.sh`) performs the following steps:
 1. Validates arguments and checks Solana CLI installation
 2. Checks deployer balance
 3. Requires explicit "yes" confirmation for mainnet-beta
-4. Builds the program via `cargo build-sbf`
+4. Builds the program via `cargo build-sbf --tools-version v1.52` (the pinned line every artifact statement is made about)
 5. Deploys via `solana program deploy` with `--output json`
 6. Optionally transfers upgrade authority (if `--upgrade-authority` is provided)
 7. Saves program ID and metadata to `tools/solana/program-id.json`
@@ -362,7 +362,7 @@ git pull origin epic-33
 
 # Build the updated program
 make solana-build
-# Or: cd packages/solana-program && cargo build-sbf
+# Or: cd packages/solana-program && cargo build-sbf --tools-version v1.52
 ```
 
 Verify the binary at `target/deploy/payment_channel.so` (workspace-root `target/`, per the note above).
@@ -433,7 +433,7 @@ If an upgrade causes issues:
 
    ```bash
    git checkout <PREVIOUS_COMMIT>
-   cd packages/solana-program && cargo build-sbf
+   cd packages/solana-program && cargo build-sbf --tools-version v1.52
    ```
 
 2. **Redeploy the previous binary:**

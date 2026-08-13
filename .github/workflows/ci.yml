@@ -389,7 +389,28 @@ jobs:
         run: |
           sha256sum target/deploy/payment_channel.so | awk '{print $1}' > /tmp/build1.sha256
           echo "Build #1 sha256: $(cat /tmp/build1.sha256)"
-          rm -rf target/deploy target/sbf-solana-solana
+          # The SBF target dir's name depends on the platform-tools line:
+          # v1.44+ writes target/sbpf-solana-solana, older lines wrote
+          # target/sbf-solana-solana (rust_target_triple() in Agave's
+          # cargo-build-sbf). Remove whichever exists — and FAIL if neither
+          # does, because rm'ing a nonexistent dir is exactly how this gate
+          # was once a tautology: build #2 recompiled nothing and the two
+          # hashes were equal by construction (this PR's review).
+          removed=0
+          for dir in target/sbf-solana-solana target/sbpf-solana-solana; do
+            if [ -d "$dir" ]; then
+              rm -rf "$dir"
+              echo "Reset $dir"
+              removed=1
+            fi
+          done
+          if [ "$removed" -eq 0 ]; then
+            echo "::error::no SBF target dir found to reset — the toolchain's target triple"
+            echo "::error::changed again, and build #2 would recompile nothing. Add the new"
+            echo "::error::dir name here, or the reproducibility assertion proves nothing."
+            exit 1
+          fi
+          rm -rf target/deploy
 
       - name: Build #2 (clean)
         working-directory: packages/solana-program

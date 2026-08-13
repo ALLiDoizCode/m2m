@@ -18,7 +18,8 @@
 # Prerequisites:
 #   - Solana CLI >= 3.1.12 installed (solana --version)
 #   - Deployer keypair funded (devnet: solana airdrop 5 --url devnet)
-#   - Program built: cargo build-sbf (produces target/deploy/payment_channel.so)
+#   - Program built: cargo build-sbf --tools-version v1.52 (produces
+#     target/deploy/payment_channel.so; this script rebuilds with the same pin)
 #
 # Deployment cost estimate:
 #   ~$19-38 in refundable rent-exempt SOL at ~$89.67/SOL (March 2026).
@@ -96,6 +97,14 @@ MAINNET_URL="https://api.mainnet-beta.solana.com"
 # The default --token-mint on mainnet-beta -- see the header comment above for why this
 # is a recorded convention, not an on-chain constraint the program enforces.
 MAINNET_USDC_MINT="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+# The one platform-tools line every artifact statement in this repo is made
+# about: CI's reproducibility gate builds with it (.github/workflows/ci.yml),
+# the devnet provenance record was produced by it
+# (packages/solana-program/deployments/devnet-public.md — a default-tools
+# build of the same source differs, 112,513 vs 109,401 bytes), and the
+# max_len/rent figures this script prints assume its output size. A bare
+# `cargo build-sbf` here would broadcast a binary none of those cover.
+PLATFORM_TOOLS_VERSION="v1.52"
 
 # Default upgrade headroom for a mainnet-beta INITIAL deploy with no explicit --max-len:
 # 25% over the built binary's size, giving a later upgrade room to grow into without a
@@ -377,14 +386,17 @@ fi
 
 echo "Building program..."
 cd "$PROGRAM_DIR"
-cargo build-sbf
+# Pinned, never bare: see PLATFORM_TOOLS_VERSION's comment — the gate, the
+# provenance record and the printed size figures all describe the v1.52
+# artifact, not whatever an operator's CLI happens to default to.
+cargo build-sbf --tools-version "$PLATFORM_TOOLS_VERSION"
 echo "Build complete: $PROGRAM_SO"
 echo ""
 
 # Verify the .so file exists
 if [[ ! -f "$PROGRAM_SO" ]]; then
     echo "Error: Program binary not found at $PROGRAM_SO"
-    echo "Run 'cargo build-sbf' from $PROGRAM_DIR"
+    echo "Run 'cargo build-sbf --tools-version $PLATFORM_TOOLS_VERSION' from $PROGRAM_DIR"
     exit 1
 fi
 
