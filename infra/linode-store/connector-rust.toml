@@ -290,17 +290,6 @@ key_file = "/app/data/signer.key"
 # `relay_url` is deliberately ABSENT too: this box fronts no relay (see
 # docs/operators/announcing-a-node.md), and pointing it at the g.toon proxy's
 # relay would advertise free reads this node does not serve.
-#
-# `notice_id`/`notice_severity`/`notice_summary`/`notice_url` (issue #948,
-# re-homed from toon-meta#335) put the two-box-cutover operator notice on the
-# wire via the schema'd `notice` field (toon#183, issue #912) -- the
-# permanent mechanism, not toon-meta#335's retired content ride-along. The
-# durable text lives at `notice_url`, in toon-meta's own
-# `docs/operators/2026-08-13-two-box-cutover.md`; this box's announce carries
-# only the pointer, per that doc's own convention
-# (`docs/operators/README.md` in toon-meta). `severity` is `action-required`:
-# this box IS the store leg the notice warns about -- an upload here does not
-# self-heal after the cutover without an updated client.
 [announce]
 addresses     = ["g.toon.ario"]
 http_endpoint = "https://proxy.ario.devnet.toonprotocol.dev/ilp"
@@ -347,6 +336,16 @@ publish_btp_url = "wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp"
 # copy of this file carries.
 pay_channel = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeadc0de"
 
+# `notice_id`/`notice_severity`/`notice_summary`/`notice_url` (issue #948,
+# re-homed from toon-meta#335) put the two-box-cutover operator notice on the
+# wire via the schema'd `notice` field (toon#183, issue #912) -- the
+# permanent mechanism, not toon-meta#335's retired content ride-along. The
+# durable text lives at `notice_url`, in toon-meta's own
+# `docs/operators/2026-08-13-two-box-cutover.md`; this box's announce carries
+# only the pointer, per that doc's own convention
+# (`docs/operators/README.md` in toon-meta). `severity` is `action-required`:
+# this box IS the store leg the notice warns about -- an upload here does not
+# self-heal after the cutover without an updated client.
 notice_id       = "2026-08-13-two-box-cutover"
 notice_severity = "action-required"
 notice_summary  = "The devnet apex is being retired; reads and relay publishing repair themselves, but store uploads need a client released after the cutover."
