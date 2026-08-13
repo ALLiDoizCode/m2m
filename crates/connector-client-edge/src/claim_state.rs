@@ -38,6 +38,19 @@
 //! channel exists. `"expired"` is the one distinct reason, because it is
 //! a fact about the caller's own request, not about the channel.
 //!
+//! **What the operator sees instead (issue #908).** The wire response
+//! stays this coarse deliberately, but that left the *operator* running
+//! this node as blind as the caller it is protecting -- a refused channel
+//! could not be diagnosed without a debugger, only reproduced. Every
+//! branch below that refuses or verifies an entry logs the real cause at
+//! `debug` ([`log_outcome`], [`log_lookup_error`]): a malformed field, no
+//! record of the channel, the underlying [`ChannelResolutionError`]
+//! (lookup failure, budget exhaustion, or a terminal channel, each with
+//! its own string), a signature that does not verify, an expired
+//! challenge, or success. This is exactly the distinction the wire
+//! response must not make, moved to a place only this node's own operator
+//! reads.
+//!
 //! **The admission path is untouched.** This handler only reads --
 //! [`crate::ClientClaimGate::watermark`], [`crate::ClientClaimGate::channels`],
 //! [`crate::ClientClaimGate::last_claim_time`] -- and a channel lookup that
@@ -61,8 +74,48 @@ use connector_signer::{
     verify_evm_claim_state_challenge, verify_solana_claim_state_challenge, EvmClaimStateChallenge,
 };
 
-use crate::channels::{decode_base58_bytes, decode_hex_bytes, DepositFloor};
+use crate::channels::{
+    decode_base58_bytes, decode_hex_bytes, ChannelResolutionError, DepositFloor,
+};
 use crate::{hex_encode, now_unix, ClientEdgeState};
+
+/// The wire response for a channel entry stays the single generic
+/// `"unverified"`/`"expired"` this module's doc commits to -- but the
+/// underlying cause is exactly the thing an operator debugging a refused
+/// channel needs (issue #908), so every branch that leads to a refusal or a
+/// success logs it here, server-side only, at `debug`. `channel_id` is
+/// whatever the caller sent, even when it fails to decode -- the point of
+/// this line is to be legible without also being a valid channel lookup.
+fn log_outcome(blockchain: &'static str, channel_id: &str, cause: &'static str) {
+    tracing::debug!(
+        blockchain = %blockchain,
+        channel_id = %channel_id,
+        cause = %cause,
+        "claim-state request resolved"
+    );
+}
+
+/// As [`log_outcome`], for the one refusal whose cause carries a detail of
+/// its own: a lookup this connector could not complete. The variant alone is
+/// not enough -- "the chain said no" and "I never got to ask" are
+/// different operator problems (see [`ChannelResolutionError`]'s own doc),
+/// and [`crate::channels::ChannelLookupFailed`]'s opaque string is the only
+/// place the underlying reason exists -- so both go out: the variant as
+/// `cause`, its `Display` as `detail`.
+fn log_lookup_error(blockchain: &'static str, channel_id: &str, error: &ChannelResolutionError) {
+    let cause = match error {
+        ChannelResolutionError::LookupFailed(_) => "channel_lookup_failed",
+        ChannelResolutionError::Budgeted(_) => "channel_lookup_budgeted",
+        ChannelResolutionError::Terminal(_) => "channel_terminal",
+    };
+    tracing::debug!(
+        blockchain = %blockchain,
+        channel_id = %channel_id,
+        cause = %cause,
+        detail = %error,
+        "claim-state request resolved"
+    );
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -199,12 +252,15 @@ async fn resolve_evm(
     now: u64,
 ) -> ChannelStateResult {
     if expires <= now {
+        log_outcome("evm", &channel_id_text, "expired");
         return unverified("evm", channel_id_text, "expired");
     }
     let Some(channel_id) = decode_hex_bytes::<32>(&channel_id_text) else {
+        log_outcome("evm", &channel_id_text, "malformed_channel_id");
         return unverified("evm", channel_id_text, "unverified");
     };
     let Some(signature) = decode_hex_bytes::<65>(&signature_text) else {
+        log_outcome("evm", &channel_id_text, "malformed_signature");
         return unverified("evm", channel_id_text, "unverified");
     };
 
@@ -214,8 +270,16 @@ async fn resolve_evm(
         .channels()
         .evm(&channel_id, &requester)
         .await;
-    let Ok(Some(channel)) = lookup else {
-        return unverified("evm", channel_id_text, "unverified");
+    let channel = match lookup {
+        Ok(Some(channel)) => channel,
+        Ok(None) => {
+            log_outcome("evm", &channel_id_text, "channel_unknown");
+            return unverified("evm", channel_id_text, "unverified");
+        }
+        Err(error) => {
+            log_lookup_error("evm", &channel_id_text, &error);
+            return unverified("evm", channel_id_text, "unverified");
+        }
     };
 
     let challenge = EvmClaimStateChallenge {
@@ -225,8 +289,10 @@ async fn resolve_evm(
         token_network_address: channel.token_network_address,
     };
     if !verify_evm_claim_state_challenge(&challenge, &signature, &channel.counterparty) {
+        log_outcome("evm", &channel_id_text, "signature_invalid");
         return unverified("evm", channel_id_text, "unverified");
     }
+    log_outcome("evm", &channel_id_text, "verified");
 
     let channel_id_hex = format!("0x{}", hex_encode(&channel_id));
     let channel_key = format!("evm:{channel_id_hex}");
@@ -248,12 +314,15 @@ async fn resolve_solana(
     now: u64,
 ) -> ChannelStateResult {
     if expires <= now {
+        log_outcome("solana", &channel_account_text, "expired");
         return unverified("solana", channel_account_text, "expired");
     }
     let Some(channel_account) = decode_base58_bytes::<32>(&channel_account_text) else {
+        log_outcome("solana", &channel_account_text, "malformed_channel_id");
         return unverified("solana", channel_account_text, "unverified");
     };
     let Ok(signature) = BASE64.decode(&signature_text) else {
+        log_outcome("solana", &channel_account_text, "malformed_signature");
         return unverified("solana", channel_account_text, "unverified");
     };
 
@@ -263,8 +332,16 @@ async fn resolve_solana(
         .channels()
         .solana(&channel_account, &requester)
         .await;
-    let Ok(Some(channel)) = lookup else {
-        return unverified("solana", channel_account_text, "unverified");
+    let channel = match lookup {
+        Ok(Some(channel)) => channel,
+        Ok(None) => {
+            log_outcome("solana", &channel_account_text, "channel_unknown");
+            return unverified("solana", channel_account_text, "unverified");
+        }
+        Err(error) => {
+            log_lookup_error("solana", &channel_account_text, &error);
+            return unverified("solana", channel_account_text, "unverified");
+        }
     };
 
     if !verify_solana_claim_state_challenge(
@@ -273,8 +350,10 @@ async fn resolve_solana(
         &signature,
         &channel.counterparty,
     ) {
+        log_outcome("solana", &channel_account_text, "signature_invalid");
         return unverified("solana", channel_account_text, "unverified");
     }
+    log_outcome("solana", &channel_account_text, "verified");
 
     let channel_key = format!("solana:{channel_account_text}");
     ChannelStateResult::Verified(verified_state(
@@ -344,11 +423,14 @@ mod tests {
     use ed25519_dalek::Signer as Ed25519Signer;
     use libsecp256k1::{Message, PublicKey, SecretKey};
     use rand::SeedableRng;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
     use tower::ServiceExt;
 
     use crate::channels::test_source::FakeChannelSource;
     use crate::{
-        router_with_gate, ClientChannelRegistry, ClientClaimGate, ClientPayoutLedger, EvmChannel,
+        router_with_gate, ChannelLookupFailed, ClientChannelRegistry, ClientClaimGate,
+        ClientPayoutLedger, EvmChannel,
     };
 
     const EVM_CHAIN_ID: u64 = 8453;
@@ -479,6 +561,121 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
         serde_json::from_slice(&bytes).expect("valid JSON response")
+    }
+
+    /// Issue #908: this module's own two logging call sites
+    /// ([`log_outcome`], [`log_lookup_error`]) never appear on the wire, so
+    /// asserting they fire -- and with which cause -- needs a `Subscriber`
+    /// installed for the duration of a request, exactly like
+    /// `connector_runtime::connector`'s `SpanFieldCapture` does for the
+    /// `"packet"` span, adapted to events instead.
+    ///
+    /// Only this module's own events are kept: `enabled` has to answer
+    /// `true` for everything (see [`claim_state_events`] on why a narrower
+    /// answer is not race-free), which otherwise leaves the assertions
+    /// below counting whatever axum, tower or hyper happens to log on the
+    /// same thread during the request.
+    struct EventFieldCapture {
+        events: Arc<Mutex<Vec<HashMap<String, String>>>>,
+    }
+
+    /// `tracing`'s default target -- the module path of the
+    /// [`log_outcome`]/[`log_lookup_error`] call sites, which are in the
+    /// parent module, not in `tests`.
+    const CLAIM_STATE_TARGET: &str = "connector_client_edge::claim_state";
+
+    struct StringVisitor<'a>(&'a mut HashMap<String, String>);
+
+    impl tracing::field::Visit for StringVisitor<'_> {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    impl tracing::Subscriber for EventFieldCapture {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _attrs: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            if event.metadata().target() != CLAIM_STATE_TARGET {
+                return;
+            }
+            let mut fields = HashMap::new();
+            let mut visitor = StringVisitor(&mut fields);
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .expect("capture lock poisoned")
+                .push(fields);
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    /// Run `work` under an [`EventFieldCapture`] and return every event
+    /// this module's logging recorded, in `work`'s own order, alongside
+    /// `work`'s result.
+    ///
+    /// Probes both [`log_outcome`] and [`log_lookup_error`] -- this
+    /// module's only two logging call sites, however many distinct
+    /// `cause`s flow through them at runtime -- and rebuilds tracing-core's
+    /// callsite interest cache until the probes are observably captured.
+    /// A single rebuild is not race-free under the default parallel
+    /// `cargo test`: each call site's `Interest` is cached globally,
+    /// computed once by whichever thread touches it first, and a
+    /// concurrent test elsewhere in this file that never installs a
+    /// subscriber can be that first toucher, caching `Interest::never`
+    /// before this capture ever runs. See
+    /// `connector_runtime::connector`'s `packet_span_fields` for the fuller
+    /// account of why probing until the capture actually fires is the only
+    /// race-free fix.
+    async fn claim_state_events<T, F: std::future::Future<Output = T>>(
+        work: F,
+    ) -> (Vec<HashMap<String, String>>, T) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let guard = tracing::subscriber::set_default(EventFieldCapture {
+            events: Arc::clone(&events),
+        });
+        let mut attempts = 0u32;
+        loop {
+            tracing::callsite::rebuild_interest_cache();
+            log_outcome("evm", "probe", "probe");
+            log_lookup_error(
+                "evm",
+                "probe",
+                &ChannelResolutionError::LookupFailed(ChannelLookupFailed("probe".to_string())),
+            );
+            if events.lock().expect("capture lock poisoned").len() >= 2 {
+                events.lock().expect("capture lock poisoned").clear();
+                break;
+            }
+            attempts += 1;
+            assert!(
+                attempts < 1_000,
+                "the claim-state log call sites never became enabled under this capture"
+            );
+            std::thread::yield_now();
+        }
+
+        let result = work.await;
+
+        drop(guard);
+        let captured = events.lock().expect("capture lock poisoned").clone();
+        (captured, result)
     }
 
     #[tokio::test]
@@ -618,6 +815,231 @@ mod tests {
             // caller cannot tell "wrong key" from "no such channel" apart.
             assert_eq!(entry.as_object().unwrap().len(), 4);
         }
+    }
+
+    /// Issue #908: the wire response for a bad signature and an unknown
+    /// channel is the identical `"unverified"` shape (proven above), but an
+    /// operator reading this node's own logs must be able to tell them
+    /// apart -- that is the whole point of the issue. Same two requests as
+    /// the wire-shape test above; this one asserts on what got logged
+    /// instead of what got answered.
+    #[tokio::test]
+    async fn an_unknown_channel_and_a_bad_signature_are_logged_with_different_causes() {
+        let expires = far_future_expiry();
+        let forger_secret = SecretKey::parse(&[42u8; 32]).unwrap();
+        let wrong_signature = evm_challenge_signature(&forger_secret, EVM_CHANNEL_ID, expires);
+
+        let unknown_channel_id = [0x99u8; 32];
+        let unknown_channel_signature =
+            evm_challenge_signature(&forger_secret, unknown_channel_id, expires);
+
+        let body = serde_json::json!({
+            "channels": [
+                {
+                    "blockchain": "evm",
+                    "channelId": evm_channel_id_hex(),
+                    "expires": expires,
+                    "signature": wrong_signature,
+                },
+                {
+                    "blockchain": "evm",
+                    "channelId": format!("0x{}", hex_encode(&unknown_channel_id)),
+                    "expires": expires,
+                    "signature": unknown_channel_signature,
+                },
+            ]
+        });
+
+        let (events, response) = claim_state_events(post_claim_state(test_gate(), body)).await;
+
+        for index in 0..2 {
+            assert_eq!(response["channels"][index]["error"], "unverified");
+        }
+        let causes: Vec<Option<&str>> = events
+            .iter()
+            .map(|fields| fields.get("cause").map(String::as_str))
+            .collect();
+        assert_eq!(
+            causes,
+            vec![Some("signature_invalid"), Some("channel_unknown")],
+            "the two identical wire refusals must be distinguishable in the log"
+        );
+    }
+
+    /// Issue #908: a lookup this connector could not complete (an
+    /// unreachable settlement RPC, say) is not the same event as a channel
+    /// this connector has simply never heard of -- both answer the wire the
+    /// identical `"unverified"`, but the log must carry the underlying
+    /// [`crate::channels::ChannelLookupFailed`] reason, not just the fact
+    /// that *something* failed.
+    #[tokio::test]
+    async fn a_channel_lookup_failure_is_logged_with_its_underlying_reason() {
+        let source = FakeChannelSource::unreachable("settlement rpc unreachable");
+        let channels = ClientChannelRegistry::new().with_source(Arc::new(source));
+        let gate = ClientClaimGate::restore(channels, Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay");
+
+        let expires = far_future_expiry();
+        let body = serde_json::json!({
+            "channels": [{
+                "blockchain": "evm",
+                "channelId": evm_channel_id_hex(),
+                "expires": expires,
+                "signature": format!("0x{}", "11".repeat(65)),
+            }]
+        });
+
+        let (events, response) = claim_state_events(post_claim_state(gate, body)).await;
+
+        assert_eq!(response["channels"][0]["ok"], false);
+        assert_eq!(response["channels"][0]["error"], "unverified");
+
+        let event = events
+            .iter()
+            .find(|fields| fields.get("cause").map(String::as_str) == Some("channel_lookup_failed"))
+            .expect("a channel_lookup_failed event");
+        assert_eq!(
+            event.get("detail").map(String::as_str),
+            Some("settlement rpc unreachable")
+        );
+    }
+
+    /// Issue #908: a settled channel is a known, definitive fact (issue
+    /// #661) -- distinct in the log from both an unknown channel and a
+    /// bare lookup failure, the same way [`crate::ClaimIngestRejection`]
+    /// keeps it distinct on the claim-ingestion path.
+    #[tokio::test]
+    async fn a_terminal_channel_is_logged_distinctly_from_an_unknown_one() {
+        let source = FakeChannelSource::knowing(vec![]);
+        source.now_terminal(EVM_CHANNEL_ID);
+        let channels = ClientChannelRegistry::new().with_source(Arc::new(source));
+        let gate = ClientClaimGate::restore(channels, Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay");
+
+        let expires = far_future_expiry();
+        let body = serde_json::json!({
+            "channels": [{
+                "blockchain": "evm",
+                "channelId": evm_channel_id_hex(),
+                "expires": expires,
+                "signature": format!("0x{}", "11".repeat(65)),
+            }]
+        });
+
+        let (events, response) = claim_state_events(post_claim_state(gate, body)).await;
+
+        assert_eq!(response["channels"][0]["error"], "unverified");
+        let event = events
+            .iter()
+            .find(|fields| fields.get("cause").map(String::as_str) == Some("channel_terminal"))
+            .expect("a channel_terminal event");
+        assert!(event
+            .get("detail")
+            .is_some_and(|detail| detail.contains("settled")));
+    }
+
+    /// Issue #908: malformed input (an unparseable channel id or
+    /// signature) never reaches a channel lookup at all, and the log line
+    /// says so distinctly from both "no such channel" and "bad signature".
+    #[tokio::test]
+    async fn malformed_fields_are_logged_before_any_lookup_is_attempted() {
+        let body = serde_json::json!({
+            "channels": [
+                {
+                    "blockchain": "evm",
+                    "channelId": "not-hex",
+                    "expires": far_future_expiry(),
+                    "signature": format!("0x{}", "11".repeat(65)),
+                },
+                {
+                    "blockchain": "evm",
+                    "channelId": evm_channel_id_hex(),
+                    "expires": far_future_expiry(),
+                    "signature": "not-hex-either",
+                },
+            ]
+        });
+
+        let (events, response) = claim_state_events(post_claim_state(test_gate(), body)).await;
+
+        for index in 0..2 {
+            assert_eq!(response["channels"][index]["error"], "unverified");
+        }
+        let causes: Vec<Option<&str>> = events
+            .iter()
+            .map(|fields| fields.get("cause").map(String::as_str))
+            .collect();
+        assert_eq!(
+            causes,
+            vec![Some("malformed_channel_id"), Some("malformed_signature")]
+        );
+    }
+
+    /// Issue #908: a successful verification logs too -- "nothing happened"
+    /// and "a request I cannot explain happened" must not look the same in
+    /// the log.
+    #[tokio::test]
+    async fn a_verified_channel_is_logged_as_verified() {
+        let (secret, _address) = evm_signer();
+        let expires = far_future_expiry();
+        let body = serde_json::json!({
+            "channels": [{
+                "blockchain": "evm",
+                "channelId": evm_channel_id_hex(),
+                "expires": expires,
+                "signature": evm_challenge_signature(&secret, EVM_CHANNEL_ID, expires),
+            }]
+        });
+
+        let (events, response) = claim_state_events(post_claim_state(test_gate(), body)).await;
+
+        assert_eq!(response["channels"][0]["ok"], true);
+        let causes: Vec<Option<&str>> = events
+            .iter()
+            .map(|fields| fields.get("cause").map(String::as_str))
+            .collect();
+        assert_eq!(causes, vec![Some("verified")]);
+    }
+
+    /// Issue #908: the Solana branch refuses on the same generic
+    /// `"unverified"` as the EVM one, so it owes the operator the same
+    /// distinguishing log line -- and the line is only actionable if it also
+    /// says *which* chain and *which* channel, which is the half of the
+    /// issue's ask ("the channel id and the branch taken") the
+    /// cause-only assertions above do not pin down.
+    #[tokio::test]
+    async fn a_bad_solana_signature_is_logged_with_its_chain_and_channel() {
+        let channel_account = base58_encode(&SOLANA_CHANNEL_ACCOUNT);
+        let body = serde_json::json!({
+            "channels": [{
+                "blockchain": "solana",
+                "channelAccount": channel_account,
+                "expires": far_future_expiry(),
+                "signature": BASE64.encode([7u8; 64]),
+            }]
+        });
+
+        let (events, response) = claim_state_events(post_claim_state(test_gate(), body)).await;
+
+        assert_eq!(response["channels"][0]["error"], "unverified");
+        let logged: Vec<(Option<&str>, Option<&str>, Option<&str>)> = events
+            .iter()
+            .map(|fields| {
+                (
+                    fields.get("blockchain").map(String::as_str),
+                    fields.get("channel_id").map(String::as_str),
+                    fields.get("cause").map(String::as_str),
+                )
+            })
+            .collect();
+        assert_eq!(
+            logged,
+            vec![(
+                Some("solana"),
+                Some(channel_account.as_str()),
+                Some("signature_invalid")
+            )]
+        );
     }
 
     #[tokio::test]
