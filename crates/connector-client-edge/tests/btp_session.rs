@@ -239,9 +239,21 @@ fn test_clock() -> Arc<TestClock> {
 /// whose condition matches the fulfilment that seal derives (ADR 0019) --
 /// a packet the termination genuinely fulfils.
 fn sealed_prepare(destination: &str, receiver_public: &PublicKeyBytes) -> Prepare {
+    sealed_prepare_with_target(destination, "/", receiver_public)
+}
+
+/// As [`sealed_prepare`], but with the envelope's own `target` (issue
+/// #596/#869) set to `target` rather than hard-coded to `"/"` -- for a test
+/// asserting on what happens when that target does, or does not, resolve
+/// under the matched route's handler path.
+fn sealed_prepare_with_target(
+    destination: &str,
+    target: &str,
+    receiver_public: &PublicKeyBytes,
+) -> Prepare {
     let envelope = EnvelopeRequest {
         method: "POST".to_string(),
-        target: "/".to_string(),
+        target: target.to_string(),
         headers: vec![],
         body: b"hello app over btp".to_vec(),
     }
@@ -629,6 +641,49 @@ async fn a_replayed_claim_is_refused_with_the_http_taxonomy() {
     let reject = Reject::decode(&second.ilp_packet).expect("an OER REJECT");
     assert_eq!(reject.code.as_str(), "F01");
     assert_eq!(pd(&second, "toon-accumulated-cost"), Some(b"0".as_slice()));
+}
+
+/// Issue #869, BTP-shaped: a packet refused for its envelope's own target
+/// shape (F00) must never advance the covering claim's watermark, on this
+/// carriage exactly as on HTTP (§9's no-drift invariant). Proven the same
+/// way [`a_replayed_claim_is_refused_with_the_http_taxonomy`] proves the
+/// opposite direction: the identical claim, resent with a target that
+/// resolves cleanly, still pays -- only possible if the first, refused
+/// attempt left the watermark untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claim_covering_a_packet_refused_for_envelope_shape_is_never_spent_over_btp() {
+    let (addr, signer) = serve_edge().await;
+    let mut session = connect(addr).await;
+    let receiver = signer.public_key().unwrap();
+    let claim = evm_claim_json(1, PRICE);
+
+    send(
+        &mut session,
+        btp_message(
+            1,
+            &[("payment-channel-claim", claim.as_bytes())],
+            &sealed_prepare_with_target("g.test.app", "/write", &receiver).encode(),
+        ),
+    )
+    .await;
+    let first = next_answer(&mut session).await;
+    let reject = Reject::decode(&first.ilp_packet).expect("an OER REJECT");
+    assert_eq!(reject.code.as_str(), "F00");
+    assert_eq!(pd(&first, "toon-accumulated-cost"), Some(b"0".as_slice()));
+
+    // The identical claim, resent with a target that resolves cleanly,
+    // must still be accepted.
+    send(
+        &mut session,
+        btp_message(
+            2,
+            &[("payment-channel-claim", claim.as_bytes())],
+            &sealed_prepare("g.test.app", &receiver).encode(),
+        ),
+    )
+    .await;
+    let second = next_answer(&mut session).await;
+    Fulfill::decode(&second.ilp_packet).expect("the unspent claim is still accepted");
 }
 
 /// §1.9 step 4: a standalone claim is ingested fire-and-forget -- no

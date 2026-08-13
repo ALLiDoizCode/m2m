@@ -65,8 +65,12 @@ pub enum AppOutcome {
 ///
 /// Shared by [`HttpAppClient`] and [`FakeAppClient`] so both implementations
 /// of this port enforce the identical rule (ADR 0007: a fake must genuinely
-/// uphold the contract it stands in for).
-fn resolve_target_under_handler(handler_url: &Url, target: &str) -> Result<Url, String> {
+/// uphold the contract it stands in for), and by
+/// [`crate::connector::Connector::envelope_target_would_be_refused`] (issue
+/// #869), which asks this exact question before a covering claim is ever
+/// admitted -- so "will this be refused" cannot drift from "was this
+/// refused" between the two call sites.
+pub(crate) fn resolve_target_under_handler(handler_url: &Url, target: &str) -> Result<Url, String> {
     let (path_part, query_part) = match target.split_once('?') {
         Some((path, query)) => (path, Some(query)),
         None => (target, None),

@@ -779,22 +779,33 @@ async fn handle_frame(
     // `handle_ilp`. Admission -- the only order-sensitive step -- happens
     // here, inline; a refusal answers immediately, and an acceptance
     // carries its durability ticket into the windowed task below.
+    //
+    // Issue #869: mirrors `handle_ilp`'s own check, so the two carriages
+    // cannot drift on this invariant (§9) -- a packet whose envelope will
+    // be refused for its own target shape (`AppOutcome::Refused`, F00) is
+    // never going to reach the app, however good the claim covering it
+    // is, so that claim is left entirely unadmitted rather than spent on
+    // a packet already known to be going nowhere. `finish_frame` below
+    // still routes `prepare` unchanged and raises the identical F00
+    // itself.
     let admitted = match claim_json {
-        Some(json) => match state.claim_gate.admit(&json, price).await {
-            Ok(accepted) => Some(accepted),
-            Err(rejection) => {
-                return reply(
-                    replies,
-                    reject_response(
-                        frame.request_id,
-                        claim_rejection_reject(rejection, price),
-                        Vec::new(),
-                    ),
-                )
-                .await;
+        Some(json) if !state.connector.envelope_target_would_be_refused(&prepare) => {
+            match state.claim_gate.admit(&json, price).await {
+                Ok(accepted) => Some(accepted),
+                Err(rejection) => {
+                    return reply(
+                        replies,
+                        reject_response(
+                            frame.request_id,
+                            claim_rejection_reject(rejection, price),
+                            Vec::new(),
+                        ),
+                    )
+                    .await;
+                }
             }
-        },
-        None => None,
+        }
+        _ => None,
     };
 
     let session_address = binding.as_ref().map(|(address, _)| address.clone());

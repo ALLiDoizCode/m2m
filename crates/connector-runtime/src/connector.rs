@@ -2039,6 +2039,80 @@ impl Connector {
         self.client_route(destination).map(|route| route.price)
     }
 
+    /// Whether `prepare` names a terminated app route whose envelope
+    /// target will be refused (`AppOutcome::Refused`, F00, issue #596)
+    /// once this packet is actually routed and delivered there -- decided
+    /// without delivering anything, so the client edge can ask this
+    /// *before* admitting `prepare`'s covering claim (issue #869) and skip
+    /// ingesting it: a packet this connector was always going to refuse
+    /// for its envelope's own shape must never spend the claim it rode in
+    /// on.
+    ///
+    /// `false` covers every case besides a confirmed envelope-shape
+    /// refusal: an unmatched destination, a forwarded route -- configured
+    /// **or leased**; either way its `data` stays opaque at this hop, and
+    /// only a terminated route's envelope is ever opened -- no identity
+    /// key configured, a gift wrap that fails to open, or an envelope that
+    /// fails to decode. The first two have no envelope to judge at this
+    /// hop at all; the last three are packets this method cannot read, so
+    /// it cannot tell "refused for its target's shape" from "unreadable"
+    /// and declines to guess. `false` therefore leaves each of them
+    /// exactly as it was before this method existed -- the covering claim
+    /// is still admitted, so a packet [`Self::deliver_to_app`] then turns
+    /// away for an unopenable wrap is still charged for it. That is issue
+    /// #869's own complaint arriving through a different door, and closing
+    /// it belongs to a separate change: this method answers only the
+    /// refusal it can prove in advance. This is deliberately not a cache of
+    /// [`Self::deliver_to_app`]'s decision: it repeats the same
+    /// open-and-decode work, on the same immutable `prepare.data`, and it
+    /// resolves the winning route by the same rule
+    /// [`Self::handle_prepare_traced`] applies (longest prefix,
+    /// [`RouteRank`] on a tie), so the two can never disagree about where
+    /// this packet actually goes.
+    pub fn envelope_target_would_be_refused(&self, prepare: &Prepare) -> bool {
+        let Some((configured_len, ConfiguredTarget::App(index))) =
+            self.select_configured_route(&prepare.destination)
+        else {
+            return false;
+        };
+        // The same winner rule the router applies: an active lease beats
+        // the app route only on a strictly longer prefix (equal length
+        // ties break to the app -- `RouteRank::App > RouteRank::Leased`).
+        // When a lease wins, this packet is *forwarded* with its data
+        // opaque at this hop, so there is no envelope-shape refusal to
+        // predict -- and answering `true` off the outranked app route
+        // would let the forwarded packet skip claim admission entirely
+        // and ride for free (the review's finding on issue #869).
+        let leased_routes = self.leased_routes_snapshot();
+        let now = self.clock.now();
+        let active_leased: Vec<&LeasedRoute> = leased_routes
+            .values()
+            .filter(|route| !is_expired(route.expires_at(), now))
+            .collect();
+        let leased_prefixes: Vec<&str> = active_leased.iter().map(|route| route.prefix()).collect();
+        if let Some(index) = select_route(&prepare.destination, &leased_prefixes) {
+            if active_leased[index].prefix().len() > configured_len {
+                return false;
+            }
+        }
+        let Some(identity_signer) = self.identity_signer.as_ref() else {
+            return false;
+        };
+        let Ok((envelope_bytes, _shared_secret)) =
+            open_request(&prepare.data, identity_signer.as_ref())
+        else {
+            return false;
+        };
+        let Ok(request) = EnvelopeRequest::decode(&envelope_bytes) else {
+            return false;
+        };
+        crate::app_client::resolve_target_under_handler(
+            self.routes[index].handler_url(),
+            &request.target,
+        )
+        .is_err()
+    }
+
     /// This node's static routes, for the operator surface's read-only
     /// inspection interface (issue #420).
     pub fn routes(&self) -> Vec<RouteView> {
@@ -5492,6 +5566,55 @@ mod tests {
                 }
                 other => panic!("expected a reject, got {other:?}"),
             }
+        }
+
+        /// The review's finding on issue #869's PR: the refusal probe must
+        /// resolve the winning route the way the router does. With an app
+        /// route on `g.example.app` and an active lease on the strictly
+        /// longer `g.example.app.leased`, a packet to the leased prefix is
+        /// *forwarded* -- its envelope is never opened at this hop -- so
+        /// the probe must not predict an envelope-shape refusal off the
+        /// outranked app route: that answer made the client edge skip
+        /// claim admission and forward the packet unmetered.
+        #[tokio::test]
+        async fn the_refusal_probe_defers_to_a_longer_prefix_lease_that_wins_the_route() {
+            let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000/write", 25)
+                .unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            let connector = connector_with(vec![route], app_client, test_clock());
+            let (data, _shared_secret) =
+                sealed_envelope_request_data_with_target("/admin", b"hello");
+            let to_leased_prefix = Prepare {
+                destination: "g.example.app.leased".to_string(),
+                ..prepare_with_data(data)
+            };
+
+            // Without the lease, the app route wins the leased prefix too,
+            // and this escaping target is exactly what the probe reports.
+            assert!(connector.envelope_target_would_be_refused(&to_leased_prefix));
+
+            connector
+                .upsert_leased_route(
+                    "g.example.app.leased",
+                    "leased-peer",
+                    0,
+                    Duration::seconds(60),
+                )
+                .unwrap();
+
+            // With the lease active, this packet forwards -- nothing to
+            // refuse, so nothing to ride free on.
+            assert!(!connector.envelope_target_would_be_refused(&to_leased_prefix));
+
+            // An equal-length lease changes nothing: the app route wins
+            // that tie (issue #427, `RouteRank`), the packet terminates
+            // here, and the probe still predicts the refusal.
+            connector
+                .upsert_leased_route("g.example.app", "leased-peer", 0, Duration::seconds(60))
+                .unwrap();
+            let (data, _shared_secret) =
+                sealed_envelope_request_data_with_target("/admin", b"hello");
+            assert!(connector.envelope_target_would_be_refused(&prepare_with_data(data)));
         }
 
         /// AC4: a probe behind one forwarding hop, terminating at a priced
