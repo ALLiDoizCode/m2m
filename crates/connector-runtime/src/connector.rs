@@ -1891,31 +1891,38 @@ impl Connector {
     /// past a successful open carries the request's own shared secret back
     /// through [`Self::seal_termination_response`] -- a FULFILL and a
     /// REJECT raised at the termination are both sealed with it (ADR 0018);
-    /// only the three failures below, which happen before any secret is
-    /// recovered, stay plaintext.
+    /// only [`Self::open_termination_request`]'s own two failures, which
+    /// happen before any secret is recovered, stay plaintext.
     async fn deliver_to_app(&self, route: &StaticRoute, prepare: Prepare) -> PacketResponse {
         let condition = prepare.execution_condition;
 
-        let Some(identity_signer) = self.identity_signer.as_ref() else {
-            return PacketResponse::Reject(unsealed_termination_reject(
-                "no identity key configured to open a sealed payload",
-            ));
+        let (envelope_bytes, shared_secret) = match self.open_termination_request(&prepare.data) {
+            Ok(opened) => opened,
+            Err(reject) => return PacketResponse::Reject(reject),
         };
-
-        let (envelope_bytes, shared_secret) =
-            match open_request(&prepare.data, identity_signer.as_ref()) {
-                Ok(opened) => opened,
-                Err(error) => {
-                    return PacketResponse::Reject(unsealed_termination_reject(&format!(
-                        "gift wrap could not be opened: {error}"
-                    )));
-                }
-            };
 
         let inner = self
             .deliver_opened_envelope(route, &condition, &shared_secret, &envelope_bytes)
             .await;
         Self::seal_termination_response(inner, &shared_secret)
+    }
+
+    /// Open the ADR 0018 gift wrap `data` carries, yielding the envelope
+    /// bytes inside it and the shared secret every answer past this point
+    /// is sealed with -- or the plaintext refusal to answer instead. Its
+    /// two failures are the only ones a termination raises before a secret
+    /// is in hand, which is exactly why they are also the only ones that
+    /// stay unsealed. Shared by both terminations this connector has:
+    /// [`Self::deliver_to_app`] and [`Self::deliver_peer_sale`].
+    fn open_termination_request(&self, data: &[u8]) -> Result<(Vec<u8>, [u8; 32]), Reject> {
+        let Some(identity_signer) = self.identity_signer.as_ref() else {
+            return Err(unsealed_termination_reject(
+                "no identity key configured to open a sealed payload",
+            ));
+        };
+        open_request(data, identity_signer.as_ref()).map_err(|error| {
+            unsealed_termination_reject(&format!("gift wrap could not be opened: {error}"))
+        })
     }
 
     /// The part of [`Self::deliver_to_app`] that runs once the gift wrap has
@@ -2037,20 +2044,10 @@ impl Connector {
             .expect("only reached when select_configured_route matched PeerSale")
             .price();
 
-        let Some(identity_signer) = self.identity_signer.as_ref() else {
-            return PacketResponse::Reject(unsealed_termination_reject(
-                "no identity key configured to open a sealed payload",
-            ));
+        let (envelope_bytes, shared_secret) = match self.open_termination_request(&prepare.data) {
+            Ok(opened) => opened,
+            Err(reject) => return PacketResponse::Reject(reject),
         };
-        let (envelope_bytes, shared_secret) =
-            match open_request(&prepare.data, identity_signer.as_ref()) {
-                Ok(opened) => opened,
-                Err(error) => {
-                    return PacketResponse::Reject(unsealed_termination_reject(&format!(
-                        "gift wrap could not be opened: {error}"
-                    )));
-                }
-            };
         let inner = self
             .settle_peer_sale_purchase(
                 &condition,
@@ -2129,8 +2126,13 @@ impl Connector {
         // to the new peer (`price - fee`) must be enough to cover what the
         // buyer itself declares it needs to relay onward, or the peering
         // being purchased could never break even one hop further out.
-        let remainder = purchase.price.checked_sub(purchase.fee);
-        if !remainder.is_some_and(|remainder| remainder >= purchase.next_hop_price) {
+        // `checked_sub`, so a fee exceeding the price is refused here like
+        // any other shortfall rather than underflowing.
+        let covers_next_hop = purchase
+            .price
+            .checked_sub(purchase.fee)
+            .is_some_and(|forwarded| forwarded >= purchase.next_hop_price);
+        if !covers_next_hop {
             tracing::warn!(
                 channel_id,
                 fee = purchase.fee,
@@ -5351,19 +5353,47 @@ mod tests {
             assert_eq!(route.kind, ClientRouteKind::Terminated);
         }
 
-        #[test]
-        fn a_repeat_purchase_on_the_same_channel_updates_rather_than_duplicates() {
-            // `upsert_runtime_peer`'s own contract (issue #884): calling it
-            // again for an id already in the table is an update, not a
-            // second row -- exercised here at the level this module cares
-            // about (that a repeat purchase does not error), not
-            // re-testing #884's own coverage of that contract.
-            let connector = peer_sale_connector(Arc::new(InMemorySettlementBackend::new()));
-            connector.upsert_runtime_peer("evm:1").unwrap();
-            connector.upsert_runtime_peer("evm:1").unwrap();
+        #[tokio::test]
+        async fn a_repeat_purchase_on_the_same_channel_updates_rather_than_duplicates() {
+            let backend = Arc::new(InMemorySettlementBackend::new());
+            let channel_id = backend
+                .open(b"buyer".to_vec(), Duration::seconds(3600))
+                .await
+                .expect("open");
+            let client_channel_id = format!("evm:{}", channel_id.0);
+            let connector = peer_sale_connector(backend);
+
+            for price in [25, 40] {
+                let (sealed, _shared_secret) =
+                    peer_sale_prepare(&purchase_body("g.example.buyer", 3, price, 10));
+                let response = connector
+                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                    .await;
+                assert!(
+                    matches!(response, PacketResponse::Fulfill(_)),
+                    "the purchase at price {price} did not fulfil: {response:?}"
+                );
+            }
+
+            // The channel that paid IS the peer id, so a second purchase on
+            // one channel restates the same rows rather than adding a
+            // second pair -- `upsert_runtime_peer`/`upsert_runtime_peer_route`'s
+            // own upsert contract (issue #884), reached the way a buyer
+            // actually reaches it.
             assert_eq!(
-                connector.peers().iter().filter(|p| p.id == "evm:1").count(),
+                connector
+                    .peers()
+                    .iter()
+                    .filter(|peer| peer.id == client_channel_id)
+                    .count(),
                 1
+            );
+            assert_eq!(
+                connector
+                    .client_route("g.example.buyer")
+                    .expect("route now exists")
+                    .price,
+                40
             );
         }
     }
