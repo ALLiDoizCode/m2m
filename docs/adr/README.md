@@ -1,6 +1,6 @@
 # Architecture decision records
 
-38 records, and they do **three different jobs**. Most readers only need one group.
+39 records, and they do **three different jobs**. Most readers only need one group.
 
 The numbers are permanent and are never reused or renumbered — they are cited over a thousand
 times across this repo and from `toon-meta`, `relay` and `store`. This index groups them by
@@ -8,7 +8,7 @@ scope; it does not move them.
 
 | If you are…                                                                 | Read                                                               |
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| changing the connector's code or structure                                  | **[Connector architecture](#connector-architecture)** — 13 records |
+| changing the connector's code or structure                                  | **[Connector architecture](#connector-architecture)** — 14 records |
 | writing or fixing another implementation (a client SDK, a second connector) | **[Protocol law](#protocol-law)** — 22 records                     |
 | deploying, migrating or operating the fleet                                 | **[Fleet and operations](#fleet-and-operations)** — 3 records      |
 

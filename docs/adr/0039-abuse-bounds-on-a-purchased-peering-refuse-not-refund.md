@@ -37,9 +37,8 @@ buys, all forwarding to the one peer id it holds. So:
   every ILP address; this is this node's own choice about how much of that allowance a _purchase_
   gets to spend.
 - `purchase_rate_limit` / `purchase_rate_window_seconds` bound purchase _attempts_ per payer,
-  successful or not — a fixed-window limiter (`PurchaseRateLimiter`) with the same shape
-  `ProbeRateLimiter` already has for probe traffic, kept as a separate instance so a flood against
-  one budget cannot starve the other's.
+  successful or not — the same `FixedWindowRateLimiter` probe traffic already uses, held as a
+  second, separate instance so a flood against one budget cannot starve the other's.
 
 Every bound has a default (`connector-config::peer_sale`'s own constants — 32 rows, 4 routes per
 payer, 128-byte prefixes, 5 attempts per 60 seconds), is configurable via `[peer_sale]`, and is
@@ -55,13 +54,17 @@ never grows either table.
 **Every refusal is loud.** Each bound's refusal is a `tracing::warn!` naming the payer's channel
 id and the specific number and limit it hit, and the same information rides the packet's own
 REJECT message — matching #885's own existing containment/arithmetic refusals, not a new
-convention.
+convention. A shape refusal reached with no claim admitted (the ordinary path for one, per the
+section below) has no payer to name and logs `<unadmitted>` rather than inventing one.
 
-**Ordering: cheapest first, chain read last.** The rate limit is checked before the purchase body
-is even parsed (bounding attempts, not only well-formed ones — a flood of garbage bodies is
-throttled rather than parsed and judged every time). The row and length caps run after the
-existing containment/arithmetic checks and before `verify_purchasing_channel_open`'s chain read —
-a purchase a bound was always going to refuse never pays for that read.
+**Ordering: unpaid refusals first, chain read last.** `settle_peer_sale_purchase` parses the
+purchase body and runs every shape-derived refusal (`peer_sale_shape_refusal`, including this
+issue's length cap) before it so much as looks at which channel paid — the order the section
+below requires, so the answer is identical whether or not a claim was admitted. The rate limit
+and the row caps come next, keyed by that channel; they meter _judged_ attempts, so a malformed
+body no longer occupies a payer's rate-window slot (it is refused unpaid, above). All of it
+precedes `verify_purchasing_channel_open`'s chain read, so a purchase a bound was always going
+to refuse never pays for that read.
 
 ## What "before taking payment" covers here, and what it does not
 
@@ -108,8 +111,9 @@ arithmetic shortfall, or an over-length prefix now refuses with **nothing charge
 is never admitted, and the refusal message is byte-identical to the paid path's. What remains
 charged-then-refused is the identity-keyed set: the purchase rate limit, the per-payer route
 cap, the total-row cap (identity-keyed because a renewal never grows the table), and the
-on-chain channel-state re-check. That residual window is qualitatively different from the one
-the review found: it is reachable only by a payer spending against **their own** channel, its
+on-chain channel-state re-check. That residual window is qualitatively different from the
+shape-refusal one closed above, which any stranger could open with a single malformed body:
+it is reachable only by a payer spending against **their own** channel, its
 frequency is bounded by this ADR's own rate limit, and every such charge is visible in the
 claim journal. Closing it too needs either the credit-refund ledger (#709) or a purpose-built
 pre-admission identity peek carried through both carriages — a separable, security-relevant

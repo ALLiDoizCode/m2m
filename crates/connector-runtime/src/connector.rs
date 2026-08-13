@@ -639,6 +639,13 @@ enum CoverOutcome {
 /// is a small allowance rather than none at all.
 const DEFAULT_PROBE_LIMIT: u32 = 60;
 
+/// What a refusal log names as the payer when the refusal was reached
+/// without a claim ever having been admitted (issue #887): the shape
+/// refusals the client edge predicts pre-admission arrive here with no
+/// channel bound, and "no payer was charged for this" is the honest thing
+/// for the log to say.
+const UNADMITTED_PAYER: &str = "<unadmitted>";
+
 /// [`Connector`]'s default probe rate limit window, paired with
 /// [`DEFAULT_PROBE_LIMIT`].
 /// `bytes` as lower-case hex, no `0x`.
@@ -2341,15 +2348,27 @@ impl Connector {
         // that property was already spent the moment the edge's probe
         // began parsing every attempt pre-admission; the rate limit still
         // throttles per-identity judged attempts below.
+        //
+        // Issue #887's "refusal is loud" still names the payer wherever
+        // there is one to name -- but a shape refusal is judged before any
+        // payment was bound, so on the pre-admission path (the ordinary
+        // one for these) there is no admitted channel and the log says so
+        // rather than inventing an identity.
+        let payer = client_channel_id.unwrap_or(UNADMITTED_PAYER);
         let purchase: PeerSaleRequest = match serde_json::from_slice(&request.body) {
             Ok(purchase) => purchase,
             Err(error) => {
-                tracing::warn!(%error, "peer-sale purchase refused: malformed request body");
+                tracing::warn!(
+                    channel_id = payer,
+                    %error,
+                    "peer-sale purchase refused: malformed request body"
+                );
                 return refuse(format!("malformed peer-sale request body: {error}"));
             }
         };
         if let Some(message) = self.peer_sale_shape_refusal(&purchase) {
             tracing::warn!(
+                channel_id = payer,
                 prefix = %purchase.prefix,
                 %message,
                 "peer-sale purchase refused on the request's own shape"
@@ -2407,7 +2426,7 @@ impl Connector {
         let is_new_payer = !self.runtime_peers_snapshot().contains_key(channel_id);
         if is_new_payer {
             let total = self.purchased_peer_count();
-            if total >= bounds.max_purchased_rows() as usize {
+            if total as u64 >= bounds.max_purchased_rows() {
                 tracing::warn!(
                     channel_id,
                     total,
@@ -2426,7 +2445,7 @@ impl Connector {
             .is_some_and(|route| route.peer_id() == channel_id);
         if !route_already_owned_by_payer {
             let payer_routes = self.purchased_route_count_for_payer(channel_id);
-            if payer_routes >= bounds.max_routes_per_payer() as usize {
+            if payer_routes as u64 >= bounds.max_routes_per_payer() {
                 tracing::warn!(
                     channel_id,
                     payer_routes,
@@ -2715,35 +2734,10 @@ impl Connector {
         else {
             return false;
         };
-        // The same winner rule the router applies: an active lease beats
-        // the app route only on a strictly longer prefix (equal length
-        // ties break to the app -- `RouteRank::App > RouteRank::Leased`).
-        // When a lease wins, this packet is *forwarded* with its data
-        // opaque at this hop, so there is no envelope-shape refusal to
-        // predict -- and answering `true` off the outranked app route
-        // would let the forwarded packet skip claim admission entirely
-        // and ride for free (the review's finding on issue #869).
-        let leased_routes = self.leased_routes_snapshot();
-        let now = self.clock.now();
-        let active_leased: Vec<&LeasedRoute> = leased_routes
-            .values()
-            .filter(|route| !is_expired(route.expires_at(), now))
-            .collect();
-        let leased_prefixes: Vec<&str> = active_leased.iter().map(|route| route.prefix()).collect();
-        if let Some(index) = select_route(&prepare.destination, &leased_prefixes) {
-            if active_leased[index].prefix().len() > configured_len {
-                return false;
-            }
+        if self.active_lease_outranks(&prepare.destination, configured_len) {
+            return false;
         }
-        let Some(identity_signer) = self.identity_signer.as_ref() else {
-            return false;
-        };
-        let Ok((envelope_bytes, _shared_secret)) =
-            open_request(&prepare.data, identity_signer.as_ref())
-        else {
-            return false;
-        };
-        let Ok(request) = EnvelopeRequest::decode(&envelope_bytes) else {
+        let Some(request) = self.opened_envelope_request(&prepare.data) else {
             return false;
         };
         crate::app_client::resolve_target_under_handler(
@@ -2751,6 +2745,43 @@ impl Connector {
             &request.target,
         )
         .is_err()
+    }
+
+    /// Whether a strictly longer-prefix active lease beats the configured
+    /// route of prefix length `configured_len` that `destination` already
+    /// resolved to -- the same winner rule the router applies (equal
+    /// length ties break to the configured route, `RouteRank::App >
+    /// RouteRank::Leased`). Both pre-admission probes below ask this
+    /// before they judge anything: when a lease wins, the packet is
+    /// *forwarded* with its data opaque at this hop, so there is no
+    /// refusal to predict -- and answering `true` off the outranked
+    /// configured route would let the forwarded packet skip claim
+    /// admission entirely and ride for free (the review's findings on
+    /// issues #869 and #944).
+    fn active_lease_outranks(&self, destination: &str, configured_len: usize) -> bool {
+        let leased_routes = self.leased_routes_snapshot();
+        let now = self.clock.now();
+        let active_leased: Vec<&LeasedRoute> = leased_routes
+            .values()
+            .filter(|route| !is_expired(route.expires_at(), now))
+            .collect();
+        let leased_prefixes: Vec<&str> = active_leased.iter().map(|route| route.prefix()).collect();
+        select_route(destination, &leased_prefixes)
+            .is_some_and(|index| active_leased[index].prefix().len() > configured_len)
+    }
+
+    /// Open a terminated packet's gift wrap with this node's identity key
+    /// and decode the envelope inside, for a pre-admission probe that has
+    /// already established the packet terminates here. `None` when there
+    /// is no identity key configured, the wrap does not open, or the
+    /// envelope does not decode -- three packets a probe cannot read, so
+    /// it cannot tell "refused for its shape" from "unreadable" and
+    /// declines to guess. Discards the shared secret: nothing is sealed
+    /// on this path, and the delivery path derives its own.
+    fn opened_envelope_request(&self, data: &[u8]) -> Option<EnvelopeRequest> {
+        let identity_signer = self.identity_signer.as_ref()?;
+        let (envelope_bytes, _shared_secret) = open_request(data, identity_signer.as_ref()).ok()?;
+        EnvelopeRequest::decode(&envelope_bytes).ok()
     }
 
     /// The purchase refusals derivable from the request's own shape --
@@ -2815,30 +2846,10 @@ impl Connector {
         else {
             return false;
         };
-        // Same lease-outranking rule as the envelope probe above (#944's
-        // finding): a strictly longer-prefix active lease wins the route,
-        // the packet forwards with its data opaque, nothing to refuse.
-        let leased_routes = self.leased_routes_snapshot();
-        let now = self.clock.now();
-        let active_leased: Vec<&LeasedRoute> = leased_routes
-            .values()
-            .filter(|route| !is_expired(route.expires_at(), now))
-            .collect();
-        let leased_prefixes: Vec<&str> = active_leased.iter().map(|route| route.prefix()).collect();
-        if let Some(index) = select_route(&prepare.destination, &leased_prefixes) {
-            if active_leased[index].prefix().len() > configured_len {
-                return false;
-            }
+        if self.active_lease_outranks(&prepare.destination, configured_len) {
+            return false;
         }
-        let Some(identity_signer) = self.identity_signer.as_ref() else {
-            return false;
-        };
-        let Ok((envelope_bytes, _shared_secret)) =
-            open_request(&prepare.data, identity_signer.as_ref())
-        else {
-            return false;
-        };
-        let Ok(request) = EnvelopeRequest::decode(&envelope_bytes) else {
+        let Some(request) = self.opened_envelope_request(&prepare.data) else {
             return false;
         };
         // A body that does not parse dooms the purchase as surely as any
