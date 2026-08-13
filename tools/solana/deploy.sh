@@ -232,6 +232,18 @@ if [[ "$NETWORK" == "mainnet-beta" ]]; then
     # behalf as a side effect of an initial deploy.
     case "$UPGRADE_AUTHORITY_DECISION" in
         deployer)
+            # The decision and the flags must agree, both ways: 'transfer'
+            # without a target is refused below, and 'deployer' WITH a
+            # target is refused here -- otherwise the run would print
+            # "Authority decision: deployer" and then hand authority to the
+            # co-passed key anyway, the opposite of the recorded decision,
+            # on the one action this gate exists to make binding.
+            if [[ -n "$UPGRADE_AUTHORITY" ]]; then
+                echo "Error: --upgrade-authority-decision deployer means the deployer keypair KEEPS"
+                echo "upgrade authority; a co-passed --upgrade-authority contradicts that decision."
+                echo "Drop --upgrade-authority, or record the decision as 'transfer'."
+                exit 1
+            fi
             ;;
         transfer)
             if [[ -z "$UPGRADE_AUTHORITY" ]]; then

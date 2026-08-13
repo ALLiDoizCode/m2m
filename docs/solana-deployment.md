@@ -511,6 +511,10 @@ decides for you.
    - `--upgrade-authority-decision transfer --upgrade-authority <path>` -- upgrade
      authority moves to a different keypair as part of this same deploy.
 
+   The decision and the flags must agree, both ways: `transfer` without
+   `--upgrade-authority` is refused, and `deployer` **with** `--upgrade-authority` is
+   refused too -- the script will not record one decision and act out the other.
+
    `--final` is deliberately **not** an option on `deploy.sh`, on any network: it is
    irreversible, so it stays the separate, explicit follow-up step documented in
    [Upgrade Authority Management](#upgrade-authority-management), run only once
