@@ -58,6 +58,8 @@ const SOLANA_USDC_DECIMALS = Number(process.env.SOLANA_USDC_DECIMALS || '6');
 // Conservative default — see the treasury-balance note above (toon-meta#258).
 const SOLANA_SOL_AMOUNT = Number(process.env.SOLANA_SOL_AMOUNT || '0.03'); // SOL per drip
 const SOLANA_USDC_AMOUNT = Number(process.env.SOLANA_USDC_AMOUNT || '1000'); // USDC per drip
+// The drip amount in the unit every on-chain call and balance check uses.
+const SOL_DRIP_LAMPORTS = Math.round(SOLANA_SOL_AMOUNT * LAMPORTS_PER_SOL);
 // Solana's base fee is 5,000 lamports/signature; a treasury→recipient
 // transfer signs once. Reserved on top of the drip amount when pre-checking
 // the treasury can actually cover a transfer (issue #691).
@@ -142,7 +144,7 @@ export function withDeadline(promise, ms, label) {
 // report success WITH a real transaction signature for 8 of 20 addresses
 // while delivering 0 lamports. `sendAndConfirmTransaction`/
 // `confirmTransaction` resolving does not, by itself, prove the recipient's
-// balance moved -- on the public devnet RPC (a load-balanced, multi-node
+// balance moved — on the public devnet RPC (a load-balanced, multi-node
 // endpoint since the self-hosted validator was retired 2026-07-19) the
 // confirmation read and a balance read immediately after can be served by
 // different backend nodes, so a fresh read can still lag the write it just
@@ -163,7 +165,7 @@ export async function verifyDelivered(
   if (balance < floorLamports) {
     const err = new Error(
       `Transaction reported success but the recipient's balance is still ${balance} lamports, ` +
-        `short of the expected ${floorLamports}-lamport floor -- treating the delivery as ` +
+        `short of the expected ${floorLamports}-lamport floor — treating the delivery as ` +
         'unverified rather than reporting success.'
     );
     err.code = 'SOL_DELIVERY_UNVERIFIED';
@@ -268,7 +270,6 @@ export function createSolanaFaucet() {
   // caller); delivery is verified against it before the signature is trusted
   // (issue #691).
   async function transferSol(recipient, startBalance) {
-    const lamports = Math.round(SOLANA_SOL_AMOUNT * LAMPORTS_PER_SOL);
     const latest = await connection.getLatestBlockhash('confirmed');
     const tx = new Transaction({
       feePayer: authority.publicKey,
@@ -278,7 +279,7 @@ export function createSolanaFaucet() {
       SystemProgram.transfer({
         fromPubkey: authority.publicKey,
         toPubkey: recipient,
-        lamports,
+        lamports: SOL_DRIP_LAMPORTS,
       })
     );
     const signature = await sendAndConfirmTransaction(connection, tx, [authority], {
@@ -286,7 +287,7 @@ export function createSolanaFaucet() {
     });
     await verifyDelivered(
       () => connection.getBalance(recipient, 'confirmed'),
-      startBalance + lamports
+      startBalance + SOL_DRIP_LAMPORTS
     );
     console.log(`  📤 Transferred ${SOLANA_SOL_AMOUNT} SOL from treasury: ${signature}`);
     return signature;
@@ -297,9 +298,8 @@ export function createSolanaFaucet() {
   // Fallback only: used when the treasury itself can't cover the SOL transfer.
   // Delivery is verified the same way as the treasury path (issue #691).
   async function airdropSol(recipient, startBalance) {
-    const lamports = Math.round(SOLANA_SOL_AMOUNT * LAMPORTS_PER_SOL);
     const latest = await connection.getLatestBlockhash('confirmed');
-    const airdropSig = await connection.requestAirdrop(recipient, lamports);
+    const airdropSig = await connection.requestAirdrop(recipient, SOL_DRIP_LAMPORTS);
     await connection.confirmTransaction(
       {
         signature: airdropSig,
@@ -310,7 +310,7 @@ export function createSolanaFaucet() {
     );
     await verifyDelivered(
       () => connection.getBalance(recipient, 'confirmed'),
-      startBalance + lamports
+      startBalance + SOL_DRIP_LAMPORTS
     );
     console.log(`  📤 Airdropped ${SOLANA_SOL_AMOUNT} SOL: ${airdropSig}`);
     return airdropSig;
@@ -404,16 +404,16 @@ export function createSolanaFaucet() {
         balanceSol: String(startBalance / LAMPORTS_PER_SOL),
       };
     } else {
-      const lamports = Math.round(SOLANA_SOL_AMOUNT * LAMPORTS_PER_SOL);
       // Pre-flight: the treasury does not self-replenish (toon-meta#258), so
       // check it can actually cover this drip + its own fee BEFORE attempting
       // the transfer, rather than letting an underfunded treasury surface as
       // an opaque RPC error (issue #691).
       const treasuryBalance = await connection.getBalance(authority.publicKey, 'confirmed');
-      if (treasuryBalance < lamports + SOL_TRANSFER_FEE_BUFFER_LAMPORTS) {
+      if (treasuryBalance < SOL_DRIP_LAMPORTS + SOL_TRANSFER_FEE_BUFFER_LAMPORTS) {
         console.log(
           `  ⚠️  Treasury SOL balance (${treasuryBalance} lamports) can't cover a ` +
-            `${lamports}-lamport drip + fee — skipping the treasury transfer, trying requestAirdrop`
+            `${SOL_DRIP_LAMPORTS}-lamport drip + fee — skipping the treasury transfer, ` +
+            'trying requestAirdrop'
         );
         sol = await fallbackToAirdrop(
           recipient,
