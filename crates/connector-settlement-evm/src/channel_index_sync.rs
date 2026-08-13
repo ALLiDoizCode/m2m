@@ -62,10 +62,10 @@ pub struct EvmChannelIndexSyncer {
 }
 
 impl EvmChannelIndexSyncer {
-    /// `confirmations` must be at least 1 -- `crate::config` (via
-    /// `EvmSettlementConfig::channel_index_confirmations`) already refuses a
-    /// depth of `0` at config load time, so this is a second, defensive
-    /// check rather than the primary one.
+    /// `confirmations` must be at least 1 -- `connector-config`'s
+    /// `EvmSettlementConfig::channel_index_confirmations` already refuses a
+    /// depth of `0` at config load time, so the `max(1)` below is a second,
+    /// defensive check rather than the primary one.
     pub fn new(
         rpc_url: &str,
         contract_address: Address,
@@ -113,7 +113,7 @@ impl EvmChannelIndexSyncer {
     }
 
     /// Every log this index folds in, over `from..=to`. One `eth_getLogs`
-    /// per event type -- the four topics have nothing in common to filter
+    /// per event type -- the three topics have nothing in common to filter
     /// on in a single query -- gathered unordered, since
     /// [`EvmChannelIndex::apply`] sorts the whole batch into chain order
     /// before applying any of it.

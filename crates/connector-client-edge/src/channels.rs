@@ -436,8 +436,11 @@ impl std::fmt::Display for ChannelLookupFailed {
 impl std::error::Error for ChannelLookupFailed {}
 
 /// A [`ClientChannelSource`] has a definitive, known-without-a-chain-read
-/// answer that a channel can never be paid on again -- it settled, or it
-/// closed by expiry (issue #661). Kept distinct from [`ChannelLookupFailed`]
+/// answer that a channel can never be paid on again -- it settled (issue
+/// #661). A *closed* channel is deliberately not this: `claimFromChannel`
+/// accepts a channel in `Closed` as readily as one in `Opened`, so closing
+/// -- however it was closed -- ends nothing this connector can still be
+/// paid for. Kept distinct from [`ChannelLookupFailed`]
 /// (this connector could not find out) and from a plain `Ok(None)` (this
 /// connector has no information either way): a source that can report this
 /// reliably -- the local `TokenNetwork` event index, which has itself seen
@@ -553,8 +556,9 @@ pub trait ClientChannelSource: Send + Sync + std::fmt::Debug {
     }
 
     /// Whether this source has a durable, definitive record that
-    /// `channel_id` has settled or closed by expiry -- without touching a
-    /// chain to find out (issue #661). Only ever consulted after
+    /// `channel_id` has settled -- without touching a chain to find out
+    /// (issue #661; a merely closed channel is not terminal, see
+    /// [`ChannelTerminal`]). Only ever consulted after
     /// [`evm_channel`](Self::evm_channel) has already answered `Ok(None)`
     /// for the same lookup, and only to decide how to *report* that
     /// refusal: it never overrides a positive answer, and a source with no
@@ -1153,7 +1157,7 @@ impl ClientChannelRegistry {
                 .expect("resolved client channels lock poisoned")
                 .remove(channel_id);
             return Err(ChannelTerminal(format!(
-                "channel {} has settled or closed by expiry and can never be redeemed again",
+                "channel {} has settled and can never be redeemed again",
                 hex::encode(channel_id)
             ))
             .into());
@@ -1472,7 +1476,7 @@ pub(crate) mod test_source {
         /// cannot be expressed by a source that failed from the start.
         failure: Mutex<Option<String>>,
         /// Channels this source has a durable, definitive record of having
-        /// settled or closed by expiry (issue #661) -- a stand-in for the
+        /// settled (issue #661) -- a stand-in for the
         /// local channel index's own terminal record, answered by
         /// [`ClientChannelSource::evm_channel_terminal`] and never counted
         /// against [`Self::lookups`], since the real index answers it from
@@ -1508,7 +1512,7 @@ pub(crate) mod test_source {
         }
 
         /// This source now has a durable, definitive record that
-        /// `channel_id` has settled or closed by expiry (issue #661) -- the
+        /// `channel_id` has settled (issue #661) -- the
         /// stand-in for the local channel index having observed the
         /// terminal log. Also removes any positive `now_says` entry, the
         /// same way a real index drops a channel's active record once it
@@ -1921,7 +1925,7 @@ mod tests {
             registry.evm(&[0x07; 32], A_BUYER).await,
             Err(ChannelTerminal(
                 "channel 0707070707070707070707070707070707070707070707070707070707070707 has \
-                 settled or closed by expiry and can never be redeemed again"
+                 settled and can never be redeemed again"
                     .to_string()
             )
             .into())
@@ -1968,7 +1972,7 @@ mod tests {
             registry.refresh_evm(&[0x07; 32], A_BUYER).await,
             Err(ChannelTerminal(
                 "channel 0707070707070707070707070707070707070707070707070707070707070707 has \
-                 settled or closed by expiry and can never be redeemed again"
+                 settled and can never be redeemed again"
                     .to_string()
             )
             .into())

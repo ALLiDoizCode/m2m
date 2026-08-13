@@ -2525,6 +2525,9 @@ key_file = "{key_path}"
             assert_eq!(opened.deposited, 0);
         }
 
+        /// The raw 32 bytes behind a `ChannelId`'s `0x`-prefixed 64-hex
+        /// string -- what every on-chain-facing type in these tests keys a
+        /// channel by.
         fn channel_id_bytes(id: &str) -> [u8; 32] {
             let hex_digits = id.trim_start_matches("0x");
             let mut out = [0u8; 32];
@@ -3482,12 +3485,7 @@ key_file = "{key_path}"
             assert_eq!(state.deposited, 1_000);
 
             let claim_json = |nonce: u64, transferred_amount: u64| {
-                let digits = channel.0.trim_start_matches("0x");
-                let mut channel_id = [0u8; 32];
-                for (i, byte) in channel_id.iter_mut().enumerate() {
-                    *byte = u8::from_str_radix(&digits[i * 2..i * 2 + 2], 16)
-                        .expect("a channel id is 0x-prefixed 64-hex");
-                }
+                let channel_id = channel_id_bytes(&channel.0);
                 let proof = EvmBalanceProof {
                     channel_id,
                     nonce,

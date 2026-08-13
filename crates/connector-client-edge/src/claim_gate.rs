@@ -171,7 +171,7 @@ pub enum ClaimIngestRejection {
     /// `connector_runtime::ClaimRejectReason::UnknownChannel`.
     UnknownChannel,
     /// The claim names a channel a [`crate::ClientChannelSource`] has a
-    /// durable, definitive record of having settled or closed by expiry
+    /// durable, definitive record of having settled
     /// (issue #661's local channel index) -- reported without a chain read,
     /// and kept distinct from [`ClaimIngestRejection::UnknownChannel`] for
     /// the same reason every variant here is kept distinct from its
@@ -292,8 +292,8 @@ impl ClaimIngestRejection {
                  signature against"
                 .to_string(),
             ClaimIngestRejection::ChannelTerminal(reason) => format!(
-                "claim rejected: this channel has settled or closed by expiry and can never be \
-                 redeemed again: {reason}"
+                "claim rejected: this channel has settled and can never be redeemed again: \
+                 {reason}"
             ),
             ClaimIngestRejection::ChannelLookupFailed(reason) => format!(
                 "claim rejected: this connector could not look up the channel's counterparty, \
