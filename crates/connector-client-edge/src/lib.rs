@@ -1128,8 +1128,9 @@ async fn handle_ilp(
     let mut plaintext_claim_signer = None;
     // Issue #535/ADR 0036: the channel this packet's covering claim admitted
     // on, carried into the `"packet"` span so a paid delivery is joinable to
-    // `GET /channels`' `counterparty` -- the honest successor to the relay's
-    // retired payer-attribution header. `None` for an unclaimed request
+    // the `state_dir` journal's `InboundClaimAccepted` entries under the
+    // same channel key -- the honest successor to the relay's retired
+    // payer-attribution header. `None` for an unclaimed request
     // (unpriced/unmatched destination), the only shape that reaches routing
     // without one.
     let mut client_channel_id = None;

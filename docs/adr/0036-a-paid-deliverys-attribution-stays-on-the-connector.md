@@ -68,7 +68,9 @@ documents. **Payer attribution stays on the connector.**
 - **The money record.** `JournalEntry::InboundClaimAccepted` / `OutboundClaimSigned`
   (`crates/connector-domain/src/projection.rs`) in a durable `FileJournal` under `state_dir`,
   projected to `ClaimView` (`crates/connector-runtime/src/operator_view.rs`) and read at
-  `GET /claims`; channel counterparty, deposit and redeemed amount at `GET /channels`.
+  `GET /claims`; channel counterparty, deposit and redeemed amount at `GET /channels`. Both
+  endpoints project this node's own peer-wire records only — a **client** channel's
+  `InboundClaimAccepted` entries live in the same journal but surface at no endpoint.
   [ADR 0005](0005-claims-are-truth-balances-are-a-projection.md): claims are truth, balances are a
   projection.
 - **Metrics.** `toon_packets_total{outcome}`, `toon_packets_rejected_total{code}`,
@@ -93,9 +95,16 @@ claim admitted the packet — whenever a claim was presented. A packet with no c
 unclaimed request, or a peer-wire arrival) is unchanged: the field is simply absent, not recorded
 empty. The value is the chain-namespaced channel key the claim itself is judged under
 (`evm:<channel id>` or `solana:<channel account>`), so a claim on either chain names its channel
-unambiguously. That channel's `counterparty` at `GET /channels` is exactly "which payer paid for
-this delivery" — assembled from records the connector already kept, at the cost of one more field
-on a log line that already existed.
+unambiguously. That key is the same one the `state_dir` journal's
+`JournalEntry::InboundClaimAccepted` entries are recorded under
+(`crates/connector-client-edge/src/claim_gate.rs`), and the one the connector's client-channel
+record — `[[client_channels]]` or resolved from chain, the `ClientChannelRegistry` authority the
+payer section above names — states the accepted counterparty for. Joining the two answers "which
+payer paid for this delivery" — assembled from records the connector already kept, at the cost of
+one more field on a log line that already existed. Deliberately **not** `GET /channels` or
+`GET /claims`: both are projections of this node's own peer-wire records (`known_channels` — the
+channels this node itself opened — and the `ClaimBook`), and a client channel, opened and funded
+by the payer, appears in neither.
 
 This is implemented in `crates/connector-runtime/src/connector.rs`
 (`Connector::handle_prepare_with_client_channel`), threaded from the client edge's claim admission
@@ -133,7 +142,8 @@ better records than the headers ever were.
 connector tells the app nothing about the payment that brought a packet to it, so the next reader
 does not re-propose a header. No production behavior changes for the app: nothing new is sent to
 it, and nothing it previously received is removed (it never received payment attribution in the
-first place). An operator joining `client_channel_id` in a `"packet"` log line to `GET /channels`'
-`counterparty` can now answer "who paid for this delivery" from records this connector already
-kept — the record issue #535 asked for, without the header issue #505 correctly declined to bring
-back.
+first place). An operator joining `client_channel_id` in a `"packet"` log line to the `state_dir`
+journal's `InboundClaimAccepted` entries under that same channel key — with the payer's identity
+from the channel's `[[client_channels]]`/chain-resolved record — can now answer "who paid for this
+delivery" from records this connector already kept: the record issue #535 asked for, without the
+header issue #505 correctly declined to bring back.

@@ -79,7 +79,8 @@ one.
   line emitted while handling a packet is correlated automatically
   ([ADR 0014](../adr/0014-metrics-surface-and-packet-correlated-logs.md)). Do not thread a
   correlation id through call signatures. The same span carries `client_channel_id` whenever a
-  client claim admitted the packet, joinable to `GET /channels`' `counterparty`
+  client claim admitted the packet, joinable to the `state_dir` journal's `InboundClaimAccepted`
+  entries and the channel's `[[client_channels]]`/chain-resolved record
   ([ADR 0036](../adr/0036-a-paid-deliverys-attribution-stays-on-the-connector.md)) — this is
   connector-side attribution, and it is the only place payer attribution is recorded; see below.
 - **Never log a private key, a mnemonic, a bearer token or a decrypted payload.** A gift wrap's

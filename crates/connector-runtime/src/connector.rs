@@ -1129,8 +1129,9 @@ impl Connector {
     /// `correlation_id` and `destination` (issue #535, ADR 0036): the
     /// client channel whose covering claim admitted this packet -- the
     /// honest successor to the relay's retired payer-attribution header,
-    /// naming the channel whose `counterparty` at `GET /channels` is
-    /// "who paid for this delivery". Carries the chain-namespaced key
+    /// naming the channel whose journal entries and
+    /// `[[client_channels]]`/chain-resolved record say "who paid for this
+    /// delivery" (ADR 0036). Carries the chain-namespaced key
     /// [`connector_domain::client_claim::ClientClaim::channel_key`] produces
     /// (`evm:<channel id>`, `solana:<channel account>`), so a claim on
     /// either chain names its channel unambiguously.
