@@ -82,6 +82,15 @@ because this ADR is downstream of that decision, not because it is re-litigated.
 inserted here is a permanent grant, exactly like any other operator-written `[[routes]]` row,
 until a later child adds a TTL or a cap. Nothing here forecloses either.
 
+**Config-owned address space is not for sale.** A purchase whose prefix sits strictly inside a
+configured route's prefix (extends it by at least one `.`-separated segment) is refused before
+anything is inserted: route selection ranks matched length first, so that row — durable, no
+expiry — would outrank the seller's own route for the whole subtree, diverting the seller's
+address space for the price of one purchase. Exact collisions were already refused by #884's
+`config_owns_prefix` guard on the write itself; strict containment only became reachable when
+the write became purchasable, so the guard lives on the sale. #887's abuse bounds are rates and
+quantities; containment is not expressible as a bound.
+
 **No `ClaimBook` peer-channel registration, and no change to peer-carriage accept-side
 authentication.** This is the one place this ADR's scope stops short of #885's "the buyer can
 immediately forward over the new peering" acceptance criterion, and it is worth stating plainly
@@ -106,7 +115,10 @@ rather than leaving a reader to discover it by tracing code:
 Both gaps are pre-existing and orthogonal to #885: #884 already shipped a runtime routing-table
 write with no live carriage wired to it (ADR 0034's own "Consequences" section says so for the
 _outbound_ direction), and #868 covers the credit-window/role-decision rewrite that would close
-the inbound one. Building either into #885 would mean redesigning `ClaimBook`'s internal
+the inbound one. This deferral is an **owner agreement recorded on #885** (2026-08-13, in
+response to this PR's review): "the buyer can immediately forward over the new peering"
+transfers to #868's acceptance — a purchased peering becomes usable when #868 lands the runtime
+peer path — rather than standing as an unmet criterion here. Building either into #885 would mean redesigning `ClaimBook`'s internal
 mutability and/or `connector-peer-auth`'s stop-ship role invariant under a ticket titled
 "price the mutation and advertise it" — scope creep into two separably-reviewable,
 security-sensitive changes that already have (or need) their own ADRs. What #885 _does_ ship —

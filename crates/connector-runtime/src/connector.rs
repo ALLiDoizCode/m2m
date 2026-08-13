@@ -1019,6 +1019,26 @@ impl Connector {
                 .any(|route| route.prefix() == prefix)
     }
 
+    /// Whether `prefix` sits strictly inside address space a config-file
+    /// route already serves -- some configured prefix is a proper ancestor
+    /// of it (`prefix` extends that prefix by at least one `.`-separated
+    /// segment; a sibling like `g.appx` beside `g.app` does not count).
+    /// Route selection ranks matched prefix length first, so a durable row
+    /// inserted here would outrank the configured route for that whole
+    /// subtree -- the review's second finding on issue #885's PR, where one
+    /// purchase permanently diverted the seller's own app route.
+    fn config_owns_ancestor_of(&self, prefix: &str) -> bool {
+        self.routes
+            .iter()
+            .map(|route| route.prefix())
+            .chain(self.peer_routes.iter().map(|route| route.prefix()))
+            .any(|owned| {
+                prefix.len() > owned.len()
+                    && prefix.starts_with(owned)
+                    && prefix.as_bytes()[owned.len()] == b'.'
+            })
+    }
+
     /// Add or update a runtime peer-forwarding route (issue #884):
     /// `POST /routes/peers`, keyed by `prefix` exactly like
     /// `upsert_leased_route`, so posting the same prefix again updates
@@ -2120,6 +2140,28 @@ impl Connector {
                 "peer-sale purchase refused: invalid prefix"
             );
             return refuse(format!("'{}' is not a valid ILP address", purchase.prefix));
+        }
+
+        // Config-owned address space is not for sale (the review's second
+        // finding on this PR): a purchased row is durable with no expiry,
+        // and longest-prefix selection would hand the buyer every packet
+        // for a subtree of the seller's own routes. Refused before
+        // anything is inserted. Exact collisions are already refused by
+        // `upsert_runtime_peer_route`'s `config_owns_prefix` guard; this
+        // is the strict-containment case that guard deliberately does not
+        // cover, opened only when the write became purchasable. #887's
+        // abuse bounds cover rates and quantities, not containment.
+        if self.config_owns_ancestor_of(&purchase.prefix) {
+            tracing::warn!(
+                channel_id,
+                prefix = %purchase.prefix,
+                "peer-sale purchase refused: prefix sits under a configured route"
+            );
+            return refuse(format!(
+                "'{}' sits under address space a configured route already serves; \
+                 config-owned space is not for sale",
+                purchase.prefix
+            ));
         }
 
         // Issue #885's own arithmetic bound: what this connector forwards
@@ -5205,6 +5247,65 @@ mod tests {
                 .peers()
                 .iter()
                 .any(|peer| peer.id == client_channel_id));
+        }
+
+        /// The review's second finding on this PR: with an app route on
+        /// `g.example.node.app`, one purchase of `g.example.node.app.sub`
+        /// used to insert a durable, longer-prefix row that outranked the
+        /// seller's own route for that whole subtree. Config-owned address
+        /// space is not for sale — and containment is per `.`-separated
+        /// segment, so a sibling that merely shares the string start stays
+        /// purchasable.
+        #[tokio::test]
+        async fn a_purchase_under_a_configured_routes_prefix_is_refused() {
+            let backend = Arc::new(InMemorySettlementBackend::new());
+            let channel_id = backend
+                .open(b"buyer".to_vec(), Duration::seconds(3600))
+                .await
+                .expect("open");
+            let client_channel_id = format!("evm:{}", channel_id.0);
+            let connector = Connector::new(
+                vec![
+                    StaticRoute::new_priced("g.example.node.app", "http://localhost:4000", 10)
+                        .unwrap(),
+                ],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_identity_signer(identity_signer())
+            .with_peer_sale(PEER_SALE_PREFIX, PEER_SALE_PRICE)
+            .with_settlement(SettlementChain::Evm, backend);
+
+            let (sealed, _shared_secret) =
+                peer_sale_prepare(&purchase_body("g.example.node.app.sub", 3, 25, 10));
+            let response = connector
+                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                .await;
+
+            assert!(matches!(response, PacketResponse::Reject(_)));
+            // Nothing was inserted, and the seller's subtree still
+            // terminates at the seller's own app.
+            assert!(connector.peers().is_empty());
+            let route = connector
+                .client_route("g.example.node.app.sub")
+                .expect("the app route still serves its subtree");
+            assert_eq!(route.kind, ClientRouteKind::Terminated);
+
+            // The dot boundary: `g.example.node.appendix` shares the
+            // string start but is a sibling, not contained — purchasable.
+            let (sealed, shared_secret) =
+                peer_sale_prepare(&purchase_body("g.example.node.appendix", 3, 25, 10));
+            let response = connector
+                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                .await;
+            match response {
+                PacketResponse::Fulfill(fulfill) => {
+                    assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
+                }
+                other => panic!("expected a fulfill, got {other:?}"),
+            }
         }
 
         #[tokio::test]
