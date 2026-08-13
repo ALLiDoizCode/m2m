@@ -38,6 +38,7 @@ not change what anything else must do.
 | [0015](0015-read-mostly-state-is-a-swapped-snapshot.md)                               | Read-mostly state is a swapped snapshot; the packet path never locks   | current                      |
 | [0034](0034-a-runtime-peer-route-table-never-shadows-the-config-file.md)              | A runtime peer/route table never shadows the config file               | current — extends 0009       |
 | [0037](0037-a-purchased-peering-is-a-terminated-route-whose-work-is-a-table-write.md) | A purchased peering is a terminated route whose work is a table write  | current — extends 0028, 0034 |
+| [0038](0038-a-peer-sale-lease-demotes-at-match-time-and-reaps-off-the-hot-path.md)    | A peer-sale lease demotes at match time and reaps off the hot path     | current — extends 0034, 0037 |
 
 ---
 

@@ -102,7 +102,9 @@ announce comes from the running configuration: prices from `[[routes]]`, settlem
 the `[settlement.*]` tables the node verified against a chain at startup, the edge identity from
 `[signer]`. A node selling peering (`[peer_sale]`, issue #885) has its price added to
 `routePrices` unconditionally -- it does not need to be, and need not be, also listed in
-`addresses` below.
+`addresses` below. Its lease duration (`[peer_sale].lease_seconds`, issue #886 -- how long a
+purchase buys before it must be renewed) is likewise advertised unconditionally, as
+`peerSaleLeaseSeconds`.
 
 ```toml
 [announce]

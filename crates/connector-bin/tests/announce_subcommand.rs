@@ -339,10 +339,12 @@ fn a_node_fronting_no_relay_announces_no_relay_url() {
     );
 }
 
-/// Issue #885: a node selling peering advertises the price in kind:10032's
-/// `routePrices` even though the peer-sale prefix was never added to
-/// `[announce].addresses` -- discoverable without a second, easy-to-forget
-/// config line, which is the whole point of pricing the mutation.
+/// Issue #885/#886: a node selling peering advertises the price (and,
+/// issue #886, the lease duration a purchase buys) in kind:10032's
+/// `routePrices`/`peerSaleLeaseSeconds` even though the peer-sale prefix
+/// was never added to `[announce].addresses` -- discoverable without a
+/// second, easy-to-forget config line, which is the whole point of
+/// pricing the mutation.
 #[test]
 fn a_peer_sale_routes_price_is_advertised_without_being_listed_in_addresses() {
     let ingress = RecordingIngress::start();
@@ -350,7 +352,7 @@ fn a_peer_sale_routes_price_is_advertised_without_being_listed_in_addresses() {
     let config = write(&relay_fronting_config(
         key_file.path(),
         &format!("http://{}/write", ingress.addr),
-        "\n[peer_sale]\nprefix = \"g.test.peer-sale\"\nprice = 5000\n",
+        "\n[peer_sale]\nprefix = \"g.test.peer-sale\"\nprice = 5000\nlease_seconds = 3600\n",
     ));
     let node = support::spawn_connector(config.path());
 
@@ -378,6 +380,10 @@ fn a_peer_sale_routes_price_is_advertised_without_being_listed_in_addresses() {
     // yet its price is present.
     assert_eq!(info["routePrices"]["g.test.peer-sale"], "5000");
     assert_eq!(info["routePrices"]["g.test.relay"], "1000");
+    // Issue #886: the lease duration is likewise visible to a buyer before
+    // it ever pays -- the same "discoverable, not a second config line"
+    // treatment the price above gets.
+    assert_eq!(info["peerSaleLeaseSeconds"], 3600);
 }
 
 /// A config with nothing to announce refuses by name rather than

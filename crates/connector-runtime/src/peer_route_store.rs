@@ -20,11 +20,12 @@
 //! snapshot in place rather than a half-written file. An operator inspects
 //! the current table at any time with `cat`/`jq` directly on `path`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -42,6 +43,50 @@ pub enum PeerRouteStoreError {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(from = "StoredPeerCompat")]
+struct StoredPeer {
+    id: String,
+    /// `None` for a peer added over the plain operator surface
+    /// (`POST /peers`) -- durable and permanent, exactly as every runtime
+    /// peer was before issue #886. `Some` for one a peer-sale purchase
+    /// inserted: the instant past which it lapses and is demoted back to
+    /// client role unless renewed (`Connector::upsert_runtime_peer_purchase`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expires_at: Option<DateTime<Utc>>,
+}
+
+/// The two on-disk shapes a stored peer has ever had. Issue #884 wrote
+/// `peers` as a bare `Vec<String>`; #886 grew each entry into a struct to
+/// carry `expires_at`. `state_dir` is a persistent volume that outlives
+/// image upgrades (deploy/connector-rust/README.md), so a node that added
+/// a runtime peer before this change still holds the string form -- and a
+/// snapshot format has no version field to migrate on. Reading accepts
+/// both (a bare string is a permanent peer, `expires_at: None`, exactly
+/// what it meant when written); writing always produces the struct form.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredPeerCompat {
+    Bare(String),
+    Full {
+        id: String,
+        #[serde(default)]
+        expires_at: Option<DateTime<Utc>>,
+    },
+}
+
+impl From<StoredPeerCompat> for StoredPeer {
+    fn from(compat: StoredPeerCompat) -> StoredPeer {
+        match compat {
+            StoredPeerCompat::Bare(id) => StoredPeer {
+                id,
+                expires_at: None,
+            },
+            StoredPeerCompat::Full { id, expires_at } => StoredPeer { id, expires_at },
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct StoredRoute {
     prefix: String,
     peer_id: String,
@@ -52,15 +97,20 @@ struct StoredRoute {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Snapshot {
     #[serde(default)]
-    peers: Vec<String>,
+    peers: Vec<StoredPeer>,
     #[serde(default)]
     routes: Vec<StoredRoute>,
 }
 
+/// A runtime peer id, alongside its lease expiry -- `None` for a peer
+/// added over the plain operator surface, never subject to a lease
+/// (issue #886).
+pub type RuntimePeers = HashMap<String, Option<DateTime<Utc>>>;
+
 /// What opening a [`PeerRouteStore`] replays: the store itself, plus
-/// whatever peer ids and peer-forwarding routes its file already held
-/// (empty for a fresh file).
-pub type PeerRouteTable = (PeerRouteStore, HashSet<String>, HashMap<String, PeerRoute>);
+/// whatever peer ids (with their lease, if any) and peer-forwarding
+/// routes its file already held (empty for a fresh file).
+pub type PeerRouteTable = (PeerRouteStore, RuntimePeers, HashMap<String, PeerRoute>);
 
 /// The `state_dir`-scoped file backing issue #884's runtime peer/route
 /// table. Opening one replays whatever it already held (empty for a fresh
@@ -81,21 +131,25 @@ impl PeerRouteStore {
             path: path.to_path_buf(),
         };
         if !path.exists() {
-            return Ok((store, HashSet::new(), HashMap::new()));
+            return Ok((store, HashMap::new(), HashMap::new()));
         }
         let text = fs::read_to_string(path).map_err(|source| PeerRouteStoreError::Io {
             path: path.to_path_buf(),
             source,
         })?;
         if text.trim().is_empty() {
-            return Ok((store, HashSet::new(), HashMap::new()));
+            return Ok((store, HashMap::new(), HashMap::new()));
         }
         let snapshot: Snapshot =
             serde_json::from_str(&text).map_err(|source| PeerRouteStoreError::Corrupt {
                 path: path.to_path_buf(),
                 source,
             })?;
-        let peers = snapshot.peers.into_iter().collect();
+        let peers = snapshot
+            .peers
+            .into_iter()
+            .map(|peer| (peer.id, peer.expires_at))
+            .collect();
         let routes = snapshot
             .routes
             .into_iter()
@@ -116,11 +170,17 @@ impl PeerRouteStore {
     /// unspecified iteration order.
     pub fn persist(
         &self,
-        peers: &HashSet<String>,
+        peers: &RuntimePeers,
         routes: &HashMap<String, PeerRoute>,
     ) -> Result<(), PeerRouteStoreError> {
-        let mut peer_ids: Vec<String> = peers.iter().cloned().collect();
-        peer_ids.sort();
+        let mut stored_peers: Vec<StoredPeer> = peers
+            .iter()
+            .map(|(id, expires_at)| StoredPeer {
+                id: id.clone(),
+                expires_at: *expires_at,
+            })
+            .collect();
+        stored_peers.sort_by(|a, b| a.id.cmp(&b.id));
         let mut stored_routes: Vec<StoredRoute> = routes
             .values()
             .map(|route| StoredRoute {
@@ -132,7 +192,7 @@ impl PeerRouteStore {
             .collect();
         stored_routes.sort_by(|a, b| a.prefix.cmp(&b.prefix));
         let snapshot = Snapshot {
-            peers: peer_ids,
+            peers: stored_peers,
             routes: stored_routes,
         };
         let text = serde_json::to_string_pretty(&snapshot)
@@ -169,6 +229,7 @@ impl PeerRouteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn opening_a_path_that_does_not_exist_yet_yields_an_empty_table() {
@@ -186,8 +247,8 @@ mod tests {
         let path = dir.path().join("runtime_peers.json");
         let (store, _, _) = PeerRouteStore::open(&path).expect("open");
 
-        let mut peers = HashSet::new();
-        peers.insert("apex-relay-2".to_string());
+        let mut peers = HashMap::new();
+        peers.insert("apex-relay-2".to_string(), None);
         let mut routes = HashMap::new();
         routes.insert(
             "g.example.relay2".to_string(),
@@ -200,27 +261,78 @@ mod tests {
         assert_eq!(read_routes, routes);
     }
 
+    /// The exact bytes issue #884's format wrote -- `peers` as bare
+    /// strings -- still replay after #886 grew each entry into a struct:
+    /// `state_dir` outlives image upgrades, so a node that added a runtime
+    /// peer before the change boots with this very file on disk, and
+    /// refusing to parse it is a crash loop with no migration path (this
+    /// PR's review). A bare string means what it meant when written: a
+    /// permanent peer, no lease.
+    #[test]
+    fn a_pre_lease_snapshot_with_bare_string_peers_still_replays() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("runtime_peers.json");
+        fs::write(
+            &path,
+            r#"{"peers":["apex-relay-2"],"routes":[{"prefix":"g.example.relay2","peer_id":"apex-relay-2","fee":3,"price":25}]}"#,
+        )
+        .expect("write the #884-format file");
+
+        let (store, peers, routes) = PeerRouteStore::open(&path).expect("the old format parses");
+        assert_eq!(peers.get("apex-relay-2"), Some(&None));
+        assert_eq!(routes.len(), 1);
+
+        // And persisting rewrites it in the current struct form, which the
+        // next open reads back identically -- upgrade happens on first
+        // write, not by hand.
+        store.persist(&peers, &routes).expect("persist");
+        let (_store, read_peers, read_routes) = PeerRouteStore::open(&path).expect("re-open");
+        assert_eq!(read_peers, peers);
+        assert_eq!(read_routes, routes);
+    }
+
+    /// A peer-sale purchase's lease (issue #886) round-trips through the
+    /// durable snapshot exactly like every other field -- an operator
+    /// restarting a box must not silently lose track of when a purchased
+    /// peering lapses.
+    #[test]
+    fn a_peers_lease_expiry_round_trips() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("runtime_peers.json");
+        let (store, _, _) = PeerRouteStore::open(&path).expect("open");
+
+        let expires_at = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+        let mut peers = HashMap::new();
+        peers.insert("evm:1".to_string(), Some(expires_at));
+        peers.insert("apex-relay-2".to_string(), None);
+        store.persist(&peers, &HashMap::new()).expect("persist");
+
+        let (_store, read_peers, _) = PeerRouteStore::open(&path).expect("re-open");
+        assert_eq!(read_peers.get("evm:1"), Some(&Some(expires_at)));
+        assert_eq!(read_peers.get("apex-relay-2"), Some(&None));
+    }
+
     #[test]
     fn persisting_again_overwrites_rather_than_appends() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("runtime_peers.json");
         let (store, _, _) = PeerRouteStore::open(&path).expect("open");
 
-        let mut peers = HashSet::new();
-        peers.insert("peer-a".to_string());
+        let mut peers = HashMap::new();
+        peers.insert("peer-a".to_string(), None);
         store
             .persist(&peers, &HashMap::new())
             .expect("first persist");
 
         peers.remove("peer-a");
-        peers.insert("peer-b".to_string());
+        peers.insert("peer-b".to_string(), None);
         store
             .persist(&peers, &HashMap::new())
             .expect("second persist");
 
         let (_store, read_peers, _) = PeerRouteStore::open(&path).expect("re-open");
         assert_eq!(read_peers, peers);
-        assert!(!read_peers.contains("peer-a"));
+        assert!(!read_peers.contains_key("peer-a"));
     }
 
     #[test]

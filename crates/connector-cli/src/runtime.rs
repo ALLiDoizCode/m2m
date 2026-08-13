@@ -923,9 +923,14 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     .with_config_peer_ids(config.peers().iter().map(|peer| peer.id().to_string()));
     // Issue #885: the single priced route that buys peering with this
     // node, if this operator sells one -- an absent `[peer_sale]` leaves
-    // the connector exactly as it was before this section existed.
+    // the connector exactly as it was before this section existed. Issue
+    // #886: the lease a purchase actually buys, alongside the price.
     if let Some(peer_sale) = config.peer_sale() {
-        connector = connector.with_peer_sale(peer_sale.prefix(), peer_sale.price());
+        connector = connector.with_peer_sale(
+            peer_sale.prefix(),
+            peer_sale.price(),
+            chrono::Duration::seconds(peer_sale.lease_seconds() as i64),
+        );
     }
     // `[[peer_channels]]` reaching `ClaimBook` at last (§11: "it MUST
     // actually wire `ClaimBook`'s signer, verification key and EIP-712
@@ -1063,14 +1068,46 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
         connector =
             connector.with_runtime_peer_route_store(store, runtime_peers, runtime_peer_routes);
     }
+    let connector = Arc::new(connector);
+    // Issue #886: a purchased peering's lease is enforced immediately at
+    // routing time regardless of this loop (`Connector::select_configured_route`
+    // stops matching a lapsed lease's route the instant the clock passes
+    // it), but the durable row behind it is only ever removed here --
+    // otherwise it rots in `runtime-peers.json` forever, the "slow leak on
+    // a long-lived box" issue #886's own rationale names. Spawned once,
+    // never awaited on the startup path, mirroring
+    // `EvmChannelIndexSyncer::run`'s own periodic-sweep shape.
+    tokio::spawn(reap_expired_peer_leases_periodically(Arc::clone(
+        &connector,
+    )));
     Ok(Runtime {
-        connector: Arc::new(connector),
+        connector,
         signer,
         client_channel_source_evm,
         client_channel_source_solana,
         settlement_terms,
         settlements,
     })
+}
+
+/// How often [`build`]'s spawned loop sweeps for lapsed peer-sale leases
+/// (issue #886) -- frequent enough that a durable dead row does not sit
+/// around for long, infrequent enough that it costs nothing worth naming
+/// on a box with no peer-sale purchases at all (`Connector::reap_expired_peer_leases`
+/// is a cheap no-op when nothing has lapsed).
+const PEER_LEASE_REAP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Sweep `connector`'s durable runtime peer table for lapsed peer-sale
+/// leases every [`PEER_LEASE_REAP_INTERVAL`], forever. Never returns, so
+/// it is spawned rather than awaited; a sweep that cannot persist logs and
+/// leaves the table alone, so a failure costs a cycle rather than the
+/// loop.
+async fn reap_expired_peer_leases_periodically(connector: Arc<Connector>) {
+    let mut interval = tokio::time::interval(PEER_LEASE_REAP_INTERVAL);
+    loop {
+        interval.tick().await;
+        connector.reap_expired_peer_leases();
+    }
 }
 
 /// The channels this node accepts client-edge claims on, and whose
