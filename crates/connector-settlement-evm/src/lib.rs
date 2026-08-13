@@ -688,6 +688,10 @@ async fn confirm<P: JsonRpcClient + Clone>(
 /// runs at all, so this only needs to cover a load-balanced endpoint
 /// happening to route a further handful of requests to lagging backends.
 const UNOBSERVED_RECHECK_ATTEMPTS: usize = 4;
+
+/// How long [`recheck_unobserved`] waits between those calls -- long enough
+/// for a lagging backend to have caught up on a new block, short enough
+/// that the whole re-check stays within a caller's patience.
 const UNOBSERVED_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The authoritative re-check `confirm` falls back to once ethers' own
@@ -935,6 +939,7 @@ mod recovery_id_tests {
 /// now treat as "not observed" rather than "dropped".
 #[cfg(test)]
 mod confirm_tests {
+    use std::str::FromStr;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -976,8 +981,8 @@ mod confirm_tests {
         }
     }
 
-    async fn flaky_provider(rpc_url: &str) -> Provider<FlakyMempoolClient> {
-        let http = Http::new(url::Url::parse(rpc_url).expect("valid anvil url"));
+    fn flaky_provider(rpc_url: &str) -> Provider<FlakyMempoolClient> {
+        let http = Http::from_str(rpc_url).expect("valid anvil url");
         Provider::new(FlakyMempoolClient { inner: http }).interval(Duration::from_millis(50))
     }
 
@@ -987,7 +992,7 @@ mod confirm_tests {
             return;
         }
         let anvil = Anvil::spawn(19_700).await;
-        let provider = flaky_provider(&anvil.rpc_url).await;
+        let provider = flaky_provider(&anvil.rpc_url);
         let wallet: LocalWallet = DEPLOYER_PRIVATE_KEY
             .parse::<LocalWallet>()
             .expect("valid key")
@@ -1036,7 +1041,7 @@ mod confirm_tests {
             return;
         }
         let anvil = Anvil::spawn(19_750).await;
-        let provider = flaky_provider(&anvil.rpc_url).await;
+        let provider = flaky_provider(&anvil.rpc_url);
 
         // A hash nothing was ever submitted under -- the real chain
         // genuinely has no receipt for it, so `confirm` must exhaust its
@@ -1061,7 +1066,7 @@ mod confirm_tests {
             "message should say plainly that it was not observed: {message}"
         );
         assert!(
-            message.to_lowercase().contains(&format!("{tx_hash:#x}")),
+            message.contains(&format!("{tx_hash:#x}")),
             "message must carry the transaction hash so a caller is not left to recover it via \
              a block explorer: {message}"
         );
