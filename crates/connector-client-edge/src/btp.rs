@@ -831,6 +831,12 @@ async fn finish_frame(
     replies: mpsc::Sender<Vec<u8>>,
     session_address: Option<String>,
 ) {
+    // Issue #535/ADR 0036: the channel a covering claim admitted this
+    // packet on, read before `admitted` is consumed below, so it can ride
+    // into the `"packet"` span the same way the HTTP carriage's `handle_ilp`
+    // threads its own `admitted.channel_key` through.
+    let client_channel_id = admitted.as_ref().map(|(claim, _)| claim.channel_key());
+
     if let Some((claim, durability)) = admitted {
         match durability.durable().await {
             // A claim that cleared the gate makes the sender eligible to
@@ -855,7 +861,14 @@ async fn finish_frame(
     // Issue #736: the same fourth routing arm `handle_ilp`'s HTTP carriage
     // uses -- a configured route first, then whatever client session
     // `state.session_registry` has bound to this destination.
-    let response = match crate::session_route::route_prepare(&state, prepare, price).await {
+    let response = match crate::session_route::route_prepare(
+        &state,
+        prepare,
+        price,
+        client_channel_id.as_deref(),
+    )
+    .await
+    {
         PacketResponse::Fulfill(fulfill) => encode_response(request_id, &[], &fulfill.encode()),
         PacketResponse::Reject(reject) => reject_response(request_id, reject, Vec::new()),
     };

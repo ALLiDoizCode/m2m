@@ -78,9 +78,18 @@ one.
 - Packet handling runs inside an `info_span!("packet", correlation_id, destination)`, so every
   line emitted while handling a packet is correlated automatically
   ([ADR 0014](../adr/0014-metrics-surface-and-packet-correlated-logs.md)). Do not thread a
-  correlation id through call signatures.
+  correlation id through call signatures. The same span carries `client_channel_id` whenever a
+  client claim admitted the packet, joinable to `GET /channels`' `counterparty`
+  ([ADR 0036](../adr/0036-a-paid-deliverys-attribution-stays-on-the-connector.md)) — this is
+  connector-side attribution, and it is the only place payer attribution is recorded; see below.
 - **Never log a private key, a mnemonic, a bearer token or a decrypted payload.** A gift wrap's
   failure to open is reported by kind, never by content.
+- **A terminating connector tells the app nothing about the payment that brought a packet to it**
+  ([ADR 0036](../adr/0036-a-paid-deliverys-attribution-stays-on-the-connector.md)): not who paid,
+  not how much, not on what chain. Do not add a header, query parameter or envelope field carrying
+  any of the three — `amount` is implied by the handler that fired (ADR 0020), `chain` has no
+  honest source, and `payer` is a connector-side fact (`client_channel_id`, above), never handed
+  downstream.
 
 ## Documentation
 

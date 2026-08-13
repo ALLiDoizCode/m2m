@@ -1126,6 +1126,13 @@ async fn handle_ilp(
     // routed at all (client-edge-spec.md §1.3) -- the app is never asked to
     // do work that was never validly paid for.
     let mut plaintext_claim_signer = None;
+    // Issue #535/ADR 0036: the channel this packet's covering claim admitted
+    // on, carried into the `"packet"` span so a paid delivery is joinable to
+    // `GET /channels`' `counterparty` -- the honest successor to the relay's
+    // retired payer-attribution header. `None` for an unclaimed request
+    // (unpriced/unmatched destination), the only shape that reaches routing
+    // without one.
+    let mut client_channel_id = None;
     match extract_and_validate_claim(&headers, price, &state).await {
         Err(rejection) => return claim_rejected_response(rejection, price),
         // A claim that cleared the gate is this connector's evidence that
@@ -1134,6 +1141,7 @@ async fn handle_ilp(
         Ok(Some(admitted)) => {
             state.connector.recognize_channel(&admitted.channel_key);
             plaintext_claim_signer = admitted.plaintext_signer;
+            client_channel_id = Some(admitted.channel_key);
         }
         Ok(None) => {}
     }
@@ -1157,7 +1165,9 @@ async fn handle_ilp(
     // Issue #736: routing is `Connector::handle_prepare`'s three configured
     // sources first, then whatever client session `state.session_registry`
     // has bound to this destination -- see `session_route::route_prepare`.
-    packet_response(session_route::route_prepare(&state, prepare, price).await)
+    packet_response(
+        session_route::route_prepare(&state, prepare, price, client_channel_id.as_deref()).await,
+    )
 }
 
 /// `POST /ilp/probe` -- a probe's ingress (client-edge-spec.md §1.6, ADR

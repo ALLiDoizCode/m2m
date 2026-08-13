@@ -68,17 +68,28 @@ use crate::ClientEdgeState;
 /// §1.10) actually rises instead of staying a figure only a unit test ever
 /// produces. See [`credit_session_earnings`] for both steps and why each is
 /// best-effort past the point the packet's own answer is already decided.
+///
+/// `client_channel_id` is the channel a covering claim admitted this
+/// request on (issue #535, ADR 0036) -- `None` for an unclaimed request to
+/// an unpriced/unmatched destination, the only shape that reaches this
+/// arm without one. It rides straight through to the `"packet"` span
+/// [`connector_runtime::Connector::handle_prepare_with_client_channel`]
+/// opens; this function itself does nothing with it beyond forwarding it.
 pub(crate) async fn route_prepare(
     state: &ClientEdgeState,
     prepare: Prepare,
     price: u64,
+    client_channel_id: Option<&str>,
 ) -> PacketResponse {
     let now = crate::now_unix();
     let Some(lease) = state.session_registry.resolve(&prepare.destination, now) else {
         // No session is bound here right now -- not even a candidate for
         // this arm, so the ordinary three-source answer (most likely `F02`)
         // stands unchanged.
-        return state.connector.handle_prepare(prepare, 0).await;
+        return state
+            .connector
+            .handle_prepare_with_client_channel(prepare, 0, client_channel_id)
+            .await;
     };
 
     // Issue #902: a live session and a locally terminated app route can
@@ -100,7 +111,10 @@ pub(crate) async fn route_prepare(
     let condition = prepare.execution_condition;
     let amount = prepare.amount;
     let encoded = prepare.encode();
-    let response = state.connector.handle_prepare(prepare, 0).await;
+    let response = state
+        .connector
+        .handle_prepare_with_client_channel(prepare, 0, client_channel_id)
+        .await;
     if !is_unreachable(&response) {
         // A configured route decided this packet -- never silently
         // overridden by a live session (issue #736's precedence AC).
@@ -471,7 +485,7 @@ mod tests {
         let state = test_state(empty_connector(), SessionRegistry::new());
         let prepare = sample_prepare("g.nowhere", derive_condition(&FULFILLMENT));
 
-        let response = route_prepare(&state, prepare, 0).await;
+        let response = route_prepare(&state, prepare, 0, None).await;
 
         let PacketResponse::Reject(reject) = response else {
             panic!("expected a reject");
@@ -506,7 +520,7 @@ mod tests {
             .await;
         });
 
-        let response = route_prepare(&state, prepare, 0).await;
+        let response = route_prepare(&state, prepare, 0, None).await;
         peer.await.expect("the peer task");
 
         assert!(
@@ -539,7 +553,7 @@ mod tests {
             .await;
         });
 
-        let response = route_prepare(&state, prepare, 42).await;
+        let response = route_prepare(&state, prepare, 42, None).await;
         peer.await.expect("the peer task");
 
         let PacketResponse::Reject(reject) = response else {
@@ -559,7 +573,7 @@ mod tests {
         let state = test_state(empty_connector(), registry);
 
         let prepare = sample_prepare("g.provider.three", derive_condition(&FULFILLMENT));
-        let response = route_prepare(&state, prepare, 0).await;
+        let response = route_prepare(&state, prepare, 0, None).await;
 
         let PacketResponse::Reject(reject) = response else {
             panic!("expected a reject");
@@ -599,7 +613,7 @@ mod tests {
         // Deliberately no peer task: nothing ever answers the forwarded
         // MESSAGE, the exact shape of a client that is bound but has gone
         // quiet (asleep, network-partitioned, or simply slow).
-        let response = route_prepare(&state, prepare, 0).await;
+        let response = route_prepare(&state, prepare, 0, None).await;
 
         assert!(
             reply_rx.try_recv().is_ok(),
@@ -690,7 +704,7 @@ mod tests {
             ..sample_prepare("g.example.app", condition)
         };
 
-        let response = route_prepare(&state, prepare, 0).await;
+        let response = route_prepare(&state, prepare, 0, None).await;
 
         let PacketResponse::Reject(reject) = response else {
             panic!("expected a reject, not a fulfilment the connector has no right to derive");
@@ -744,7 +758,7 @@ mod tests {
         let condition = derive_condition(&FULFILLMENT);
         let prepare = sample_prepare("g.example.peer", condition);
 
-        let response = route_prepare(&state, prepare, 0).await;
+        let response = route_prepare(&state, prepare, 0, None).await;
 
         // `InProcessPeerTransport` with no peer named "peer-a" registered
         // answers `T01` naming that peer -- which is what makes this
@@ -797,7 +811,7 @@ mod tests {
             .await;
         });
 
-        let response = route_prepare(&state, prepare, 0).await;
+        let response = route_prepare(&state, prepare, 0, None).await;
         peer.await.expect("the peer task");
 
         assert!(matches!(response, PacketResponse::Fulfill(_)));
@@ -919,7 +933,7 @@ mod tests {
             });
         });
 
-        let response = route_prepare(&state, prepare, 0).await;
+        let response = route_prepare(&state, prepare, 0, None).await;
         peer.await.expect("the peer task");
 
         assert!(
@@ -1000,13 +1014,13 @@ mod tests {
             amount: 5_000,
             ..sample_prepare(address, condition)
         };
-        let response_first = route_prepare(&state, first, 0).await;
+        let response_first = route_prepare(&state, first, 0, None).await;
 
         let retry = Prepare {
             amount: 5_000,
             ..sample_prepare(address, condition)
         };
-        let response_retry = route_prepare(&state, retry, 0).await;
+        let response_retry = route_prepare(&state, retry, 0, None).await;
 
         peer.await.expect("the peer task");
 
@@ -1143,7 +1157,7 @@ mod tests {
             });
         });
 
-        let response = route_prepare(&state, prepare, 0).await;
+        let response = route_prepare(&state, prepare, 0, None).await;
         peer.await.expect("the peer task");
 
         assert!(
@@ -1211,7 +1225,7 @@ mod tests {
             reply_rx
         });
 
-        let response = route_prepare(&state, prepare, 0).await;
+        let response = route_prepare(&state, prepare, 0, None).await;
         // `route_prepare` only returns once `credit_session_earnings` (and
         // therefore any payout TRANSFER it would send) has already been
         // awaited to completion -- so if nothing was queued by now, nothing
@@ -1286,7 +1300,7 @@ mod tests {
             reply_rx
         });
 
-        let response = route_prepare(&state, prepare, 0).await;
+        let response = route_prepare(&state, prepare, 0, None).await;
         // As `a_channel_that_does_not_resolve_on_chain_is_not_credited`:
         // `route_prepare` only returns once crediting has already been
         // awaited to completion.
@@ -1366,7 +1380,7 @@ mod tests {
             drop(reply_rx);
         });
 
-        let response_first = route_prepare(&state, first, 0).await;
+        let response_first = route_prepare(&state, first, 0, None).await;
         peer.await.expect("the peer task");
 
         assert!(matches!(response_first, PacketResponse::Fulfill(_)));
@@ -1430,7 +1444,7 @@ mod tests {
             reply_rx2
         });
 
-        let response_retry = route_prepare(&state, retry, 0).await;
+        let response_retry = route_prepare(&state, retry, 0, None).await;
         let mut reply_rx2 = peer2.await.expect("the peer task");
 
         assert!(
