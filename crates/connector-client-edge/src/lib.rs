@@ -776,6 +776,29 @@ struct AdmittedClaim {
     plaintext_signer: Option<String>,
 }
 
+/// The claim header's own declared channel key, read WITHOUT validating
+/// or admitting anything (issue #887's pre-admission identity peek).
+/// `None` when no claim header is present, or when it does not decode or
+/// parse -- every one of those shapes is answered authoritatively by
+/// [`extract_and_validate_claim`] a moment later, so this peek never
+/// speaks where admission would have said something else. Reads the two
+/// headers in the same precedence order admission does, for the same
+/// reason: a client presenting both is presenting one claim twice.
+fn peek_claimed_channel_key(headers: &HeaderMap, state: &ClientEdgeState) -> Option<String> {
+    let (header_value, wrapped) = match headers.get(CLAIM_HEADER) {
+        Some(value) => (value, false),
+        None => (headers.get(CLAIM_WRAPPED_HEADER)?, true),
+    };
+    let claim_json = decode_claim_header(
+        header_value.as_bytes(),
+        wrapped,
+        state.wrap_receiver_secret.as_ref(),
+    )
+    .ok()?;
+    let claim = connector_domain::client_claim::parse_client_claim(&claim_json).ok()?;
+    Some(claim.channel_key())
+}
+
 /// Extract and fully validate whatever claim header `headers` carries, per
 /// client-edge-spec.md §1.3, against `price` -- the matched route's price,
 /// `0` for an unpriced or unmatched destination, since routing itself (not
@@ -789,30 +812,6 @@ struct AdmittedClaim {
 /// present claim validated cleanly. A plaintext header takes precedence
 /// when both are present, since a client presenting both is presenting the
 /// same claim twice, not two different ones.
-/// The claim header's own declared channel key, read WITHOUT validating
-/// or admitting anything (issue #887's pre-admission identity peek).
-/// `None` when no claim header is present, or when it does not decode or
-/// parse -- every one of those shapes is answered authoritatively by
-/// [`extract_and_validate_claim`] a moment later, so this peek never
-/// speaks where admission would have said something else.
-fn peek_claimed_channel_key(headers: &HeaderMap, state: &ClientEdgeState) -> Option<String> {
-    let (header_value, wrapped) = if let Some(value) = headers.get(CLAIM_HEADER) {
-        (value, false)
-    } else if let Some(value) = headers.get(CLAIM_WRAPPED_HEADER) {
-        (value, true)
-    } else {
-        return None;
-    };
-    let claim_json = decode_claim_header(
-        header_value.as_bytes(),
-        wrapped,
-        state.wrap_receiver_secret.as_ref(),
-    )
-    .ok()?;
-    let claim = connector_domain::client_claim::parse_client_claim(&claim_json).ok()?;
-    Some(claim.channel_key())
-}
-
 async fn extract_and_validate_claim(
     headers: &HeaderMap,
     price: u64,

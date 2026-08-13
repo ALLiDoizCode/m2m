@@ -2860,9 +2860,11 @@ impl Connector {
     /// watermark moved getting there.
     ///
     /// The identity-keyed bounds -- the purchase rate limit and the row
-    /// caps -- are deliberately NOT probed here: a payer's identity is
-    /// proven by the admitted claim itself, and ADR 0039 records why
-    /// those refusals stay on the paid side of admission.
+    /// caps -- need a payer to judge, so they are not answerable from the
+    /// packet alone and live in
+    /// [`Self::peer_sale_purchase_refusal_for_payer`], which the edge
+    /// consults second, off the claim's own declared channel key. ADR
+    /// 0039 records why that peek is a sound refusal basis unadmitted.
     pub fn peer_sale_purchase_would_be_refused(&self, prepare: &Prepare) -> bool {
         match self.open_peer_sale_purchase(prepare) {
             None => false,
@@ -2912,7 +2914,6 @@ impl Connector {
     /// delivery path answers before any claim is spent), `Some(Err(()))`
     /// for a peer-sale packet whose body does not parse, and the parsed
     /// purchase otherwise.
-    #[allow(clippy::type_complexity)]
     fn open_peer_sale_purchase(&self, prepare: &Prepare) -> Option<Result<PeerSaleRequest, ()>> {
         let Some((configured_len, ConfiguredTarget::PeerSale { .. })) =
             self.select_configured_route(&prepare.destination)
