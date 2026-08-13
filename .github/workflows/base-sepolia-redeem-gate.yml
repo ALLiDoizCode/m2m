@@ -121,6 +121,14 @@ jobs:
           const fail = (m) => { console.error(`::error::${m}`); process.exit(1); };
           const mask = (v) => console.log(`::add-mask::${v}`);
 
+          // A derived identity exposes no separate EVM private key, because
+          // there is no separate EVM identity: `secretKey` is the single
+          // secp256k1 key shared by the Nostr and EVM sides (issue #953), so
+          // producing a signing key from it is only hex encoding. The
+          // self-test below runs this exact function, so the encoding the
+          // real key depends on cannot drift away from the tested one.
+          const evmKey = (id) => '0x' + Buffer.from(id.secretKey).toString('hex');
+
           const { E2E_DEV_MNEMONIC: MNEMONIC, RPC_URL, REGISTRY, TOKEN, DECIMALS, ACCOUNT_INDEX } = process.env;
 
           // A blank secret must fail the job outright -- it must never look
@@ -132,11 +140,11 @@ jobs:
 
           // Self-test: a public BIP-39 vector, proving the SDK and ethers
           // agree on the NIP-06 EVM path before the real secret is touched.
-          // There is no separate EVM private key exposed by the SDK --
-          // `secretKey` IS the EVM key (same secp256k1 key as the Nostr
-          // identity), so the self-test also proves that hex-encoding it
-          // round-trips to the SDK's own `evmAddress`, not just that the
-          // SDK and ethers agree on the address independently.
+          // It asserts BOTH halves the real derivation below leans on: the
+          // address the SDK reports for a path, and that the key `evmKey`
+          // builds signs as that same address. Checking only the first is
+          // what let #953 reach production -- the job read a key field that
+          // does not exist, one line after a green "SDK and ethers agree".
           const TEST = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
           for (const i of [0, 2]) {
             const a = await fromMnemonicFull(TEST, { accountIndex: i });
@@ -144,8 +152,7 @@ jobs:
             if (a.evmAddress.toLowerCase() !== b.address.toLowerCase()) {
               fail(`Self-test FAILED at index ${i}: SDK ${a.evmAddress} != ethers ${b.address}.`);
             }
-            const derivedPk = '0x' + Buffer.from(a.secretKey).toString('hex');
-            const derivedAddress = new Wallet(derivedPk).address;
+            const derivedAddress = new Wallet(evmKey(a)).address;
             if (derivedAddress.toLowerCase() !== a.evmAddress.toLowerCase()) {
               fail(`Self-test FAILED at index ${i}: key derived from secretKey resolves to ${derivedAddress} != SDK evmAddress ${a.evmAddress}.`);
             }
@@ -155,10 +162,7 @@ jobs:
           const idx = Number.parseInt(ACCOUNT_INDEX ?? '0', 10);
           if (!Number.isInteger(idx) || idx < 0) fail(`Bad account_index: ${ACCOUNT_INDEX}`);
           const id = await fromMnemonicFull(MNEMONIC, { accountIndex: idx });
-          // No separate EVM private key exists to read off the identity --
-          // `secretKey` is the single secp256k1 key shared by the Nostr and
-          // EVM identities (see #953); it only needs hex encoding.
-          const pk = '0x' + Buffer.from(id.secretKey).toString('hex');
+          const pk = evmKey(id);
           mask(pk);
 
           const provider = new JsonRpcProvider(RPC_URL);
