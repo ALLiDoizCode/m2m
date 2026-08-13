@@ -921,6 +921,12 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     // to enforce that, even though it stores nothing else about a
     // config peer (see `PeerView`'s own docs).
     .with_config_peer_ids(config.peers().iter().map(|peer| peer.id().to_string()));
+    // Issue #885: the single priced route that buys peering with this
+    // node, if this operator sells one -- an absent `[peer_sale]` leaves
+    // the connector exactly as it was before this section existed.
+    if let Some(peer_sale) = config.peer_sale() {
+        connector = connector.with_peer_sale(peer_sale.prefix(), peer_sale.price());
+    }
     // `[[peer_channels]]` reaching `ClaimBook` at last (§11: "it MUST
     // actually wire `ClaimBook`'s signer, verification key and EIP-712
     // domain, with no code-only setters left on the config path"). Before

@@ -595,6 +595,16 @@ pub fn build_announcement(config: &Config, runtime: &Runtime) -> IlpPeerInfo {
             route_prices.insert(address.clone(), price.to_string());
         }
     }
+    // Issue #885: a node selling peering advertises its price here
+    // unconditionally, whether or not an operator also remembered to list
+    // the peer-sale prefix in `[announce].addresses` -- the whole point of
+    // pricing the mutation is that a buyer discovers it without asking a
+    // human, so it cannot depend on a second, easy-to-forget config line.
+    if let Some(peer_sale) = config.peer_sale() {
+        if let Some(price) = runtime.connector.client_route_price(peer_sale.prefix()) {
+            route_prices.insert(peer_sale.prefix().to_string(), price.to_string());
+        }
+    }
 
     let edge_identity = runtime
         .signer

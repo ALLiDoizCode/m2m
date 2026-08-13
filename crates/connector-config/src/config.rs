@@ -13,6 +13,7 @@ use crate::identity::{resolve_client_identities, ClientIdentityConfig, RawClient
 use crate::operator::{resolve_operator, OperatorConfig, RawOperatorConfig};
 use crate::peer::{parse_peer_exposure, resolve_peers, PeerConfig, PeerExposure, RawPeer};
 use crate::peer_channel::{resolve_peer_channels, PeerChannelConfig, RawPeerChannel};
+use crate::peer_sale::{resolve_peer_sale, PeerSaleConfig, RawPeerSale};
 use crate::route::{resolve_routes, PeerRouteConfig, RawChild, RawRoute, StaticRoute};
 use crate::secret::{RawSignerConfig, SecretLocation};
 use crate::settlement::{resolve_settlement, RawSettlementSection, SettlementConfig};
@@ -98,6 +99,13 @@ struct RawConfig {
     /// can never take the peer role at all.
     #[serde(default)]
     peer_channels: Vec<RawPeerChannel>,
+    /// The single priced route that, when paid, buys peering with this
+    /// node (issue #885, part of #867 "sell peering"): inserts the payer
+    /// into the runtime peer/route table (issue #884) instead of an
+    /// out-of-band `{peerId, secret}` exchange. Absent means this node
+    /// sells no peering, exactly as before this section existed.
+    #[serde(default)]
+    peer_sale: Option<RawPeerSale>,
     /// One or more real settlement backends to construct at startup (issue
     /// #542; per-chain tables, issue #628). Absent means channel operations
     /// keep degrading to `ChannelOperationError::NoSettlementBackend`, same
@@ -240,6 +248,7 @@ pub struct Config {
     peer_expose: PeerExposure,
     peer_allow_plaintext_endpoints: bool,
     peer_channels: Vec<PeerChannelConfig>,
+    peer_sale: Option<PeerSaleConfig>,
     operator: Option<OperatorConfig>,
     announce: Option<AnnounceConfig>,
     settlements: Vec<SettlementConfig>,
@@ -332,6 +341,25 @@ impl Config {
             {
                 return Err(ConfigError::PeerChannelUnbound {
                     id: peer.id().to_string(),
+                });
+            }
+        }
+        let peer_sale = resolve_peer_sale(raw.peer_sale)?;
+        // Prefixes share one namespace (`resolve_routes`'s own
+        // `DuplicatePrefix` rule, extended to the peer-sale route -- issue
+        // #885): a purchase address that silently doubled as an app or
+        // peer-forwarding route would resolve to whichever one this
+        // connector happened to match first, and a config-file row always
+        // wins over a runtime purchase (ADR 0034), so the ambiguity is
+        // refused here rather than left to that precedence rule to hide.
+        if let Some(sale) = &peer_sale {
+            let collides = routes.iter().any(|route| route.prefix() == sale.prefix())
+                || peer_routes
+                    .iter()
+                    .any(|route| route.prefix() == sale.prefix());
+            if collides {
+                return Err(ConfigError::PeerSalePrefixCollision {
+                    prefix: sale.prefix().to_string(),
                 });
             }
         }
@@ -532,6 +560,7 @@ impl Config {
             peer_expose,
             peer_allow_plaintext_endpoints,
             peer_channels,
+            peer_sale,
             operator,
             announce,
             settlements,
@@ -677,6 +706,12 @@ impl Config {
     /// construction (`peer-carriage-spec.md` §1.8).
     pub fn peer_channels(&self) -> &[PeerChannelConfig] {
         &self.peer_channels
+    }
+
+    /// The single priced route that buys peering with this node (issue
+    /// #885), or `None` on a node that sells no peering.
+    pub fn peer_sale(&self) -> Option<&PeerSaleConfig> {
+        self.peer_sale.as_ref()
     }
 
     /// The channels bound to one peering relation. Never empty for a

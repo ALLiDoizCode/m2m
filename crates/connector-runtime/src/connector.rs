@@ -10,12 +10,13 @@ use connector_config::{SettlementChain, StaticRoute, TransportPolicy};
 use connector_domain::x402::X402PaymentRequired;
 use connector_domain::{
     amount_after_fee, condition_is_present, fulfillment_matches_condition, is_expired,
-    is_valid_ilp_address, select_route, EnvelopeRequest, Fulfill, PacketResponse, Prepare, Reject,
-    RejectCode,
+    is_valid_ilp_address, select_route, EnvelopeRequest, EnvelopeResponse, Fulfill, PacketResponse,
+    Prepare, Reject, RejectCode,
 };
-use connector_settlement::{ChannelId, Claim, SettlementBackend, SettlementError};
+use connector_settlement::{ChannelId, ChannelStatus, Claim, SettlementBackend, SettlementError};
 use connector_signer::giftwrap::{derive_fulfillment, open_request, seal_response};
 use connector_signer::{Address, Signer};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::Instrument;
 
@@ -32,7 +33,7 @@ use crate::operator_view::{
 use crate::outbound_client::{ClaimStateSource, EvmDomain, OutboundClientLedger};
 use crate::peer_route_store::{PeerRouteStore, PeerRouteStoreError};
 use crate::peer_transport::PeerTransport;
-use crate::route::{LeasedRoute, PeerRoute};
+use crate::route::{LeasedRoute, PeerRoute, PeerSaleRoute};
 
 /// A reject this connector originates before a gift wrap's shared secret
 /// could be recovered -- no identity key configured, or the wrap itself
@@ -231,6 +232,10 @@ enum RouteTarget {
     /// bounded-size clone per packet, not the whole-collection copy ADR
     /// 0015 warns against.
     RuntimePeer(PeerRoute),
+    /// The single priced peer-sale route (issue #885), when this
+    /// connector has one configured. Unit-like `PeerSale`, not indexed:
+    /// there is at most one, held as `Connector::peer_sale`.
+    PeerSale,
 }
 
 /// How permanent a matched routing-table entry is, least to most -- the
@@ -263,7 +268,10 @@ impl RouteTarget {
             RouteTarget::Leased(_) => RouteRank::Leased,
             RouteTarget::RuntimePeer(_) => RouteRank::RuntimePeer,
             RouteTarget::Peer(_) => RouteRank::Peer,
-            RouteTarget::App(_) => RouteRank::App,
+            // A config-file entry, like an app route -- durable and
+            // priced, never shadowed by a lease or a runtime peer route
+            // at the same prefix length.
+            RouteTarget::App(_) | RouteTarget::PeerSale => RouteRank::App,
         }
     }
 }
@@ -296,6 +304,9 @@ enum ConfiguredTarget {
     /// file. See [`RouteTarget::RuntimePeer`] for why this is owned
     /// rather than indexed.
     RuntimePeer(PeerRoute),
+    /// The single priced peer-sale route (issue #885). See
+    /// [`RouteTarget::PeerSale`].
+    PeerSale,
 }
 
 impl ConfiguredTarget {
@@ -304,6 +315,7 @@ impl ConfiguredTarget {
             ConfiguredTarget::App(index) => RouteTarget::App(index),
             ConfiguredTarget::Peer(index) => RouteTarget::Peer(index),
             ConfiguredTarget::RuntimePeer(route) => RouteTarget::RuntimePeer(route),
+            ConfiguredTarget::PeerSale => RouteTarget::PeerSale,
         }
     }
 
@@ -314,7 +326,7 @@ impl ConfiguredTarget {
     /// it.
     fn rank(&self) -> RouteRank {
         match self {
-            ConfiguredTarget::App(_) => RouteRank::App,
+            ConfiguredTarget::App(_) | ConfiguredTarget::PeerSale => RouteRank::App,
             ConfiguredTarget::Peer(_) => RouteRank::Peer,
             ConfiguredTarget::RuntimePeer(_) => RouteRank::RuntimePeer,
         }
@@ -347,6 +359,38 @@ pub struct ClientRouteFacts {
     pub kind: ClientRouteKind,
 }
 
+/// A peer-sale purchase's request body (issue #885), JSON inside the
+/// sealed `EnvelopeRequest` a terminated route already carries (ADR 0018):
+/// the terms of the peer-forwarding route the buyer wants inserted for the
+/// channel that pays for this packet. `prefix` is the buyer's own address,
+/// reachable through this connector once admitted; `fee` is what this
+/// connector retains per packet forwarded there; `price` is what this
+/// connector's client edge will charge for a packet to `prefix`;
+/// `next_hop_price` is what the buyer itself declares it needs delivered
+/// to relay a packet onward, checked against `price - fee` before
+/// anything is inserted.
+#[derive(Debug, Deserialize)]
+struct PeerSaleRequest {
+    prefix: String,
+    #[serde(default)]
+    fee: u64,
+    price: u64,
+    #[serde(default)]
+    next_hop_price: u64,
+}
+
+/// The sealed confirmation a successful peer-sale purchase answers with:
+/// the peer id (the channel key that paid) and the route row now in
+/// force, echoed back so the buyer can confirm what was actually inserted
+/// rather than only what it asked for.
+#[derive(Debug, Serialize)]
+struct PeerSaleResponse {
+    peer_id: String,
+    prefix: String,
+    fee: u64,
+    price: u64,
+}
+
 /// The connector's packet plane: a fixed set of terminated routes and peer
 /// routes, an [`AppClient`] port for delivering to the apps behind
 /// terminated routes, a [`PeerTransport`] port for forwarding to the next
@@ -359,6 +403,10 @@ pub struct ClientRouteFacts {
 pub struct Connector {
     routes: Vec<StaticRoute>,
     peer_routes: Vec<PeerRoute>,
+    /// The single priced route that, when paid, buys peering with this
+    /// node (issue #885). `None` on a node that sells no peering, in
+    /// which case its would-be prefix simply matches nothing here.
+    peer_sale: Option<PeerSaleRoute>,
     /// Routes pushed at runtime over the operator surface with a time
     /// limit (ADR 0006, issue #427), keyed by prefix so pushing the same
     /// prefix again renews it rather than adding a duplicate entry. Lives
@@ -575,6 +623,7 @@ impl Connector {
         Connector {
             routes,
             peer_routes,
+            peer_sale: None,
             leased_routes: ArcSwap::from_pointee(HashMap::new()),
             app_client,
             peer_transport,
@@ -603,6 +652,13 @@ impl Connector {
     /// or be shadowed by the config-file row of the same id.
     pub fn with_config_peer_ids(mut self, ids: impl IntoIterator<Item = String>) -> Self {
         self.config_peer_ids = ids.into_iter().collect();
+        self
+    }
+
+    /// Configure the single priced route that buys peering with this node
+    /// (issue #885, `[peer_sale]`). A node not given one sells no peering.
+    pub fn with_peer_sale(mut self, prefix: impl Into<String>, price: u64) -> Self {
+        self.peer_sale = Some(PeerSaleRoute::new(prefix, price));
         self
     }
 
@@ -1155,7 +1211,7 @@ impl Connector {
         if let Some(channel_id) = client_channel_id {
             span.record("client_channel_id", channel_id);
         }
-        self.handle_prepare_traced(prepare, minimum_delivery)
+        self.handle_prepare_traced(prepare, minimum_delivery, client_channel_id)
             .instrument(span)
             .await
     }
@@ -1365,6 +1421,7 @@ impl Connector {
         &self,
         prepare: Prepare,
         minimum_delivery: u64,
+        client_channel_id: Option<&str>,
     ) -> PacketResponse {
         // Per-packet lines are debug, not info (issue #690): at huddle rates
         // (hundreds of packets/s) every INFO here becomes per-event disk I/O
@@ -1432,6 +1489,11 @@ impl Connector {
             RouteTarget::App(index) => {
                 tracing::debug!(handler_url = %self.routes[index].handler_url(), "routed to app");
                 let response = self.deliver_to_app(&self.routes[index], prepare).await;
+                return self.finish(response);
+            }
+            RouteTarget::PeerSale => {
+                tracing::debug!("routed to peer-sale");
+                let response = self.deliver_peer_sale(prepare, client_channel_id).await;
                 return self.finish(response);
             }
             RouteTarget::Peer(index) => Cow::Borrowed(&self.peer_routes[index]),
@@ -1945,6 +2007,243 @@ impl Connector {
         }
     }
 
+    /// Deliver a PREPARE that paid this connector's peer-sale route (issue
+    /// #885): sealed and priced exactly like a terminated app route (ADR
+    /// 0018/0019/0020), but the "app" is this connector itself, and the
+    /// work it does is inserting the payer into the runtime peer/route
+    /// table (issue #884) rather than an HTTP round trip.
+    ///
+    /// The channel that paid for this very packet is the channel being
+    /// bought into peering -- "the payment names the channel it is
+    /// binding" (issue #885) -- so no separate `channelId` field rides the
+    /// request: `client_channel_id` (ADR 0036, threaded from the client
+    /// edge's own already-chain-verified claim admission) is both the
+    /// payer's identity and the binding. This method re-reads that
+    /// channel fresh from its settlement backend before inserting
+    /// anything: the client edge already proved the claim's signer
+    /// against it once to admit the payment, and this guards against the
+    /// channel having gone terminal (or vanished from an operator's chain
+    /// entirely) in the window between that admission and this delivery,
+    /// rather than trusting a string across that boundary.
+    async fn deliver_peer_sale(
+        &self,
+        prepare: Prepare,
+        client_channel_id: Option<&str>,
+    ) -> PacketResponse {
+        let condition = prepare.execution_condition;
+        let price = self
+            .peer_sale
+            .as_ref()
+            .expect("only reached when select_configured_route matched PeerSale")
+            .price();
+
+        let Some(identity_signer) = self.identity_signer.as_ref() else {
+            return PacketResponse::Reject(unsealed_termination_reject(
+                "no identity key configured to open a sealed payload",
+            ));
+        };
+        let (envelope_bytes, shared_secret) =
+            match open_request(&prepare.data, identity_signer.as_ref()) {
+                Ok(opened) => opened,
+                Err(error) => {
+                    return PacketResponse::Reject(unsealed_termination_reject(&format!(
+                        "gift wrap could not be opened: {error}"
+                    )));
+                }
+            };
+        let inner = self
+            .settle_peer_sale_purchase(
+                &condition,
+                &shared_secret,
+                client_channel_id,
+                price,
+                &envelope_bytes,
+            )
+            .await;
+        Self::seal_termination_response(inner, &shared_secret)
+    }
+
+    /// The part of [`Self::deliver_peer_sale`] that runs once the gift wrap
+    /// has been opened -- split out, like [`Self::deliver_opened_envelope`],
+    /// so every return path is sealed uniformly by the caller.
+    async fn settle_peer_sale_purchase(
+        &self,
+        condition: &[u8; 32],
+        shared_secret: &[u8; 32],
+        client_channel_id: Option<&str>,
+        price: u64,
+        envelope_bytes: &[u8],
+    ) -> PacketResponse {
+        let refuse = |message: String| {
+            PacketResponse::Reject(Reject {
+                code: RejectCode::f00_bad_request(),
+                triggered_by: String::new(),
+                message,
+                data: Vec::new(),
+                accumulated_cost: 0,
+            })
+        };
+
+        let request = match EnvelopeRequest::decode(envelope_bytes) {
+            Ok(request) => request,
+            Err(error) => {
+                return PacketResponse::Reject(Reject {
+                    code: RejectCode::f01_invalid_packet(),
+                    triggered_by: String::new(),
+                    message: format!("envelope did not decode: {error}"),
+                    data: Vec::new(),
+                    accumulated_cost: price,
+                });
+            }
+        };
+
+        let Some(channel_id) = client_channel_id else {
+            tracing::warn!(
+                "peer-sale purchase refused: no client channel admitted this payment to bind"
+            );
+            return refuse(
+                "buying peering requires paying with a covering claim on the channel being \
+                 bought in"
+                    .to_string(),
+            );
+        };
+
+        let purchase: PeerSaleRequest = match serde_json::from_slice(&request.body) {
+            Ok(purchase) => purchase,
+            Err(error) => {
+                tracing::warn!(channel_id, %error, "peer-sale purchase refused: malformed request body");
+                return refuse(format!("malformed peer-sale request body: {error}"));
+            }
+        };
+
+        if !is_valid_ilp_address(&purchase.prefix) {
+            tracing::warn!(
+                channel_id,
+                prefix = %purchase.prefix,
+                "peer-sale purchase refused: invalid prefix"
+            );
+            return refuse(format!("'{}' is not a valid ILP address", purchase.prefix));
+        }
+
+        // Issue #885's own arithmetic bound: what this connector forwards
+        // to the new peer (`price - fee`) must be enough to cover what the
+        // buyer itself declares it needs to relay onward, or the peering
+        // being purchased could never break even one hop further out.
+        let remainder = purchase.price.checked_sub(purchase.fee);
+        if !remainder.is_some_and(|remainder| remainder >= purchase.next_hop_price) {
+            tracing::warn!(
+                channel_id,
+                fee = purchase.fee,
+                price = purchase.price,
+                next_hop_price = purchase.next_hop_price,
+                "peer-sale purchase refused: price - fee does not cover the declared next-hop price"
+            );
+            return refuse(format!(
+                "price ({}) minus fee ({}) must be at least next_hop_price ({})",
+                purchase.price, purchase.fee, purchase.next_hop_price
+            ));
+        }
+
+        // The raw on-chain id, stripped of the `evm:`/`solana:` namespace
+        // `ClientClaim::channel_key` prefixes it with -- `settlement_for_channel`
+        // and `ChannelId` both expect the bare id, matching every other
+        // per-channel operation on this connector (`open_channel`,
+        // `redeem_channel`, ...).
+        let raw_channel_id = channel_id.split_once(':').map_or(channel_id, |(_, id)| id);
+        let settlement = match self.settlement_for_channel(raw_channel_id) {
+            Ok(settlement) => settlement,
+            Err(error) => {
+                tracing::warn!(
+                    channel_id,
+                    %error,
+                    "peer-sale purchase refused: no settlement backend for this channel"
+                );
+                return refuse(format!(
+                    "channel '{channel_id}' names no settlement backend"
+                ));
+            }
+        };
+        let state = match settlement
+            .channel_state(&ChannelId(raw_channel_id.to_string()))
+            .await
+        {
+            Ok(state) => state,
+            Err(error) => {
+                tracing::warn!(
+                    channel_id,
+                    %error,
+                    "peer-sale purchase refused: channel does not exist on chain"
+                );
+                return refuse(format!(
+                    "channel '{channel_id}' does not exist on chain: {error}"
+                ));
+            }
+        };
+        if state.status != ChannelStatus::Open {
+            tracing::warn!(
+                channel_id,
+                status = ?state.status,
+                "peer-sale purchase refused: channel is not open"
+            );
+            return refuse(format!("channel '{channel_id}' is not open"));
+        }
+
+        // The channel that paid for this packet IS the peer being bought
+        // in (issue #885: "the payment names the channel it is binding"),
+        // so it doubles as this connector's peer id -- unique, stable, and
+        // needing no buyer-chosen name to collide over.
+        let peer_id = channel_id;
+        if let Err(error) = self.upsert_runtime_peer(peer_id) {
+            tracing::warn!(channel_id, %error, "peer-sale purchase refused: could not insert peer row");
+            return refuse(format!("could not register peer '{peer_id}': {error}"));
+        }
+        let route = match self.upsert_runtime_peer_route(
+            purchase.prefix.clone(),
+            peer_id,
+            purchase.fee,
+            purchase.price,
+        ) {
+            Ok(route) => route,
+            Err(error) => {
+                tracing::warn!(channel_id, %error, "peer-sale purchase refused: could not insert route row");
+                return refuse(format!(
+                    "could not register route '{}': {error}",
+                    purchase.prefix
+                ));
+            }
+        };
+
+        tracing::info!(
+            channel_id,
+            peer_id,
+            prefix = %route.prefix,
+            fee = route.fee,
+            price = route.price,
+            "peer-sale purchase admitted: peer and route rows inserted"
+        );
+
+        let body = serde_json::to_vec(&PeerSaleResponse {
+            peer_id: peer_id.to_string(),
+            prefix: route.prefix.clone(),
+            fee: route.fee,
+            price: route.price,
+        })
+        .expect("PeerSaleResponse always serializes");
+        Self::accept_if_fulfilled(
+            condition,
+            Fulfill {
+                fulfillment: derive_fulfillment(shared_secret),
+                data: EnvelopeResponse {
+                    status: 200,
+                    headers: vec![("content-type".to_string(), "application/json".to_string())],
+                    body,
+                }
+                .encode(),
+            },
+            price,
+        )
+    }
+
     /// The index into `self.routes` that `destination` longest-prefix
     /// matches against, if any.
     fn select_app_route(&self, destination: &str) -> Option<usize> {
@@ -1990,7 +2289,11 @@ impl Connector {
                 ConfiguredTarget::RuntimePeer(runtime_list[index].clone()),
             )
         });
-        [app_match, peer_match, runtime_match]
+        let peer_sale_match = self.peer_sale.as_ref().and_then(|sale| {
+            select_route(destination, &[sale.prefix()])
+                .map(|_| (sale.prefix().len(), ConfiguredTarget::PeerSale))
+        });
+        [app_match, peer_match, runtime_match, peer_sale_match]
             .into_iter()
             .flatten()
             .max_by_key(|(len, target)| (*len, target.rank()))
@@ -2029,6 +2332,19 @@ impl Connector {
                     price: route.price(),
                     transport_policy: TransportPolicy::Both,
                     kind: ClientRouteKind::Forwarded,
+                },
+                // Priced and greeted exactly like a terminated route
+                // (issue #885): buying peering is the terminating app's
+                // work, done by this connector itself rather than an
+                // HTTP handler.
+                ConfiguredTarget::PeerSale => ClientRouteFacts {
+                    price: self
+                        .peer_sale
+                        .as_ref()
+                        .expect("select_configured_route only returns PeerSale when configured")
+                        .price(),
+                    transport_policy: TransportPolicy::Both,
+                    kind: ClientRouteKind::Terminated,
                 },
             })
     }
@@ -4786,6 +5102,269 @@ mod tests {
                 hex.push_str(&format!("{byte:02x}"));
             }
             hex
+        }
+    }
+
+    /// Issue #885: paying the priced peer-sale route inserts the payer as
+    /// a runtime peer, per issue #884's own `upsert_runtime_peer`/
+    /// `upsert_runtime_peer_route` API. Driven against
+    /// `connector_settlement::InMemorySettlementBackend` (ADR 0007) rather
+    /// than a real chain -- the channel-verification step this exercises
+    /// (`Connector::settlement_for_channel` + `channel_state`) is the same
+    /// port every real backend implements, and the port's own contract
+    /// suite (`connector_settlement::contract`) is what proves a real
+    /// backend answers it identically.
+    mod peer_sale_purchase {
+        use super::*;
+        use connector_settlement::InMemorySettlementBackend;
+
+        const PEER_SALE_PREFIX: &str = "g.example.node.peer-sale";
+        const PEER_SALE_PRICE: u64 = 1000;
+
+        fn peer_sale_connector(backend: Arc<InMemorySettlementBackend>) -> Connector {
+            Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_identity_signer(identity_signer())
+            .with_peer_sale(PEER_SALE_PREFIX, PEER_SALE_PRICE)
+            .with_settlement(SettlementChain::Evm, backend)
+        }
+
+        /// A sealed `Prepare` to the peer-sale route, priced correctly and
+        /// carrying `body` as its `EnvelopeRequest.body` -- the purchase
+        /// terms, JSON-encoded by the caller.
+        fn peer_sale_prepare(body: &[u8]) -> (Prepare, [u8; 32]) {
+            let (data, shared_secret) = sealed_envelope_request_data(body);
+            let prepare = Prepare {
+                data,
+                execution_condition: matching_condition(&shared_secret),
+                ..prepare_with_amount(PEER_SALE_PREFIX, PEER_SALE_PRICE)
+            };
+            (prepare, shared_secret)
+        }
+
+        fn purchase_body(prefix: &str, fee: u64, price: u64, next_hop_price: u64) -> Vec<u8> {
+            serde_json::json!({
+                "prefix": prefix,
+                "fee": fee,
+                "price": price,
+                "next_hop_price": next_hop_price,
+            })
+            .to_string()
+            .into_bytes()
+        }
+
+        #[tokio::test]
+        async fn a_valid_purchase_inserts_both_rows_and_the_buyer_can_route_immediately() {
+            let backend = Arc::new(InMemorySettlementBackend::new());
+            let channel_id = backend
+                .open(b"buyer".to_vec(), Duration::seconds(3600))
+                .await
+                .expect("open");
+            let client_channel_id = format!("evm:{}", channel_id.0);
+            let connector = peer_sale_connector(backend);
+
+            let (sealed, shared_secret) =
+                peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
+
+            let response = connector
+                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                .await;
+
+            match response {
+                PacketResponse::Fulfill(fulfill) => {
+                    assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
+                    let envelope = open_sealed_envelope(&shared_secret, &fulfill.data);
+                    assert_eq!(envelope.status, 200);
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&envelope.body).expect("json body");
+                    assert_eq!(body["peer_id"], client_channel_id);
+                    assert_eq!(body["prefix"], "g.example.buyer");
+                    assert_eq!(body["fee"], 3);
+                    assert_eq!(body["price"], 25);
+                }
+                other => panic!("expected a fulfill, got {other:?}"),
+            }
+
+            // The routing table IS insertable and immediately routable
+            // (issue #884's own mechanism, driven here at the same
+            // `Connector` level its own tests exercise): a subsequent
+            // packet to the purchased prefix resolves to the new peer.
+            let route = connector
+                .client_route("g.example.buyer")
+                .expect("route now exists");
+            assert_eq!(route.price, 25);
+            assert_eq!(route.kind, ClientRouteKind::Forwarded);
+            assert!(connector
+                .peers()
+                .iter()
+                .any(|peer| peer.id == client_channel_id));
+        }
+
+        #[tokio::test]
+        async fn a_purchase_with_no_client_channel_is_refused() {
+            let backend = Arc::new(InMemorySettlementBackend::new());
+            let connector = peer_sale_connector(backend);
+            let (sealed, _shared_secret) =
+                peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
+
+            // `handle_prepare` (unlike `handle_prepare_with_client_channel`)
+            // carries no client channel id at all -- exactly the shape a
+            // caller with nothing to bind produces.
+            let response = connector.handle_prepare(sealed, 0).await;
+
+            assert!(matches!(response, PacketResponse::Reject(_)));
+            assert!(connector.peers().is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_purchase_whose_channel_does_not_exist_on_chain_is_refused() {
+            let backend = Arc::new(InMemorySettlementBackend::new());
+            let connector = peer_sale_connector(backend);
+            let (sealed, _shared_secret) =
+                peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
+
+            let response = connector
+                .handle_prepare_with_client_channel(sealed, 0, Some("evm:999999"))
+                .await;
+
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert!(
+                        reject.message.contains("does not exist"),
+                        "expected the refusal to say the channel does not exist, got: {}",
+                        reject.message
+                    );
+                }
+                other => panic!("expected a reject, got {other:?}"),
+            }
+            assert!(connector.peers().is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_purchase_against_a_closed_channel_is_refused() {
+            let backend = Arc::new(InMemorySettlementBackend::new());
+            let channel_id = backend
+                .open(b"buyer".to_vec(), Duration::seconds(3600))
+                .await
+                .expect("open");
+            backend
+                .close(&channel_id)
+                .await
+                .expect("close starts the challenge period");
+            let client_channel_id = format!("evm:{}", channel_id.0);
+            let connector = peer_sale_connector(backend);
+            let (sealed, _shared_secret) =
+                peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
+
+            let response = connector
+                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                .await;
+
+            assert!(matches!(response, PacketResponse::Reject(_)));
+            assert!(connector.peers().is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_purchase_whose_arithmetic_does_not_cover_the_next_hop_is_refused() {
+            let backend = Arc::new(InMemorySettlementBackend::new());
+            let channel_id = backend
+                .open(b"buyer".to_vec(), Duration::seconds(3600))
+                .await
+                .expect("open");
+            let client_channel_id = format!("evm:{}", channel_id.0);
+            let connector = peer_sale_connector(backend);
+            // price(25) - fee(3) = 22, less than next_hop_price(30): the
+            // buyer would be forwarded less than it declared it needs.
+            let (sealed, _shared_secret) =
+                peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 30));
+
+            let response = connector
+                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                .await;
+
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert!(
+                        reject.message.contains("next_hop_price"),
+                        "expected the refusal to name the arithmetic it violated, got: {}",
+                        reject.message
+                    );
+                }
+                other => panic!("expected a reject, got {other:?}"),
+            }
+            assert!(connector.peers().is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_purchase_whose_fee_exceeds_its_price_is_refused_not_a_panic() {
+            let backend = Arc::new(InMemorySettlementBackend::new());
+            let channel_id = backend
+                .open(b"buyer".to_vec(), Duration::seconds(3600))
+                .await
+                .expect("open");
+            let client_channel_id = format!("evm:{}", channel_id.0);
+            let connector = peer_sale_connector(backend);
+            // fee(30) > price(25): `price.checked_sub(fee)` is `None`,
+            // proving the refusal path (not an underflow panic) is what
+            // actually runs.
+            let (sealed, _shared_secret) =
+                peer_sale_prepare(&purchase_body("g.example.buyer", 30, 25, 0));
+
+            let response = connector
+                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                .await;
+
+            assert!(matches!(response, PacketResponse::Reject(_)));
+            assert!(connector.peers().is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_malformed_purchase_body_is_refused() {
+            let backend = Arc::new(InMemorySettlementBackend::new());
+            let channel_id = backend
+                .open(b"buyer".to_vec(), Duration::seconds(3600))
+                .await
+                .expect("open");
+            let client_channel_id = format!("evm:{}", channel_id.0);
+            let connector = peer_sale_connector(backend);
+            let (sealed, _shared_secret) = peer_sale_prepare(b"not json");
+
+            let response = connector
+                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                .await;
+
+            assert!(matches!(response, PacketResponse::Reject(_)));
+        }
+
+        #[test]
+        fn the_peer_sale_prefix_is_priced_and_terminated_for_the_client_edge() {
+            let connector = peer_sale_connector(Arc::new(InMemorySettlementBackend::new()));
+            let route = connector
+                .client_route(PEER_SALE_PREFIX)
+                .expect("peer-sale route matches its own prefix");
+            assert_eq!(route.price, PEER_SALE_PRICE);
+            assert_eq!(route.kind, ClientRouteKind::Terminated);
+        }
+
+        #[test]
+        fn a_repeat_purchase_on_the_same_channel_updates_rather_than_duplicates() {
+            // `upsert_runtime_peer`'s own contract (issue #884): calling it
+            // again for an id already in the table is an update, not a
+            // second row -- exercised here at the level this module cares
+            // about (that a repeat purchase does not error), not
+            // re-testing #884's own coverage of that contract.
+            let connector = peer_sale_connector(Arc::new(InMemorySettlementBackend::new()));
+            connector.upsert_runtime_peer("evm:1").unwrap();
+            connector.upsert_runtime_peer("evm:1").unwrap();
+            assert_eq!(
+                connector.peers().iter().filter(|p| p.id == "evm:1").count(),
+                1
+            );
         }
     }
 
