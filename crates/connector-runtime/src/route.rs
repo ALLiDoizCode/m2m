@@ -3,7 +3,7 @@
 //! [`crate::Connector`] level -- `connector_domain::select_route` picks the
 //! most specific prefix across both kinds without caring which one it is.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 
 /// A route whose traffic this connector forwards to a peer's connector for
 /// the next hop, rather than terminating it at an app of its own.
@@ -139,17 +139,26 @@ impl LeasedRoute {
 /// on the same path -- and carries no `fee`, since it is not itself
 /// carriage: the peer-forwarding route it causes to be inserted carries
 /// its own `fee`/`price`, negotiated at purchase time.
+///
+/// `lease` (issue #886) is what the purchase actually buys alongside the
+/// table write: the peer and route rows a purchase inserts expire this
+/// long after the purchase clears (or after the most recent renewal --
+/// see `Connector::upsert_runtime_peer_purchase`), unlike a config-file
+/// `[[peers]]`/`[[routes]]` row or an operator-added runtime one via
+/// `POST /peers`, neither of which ever carries a lease at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerSaleRoute {
     prefix: String,
     price: u64,
+    lease: Duration,
 }
 
 impl PeerSaleRoute {
-    pub fn new(prefix: impl Into<String>, price: u64) -> PeerSaleRoute {
+    pub fn new(prefix: impl Into<String>, price: u64, lease: Duration) -> PeerSaleRoute {
         PeerSaleRoute {
             prefix: prefix.into(),
             price,
+            lease,
         }
     }
 
@@ -161,6 +170,12 @@ impl PeerSaleRoute {
     /// The flat price a claim must advance by to buy peering.
     pub fn price(&self) -> u64 {
         self.price
+    }
+
+    /// How long a purchase leases peering for, from the moment it clears
+    /// (or extends from the current expiry, on a renewal).
+    pub fn lease(&self) -> Duration {
+        self.lease
     }
 }
 
@@ -175,6 +190,14 @@ mod tests {
         assert_eq!(route.prefix(), "g.example.remote");
         assert_eq!(route.peer_id(), "peer-b");
         assert_eq!(route.fee(), 5);
+    }
+
+    #[test]
+    fn peer_sale_route_exposes_prefix_price_and_lease() {
+        let sale = PeerSaleRoute::new("g.example.node.peer-sale", 1000, Duration::seconds(3600));
+        assert_eq!(sale.prefix(), "g.example.node.peer-sale");
+        assert_eq!(sale.price(), 1000);
+        assert_eq!(sale.lease(), Duration::seconds(3600));
     }
 
     #[test]

@@ -674,4 +674,10 @@ pub enum ConfigError {
          naming that prefix (issue #885) -- prefixes share one namespace"
     )]
     PeerSalePrefixCollision { prefix: String },
+
+    #[error(
+        "[peer_sale] prefix '{prefix}' sets no 'lease_seconds': a purchased peering is a lease, \
+         never a permanent grant (issue #886) -- name how long a purchase buys"
+    )]
+    PeerSaleMissingLease { prefix: String },
 }
