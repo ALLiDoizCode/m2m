@@ -49,7 +49,9 @@
 #   silently (issue #954). --final itself stays a deliberate, separate follow-up step
 #   (this script never passes --final on your behalf) since it is irreversible.
 #
-# Mainnet-beta only, and never on devnet:
+# Mainnet-beta defaults (both flags parse on any network; what is mainnet-only is
+# their defaulting and validation -- on devnet --token-mint is only echoed back and
+# recorded, and --max-len is passed through exactly as given):
 #   --token-mint records which SPL mint channels opened against this program instance
 #   are expected to settle in (default: Circle's native USDC mint on Solana mainnet,
 #   EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v). This is documentation only -- the
@@ -124,10 +126,11 @@ usage() {
     echo "                                If not specified, the deployer keypair retains upgrade authority."
     echo "  --program-id                  Existing program ID for upgrade deployments (optional)"
     echo "                                If specified, deploys as an upgrade to the existing program."
-    echo "  --token-mint                  Mainnet-beta only. Base58 SPL mint channels opened against"
-    echo "                                this program are expected to settle in. Defaults to Circle's"
-    echo "                                native USDC mint ($MAINNET_USDC_MINT)."
-    echo "                                Recorded for documentation only -- see the header comment."
+    echo "  --token-mint                  Base58 SPL mint channels opened against this program are"
+    echo "                                expected to settle in. On mainnet-beta it is validated and"
+    echo "                                defaults to Circle's native USDC mint"
+    echo "                                ($MAINNET_USDC_MINT); elsewhere it is"
+    echo "                                recorded as given. Documentation only -- see the header comment."
     echo "  --max-len                     ProgramData size (bytes) to allocate, giving upgrade headroom"
     echo "                                beyond the built binary. On a mainnet-beta initial deploy,"
     echo "                                defaults to +${DEFAULT_MAINNET_HEADROOM_PERCENT}% of the binary size if omitted."

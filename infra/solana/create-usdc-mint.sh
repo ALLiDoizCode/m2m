@@ -16,8 +16,8 @@
 # mock token from a keypair committed to this repo, which has no relationship to
 # real USDC. Mainnet channels bind Circle's real mint instead (see
 # docs/solana-deployment.md's "Mainnet Deployment Runbook") -- this script has no
-# mainnet-shaped mode, only a hard refusal below, so pointing it at mainnet-beta by
-# accident is impossible rather than merely unintended.
+# mainnet-shaped mode at all, only the hard refusal below, which rejects any RPC URL
+# that names mainnet (see that guard for what the heuristic does and does not catch).
 #
 #   ./create-usdc-mint.sh [RPC_URL]      # default http://localhost:8899
 set -euo pipefail

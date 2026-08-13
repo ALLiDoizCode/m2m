@@ -182,7 +182,10 @@ After deployment, verify the program is on-chain:
 solana program show <PROGRAM_ID> --url devnet
 ```
 
-The program ID is recorded in `tools/solana/program-id.json` with the following schema:
+The program ID is recorded in `tools/solana/program-id.json` with the following schema
+(a mainnet-beta deploy writes the same schema to `tools/solana/program-id.mainnet.json`, a
+separate file so neither record can clobber the other -- see the
+[Mainnet Deployment Runbook](#mainnet-deployment-runbook)):
 
 ```json
 {
@@ -191,9 +194,16 @@ The program ID is recorded in `tools/solana/program-id.json` with the following 
   "rpcUrl": "https://api.devnet.solana.com",
   "deployedAt": "2026-03-26T00:00:00Z",
   "deployerPubkey": "<deployer public key>",
-  "binarySize": 95000
+  "binarySize": 95000,
+  "tokenMint": null,
+  "maxLen": null
 }
 ```
+
+`tokenMint` and `maxLen` are `null` unless set: on devnet only when `--token-mint` /
+`--max-len` are passed explicitly, on mainnet-beta `tokenMint` always (it defaults to
+Circle's USDC mint) and `maxLen` on an initial deploy (it defaults to the binary size plus
+headroom; an upgrade reuses the existing account's `max_len` and records `null`).
 
 ---
 

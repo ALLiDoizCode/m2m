@@ -322,12 +322,15 @@ jobs:
 
   # Build-reproducibility check for the mainnet deploy path (issue #954, the
   # no-broadcast part of #834). Builds packages/solana-program TWICE, from clean,
-  # with the same pinned v1.52 platform-tools line the live devnet program was
-  # proven to reproduce from (packages/solana-program/deployments/devnet-public.md,
-  # "Reproducible-build comparison"), and asserts the two artifacts hash identically.
-  # No deploy, no key material, no network beyond fetching the toolchain itself --
-  # this proves the SOURCE reproduces bit-for-bit, which is what the mainnet
-  # runbook's human deploy step relies on being true before it ever runs.
+  # with the same pinned v1.52 platform-tools line the live devnet program was built
+  # from (packages/solana-program/deployments/devnet-public.md, "Reproducible-build
+  # comparison" -- that line matches the live bytes exactly in size and 99.66%
+  # byte-identically; a zero-diff against the live program would additionally need the
+  # deploy-time lockfile and build path, which were not preserved), and asserts the two
+  # artifacts hash identically. No deploy, no key material, no network beyond fetching
+  # the toolchain itself -- this proves the SOURCE rebuilds bit-for-bit from a clean
+  # SBF target, which is what the mainnet runbook's human deploy step relies on being
+  # true before it ever runs.
   solana-program-reproducibility:
     name: Solana Program Build Reproducibility (mainnet deploy path)
     runs-on: ubuntu-latest
@@ -374,6 +377,12 @@ jobs:
             sleep 5
           done
 
+      # No working-directory here on purpose: packages/solana-program is a member of
+      # the root Cargo workspace, so cargo build-sbf writes to the workspace-root
+      # target/, the same path tools/solana/deploy.sh reads. Removing target/deploy
+      # and the SBF target dir makes build #2 recompile the program from source
+      # instead of re-copying build #1's artifact; host-side build artifacts are left
+      # alone because nothing from them lands in the .so.
       - name: Hash build #1 and reset build output
         run: |
           sha256sum target/deploy/payment_channel.so | awk '{print $1}' > /tmp/build1.sha256
