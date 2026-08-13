@@ -626,6 +626,15 @@ fn default_probe_window() -> Duration {
     Duration::seconds(60)
 }
 
+/// Whether `peer_id`'s peer-sale lease has lapsed as of `now` (issue
+/// #886). `false` for a peer with no lease at all -- one added over the
+/// plain `POST /peers` surface -- and for one whose lease is still
+/// running, so the one thing this is `true` for is the row a demotion is
+/// owed to.
+fn peer_lease_has_lapsed(peers: &RuntimePeers, peer_id: &str, now: DateTime<Utc>) -> bool {
+    matches!(peers.get(peer_id), Some(Some(expires_at)) if is_expired(*expires_at, now))
+}
+
 impl Connector {
     pub fn new(
         routes: Vec<StaticRoute>,
@@ -2481,12 +2490,7 @@ impl Connector {
         let runtime_peer_routes = self.runtime_peer_routes_snapshot();
         let runtime_list: Vec<&PeerRoute> = runtime_peer_routes
             .values()
-            .filter(|route| {
-                !matches!(
-                    runtime_peers.get(route.peer_id()),
-                    Some(Some(expires_at)) if is_expired(*expires_at, now)
-                )
-            })
+            .filter(|route| !peer_lease_has_lapsed(&runtime_peers, route.peer_id(), now))
             .collect();
         let runtime_prefixes: Vec<&str> = runtime_list.iter().map(|route| route.prefix()).collect();
         let runtime_match = select_route(destination, &runtime_prefixes).map(|index| {
@@ -3025,28 +3029,21 @@ mod tests {
         }
     }
 
-    /// A `Prepare` sealed to [`identity_signer`]'s identity and carrying
-    /// `body` (issue #524), with `execution_condition` set to match the
-    /// fulfilment this same sealed secret derives (ADR 0019, issue #525) --
-    /// the common case for a test that drives `Connector::handle_prepare`
-    /// directly rather than through the HTTP router and expects the packet
-    /// to genuinely fulfil. Returns the shared secret alongside, to open
-    /// the sealed `Fulfill`/termination-`Reject` this produces, or to
-    /// compute the expected fulfilment via `expected_fulfillment`.
+    /// [`sealed_prepare_to`], addressed to `"g.example.app"` -- the
+    /// destination almost every sealed-request test terminates at.
     fn sealed_prepare(body: &[u8]) -> (Prepare, [u8; 32]) {
-        let (data, shared_secret) = sealed_envelope_request_data(body);
-        let prepare = Prepare {
-            data,
-            execution_condition: matching_condition(&shared_secret),
-            ..prepare("g.example.app", b"unused")
-        };
-        (prepare, shared_secret)
+        sealed_prepare_to("g.example.app", body)
     }
 
-    /// [`sealed_prepare`], with `destination` given rather than fixed to
-    /// `"g.example.app"` -- for a test that routes a sealed request
-    /// somewhere other than that hardcoded prefix (a forwarded packet
-    /// whose ultimate app lives past a peer hop, for instance).
+    /// A `Prepare` for `destination`, sealed to [`identity_signer`]'s
+    /// identity and carrying `body` (issue #524), with
+    /// `execution_condition` set to match the fulfilment this same sealed
+    /// secret derives (ADR 0019, issue #525) -- the common case for a test
+    /// that drives `Connector::handle_prepare` directly rather than through
+    /// the HTTP router and expects the packet to genuinely fulfil. Returns
+    /// the shared secret alongside, to open the sealed
+    /// `Fulfill`/termination-`Reject` this produces, or to compute the
+    /// expected fulfilment via `expected_fulfillment`.
     fn sealed_prepare_to(destination: &str, body: &[u8]) -> (Prepare, [u8; 32]) {
         let (data, shared_secret) = sealed_envelope_request_data(body);
         let prepare = Prepare {

@@ -1097,6 +1097,11 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
 /// is a cheap no-op when nothing has lapsed).
 const PEER_LEASE_REAP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Sweep `connector`'s durable runtime peer table for lapsed peer-sale
+/// leases every [`PEER_LEASE_REAP_INTERVAL`], forever. Never returns, so
+/// it is spawned rather than awaited; a sweep that cannot persist logs and
+/// leaves the table alone, so a failure costs a cycle rather than the
+/// loop.
 async fn reap_expired_peer_leases_periodically(connector: Arc<Connector>) {
     let mut interval = tokio::time::interval(PEER_LEASE_REAP_INTERVAL);
     loop {
