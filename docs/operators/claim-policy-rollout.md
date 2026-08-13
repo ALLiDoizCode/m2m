@@ -119,9 +119,13 @@ the one this runbook rolls. Note it down before starting Order below — do not 
 committed pin of record is it.
 
 **The committed pin of record and the live pin are two different things, and both matter here:**
-`crates/connector-bin/tests/devnet_configs_load.rs::EXPECTED_CONNECTOR_TAG` is
-`rust-sha-440eab7` today — what the _repo's_ five compose files declare — and it predates B2/B3/B5
-(issue numbers #880/#881/#882 postdate #859, the PR that set it). **The live boxes are running an
+`crates/connector-bin/tests/devnet_configs_load.rs::EXPECTED_CONNECTOR_TAG` was `rust-sha-440eab7`
+when this paragraph was written — what the _repo's_ five compose files declared at the time — and
+it predated B2/B3/B5 (issue numbers #880/#881/#882 postdate #859, the PR that set it). Issue #948
+has since bumped it to `rust-sha-415531a`, for an unrelated reason (carrying #912's `notice_*`
+announce fields) — check the constant's own doc comment for the current value and provenance
+rather than trusting this literal; do not assume a newer pin's mere existence means B2/B3/B5's own
+tag has been noted per this section's own instruction above. **The live boxes are running an
 older tag still** (`rust-sha-33f10e2` per this issue's own text) — nothing on any box
 auto-deploys, so neither tag is what Order step 1 below actually checks; the box's live tag is.
 Bumping `EXPECTED_CONNECTOR_TAG` and the five `image:` pins to the new tag is a **separate, later**

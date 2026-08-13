@@ -136,15 +136,16 @@ services:
     # through a green gate the first time this shape was written, issue
     # #833's review).
     #
-    # PIN OF RECORD (issue #848): bumped from `rust-sha-33f10e2` (what the
-    # relay box still runs as of this change) to `rust-sha-440eab7` -- the
-    # earliest tag carrying the announce-identity fix this very overlay
-    # exists to deploy (issue #833, PR #839; the tag IS that fix's commit).
-    # Not yet deployed to the box -- this repo's compose files are the
-    # fleet's pin of record and lead the boxes, not the reverse. See
-    # `EXPECTED_CONNECTOR_TAG` in
+    # PIN OF RECORD (issue #848, bumped for #948): bumped from
+    # `rust-sha-440eab7` to `rust-sha-415531a` -- 440eab7 predates the
+    # `notice_*` announce fields (issue #912, PR #915) this box's committed
+    # `connector-rust.toml` now sets, and the one-shot `announce` this
+    # overlay runs would refuse to boot on it (`RawAnnounceConfig` is
+    # `deny_unknown_fields`). Not yet deployed to the box -- this repo's
+    # compose files are the fleet's pin of record and lead the boxes, not the
+    # reverse. See `EXPECTED_CONNECTOR_TAG` in
     # crates/connector-bin/tests/devnet_configs_load.rs.
-    image: ghcr.io/toon-protocol/connector:rust-sha-440eab7
+    image: ghcr.io/toon-protocol/connector:rust-sha-415531a
     # `$$` throughout: compose interpolates a bare `$VAR`/`${VAR}` in this
     # file's own text against the HOST's environment at `up` time -- `$$` is
     # what survives that pass as a literal `$`, so the shell below sees it,
