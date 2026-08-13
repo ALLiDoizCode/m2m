@@ -320,11 +320,98 @@ jobs:
             sleep 5
           done
 
+  # Build-reproducibility check for the mainnet deploy path (issue #954, the
+  # no-broadcast part of #834). Builds packages/solana-program TWICE, from clean,
+  # with the same pinned v1.52 platform-tools line the live devnet program was
+  # proven to reproduce from (packages/solana-program/deployments/devnet-public.md,
+  # "Reproducible-build comparison"), and asserts the two artifacts hash identically.
+  # No deploy, no key material, no network beyond fetching the toolchain itself --
+  # this proves the SOURCE reproduces bit-for-bit, which is what the mainnet
+  # runbook's human deploy step relies on being true before it ever runs.
+  solana-program-reproducibility:
+    name: Solana Program Build Reproducibility (mainnet deploy path)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Solana CLI tools
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v3.1.12/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+
+      # Caching the platform-tools dir keyed on the tools-version avoids the
+      # flaky network resolution panic (issue #105), same as the solana-program
+      # job above. mkdir -p defends against a cold cache (no prior key match):
+      # a from-scratch ~/.cache/solana directory with no `solana` subdirectory
+      # yet has been observed to make cargo-build-sbf panic on an internal
+      # unwrap before it ever reaches the network, rather than creating the
+      # directory itself -- pre-creating it is a no-op once the cache restores.
+      - name: Cache Solana platform-tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/solana
+          key: solana-platform-tools-${{ runner.os }}-v1.52
+
+      - name: Ensure platform-tools cache directory exists
+        run: mkdir -p ~/.cache/solana
+
+      - name: Build #1 (clean)
+        working-directory: packages/solana-program
+        run: |
+          n=0
+          until cargo build-sbf --tools-version v1.52; do
+            n=$((n + 1))
+            if [ "$n" -ge 3 ]; then
+              echo "cargo build-sbf (build #1) failed after $n attempts"
+              exit 1
+            fi
+            echo "cargo build-sbf attempt $n failed (likely flaky tools-version resolution) — retrying in 5s..."
+            sleep 5
+          done
+
+      - name: Hash build #1 and reset build output
+        run: |
+          sha256sum target/deploy/payment_channel.so | awk '{print $1}' > /tmp/build1.sha256
+          echo "Build #1 sha256: $(cat /tmp/build1.sha256)"
+          rm -rf target/deploy target/sbf-solana-solana
+
+      - name: Build #2 (clean)
+        working-directory: packages/solana-program
+        run: cargo build-sbf --tools-version v1.52
+
+      - name: Hash build #2 and assert reproducibility
+        run: |
+          sha256sum target/deploy/payment_channel.so | awk '{print $1}' > /tmp/build2.sha256
+          echo "Build #2 sha256: $(cat /tmp/build2.sha256)"
+          if ! diff -q /tmp/build1.sha256 /tmp/build2.sha256 > /dev/null; then
+            echo "::error::Two clean builds of packages/solana-program with the pinned v1.52"
+            echo "::error::toolchain produced DIFFERENT artifact hashes. The mainnet deploy"
+            echo "::error::runbook (docs/solana-deployment.md) depends on this build being"
+            echo "::error::reproducible -- investigate before deploying anything built from"
+            echo "::error::this commit."
+            exit 1
+          fi
+          echo "Reproducible: both clean builds hash identically ($(cat /tmp/build1.sha256))."
+
   # Summary job to provide clear CI status
   ci-status:
     name: CI Status Summary
     runs-on: ubuntu-latest
-    needs: [lint-and-format, rust-gate, security, solana-program, devbox-validate, tracked-secrets]
+    needs:
+      [
+        lint-and-format,
+        rust-gate,
+        security,
+        solana-program,
+        solana-program-reproducibility,
+        devbox-validate,
+        tracked-secrets,
+      ]
     if: always()
 
     steps:
@@ -339,6 +426,7 @@ jobs:
           echo "  Rust Workspace Gate: ${{ needs.rust-gate.result }}"
           echo "  EVM Contracts: see Contracts workflow (.github/workflows/contracts.yml)"
           echo "  Solana Program: ${{ needs.solana-program.result }}"
+          echo "  Solana Build Reproducibility: ${{ needs.solana-program-reproducibility.result }}"
           echo "  Devbox Validation: ${{ needs.devbox-validate.result }}"
           echo "  Security: ${{ needs.security.result }}"
           echo "  Tracked Key Guard: ${{ needs.tracked-secrets.result }}"
@@ -351,6 +439,7 @@ jobs:
           if [[ "${{ needs.lint-and-format.result }}" != "success" ]] || \
              [[ "${{ needs.rust-gate.result }}" != "success" ]] || \
              [[ "${{ needs.solana-program.result }}" != "success" ]] || \
+             [[ "${{ needs.solana-program-reproducibility.result }}" != "success" ]] || \
              [[ "${{ needs.devbox-validate.result }}" != "success" ]] || \
              [[ "${{ needs.tracked-secrets.result }}" != "success" ]]; then
             echo "❌ CI Pipeline FAILED"

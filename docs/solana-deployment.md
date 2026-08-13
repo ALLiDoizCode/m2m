@@ -23,6 +23,13 @@ This guide covers deploying the Solana payment channel program to devnet, config
   - [Deploying an Upgrade](#deploying-an-upgrade)
   - [Upgrade Authority Management](#upgrade-authority-management)
   - [Rollback Process](#rollback-process)
+- [Mainnet Deployment Runbook](#mainnet-deployment-runbook)
+  - [Decisions to Record Before You Run the Deploy Command](#decisions-to-record-before-you-run-the-deploy-command)
+  - [Flags and Environment Variables](#flags-and-environment-variables)
+  - [The Deploy Command](#the-deploy-command)
+  - [Expected Output](#expected-output)
+  - [Post-Deploy Verification](#post-deploy-verification)
+  - [What This Runbook Does Not Cover](#what-this-runbook-does-not-cover)
 - [Monitoring Guide](#monitoring-guide)
   - [Channel Health Monitoring](#channel-health-monitoring)
   - [Stuck Channel Detection](#stuck-channel-detection)
@@ -434,6 +441,186 @@ If an upgrade causes issues:
    ```
 
 > **Note:** Rollback is only possible if the program is still upgradeable (not marked `--final`).
+
+---
+
+## Mainnet Deployment Runbook
+
+Everything above this section describes devnet, which every existing default in
+`tools/solana/deploy.sh` still targets unchanged. This section is the mainnet-shaped
+deploy path added by
+[toon-protocol/connector#954](https://github.com/toon-protocol/connector/issues/954),
+which is the no-broadcast majority of
+[#834](https://github.com/toon-protocol/connector/issues/834) split out because steps
+1 to 3 there -- the deploy path, the reproducibility check, and this runbook -- "move
+no funds and touch no key," unlike step 4, the actual broadcast. **The broadcast
+itself stays human-only on #834** -- nothing in this section is agent-triggered, and
+running the command below against real mainnet-beta is a deliberate human action, not
+something this repository or its CI ever does on its own.
+
+Unlike Base mainnet (`packages/contracts/script/DeployMainnet.s.sol`), the
+payment-channel program takes **no token address at deploy time at all** -- it is
+mint-agnostic per channel: each channel names its own SPL mint when it is opened
+later (`InitializeChannel`'s accounts, not the program's deploy). So "binding" Circle's
+USDC mint here is a **recorded convention**, not an on-chain constraint the way
+`TokenNetwork`'s constructor argument is on EVM: `--token-mint` (below) is written into
+`tools/solana/program-id.mainnet.json` for operators to read, and nothing in
+`tools/solana/deploy.sh` enforces it against any channel opened later. What mainnet
+does forbid, structurally rather than by convention, is **creating** a mint from this
+path: `deploy.sh` contains no `spl-token create-token`/`initialize_mint` call at all
+(verify with `grep -i create-token tools/solana/deploy.sh` -- there is nothing to
+find), and `infra/solana/create-usdc-mint.sh` (the devnet mock-USDC tool, driven by a
+keypair committed to this repo) refuses outright when its RPC URL looks
+mainnet-shaped.
+
+Similarly: the Solana program enforces **no on-chain deposit or lifetime cap** --
+unlike `TokenNetwork`'s `maxChannelDeposit`/`maxChannelLifetime` constructor
+arguments, `Deposit` accepts any amount and `InitializeChannel` takes only a
+`challenge_duration` (the close-challenge window, not a channel lifetime ceiling; see
+`packages/solana-program/src/instruction.rs`). There is no deploy-time flag that could
+cap either, because the deployed program has no such check to configure. The
+conservative-default decision an EVM mainnet deploy makes once at deploy time is, on
+Solana, an operator/connector-side decision made per channel (`challenge_duration`
+at `InitializeChannel`) -- record it the same way you record the two decisions below,
+but it is not a `deploy.sh` flag.
+
+### Decisions to Record Before You Run the Deploy Command
+
+`tools/solana/deploy.sh` will not run against `--network mainnet-beta` until both of
+these are answered -- not defaulted into silently, and not something the script
+decides for you.
+
+1. **Upgrade authority custody.** After first deploy, the upgrade authority is
+   whichever keypair you name. Live authority means the program stays fixable if a
+   bug surfaces, but every counterparty can ask who holds it and what their key
+   hygiene is; `--final` (see [Upgrade Authority
+   Management](#upgrade-authority-management) above) means nothing to rug but nothing
+   to fix, ever. This is an owner decision, not a default -- decide it, then pass:
+   - `--upgrade-authority-decision deployer` -- the deployer keypair you already
+     passed via `--keypair` keeps upgrade authority.
+   - `--upgrade-authority-decision transfer --upgrade-authority <path>` -- upgrade
+     authority moves to a different keypair as part of this same deploy.
+
+   `--final` is deliberately **not** an option on `deploy.sh`, on any network: it is
+   irreversible, so it stays the separate, explicit follow-up step documented in
+   [Upgrade Authority Management](#upgrade-authority-management), run only once
+   whoever holds authority has decided to freeze the program for good.
+
+2. **`max_len` headroom.** The devnet deploy allocated `max_len` at exactly the
+   binary size with no headroom (see [Deployment Cost
+   Estimates](#deployment-cost-estimates)), so a later, larger binary needs
+   `solana program extend` first. On a mainnet-beta **initial** deploy (no
+   `--program-id`) with no explicit `--max-len`, `deploy.sh` allocates **+25%
+   headroom over the built binary's size** automatically and prints exactly how many
+   bytes and how much rent that costs before deploying. For the current ~109,416-byte
+   binary this is `~27,354` bytes of headroom (`max_len` `~136,770`), costing
+   `~190,383,840` lamports (`~0.19 SOL`) in additional rent-exempt deposit --
+   **refundable** (see [Rent Economics](#rent-economics)), but real SOL escrowed
+   upfront, which is why it is computed and printed rather than silently assumed. The
+   trade-off: paying that ~0.19 SOL now avoids a separate `solana program extend`
+   call later (roughly 0.14 SOL for a 105KB→125KB, 20KB delta -- see #834's own
+   cost note) the next time the binary grows past `max_len`. Override with an
+   explicit `--max-len <bytes>` if 25% is not the headroom you want; recompute the
+   rent it implies with the formula in [Deployment Cost
+   Estimates](#deployment-cost-estimates).
+
+### Flags and Environment Variables
+
+| Flag                           | Env fallback                 | Required on mainnet-beta                 | Default                                                                     |
+| ------------------------------ | ---------------------------- | ---------------------------------------- | --------------------------------------------------------------------------- |
+| `--network mainnet-beta`       | --                           | yes                                      | --                                                                          |
+| `--keypair <path>`             | --                           | yes                                      | -- (must be funded; see [Cost](#deployment-cost-estimates) for how much)    |
+| `--upgrade-authority-decision` | `UPGRADE_AUTHORITY_DECISION` | yes                                      | -- (refuses to run unset; `deployer` or `transfer`)                         |
+| `--upgrade-authority <path>`   | --                           | only if the decision above is `transfer` | -- (deployer keypair retains authority)                                     |
+| `--token-mint <pubkey>`        | `TOKEN_MINT`                 | no                                       | Circle's native USDC mint, `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`   |
+| `--max-len <bytes>`            | `MAX_LEN`                    | no                                       | binary size + 25% headroom (initial deploys only; see above)                |
+| `--program-id <pubkey>`        | --                           | no                                       | -- (omit for an initial deploy; set to upgrade an existing mainnet program) |
+
+### The Deploy Command
+
+The remaining human step, once both decisions above are recorded, is one command:
+
+```bash
+./tools/solana/deploy.sh \
+  --network mainnet-beta \
+  --keypair ~/.config/solana/mainnet-deployer.json \
+  --upgrade-authority-decision transfer \
+  --upgrade-authority ~/.config/solana/mainnet-authority.json
+```
+
+(Substitute `--upgrade-authority-decision deployer` with no `--upgrade-authority` if
+the deployer keypair itself is the recorded choice. `--token-mint` and `--max-len`
+only need to be passed explicitly if you are deliberately overriding either default
+above.)
+
+### Expected Output
+
+Illustrative -- exact byte counts and pubkeys will differ per build/deploy:
+
+```
+No --token-mint given; defaulting to Circle's native USDC mint on Solana mainnet: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+============================================
+Solana Payment Channel Program — Deployment
+============================================
+
+Network:            mainnet-beta
+RPC URL:            https://api.mainnet-beta.solana.com
+Deployer keypair:   /home/you/.config/solana/mainnet-deployer.json
+Upgrade authority:  /home/you/.config/solana/mainnet-authority.json
+Deployment type:    initial (new program)
+Token mint:         EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v (recorded only -- see header comment)
+Authority decision: transfer
+
+...
+WARNING: You are about to deploy to MAINNET-BETA.
+This will cost real SOL and the program will be publicly accessible.
+
+Are you sure you want to continue? (yes/no): yes
+
+Building program...
+Build complete: .../target/deploy/payment_channel.so
+
+Program binary size: 109416 bytes
+
+No --max-len given; allocating +25% upgrade headroom:
+  max_len:        136770 bytes (109416 binary + 27354 headroom)
+  extra rent:     190383840 lamports for the headroom alone (refundable; see
+                  docs/solana-deployment.md's rent-exemption formula)
+
+Deploying to mainnet-beta...
+...
+Program deployed successfully!
+Program ID: <PROGRAM_PUBKEY>
+
+Setting upgrade authority to: <AUTHORITY_PUBKEY>
+Upgrade authority set to: <AUTHORITY_PUBKEY>
+
+Program ID saved to: tools/solana/program-id.mainnet.json
+
+Verifying deployment...
+<solana program show output>
+```
+
+### Post-Deploy Verification
+
+```bash
+solana program show <PROGRAM_ID> --url https://api.mainnet-beta.solana.com
+```
+
+confirms the program is executable, owned by `BPFLoaderUpgradeab1e...`, and shows the
+upgrade authority you recorded above (or no authority at all, once and only once a
+deliberate, separate `--final` step has been run). `tools/solana/program-id.mainnet.json`
+records the program id, the token mint this deploy expects channels to settle in, the
+binary size, and the `max_len` allocated -- keep it, and consider committing a
+deployment record under `packages/solana-program/deployments/` mirroring
+`devnet-public.md`'s format once the broadcast has happened.
+
+### What This Runbook Does Not Cover
+
+Per #954's own scope (and #834's, which stays open for exactly this): the actual
+broadcast, a funded mainnet deployer keypair, and any transaction. Nothing above
+performs any of those -- the command in [The Deploy Command](#the-deploy-command) is
+the human-only step #834 remains gated on.
 
 ---
 
