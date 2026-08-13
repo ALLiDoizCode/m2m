@@ -415,11 +415,23 @@ jobs:
               # holds the identity key -- and the loop's greppable verdict
               # line is the read-back this file's doctrine demands.
               sshbox "cd $REMOTE_REPO && $COMPOSE_ANNOUNCE up -d announce && $COMPOSE_ANNOUNCE restart announce"
+              # Anchor the read-back at the restarted container's own
+              # StartedAt, never a relative window: `restart` reuses the
+              # container and its log file, and the loop publishes every
+              # 240s on its own, so `--since 90s` could match an OK (or a
+              # FAILED) printed BEFORE the restart -- a verdict about a
+              # publish this run never triggered (issue #948). Every line
+              # `--since $STARTED_AT` matches is from the forced run.
+              STARTED_AT=$(sshbox "cd $REMOTE_REPO && docker inspect -f '{{.State.StartedAt}}' \$($COMPOSE_ANNOUNCE ps -q announce)")
+              if [ -z "$STARTED_AT" ]; then
+                echo "::error::could not read the restarted announce container's StartedAt"
+                exit 1
+              fi
               VERDICT=""
               LOGS=""
               for i in $(seq 1 18); do
                 sleep 5
-                LOGS=$(sshbox "cd $REMOTE_REPO && $COMPOSE_ANNOUNCE logs --since 90s announce" 2>/dev/null || true)
+                LOGS=$(sshbox "cd $REMOTE_REPO && $COMPOSE_ANNOUNCE logs --since '$STARTED_AT' announce" 2>/dev/null || true)
                 if echo "$LOGS" | grep -q '\[announce\] OK'; then VERDICT=ok; break; fi
                 if echo "$LOGS" | grep -q '\[announce\] FAILED'; then VERDICT=failed; break; fi
               done
