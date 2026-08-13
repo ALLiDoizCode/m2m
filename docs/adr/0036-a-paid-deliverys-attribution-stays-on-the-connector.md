@@ -91,9 +91,11 @@ crates` continues to return nothing.
 `"packet"` span (ADR 0014) now also carries `client_channel_id` — the client channel whose covering
 claim admitted the packet — whenever a claim was presented. A packet with no claim (an unpriced or
 unclaimed request, or a peer-wire arrival) is unchanged: the field is simply absent, not recorded
-empty. `client_channel_id` joins directly to `GET /channels`' `counterparty` for that channel, which
-is exactly "which payer paid for this delivery" — assembled from records the connector already
-kept, at the cost of one more field on a log line that already existed.
+empty. The value is the chain-namespaced channel key the claim itself is judged under
+(`evm:<channel id>` or `solana:<channel account>`), so a claim on either chain names its channel
+unambiguously. That channel's `counterparty` at `GET /channels` is exactly "which payer paid for
+this delivery" — assembled from records the connector already kept, at the cost of one more field
+on a log line that already existed.
 
 This is implemented in `crates/connector-runtime/src/connector.rs`
 (`Connector::handle_prepare_with_client_channel`), threaded from the client edge's claim admission

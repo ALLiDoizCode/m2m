@@ -1128,12 +1128,17 @@ impl Connector {
     /// `client_channel_id` in the `"packet"` span alongside
     /// `correlation_id` and `destination` (issue #535, ADR 0036): the
     /// client channel whose covering claim admitted this packet -- the
-    /// honest successor to the relay's old payer-attribution header (ADR
-    /// 0036), joinable to `GET /channels`' `counterparty`. `None` when no client
-    /// claim admitted this packet (an unclaimed request, a peer-wire
-    /// arrival, or a test harness calling [`Self::handle_prepare`]
-    /// directly) -- the field is then simply absent from the span, not
-    /// recorded empty.
+    /// honest successor to the relay's retired payer-attribution header,
+    /// naming the channel whose `counterparty` at `GET /channels` is
+    /// "who paid for this delivery". Carries the chain-namespaced key
+    /// [`connector_domain::client_claim::ClientClaim::channel_key`] produces
+    /// (`evm:<channel id>`, `solana:<channel account>`), so a claim on
+    /// either chain names its channel unambiguously.
+    ///
+    /// `None` when no client claim admitted this packet (an unclaimed
+    /// request, a peer-wire arrival, or a caller using
+    /// [`Self::handle_prepare`] directly) -- the field is then simply
+    /// absent from the span, not recorded empty.
     pub async fn handle_prepare_with_client_channel(
         &self,
         prepare: Prepare,
@@ -2503,13 +2508,19 @@ mod tests {
         assert!(app_client.deliveries().is_empty());
     }
 
-    /// A minimal [`tracing::Subscriber`] that records exactly the field
-    /// values a single named span (`"packet"`, in practice) carries by the
-    /// time it is dropped -- no formatting, no filtering by level, so it
-    /// captures a span's fields whether or not anything was ever logged
-    /// inside it. Issue #535/ADR 0036's own acceptance criterion is that
-    /// `client_channel_id` is asserted from the emitted span, not from
-    /// inspecting the call site -- this is that capture.
+    /// A minimal [`tracing::Subscriber`] that records the field values a
+    /// single named span (`"packet"`, in practice) carries -- no
+    /// formatting, no filtering by level, so it captures a span's fields
+    /// whether or not anything was ever logged inside it. Issue #535/ADR
+    /// 0036's own acceptance criterion is that `client_channel_id` is
+    /// asserted from the emitted span, not from inspecting the call site
+    /// -- this is that capture.
+    ///
+    /// Every span gets the same id, so a deferred `record` -- which is how
+    /// `client_channel_id` arrives -- cannot be attributed back to the span
+    /// it belongs to and is captured unconditionally; only span *creation*
+    /// is filtered by name. Harmless here: `"packet"` is the only span
+    /// these tests exercise.
     struct SpanFieldCapture {
         span_name: &'static str,
         fields: Arc<Mutex<HashMap<String, String>>>,
@@ -2554,19 +2565,16 @@ mod tests {
         fn exit(&self, _span: &tracing::span::Id) {}
     }
 
-    #[tokio::test]
-    async fn packet_span_carries_the_admitting_client_channel_id_when_a_claim_admitted_the_packet()
-    {
-        let app_client = Arc::new(FakeAppClient::new());
-        let clock = test_clock();
-        let connector = connector_with(vec![], app_client, clock);
-
+    /// Run `work` under a [`SpanFieldCapture`] on the `"packet"` span, and
+    /// return the fields that span actually recorded.
+    async fn packet_span_fields<F: std::future::Future<Output = ()>>(
+        work: F,
+    ) -> HashMap<String, String> {
         let fields = Arc::new(Mutex::new(HashMap::new()));
-        let capture = SpanFieldCapture {
+        let guard = tracing::subscriber::set_default(SpanFieldCapture {
             span_name: "packet",
-            fields: fields.clone(),
-        };
-        let _guard = tracing::subscriber::set_default(capture);
+            fields: Arc::clone(&fields),
+        });
         // Force every callsite's cached interest to be recomputed against
         // this thread's now-current dispatch -- without this, a callsite
         // whose interest was already cached (e.g. by an earlier test in
@@ -2576,22 +2584,35 @@ mod tests {
         // cache).
         tracing::callsite::rebuild_interest_cache();
 
-        let _ = connector
-            .handle_prepare_with_client_channel(
-                prepare("g.nowhere", b"hello"),
-                0,
-                Some("evm:0xdeadbeef"),
-            )
-            .await;
+        work.await;
 
-        drop(_guard);
+        drop(guard);
+        let captured = fields.lock().unwrap();
+        captured.clone()
+    }
+
+    #[tokio::test]
+    async fn packet_span_carries_the_admitting_client_channel_id_when_a_claim_admitted_the_packet()
+    {
+        let app_client = Arc::new(FakeAppClient::new());
+        let clock = test_clock();
+        let connector = connector_with(vec![], app_client, clock);
+
+        let fields = packet_span_fields(async {
+            let _ = connector
+                .handle_prepare_with_client_channel(
+                    prepare("g.nowhere", b"hello"),
+                    0,
+                    Some("evm:0xdeadbeef"),
+                )
+                .await;
+        })
+        .await;
+
         assert_eq!(
-            fields
-                .lock()
-                .unwrap()
-                .get("client_channel_id")
-                .map(String::as_str),
-            Some("evm:0xdeadbeef")
+            fields.get("client_channel_id").map(String::as_str),
+            Some("evm:0xdeadbeef"),
+            "captured: {fields:?}"
         );
     }
 
@@ -2601,30 +2622,24 @@ mod tests {
         let clock = test_clock();
         let connector = connector_with(vec![], app_client, clock);
 
-        let fields = Arc::new(Mutex::new(HashMap::new()));
-        let capture = SpanFieldCapture {
-            span_name: "packet",
-            fields: fields.clone(),
-        };
-        let _guard = tracing::subscriber::set_default(capture);
-        // Force every callsite's cached interest to be recomputed against
-        // this thread's now-current dispatch -- without this, a callsite
-        // whose interest was already cached (e.g. by an earlier test in
-        // this same process running with no subscriber at all) never
-        // calls back into this capture, even though it is the active
-        // default (tracing-core's global, non-thread-local interest
-        // cache).
-        tracing::callsite::rebuild_interest_cache();
+        let fields = packet_span_fields(async {
+            // The ordinary `handle_prepare` entry point -- no admitting
+            // client channel available at all, exactly the peer-wire and
+            // unclaimed-request shapes.
+            let _ = connector
+                .handle_prepare(prepare("g.nowhere", b"hello"), 0)
+                .await;
+        })
+        .await;
 
-        // The ordinary `handle_prepare` entry point -- no admitting client
-        // channel available at all, exactly the peer-wire and unclaimed-
-        // request shapes.
-        let _ = connector
-            .handle_prepare(prepare("g.nowhere", b"hello"), 0)
-            .await;
-
-        drop(_guard);
-        assert!(!fields.lock().unwrap().contains_key("client_channel_id"));
+        // `correlation_id` proves the capture saw the span at all, so the
+        // absence below is the field being omitted rather than nothing
+        // having been captured.
+        assert!(
+            fields.contains_key("correlation_id"),
+            "the capture saw no `packet` span: {fields:?}"
+        );
+        assert!(!fields.contains_key("client_channel_id"));
     }
 
     #[tokio::test]
