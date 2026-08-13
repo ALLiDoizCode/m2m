@@ -146,7 +146,7 @@ infra-down:
 # already present or absent.
 SOLANA_BIN := $(HOME)/.local/share/solana/install/active_release/bin
 solana-build:
-	cd packages/solana-program && PATH="$(SOLANA_BIN):$$PATH" cargo build-sbf
+	cd packages/solana-program && PATH="$(SOLANA_BIN):$$PATH" cargo build-sbf --tools-version v1.52
 
 solana-test:
 	cd packages/solana-program && PATH="$(SOLANA_BIN):$$PATH" cargo test-sbf

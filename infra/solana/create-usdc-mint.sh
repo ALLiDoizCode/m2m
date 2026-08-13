@@ -12,11 +12,34 @@
 # Runs on the HOST (the beeman validator image has no spl-token CLI) against the
 # validator's published RPC. Requires spl-token + solana CLIs on PATH.
 #
+# NEVER point this at mainnet-beta (issue #954): it mints an unlimited supply of a
+# mock token from a keypair committed to this repo, which has no relationship to
+# real USDC. Mainnet channels bind Circle's real mint instead (see
+# docs/solana-deployment.md's "Mainnet Deployment Runbook") -- this script has no
+# mainnet-shaped mode at all, only the hard refusal below, which rejects any RPC URL
+# that names mainnet (see that guard for what the heuristic does and does not catch).
+#
 #   ./create-usdc-mint.sh [RPC_URL]      # default http://localhost:8899
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RPC_URL="${1:-${SOLANA_RPC_URL:-http://localhost:8899}}"
+
+# Case-insensitive substring match on "mainnet" anywhere in the URL -- deliberately
+# broad rather than an exact match on api.mainnet-beta.solana.com: a hosted RPC
+# provider (Helius, QuickNode, Alchemy, ...) names its mainnet endpoint however it
+# likes, and a false positive here just means re-running with the intended devnet/
+# localhost URL, while a false negative mints a mock token against real mainnet.
+case "${RPC_URL,,}" in
+    *mainnet*)
+        echo "Error: refusing to run against a mainnet-shaped RPC URL: $RPC_URL" >&2
+        echo "This script creates a MOCK USDC mint from a keypair committed to this repo -- it" >&2
+        echo "must never target Solana mainnet. Mainnet channels bind Circle's real USDC mint" >&2
+        echo "instead; see docs/solana-deployment.md's \"Mainnet Deployment Runbook\"." >&2
+        exit 1
+        ;;
+esac
+
 MINT_KP="$HERE/usdc-mint.json"
 AUTH_KP="$HERE/usdc-authority.json"
 DECIMALS=6                                   # real-USDC standard (EVM mock is 18)
