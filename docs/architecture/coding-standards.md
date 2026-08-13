@@ -79,10 +79,11 @@ one.
   line emitted while handling a packet is correlated automatically
   ([ADR 0014](../adr/0014-metrics-surface-and-packet-correlated-logs.md)). Do not thread a
   correlation id through call signatures. The same span carries `client_channel_id` whenever a
-  client claim admitted the packet, joinable to the `state_dir` journal's `InboundClaimAccepted`
-  entries and the channel's `[[client_channels]]`/chain-resolved record
-  ([ADR 0036](../adr/0036-a-paid-deliverys-attribution-stays-on-the-connector.md)) — this is
-  connector-side attribution, and it is the only place payer attribution is recorded; see below.
+  client claim admitted the packet, joinable to `state_dir/client-edge-claims.log`'s
+  `InboundClaimAccepted` entries and the channel's `[[client_channels]]`/chain-resolved record
+  ([ADR 0036](../adr/0036-a-paid-deliverys-attribution-stays-on-the-connector.md)) — payer
+  attribution lives in the connector's own records and is never handed to the app, per the bullet
+  below.
 - **Never log a private key, a mnemonic, a bearer token or a decrypted payload.** A gift wrap's
   failure to open is reported by kind, never by content.
 - **A terminating connector tells the app nothing about the payment that brought a packet to it**

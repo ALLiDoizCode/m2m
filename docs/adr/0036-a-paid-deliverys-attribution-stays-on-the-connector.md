@@ -66,11 +66,12 @@ documents. **Payer attribution stays on the connector.**
   `correlation_id` — the packet's own execution condition, hex-encoded, invariant across hops — and
   `destination`. One JSON object per line, joinable across a hop boundary with no wire change.
 - **The money record.** `JournalEntry::InboundClaimAccepted` / `OutboundClaimSigned`
-  (`crates/connector-domain/src/projection.rs`) in a durable `FileJournal` under `state_dir`,
+  (`crates/connector-domain/src/projection.rs`) in durable `FileJournal`s under `state_dir`,
   projected to `ClaimView` (`crates/connector-runtime/src/operator_view.rs`) and read at
   `GET /claims`; channel counterparty, deposit and redeemed amount at `GET /channels`. Both
-  endpoints project this node's own peer-wire records only — a **client** channel's
-  `InboundClaimAccepted` entries live in the same journal but surface at no endpoint.
+  endpoints project this node's own peer-wire book only, replayed from `state_dir/peer-claims.log`
+  — a **client** channel's `InboundClaimAccepted` entries are a second book in a second file,
+  `state_dir/client-edge-claims.log` (issue #605), and surface at no endpoint.
   [ADR 0005](0005-claims-are-truth-balances-are-a-projection.md): claims are truth, balances are a
   projection.
 - **Metrics.** `toon_packets_total{outcome}`, `toon_packets_rejected_total{code}`,
@@ -95,9 +96,9 @@ claim admitted the packet — whenever a claim was presented. A packet with no c
 unclaimed request, or a peer-wire arrival) is unchanged: the field is simply absent, not recorded
 empty. The value is the chain-namespaced channel key the claim itself is judged under
 (`evm:<channel id>` or `solana:<channel account>`), so a claim on either chain names its channel
-unambiguously. That key is the same one the `state_dir` journal's
-`JournalEntry::InboundClaimAccepted` entries are recorded under
-(`crates/connector-client-edge/src/claim_gate.rs`), and the one the connector's client-channel
+unambiguously. That key is the same one the client-edge claim journal's
+(`state_dir/client-edge-claims.log`) `JournalEntry::InboundClaimAccepted` entries are recorded
+under (`crates/connector-client-edge/src/claim_gate.rs`), and the one the connector's client-channel
 record — `[[client_channels]]` or resolved from chain, the `ClientChannelRegistry` authority the
 payer section above names — states the accepted counterparty for. Joining the two answers "which
 payer paid for this delivery" — assembled from records the connector already kept, at the cost of
@@ -142,8 +143,8 @@ better records than the headers ever were.
 connector tells the app nothing about the payment that brought a packet to it, so the next reader
 does not re-propose a header. No production behavior changes for the app: nothing new is sent to
 it, and nothing it previously received is removed (it never received payment attribution in the
-first place). An operator joining `client_channel_id` in a `"packet"` log line to the `state_dir`
-journal's `InboundClaimAccepted` entries under that same channel key — with the payer's identity
-from the channel's `[[client_channels]]`/chain-resolved record — can now answer "who paid for this
-delivery" from records this connector already kept: the record issue #535 asked for, without the
-header issue #505 correctly declined to bring back.
+first place). An operator joining `client_channel_id` in a `"packet"` log line to
+`state_dir/client-edge-claims.log`'s `InboundClaimAccepted` entries under that same channel key —
+with the payer's identity from the channel's `[[client_channels]]`/chain-resolved record — can now
+answer "who paid for this delivery" from records this connector already kept: the record issue #535
+asked for, without the header issue #505 correctly declined to bring back.

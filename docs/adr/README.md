@@ -73,14 +73,14 @@ outside this repository.
 
 ### Payload, envelope and termination
 
-| #                                                                       | Decision                                                            | Status                                                                                                                    |
-| ----------------------------------------------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| [0016](0016-payload-opacity-is-a-property-of-carriage.md)               | Payload opacity is a property of carriage                           | **partly superseded** — first half stands and is made structural by 0018; its client-edge-v1 ruling is superseded by 0017 |
-| [0018](0018-a-payload-is-sealed-to-the-terminating-connector.md)        | A packet's payload is sealed to the terminating connector           | current                                                                                                                   |
-| [0019](0019-a-terminating-connector-derives-the-fulfilment.md)          | A terminating connector derives the fulfilment it is paid against   | current                                                                                                                   |
-| [0025](0025-an-envelope-target-is-confined-beneath-the-handler-path.md) | An envelope target is confined beneath the route's handler path     | current                                                                                                                   |
-| [0032](0032-a-client-destination-is-never-a-route-termination.md)       | A client destination is never a route termination                   | current — bounds 0018 and 0019                                                                                            |
-| [0036](0036-a-paid-deliverys-attribution-stays-on-the-connector.md)     | A paid delivery's attribution stays on the connector, never the app | current — extends 0014                                                                                                    |
+| #                                                                       | Decision                                                               | Status                                                                                                                    |
+| ----------------------------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| [0016](0016-payload-opacity-is-a-property-of-carriage.md)               | Payload opacity is a property of carriage                              | **partly superseded** — first half stands and is made structural by 0018; its client-edge-v1 ruling is superseded by 0017 |
+| [0018](0018-a-payload-is-sealed-to-the-terminating-connector.md)        | A packet's payload is sealed to the terminating connector              | current                                                                                                                   |
+| [0019](0019-a-terminating-connector-derives-the-fulfilment.md)          | A terminating connector derives the fulfilment it is paid against      | current                                                                                                                   |
+| [0025](0025-an-envelope-target-is-confined-beneath-the-handler-path.md) | An envelope target is confined beneath the route's handler path        | current                                                                                                                   |
+| [0032](0032-a-client-destination-is-never-a-route-termination.md)       | A client destination is never a route termination                      | current — bounds 0018 and 0019                                                                                            |
+| [0036](0036-a-paid-deliverys-attribution-stays-on-the-connector.md)     | A paid delivery's attribution stays on the connector, never on the app | current — extends 0014                                                                                                    |
 
 ### Discovery
 
