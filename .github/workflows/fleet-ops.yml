@@ -199,10 +199,13 @@ jobs:
           # box's bootstrap.sh: bare `docker compose` in /root/connector
           # resolves the repo-root dev-stack file, which defines no
           # `connector-rust` service at all, so every compose verb below
-          # would target the wrong stack (this PR's review, finding 1).
-          # COMPOSE_ANNOUNCE adds the box's announce overlay, the only file
-          # set that defines the `announce` one-shot
-          # (docs/operators/announcing-a-node.md).
+          # would target the wrong stack (issue #948).
+          # COMPOSE_ANNOUNCE adds the box's announce overlay. Only the relay
+          # and store overlays define the `announce` one-shot
+          # (docs/operators/announcing-a-node.md) -- `toon`'s overlay carries
+          # the long-running TypeScript `announcer` sidecar instead and the
+          # faucet box announces nothing, so the `announce` operation below
+          # fails loudly on those two boxes, as it always has.
           case "$BOX" in
             toon)
               INFRA_DIR=infra/linode-node
@@ -353,7 +356,7 @@ jobs:
               fi
               # The box's checkout IS the deploy input: compose reads
               # /root/connector, so a stale checkout silently redeploys the
-              # OLD pin (this PR's review, finding 2).
+              # OLD pin (issue #948).
               # infra/devnet-manage.sh's deploy legs pull for the same
               # reason -- but fail-closed here, no \`|| true\`: a diverged
               # or detached checkout means the pin about to deploy is not
@@ -368,7 +371,7 @@ jobs:
               # Re-read OFF THE BOX (this file's own doctrine): the running
               # container's image id must be the id of the pin just pulled.
               # \`docker ps\` output alone cannot distinguish a no-op from a
-              # rollout (this PR's review, finding 3).
+              # rollout (issue #948).
               RUNNING=$(sshbox "cd $REMOTE_REPO && docker inspect -f '{{.Image}}' \$($COMPOSE ps -q '$SERVICE')")
               PULLED=$(sshbox "docker image inspect -f '{{.Id}}' '$PINNED'")
               if [ -z "$RUNNING" ] || [ "$RUNNING" != "$PULLED" ]; then
