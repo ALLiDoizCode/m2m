@@ -2053,10 +2053,16 @@ impl Connector {
     /// **or leased**; either way its `data` stays opaque at this hop, and
     /// only a terminated route's envelope is ever opened -- no identity
     /// key configured, a gift wrap that fails to open, or an envelope that
-    /// fails to decode. None of those needs this check to stay free --
-    /// [`Self::deliver_to_app`]'s own early returns already answer them
-    /// before any claim is spent either way, whether or not this method is
-    /// ever called. This is deliberately not a cache of
+    /// fails to decode. The first two have no envelope to judge at this
+    /// hop at all; the last three are packets this method cannot read, so
+    /// it cannot tell "refused for its target's shape" from "unreadable"
+    /// and declines to guess. `false` therefore leaves each of them
+    /// exactly as it was before this method existed -- the covering claim
+    /// is still admitted, so a packet [`Self::deliver_to_app`] then turns
+    /// away for an unopenable wrap is still charged for it. That is issue
+    /// #869's own complaint arriving through a different door, and closing
+    /// it belongs to a separate change: this method answers only the
+    /// refusal it can prove in advance. This is deliberately not a cache of
     /// [`Self::deliver_to_app`]'s decision: it repeats the same
     /// open-and-decode work, on the same immutable `prepare.data`, and it
     /// resolves the winning route by the same rule
