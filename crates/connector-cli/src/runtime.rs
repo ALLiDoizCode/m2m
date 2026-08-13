@@ -553,6 +553,30 @@ impl ClientChannelSource for IndexedEvmChannelSource {
         }
     }
 
+    /// A breach re-read (issue #661's follow-up finding): the indexed
+    /// deposit lags the chain by the confirmation depth, so `Active` is
+    /// exactly the answer a breach exists to distrust -- a top-up (or a
+    /// `ChannelNewDeposit` younger than the confirmation window) is real on
+    /// chain before this index will admit it. The chain is asked directly,
+    /// as it would have been before this index existed, so a claim main
+    /// would honour is honoured here on the same submission. `Terminal`
+    /// stays answered from the index: settlement is monotone and the index
+    /// only applies confirmed logs, so a chain read could only repeat it.
+    async fn evm_channel_fresh(
+        &self,
+        channel_id: &[u8; 32],
+    ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
+        match self
+            .index
+            .lookup(channel_id, self.fallback.backend.own_address())
+        {
+            ChannelIndexLookup::Terminal => Ok(None),
+            ChannelIndexLookup::Active { .. } | ChannelIndexLookup::Miss => {
+                self.fallback.evm_channel(channel_id).await
+            }
+        }
+    }
+
     async fn evm_channel_terminal(&self, channel_id: &[u8; 32]) -> bool {
         matches!(
             self.index
@@ -2628,6 +2652,113 @@ key_file = "{key_path}"
                 .expect("the channel is active in the index");
             assert_eq!(resolved.counterparty, counterparty_address.to_fixed_bytes());
             assert_eq!(resolved.deposit_floor, DepositFloor::AtLeast(750));
+        }
+
+        /// The follow-up finding on issue #661's PR: an indexed deposit
+        /// lags the chain by the confirmation depth, so a channel whose
+        /// `ChannelOpened` is confirmed but whose `ChannelNewDeposit` is
+        /// not answers `Active` with a floor of zero -- and a breach
+        /// re-read served from the same index would refuse a claim the
+        /// chain honours. `evm_channel_fresh` must bypass the index and
+        /// read the chain, exactly as a node on `main` would have.
+        #[tokio::test]
+        async fn a_breach_re_read_bypasses_the_index_and_reads_the_chain() {
+            if !anvil_available() {
+                eprintln!(
+                    "skipping: `anvil` not found on PATH (install via https://getfoundry.sh)"
+                );
+                return;
+            }
+
+            let anvil = Anvil::spawn(ANVIL_BASE_PORT).await;
+            let token = EvmSettlementBackend::deploy_mock_token(
+                &anvil.rpc_url,
+                DEPLOYER_PRIVATE_KEY,
+                1_000_000,
+            )
+            .await
+            .expect("deploy mock USDC");
+            let backend = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
+                .await
+                .expect("deploy a TokenNetwork through a fresh registry");
+
+            let counterparty_address =
+                ethers::signers::LocalWallet::new(&mut ethers::core::rand::thread_rng()).address();
+            let channel = backend
+                .open(
+                    counterparty_address.as_bytes().to_vec(),
+                    Duration::seconds(3601),
+                )
+                .await
+                .expect("open a channel");
+            backend.fund(&channel, 750).await.expect("fund the channel");
+
+            // The index has seen the open but not the deposit -- the
+            // "confirmed `ChannelOpened`, unconfirmed `ChannelNewDeposit`"
+            // window the finding describes.
+            let channel_id = channel_id_bytes(&channel.0);
+            let index = Arc::new(EvmChannelIndex::open(None).expect("open in-memory index"));
+            index
+                .apply(
+                    vec![OrderedChannelIndexEvent {
+                        block_number: 1,
+                        log_index: 0,
+                        event: ChannelIndexEvent::Opened {
+                            channel_id,
+                            participant1: backend.own_address(),
+                            participant2: counterparty_address,
+                        },
+                    }],
+                    1,
+                )
+                .expect("apply");
+
+            let source = IndexedEvmChannelSource {
+                index: index.clone(),
+                fallback: SettlementChannelSource {
+                    backend: Arc::new(backend),
+                },
+            };
+
+            // The ordinary read answers from the index: floor zero.
+            let cached = source
+                .evm_channel(&channel_id)
+                .await
+                .expect("index lookup")
+                .expect("active in the index");
+            assert_eq!(cached.deposit_floor, DepositFloor::AtLeast(0));
+
+            // The breach read reaches the chain and finds the real 750.
+            let fresh = source
+                .evm_channel_fresh(&channel_id)
+                .await
+                .expect("chain lookup")
+                .expect("active on chain");
+            assert_eq!(fresh.deposit_floor, DepositFloor::AtLeast(750));
+
+            // A terminal record, though, stays answered from the index
+            // even on a breach: settlement is monotone and the index only
+            // applies confirmed logs, so the chain could only repeat it.
+            // Proven the same way as the lookup test above: with the chain
+            // dead, an answer at all is proof the index answered.
+            index
+                .apply(
+                    vec![OrderedChannelIndexEvent {
+                        block_number: 2,
+                        log_index: 0,
+                        event: ChannelIndexEvent::Settled { channel_id },
+                    }],
+                    2,
+                )
+                .expect("apply the settlement");
+            drop(anvil);
+            assert_eq!(
+                source
+                    .evm_channel_fresh(&channel_id)
+                    .await
+                    .expect("the terminal answer needs no chain"),
+                None
+            );
         }
 
         /// Issue #632's EVM-only acceptance criterion: "EVM-only node:

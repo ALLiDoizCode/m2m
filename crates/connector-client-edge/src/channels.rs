@@ -555,6 +555,23 @@ pub trait ClientChannelSource: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
+    /// The record for `channel_id`, read from this source's own authority
+    /// -- for a caching source, the chain its cache is built from -- never
+    /// from a cache it keeps. The registry calls this instead of
+    /// [`evm_channel`](Self::evm_channel) when a claim has **breached** the
+    /// memoised deposit floor: the floor is a lower bound, and a cache can
+    /// legitimately hold a stale or partial one (a deposit top-up whose log
+    /// is not yet confirmation-deep), so re-serving the cache would refuse
+    /// a claim the chain would honour. A source that already answers from
+    /// the chain (the default) has nothing fresher to say than
+    /// [`evm_channel`](Self::evm_channel).
+    async fn evm_channel_fresh(
+        &self,
+        channel_id: &[u8; 32],
+    ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
+        self.evm_channel(channel_id).await
+    }
+
     /// Whether this source has a durable, definitive record that
     /// `channel_id` has settled -- without touching a chain to find out
     /// (issue #661; a merely closed channel is not terminal, see
@@ -1032,7 +1049,7 @@ impl ClientChannelRegistry {
             Plan::Serve(channel) => Ok(Some(channel)),
             Plan::Refuse(failure) => Err(failure.into()),
             Plan::Ask { fallback, unseen } => {
-                self.resolve_evm(channel_id, fallback, unseen, requester)
+                self.resolve_evm(channel_id, fallback, unseen, requester, Trigger::Age)
                     .await
             }
         }
@@ -1072,7 +1089,7 @@ impl ClientChannelRegistry {
             Plan::Serve(channel) => Ok(Some(channel)),
             Plan::Refuse(failure) => Err(failure.into()),
             Plan::Ask { fallback, unseen } => {
-                self.resolve_evm(channel_id, fallback, unseen, requester)
+                self.resolve_evm(channel_id, fallback, unseen, requester, Trigger::Breach)
                     .await
             }
         }
@@ -1082,13 +1099,19 @@ impl ClientChannelRegistry {
     /// one place [`Self::resolved`] is written. `fallback` is the memoised
     /// reading to answer with if the lookup fails, and `unseen` says this
     /// registry held no entry for the channel at all -- see [`Plan::Ask`]
-    /// for why the two are not the same thing.
+    /// for why the two are not the same thing. `trigger` decides which of
+    /// the source's two reads this is: a [`Trigger::Breach`] must reach the
+    /// source's authority ([`ClientChannelSource::evm_channel_fresh`]) --
+    /// the whole reason a breach re-reads is that a cached floor may be
+    /// stale -- while an ageing re-read is content with whatever the source
+    /// considers current.
     async fn resolve_evm(
         &self,
         channel_id: &[u8; 32],
         fallback: Option<EvmChannel>,
         unseen: bool,
         requester: &str,
+        trigger: Trigger,
     ) -> Result<Option<EvmChannel>, ChannelResolutionError> {
         let Some(source) = self.sources.get(&ClaimChain::Evm) else {
             return Ok(None);
@@ -1107,7 +1130,11 @@ impl ClientChannelRegistry {
             memo: &self.resolved,
             key: *channel_id,
         };
-        let resolved = match source.evm_channel(channel_id).await {
+        let lookup = match trigger {
+            Trigger::Age => source.evm_channel(channel_id).await,
+            Trigger::Breach => source.evm_channel_fresh(channel_id).await,
+        };
+        let resolved = match lookup {
             Ok(resolved) => {
                 self.record_lookup_outcome(ClaimChain::Evm, None);
                 resolved
@@ -2220,6 +2247,84 @@ mod tests {
             DepositFloor::AtLeast(5_000)
         );
         assert_eq!(source.lookups(), 2);
+    }
+
+    /// A source that answers `evm_channel` from a cache of its own (the
+    /// issue #661 channel index) can hold a deposit floor the chain has
+    /// since raised -- a top-up whose log is not yet confirmation-deep. A
+    /// breach re-read that consulted the same cache again would refuse a
+    /// claim the chain would honour, so the breach path must go through
+    /// [`ClientChannelSource::evm_channel_fresh`], never
+    /// [`ClientChannelSource::evm_channel`].
+    #[tokio::test]
+    async fn a_breach_re_read_bypasses_a_source_s_own_cache() {
+        /// `evm_channel` plays the cache (stale floor); `evm_channel_fresh`
+        /// plays the chain (the floor after the top-up).
+        #[derive(Debug)]
+        struct CachingSource;
+
+        #[async_trait]
+        impl ClientChannelSource for CachingSource {
+            async fn evm_channel(
+                &self,
+                _channel_id: &[u8; 32],
+            ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
+                Ok(Some(evm_channel_depositing(DepositFloor::AtLeast(1_000))))
+            }
+
+            async fn evm_channel_fresh(
+                &self,
+                _channel_id: &[u8; 32],
+            ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
+                Ok(Some(evm_channel_depositing(DepositFloor::AtLeast(5_000))))
+            }
+        }
+
+        // A long refresh window, so the ageing path serves the memo (which
+        // is what lets the final assertion below see the write-through
+        // rather than another cached read), and no re-attempt suppression,
+        // so the breach re-read is observable immediately.
+        let registry = ClientChannelRegistry::new()
+            .with_source(Arc::new(CachingSource))
+            .with_liveness_policy(ChannelLivenessPolicy {
+                refresh_after: Duration::from_secs(3_600),
+                serve_stale_until: Duration::from_secs(7_200),
+                min_reattempt_interval: Duration::ZERO,
+            });
+
+        // An ordinary resolve is content with the source's cached answer.
+        assert_eq!(
+            registry
+                .evm(&[0x07; 32], A_BUYER)
+                .await
+                .unwrap()
+                .unwrap()
+                .deposit_floor,
+            DepositFloor::AtLeast(1_000)
+        );
+
+        // A breach is not: it reaches the source's authority.
+        assert_eq!(
+            registry
+                .refresh_evm(&[0x07; 32], A_BUYER)
+                .await
+                .unwrap()
+                .unwrap()
+                .deposit_floor,
+            DepositFloor::AtLeast(5_000)
+        );
+
+        // And the fresh floor writes through the memo, so the next packet
+        // is served the corrected figure without another read.
+        assert_eq!(
+            registry
+                .evm(&[0x07; 32], A_BUYER)
+                .await
+                .unwrap()
+                .unwrap()
+                .deposit_floor,
+            DepositFloor::AtLeast(5_000)
+        );
     }
 
     /// Issue #649: a channel resolved while it was payable, which the chain
