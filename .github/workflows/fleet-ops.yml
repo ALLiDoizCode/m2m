@@ -409,8 +409,8 @@ jobs:
               # publish, sleep, repeat (its overlay's own header explains
               # why) -- NOT a one-shot: `run --rm` would hang this job on
               # the loop while standing up a SECOND publisher issuing
-              # duplicate PAID writes beside the box's own (this PR's
-              # review). Restarting the resident service re-enters the loop
+              # duplicate PAID writes beside the box's own (issue #948).
+              # Restarting the resident service re-enters the loop
               # at its first iteration: one publish, now, from the box that
               # holds the identity key -- and the loop's greppable verdict
               # line is the read-back this file's doctrine demands.
