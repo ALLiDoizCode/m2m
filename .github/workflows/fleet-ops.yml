@@ -358,6 +358,17 @@ jobs:
               # checkout's compose file currently names and recreates the
               # container from it — the missing verb #948 needed to actually
               # roll a box onto a tag carrying its config's fields.
+              #
+              # ORDER MATTERS, and only one order is safe: `deploy` FIRST,
+              # `config-apply` SECOND. `RawAnnounceConfig`/`RawConfig` are
+              # `deny_unknown_fields`, so a config carrying a field the
+              # running binary predates is not ignored — it is a load error.
+              # `config-apply` restarts `connector-rust` as its whole point,
+              # so applying such a config to a box still on the old pin exits
+              # the container and takes the box's client edge down until
+              # someone restores the backup. The new binary reading the OLD
+              # config is harmless by comparison, which is why the pin goes
+              # first.
               if [ "$APPLY" != "true" ]; then
                 say "**Dry run.** Would run on \`$BOX\`: \`git pull --ff-only\`, then \`$COMPOSE pull $SERVICE && $COMPOSE up -d --no-deps $SERVICE\`, then fail unless the running container's image id equals the id of the pin the refreshed checkout names."
                 exit 0
