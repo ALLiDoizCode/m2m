@@ -18,8 +18,8 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-# Key-shaped filename patterns (extended globs, matched with bash's
-# GLOBSTAR-free `case`). Kept in sync with connector#922's acceptance
+# Key-shaped filename patterns, matched against each tracked file's basename
+# by `matches_pattern` below. Kept in sync with connector#922's acceptance
 # criteria; add a pattern here rather than special-casing a path below.
 PATTERNS=(
   '*-keypair.json'
