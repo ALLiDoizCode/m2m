@@ -1,45 +1,22 @@
 // ---------------------------------------------------------------------------
 // Solana faucet drip
 // ---------------------------------------------------------------------------
-// Mirrors infra/solana/fund-solana.sh, but in-process:
-//   1. Transfer SOL to the recipient from the committed devnet treasury
-//      authority (usdc-authority.json) — a plain treasury→recipient transfer,
-//      same as the USDC leg below and the Mina `treasury-drip` mode. This
-//      avoids `requestAirdrop`, whose public-devnet endpoint is per-IP
-//      rate-limited and frequently dry for outside callers (issue #379). A
-//      `requestAirdrop` call is kept as a fallback for when the treasury
-//      itself runs low.
-//   2. Transfer mock USDC from the committed devnet treasury authority
-//      (usdc-authority.json) — auto-creating the recipient's associated token
-//      account (ATA) if it does not exist yet.
+// USDC only (owner decision, issue #945 — supersedes #691 and #258/#379's SOL
+// leg entirely, not just hardens it): transfer mock USDC from the committed
+// devnet treasury authority (usdc-authority.json), auto-creating the
+// recipient's associated token account (ATA) if it does not exist yet.
+// Treasury SOL is scarce and not self-replenishing (toon-meta#258); gas
+// provisioning is not this faucet's job — recipients get SOL for fees from
+// the chain's own faucet.
 //
 // The treasury keypair + USDC mint are the SAME deterministic devnet identities
 // seeded by infra/solana/create-usdc-mint.sh, so peers can hardcode them.
-//
-// SOLANA_SOL_AMOUNT default (toon-meta#258): the committed devnet treasury
-// (AEPoA5xTTJY9SR8c5CfsemFGC5TmxQBe6Xf6wewEtnYa) has observed balances as low
-// as ~0.45 SOL — it is NOT re-funded by the public airdrop (that is the whole
-// problem this fix works around), only by an operator manually topping it up.
-// A 2 SOL/drip default (the pre-#258 value) would exhaust it in ONE request
-// and 500 every drip after; 0.03 SOL/drip is enough to open + operate a
-// payment channel and gives the treasury ~15 drips before an operator needs to
-// top it up. The per-address cooldown below (mirroring the Base Sepolia /
-// Mina USDC legs) is what makes that budget last: without it, one address
-// looping the endpoint could drain the whole treasury in seconds.
 //
 // Everything here is OPTIONAL: if SOLANA_FAUCET_KEYPAIR / the RPC are not
 // configured (e.g. an EVM-only deploy), `createSolanaFaucet` returns null and
 // the route answers a clear 503 instead of crashing the whole service.
 import fs from 'fs';
-import {
-  Connection,
-  Keypair,
-  LAMPORTS_PER_SOL,
-  PublicKey,
-  SystemProgram,
-  Transaction,
-  sendAndConfirmTransaction,
-} from '@solana/web3.js';
+import { Connection, Keypair, PublicKey } from '@solana/web3.js';
 import { getOrCreateAssociatedTokenAccount, transfer } from '@solana/spl-token';
 import { createDripLimiter } from './drip-limiter.js';
 
@@ -48,10 +25,8 @@ const SOLANA_USDC_MINT = process.env.SOLANA_USDC_MINT || '';
 const SOLANA_FAUCET_KEYPAIR = process.env.SOLANA_FAUCET_KEYPAIR || '/keys/usdc-authority.json';
 // 6 decimals — real-USDC standard, matches infra/solana/create-usdc-mint.sh.
 const SOLANA_USDC_DECIMALS = Number(process.env.SOLANA_USDC_DECIMALS || '6');
-// Conservative default — see the treasury-balance note above (toon-meta#258).
-const SOLANA_SOL_AMOUNT = Number(process.env.SOLANA_SOL_AMOUNT || '0.03'); // SOL per drip
 const SOLANA_USDC_AMOUNT = Number(process.env.SOLANA_USDC_AMOUNT || '1000'); // USDC per drip
-// Per-address cooldown (default 24h) — protects the low-balance SOL treasury
+// Per-address cooldown (default 24h) — protects the treasury's USDC balance
 // from being drained by repeat requests from a single address. Mirrors
 // BASE_SEPOLIA_COOLDOWN_MS / MINA_USDC_COOLDOWN_HOURS.
 const SOLANA_DRIP_COOLDOWN_MS = Number(
@@ -78,10 +53,11 @@ const SOLANA_DRIP_COOLDOWN_MS = Number(
 // within one 1.5s probe interval essentially always; two intervals (3s) before
 // declaring a stall is already very conservative.
 const SLOT_PROBE_INTERVAL_MS = Number(process.env.SOLANA_SLOT_PROBE_INTERVAL_MS || '1500');
-// Deadline: a healthy full drip (airdrop + up to 3 treasury txs, 'confirmed'
-// commitment at ~2.3 slots/s) completes in well under 15s; a single blockhash
-// validity window (150 blocks) is ~65s. 90s ≥ one full window + margin, so the
-// deadline can only fire when the chain genuinely stalls mid-drip.
+// Deadline: a healthy USDC drip (up to 2 treasury txs — the source and
+// recipient ATA creation/transfer — at 'confirmed' commitment, ~2.3 slots/s)
+// completes in well under 15s; a single blockhash validity window (150
+// blocks) is ~65s. 90s ≥ one full window + margin, so the deadline can only
+// fire when the chain genuinely stalls mid-drip.
 const SOLANA_DRIP_DEADLINE_MS = Number(process.env.SOLANA_DRIP_DEADLINE_MS || '90000');
 
 // Probes `getSlot()` (an async () => number) until it advances past its first
@@ -156,21 +132,20 @@ export function createSolanaFaucet() {
   const connection = new Connection(SOLANA_RPC_URL, 'confirmed');
 
   // Per-address off-chain cooldown (claim BEFORE the drip; released on
-  // failure) — see the SOLANA_SOL_AMOUNT note above for why this matters here:
-  // the treasury's SOL balance is small and NOT self-replenishing.
+  // failure) — protects the treasury's USDC balance from being drained by
+  // repeat requests from a single address.
   const limiter = createDripLimiter({ cooldownMs: SOLANA_DRIP_COOLDOWN_MS });
 
   console.log(`✅ Solana faucet enabled: RPC ${SOLANA_RPC_URL}`);
   console.log(`   USDC mint:   ${mint.toBase58()}`);
   console.log(`   Treasury:    ${authority.publicKey.toBase58()}`);
-  console.log(`   Per drip:    ${SOLANA_SOL_AMOUNT} SOL + ${SOLANA_USDC_AMOUNT} USDC`);
+  console.log(`   Per drip:    ${SOLANA_USDC_AMOUNT} USDC`);
   console.log(`   Cooldown:    ${SOLANA_DRIP_COOLDOWN_MS / 3_600_000}h per address`);
 
   return {
     rpcUrl: SOLANA_RPC_URL,
     mint: mint.toBase58(),
     treasury: authority.publicKey.toBase58(),
-    solAmount: SOLANA_SOL_AMOUNT,
     usdcAmount: SOLANA_USDC_AMOUNT,
     cooldownMs: SOLANA_DRIP_COOLDOWN_MS,
 
@@ -195,6 +170,11 @@ export function createSolanaFaucet() {
       limiter.release(address);
     },
 
+    // USDC-only drip: a plain treasury→recipient token transfer. The
+    // TREASURY (not the recipient) pays the tx fee + ATA rent, so this works
+    // even if the recipient currently holds 0 SOL — recipients get SOL for
+    // gas from the chain's own faucet (mirrors the Mina
+    // `/api/mina/usdc-request` USDC-only leg).
     async drip(address) {
       // Fail fast (~1.5–3s) with an honest VALIDATOR_STALLED error when the
       // validator is wedged, instead of burning 30–90s in confirmation waits
@@ -204,59 +184,21 @@ export function createSolanaFaucet() {
       return withDeadline(dripInner(address), SOLANA_DRIP_DEADLINE_MS, 'Solana drip');
     },
 
-    // USDC-only drip: a plain treasury→recipient token transfer with NO SOL
-    // airdrop. The TREASURY (not the recipient) pays the tx fee + ATA rent, so
-    // this works even when the public devnet airdrop is dry/rate-limited and even
-    // if the recipient currently holds 0 SOL. Use it for addresses already funded
-    // with SOL (mirrors the Mina `/api/mina/usdc-request` USDC-only leg).
-    async dripUsdcOnly(address) {
-      await assertSlotAdvancing(() => connection.getSlot('processed'));
-      return withDeadline(usdcOnlyInner(address), SOLANA_DRIP_DEADLINE_MS, 'Solana USDC drip');
+    // Release the RPC websocket @solana/web3.js holds under this faucet's
+    // Connection. Teardown-only: the faucet's Connection is otherwise
+    // unreachable from outside, and a websocket whose validator has already
+    // gone away retries its reconnect forever, pinning the caller's event
+    // loop — which is exactly the state an integration test is in after it
+    // kills its disposable validator. A deliberate close beforehand is
+    // final. No-op if the socket never connected.
+    close() {
+      try {
+        connection._rpcWebSocket.close();
+      } catch {
+        // Never connected — nothing holding the loop, nothing to release.
+      }
     },
   };
-
-  // Transfer SOL from the treasury to the recipient — the primary SOL-funding
-  // path (issue #379). The TREASURY pays the tx fee, so this works regardless
-  // of the public devnet airdrop's rate limits, mirroring `transferUsdc` below.
-  async function transferSol(recipient) {
-    const lamports = Math.round(SOLANA_SOL_AMOUNT * LAMPORTS_PER_SOL);
-    const latest = await connection.getLatestBlockhash('confirmed');
-    const tx = new Transaction({
-      feePayer: authority.publicKey,
-      blockhash: latest.blockhash,
-      lastValidBlockHeight: latest.lastValidBlockHeight,
-    }).add(
-      SystemProgram.transfer({
-        fromPubkey: authority.publicKey,
-        toPubkey: recipient,
-        lamports,
-      })
-    );
-    const signature = await sendAndConfirmTransaction(connection, tx, [authority], {
-      commitment: 'confirmed',
-    });
-    console.log(`  📤 Transferred ${SOLANA_SOL_AMOUNT} SOL from treasury: ${signature}`);
-    return signature;
-  }
-
-  // Airdrop SOL to the recipient and confirm it (blockhash/lastValidBlockHeight
-  // strategy — tied to actual chain progress, not a 30s wall clock; issue #277).
-  // Fallback only: used when the treasury itself can't cover the SOL transfer.
-  async function airdropSol(recipient) {
-    const lamports = Math.round(SOLANA_SOL_AMOUNT * LAMPORTS_PER_SOL);
-    const latest = await connection.getLatestBlockhash('confirmed');
-    const airdropSig = await connection.requestAirdrop(recipient, lamports);
-    await connection.confirmTransaction(
-      {
-        signature: airdropSig,
-        blockhash: latest.blockhash,
-        lastValidBlockHeight: latest.lastValidBlockHeight,
-      },
-      'confirmed'
-    );
-    console.log(`  📤 Airdropped ${SOLANA_SOL_AMOUNT} SOL: ${airdropSig}`);
-    return airdropSig;
-  }
 
   // Transfer USDC from the treasury to the recipient, auto-creating the recipient
   // ATA (the treasury is the fee payer + rent payer, so the recipient needs no
@@ -293,62 +235,10 @@ export function createSolanaFaucet() {
     };
   }
 
-  // Full drip: SOL + USDC — but the USDC leg is DECOUPLED from the SOL leg. The
-  // SOL leg is SKIPPED when the recipient is already funded, and a FAILED SOL
-  // leg no longer aborts the request: the USDC transfer still runs (it is
-  // funded by the treasury, independent of the SOL leg's outcome). USDC drips
-  // as long as the treasury holds SOL (fees) + USDC.
+  // Drip body — a treasury→recipient USDC transfer, no other on-chain action.
   async function dripInner(address) {
     const recipient = new PublicKey(address);
-
-    // Skip the SOL leg when the recipient already holds enough SOL to transact.
-    const SKIP_AIRDROP_LAMPORTS = Math.round(0.02 * LAMPORTS_PER_SOL);
-    const startBalance = await connection.getBalance(recipient, 'confirmed');
-
-    let sol;
-    if (startBalance >= SKIP_AIRDROP_LAMPORTS) {
-      console.log(
-        `  ⏭️  Recipient holds ${startBalance / LAMPORTS_PER_SOL} SOL — skipping SOL leg`
-      );
-      sol = {
-        skipped: true,
-        reason: 'recipient already funded',
-        balanceSol: String(startBalance / LAMPORTS_PER_SOL),
-      };
-    } else {
-      try {
-        // Primary: a treasury→recipient SOL transfer, immune to the public
-        // devnet airdrop's per-IP rate limit (issue #379).
-        const signature = await transferSol(recipient);
-        sol = { signature, amount: String(SOLANA_SOL_AMOUNT), source: 'treasury' };
-      } catch (err) {
-        console.log(
-          `  ⚠️  Treasury SOL transfer failed (${err.message}); falling back to requestAirdrop`
-        );
-        try {
-          const signature = await airdropSol(recipient);
-          sol = { signature, amount: String(SOLANA_SOL_AMOUNT), source: 'airdrop-fallback' };
-        } catch (airdropErr) {
-          // Neither path worked (e.g. treasury underfunded AND the public
-          // airdrop is dry). Do NOT abort — the USDC leg is treasury-funded
-          // and independent of this leg.
-          sol = {
-            skipped: true,
-            reason: 'sol funding unavailable',
-            error: String(airdropErr.message || airdropErr),
-          };
-        }
-      }
-    }
-
     const usdc = await transferUsdc(recipient);
-    return { sol, usdc };
-  }
-
-  // USDC-only body — a treasury→recipient transfer with no airdrop leg at all.
-  async function usdcOnlyInner(address) {
-    const recipient = new PublicKey(address);
-    const usdc = await transferUsdc(recipient);
-    return { sol: { skipped: true, reason: 'usdc-only route' }, usdc };
+    return { usdc };
   }
 }
