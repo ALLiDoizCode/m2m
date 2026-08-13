@@ -70,6 +70,9 @@ test(
   'dripInner delivers real, verified lamports and explicitly diagnoses a low treasury',
   { skip: !available && 'solana-test-validator not on PATH' },
   async (t) => {
+    // Assigned mid-test, referenced by the teardown below — declared up
+    // here so a test that fails before the faucet exists still tears down.
+    let faucet;
     const rpcPort = 21000 + Math.floor(Math.random() * 3000);
     const rpcUrl = `http://127.0.0.1:${rpcPort}`;
     const ledgerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'faucet-solana-live-'));
@@ -95,18 +98,28 @@ test(
       { stdio: 'ignore' }
     );
     t.after(() => {
+      // Close both RPC websockets FIRST, while the validator is still up: a
+      // deliberate close with no live subscriptions is final, whereas a
+      // socket that watches its validator die retries its reconnect forever
+      // and keeps this process's event loop alive. With both released, the
+      // process exits naturally, so the TAP results AND the exit code are
+      // the runner's own — the previous unconditional `process.exit(0)`
+      // here ran before the test's result was flushed, which reported
+      // assertion failures as `ok` with exit code 0 (this file was
+      // incapable of failing).
+      faucet?.close();
+      try {
+        connection._rpcWebSocket.close();
+      } catch {
+        // Never connected — nothing to release.
+      }
       child.kill();
       fs.rmSync(ledgerDir, { recursive: true, force: true });
-      // @solana/web3.js's RPC websocket client (created internally by both
-      // this file's own Connection and the faucet's, the latter unreachable
-      // from here) retries forever once the validator it was subscribed to
-      // is killed above — harmless, but it keeps this process's event loop
-      // alive so `node --test` never sees it exit. node:test isolates each
-      // test FILE into its own process (this file's process runs no other
-      // file's tests), so a clean forced exit here is scoped to this file
-      // only; the queueMicrotask lets the TAP result for this test flush
-      // first.
-      queueMicrotask(() => process.exit(0));
+      // Fallback only, and unref'd so it cannot keep the process alive
+      // itself: if some straggling handle still pins the event loop, exit
+      // with the verdict node:test has set by then (a failed test file sets
+      // `process.exitCode` nonzero), never a hardcoded 0.
+      setTimeout(() => process.exit(process.exitCode ?? 0), 5_000).unref();
     });
 
     const connection = new Connection(rpcUrl, 'confirmed');
@@ -154,7 +167,7 @@ test(
     process.env.SOLANA_DRIP_COOLDOWN_MS = '1';
 
     const { createSolanaFaucet } = await import('../src/solana.js');
-    const faucet = createSolanaFaucet();
+    faucet = createSolanaFaucet();
     assert.ok(faucet, 'faucet should be enabled against the live validator');
 
     // ── Case 1: a well-funded treasury delivers real, verified lamports ──

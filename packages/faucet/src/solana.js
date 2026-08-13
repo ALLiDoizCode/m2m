@@ -222,6 +222,21 @@ export function createSolanaFaucet() {
     usdcAmount: SOLANA_USDC_AMOUNT,
     cooldownMs: SOLANA_DRIP_COOLDOWN_MS,
 
+    // Release the RPC websocket @solana/web3.js holds under this faucet's
+    // Connection. Teardown-only: the faucet's Connection is otherwise
+    // unreachable from outside, and a websocket whose validator has already
+    // gone away retries its reconnect forever, pinning the caller's event
+    // loop — which is exactly the state an integration test is in after it
+    // kills its disposable validator. A deliberate close beforehand is
+    // final. No-op if the socket never connected.
+    close() {
+      try {
+        connection._rpcWebSocket.close();
+      } catch {
+        // Never connected — nothing holding the loop, nothing to release.
+      }
+    },
+
     isValidAddress(address) {
       try {
         // PublicKey throws on a malformed base58 / wrong-length key.
