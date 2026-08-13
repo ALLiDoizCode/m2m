@@ -24,6 +24,7 @@ mod identity;
 mod operator;
 mod peer;
 mod peer_channel;
+mod peer_sale;
 mod route;
 mod secret;
 mod settlement;
@@ -36,6 +37,7 @@ pub use identity::ClientIdentityConfig;
 pub use operator::OperatorConfig;
 pub use peer::{ClaimEnforcement, PeerCarriage, PeerConfig, PeerCredential, PeerExposure};
 pub use peer_channel::{EvmPeerChannelConfig, PeerChannelConfig, SolanaPeerChannelConfig};
+pub use peer_sale::PeerSaleConfig;
 pub use route::{PeerRouteConfig, StaticRoute, TransportPolicy};
 pub use secret::SecretLocation;
 pub use settlement::{

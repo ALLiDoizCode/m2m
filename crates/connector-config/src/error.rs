@@ -662,4 +662,16 @@ pub enum ConfigError {
          (issue #912)"
     )]
     AnnounceNoticeInvalidSeverity { value: String },
+
+    #[error(
+        "[peer_sale] prefix '{prefix}' sets no 'price': the peer-sale route is never silently \
+         free either (ADR 0028/issue #557) -- set 'price = 0' if that is deliberate (issue #885)"
+    )]
+    PeerSaleMissingPrice { prefix: String },
+
+    #[error(
+        "[peer_sale] prefix '{prefix}' collides with a route, peer route or child already \
+         naming that prefix (issue #885) -- prefixes share one namespace"
+    )]
+    PeerSalePrefixCollision { prefix: String },
 }

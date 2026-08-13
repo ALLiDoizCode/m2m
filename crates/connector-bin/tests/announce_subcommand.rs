@@ -339,6 +339,47 @@ fn a_node_fronting_no_relay_announces_no_relay_url() {
     );
 }
 
+/// Issue #885: a node selling peering advertises the price in kind:10032's
+/// `routePrices` even though the peer-sale prefix was never added to
+/// `[announce].addresses` -- discoverable without a second, easy-to-forget
+/// config line, which is the whole point of pricing the mutation.
+#[test]
+fn a_peer_sale_routes_price_is_advertised_without_being_listed_in_addresses() {
+    let ingress = RecordingIngress::start();
+    let key_file = support::write_raw_key_file(17);
+    let config = write(&relay_fronting_config(
+        key_file.path(),
+        &format!("http://{}/write", ingress.addr),
+        "\n[peer_sale]\nprefix = \"g.test.peer-sale\"\nprice = 5000\n",
+    ));
+    let node = support::spawn_connector(config.path());
+
+    let (ok, stdout, stderr) = run_connector(&[
+        "announce",
+        "--config",
+        &config.path().display().to_string(),
+        &format!("http://{}/ilp", node.client_edge_addr),
+        "--dry-run",
+    ]);
+
+    assert!(ok, "dry run failed:\nstdout: {stdout}\nstderr: {stderr}");
+    let printed: serde_json::Value = serde_json::from_str(
+        stdout
+            .split_once('{')
+            .map(|(_, rest)| format!("{{{rest}"))
+            .expect("the dry run prints the event")
+            .trim(),
+    )
+    .expect("the printed event is JSON");
+    let info: serde_json::Value =
+        serde_json::from_str(printed["content"].as_str().expect("content is a string"))
+            .expect("the content is an IlpPeerInfo");
+    // Not in `[announce].addresses` (only "g.test" and "g.test.relay" are),
+    // yet its price is present.
+    assert_eq!(info["routePrices"]["g.test.peer-sale"], "5000");
+    assert_eq!(info["routePrices"]["g.test.relay"], "1000");
+}
+
 /// A config with nothing to announce refuses by name rather than
 /// announcing a node it can only half describe.
 #[test]

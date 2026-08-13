@@ -1,6 +1,6 @@
 # Architecture decision records
 
-36 records, and they do **three different jobs**. Most readers only need one group.
+37 records, and they do **three different jobs**. Most readers only need one group.
 
 The numbers are permanent and are never reused or renumbered — they are cited over a thousand
 times across this repo and from `toon-meta`, `relay` and `store`. This index groups them by
@@ -8,7 +8,7 @@ scope; it does not move them.
 
 | If you are…                                                                 | Read                                                               |
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| changing the connector's code or structure                                  | **[Connector architecture](#connector-architecture)** — 11 records |
+| changing the connector's code or structure                                  | **[Connector architecture](#connector-architecture)** — 12 records |
 | writing or fixing another implementation (a client SDK, a second connector) | **[Protocol law](#protocol-law)** — 22 records                     |
 | deploying, migrating or operating the fleet                                 | **[Fleet and operations](#fleet-and-operations)** — 3 records      |
 
@@ -24,19 +24,20 @@ scope; it does not move them.
 Internal to this codebase. Changing one of these changes how the connector is built; it does
 not change what anything else must do.
 
-| #                                                                        | Decision                                                               | Status                 |
-| ------------------------------------------------------------------------ | ---------------------------------------------------------------------- | ---------------------- |
-| [0001](0001-rust-workspace-library-first.md)                             | The connector is a Rust library first, a binary second                 | current                |
-| [0002](0002-drop-mina-from-the-rust-connector.md)                        | Settles on EVM and Solana only; Mina is dropped                        | current                |
-| [0005](0005-claims-are-truth-balances-are-a-projection.md)               | Claims are the source of truth; balances are a projection              | current                |
-| [0006](0006-the-connector-is-mechanism-not-policy.md)                    | The connector is mechanism; discovery and route policy live outside it | current                |
-| [0007](0007-testing-doctrine-fakes-yes-mocks-no.md)                      | Property tests over a pure core; fakes are allowed, mocks are not      | current                |
-| [0008](0008-operator-surface-splits-read-from-write.md)                  | The operator surface splits read authority from write authority        | current                |
-| [0009](0009-one-typed-config-file-no-environment-layer.md)               | Configuration is one typed file with no environment-variable layer     | current                |
-| [0012](0012-a-signer-and-a-treasury-not-a-wallet.md)                     | The connector holds a signer and a treasury, not a wallet              | current                |
-| [0014](0014-metrics-surface-and-packet-correlated-logs.md)               | The metrics surface is decided, not accreted                           | current                |
-| [0015](0015-read-mostly-state-is-a-swapped-snapshot.md)                  | Read-mostly state is a swapped snapshot; the packet path never locks   | current                |
-| [0034](0034-a-runtime-peer-route-table-never-shadows-the-config-file.md) | A runtime peer/route table never shadows the config file               | current — extends 0009 |
+| #                                                                                     | Decision                                                               | Status                       |
+| ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | ---------------------------- |
+| [0001](0001-rust-workspace-library-first.md)                                          | The connector is a Rust library first, a binary second                 | current                      |
+| [0002](0002-drop-mina-from-the-rust-connector.md)                                     | Settles on EVM and Solana only; Mina is dropped                        | current                      |
+| [0005](0005-claims-are-truth-balances-are-a-projection.md)                            | Claims are the source of truth; balances are a projection              | current                      |
+| [0006](0006-the-connector-is-mechanism-not-policy.md)                                 | The connector is mechanism; discovery and route policy live outside it | current                      |
+| [0007](0007-testing-doctrine-fakes-yes-mocks-no.md)                                   | Property tests over a pure core; fakes are allowed, mocks are not      | current                      |
+| [0008](0008-operator-surface-splits-read-from-write.md)                               | The operator surface splits read authority from write authority        | current                      |
+| [0009](0009-one-typed-config-file-no-environment-layer.md)                            | Configuration is one typed file with no environment-variable layer     | current                      |
+| [0012](0012-a-signer-and-a-treasury-not-a-wallet.md)                                  | The connector holds a signer and a treasury, not a wallet              | current                      |
+| [0014](0014-metrics-surface-and-packet-correlated-logs.md)                            | The metrics surface is decided, not accreted                           | current                      |
+| [0015](0015-read-mostly-state-is-a-swapped-snapshot.md)                               | Read-mostly state is a swapped snapshot; the packet path never locks   | current                      |
+| [0034](0034-a-runtime-peer-route-table-never-shadows-the-config-file.md)              | A runtime peer/route table never shadows the config file               | current — extends 0009       |
+| [0037](0037-a-purchased-peering-is-a-terminated-route-whose-work-is-a-table-write.md) | A purchased peering is a terminated route whose work is a table write  | current — extends 0028, 0034 |
 
 ---
 
