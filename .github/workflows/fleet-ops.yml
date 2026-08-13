@@ -366,7 +366,7 @@ jobs:
               # /root/connector, so a stale checkout silently redeploys the
               # OLD pin (issue #948).
               # infra/devnet-manage.sh's deploy legs pull for the same
-              # reason -- but fail-closed here, no \`|| true\`: a diverged
+              # reason -- but fail-closed here, no `|| true`: a diverged
               # or detached checkout means the pin about to deploy is not
               # the committed one, which is this verb's whole job.
               sshbox "cd $REMOTE_REPO && git pull --ff-only"
@@ -378,7 +378,7 @@ jobs:
               sshbox "cd $REMOTE_REPO && $COMPOSE pull '$SERVICE' && $COMPOSE up -d '$SERVICE'"
               # Re-read OFF THE BOX (this file's own doctrine): the running
               # container's image id must be the id of the pin just pulled.
-              # \`docker ps\` output alone cannot distinguish a no-op from a
+              # `docker ps` output alone cannot distinguish a no-op from a
               # rollout (issue #948).
               RUNNING=$(sshbox "cd $REMOTE_REPO && docker inspect -f '{{.Image}}' \$($COMPOSE ps -q '$SERVICE')")
               PULLED=$(sshbox "docker image inspect -f '{{.Id}}' '$PINNED'")

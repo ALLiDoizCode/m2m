@@ -135,11 +135,12 @@ services:
     # PIN OF RECORD (issue #848, bumped for #948): bumped past that floor to
     # `rust-sha-415531a` -- the prior pin `rust-sha-440eab7` predates the
     # `notice_*` announce fields (issue #912, PR #915) this box's committed
-    # `connector-rust.toml` now sets, and the one-shot `announce` this
-    # overlay runs would refuse to boot on it (`RawAnnounceConfig` is
-    # `deny_unknown_fields`). This repo's compose files are the fleet's pin
-    # of record and lead the boxes, not the reverse (#948 is a repo-only
-    # change; the cutover is separate and human-gated). See
+    # `connector-rust.toml` now sets, and every cycle of the publish loop
+    # below would fail to load that config on it (`RawAnnounceConfig` is
+    # `deny_unknown_fields`) -- the loop would survive and announce nothing,
+    # logging `[announce] FAILED` forever. This repo's compose files are the
+    # fleet's pin of record and lead the boxes, not the reverse (#948 is a
+    # repo-only change; the cutover is separate and human-gated). See
     # infra/linode-node/docker-compose.node.rust.yml's matching comment and
     # `EXPECTED_CONNECTOR_TAG` in
     # crates/connector-bin/tests/devnet_configs_load.rs.
