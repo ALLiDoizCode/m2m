@@ -237,7 +237,10 @@ enum RouteTarget {
     /// is at most one such route, so there is nothing to index into, and
     /// carrying the facts here means no arm downstream has to reach back
     /// into `Connector::peer_sale` and assert it is still `Some`.
-    PeerSale(u64, Duration),
+    PeerSale {
+        price: u64,
+        lease: Duration,
+    },
 }
 
 /// How permanent a matched routing-table entry is, least to most -- the
@@ -273,7 +276,7 @@ impl RouteTarget {
             // A config-file entry, like an app route -- durable and
             // priced, never shadowed by a lease or a runtime peer route
             // at the same prefix length.
-            RouteTarget::App(_) | RouteTarget::PeerSale(..) => RouteRank::App,
+            RouteTarget::App(_) | RouteTarget::PeerSale { .. } => RouteRank::App,
         }
     }
 }
@@ -308,7 +311,10 @@ enum ConfiguredTarget {
     RuntimePeer(PeerRoute),
     /// The single priced peer-sale route (issue #885), carrying its price
     /// and lease duration (issue #886). See [`RouteTarget::PeerSale`].
-    PeerSale(u64, Duration),
+    PeerSale {
+        price: u64,
+        lease: Duration,
+    },
 }
 
 impl ConfiguredTarget {
@@ -317,7 +323,7 @@ impl ConfiguredTarget {
             ConfiguredTarget::App(index) => RouteTarget::App(index),
             ConfiguredTarget::Peer(index) => RouteTarget::Peer(index),
             ConfiguredTarget::RuntimePeer(route) => RouteTarget::RuntimePeer(route),
-            ConfiguredTarget::PeerSale(price, lease) => RouteTarget::PeerSale(price, lease),
+            ConfiguredTarget::PeerSale { price, lease } => RouteTarget::PeerSale { price, lease },
         }
     }
 
@@ -328,7 +334,7 @@ impl ConfiguredTarget {
     /// it.
     fn rank(&self) -> RouteRank {
         match self {
-            ConfiguredTarget::App(_) | ConfiguredTarget::PeerSale(..) => RouteRank::App,
+            ConfiguredTarget::App(_) | ConfiguredTarget::PeerSale { .. } => RouteRank::App,
             ConfiguredTarget::Peer(_) => RouteRank::Peer,
             ConfiguredTarget::RuntimePeer(_) => RouteRank::RuntimePeer,
         }
@@ -1195,10 +1201,11 @@ impl Connector {
     /// Safe to call at any time, including with packets concurrently in
     /// flight: [`Self::select_configured_route`] already stops matching a
     /// lapsed lease's route the instant the clock passes it (independent
-    /// of whether or when this has run), and every route this returns
-    /// already cloned itself out of the `ArcSwap` snapshot it matched
-    /// against before this method could touch the table -- so a call here
-    /// can only ever remove a row nothing in flight is still reading.
+    /// of whether or when this has run), and a packet already forwarding
+    /// carries a [`PeerRoute`] cloned out of the `ArcSwap` snapshot it
+    /// matched against, so it reads nothing this method can touch -- a
+    /// call here can only ever remove a row nothing in flight still
+    /// depends on.
     /// Intended to be driven periodically by a caller outside this crate
     /// (`connector-cli`), the same shape `EvmChannelIndexSyncer::run`
     /// takes for its own periodic sweep.
@@ -1652,7 +1659,7 @@ impl Connector {
                 let response = self.deliver_to_app(&self.routes[index], prepare).await;
                 return self.finish(response);
             }
-            RouteTarget::PeerSale(price, lease) => {
+            RouteTarget::PeerSale { price, lease } => {
                 tracing::debug!("routed to peer-sale");
                 let response = self
                     .deliver_peer_sale(prepare, client_channel_id, price, lease)
@@ -2503,7 +2510,10 @@ impl Connector {
             select_route(destination, &[sale.prefix()]).map(|_| {
                 (
                     sale.prefix().len(),
-                    ConfiguredTarget::PeerSale(sale.price(), sale.lease()),
+                    ConfiguredTarget::PeerSale {
+                        price: sale.price(),
+                        lease: sale.lease(),
+                    },
                 )
             })
         });
@@ -2551,7 +2561,7 @@ impl Connector {
                 // (issue #885): buying peering is the terminating app's
                 // work, done by this connector itself rather than an
                 // HTTP handler.
-                ConfiguredTarget::PeerSale(price, _lease) => ClientRouteFacts {
+                ConfiguredTarget::PeerSale { price, .. } => ClientRouteFacts {
                     price,
                     transport_policy: TransportPolicy::Both,
                     kind: ClientRouteKind::Terminated,
@@ -5810,7 +5820,7 @@ mod tests {
         /// "checked fresh against the clock on every lookup" guarantee
         /// issue #427's leases already give.
         #[tokio::test]
-        async fn a_purchased_routes_stops_matching_the_instant_its_lease_expires() {
+        async fn a_purchased_route_stops_matching_the_instant_its_lease_expires() {
             let backend = Arc::new(InMemorySettlementBackend::new());
             let channel_id = backend
                 .open(b"buyer".to_vec(), Duration::seconds(3600))

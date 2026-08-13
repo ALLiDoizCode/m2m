@@ -95,7 +95,8 @@ actually happened, not only by what it asked for.
 
 **Safety of removing a row with packets concurrently in flight is inherited, not
 re-solved.** `select_configured_route` already clones the one matched `PeerRoute` out of its
-`ArcSwap` snapshot before returning (ADR 0034's own "Cow, not a plain clone" reasoning); by the
+`ArcSwap` snapshot before returning (`RouteTarget::RuntimePeer`'s own reasoning: one
+bounded-size clone per packet rather than ADR 0015's forbidden whole-collection copy); by the
 time a packet is forwarding, it is no longer reading the table at all. A reap can therefore
 only ever remove a row nothing currently in flight still depends on.
 
