@@ -57,6 +57,26 @@ jobs:
           echo "Checking Prettier formatting..."
           npm run format:check
 
+  # Fails when a key-shaped file (a Solana/EVM keypair, a `.key`/`.secret`, a
+  # wallet file) is tracked in git — the guard connector#920/#922 asked for
+  # after crates/connector-settlement-solana/deploy/payment_channel-keypair.json
+  # sat tracked with no `.gitignore` rule covering it at all. An ignore rule
+  # alone does not catch this class of gap: it only stops a *new* commit from
+  # adding a matching file, not one already in the index, which is exactly how
+  # that keypair survived. This job inspects `git ls-files`, so it catches
+  # both. See tools/ci/check-tracked-secrets.sh for the allowlist and the
+  # pattern list.
+  tracked-secrets:
+    name: Tracked Key Guard
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for tracked key-shaped files
+        run: bash tools/ci/check-tracked-secrets.sh
+
   security:
     name: Security Audit
     runs-on: ubuntu-latest
@@ -174,8 +194,7 @@ jobs:
           # auto-provisioned GITHUB_TOKEN bumps the limit from 60 -> 5000 req/hr.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # solana-test-validator (and solana-keygen, used to resolve the checked-in program
-      # keypair's pubkey) on PATH for connector-settlement-solana's tests (issue #428), the
+      # solana-test-validator on PATH for connector-settlement-solana's tests (issue #428), the
       # Solana twin of the Foundry install above. Without this, a solana-test-validator-gated
       # test would silently skip and report `passed` -- exactly the defect #471 closed for
       # anvil, see crates/connector-settlement-solana/tests/support/mod.rs.
@@ -305,7 +324,7 @@ jobs:
   ci-status:
     name: CI Status Summary
     runs-on: ubuntu-latest
-    needs: [lint-and-format, rust-gate, security, solana-program, devbox-validate]
+    needs: [lint-and-format, rust-gate, security, solana-program, devbox-validate, tracked-secrets]
     if: always()
 
     steps:
@@ -322,6 +341,7 @@ jobs:
           echo "  Solana Program: ${{ needs.solana-program.result }}"
           echo "  Devbox Validation: ${{ needs.devbox-validate.result }}"
           echo "  Security: ${{ needs.security.result }}"
+          echo "  Tracked Key Guard: ${{ needs.tracked-secrets.result }}"
           echo ""
 
           # Security is advisory (transitive dependency vulnerabilities), so it
@@ -331,7 +351,8 @@ jobs:
           if [[ "${{ needs.lint-and-format.result }}" != "success" ]] || \
              [[ "${{ needs.rust-gate.result }}" != "success" ]] || \
              [[ "${{ needs.solana-program.result }}" != "success" ]] || \
-             [[ "${{ needs.devbox-validate.result }}" != "success" ]]; then
+             [[ "${{ needs.devbox-validate.result }}" != "success" ]] || \
+             [[ "${{ needs.tracked-secrets.result }}" != "success" ]]; then
             echo "❌ CI Pipeline FAILED"
             echo ""
             echo "Please check the failed jobs above for details."

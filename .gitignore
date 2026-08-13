@@ -144,5 +144,14 @@ deploy/connector-rust/*.secret
 # ignore rule) is what closed that exposure.
 infra/linode-store/gas-station-solana.key
 
+# Solana program deploy keypairs (issue #922). `crates/connector-settlement-solana/deploy/
+# payment_channel-keypair.json` was tracked with no ignore rule covering it at all — an
+# ignore rule does not protect a file that is already tracked (this one had to be
+# `git rm --cached` separately; see connector#920), but it stops the next one from ever
+# reaching that state. Wildcarded on the crate-relative `deploy/` convention rather than
+# named per-crate, so a new settlement crate's own program keypair is covered without a
+# second ignore rule.
+crates/**/deploy/*-keypair.json
+
 # Local operator scratch notes — working files, never part of the repo.
 .connector-*-runbook.md
