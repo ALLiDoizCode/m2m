@@ -14,7 +14,13 @@ use crate::route::is_valid_ilp_address;
 /// address. `deny_unknown_fields` (issue #556's principle): a mistyped
 /// `pric` is a refuse-to-start error, not a route that silently resolves
 /// with a price of nothing.
-#[derive(Debug, Default, Deserialize)]
+///
+/// `Default` is test-only on purpose: its default value (an empty
+/// `prefix`) is not a config this crate would ever accept, and exists
+/// only so a test naming the two or three fields it cares about can
+/// leave the rest at `..Default::default()`.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(Default))]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawPeerSale {
     prefix: String,
@@ -45,9 +51,21 @@ pub(crate) struct RawPeerSale {
 /// `[peer_sale]` section is bounded exactly as one whose section leaves
 /// every bound unwritten, and the two can never drift apart.
 pub const DEFAULT_MAX_PURCHASED_ROWS: u64 = 32;
+
+/// [`PeerSaleConfig::max_routes_per_payer`]'s default -- see
+/// [`DEFAULT_MAX_PURCHASED_ROWS`] for why these are deliberately tight.
 pub const DEFAULT_MAX_ROUTES_PER_PAYER: u64 = 4;
+
+/// [`PeerSaleConfig::max_prefix_length`]'s default, in bytes -- see
+/// [`DEFAULT_MAX_PURCHASED_ROWS`].
 pub const DEFAULT_MAX_PREFIX_LENGTH: u32 = 128;
+
+/// [`PeerSaleConfig::purchase_rate_limit`]'s default -- see
+/// [`DEFAULT_MAX_PURCHASED_ROWS`].
 pub const DEFAULT_PURCHASE_RATE_LIMIT: u32 = 5;
+
+/// [`PeerSaleConfig::purchase_rate_window_seconds`]'s default -- see
+/// [`DEFAULT_MAX_PURCHASED_ROWS`].
 pub const DEFAULT_PURCHASE_RATE_WINDOW_SECONDS: u64 = 60;
 
 /// A fully validated `[peer_sale]` section. Constructed only by

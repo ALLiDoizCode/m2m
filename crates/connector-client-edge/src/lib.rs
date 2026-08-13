@@ -799,6 +799,22 @@ fn peek_claimed_channel_key(headers: &HeaderMap, state: &ClientEdgeState) -> Opt
     Some(claim.channel_key())
 }
 
+/// The REJECT a peer-sale abuse bound raises pre-admission (issue #887),
+/// built once for both carriages (§9: the two must not drift). F00 and
+/// `accumulated_cost: 0`, exactly like the refusal
+/// `Connector::settle_peer_sale_purchase` raises for the same bound on the
+/// paid side -- the claim was never admitted, so nothing was charged
+/// reaching it.
+pub(crate) fn peer_sale_bound_reject(message: String) -> Reject {
+    Reject {
+        code: RejectCode::f00_bad_request(),
+        triggered_by: String::new(),
+        message,
+        data: Vec::new(),
+        accumulated_cost: 0,
+    }
+}
+
 /// Extract and fully validate whatever claim header `headers` carries, per
 /// client-edge-spec.md §1.3, against `price` -- the matched route's price,
 /// `0` for an unpriced or unmatched destination, since routing itself (not
@@ -1197,13 +1213,7 @@ async fn handle_ilp(
                 .connector
                 .peer_sale_purchase_refusal_for_payer(&prepare, &claimed)
             {
-                return packet_response(PacketResponse::Reject(Reject {
-                    code: RejectCode::f00_bad_request(),
-                    triggered_by: String::new(),
-                    message,
-                    data: Vec::new(),
-                    accumulated_cost: 0,
-                }));
+                return packet_response(PacketResponse::Reject(peer_sale_bound_reject(message)));
             }
         }
         match extract_and_validate_claim(&headers, price, &state).await {

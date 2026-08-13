@@ -649,6 +649,22 @@ enum CoverOutcome {
     Failed(String),
 }
 
+/// How much of a packet [`Connector::open_peer_sale_purchase`] could read,
+/// for the two pre-admission peer-sale probes (issue #887).
+enum PeerSalePeek {
+    /// Nothing this probe may judge: `prepare` is not a packet this node's
+    /// peer-sale route will terminate (no peer-sale route, an outranking
+    /// lease), or it is one this node cannot read (no identity key, a gift
+    /// wrap or envelope that does not open). Every one of those is
+    /// answered by the delivery path before any claim is spent, so a probe
+    /// declines to guess at them.
+    NotJudgeable,
+    /// A peer-sale packet whose body does not parse as a purchase.
+    Malformed,
+    /// The parsed purchase.
+    Purchase(PeerSaleRequest),
+}
+
 /// [`Connector`]'s default probe rate limit absent
 /// [`Connector::with_probe_rate_limit`] -- a deliberately conservative
 /// figure (issue #426): probing costs a sender nothing, so the safe default
@@ -2757,7 +2773,6 @@ impl Connector {
     /// and a shape-refused purchase is never charged (issue #887's own
     /// "refuse BEFORE taking payment").
     fn peer_sale_shape_refusal(&self, purchase: &PeerSaleRequest) -> Option<String> {
-        let bounds = self.peer_sale_bounds;
         if !is_valid_ilp_address(&purchase.prefix) {
             return Some(format!("'{}' is not a valid ILP address", purchase.prefix));
         }
@@ -2778,12 +2793,13 @@ impl Connector {
                 purchase.price, purchase.fee, purchase.next_hop_price
             ));
         }
-        if purchase.prefix.len() > bounds.max_prefix_length() {
+        let max_prefix_length = self.peer_sale_bounds.max_prefix_length();
+        if purchase.prefix.len() > max_prefix_length {
             return Some(format!(
-                "'{}' is {} bytes, over this node's {}-byte purchased-prefix limit",
+                "'{}' is {} bytes, over this node's {max_prefix_length}-byte purchased-prefix \
+                 limit",
                 purchase.prefix,
                 purchase.prefix.len(),
-                bounds.max_prefix_length()
             ));
         }
         None
@@ -2867,14 +2883,14 @@ impl Connector {
     /// 0039 records why that peek is a sound refusal basis unadmitted.
     pub fn peer_sale_purchase_would_be_refused(&self, prepare: &Prepare) -> bool {
         match self.open_peer_sale_purchase(prepare) {
-            None => false,
+            PeerSalePeek::NotJudgeable => false,
             // A body that does not parse dooms the purchase as surely as
             // any bound -- no identity could make it insertable -- so it
             // is predicted here too, and `settle_peer_sale_purchase`
             // raises the identical malformed-body refusal on the
             // unadmitted path.
-            Some(Err(())) => true,
-            Some(Ok(purchase)) => self.peer_sale_shape_refusal(&purchase).is_some(),
+            PeerSalePeek::Malformed => true,
+            PeerSalePeek::Purchase(purchase) => self.peer_sale_shape_refusal(&purchase).is_some(),
         }
     }
 
@@ -2899,46 +2915,45 @@ impl Connector {
         prepare: &Prepare,
         claimed_channel: &str,
     ) -> Option<String> {
-        match self.open_peer_sale_purchase(prepare) {
-            Some(Ok(purchase)) => {
-                let refusal = self.peer_sale_identity_refusal(claimed_channel, &purchase, false);
-                if let Some(message) = &refusal {
-                    // #887's "every rejected purchase logs the payer
-                    // identity and the bound it hit": this probe's answer
-                    // IS the refusal the client edge returns -- the packet
-                    // is never routed afterwards, so no later stage exists
-                    // to log it. One log site covers both carriages.
-                    tracing::warn!(
-                        channel_id = claimed_channel,
-                        prefix = %purchase.prefix,
-                        %message,
-                        "peer-sale purchase refused pre-admission on an identity-keyed bound"
-                    );
-                }
-                refusal
-            }
-            _ => None,
+        let PeerSalePeek::Purchase(purchase) = self.open_peer_sale_purchase(prepare) else {
+            return None;
+        };
+        let refusal = self.peer_sale_identity_refusal(claimed_channel, &purchase, false);
+        if let Some(message) = &refusal {
+            // #887's "every rejected purchase logs the payer identity and
+            // the bound it hit": this probe's answer IS the refusal the
+            // client edge returns -- the packet is never routed
+            // afterwards, so no later stage exists to log it. One log site
+            // covers both carriages.
+            tracing::warn!(
+                channel_id = claimed_channel,
+                prefix = %purchase.prefix,
+                %message,
+                "peer-sale purchase refused pre-admission on an identity-keyed bound"
+            );
         }
+        refusal
     }
 
-    /// The shared front half of both peer-sale probes: `None` when
-    /// `prepare` is not a packet this node's peer-sale route will
-    /// terminate (no peer-sale route, an outranking lease, no identity
-    /// key, or a gift wrap/envelope that does not open -- all cases the
-    /// delivery path answers before any claim is spent), `Some(Err(()))`
-    /// for a peer-sale packet whose body does not parse, and the parsed
-    /// purchase otherwise.
-    fn open_peer_sale_purchase(&self, prepare: &Prepare) -> Option<Result<PeerSaleRequest, ()>> {
+    /// The shared front half of both peer-sale probes: how much of a
+    /// packet a pre-admission probe can actually read -- see
+    /// [`PeerSalePeek`].
+    fn open_peer_sale_purchase(&self, prepare: &Prepare) -> PeerSalePeek {
         let Some((configured_len, ConfiguredTarget::PeerSale { .. })) =
             self.select_configured_route(&prepare.destination)
         else {
-            return None;
+            return PeerSalePeek::NotJudgeable;
         };
         if self.active_lease_outranks(&prepare.destination, configured_len) {
-            return None;
+            return PeerSalePeek::NotJudgeable;
         }
-        let request = self.opened_envelope_request(&prepare.data)?;
-        Some(serde_json::from_slice::<PeerSaleRequest>(&request.body).map_err(|_| ()))
+        let Some(request) = self.opened_envelope_request(&prepare.data) else {
+            return PeerSalePeek::NotJudgeable;
+        };
+        match serde_json::from_slice::<PeerSaleRequest>(&request.body) {
+            Ok(purchase) => PeerSalePeek::Purchase(purchase),
+            Err(_) => PeerSalePeek::Malformed,
+        }
     }
 
     /// This node's static routes, for the operator surface's read-only

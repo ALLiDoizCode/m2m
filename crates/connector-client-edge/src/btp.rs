@@ -815,13 +815,7 @@ async fn handle_frame(
                     replies,
                     reject_response(
                         frame.request_id,
-                        Reject {
-                            code: RejectCode::f00_bad_request(),
-                            triggered_by: String::new(),
-                            message,
-                            data: Vec::new(),
-                            accumulated_cost: 0,
-                        },
+                        crate::peer_sale_bound_reject(message),
                         Vec::new(),
                     ),
                 )
