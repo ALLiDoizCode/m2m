@@ -2571,32 +2571,47 @@ mod tests {
     async fn packet_span_fields<F: std::future::Future<Output = ()>>(
         work: F,
     ) -> HashMap<String, String> {
-        // Touch the `info_span!("packet")` callsite once BEFORE the capture
-        // is installed. tracing-core registers a callsite exactly once per
-        // process, computing its cached `Interest` from whatever thread
-        // touches it first -- under parallel `cargo test` that can be a
-        // test with no subscriber at all, caching `Interest::never`, and a
-        // `rebuild_interest_cache()` that runs before that first touch
-        // fixes nothing. Exercising the entry point here pins the order:
-        // registered now (whatever interest gets cached), then recomputed
-        // against this capture by the rebuild below.
-        let _ = connector_with(vec![], Arc::new(FakeAppClient::new()), test_clock())
-            .handle_prepare(prepare("g.nowhere", b"warmup"), 0)
-            .await;
-
         let fields = Arc::new(Mutex::new(HashMap::new()));
         let guard = tracing::subscriber::set_default(SpanFieldCapture {
             span_name: "packet",
             fields: Arc::clone(&fields),
         });
-        // Force every callsite's cached interest to be recomputed against
-        // this thread's now-current dispatch -- without this, a callsite
-        // whose interest was already cached (e.g. by an earlier test in
-        // this same process running with no subscriber at all) never
-        // calls back into this capture, even though it is the active
-        // default (tracing-core's global, non-thread-local interest
-        // cache).
-        tracing::callsite::rebuild_interest_cache();
+        // Prove the `info_span!("packet")` callsite records into THIS
+        // capture before running `work`, by probing the entry point until
+        // the capture observably fires. Nothing weaker is race-free under
+        // the default parallel `cargo test`: tracing-core caches each
+        // callsite's `Interest` globally, computed once by whatever thread
+        // touches it first -- possibly a concurrent test with no subscriber
+        // at all, caching `Interest::never` -- and
+        // `DefaultCallsite::register` publishes that interest BEFORE it
+        // pushes the callsite into the registry `rebuild_interest_cache()`
+        // walks, while `interest()` short-circuits on the published value.
+        // So a single warm-up touch can return having fixed nothing (the
+        // touch short-circuits on `never` mid-registration) and a single
+        // rebuild can miss (the registry does not contain the callsite
+        // yet). Probing until a field is actually captured closes every
+        // ordering: once the concurrent registration completes, a rebuild
+        // recomputes against this capture and the probe records.
+        let probe = connector_with(vec![], Arc::new(FakeAppClient::new()), test_clock());
+        let mut attempts = 0u32;
+        loop {
+            tracing::callsite::rebuild_interest_cache();
+            let _ = probe
+                .handle_prepare(prepare("g.nowhere", b"probe"), 0)
+                .await;
+            if fields.lock().unwrap().contains_key("correlation_id") {
+                // The probe's own fields must not leak into `work`'s
+                // assertions.
+                fields.lock().unwrap().clear();
+                break;
+            }
+            attempts += 1;
+            assert!(
+                attempts < 1_000,
+                "the `packet` callsite never became enabled under this capture"
+            );
+            std::thread::yield_now();
+        }
 
         work.await;
 
