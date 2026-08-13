@@ -1134,17 +1134,30 @@ async fn handle_ilp(
     // `None` for an unclaimed request (unpriced/unmatched destination), the
     // only shape that reaches routing without one.
     let mut client_channel_id = None;
-    match extract_and_validate_claim(&headers, price, &state).await {
-        Err(rejection) => return claim_rejected_response(rejection, price),
-        // A claim that cleared the gate is this connector's evidence that
-        // the sender holds the channel it names (issue #548), which is what
-        // makes that sender eligible to probe at `POST /ilp/probe` later.
-        Ok(Some(admitted)) => {
-            state.connector.recognize_channel(&admitted.channel_key);
-            plaintext_claim_signer = admitted.plaintext_signer;
-            client_channel_id = Some(admitted.channel_key);
+    // Issue #869: the converse of the invariant stated above -- a packet
+    // whose envelope will be refused for its own target shape
+    // (`AppOutcome::Refused`, F00) is never going to reach the app either,
+    // however good the claim covering it is. Rather than ingest that claim
+    // and then answer a refusal that says nothing was charged, the claim
+    // is left entirely unadmitted: routing below still runs unchanged for
+    // both branches and raises the identical F00 itself
+    // (`Connector::deliver_to_app`'s own check, untouched), so nothing
+    // about *what* the sender is told changes -- only that no watermark
+    // moves getting there.
+    if !state.connector.envelope_target_would_be_refused(&prepare) {
+        match extract_and_validate_claim(&headers, price, &state).await {
+            Err(rejection) => return claim_rejected_response(rejection, price),
+            // A claim that cleared the gate is this connector's evidence
+            // that the sender holds the channel it names (issue #548),
+            // which is what makes that sender eligible to probe at
+            // `POST /ilp/probe` later.
+            Ok(Some(admitted)) => {
+                state.connector.recognize_channel(&admitted.channel_key);
+                plaintext_claim_signer = admitted.plaintext_signer;
+                client_channel_id = Some(admitted.channel_key);
+            }
+            Ok(None) => {}
         }
-        Ok(None) => {}
     }
 
     // client-edge-spec.md §1.2: the sender's identity, resolved and made
@@ -1255,7 +1268,7 @@ mod tests {
     /// directly only by tests whose `Prepare` never reaches
     /// `Connector::deliver_to_app` at all (a reject raised short of the
     /// termination neither inspects nor requires a sealed `data`). Any test
-    /// that expects real app delivery must use [`sealed_envelope_request_data`]
+    /// that expects real app delivery must use [`sealed_sample_prepare`]
     /// instead, sealed to whichever identity the terminating `Connector` is
     /// configured with -- per ADR 0018, `deliver_to_app` cannot open a
     /// plaintext envelope at all now that sealing is mandatory (issue #524).
@@ -1267,19 +1280,6 @@ mod tests {
             body: body.to_vec(),
         }
         .encode()
-    }
-
-    /// The gift wrap a real sender would produce (issue #524): seals a
-    /// minimal `POST /` envelope carrying `body` to `receiver_public`.
-    /// Returns the wire bytes for `Prepare.data` and the shared secret the
-    /// wrap carries, which a caller also needs to open the sealed
-    /// `Fulfill`/termination-`Reject` this `Prepare` produces.
-    fn sealed_envelope_request_data(
-        body: &[u8],
-        receiver_public: &PublicKeyBytes,
-    ) -> (Vec<u8>, [u8; 32]) {
-        connector_signer::giftwrap::seal_request(&envelope_request_data(body), receiver_public)
-            .expect("seal")
     }
 
     /// Open `data` (a `Fulfill.data`, or a termination `Reject.data`) with
@@ -1371,7 +1371,27 @@ mod tests {
         destination: &str,
         receiver_public: &PublicKeyBytes,
     ) -> (Prepare, [u8; 32]) {
-        let (data, shared_secret) = sealed_envelope_request_data(b"hello app", receiver_public);
+        sealed_sample_prepare_with_target(destination, "/", receiver_public)
+    }
+
+    /// As [`sealed_sample_prepare`], but with the envelope's own `target`
+    /// (issue #596/#869) set to `target` rather than hard-coded to `"/"` --
+    /// for a test asserting on what happens when that target does, or does
+    /// not, resolve under the matched route's handler path.
+    fn sealed_sample_prepare_with_target(
+        destination: &str,
+        target: &str,
+        receiver_public: &PublicKeyBytes,
+    ) -> (Prepare, [u8; 32]) {
+        let envelope = EnvelopeRequest {
+            method: "POST".to_string(),
+            target: target.to_string(),
+            headers: vec![],
+            body: b"hello app".to_vec(),
+        }
+        .encode();
+        let (data, shared_secret) =
+            connector_signer::giftwrap::seal_request(&envelope, receiver_public).expect("seal");
         let condition = derive_condition(&connector_signer::giftwrap::derive_fulfillment(
             &shared_secret,
         ));
@@ -2967,6 +2987,63 @@ mod tests {
 
             let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
             Fulfill::decode(&bytes).expect("decode fulfill");
+            assert_eq!(app_client.deliveries().len(), 1);
+        }
+
+        /// Issue #869: a packet refused for its envelope's own target
+        /// shape (`AppOutcome::Refused`, F00) must never advance the
+        /// covering claim's watermark -- the payer is told `accumulated_
+        /// cost` 0 and the app is never asked to do anything, so the claim
+        /// it rode in on must still be spendable afterward. Proven the same
+        /// way `a_replayed_claim_nonce_rejects_before_reaching_the_app`
+        /// proves the opposite direction: the identical claim, resent with
+        /// a target that resolves cleanly, is still accepted -- which is
+        /// only possible if the first, refused attempt left the watermark
+        /// untouched.
+        #[tokio::test]
+        async fn a_claim_covering_a_packet_refused_for_envelope_shape_is_never_spent() {
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"ok"));
+            let signer = test_signer();
+            let connector = Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone()),
+            );
+            let app = router_with_gate(connector, signer.clone(), None, test_gate(test_channels()));
+            let claim = evm_claim_json(1, 100);
+
+            let (escaping_prepare, _shared_secret) = sealed_sample_prepare_with_target(
+                "g.example.app",
+                "/write",
+                &signer.public_key().unwrap(),
+            );
+            let escaping_request =
+                request_with_claim_header(&escaping_prepare, CLAIM_HEADER, &claim);
+            let response = app.clone().oneshot(escaping_request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = Reject::decode(&bytes).expect("decode reject");
+            assert_eq!(reject.code.as_str(), "F00");
+            assert_eq!(reject.accumulated_cost, 0);
+            assert!(
+                app_client.deliveries().is_empty(),
+                "an escaping target must never reach the app"
+            );
+
+            let (valid_prepare, _shared_secret) =
+                sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
+            let valid_request = request_with_claim_header(&valid_prepare, CLAIM_HEADER, &claim);
+            let response = app.oneshot(valid_request).await.unwrap();
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            Fulfill::decode(&bytes).expect("the unspent claim is still accepted");
             assert_eq!(app_client.deliveries().len(), 1);
         }
 

@@ -2039,6 +2039,50 @@ impl Connector {
         self.client_route(destination).map(|route| route.price)
     }
 
+    /// Whether `prepare` names a terminated app route whose envelope
+    /// target will be refused (`AppOutcome::Refused`, F00, issue #596)
+    /// once this packet is actually routed and delivered there -- decided
+    /// without delivering anything, so the client edge can ask this
+    /// *before* admitting `prepare`'s covering claim (issue #869) and skip
+    /// ingesting it: a packet this connector was always going to refuse
+    /// for its envelope's own shape must never spend the claim it rode in
+    /// on.
+    ///
+    /// `false` covers every case besides a confirmed envelope-shape
+    /// refusal: an unmatched destination, a forwarded route (its `data`
+    /// stays opaque at this hop -- only a terminated route's envelope is
+    /// ever opened), no identity key configured, a gift wrap that fails to
+    /// open, or an envelope that fails to decode. None of those needs this
+    /// check to stay free -- [`Self::deliver_to_app`]'s own early returns
+    /// already answer them before any claim is spent either way, whether
+    /// or not this method is ever called. This is deliberately not a
+    /// cache of [`Self::deliver_to_app`]'s decision: it repeats the same
+    /// open-and-decode work, on the same immutable `prepare.data`, so the
+    /// two can never disagree about a target that genuinely escapes.
+    pub fn envelope_target_would_be_refused(&self, prepare: &Prepare) -> bool {
+        let Some((_, ConfiguredTarget::App(index))) =
+            self.select_configured_route(&prepare.destination)
+        else {
+            return false;
+        };
+        let Some(identity_signer) = self.identity_signer.as_ref() else {
+            return false;
+        };
+        let Ok((envelope_bytes, _shared_secret)) =
+            open_request(&prepare.data, identity_signer.as_ref())
+        else {
+            return false;
+        };
+        let Ok(request) = EnvelopeRequest::decode(&envelope_bytes) else {
+            return false;
+        };
+        crate::app_client::resolve_target_under_handler(
+            self.routes[index].handler_url(),
+            &request.target,
+        )
+        .is_err()
+    }
+
     /// This node's static routes, for the operator surface's read-only
     /// inspection interface (issue #420).
     pub fn routes(&self) -> Vec<RouteView> {
