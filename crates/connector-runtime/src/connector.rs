@@ -2901,7 +2901,21 @@ impl Connector {
     ) -> Option<String> {
         match self.open_peer_sale_purchase(prepare) {
             Some(Ok(purchase)) => {
-                self.peer_sale_identity_refusal(claimed_channel, &purchase, false)
+                let refusal = self.peer_sale_identity_refusal(claimed_channel, &purchase, false);
+                if let Some(message) = &refusal {
+                    // #887's "every rejected purchase logs the payer
+                    // identity and the bound it hit": this probe's answer
+                    // IS the refusal the client edge returns -- the packet
+                    // is never routed afterwards, so no later stage exists
+                    // to log it. One log site covers both carriages.
+                    tracing::warn!(
+                        channel_id = claimed_channel,
+                        prefix = %purchase.prefix,
+                        %message,
+                        "peer-sale purchase refused pre-admission on an identity-keyed bound"
+                    );
+                }
+                refusal
             }
             _ => None,
         }
