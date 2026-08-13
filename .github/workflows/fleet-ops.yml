@@ -26,6 +26,13 @@
 # worked. `config-apply` therefore ALWAYS restarts the service that reads the
 # file, and then re-reads the file OFF THE BOX to prove what is actually there.
 #
+# `deploy` is not an exception to that rule but its other half: a bumped
+# `image:` pin reaches a box only by recreating the CONTAINER, which is
+# exactly what `up -d` does and what `restart` does not. So `deploy` pulls the
+# pin the box's checkout names, recreates the service, and then proves the
+# running container's image id IS that pin's — the same re-read doctrine,
+# applied to the image instead of the file.
+#
 # ── SAFETY ──────────────────────────────────────────────────────────────────
 #   * `apply` defaults to false. A dry run reads the box, prints the exact diff
 #     it would write, and changes nothing.
