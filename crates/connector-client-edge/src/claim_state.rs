@@ -95,6 +95,13 @@ fn log_outcome(blockchain: &'static str, channel_id: &str, cause: &'static str) 
     );
 }
 
+/// As [`log_outcome`], for the one refusal whose cause carries a detail of
+/// its own: a lookup this connector could not complete. The variant alone is
+/// not enough -- "the chain said no" and "I never got to ask" are
+/// different operator problems (see [`ChannelResolutionError`]'s own doc),
+/// and [`crate::channels::ChannelLookupFailed`]'s opaque string is the only
+/// place the underlying reason exists -- so both go out: the variant as
+/// `cause`, its `Display` as `detail`.
 fn log_lookup_error(blockchain: &'static str, channel_id: &str, error: &ChannelResolutionError) {
     let cause = match error {
         ChannelResolutionError::LookupFailed(_) => "channel_lookup_failed",
@@ -978,6 +985,47 @@ mod tests {
             .map(|fields| fields.get("cause").map(String::as_str))
             .collect();
         assert_eq!(causes, vec![Some("verified")]);
+    }
+
+    /// Issue #908: the Solana branch refuses on the same generic
+    /// `"unverified"` as the EVM one, so it owes the operator the same
+    /// distinguishing log line -- and the line is only actionable if it also
+    /// says *which* chain and *which* channel, which is the half of the
+    /// issue's ask ("the channel id and the branch taken") the
+    /// cause-only assertions above do not pin down.
+    #[tokio::test]
+    async fn a_bad_solana_signature_is_logged_with_its_chain_and_channel() {
+        let channel_account = base58_encode(&SOLANA_CHANNEL_ACCOUNT);
+        let body = serde_json::json!({
+            "channels": [{
+                "blockchain": "solana",
+                "channelAccount": channel_account,
+                "expires": far_future_expiry(),
+                "signature": BASE64.encode([7u8; 64]),
+            }]
+        });
+
+        let (events, response) = claim_state_events(post_claim_state(test_gate(), body)).await;
+
+        assert_eq!(response["channels"][0]["error"], "unverified");
+        let logged: Vec<(Option<&str>, Option<&str>, Option<&str>)> = events
+            .iter()
+            .map(|fields| {
+                (
+                    fields.get("blockchain").map(String::as_str),
+                    fields.get("channel_id").map(String::as_str),
+                    fields.get("cause").map(String::as_str),
+                )
+            })
+            .collect();
+        assert_eq!(
+            logged,
+            vec![(
+                Some("solana"),
+                Some(channel_account.as_str()),
+                Some("signature_invalid")
+            )]
+        );
     }
 
     #[tokio::test]
