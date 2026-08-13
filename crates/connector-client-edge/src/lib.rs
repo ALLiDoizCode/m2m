@@ -1141,9 +1141,13 @@ async fn handle_ilp(
     // and then answer a refusal that says nothing was charged, the claim
     // is left entirely unadmitted: routing below still runs unchanged for
     // both branches and raises the identical F00 itself
-    // (`Connector::deliver_to_app`'s own check, untouched), so nothing
-    // about *what* the sender is told changes -- only that no watermark
-    // moves getting there.
+    // (`Connector::deliver_to_app`'s own check, untouched), so a sender
+    // whose claim was good is told exactly what it was told before --
+    // only that no watermark moves getting there. A sender whose claim
+    // would *also* have been refused now hears about the target instead
+    // of the claim (F00 rather than §1.3's F01/F03/T00 taxonomy): that
+    // claim is never looked at on this path, since nothing about it could
+    // make this packet deliverable.
     if !state.connector.envelope_target_would_be_refused(&prepare) {
         match extract_and_validate_claim(&headers, price, &state).await {
             Err(rejection) => return claim_rejected_response(rejection, price),
