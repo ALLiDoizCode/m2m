@@ -2570,6 +2570,19 @@ mod tests {
     async fn packet_span_fields<F: std::future::Future<Output = ()>>(
         work: F,
     ) -> HashMap<String, String> {
+        // Touch the `info_span!("packet")` callsite once BEFORE the capture
+        // is installed. tracing-core registers a callsite exactly once per
+        // process, computing its cached `Interest` from whatever thread
+        // touches it first -- under parallel `cargo test` that can be a
+        // test with no subscriber at all, caching `Interest::never`, and a
+        // `rebuild_interest_cache()` that runs before that first touch
+        // fixes nothing. Exercising the entry point here pins the order:
+        // registered now (whatever interest gets cached), then recomputed
+        // against this capture by the rebuild below.
+        let _ = connector_with(vec![], Arc::new(FakeAppClient::new()), test_clock())
+            .handle_prepare(prepare("g.nowhere", b"warmup"), 0)
+            .await;
+
         let fields = Arc::new(Mutex::new(HashMap::new()));
         let guard = tracing::subscriber::set_default(SpanFieldCapture {
             span_name: "packet",
