@@ -118,10 +118,13 @@ if that ever matters in practice.
 
 - A node that never writes `[peer_sale]` is unaffected: bounds are consulted only when a peer-sale
   route exists and a purchase actually matches it.
-- `docs/adr/0037-...`'s "config-owned address space is not for sale" and its arithmetic bound are
-  restated here as already satisfying #887's own containment acceptance criterion ("a purchased
-  prefix cannot shadow a config-file prefix unless the precedence rule from C1 explicitly
-  permits it") — no new code was needed for that bullet, only this record connecting it to #887.
+- `docs/adr/0037-...`'s "config-owned address space is not for sale" and its arithmetic bound
+  satisfy #887's own containment acceptance criterion ("a purchased prefix cannot shadow a
+  config-file prefix unless the precedence rule from C1 explicitly permits it") — with one
+  addition this issue did need: the `[peer_sale]` prefix itself now counts as config-owned in
+  both anti-shadowing guards, since it is as much a config-file route as any `[[routes]]` row,
+  and omitting it let a buyer purchase a prefix beneath the sale address and outrank the sale
+  route for its whole subtree.
 - The declared-channel peek is now the codebase's second pre-admission identity idiom, distinct
   from `lookup_budget`'s (#613): there the label is attribution-only and lying wins slack; here
   the label is the charged channel itself and lying buys an unpaid rejection. A reader extending

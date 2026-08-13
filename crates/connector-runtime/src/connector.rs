@@ -1176,11 +1176,21 @@ impl Connector {
     /// route or a peer-forwarding route -- the set of prefixes a runtime
     /// write may never add, update or remove.
     fn config_owns_prefix(&self, prefix: &str) -> bool {
-        self.routes.iter().any(|route| route.prefix() == prefix)
-            || self
-                .peer_routes
-                .iter()
-                .any(|route| route.prefix() == prefix)
+        self.config_prefixes().any(|owned| owned == prefix)
+    }
+
+    /// Every prefix the config file itself serves: app routes, peer
+    /// forwarding routes, and -- when configured -- the `[peer_sale]`
+    /// route (this PR's review, fourth finding: the sale prefix is as
+    /// config-owned as any `[[routes]]` row, and omitting it here let a
+    /// buyer purchase a prefix strictly beneath the sale address and
+    /// outrank the sale route for its whole subtree).
+    fn config_prefixes(&self) -> impl Iterator<Item = &str> {
+        self.routes
+            .iter()
+            .map(|route| route.prefix())
+            .chain(self.peer_routes.iter().map(|route| route.prefix()))
+            .chain(self.peer_sale.as_ref().map(|sale| sale.prefix()))
     }
 
     /// Whether `prefix` sits strictly inside address space a config-file
@@ -1190,17 +1200,14 @@ impl Connector {
     /// Route selection ranks matched prefix length first, so a durable row
     /// inserted here would outrank the configured route for that whole
     /// subtree: without this guard, one peer-sale purchase (issue #885,
-    /// ADR 0037) permanently diverts the seller's own app route.
+    /// ADR 0037) permanently diverts the seller's own app route -- or,
+    /// per this PR's review, the seller's own sale route.
     fn config_owns_ancestor_of(&self, prefix: &str) -> bool {
-        self.routes
-            .iter()
-            .map(|route| route.prefix())
-            .chain(self.peer_routes.iter().map(|route| route.prefix()))
-            .any(|owned| {
-                prefix.len() > owned.len()
-                    && prefix.starts_with(owned)
-                    && prefix.as_bytes()[owned.len()] == b'.'
-            })
+        self.config_prefixes().any(|owned| {
+            prefix.len() > owned.len()
+                && prefix.starts_with(owned)
+                && prefix.as_bytes()[owned.len()] == b'.'
+        })
     }
 
     /// How many distinct payers currently hold a runtime-purchased peer
@@ -5832,6 +5839,47 @@ mod tests {
                 .peers()
                 .iter()
                 .any(|peer| peer.id == client_channel_id));
+        }
+
+        /// The sale route's own subtree is config-owned too (this PR's
+        /// review, fourth finding): a purchase strictly beneath the
+        /// `[peer_sale]` prefix would outrank the sale route by length and
+        /// hijack the purchase endpoint itself. Predicted by the probe,
+        /// refused unpaid, and the sale route still terminates its
+        /// subtree afterwards.
+        #[tokio::test]
+        async fn a_purchase_under_the_sale_prefix_itself_is_refused() {
+            let backend = Arc::new(InMemorySettlementBackend::new());
+            let channel_id = backend
+                .open(b"buyer".to_vec(), Duration::seconds(3600))
+                .await
+                .expect("open");
+            let client_channel_id = format!("evm:{}", channel_id.0);
+            let connector = peer_sale_connector(backend);
+
+            let evil_prefix = format!("{PEER_SALE_PREFIX}.evil");
+            let (sealed, _s) = peer_sale_prepare(&purchase_body(&evil_prefix, 3, 25, 10));
+            assert!(connector.peer_sale_purchase_would_be_refused(&sealed));
+
+            let response = connector
+                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                .await;
+            match response {
+                PacketResponse::Reject(reject) => assert!(
+                    reject
+                        .message
+                        .contains("config-owned space is not for sale"),
+                    "expected the containment refusal, got: {}",
+                    reject.message
+                ),
+                other => panic!("expected a reject, got {other:?}"),
+            }
+            assert!(connector.peers().is_empty());
+            // The sale route still wins its own subtree.
+            assert!(matches!(
+                connector.select_configured_route(&format!("{evil_prefix}.x")),
+                Some((_, ConfiguredTarget::PeerSale { .. }))
+            ));
         }
 
         /// Config-owned address space is not for sale (ADR 0037): with an
