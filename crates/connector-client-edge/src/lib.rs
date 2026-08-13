@@ -1148,7 +1148,17 @@ async fn handle_ilp(
     // of the claim (F00 rather than §1.3's F01/F03/T00 taxonomy): that
     // claim is never looked at on this path, since nothing about it could
     // make this packet deliverable.
-    if !state.connector.envelope_target_would_be_refused(&prepare) {
+    //
+    // Issue #887 extends the same seam to a peer-sale purchase whose own
+    // shape already dooms it (oversized prefix, config-owned space, broken
+    // arithmetic): the shape refusal is identical with or without the
+    // claim, so admitting first would only charge the buyer for a mutation
+    // that was never going to happen.
+    if !state.connector.envelope_target_would_be_refused(&prepare)
+        && !state
+            .connector
+            .peer_sale_purchase_would_be_refused(&prepare)
+    {
         match extract_and_validate_claim(&headers, price, &state).await {
             Err(rejection) => return claim_rejected_response(rejection, price),
             // A claim that cleared the gate is this connector's evidence
@@ -3042,6 +3052,80 @@ mod tests {
                 "an escaping target must never reach the app"
             );
 
+            let (valid_prepare, _shared_secret) =
+                sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
+            let valid_request = request_with_claim_header(&valid_prepare, CLAIM_HEADER, &claim);
+            let response = app.oneshot(valid_request).await.unwrap();
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            Fulfill::decode(&bytes).expect("the unspent claim is still accepted");
+            assert_eq!(app_client.deliveries().len(), 1);
+        }
+
+        /// Issue #887's "refuse BEFORE taking payment", proven at the seam
+        /// the criterion names: a peer-sale purchase doomed by its own
+        /// shape (here, arithmetic that cannot cover its declared next
+        /// hop) never spends the claim that covered it. Same proof shape
+        /// as the #869 test above: the identical claim, resent on a
+        /// deliverable packet, is still accepted -- only possible if the
+        /// doomed purchase left the watermark untouched.
+        #[tokio::test]
+        async fn a_claim_covering_a_shape_doomed_purchase_is_never_spent() {
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"ok"));
+            let signer = test_signer();
+            let connector = Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone())
+                .with_peer_sale(
+                    "g.example.sale",
+                    100,
+                    chrono::Duration::seconds(600),
+                ),
+            );
+            let app = router_with_gate(connector, signer.clone(), None, test_gate(test_channels()));
+            let claim = evm_claim_json(1, 100);
+
+            // fee > price: the arithmetic bound dooms this purchase from
+            // its shape alone, no identity involved.
+            let purchase_envelope = EnvelopeRequest {
+                method: "POST".to_string(),
+                target: "/".to_string(),
+                headers: vec![],
+                body: br#"{"prefix":"g.example.buyer","fee":5,"price":1,"next_hop_price":0}"#
+                    .to_vec(),
+            }
+            .encode();
+            let (data, _shared_secret) = connector_signer::giftwrap::seal_request(
+                &purchase_envelope,
+                &signer.public_key().unwrap(),
+            )
+            .expect("seal");
+            let doomed_prepare = Prepare {
+                data,
+                ..sample_prepare("g.example.sale")
+            };
+            let doomed_request = request_with_claim_header(&doomed_prepare, CLAIM_HEADER, &claim);
+            let response = app.clone().oneshot(doomed_request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = Reject::decode(&bytes).expect("decode reject");
+            assert_eq!(reject.code.as_str(), "F00");
+            assert_eq!(reject.accumulated_cost, 0);
+            assert!(
+                reject.message.contains("next_hop_price"),
+                "expected the arithmetic bound's own refusal, got: {}",
+                reject.message
+            );
+
+            // The identical claim still spends on a deliverable packet.
             let (valid_prepare, _shared_secret) =
                 sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
             let valid_request = request_with_claim_header(&valid_prepare, CLAIM_HEADER, &claim);

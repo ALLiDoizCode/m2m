@@ -70,18 +70,22 @@ money and then decline the insert."_ This connector has no refund/credit-back me
 "serving claimless packets against banked surplus", is not built) — so the answer is **refuse**,
 not refund, restated from #885's own precedent rather than invented here.
 
-**Where this ADR's bounds actually run.** `settle_peer_sale_purchase` is reached only after
-`connector-client-edge` has already admitted the packet's covering claim (advanced the payer's
-watermark) — the same position #885's own containment and arithmetic checks already occupy, and
-the position issue #869/#944 closed for a _different_ refusal class (an app route's envelope
-target) by adding `Connector::envelope_target_would_be_refused`, consulted **before** admission.
+**Where this ADR's bounds actually run.** They split along one line: whether the refusal is
+derivable from the packet alone, or only from the payer's proven identity.
 
-That pre-admission mechanism does not extend to this issue's bounds, for a structural reason
-`envelope_target_would_be_refused`'s own doc already states for its own scope: it repeats only
-work that needs no payer identity (opening the gift wrap, decoding the envelope, matching a
-route). Exactly one of #887's four bounds is identity-free in that sense — the prefix-length cap,
-which judges the requested prefix's own shape and could in principle be evaluated the same way
-before admission. The other three are all about _this payer's_ history: the per-payer route cap
+**Shape-derived refusals run BEFORE payment.** `Connector::peer_sale_purchase_would_be_refused`
+extends the exact pre-admission seam issues #869/#944 built for envelope-target refusals: the
+client edge consults it (both carriages) before `ClientClaimGate::admit`, and when it answers
+`true` the claim is left entirely unadmitted — routing still runs, and
+`settle_peer_sale_purchase` re-derives the identical refusal from the same shared
+`peer_sale_shape_refusal` function, so the two sides can never disagree and no watermark moves.
+This covers everything judgeable from the request alone: an unparseable body, an invalid prefix,
+a config-shadowing prefix (ADR 0037), an arithmetic shortfall, and this issue's prefix-length
+cap. A stranger without so much as a channel can no longer cause a single charged refusal with
+any of them.
+
+**Identity-keyed bounds run after, and this is structural.** The remaining bounds are all about
+_this payer's_ history: the per-payer route cap
 and the purchase rate limit obviously so, and the total-row cap because it is deliberately not
 applied to a payer that already holds a row (a renewal never grows the table), which is a fact
 about the payer's identity like the other two. And the payer's identity does not exist as a
@@ -100,14 +104,16 @@ same weak identity threaded through both HTTP and BTP carriages in `connector-cl
 a `connector-runtime` bound it does not otherwise need to know about.
 
 **Net effect, stated plainly:** a malformed body, an invalid or config-shadowing prefix, an
-arithmetic shortfall, an over-length prefix, or a table already at its total-row capacity are all
-refused after this packet's claim has been admitted — charged, in the sense that a redeemable
-claim now exists at a higher cumulative amount, exactly as #885's own pre-existing checks already
-were before this issue. This is not a new gap #887 introduces; it is the same one, now also true
-of four more refusal reasons. Closing it for every peer-sale refusal reason at once — not just the
-identity-free prefix-length cap — needs either the credit-refund ledger (#709) or a purpose-built
-pre-admission identity peek carried through both carriages, and either is a separable, security-relevant change
-better scoped on its own ticket than folded into a bounds-and-defaults issue.
+arithmetic shortfall, or an over-length prefix now refuses with **nothing charged** — the claim
+is never admitted, and the refusal message is byte-identical to the paid path's. What remains
+charged-then-refused is the identity-keyed set: the purchase rate limit, the per-payer route
+cap, the total-row cap (identity-keyed because a renewal never grows the table), and the
+on-chain channel-state re-check. That residual window is qualitatively different from the one
+the review found: it is reachable only by a payer spending against **their own** channel, its
+frequency is bounded by this ADR's own rate limit, and every such charge is visible in the
+claim journal. Closing it too needs either the credit-refund ledger (#709) or a purpose-built
+pre-admission identity peek carried through both carriages — a separable, security-relevant
+change better scoped on its own ticket than folded into a bounds-and-defaults issue.
 
 ## Consequences
 

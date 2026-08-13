@@ -787,9 +787,16 @@ async fn handle_frame(
     // is, so that claim is left entirely unadmitted rather than spent on
     // a packet already known to be going nowhere. `finish_frame` below
     // still routes `prepare` unchanged and raises the identical F00
-    // itself.
+    // itself. Issue #887 extends the same seam to a peer-sale purchase
+    // whose own shape already dooms it, for the same reason: the shape
+    // refusal is identical with or without the claim.
     let admitted = match claim_json {
-        Some(json) if !state.connector.envelope_target_would_be_refused(&prepare) => {
+        Some(json)
+            if !state.connector.envelope_target_would_be_refused(&prepare)
+                && !state
+                    .connector
+                    .peer_sale_purchase_would_be_refused(&prepare) =>
+        {
             match state.claim_gate.admit(&json, price).await {
                 Ok(accepted) => Some(accepted),
                 Err(rejection) => {
