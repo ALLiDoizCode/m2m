@@ -53,11 +53,11 @@ const SOLANA_DRIP_COOLDOWN_MS = Number(
 // within one 1.5s probe interval essentially always; two intervals (3s) before
 // declaring a stall is already very conservative.
 const SLOT_PROBE_INTERVAL_MS = Number(process.env.SOLANA_SLOT_PROBE_INTERVAL_MS || '1500');
-// Deadline: a healthy USDC drip (up to 2 treasury txs — the source and
-// recipient ATA creation/transfer — at 'confirmed' commitment, ~2.3 slots/s)
-// completes in well under 15s; a single blockhash validity window (150
-// blocks) is ~65s. 90s ≥ one full window + margin, so the deadline can only
-// fire when the chain genuinely stalls mid-drip.
+// Deadline: a healthy USDC drip (up to 3 treasury txs — source ATA creation,
+// recipient ATA creation, the transfer itself — at 'confirmed' commitment,
+// ~2.3 slots/s) completes in well under 15s; a single blockhash validity
+// window (150 blocks) is ~65s. 90s ≥ one full window + margin, so the deadline
+// can only fire when the chain genuinely stalls mid-drip.
 const SOLANA_DRIP_DEADLINE_MS = Number(process.env.SOLANA_DRIP_DEADLINE_MS || '90000');
 
 // Probes `getSlot()` (an async () => number) until it advances past its first

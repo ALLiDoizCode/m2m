@@ -34,6 +34,7 @@ import { Connection, Keypair, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import {
   createMint,
   getAccount,
+  getAssociatedTokenAddressSync,
   getOrCreateAssociatedTokenAccount,
   mintTo,
 } from '@solana/spl-token';
@@ -50,7 +51,7 @@ function solanaTestValidatorAvailable() {
 const available = solanaTestValidatorAvailable();
 
 // The drip this test configures the faucet with, named once so the env var
-// the faucet reads and the floor asserted below cannot drift apart.
+// the faucet reads and the amount asserted below cannot drift apart.
 const DRIP_USDC = 10;
 const DRIP_DECIMALS = 6;
 const DRIP_RAW_AMOUNT = BigInt(DRIP_USDC * 10 ** DRIP_DECIMALS);
@@ -59,14 +60,14 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// `confirmTransaction` already waits for the signature to reach 'confirmed'
+// (or for its blockhash to expire, which rejects) — a retry loop around it
+// would only re-poll a transaction that has already landed or already failed.
 async function confirmAirdrop(connection, signature) {
-  for (let i = 0; i < 300; i++) {
-    if (await connection.confirmTransaction(signature, 'confirmed').then((r) => !r.value.err)) {
-      return;
-    }
-    await sleep(100);
+  const { value } = await connection.confirmTransaction(signature, 'confirmed');
+  if (value.err) {
+    throw new Error(`airdrop transaction failed: ${JSON.stringify(value.err)}`);
   }
-  throw new Error('airdrop did not confirm in time');
 }
 
 test(
@@ -193,14 +194,11 @@ test(
     assert.equal(result.usdc.mint, mint.toBase58());
 
     // Real delivery, not just a returned signature: read the recipient's own
-    // USDC token account back from the chain.
-    const recipientAta = await getOrCreateAssociatedTokenAccount(
-      connection,
-      treasury, // fee payer for this read-side lookup only, not a drip
-      mint,
-      recipient.publicKey
-    );
-    const recipientAccount = await getAccount(connection, recipientAta.address);
+    // USDC token account back from the chain. The address is derived, never
+    // created here — the drip is what must have created it, so a drip that
+    // silently skipped the ATA fails this read instead of being papered over.
+    const recipientAta = getAssociatedTokenAddressSync(mint, recipient.publicKey);
+    const recipientAccount = await getAccount(connection, recipientAta);
     assert.equal(recipientAccount.amount, DRIP_RAW_AMOUNT);
 
     // The faucet never sent the recipient any SOL, at all, in the course of
