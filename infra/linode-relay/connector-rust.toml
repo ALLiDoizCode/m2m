@@ -183,6 +183,18 @@ key_file = "/app/data/signer.key"
 # whether the peering is funded. Do not add a placeholder channel id to make
 # this section "complete" -- there is nothing for one to pay.
 #
+# `notice_id`/`notice_severity`/`notice_summary`/`notice_url` (issue #948,
+# re-homed from toon-meta#335) put the two-box-cutover operator notice on the
+# wire via the schema'd `notice` field (toon#183, issue #912) -- the
+# permanent mechanism, not toon-meta#335's retired content ride-along. The
+# durable text lives at `notice_url`, in toon-meta's own
+# `docs/operators/2026-08-13-two-box-cutover.md`; this box's announce carries
+# only the pointer, per that doc's own convention
+# (`docs/operators/README.md` in toon-meta). `severity` is
+# `action-required`: a client that only ever uploads to the store has
+# something it must do once the cutover runs (get an updated client), so
+# doing nothing is not always safe.
+#
 # `route_publish`/`route_store` are PINNED, not left to derive -- issue #845,
 # the same class of defect #841 pinned shut on the TypeScript sidecar's
 # ANNOUNCER_ROUTE_STORE. `derive_route_hints` (crates/connector-config/src/
@@ -204,6 +216,10 @@ relay_url         = "wss://relay-ws.devnet.toonprotocol.dev"
 identity_key_file = "/app/data/announce.key"
 route_publish     = "g.toon.relay"
 route_store       = "g.toon.ario"
+notice_id         = "2026-08-13-two-box-cutover"
+notice_severity   = "action-required"
+notice_summary    = "The devnet apex is being retired; reads and relay publishing repair themselves, but store uploads need a client released after the cutover."
+notice_url        = "https://github.com/toon-protocol/toon-meta/blob/main/docs/operators/2026-08-13-two-box-cutover.md"
 
 # ── Routes ─────────────────────────────────────────────────────────────────
 

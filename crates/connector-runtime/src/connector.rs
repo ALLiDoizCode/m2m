@@ -31,7 +31,7 @@ use crate::operator_view::{
     ChannelView, ClaimView, LeasedRouteView, PeerRouteView, PeerView, RouteSource, RouteView,
 };
 use crate::outbound_client::{ClaimStateSource, EvmDomain, OutboundClientLedger};
-use crate::peer_route_store::{PeerRouteStore, PeerRouteStoreError};
+use crate::peer_route_store::{PeerRouteStore, PeerRouteStoreError, RuntimePeers};
 use crate::peer_transport::PeerTransport;
 use crate::route::{LeasedRoute, PeerRoute, PeerSaleRoute};
 
@@ -233,11 +233,14 @@ enum RouteTarget {
     /// 0015 warns against.
     RuntimePeer(PeerRoute),
     /// The single priced peer-sale route (issue #885), carrying its own
-    /// price rather than an index: there is at most one such route, so
-    /// there is nothing to index into, and carrying the price here means
-    /// no arm downstream has to reach back into `Connector::peer_sale`
-    /// and assert it is still `Some`.
-    PeerSale(u64),
+    /// price and lease duration (issue #886) rather than an index: there
+    /// is at most one such route, so there is nothing to index into, and
+    /// carrying the facts here means no arm downstream has to reach back
+    /// into `Connector::peer_sale` and assert it is still `Some`.
+    PeerSale {
+        price: u64,
+        lease: Duration,
+    },
 }
 
 /// How permanent a matched routing-table entry is, least to most -- the
@@ -273,7 +276,7 @@ impl RouteTarget {
             // A config-file entry, like an app route -- durable and
             // priced, never shadowed by a lease or a runtime peer route
             // at the same prefix length.
-            RouteTarget::App(_) | RouteTarget::PeerSale(_) => RouteRank::App,
+            RouteTarget::App(_) | RouteTarget::PeerSale { .. } => RouteRank::App,
         }
     }
 }
@@ -306,9 +309,12 @@ enum ConfiguredTarget {
     /// file. See [`RouteTarget::RuntimePeer`] for why this is owned
     /// rather than indexed.
     RuntimePeer(PeerRoute),
-    /// The single priced peer-sale route (issue #885), carrying its price.
-    /// See [`RouteTarget::PeerSale`].
-    PeerSale(u64),
+    /// The single priced peer-sale route (issue #885), carrying its price
+    /// and lease duration (issue #886). See [`RouteTarget::PeerSale`].
+    PeerSale {
+        price: u64,
+        lease: Duration,
+    },
 }
 
 impl ConfiguredTarget {
@@ -317,7 +323,7 @@ impl ConfiguredTarget {
             ConfiguredTarget::App(index) => RouteTarget::App(index),
             ConfiguredTarget::Peer(index) => RouteTarget::Peer(index),
             ConfiguredTarget::RuntimePeer(route) => RouteTarget::RuntimePeer(route),
-            ConfiguredTarget::PeerSale(price) => RouteTarget::PeerSale(price),
+            ConfiguredTarget::PeerSale { price, lease } => RouteTarget::PeerSale { price, lease },
         }
     }
 
@@ -328,7 +334,7 @@ impl ConfiguredTarget {
     /// it.
     fn rank(&self) -> RouteRank {
         match self {
-            ConfiguredTarget::App(_) | ConfiguredTarget::PeerSale(_) => RouteRank::App,
+            ConfiguredTarget::App(_) | ConfiguredTarget::PeerSale { .. } => RouteRank::App,
             ConfiguredTarget::Peer(_) => RouteRank::Peer,
             ConfiguredTarget::RuntimePeer(_) => RouteRank::RuntimePeer,
         }
@@ -384,13 +390,17 @@ struct PeerSaleRequest {
 /// The sealed confirmation a successful peer-sale purchase answers with:
 /// the peer id (the channel key that paid) and the route row now in
 /// force, echoed back so the buyer can confirm what was actually inserted
-/// rather than only what it asked for.
+/// rather than only what it asked for. `expires_at` (issue #886) is the
+/// lease this purchase (or renewal) actually resulted in -- the buyer's
+/// own confirmation that a renewal extended rather than restarted, since
+/// it can compare this against what it expected.
 #[derive(Debug, Serialize)]
 struct PeerSaleResponse {
     peer_id: String,
     prefix: String,
     fee: u64,
     price: u64,
+    expires_at: DateTime<Utc>,
 }
 
 /// The connector's packet plane: a fixed set of terminated routes and peer
@@ -520,21 +530,29 @@ pub struct Connector {
     /// stored peer identity before #884 (see [`PeerView`]'s history) and
     /// still stores nothing about a config peer beyond its id here.
     config_peer_ids: HashSet<String>,
-    /// Peer ids added at runtime over the operator surface (issue #884):
-    /// `POST /peers` / `DELETE /peers/:id`. Read-mostly, like
+    /// Peer ids added at runtime over the operator surface (issue #884),
+    /// each paired with its lease expiry -- `None` for one added over the
+    /// plain `POST /peers` surface (permanent, never subject to a lease),
+    /// `Some` for one a peer-sale purchase inserted
+    /// (`Connector::upsert_runtime_peer_purchase`, issue #886), demoted
+    /// back to client role once it lapses. Read-mostly, like
     /// `leased_routes` (ADR 0015) -- an `ArcSwap` so `handle_prepare`'s
     /// hot path (which consults this only indirectly, through
     /// `runtime_peer_routes`' referential integrity already having been
     /// checked at write time) never locks. Unlike `leased_routes`, this
     /// is durable: every write is persisted to `runtime_store` before
     /// being published here, so it survives a restart -- the whole point
-    /// of #884 versus #427's lease mechanism.
-    runtime_peers: ArcSwap<HashSet<String>>,
+    /// of #884 versus #427's lease mechanism. A config-file peer id
+    /// (`config_peer_ids`) never appears here at all, so it can never
+    /// carry a lease either.
+    runtime_peers: ArcSwap<RuntimePeers>,
     /// Peer-forwarding routes added at runtime over the operator surface
     /// (issue #884), keyed by prefix like `leased_routes` -- but durable,
-    /// and stored as a plain [`PeerRoute`] with no expiry, since a runtime
-    /// row is a deliberate, paid relationship rather than an automated
-    /// controller's TTL-bound push (ADR 0006). Participates in
+    /// and stored as a plain [`PeerRoute`] with no expiry of its own: a
+    /// route's lease (if any) lives on its `peer_id`'s entry in
+    /// `runtime_peers` rather than on the route itself, since a purchase
+    /// always inserts exactly one peer for its one route and demotion acts
+    /// on peer identity, not on the route in isolation. Participates in
     /// `select_configured_route`/`client_route` exactly like a
     /// config-file peer route: matching is still longest-prefix-first
     /// with the same priority tie-break (issue #884's acceptance
@@ -614,6 +632,15 @@ fn default_probe_window() -> Duration {
     Duration::seconds(60)
 }
 
+/// Whether `peer_id`'s peer-sale lease has lapsed as of `now` (issue
+/// #886). `false` for a peer with no lease at all -- one added over the
+/// plain `POST /peers` surface -- and for one whose lease is still
+/// running, so the one thing this is `true` for is the row a demotion is
+/// owed to.
+fn peer_lease_has_lapsed(peers: &RuntimePeers, peer_id: &str, now: DateTime<Utc>) -> bool {
+    matches!(peers.get(peer_id), Some(Some(expires_at)) if is_expired(*expires_at, now))
+}
+
 impl Connector {
     pub fn new(
         routes: Vec<StaticRoute>,
@@ -640,7 +667,7 @@ impl Connector {
             outbound_client: None,
             outbound_client_hops: HashMap::new(),
             config_peer_ids: HashSet::new(),
-            runtime_peers: ArcSwap::from_pointee(HashSet::new()),
+            runtime_peers: ArcSwap::from_pointee(RuntimePeers::new()),
             runtime_peer_routes: ArcSwap::from_pointee(HashMap::new()),
             runtime_table_lock: Mutex::new(()),
             runtime_store: None,
@@ -658,9 +685,16 @@ impl Connector {
     }
 
     /// Configure the single priced route that buys peering with this node
-    /// (issue #885, `[peer_sale]`). A node not given one sells no peering.
-    pub fn with_peer_sale(mut self, prefix: impl Into<String>, price: u64) -> Self {
-        self.peer_sale = Some(PeerSaleRoute::new(prefix, price));
+    /// (issue #885, `[peer_sale]`), leased for `lease` and renewable by
+    /// paying again before it lapses (issue #886). A node not given one
+    /// sells no peering.
+    pub fn with_peer_sale(
+        mut self,
+        prefix: impl Into<String>,
+        price: u64,
+        lease: Duration,
+    ) -> Self {
+        self.peer_sale = Some(PeerSaleRoute::new(prefix, price, lease));
         self
     }
 
@@ -672,7 +706,7 @@ impl Connector {
     pub fn with_runtime_peer_route_store(
         mut self,
         store: PeerRouteStore,
-        peers: HashSet<String>,
+        peers: RuntimePeers,
         routes: HashMap<String, PeerRoute>,
     ) -> Self {
         self.runtime_peers = ArcSwap::from_pointee(peers);
@@ -915,11 +949,11 @@ impl Connector {
             .collect()
     }
 
-    /// The current runtime-peer set, snapshotted as of this call -- see
+    /// The current runtime-peer table, snapshotted as of this call -- see
     /// [`Self::leased_routes_snapshot`]'s identical reasoning (issue
     /// #452/ADR 0015): a single atomic `Arc` clone, no lock, no copy of
-    /// the set's contents.
-    fn runtime_peers_snapshot(&self) -> Arc<HashSet<String>> {
+    /// the table's contents.
+    fn runtime_peers_snapshot(&self) -> Arc<RuntimePeers> {
         self.runtime_peers.load_full()
     }
 
@@ -936,7 +970,7 @@ impl Connector {
     /// which write is current.
     fn persist_runtime_table(
         &self,
-        peers: &HashSet<String>,
+        peers: &RuntimePeers,
         routes: &HashMap<String, PeerRoute>,
     ) -> Result<(), PeerRouteTableError> {
         match &self.runtime_store {
@@ -955,6 +989,13 @@ impl Connector {
     /// update (there is nothing to update yet beyond the id itself, but
     /// the write still persists and still returns `Ok`, matching
     /// `upsert_leased_route`'s own renew-by-reinsertion shape).
+    ///
+    /// Always inserts (or restates) the id with no lease (issue #886): the
+    /// plain operator surface never creates a leased row, so a peer added
+    /// this way is a permanent grant exactly as it was before #886, the
+    /// same way a config-file row always is. Use
+    /// [`Self::upsert_runtime_peer_purchase`] for the peer-sale purchase
+    /// path, which does lease.
     pub fn upsert_runtime_peer(
         &self,
         id: impl Into<String>,
@@ -971,13 +1012,54 @@ impl Connector {
             .lock()
             .expect("runtime peer/route table lock poisoned");
         let mut peers = (*self.runtime_peers_snapshot()).clone();
-        peers.insert(id.clone());
+        peers.insert(id.clone(), None);
         self.persist_runtime_table(&peers, &self.runtime_peer_routes_snapshot())?;
         self.runtime_peers.store(Arc::new(peers));
         Ok(PeerView {
             id,
             source: RouteSource::Runtime,
+            expires_at: None,
         })
+    }
+
+    /// Add or renew a runtime peer row bought by a peer-sale purchase
+    /// (issue #886), leasing it for `lease_duration` from this connector's
+    /// own injected clock. A renewal (the id is already in the runtime
+    /// table, leased or not) **extends rather than restarts**: the new
+    /// expiry is `lease_duration` added onto whichever is later of the
+    /// current expiry or now, so paying again before a lease lapses
+    /// stacks the fresh term on top of the unused remainder instead of
+    /// discarding it, while paying again after it has already lapsed (or
+    /// for a brand new id) simply starts a fresh lease from now -- there
+    /// is no unused remainder left to preserve either way. Returns the
+    /// resulting expiry.
+    fn upsert_runtime_peer_purchase(
+        &self,
+        id: &str,
+        lease_duration: Duration,
+    ) -> Result<DateTime<Utc>, PeerRouteTableError> {
+        if id.trim().is_empty() {
+            return Err(PeerRouteTableError::InvalidPeerId);
+        }
+        if self.config_peer_ids.contains(id) {
+            return Err(PeerRouteTableError::OwnedByConfig(id.to_string()));
+        }
+        let _write_guard = self
+            .runtime_table_lock
+            .lock()
+            .expect("runtime peer/route table lock poisoned");
+        let now = self.clock.now();
+        let mut peers = (*self.runtime_peers_snapshot()).clone();
+        let base = peers
+            .get(id)
+            .copied()
+            .flatten()
+            .map_or(now, |current| current.max(now));
+        let expires_at = base + lease_duration;
+        peers.insert(id.to_string(), Some(expires_at));
+        self.persist_runtime_table(&peers, &self.runtime_peer_routes_snapshot())?;
+        self.runtime_peers.store(Arc::new(peers));
+        Ok(expires_at)
     }
 
     /// Remove a runtime peer row (issue #884): `DELETE /peers/:id`.
@@ -996,7 +1078,7 @@ impl Connector {
             .lock()
             .expect("runtime peer/route table lock poisoned");
         let peers = self.runtime_peers_snapshot();
-        if !peers.contains(id) {
+        if !peers.contains_key(id) {
             return Err(PeerRouteTableError::PeerNotFound(id.to_string()));
         }
         let routes = self.runtime_peer_routes_snapshot();
@@ -1069,7 +1151,7 @@ impl Connector {
             .lock()
             .expect("runtime peer/route table lock poisoned");
         if !self.config_peer_ids.contains(&peer_id)
-            && !self.runtime_peers_snapshot().contains(&peer_id)
+            && !self.runtime_peers_snapshot().contains_key(&peer_id)
         {
             return Err(PeerRouteTableError::UnknownPeerId { prefix, peer_id });
         }
@@ -1105,6 +1187,70 @@ impl Connector {
         self.persist_runtime_table(&self.runtime_peers_snapshot(), &routes)?;
         self.runtime_peer_routes.store(Arc::new(routes));
         Ok(())
+    }
+
+    /// Demote every runtime peer whose peer-sale lease has lapsed (issue
+    /// #886) back to client role: removes its row, and every runtime route
+    /// that forwards to it, from the durable table -- never left to rot,
+    /// which is the "slow leak" issue #886 exists to close. Returns the
+    /// peer ids demoted this call, each logged positively at the moment it
+    /// happens (`tracing::info!`, naming the peer id and the instant it
+    /// lapsed) -- a demotion is never silent, unlike an unconfigured
+    /// credential logging nothing at all (issue #886's own warning).
+    ///
+    /// Safe to call at any time, including with packets concurrently in
+    /// flight: [`Self::select_configured_route`] already stops matching a
+    /// lapsed lease's route the instant the clock passes it (independent
+    /// of whether or when this has run), and a packet already forwarding
+    /// carries a [`PeerRoute`] cloned out of the `ArcSwap` snapshot it
+    /// matched against, so it reads nothing this method can touch -- a
+    /// call here can only ever remove a row nothing in flight still
+    /// depends on.
+    /// Intended to be driven periodically by a caller outside this crate
+    /// (`connector-cli`), the same shape `EvmChannelIndexSyncer::run`
+    /// takes for its own periodic sweep.
+    pub fn reap_expired_peer_leases(&self) -> Vec<String> {
+        let now = self.clock.now();
+        let _write_guard = self
+            .runtime_table_lock
+            .lock()
+            .expect("runtime peer/route table lock poisoned");
+        let peers = self.runtime_peers_snapshot();
+        let lapsed: Vec<(String, DateTime<Utc>)> = peers
+            .iter()
+            .filter_map(|(id, expires_at)| {
+                let expires_at = (*expires_at)?;
+                is_expired(expires_at, now).then(|| (id.clone(), expires_at))
+            })
+            .collect();
+        if lapsed.is_empty() {
+            return Vec::new();
+        }
+        let lapsed_ids: HashSet<&str> = lapsed.iter().map(|(id, _)| id.as_str()).collect();
+        let routes = self.runtime_peer_routes_snapshot();
+        let next_routes: HashMap<String, PeerRoute> = (*routes)
+            .clone()
+            .into_iter()
+            .filter(|(_, route)| !lapsed_ids.contains(route.peer_id()))
+            .collect();
+        let mut next_peers = (*peers).clone();
+        for (id, _) in &lapsed {
+            next_peers.remove(id);
+        }
+        if let Err(error) = self.persist_runtime_table(&next_peers, &next_routes) {
+            tracing::warn!(%error, "could not persist demoted peer-sale leases; leaving the table unchanged");
+            return Vec::new();
+        }
+        self.runtime_peers.store(Arc::new(next_peers));
+        self.runtime_peer_routes.store(Arc::new(next_routes));
+        for (id, expires_at) in &lapsed {
+            tracing::info!(
+                peer_id = %id,
+                lapsed_at = %expires_at,
+                "peer-sale lease lapsed: demoting peer to client role"
+            );
+        }
+        lapsed.into_iter().map(|(id, _)| id).collect()
     }
 
     /// Every peer-forwarding route this node knows, config-file and
@@ -1513,10 +1659,10 @@ impl Connector {
                 let response = self.deliver_to_app(&self.routes[index], prepare).await;
                 return self.finish(response);
             }
-            RouteTarget::PeerSale(price) => {
+            RouteTarget::PeerSale { price, lease } => {
                 tracing::debug!("routed to peer-sale");
                 let response = self
-                    .deliver_peer_sale(prepare, client_channel_id, price)
+                    .deliver_peer_sale(prepare, client_channel_id, price, lease)
                     .await;
                 return self.finish(response);
             }
@@ -2061,6 +2207,7 @@ impl Connector {
         prepare: Prepare,
         client_channel_id: Option<&str>,
         price: u64,
+        lease: Duration,
     ) -> PacketResponse {
         let condition = prepare.execution_condition;
 
@@ -2074,6 +2221,7 @@ impl Connector {
                 &shared_secret,
                 client_channel_id,
                 price,
+                lease,
                 &envelope_bytes,
             )
             .await;
@@ -2089,6 +2237,7 @@ impl Connector {
         shared_secret: &[u8; 32],
         client_channel_id: Option<&str>,
         price: u64,
+        lease: Duration,
         envelope_bytes: &[u8],
     ) -> PacketResponse {
         let refuse = |message: String| {
@@ -2197,10 +2346,13 @@ impl Connector {
         // so it doubles as this connector's peer id -- unique, stable, and
         // needing no buyer-chosen name to collide over.
         let peer_id = channel_id;
-        if let Err(error) = self.upsert_runtime_peer(peer_id) {
-            tracing::warn!(channel_id, %error, "peer-sale purchase refused: could not insert peer row");
-            return refuse(format!("could not register peer '{peer_id}': {error}"));
-        }
+        let expires_at = match self.upsert_runtime_peer_purchase(peer_id, lease) {
+            Ok(expires_at) => expires_at,
+            Err(error) => {
+                tracing::warn!(channel_id, %error, "peer-sale purchase refused: could not insert peer row");
+                return refuse(format!("could not register peer '{peer_id}': {error}"));
+            }
+        };
         let route = match self.upsert_runtime_peer_route(
             purchase.prefix.clone(),
             peer_id,
@@ -2223,6 +2375,7 @@ impl Connector {
             prefix = %route.prefix,
             fee = route.fee,
             price = route.price,
+            %expires_at,
             "peer-sale purchase admitted: peer and route rows inserted"
         );
 
@@ -2231,6 +2384,7 @@ impl Connector {
             prefix: route.prefix.clone(),
             fee: route.fee,
             price: route.price,
+            expires_at,
         })
         .expect("PeerSaleResponse always serializes");
         Self::accept_if_fulfilled(
@@ -2316,6 +2470,14 @@ impl Connector {
     /// config file's own: both are static, priced, durable rows, so both
     /// belong in "configured" as this method means it -- only a lease
     /// (issue #427), with no price and no durability, is excluded.
+    ///
+    /// A runtime peer route whose peer's peer-sale lease has lapsed (issue
+    /// #886) is excluded here too, the instant the clock passes its
+    /// expiry -- exactly the same "checked fresh against the clock on
+    /// every lookup" treatment [`Self::handle_prepare_traced`] already
+    /// gives a lapsed lease (issue #427), so a demoted peer stops being
+    /// routed to immediately, whether or not [`Self::reap_expired_peer_leases`]
+    /// has run yet to remove its row from the durable table.
     fn select_configured_route(&self, destination: &str) -> Option<(usize, ConfiguredTarget)> {
         let app_match = self.select_app_route(destination).map(|index| {
             (
@@ -2330,8 +2492,13 @@ impl Connector {
                 ConfiguredTarget::Peer(index),
             )
         });
+        let now = self.clock.now();
+        let runtime_peers = self.runtime_peers_snapshot();
         let runtime_peer_routes = self.runtime_peer_routes_snapshot();
-        let runtime_list: Vec<&PeerRoute> = runtime_peer_routes.values().collect();
+        let runtime_list: Vec<&PeerRoute> = runtime_peer_routes
+            .values()
+            .filter(|route| !peer_lease_has_lapsed(&runtime_peers, route.peer_id(), now))
+            .collect();
         let runtime_prefixes: Vec<&str> = runtime_list.iter().map(|route| route.prefix()).collect();
         let runtime_match = select_route(destination, &runtime_prefixes).map(|index| {
             (
@@ -2343,7 +2510,10 @@ impl Connector {
             select_route(destination, &[sale.prefix()]).map(|_| {
                 (
                     sale.prefix().len(),
-                    ConfiguredTarget::PeerSale(sale.price()),
+                    ConfiguredTarget::PeerSale {
+                        price: sale.price(),
+                        lease: sale.lease(),
+                    },
                 )
             })
         });
@@ -2391,7 +2561,7 @@ impl Connector {
                 // (issue #885): buying peering is the terminating app's
                 // work, done by this connector itself rather than an
                 // HTTP handler.
-                ConfiguredTarget::PeerSale(price) => ClientRouteFacts {
+                ConfiguredTarget::PeerSale { price, .. } => ClientRouteFacts {
                     price,
                     transport_policy: TransportPolicy::Both,
                     kind: ClientRouteKind::Terminated,
@@ -2503,12 +2673,18 @@ impl Connector {
             .map(|id| PeerView {
                 id: id.clone(),
                 source: RouteSource::Config,
+                expires_at: None,
             })
             .collect();
-        views.extend(self.runtime_peers_snapshot().iter().map(|id| PeerView {
-            id: id.clone(),
-            source: RouteSource::Runtime,
-        }));
+        views.extend(
+            self.runtime_peers_snapshot()
+                .iter()
+                .map(|(id, expires_at)| PeerView {
+                    id: id.clone(),
+                    source: RouteSource::Runtime,
+                    expires_at: *expires_at,
+                }),
+        );
         views
     }
 
@@ -2863,20 +3039,27 @@ mod tests {
         }
     }
 
-    /// A `Prepare` sealed to [`identity_signer`]'s identity and carrying
-    /// `body` (issue #524), with `execution_condition` set to match the
-    /// fulfilment this same sealed secret derives (ADR 0019, issue #525) --
-    /// the common case for a test that drives `Connector::handle_prepare`
-    /// directly rather than through the HTTP router and expects the packet
-    /// to genuinely fulfil. Returns the shared secret alongside, to open
-    /// the sealed `Fulfill`/termination-`Reject` this produces, or to
-    /// compute the expected fulfilment via `expected_fulfillment`.
+    /// [`sealed_prepare_to`], addressed to `"g.example.app"` -- the
+    /// destination almost every sealed-request test terminates at.
     fn sealed_prepare(body: &[u8]) -> (Prepare, [u8; 32]) {
+        sealed_prepare_to("g.example.app", body)
+    }
+
+    /// A `Prepare` for `destination`, sealed to [`identity_signer`]'s
+    /// identity and carrying `body` (issue #524), with
+    /// `execution_condition` set to match the fulfilment this same sealed
+    /// secret derives (ADR 0019, issue #525) -- the common case for a test
+    /// that drives `Connector::handle_prepare` directly rather than through
+    /// the HTTP router and expects the packet to genuinely fulfil. Returns
+    /// the shared secret alongside, to open the sealed
+    /// `Fulfill`/termination-`Reject` this produces, or to compute the
+    /// expected fulfilment via `expected_fulfillment`.
+    fn sealed_prepare_to(destination: &str, body: &[u8]) -> (Prepare, [u8; 32]) {
         let (data, shared_secret) = sealed_envelope_request_data(body);
         let prepare = Prepare {
             data,
             execution_condition: matching_condition(&shared_secret),
-            ..prepare("g.example.app", b"unused")
+            ..prepare(destination, b"unused")
         };
         (prepare, shared_secret)
     }
@@ -5244,17 +5427,32 @@ mod tests {
 
         const PEER_SALE_PREFIX: &str = "g.example.node.peer-sale";
         const PEER_SALE_PRICE: u64 = 1000;
+        const PEER_SALE_LEASE_SECONDS: i64 = 3600;
 
         fn peer_sale_connector(backend: Arc<InMemorySettlementBackend>) -> Connector {
+            peer_sale_connector_with_clock(backend, test_clock())
+        }
+
+        /// Like [`peer_sale_connector`], but built on a caller-held clock
+        /// (issue #886) so a test can advance it past the lease's expiry
+        /// after purchasing.
+        fn peer_sale_connector_with_clock(
+            backend: Arc<InMemorySettlementBackend>,
+            clock: Arc<TestClock>,
+        ) -> Connector {
             Connector::new(
                 vec![],
                 vec![],
                 Arc::new(FakeAppClient::new()),
                 Arc::new(InProcessPeerTransport::new()),
-                test_clock(),
+                clock,
             )
             .with_identity_signer(identity_signer())
-            .with_peer_sale(PEER_SALE_PREFIX, PEER_SALE_PRICE)
+            .with_peer_sale(
+                PEER_SALE_PREFIX,
+                PEER_SALE_PRICE,
+                Duration::seconds(PEER_SALE_LEASE_SECONDS),
+            )
             .with_settlement(SettlementChain::Evm, backend)
         }
 
@@ -5354,7 +5552,11 @@ mod tests {
                 test_clock(),
             )
             .with_identity_signer(identity_signer())
-            .with_peer_sale(PEER_SALE_PREFIX, PEER_SALE_PRICE)
+            .with_peer_sale(
+                PEER_SALE_PREFIX,
+                PEER_SALE_PRICE,
+                Duration::seconds(PEER_SALE_LEASE_SECONDS),
+            )
             .with_settlement(SettlementChain::Evm, backend);
 
             let (sealed, _shared_secret) =
@@ -5575,6 +5777,440 @@ mod tests {
                     .price,
                 40
             );
+        }
+
+        /// Issue #886's first acceptance criterion: the lease is part of
+        /// what a purchase buys, and this connector tells the buyer
+        /// exactly what it bought -- not just what it asked for.
+        #[tokio::test]
+        async fn a_purchases_response_names_the_lease_it_bought() {
+            let backend = Arc::new(InMemorySettlementBackend::new());
+            let channel_id = backend
+                .open(b"buyer".to_vec(), Duration::seconds(3600))
+                .await
+                .expect("open");
+            let client_channel_id = format!("evm:{}", channel_id.0);
+            let clock = test_clock();
+            let connector = peer_sale_connector_with_clock(backend, clock.clone());
+            let (sealed, shared_secret) =
+                peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
+
+            let response = connector
+                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                .await;
+
+            let PacketResponse::Fulfill(fulfill) = response else {
+                panic!("expected a fulfill, got {response:?}");
+            };
+            let envelope = open_sealed_envelope(&shared_secret, &fulfill.data);
+            let body: serde_json::Value = serde_json::from_slice(&envelope.body).expect("json");
+            let expected_expiry = clock.now() + Duration::seconds(PEER_SALE_LEASE_SECONDS);
+            let reported_expiry: DateTime<Utc> = body["expires_at"]
+                .as_str()
+                .expect("expires_at is a string")
+                .parse()
+                .expect("expires_at parses as an RFC 3339 timestamp");
+            assert_eq!(reported_expiry, expected_expiry);
+        }
+
+        /// Issue #886's second acceptance criterion, at the routing
+        /// altitude: once the clock passes the lease this purchase bought,
+        /// the route it inserted stops matching -- the demotion takes
+        /// effect the instant it lapses, with no sweep delay, the same
+        /// "checked fresh against the clock on every lookup" guarantee
+        /// issue #427's leases already give.
+        #[tokio::test]
+        async fn a_purchased_route_stops_matching_the_instant_its_lease_expires() {
+            let backend = Arc::new(InMemorySettlementBackend::new());
+            let channel_id = backend
+                .open(b"buyer".to_vec(), Duration::seconds(3600))
+                .await
+                .expect("open");
+            let client_channel_id = format!("evm:{}", channel_id.0);
+            let clock = test_clock();
+            let connector = peer_sale_connector_with_clock(backend, clock.clone());
+            let (sealed, _shared_secret) =
+                peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
+            let response = connector
+                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                .await;
+            assert!(matches!(response, PacketResponse::Fulfill(_)));
+
+            assert!(connector.client_route("g.example.buyer").is_some());
+
+            clock.advance(Duration::seconds(PEER_SALE_LEASE_SECONDS));
+
+            assert!(
+                connector.client_route("g.example.buyer").is_none(),
+                "a lapsed purchase must stop being routed to, demoting the buyer back to client \
+                 role"
+            );
+        }
+
+        /// Issue #886's own acceptance wording: "expiry is tested,
+        /// including expiry while packets are in flight". A packet routed
+        /// while the lease is still active forwards to the purchased peer
+        /// and is untouched by a later expiry; a packet sent after the
+        /// lease has lapsed no longer forwards there at all -- proving the
+        /// demotion is safe to apply without disturbing traffic that
+        /// already resolved its route under the earlier, still-valid
+        /// lease.
+        #[tokio::test]
+        async fn a_purchased_route_forwards_until_its_lease_expires_then_stops() {
+            let second_hop_route =
+                StaticRoute::new("g.example.buyer", "http://localhost:4000").unwrap();
+            let second_hop_app_client = Arc::new(FakeAppClient::new());
+            second_hop_app_client.respond(
+                second_hop_route.handler_url(),
+                answered(b"delivered by the purchased peer"),
+            );
+            let second_hop = Arc::new(
+                Connector::new(
+                    vec![second_hop_route],
+                    vec![],
+                    second_hop_app_client,
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(identity_signer()),
+            );
+
+            let backend = Arc::new(InMemorySettlementBackend::new());
+            let channel_id = backend
+                .open(b"buyer".to_vec(), Duration::seconds(3600))
+                .await
+                .expect("open");
+            let client_channel_id = format!("evm:{}", channel_id.0);
+
+            let mut peer_transport = InProcessPeerTransport::new();
+            peer_transport.add_peer(&client_channel_id, second_hop);
+
+            let clock = test_clock();
+            let connector = Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(peer_transport),
+                clock.clone(),
+            )
+            .with_identity_signer(identity_signer())
+            .with_peer_sale(
+                PEER_SALE_PREFIX,
+                PEER_SALE_PRICE,
+                Duration::seconds(PEER_SALE_LEASE_SECONDS),
+            )
+            .with_settlement(SettlementChain::Evm, backend);
+
+            let (sealed, _shared_secret) =
+                peer_sale_prepare(&purchase_body("g.example.buyer", 0, 0, 0));
+            let response = connector
+                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                .await;
+            assert!(matches!(response, PacketResponse::Fulfill(_)));
+
+            // Still within the lease: forwards to the purchased peer.
+            let (sealed, shared_secret) = sealed_prepare_to("g.example.buyer", b"hello");
+            let response = connector.handle_prepare(sealed, 0).await;
+            match response {
+                PacketResponse::Fulfill(fulfill) => {
+                    assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
+                    assert_eq!(
+                        open_sealed_envelope(&shared_secret, &fulfill.data),
+                        fulfill_envelope(b"delivered by the purchased peer")
+                    );
+                }
+                other => panic!("expected a fulfill while the lease is active, got {other:?}"),
+            }
+
+            clock.advance(Duration::seconds(PEER_SALE_LEASE_SECONDS));
+
+            // Past the lease: no longer routed to the demoted peer at all.
+            let (sealed, _shared_secret) = sealed_prepare_to("g.example.buyer", b"hello");
+            let response = connector.handle_prepare(sealed, 0).await;
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code, RejectCode::f02_unreachable());
+                }
+                other => panic!("expected the lapsed route to be unreachable, got {other:?}"),
+            }
+        }
+
+        /// An [`AppClient`] that parks every delivery until the test
+        /// releases it -- the "packet in flight" issue #886's expiry
+        /// criterion needs to hold open while the clock advances and the
+        /// reap runs. `arrived` fires when a delivery is parked; `release`
+        /// lets it complete.
+        struct HoldingAppClient {
+            outcome: AppOutcome,
+            arrived: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+
+        impl HoldingAppClient {
+            fn new(outcome: AppOutcome) -> HoldingAppClient {
+                HoldingAppClient {
+                    outcome,
+                    arrived: tokio::sync::Notify::new(),
+                    release: tokio::sync::Notify::new(),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl AppClient for HoldingAppClient {
+            async fn deliver(
+                &self,
+                _handler_url: &url::Url,
+                _request: &EnvelopeRequest,
+            ) -> AppOutcome {
+                self.arrived.notify_one();
+                self.release.notified().await;
+                self.outcome.clone()
+            }
+        }
+
+        /// Issue #886's "expiry is tested, including expiry while packets
+        /// are in flight", exercised for real (this PR's review): the
+        /// forward is parked mid-delivery at the second hop while the lease
+        /// lapses AND `reap_expired_peer_leases` demotes the peer -- and it
+        /// still completes, because `select_configured_route` cloned the
+        /// matched route out of the `ArcSwap` snapshot before the reap
+        /// swapped it. The packet arriving after the reap gets F02.
+        #[tokio::test]
+        async fn a_forward_in_flight_while_the_lease_lapses_and_the_reap_runs_still_completes() {
+            let second_hop_route =
+                StaticRoute::new("g.example.buyer", "http://localhost:4000").unwrap();
+            let holding = Arc::new(HoldingAppClient::new(answered(b"delivered mid-demotion")));
+            let second_hop = Arc::new(
+                Connector::new(
+                    vec![second_hop_route],
+                    vec![],
+                    holding.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(identity_signer()),
+            );
+
+            let backend = Arc::new(InMemorySettlementBackend::new());
+            let channel_id = backend
+                .open(b"buyer".to_vec(), Duration::seconds(3600))
+                .await
+                .expect("open");
+            let client_channel_id = format!("evm:{}", channel_id.0);
+
+            let mut peer_transport = InProcessPeerTransport::new();
+            peer_transport.add_peer(&client_channel_id, second_hop);
+
+            let clock = test_clock();
+            let connector = Arc::new(
+                Connector::new(
+                    vec![],
+                    vec![],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(peer_transport),
+                    clock.clone(),
+                )
+                .with_identity_signer(identity_signer())
+                .with_peer_sale(
+                    PEER_SALE_PREFIX,
+                    PEER_SALE_PRICE,
+                    Duration::seconds(PEER_SALE_LEASE_SECONDS),
+                )
+                .with_settlement(SettlementChain::Evm, backend),
+            );
+
+            let (sealed, _shared_secret) =
+                peer_sale_prepare(&purchase_body("g.example.buyer", 0, 0, 0));
+            let response = connector
+                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                .await;
+            assert!(matches!(response, PacketResponse::Fulfill(_)));
+
+            // Put a forward genuinely in flight: it parks inside the second
+            // hop's delivery and stays there until released.
+            let (sealed, shared_secret) = sealed_prepare_to("g.example.buyer", b"hello");
+            let in_flight = tokio::spawn({
+                let connector = Arc::clone(&connector);
+                async move { connector.handle_prepare(sealed, 0).await }
+            });
+            holding.arrived.notified().await;
+
+            // With the packet parked mid-delivery: lapse the lease and run
+            // the reap. The row is gone before the in-flight packet's
+            // delivery has completed.
+            clock.advance(Duration::seconds(PEER_SALE_LEASE_SECONDS));
+            let demoted = connector.reap_expired_peer_leases();
+            assert_eq!(demoted, vec![client_channel_id.clone()]);
+            assert!(connector.client_route("g.example.buyer").is_none());
+
+            // The demotion did not disturb the traffic that had already
+            // resolved its route.
+            holding.release.notify_one();
+            match in_flight.await.expect("the in-flight task completes") {
+                PacketResponse::Fulfill(fulfill) => {
+                    assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
+                    assert_eq!(
+                        open_sealed_envelope(&shared_secret, &fulfill.data),
+                        fulfill_envelope(b"delivered mid-demotion")
+                    );
+                }
+                other => panic!("expected the in-flight forward to complete, got {other:?}"),
+            }
+
+            // And the packet AFTER the reap is refused, not forwarded.
+            let (sealed, _shared_secret) = sealed_prepare_to("g.example.buyer", b"hello");
+            match connector.handle_prepare(sealed, 0).await {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code, RejectCode::f02_unreachable());
+                }
+                other => panic!("expected the reaped route to be unreachable, got {other:?}"),
+            }
+        }
+
+        /// Issue #886's third acceptance criterion: paying again before the
+        /// lease lapses extends the existing term rather than discarding
+        /// its unused remainder and starting over from the moment of
+        /// renewal.
+        #[tokio::test]
+        async fn renewing_before_expiry_extends_rather_than_restarts_the_lease() {
+            let backend = Arc::new(InMemorySettlementBackend::new());
+            let channel_id = backend
+                .open(b"buyer".to_vec(), Duration::seconds(3600))
+                .await
+                .expect("open");
+            let client_channel_id = format!("evm:{}", channel_id.0);
+            let clock = test_clock();
+            let connector = peer_sale_connector_with_clock(backend, clock.clone());
+
+            let (sealed, _shared_secret) =
+                peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
+            connector
+                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                .await;
+            let first_expiry = connector
+                .peers()
+                .into_iter()
+                .find(|peer| peer.id == client_channel_id)
+                .and_then(|peer| peer.expires_at)
+                .expect("purchase leases the peer");
+
+            // Well before the first lease lapses.
+            clock.advance(Duration::seconds(PEER_SALE_LEASE_SECONDS / 4));
+            let (sealed, _shared_secret) =
+                peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
+            let response = connector
+                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                .await;
+            assert!(matches!(response, PacketResponse::Fulfill(_)));
+
+            let second_expiry = connector
+                .peers()
+                .into_iter()
+                .find(|peer| peer.id == client_channel_id)
+                .and_then(|peer| peer.expires_at)
+                .expect("still leased after renewal");
+
+            assert_eq!(
+                second_expiry,
+                first_expiry + Duration::seconds(PEER_SALE_LEASE_SECONDS),
+                "a renewal before expiry must stack the fresh term onto the unused remainder, \
+                 not discard it"
+            );
+        }
+
+        /// The other half of "extends rather than restarts": once a lease
+        /// has already lapsed there is no unused remainder left to
+        /// preserve, so paying again simply starts a fresh lease from the
+        /// moment of that payment.
+        #[tokio::test]
+        async fn renewing_after_expiry_starts_a_fresh_lease_from_now() {
+            let backend = Arc::new(InMemorySettlementBackend::new());
+            let channel_id = backend
+                .open(b"buyer".to_vec(), Duration::seconds(3600))
+                .await
+                .expect("open");
+            let client_channel_id = format!("evm:{}", channel_id.0);
+            let clock = test_clock();
+            let connector = peer_sale_connector_with_clock(backend, clock.clone());
+
+            let (sealed, _shared_secret) =
+                peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
+            connector
+                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                .await;
+
+            // Well past the first lease.
+            clock.advance(Duration::seconds(PEER_SALE_LEASE_SECONDS * 2));
+            let (sealed, _shared_secret) =
+                peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
+            let response = connector
+                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                .await;
+            assert!(matches!(response, PacketResponse::Fulfill(_)));
+
+            let expiry = connector
+                .peers()
+                .into_iter()
+                .find(|peer| peer.id == client_channel_id)
+                .and_then(|peer| peer.expires_at)
+                .expect("leased again after renewal");
+            assert_eq!(
+                expiry,
+                clock.now() + Duration::seconds(PEER_SALE_LEASE_SECONDS)
+            );
+        }
+
+        /// Issue #886's "Why": a lapsed purchase must not rot as a dead row
+        /// in the now-durable table forever. `reap_expired_peer_leases`
+        /// removes it (and the route it inserted), names the peer id and
+        /// the instant it lapsed in the ids it returns, and leaves an
+        /// active lease -- and a config-file/operator-added peer, neither
+        /// ever subject to a lease at all -- completely alone.
+        #[tokio::test]
+        async fn reap_expired_peer_leases_demotes_a_lapsed_purchase_and_leaves_active_rows_alone() {
+            let backend = Arc::new(InMemorySettlementBackend::new());
+            let lapsing_channel = backend
+                .open(b"lapsing-buyer".to_vec(), Duration::seconds(3600))
+                .await
+                .expect("open");
+            let lapsing_id = format!("evm:{}", lapsing_channel.0);
+            let active_channel = backend
+                .open(b"active-buyer".to_vec(), Duration::seconds(3600))
+                .await
+                .expect("open");
+            let active_id = format!("evm:{}", active_channel.0);
+            let clock = test_clock();
+            let connector = peer_sale_connector_with_clock(backend, clock.clone());
+            connector.upsert_runtime_peer("operator-added").unwrap();
+
+            let (sealed, _shared_secret) =
+                peer_sale_prepare(&purchase_body("g.example.lapsing", 3, 25, 10));
+            connector
+                .handle_prepare_with_client_channel(sealed, 0, Some(&lapsing_id))
+                .await;
+
+            clock.advance(Duration::seconds(PEER_SALE_LEASE_SECONDS));
+
+            let (sealed, _shared_secret) =
+                peer_sale_prepare(&purchase_body("g.example.active", 3, 25, 10));
+            let response = connector
+                .handle_prepare_with_client_channel(sealed, 0, Some(&active_id))
+                .await;
+            assert!(matches!(response, PacketResponse::Fulfill(_)));
+
+            let demoted = connector.reap_expired_peer_leases();
+            assert_eq!(demoted, vec![lapsing_id.clone()]);
+
+            let peers = connector.peers();
+            assert!(!peers.iter().any(|peer| peer.id == lapsing_id));
+            assert!(peers.iter().any(|peer| peer.id == active_id));
+            assert!(peers.iter().any(|peer| peer.id == "operator-added"));
+            assert!(connector.client_route("g.example.lapsing").is_none());
+            assert!(connector.client_route("g.example.active").is_some());
+
+            // Calling again with nothing lapsed does nothing.
+            assert!(connector.reap_expired_peer_leases().is_empty());
         }
     }
 
@@ -7077,10 +7713,12 @@ mod tests {
                     PeerView {
                         id: "configured-peer".to_string(),
                         source: RouteSource::Config,
+                        expires_at: None,
                     },
                     PeerView {
                         id: "runtime-peer".to_string(),
                         source: RouteSource::Runtime,
+                        expires_at: None,
                     },
                 ]
             );

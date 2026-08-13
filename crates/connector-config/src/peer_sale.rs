@@ -20,15 +20,19 @@ pub(crate) struct RawPeerSale {
     prefix: String,
     #[serde(default)]
     price: Option<u64>,
+    #[serde(default)]
+    lease_seconds: Option<u64>,
 }
 
 /// A fully validated `[peer_sale]` section. Constructed only by
 /// [`resolve_peer_sale`], so a value that exists has already had its
-/// prefix and price checked -- downstream code never re-validates either.
+/// prefix, price and lease checked -- downstream code never re-validates
+/// any of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerSaleConfig {
     prefix: String,
     price: u64,
+    lease_seconds: u64,
 }
 
 impl PeerSaleConfig {
@@ -44,6 +48,16 @@ impl PeerSaleConfig {
     /// free").
     pub fn price(&self) -> u64 {
         self.price
+    }
+
+    /// How long a purchase leases peering for before it lapses and the
+    /// peer row is demoted back to client role (issue #886), renewable by
+    /// paying again before it runs out. Never absent by accident, for the
+    /// same reason `price` is never absent: a purchase with no lease
+    /// duration would silently be a permanent grant, exactly the defect
+    /// issue #886 exists to close.
+    pub fn lease_seconds(&self) -> u64 {
+        self.lease_seconds
     }
 }
 
@@ -65,9 +79,15 @@ pub(crate) fn resolve_peer_sale(
     let price = raw.price.ok_or_else(|| ConfigError::PeerSaleMissingPrice {
         prefix: raw.prefix.clone(),
     })?;
+    let lease_seconds = raw
+        .lease_seconds
+        .ok_or_else(|| ConfigError::PeerSaleMissingLease {
+            prefix: raw.prefix.clone(),
+        })?;
     Ok(Some(PeerSaleConfig {
         prefix: raw.prefix,
         price,
+        lease_seconds,
     }))
 }
 
@@ -85,11 +105,13 @@ mod tests {
         let resolved = resolve_peer_sale(Some(RawPeerSale {
             prefix: "g.example.node.peer-sale".to_string(),
             price: Some(1000),
+            lease_seconds: Some(3600),
         }))
         .expect("resolve")
         .expect("some");
         assert_eq!(resolved.prefix(), "g.example.node.peer-sale");
         assert_eq!(resolved.price(), 1000);
+        assert_eq!(resolved.lease_seconds(), 3600);
     }
 
     #[test]
@@ -97,6 +119,7 @@ mod tests {
         let result = resolve_peer_sale(Some(RawPeerSale {
             prefix: "g.example.node.peer-sale".to_string(),
             price: None,
+            lease_seconds: Some(3600),
         }));
         assert!(matches!(
             result,
@@ -105,10 +128,24 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_lease_is_rejected_at_load() {
+        let result = resolve_peer_sale(Some(RawPeerSale {
+            prefix: "g.example.node.peer-sale".to_string(),
+            price: Some(1000),
+            lease_seconds: None,
+        }));
+        assert!(matches!(
+            result,
+            Err(ConfigError::PeerSaleMissingLease { .. })
+        ));
+    }
+
+    #[test]
     fn an_invalid_prefix_is_rejected() {
         let result = resolve_peer_sale(Some(RawPeerSale {
             prefix: "g..bad".to_string(),
             price: Some(1000),
+            lease_seconds: Some(3600),
         }));
         assert!(matches!(result, Err(ConfigError::InvalidAddress { .. })));
     }

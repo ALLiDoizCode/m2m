@@ -61,6 +61,13 @@ pub struct LeasedRouteView {
 pub struct PeerView {
     pub id: String,
     pub source: RouteSource,
+    /// When this peer's peer-sale lease lapses and it is demoted back to
+    /// client role (issue #886) -- `None` for a config-file row (never
+    /// leased) or a runtime row added over the plain `POST /peers`
+    /// surface (a permanent grant, exactly as every runtime peer was
+    /// before #886); `Some` only for one a peer-sale purchase inserted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 /// A peer-forwarding route (as opposed to [`RouteView`]'s app-terminating

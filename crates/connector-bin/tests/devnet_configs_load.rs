@@ -1211,6 +1211,94 @@ fn the_relay_devnet_config_announces_only_prefixes_it_terminates() {
     );
 }
 
+/// The two-box-cutover operator notice (issue #948, re-homed from
+/// toon-meta#335), exactly as published at
+/// `toon-meta`'s `docs/operators/2026-08-13-two-box-cutover.md`. Nothing
+/// composes a notice's content (`connector-config/src/announce.rs`'s own
+/// doc) -- it reaches the wire only by being TRANSCRIBED, twice and
+/// independently: once into each box's committed `connector-rust.toml`, and
+/// once into these four literals. A slip on either side is the only way what
+/// the fleet announces can drift from what toon-meta actually published,
+/// which is exactly what asserting one against the other catches.
+const NOTICE_ID: &str = "2026-08-13-two-box-cutover";
+const NOTICE_SEVERITY: &str = "action-required";
+const NOTICE_SUMMARY: &str = "The devnet apex is being retired; reads and relay publishing repair themselves, but store uploads need a client released after the cutover.";
+const NOTICE_URL: &str =
+    "https://github.com/toon-protocol/toon-meta/blob/main/docs/operators/2026-08-13-two-box-cutover.md";
+
+/// Both announcing boxes carry the two-box-cutover notice via the schema'd
+/// `notice` field (#912) -- not the retired content ride-along toon-meta#335
+/// originally shipped as a stopgap ahead of #912 landing (see this issue's
+/// own "Scope" text: "no content ride-along").
+fn assert_carries_two_box_cutover_notice(
+    announce: &connector_config::AnnounceConfig,
+    box_name: &str,
+) {
+    let notice = announce
+        .notice()
+        .unwrap_or_else(|| panic!("{box_name}'s announce must carry a notice (issue #948)"));
+    assert_eq!(notice.id, NOTICE_ID, "{box_name}'s notice id");
+    assert_eq!(
+        notice.severity, NOTICE_SEVERITY,
+        "{box_name}'s notice severity"
+    );
+    assert_eq!(
+        notice.summary, NOTICE_SUMMARY,
+        "{box_name}'s notice summary"
+    );
+    assert_eq!(notice.url, NOTICE_URL, "{box_name}'s notice url");
+}
+
+/// Issue #948's core property for the store box: its announce carries the
+/// two-box-cutover notice, populated from `notice_id`/`notice_severity`/
+/// `notice_summary`/`notice_url` in the committed config, not invented by
+/// this crate.
+#[test]
+fn the_store_devnet_config_carries_the_two_box_cutover_notice() {
+    let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let peer_secret = write_peer_secret();
+    let text = with_sandbox_paths(
+        STORE_CONFIG,
+        key_file.path(),
+        state_dir.path(),
+        Some(peer_secret.path()),
+    );
+    let text = with_sandbox_settlement_keys(&text, key_file.path());
+    let config_file = write_config(&text);
+    let config = Config::load(config_file.path()).expect("the committed store config must parse");
+
+    let announce = config
+        .announce()
+        .expect("the store config's [announce] section must parse");
+    assert_carries_two_box_cutover_notice(announce, "the store box");
+}
+
+/// Issue #948's core property for the relay box: its announce carries the
+/// two-box-cutover notice, populated the same way as the store's.
+#[test]
+fn the_relay_devnet_config_carries_the_two_box_cutover_notice() {
+    let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let peer_secret = write_peer_secret();
+    let text = with_sandbox_settlement_keys(
+        &with_sandbox_paths(
+            RELAY_CONFIG,
+            key_file.path(),
+            state_dir.path(),
+            Some(peer_secret.path()),
+        ),
+        key_file.path(),
+    );
+    let config_file = write_config(&text);
+    let config = Config::load(config_file.path()).expect("the committed relay config must parse");
+
+    let announce = config
+        .announce()
+        .expect("the relay config's [announce] section must parse");
+    assert_carries_two_box_cutover_notice(announce, "the relay box");
+}
+
 /// The trimmed lines of a committed `[announce]` section, or `None` for a
 /// file that has no such section -- [`route_price`]'s precedent again, no
 /// TOML dependency needed to read a couple of keys written one per line.
@@ -2234,19 +2322,29 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
 /// gathered once, by hand, and is recorded here rather than only in a PR
 /// diff:
 ///
-/// - `rust-sha-440eab7` is `440eab7b9ff610fb4914d65bb5cbbacb84f2a7ae`, the
-///   squash-merge of PR #839, which closes issue #833 -- the
-///   announce-identity fix #848 requires the pin of record to carry. The
-///   tag IS that commit, so it carries the fix by construction; it is its
-///   own evidence.
-/// - It is therefore also the EARLIEST tag that qualifies -- no tag built
-///   before the fix landed can contain it. The fleet's prior floor,
-///   `rust-sha-33f10e2`, is a strict ancestor (`git merge-base
-///   --is-ancestor 33f10e2 440eab7b` succeeds), so this is a forward move,
-///   not a rollback.
-/// - `git merge-base --is-ancestor 440eab7b9ff610fb4914d65bb5cbbacb84f2a7ae
-///   HEAD` succeeds as of this change, confirming the tag's commit is on
-///   `main`.
+/// - Bumped (issue #948) from `rust-sha-440eab7` -- which predates the
+///   `notice_*` fields issue #912 (PR #915) added to `[announce]` -- because
+///   #948's committed configs now SET `notice_id`/`notice_severity`/
+///   `notice_summary`/`notice_url`. `RawAnnounceConfig` is
+///   `deny_unknown_fields` (`connector-config/src/announce.rs`), so a binary
+///   built before #912 would refuse to boot on either box's config, not
+///   silently ignore the fields -- a config/pin pair that must move
+///   together, or the box does not come up at all.
+/// - `rust-sha-415531a` is `415531a1b22ab78c727158cf2f443593b6ab790f`, the
+///   merge commit that lands issue #944 -- itself several commits after
+///   `5b7932f6110f72f251ce5d99863e30d614fe9fce` (PR #915, issue #912), so it
+///   carries the `notice_*` schema by construction. Chosen over #912's own
+///   merge commit only because it is the most recent commit this suite could
+///   confirm was actually built and published successfully
+///   (`publish-connector-rust-image.yml` run history, 2026-08-13); any
+///   ancestor of it back through `5b7932f6` would also qualify.
+/// - `git merge-base --is-ancestor 5b7932f6110f72f251ce5d99863e30d614fe9fce
+///   415531a1b22ab78c727158cf2f443593b6ab790f` succeeds, confirming #912 is
+///   carried; `git merge-base --is-ancestor
+///   415531a1b22ab78c727158cf2f443593b6ab790f HEAD` succeeds, confirming the
+///   tag's commit is on `main`. The fleet's prior floor, `rust-sha-440eab7`,
+///   is a strict ancestor of both, so this is a forward move, not a
+///   rollback.
 ///
 /// Scope: the legacy TypeScript `connector` services in
 /// `docker-compose.node.yml` and `docker-compose.store.yml` pin
@@ -2258,10 +2356,10 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
 /// runbook's job (`docs/operators/rust-cutover-runbook.md`).
 ///
 /// This is a forward move on every box, not yet deployed anywhere -- see
-/// each overlay's own "PIN OF RECORD (issue #848)" comment. Re-pin here
-/// FIRST on any future bump; the compose files below are asserted to agree
-/// with this constant, not the other way around.
-const EXPECTED_CONNECTOR_TAG: &str = "rust-sha-440eab7";
+/// each overlay's own "PIN OF RECORD" comment. Re-pin here FIRST on any
+/// future bump; the compose files below are asserted to agree with this
+/// constant, not the other way around.
+const EXPECTED_CONNECTOR_TAG: &str = "rust-sha-415531a";
 
 /// Every `image:` pin this suite can see across the three-box fleet must
 /// name [`EXPECTED_CONNECTOR_TAG`] -- the property #848 exists to hold.

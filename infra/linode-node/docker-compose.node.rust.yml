@@ -81,19 +81,18 @@ services:
     # `up -d` as) that file reaches a box. An older image reads `state_dir`
     # as an unknown top-level key and exits 1 on config load.
     #
-    # PIN OF RECORD (issue #848): this repo's infra compose files are the
-    # fleet's pin of record -- the live boxes follow them, not the reverse.
-    # Bumped from `rust-sha-33f10e2` (what all three boxes still run as of
-    # this change) to `rust-sha-440eab7` because 33f10e2 predates the
-    # announce-identity fix (issue #833, PR #839) that #848 requires the pin
-    # of record to carry. `rust-sha-440eab7` IS that fix's commit
-    # (440eab7b9ff610fb4914d65bb5cbbacb84f2a7ae), so it carries it by
-    # construction and no earlier tag can -- the earliest that qualifies.
-    # This is a forward move on every box, not a rollback -- the boxes have
-    # not moved yet; that cutover is a separate, human-gated ticket. See
+    # PIN OF RECORD (issue #848, bumped for #948): this repo's infra compose
+    # files are the fleet's pin of record -- the live boxes follow them, not
+    # the reverse. Bumped from `rust-sha-440eab7` to `rust-sha-415531a`
+    # because 440eab7 predates the `notice_*` announce fields (issue #912,
+    # PR #915) issue #948's committed configs now set, and a binary that old
+    # would refuse to boot on either announcing box's config
+    # (`RawAnnounceConfig` is `deny_unknown_fields`). This is a forward move
+    # on every box, not a rollback -- the boxes have not moved yet; that
+    # cutover is a separate, human-gated ticket. See
     # `crates/connector-bin/tests/devnet_configs_load.rs`'s
     # `EXPECTED_CONNECTOR_TAG` for the single place this decision is recorded.
-    image: ghcr.io/toon-protocol/connector:rust-sha-440eab7
+    image: ghcr.io/toon-protocol/connector:rust-sha-415531a
     volumes:
       - ./connector-rust.toml:/app/config/connector.toml:ro
       - ./signer-rust.key:/app/data/signer.key:ro
