@@ -644,15 +644,33 @@ fn normalize_recovery_id(mut signature: Vec<u8>) -> Result<Vec<u8>, SettlementEr
 /// them fails loudly instead: nothing is ever recorded beyond what the
 /// chain itself did, so a reverted transaction leaves nothing to recover
 /// from beyond retrying with a fresh read of the real state.
-async fn confirm<P: JsonRpcClient>(
+///
+/// `pending`'s own `Ok(None)` (issue #907) means ethers' `PendingTransaction`
+/// gave up polling `eth_getTransactionByHash` for this hash after a handful
+/// of tries -- it is *not* proof the transaction was dropped, only that this
+/// endpoint had not observed it yet. Against a load-balanced RPC (the
+/// devnet repro used `base-sepolia-rpc.publicnode.com`), consecutive polls
+/// can land on different backend nodes, some of which simply have not
+/// caught up to the block the transaction is actually in. Reporting that as
+/// "dropped" told an operator (or an automated caller) that resubmitting
+/// was safe when the transaction went on to mine -- a second `open`/`fund`
+/// call is a real double spend, not a retry. So `Ok(None)` here is not the
+/// end of the story: [`recheck_unobserved`] asks the chain directly, by
+/// hash, before this function concludes anything, and the failure it can
+/// still return says "not observed", carries the hash, and says plainly
+/// that retrying is not known to be safe -- never "dropped".
+async fn confirm<P: JsonRpcClient + Clone>(
     pending: PendingTransaction<'_, P>,
 ) -> Result<TransactionReceipt, SettlementError> {
-    let receipt = pending
+    let tx_hash = pending.tx_hash();
+    let provider = pending.provider();
+    let receipt = match pending
         .await
         .map_err(|error: ProviderError| backend_error(error))?
-        .ok_or_else(|| {
-            SettlementError::Backend("transaction was dropped before mining".to_string())
-        })?;
+    {
+        Some(receipt) => receipt,
+        None => recheck_unobserved(&provider, tx_hash).await?,
+    };
     if receipt.status == Some(ethers::types::U64::zero()) {
         return Err(SettlementError::Backend(format!(
             "transaction {:#x} reverted on chain",
@@ -660,6 +678,48 @@ async fn confirm<P: JsonRpcClient>(
         )));
     }
     Ok(receipt)
+}
+
+/// How many direct `eth_getTransactionReceipt` calls [`recheck_unobserved`]
+/// makes, spaced [`UNOBSERVED_RECHECK_INTERVAL`] apart, before concluding a
+/// transaction genuinely cannot be confirmed right now. ethers' own
+/// `PendingTransaction` has already spent its own retry budget (at the
+/// endpoint's polling interval) failing to observe the hash before this
+/// runs at all, so this only needs to cover a load-balanced endpoint
+/// happening to route a further handful of requests to lagging backends.
+const UNOBSERVED_RECHECK_ATTEMPTS: usize = 4;
+
+/// How long [`recheck_unobserved`] waits between those calls -- long enough
+/// for a lagging backend to have caught up on a new block, short enough
+/// that the whole re-check stays within a caller's patience.
+const UNOBSERVED_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The authoritative re-check `confirm` falls back to once ethers' own
+/// mempool-visibility polling has given up on a hash (issue #907). Unlike
+/// `PendingTransaction`'s `GettingTx` loop -- which asks whether the
+/// endpoint has the transaction *pending* -- this asks for the receipt
+/// directly, which exists the moment the transaction mines regardless of
+/// whether this endpoint's mempool view ever showed it as pending. A few
+/// spaced-out tries give a lagging load-balanced backend a chance to catch
+/// up before this reports anything.
+async fn recheck_unobserved<P: JsonRpcClient>(
+    provider: &Provider<P>,
+    tx_hash: ethers::types::TxHash,
+) -> Result<TransactionReceipt, SettlementError> {
+    for attempt in 0..UNOBSERVED_RECHECK_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(UNOBSERVED_RECHECK_INTERVAL).await;
+        }
+        if let Ok(Some(receipt)) = provider.get_transaction_receipt(tx_hash).await {
+            return Ok(receipt);
+        }
+    }
+    Err(SettlementError::Backend(format!(
+        "transaction {tx_hash:#x} was not observed within the timeout -- this is not proof it \
+         was dropped, only that this endpoint has not confirmed it yet; check its status by \
+         hash (a block explorer or a fresh eth_getTransactionReceipt call) before resubmitting, \
+         since a transaction that later mines would be double-spent by a retry"
+    )))
 }
 
 #[async_trait]
@@ -861,5 +921,154 @@ mod recovery_id_tests {
     fn an_empty_signature_is_refused_rather_than_panicking() {
         let error = normalize_recovery_id(Vec::new()).unwrap_err();
         assert!(matches!(error, SettlementError::InvalidClaimSignature(_)));
+    }
+}
+
+/// Issue #907: a transaction that mines must never be reported as dropped,
+/// because the obvious response to "dropped" is to retry, and retrying a
+/// transaction that already mined double-spends it.
+///
+/// The repro was a load-balanced RPC endpoint whose `eth_getTransactionByHash`
+/// answers came back empty for several consecutive polls even though the
+/// transaction had already mined -- ethers' own `PendingTransaction` gives up
+/// after exactly that pattern and resolves to `Ok(None)`, which `confirm`
+/// used to report verbatim as "dropped before mining". [`FlakyMempoolClient`]
+/// reproduces the endpoint's half of that behaviour deterministically: every
+/// RPC call reaches the real `anvil` chain except `eth_getTransactionByHash`,
+/// which always answers empty, forcing the exact `Ok(None)` `confirm` must
+/// now treat as "not observed" rather than "dropped".
+#[cfg(test)]
+mod confirm_tests {
+    use std::str::FromStr;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use ethers::middleware::SignerMiddleware;
+    use ethers::providers::{Http, JsonRpcClient, Middleware, PendingTransaction, Provider};
+    use ethers::signers::{LocalWallet, Signer};
+    use ethers::types::{TransactionRequest, TxHash};
+    use serde::de::DeserializeOwned;
+    use serde::Serialize;
+
+    use crate::test_support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
+    use connector_settlement::SettlementError;
+
+    /// Forwards every RPC call to a real endpoint except
+    /// `eth_getTransactionByHash`, which always answers "not found" --
+    /// simulating a load-balanced RPC node that has never observed a given
+    /// transaction, regardless of what the chain itself has already done.
+    #[derive(Debug, Clone)]
+    struct FlakyMempoolClient {
+        inner: Http,
+    }
+
+    #[async_trait]
+    impl JsonRpcClient for FlakyMempoolClient {
+        type Error = <Http as JsonRpcClient>::Error;
+
+        async fn request<T, R>(&self, method: &str, params: T) -> Result<R, Self::Error>
+        where
+            T: std::fmt::Debug + Serialize + Send + Sync,
+            R: DeserializeOwned + Send,
+        {
+            if method == "eth_getTransactionByHash" {
+                return Ok(serde_json::from_value(serde_json::Value::Null).expect(
+                    "R is Option<Transaction> for this method, which `null` deserializes into",
+                ));
+            }
+            self.inner.request(method, params).await
+        }
+    }
+
+    fn flaky_provider(rpc_url: &str) -> Provider<FlakyMempoolClient> {
+        let http = Http::from_str(rpc_url).expect("valid anvil url");
+        Provider::new(FlakyMempoolClient { inner: http }).interval(Duration::from_millis(50))
+    }
+
+    #[tokio::test]
+    async fn a_transaction_the_endpoint_never_observed_pending_but_did_mine_still_confirms() {
+        if !require_anvil() {
+            return;
+        }
+        let anvil = Anvil::spawn(19_700).await;
+        let provider = flaky_provider(&anvil.rpc_url);
+        let wallet: LocalWallet = DEPLOYER_PRIVATE_KEY
+            .parse::<LocalWallet>()
+            .expect("valid key")
+            .with_chain_id(31_337u64);
+        let client = Arc::new(SignerMiddleware::new(provider, wallet));
+
+        // A self-transfer: what address it lands on doesn't matter, only
+        // that a real transaction is submitted and mines.
+        let tx = TransactionRequest::new()
+            .to(client.address())
+            .value(1u64)
+            .from(client.address());
+        let pending = client
+            .send_transaction(tx, None)
+            .await
+            .expect("submit to the real chain");
+
+        // The flaky client makes ethers' own polling give up and resolve to
+        // `Ok(None)` -- confirmed separately below so this test does not
+        // silently pass because the transaction never even reached that
+        // state.
+        let tx_hash = pending.tx_hash();
+        let gave_up = PendingTransaction::new(tx_hash, client.provider())
+            .interval(Duration::from_millis(20))
+            .retries(1)
+            .await
+            .expect("no transport error");
+        assert!(
+            gave_up.is_none(),
+            "expected the flaky client to reproduce ethers' own give-up (Ok(None)); the test \
+             setup is not exercising the case this fix addresses"
+        );
+
+        let receipt = super::confirm(
+            PendingTransaction::new(tx_hash, client.provider()).interval(Duration::from_millis(50)),
+        )
+        .await
+        .expect("a transaction that actually mined must confirm, not report as dropped");
+        assert_eq!(receipt.transaction_hash, tx_hash);
+        assert_eq!(receipt.status, Some(1.into()));
+    }
+
+    #[tokio::test]
+    async fn a_transaction_truly_never_observed_is_reported_as_not_observed_not_dropped() {
+        if !require_anvil() {
+            return;
+        }
+        let anvil = Anvil::spawn(19_750).await;
+        let provider = flaky_provider(&anvil.rpc_url);
+
+        // A hash nothing was ever submitted under -- the real chain
+        // genuinely has no receipt for it, so `confirm` must exhaust its
+        // recheck budget and fail, but with wording that does not claim the
+        // (nonexistent) transaction was dropped.
+        let tx_hash: TxHash = TxHash::from_low_u64_be(1);
+        let pending = PendingTransaction::new(tx_hash, &provider)
+            .interval(Duration::from_millis(20))
+            .retries(1);
+
+        let error = super::confirm(pending).await.unwrap_err();
+        let SettlementError::Backend(message) = error else {
+            panic!("expected SettlementError::Backend, got {error:?}");
+        };
+        assert!(
+            !message.contains("dropped before mining"),
+            "message must not assert the transaction was dropped -- that is a stronger claim \
+             than this function can ever verify: {message}"
+        );
+        assert!(
+            message.contains("not observed"),
+            "message should say plainly that it was not observed: {message}"
+        );
+        assert!(
+            message.contains(&format!("{tx_hash:#x}")),
+            "message must carry the transaction hash so a caller is not left to recover it via \
+             a block explorer: {message}"
+        );
     }
 }
