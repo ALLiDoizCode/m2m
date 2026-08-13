@@ -208,16 +208,17 @@ jobs:
           # `connector-rust` service at all, so every compose verb below
           # would target the wrong stack (issue #948).
           # COMPOSE_ANNOUNCE adds the box's announce overlay. Only the relay
-          # and store overlays define the `announce` one-shot
+          # and store overlays define the resident `announce` loop publisher
           # (docs/operators/announcing-a-node.md) -- `toon`'s overlay carries
-          # the long-running TypeScript `announcer` sidecar instead and the
-          # faucet box announces nothing, so the `announce` operation below
-          # fails loudly on those two boxes, as it always has.
+          # the long-running TypeScript `announcer` sidecar instead (a
+          # different service, retiring under #872) and the faucet box
+          # announces nothing, so COMPOSE_ANNOUNCE is empty there and the
+          # `announce` operation below refuses those two boxes outright.
           case "$BOX" in
             toon)
               INFRA_DIR=infra/linode-node
               COMPOSE="docker compose -f infra/linode-node/docker-compose.node.yml -f infra/linode-node/docker-compose.node.rust.yml"
-              COMPOSE_ANNOUNCE="$COMPOSE -f infra/linode-node/docker-compose.node.announcer.yml"
+              COMPOSE_ANNOUNCE=""
               ;;
             relay)
               INFRA_DIR=infra/linode-relay
@@ -232,7 +233,7 @@ jobs:
             faucet)
               INFRA_DIR=infra/linode-faucet
               COMPOSE="docker compose -f infra/linode-faucet/docker-compose.faucet.yml"
-              COMPOSE_ANNOUNCE="$COMPOSE"
+              COMPOSE_ANNOUNCE=""
               ;;
           esac
           CONF_REL="$INFRA_DIR/connector-rust.toml"
@@ -394,17 +395,42 @@ jobs:
               ;;
 
             announce)
+              if [ -z "$COMPOSE_ANNOUNCE" ]; then
+                echo "::error::box '$BOX' runs no resident announce publisher ('toon' holds the legacy apex announcer sidecar, retiring under #872; the faucet announces nothing)"
+                exit 1
+              fi
               if [ "$APPLY" != "true" ]; then
-                say "**Dry run.** Would run the one-shot announce on \`$BOX\`."
+                say "**Dry run.** Would force \`$BOX\`'s resident announce publisher to publish now (\`up -d announce && restart announce\`), then fail unless its log prints \`[announce] OK\` within 90s."
                 say "Announce is a PAID write through the node's own routing (ADR 0030)."
                 exit 0
               fi
               # ADR 0030: an operator announces a node; the node never does.
-              # One-shot, from the box that holds the identity key. The
-              # `announce` service exists only in the box's announce
-              # overlay, hence COMPOSE_ANNOUNCE.
-              sshbox "cd $REMOTE_REPO && $COMPOSE_ANNOUNCE run --rm announce" 2>&1 \
-                | tail -40 | tee -a "$GITHUB_STEP_SUMMARY"
+              # The `announce` service is a RESIDENT loop publisher --
+              # publish, sleep, repeat (its overlay's own header explains
+              # why) -- NOT a one-shot: `run --rm` would hang this job on
+              # the loop while standing up a SECOND publisher issuing
+              # duplicate PAID writes beside the box's own (this PR's
+              # review). Restarting the resident service re-enters the loop
+              # at its first iteration: one publish, now, from the box that
+              # holds the identity key -- and the loop's greppable verdict
+              # line is the read-back this file's doctrine demands.
+              sshbox "cd $REMOTE_REPO && $COMPOSE_ANNOUNCE up -d announce && $COMPOSE_ANNOUNCE restart announce"
+              VERDICT=""
+              LOGS=""
+              for i in $(seq 1 18); do
+                sleep 5
+                LOGS=$(sshbox "cd $REMOTE_REPO && $COMPOSE_ANNOUNCE logs --since 90s announce" 2>/dev/null || true)
+                if echo "$LOGS" | grep -q '\[announce\] OK'; then VERDICT=ok; break; fi
+                if echo "$LOGS" | grep -q '\[announce\] FAILED'; then VERDICT=failed; break; fi
+              done
+              say '```'
+              echo "$LOGS" | tail -10 | tee -a "$GITHUB_STEP_SUMMARY"
+              say '```'
+              if [ "$VERDICT" != "ok" ]; then
+                echo "::error::announce publisher did not report '[announce] OK' (verdict: ${VERDICT:-none within 90s})"
+                exit 1
+              fi
+              say "**Published and verified** — the resident publisher reported \`[announce] OK\`."
               ;;
           esac
 
