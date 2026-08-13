@@ -62,13 +62,9 @@ services:
       SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.devnet.solana.com}
       SOLANA_USDC_MINT: ${SOLANA_USDC_MINT:-xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in}
       SOLANA_FAUCET_KEYPAIR: /keys/usdc-authority.json
-      # SOL per drip (toon-meta#258): the committed treasury has run as low as
-      # ~0.45 SOL and is NOT self-replenishing (the public devnet airdrop that
-      # funds it is the same rate-limited endpoint this leg exists to work
-      # around), so this must stay conservative. Backed by a 24h per-address
-      # cooldown (SOLANA_DRIP_COOLDOWN_MS, default below) — raise the amount
-      # only alongside a treasury top-up.
-      SOLANA_SOL_AMOUNT: ${SOLANA_SOL_AMOUNT:-0.03}
+      # USDC only (issue #945 — the SOL leg, and SOLANA_SOL_AMOUNT with it,
+      # are retired entirely, not just hardened): backed by a 24h per-address
+      # cooldown protecting the treasury's USDC balance.
       SOLANA_DRIP_COOLDOWN_MS: ${SOLANA_DRIP_COOLDOWN_MS:-86400000}
       # Mina — points at the dedicated Mina lightnet box over HTTPS
       MINA_FAUCET_KEY: ${MINA_FAUCET_KEY:-}
@@ -104,7 +100,13 @@ services:
       - '3500:3500'
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://localhost:3500/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"]
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://localhost:3500/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -291,7 +291,7 @@ app.post('/api/solana/usdc-request', (req, res) => {
   console.log(`💧 Solana USDC-only faucet request for ${address}`);
   solanaQueue = solanaQueue
     .then(async () => {
-      const result = await solanaFaucet.dripUsdcOnly(address);
+      const result = await solanaFaucet.drip(address);
       console.log(`  ✅ Solana USDC-only request completed for ${address}`);
       res.json({
         success: true,

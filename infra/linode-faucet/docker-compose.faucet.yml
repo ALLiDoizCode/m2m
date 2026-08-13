@@ -29,9 +29,9 @@ services:
       SOLANA_USDC_MINT: ${SOLANA_USDC_MINT:-xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in}
       SOLANA_FAUCET_KEYPAIR: /keys/usdc-authority.json
       SOLANA_DRIP_COOLDOWN_MS: ${SOLANA_DRIP_COOLDOWN_MS:-86400000}
-      # SOLANA_SOL_AMOUNT is deliberately NOT set here — the native-SOL route
-      # (POST /api/solana/request) is retired (§4.6); only the USDC-only leg
-      # (dripUsdcOnly) runs on this box, and it never reads that amount.
+      # The native-SOL route (POST /api/solana/request) and its
+      # SOLANA_SOL_AMOUNT config are retired entirely (issue #945, §4.6) —
+      # only the USDC-only drip runs on this box.
       #
       # ── Mina — public devnet, USDC only ────────────────────────────────
       # MINA_FAUCET_KEY / MINA_DRIP_AMOUNT are deliberately NOT set — the
