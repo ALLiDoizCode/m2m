@@ -447,6 +447,15 @@ pub enum ConfigError {
     SettlementMissingSolanaTokenAddress,
 
     #[error(
+        "the [settlement.evm] section's channel_index_confirmations is 0: applying a log at \
+         chain head has nothing to fall back on if the head reorgs, and issue #661 deliberately \
+         ships no unwind logic for that case -- a channel inside the confirmation window is \
+         meant to fall through to a direct chain read instead. Omit the field for the default \
+         confirmation depth, or set a depth of at least 1 block"
+    )]
+    SettlementChannelIndexConfirmationsZero,
+
+    #[error(
         "invalid [[client_channels]] channel_id '{value}': must be 64 hex characters \
          (an on-chain 32-byte channel identifier), optionally '0x'-prefixed"
     )]

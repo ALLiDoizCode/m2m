@@ -24,12 +24,20 @@
 //! shape.
 
 mod bindings;
+mod channel_index;
+pub mod channel_index_sync;
 // Also compiled for this crate's own `#[cfg(test)]` unit tests (none left
 // after issue #576 removed the #568 constructor-guard tests, which were
 // `SettlementChannel`-specific -- kept available the same way regardless,
 // matching `connector-operator`'s own `test_support` precedent).
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support;
+
+pub use channel_index::{
+    ChannelIndexEvent, ChannelIndexLookup, EvmChannelIndex, EvmChannelIndexError,
+    IndexedChannelStatus, OrderedChannelIndexEvent,
+};
+pub use channel_index_sync::{ChannelIndexSyncError, EvmChannelIndexSyncer, DEFAULT_POLL_INTERVAL};
 
 use std::sync::Arc;
 

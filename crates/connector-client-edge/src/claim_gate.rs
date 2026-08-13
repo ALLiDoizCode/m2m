@@ -170,6 +170,16 @@ pub enum ClaimIngestRejection {
     /// be checked against. Matches the peer wire's own
     /// `connector_runtime::ClaimRejectReason::UnknownChannel`.
     UnknownChannel,
+    /// The claim names a channel a [`crate::ClientChannelSource`] has a
+    /// durable, definitive record of having settled (issue #661's local
+    /// channel index) -- reported without a chain read, and kept distinct
+    /// from [`ClaimIngestRejection::UnknownChannel`] for the same reason
+    /// every variant here is kept distinct from its neighbours: "this
+    /// channel is done" is a stronger, more actionable fact than "this
+    /// connector has no record of it", and conflating the two would send an
+    /// operator investigating a buyer's genuinely spent channel to go
+    /// looking for a registration problem instead.
+    ChannelTerminal(String),
     /// This connector could not find out who the claim's channel belongs
     /// to (issue #556) -- its [`crate::ClientChannelSource`] failed, e.g.
     /// an unreachable RPC endpoint. Distinct from
@@ -281,6 +291,12 @@ impl ClaimIngestRejection {
                  connector has no record of, so there is no counterparty to verify its \
                  signature against"
                 .to_string(),
+            // The reason is already the whole sentence -- it names the
+            // channel and says what became of it -- so it is quoted rather
+            // than prefaced with a second copy of itself.
+            ClaimIngestRejection::ChannelTerminal(reason) => {
+                format!("claim rejected: {reason}")
+            }
             ClaimIngestRejection::ChannelLookupFailed(reason) => format!(
                 "claim rejected: this connector could not look up the channel's counterparty, \
                  so the claim cannot be verified -- retry once the lookup succeeds: {reason}"
@@ -1171,6 +1187,9 @@ fn resolution_refusal(error: ChannelResolutionError) -> ClaimIngestRejection {
                 max_wait_ms: exhausted.max_wait.as_millis() as u64,
             }
         }
+        ChannelResolutionError::Terminal(terminal) => {
+            ClaimIngestRejection::ChannelTerminal(terminal.0)
+        }
     }
 }
 
@@ -1935,6 +1954,29 @@ mod tests {
         // 32 bytes as `0x` plus lower-case hex -- not the literal text the
         // claim spelled its `channelId` with.
         assert_eq!(accepted.channel_key(), format!("evm:0x{}", "ef".repeat(32)));
+    }
+
+    /// Issue #661 at the gate: a source that keeps its own durable record
+    /// of settlement (the local channel index) refuses the claim as
+    /// [`ClaimIngestRejection::ChannelTerminal`], not as
+    /// [`ClaimIngestRejection::UnknownChannel`] -- the whole point of the
+    /// separate variant is that an operator can tell a buyer's spent
+    /// channel from one this connector has never heard of.
+    #[tokio::test]
+    async fn a_claim_on_a_channel_the_source_records_as_settled_is_refused_as_terminal() {
+        let channel_id = decode_hex_bytes::<32>(&unrecorded_channel_id()).unwrap();
+        let source = Arc::new(FakeChannelSource::knowing(vec![]));
+        source.now_terminal(channel_id);
+        let gate = gate_over(ClientChannelRegistry::new().with_source(source));
+
+        assert_eq!(
+            gate.ingest(&evm_claim_json(&unrecorded_channel_id(), 1, 100), 100)
+                .await,
+            Err(ClaimIngestRejection::ChannelTerminal(format!(
+                "channel {} has settled and can never be redeemed again",
+                "ef".repeat(32)
+            )))
+        );
     }
 
     /// The forger rule survives the new source: a claim signed by a key
