@@ -727,9 +727,9 @@ claim was accepted on, and handing it to the app would be exactly the trusted, p
 header ADR 0017 already documents as a mistake. An operator who needs to know which payer paid for
 a given delivery joins that connector's own `"packet"` log (ADR 0014, `client_channel_id`) to the
 `state_dir` journal's `InboundClaimAccepted` entries under the same chain-namespaced channel key,
-with the payer's identity from the channel's `[[client_channels]]`/chain-resolved record (ADR
-0036) — connector-side records, never a fact the app is told. (`GET /channels`/`GET /claims` do
-not carry this: both project the node's own peer-wire channels, which a payer-opened client
+with the payer's identity from the channel's `[[client_channels]]`/chain-resolved record
+(ADR 0036) — connector-side records, never a fact the app is told. (`GET /channels`/`GET /claims`
+do not carry this: both project the node's own peer-wire channels, which a payer-opened client
 channel is not.)
 
 ### 1.9 Client BTP websocket transport (issue #674 family)
