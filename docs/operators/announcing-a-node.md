@@ -100,7 +100,9 @@ and it quotes what it would cost.
 Only the facts a node genuinely **cannot introspect about itself** live here. Everything else in the
 announce comes from the running configuration: prices from `[[routes]]`, settlement contracts from
 the `[settlement.*]` tables the node verified against a chain at startup, the edge identity from
-`[signer]`.
+`[signer]`. A node selling peering (`[peer_sale]`, issue #885) has its price added to
+`routePrices` unconditionally -- it does not need to be, and need not be, also listed in
+`addresses` below.
 
 ```toml
 [announce]

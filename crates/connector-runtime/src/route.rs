@@ -129,6 +129,41 @@ impl LeasedRoute {
     }
 }
 
+/// The single priced route that, when paid, buys peering with this
+/// connector (issue #885, part of #867 "sell peering"): its effect on
+/// payment is inserting the payer into the runtime peer/route table
+/// (issue #884, `Connector::upsert_runtime_peer`/`upsert_runtime_peer_route`)
+/// rather than terminating at an app or forwarding to a configured peer.
+/// Priced exactly like a terminated route (issue #520) -- `price` is what
+/// this connector's client edge charges to buy peering, greeted and gated
+/// on the same path -- and carries no `fee`, since it is not itself
+/// carriage: the peer-forwarding route it causes to be inserted carries
+/// its own `fee`/`price`, negotiated at purchase time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerSaleRoute {
+    prefix: String,
+    price: u64,
+}
+
+impl PeerSaleRoute {
+    pub fn new(prefix: impl Into<String>, price: u64) -> PeerSaleRoute {
+        PeerSaleRoute {
+            prefix: prefix.into(),
+            price,
+        }
+    }
+
+    /// The destination prefix that, when paid, buys peering with this node.
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// The flat price a claim must advance by to buy peering.
+    pub fn price(&self) -> u64 {
+        self.price
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
