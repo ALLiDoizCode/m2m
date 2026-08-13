@@ -66,18 +66,18 @@ on:
         required: true
         options: [relay, ario, toon, faucet]
       operation:
-        description: "box-status | config-read | pin-verify (reads) — config-apply | restart | announce (writes)"
+        description: 'box-status | config-read | pin-verify (reads) — config-apply | restart | deploy | announce (writes)'
         type: choice
         required: true
         default: box-status
-        options: [box-status, config-read, pin-verify, config-apply, restart, announce]
+        options: [box-status, config-read, pin-verify, config-apply, restart, deploy, announce]
       service:
-        description: "restart: compose service name (connector-rust, relay, store, nginx, faucet)"
+        description: 'restart/deploy: compose service name (connector-rust, relay, store, nginx, faucet)'
         type: string
         required: false
-        default: "connector-rust"
+        default: 'connector-rust'
       apply:
-        description: "Perform the write. false = dry run, reads and prints only."
+        description: 'Perform the write. false = dry run, reads and prints only.'
         type: boolean
         required: false
         default: false
@@ -313,6 +313,26 @@ jobs:
               say '```'
               ;;
 
+            deploy)
+              # `restart` only restarts the CONTAINER THAT IS ALREADY RUNNING —
+              # it does not re-resolve the compose file's `image:` pin, so a
+              # committed pin bump (bumping `EXPECTED_CONNECTOR_TAG` and the
+              # `image:` lines, as #948 did) never reaches the box through
+              # `restart` or `config-apply` alone. `deploy` pulls the pin this
+              # checkout's compose file currently names and recreates the
+              # container from it — the missing verb #948 needed to actually
+              # roll a box onto a tag carrying its config's fields.
+              if [ "$APPLY" != "true" ]; then
+                say "**Dry run.** Would run: \`docker compose pull $SERVICE && docker compose up -d $SERVICE\` on \`$BOX\`, then verify the running image digest matches the pulled pin."
+                exit 0
+              fi
+              sshbox "cd $REMOTE_REPO && docker compose pull '$SERVICE' && docker compose up -d '$SERVICE'"
+              say "Pulled and redeployed \`$SERVICE\`."
+              say '```'
+              sshbox "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'" | tee -a "$GITHUB_STEP_SUMMARY"
+              say '```'
+              ;;
+
             announce)
               if [ "$APPLY" != "true" ]; then
                 say "**Dry run.** Would run the one-shot announce on \`$BOX\`."
@@ -334,7 +354,7 @@ jobs:
       - name: Verify the box still serves
         if: >-
           inputs.apply && inputs.box != 'faucet' &&
-          (inputs.operation == 'config-apply' || inputs.operation == 'restart')
+          (inputs.operation == 'config-apply' || inputs.operation == 'restart' || inputs.operation == 'deploy')
         env:
           BOX_IP: ${{ steps.box.outputs.ip }}
         run: |
