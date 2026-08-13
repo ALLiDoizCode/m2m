@@ -278,12 +278,20 @@ export function createSolanaFaucet() {
     },
   };
 
+  // Both SOL-funding paths verify the same thing before returning a signature:
+  // that the recipient's own balance actually rose by the drip amount (issue
+  // #691). `startBalance` is the recipient's pre-transfer balance, read once by
+  // dripInner and threaded through.
+  function verifyDripLanded(recipient, startBalance) {
+    return verifyDelivered(
+      () => connection.getBalance(recipient, 'confirmed'),
+      startBalance + SOL_DRIP_LAMPORTS
+    );
+  }
+
   // Transfer SOL from the treasury to the recipient — the primary SOL-funding
   // path (issue #379). The TREASURY pays the tx fee, so this works regardless
   // of the public devnet airdrop's rate limits, mirroring `transferUsdc` below.
-  // `startBalance` is the recipient's pre-transfer balance (read by the
-  // caller); delivery is verified against it before the signature is trusted
-  // (issue #691).
   async function transferSol(recipient, startBalance) {
     const latest = await connection.getLatestBlockhash('confirmed');
     const tx = new Transaction({
@@ -300,10 +308,7 @@ export function createSolanaFaucet() {
     const signature = await sendAndConfirmTransaction(connection, tx, [authority], {
       commitment: 'confirmed',
     });
-    await verifyDelivered(
-      () => connection.getBalance(recipient, 'confirmed'),
-      startBalance + SOL_DRIP_LAMPORTS
-    );
+    await verifyDripLanded(recipient, startBalance);
     console.log(`  📤 Transferred ${SOLANA_SOL_AMOUNT} SOL from treasury: ${signature}`);
     return signature;
   }
@@ -311,7 +316,6 @@ export function createSolanaFaucet() {
   // Airdrop SOL to the recipient and confirm it (blockhash/lastValidBlockHeight
   // strategy — tied to actual chain progress, not a 30s wall clock; issue #277).
   // Fallback only: used when the treasury itself can't cover the SOL transfer.
-  // Delivery is verified the same way as the treasury path (issue #691).
   async function airdropSol(recipient, startBalance) {
     const latest = await connection.getLatestBlockhash('confirmed');
     const airdropSig = await connection.requestAirdrop(recipient, SOL_DRIP_LAMPORTS);
@@ -323,10 +327,7 @@ export function createSolanaFaucet() {
       },
       'confirmed'
     );
-    await verifyDelivered(
-      () => connection.getBalance(recipient, 'confirmed'),
-      startBalance + SOL_DRIP_LAMPORTS
-    );
+    await verifyDripLanded(recipient, startBalance);
     console.log(`  📤 Airdropped ${SOLANA_SOL_AMOUNT} SOL: ${airdropSig}`);
     return airdropSig;
   }

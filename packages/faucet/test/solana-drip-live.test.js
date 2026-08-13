@@ -52,6 +52,13 @@ function solanaTestValidatorAvailable() {
 
 const available = solanaTestValidatorAvailable();
 
+// The drip this test configures the faucet with, named once so the env var the
+// faucet reads and the lamport floors asserted below cannot drift apart.
+const DRIP_SOL = 0.03;
+const DRIP_LAMPORTS = Math.round(DRIP_SOL * LAMPORTS_PER_SOL);
+// Solana's base fee: 5,000 lamports per signature (the drain tx below signs once).
+const SIGNATURE_FEE_LAMPORTS = 5000;
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -162,7 +169,7 @@ test(
     process.env.SOLANA_RPC_URL = rpcUrl;
     process.env.SOLANA_FAUCET_KEYPAIR = keypairPath;
     process.env.SOLANA_USDC_MINT = mint.toBase58();
-    process.env.SOLANA_SOL_AMOUNT = '0.03';
+    process.env.SOLANA_SOL_AMOUNT = String(DRIP_SOL);
     process.env.SOLANA_USDC_AMOUNT = '10';
     process.env.SOLANA_DRIP_COOLDOWN_MS = '1';
 
@@ -177,7 +184,7 @@ test(
     assert.ok(result1.sol.signature);
     const recipient1Balance = await connection.getBalance(recipient1.publicKey, 'confirmed');
     assert.ok(
-      recipient1Balance >= Math.round(0.03 * LAMPORTS_PER_SOL),
+      recipient1Balance >= DRIP_LAMPORTS,
       `expected recipient to actually hold the drip; got ${recipient1Balance} lamports`
     );
 
@@ -188,20 +195,20 @@ test(
     // reporting success against a treasury it can't actually cover, or
     // failing with an opaque RPC error. ──
     const currentTreasuryBalance = await connection.getBalance(treasury.publicKey, 'confirmed');
-    const targetTreasuryBalance = Math.round(0.01 * LAMPORTS_PER_SOL); // < 0.03 SOL drip
+    const targetTreasuryBalance = Math.round(DRIP_LAMPORTS / 3); // well under one drip
     const sink = Keypair.generate();
     const drainTx = new Transaction().add(
       SystemProgram.transfer({
         fromPubkey: treasury.publicKey,
         toPubkey: sink.publicKey,
-        lamports: currentTreasuryBalance - targetTreasuryBalance - 5000,
+        lamports: currentTreasuryBalance - targetTreasuryBalance - SIGNATURE_FEE_LAMPORTS,
       })
     );
     await sendAndConfirmTransaction(connection, drainTx, [treasury], { commitment: 'confirmed' });
 
     const treasuryBalanceBeforeDrip2 = await connection.getBalance(treasury.publicKey, 'confirmed');
     assert.ok(
-      treasuryBalanceBeforeDrip2 < Math.round(0.03 * LAMPORTS_PER_SOL),
+      treasuryBalanceBeforeDrip2 < DRIP_LAMPORTS,
       'treasury must genuinely be below the drip amount for this case to be meaningful'
     );
 
@@ -216,7 +223,7 @@ test(
     assert.equal(result2.sol.treasuryBalanceLamports, treasuryBalanceBeforeDrip2);
     const recipient2Balance = await connection.getBalance(recipient2.publicKey, 'confirmed');
     assert.ok(
-      recipient2Balance >= Math.round(0.03 * LAMPORTS_PER_SOL),
+      recipient2Balance >= DRIP_LAMPORTS,
       `expected the airdrop fallback to actually deliver; got ${recipient2Balance} lamports`
     );
   }
