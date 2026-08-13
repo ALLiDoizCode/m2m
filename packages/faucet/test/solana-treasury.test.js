@@ -1,18 +1,16 @@
-// Tests for createSolanaFaucet's treasury-funded SOL leg (toon-meta#258): the
-// conservative default drip amount and the per-address cooldown that protects
-// a treasury balance which does NOT self-replenish (the public devnet airdrop
-// that would normally top it up is the same rate-limited endpoint this leg
-// exists to work around).
+// Tests for createSolanaFaucet's per-address cooldown, which protects the
+// treasury's USDC balance (the drip's only on-chain leg, issue #945) from
+// being drained by repeat requests from a single address.
 //
-// createSolanaFaucet() only touches the network INSIDE drip()/dripUsdcOnly()
-// (constructing a Connection or loading a Keypair from disk are both local),
-// so its wiring — solAmount, cooldownMs, claim()/release() — can be exercised
-// with a throwaway generated keypair and no live RPC.
+// createSolanaFaucet() only touches the network INSIDE drip() (constructing a
+// Connection or loading a Keypair from disk are both local), so its wiring —
+// cooldownMs, claim()/release() — can be exercised with a throwaway generated
+// keypair and no live RPC.
 //
-// Config (SOLANA_SOL_AMOUNT, SOLANA_DRIP_COOLDOWN_MS, ...) is read from env at
-// module load time, so this file sets env vars BEFORE importing solana.js.
-// node's test runner isolates each test FILE in its own process, so this
-// cannot leak into other test files.
+// Config (SOLANA_DRIP_COOLDOWN_MS, ...) is read from env at module load time,
+// so this file sets env vars BEFORE importing solana.js. node's test runner
+// isolates each test FILE in its own process, so this cannot leak into other
+// test files.
 //
 // Run: node --test
 import { test } from 'node:test';
@@ -31,22 +29,11 @@ process.env.SOLANA_FAUCET_KEYPAIR = keypairPath;
 // Any valid base58 pubkey works — these tests never reach a mint-aware call.
 process.env.SOLANA_USDC_MINT = Keypair.generate().publicKey.toBase58();
 // Never dialed: Connection construction is lazy, and nothing in this file
-// calls drip()/dripUsdcOnly().
+// calls drip().
 process.env.SOLANA_RPC_URL = 'http://127.0.0.1:1';
 process.env.SOLANA_DRIP_COOLDOWN_MS = '60000';
-delete process.env.SOLANA_SOL_AMOUNT; // exercise the built-in default
 
 const { createSolanaFaucet } = await import('../src/solana.js');
-
-test('createSolanaFaucet defaults to a conservative SOL drip amount', () => {
-  const faucet = createSolanaFaucet();
-  assert.ok(faucet, 'faucet should be enabled with a valid mint + keypair');
-  // toon-meta#258: the committed devnet treasury has been observed as low as
-  // ~0.45 SOL and is not self-replenishing, so the default must stay well
-  // under 1 SOL (the pre-fix default of 2 SOL would exhaust the treasury in a
-  // single request).
-  assert.equal(faucet.solAmount, 0.03);
-});
 
 test('createSolanaFaucet wires a per-address cooldown (claim/release)', () => {
   const faucet = createSolanaFaucet();
