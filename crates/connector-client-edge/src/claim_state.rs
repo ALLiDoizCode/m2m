@@ -569,9 +569,20 @@ mod tests {
     /// installed for the duration of a request, exactly like
     /// `connector_runtime::connector`'s `SpanFieldCapture` does for the
     /// `"packet"` span, adapted to events instead.
+    ///
+    /// Only this module's own events are kept: `enabled` has to answer
+    /// `true` for everything (see [`claim_state_events`] on why a narrower
+    /// answer is not race-free), which otherwise leaves the assertions
+    /// below counting whatever axum, tower or hyper happens to log on the
+    /// same thread during the request.
     struct EventFieldCapture {
         events: Arc<Mutex<Vec<HashMap<String, String>>>>,
     }
+
+    /// `tracing`'s default target -- the module path of the
+    /// [`log_outcome`]/[`log_lookup_error`] call sites, which are in the
+    /// parent module, not in `tests`.
+    const CLAIM_STATE_TARGET: &str = "connector_client_edge::claim_state";
 
     struct StringVisitor<'a>(&'a mut HashMap<String, String>);
 
@@ -599,6 +610,9 @@ mod tests {
         fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
 
         fn event(&self, event: &tracing::Event<'_>) {
+            if event.metadata().target() != CLAIM_STATE_TARGET {
+                return;
+            }
             let mut fields = HashMap::new();
             let mut visitor = StringVisitor(&mut fields);
             event.record(&mut visitor);
