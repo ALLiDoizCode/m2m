@@ -789,6 +789,30 @@ struct AdmittedClaim {
 /// present claim validated cleanly. A plaintext header takes precedence
 /// when both are present, since a client presenting both is presenting the
 /// same claim twice, not two different ones.
+/// The claim header's own declared channel key, read WITHOUT validating
+/// or admitting anything (issue #887's pre-admission identity peek).
+/// `None` when no claim header is present, or when it does not decode or
+/// parse -- every one of those shapes is answered authoritatively by
+/// [`extract_and_validate_claim`] a moment later, so this peek never
+/// speaks where admission would have said something else.
+fn peek_claimed_channel_key(headers: &HeaderMap, state: &ClientEdgeState) -> Option<String> {
+    let (header_value, wrapped) = if let Some(value) = headers.get(CLAIM_HEADER) {
+        (value, false)
+    } else if let Some(value) = headers.get(CLAIM_WRAPPED_HEADER) {
+        (value, true)
+    } else {
+        return None;
+    };
+    let claim_json = decode_claim_header(
+        header_value.as_bytes(),
+        wrapped,
+        state.wrap_receiver_secret.as_ref(),
+    )
+    .ok()?;
+    let claim = connector_domain::client_claim::parse_client_claim(&claim_json).ok()?;
+    Some(claim.channel_key())
+}
+
 async fn extract_and_validate_claim(
     headers: &HeaderMap,
     price: u64,
@@ -1159,6 +1183,30 @@ async fn handle_ilp(
             .connector
             .peer_sale_purchase_would_be_refused(&prepare)
     {
+        // Issue #887, the identity-keyed half: before ADMITTING the
+        // claim, peek its own declared channel key and ask whether this
+        // purchase would only be refused for that payer (rate limit, row
+        // caps). Sound without validating the claim: admission verifies
+        // the claim's signature against exactly the channel it declares,
+        // so a sender declaring any other channel is rejected and charged
+        // nothing -- the peek is accurate for every payer who can
+        // actually be charged. On a hit the refusal is raised here,
+        // unpaid, with the identical message the settle path's
+        // authoritative (counting) copy produces.
+        if let Some(claimed) = peek_claimed_channel_key(&headers, &state) {
+            if let Some(message) = state
+                .connector
+                .peer_sale_purchase_refusal_for_payer(&prepare, &claimed)
+            {
+                return packet_response(PacketResponse::Reject(Reject {
+                    code: RejectCode::f00_bad_request(),
+                    triggered_by: String::new(),
+                    message,
+                    data: Vec::new(),
+                    accumulated_cost: 0,
+                }));
+            }
+        }
         match extract_and_validate_claim(&headers, price, &state).await {
             Err(rejection) => return claim_rejected_response(rejection, price),
             // A claim that cleared the gate is this connector's evidence
@@ -3132,6 +3180,107 @@ mod tests {
             let response = app.oneshot(valid_request).await.unwrap();
             let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
             Fulfill::decode(&bytes).expect("the unspent claim is still accepted");
+            assert_eq!(app_client.deliveries().len(), 1);
+        }
+
+        /// The review's identity-keyed failure scenario, inverted: an
+        /// honest buyer whose purchase hits the rate limit is refused
+        /// BEFORE the claim is admitted. Proven by the sharpest
+        /// consequence: the very claim that covered the refused purchase
+        /// still spends afterward, its delta over the watermark exactly
+        /// covering the app route's price -- impossible if the refused
+        /// purchase had advanced the watermark.
+        #[tokio::test]
+        async fn a_rate_limited_purchase_is_refused_unpaid_and_its_claim_still_spends() {
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"ok"));
+            let signer = test_signer();
+            let connector = Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone())
+                .with_peer_sale("g.example.sale", 100, chrono::Duration::seconds(600))
+                .with_peer_sale_bounds(connector_runtime::PeerSaleBounds::new(
+                    32,
+                    4,
+                    128,
+                    1,
+                    chrono::Duration::seconds(60),
+                )),
+            );
+            let app = router_with_gate(connector, signer.clone(), None, test_gate(test_channels()));
+
+            let purchase_envelope = EnvelopeRequest {
+                method: "POST".to_string(),
+                target: "/".to_string(),
+                headers: vec![],
+                body: br#"{"prefix":"g.example.buyer","fee":3,"price":25,"next_hop_price":10}"#
+                    .to_vec(),
+            }
+            .encode();
+
+            // Purchase 1: judged -- admitted, charged, and counted against
+            // the payer's one-per-window rate slot. (It is then refused in
+            // the settle path for this harness's missing settlement
+            // backend, which is beside the point here: it was a judged,
+            // paid attempt.)
+            let (data, _s) = connector_signer::giftwrap::seal_request(
+                &purchase_envelope,
+                &signer.public_key().unwrap(),
+            )
+            .expect("seal");
+            let first = Prepare {
+                data,
+                ..sample_prepare("g.example.sale")
+            };
+            let first_request =
+                request_with_claim_header(&first, CLAIM_HEADER, &evm_claim_json(1, 100));
+            let response = app.clone().oneshot(first_request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            // Purchase 2, inside the window, carrying a HIGHER claim: the
+            // pre-admission peek refuses it unpaid with the rate limit's
+            // own message.
+            let (data, _s) = connector_signer::giftwrap::seal_request(
+                &purchase_envelope,
+                &signer.public_key().unwrap(),
+            )
+            .expect("seal");
+            let second = Prepare {
+                data,
+                ..sample_prepare("g.example.sale")
+            };
+            let second_claim = evm_claim_json(2, 200);
+            let second_request = request_with_claim_header(&second, CLAIM_HEADER, &second_claim);
+            let response = app.clone().oneshot(second_request).await.unwrap();
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = Reject::decode(&bytes).expect("decode reject");
+            assert_eq!(reject.code.as_str(), "F00");
+            assert_eq!(reject.accumulated_cost, 0);
+            assert!(
+                reject.message.contains("rate limit"),
+                "expected the rate limit's own refusal, got: {}",
+                reject.message
+            );
+
+            // The refused purchase's claim still spends: its 100 delta
+            // over the watermark purchase 1 left behind covers the app
+            // route's price exactly. Had purchase 2 been admitted, this
+            // same claim would be non-advancing and rejected.
+            let (valid_prepare, _shared_secret) =
+                sealed_sample_prepare("g.example.app", &signer.public_key().unwrap());
+            let valid_request =
+                request_with_claim_header(&valid_prepare, CLAIM_HEADER, &second_claim);
+            let response = app.oneshot(valid_request).await.unwrap();
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            Fulfill::decode(&bytes).expect("the refused purchase's claim still spends");
             assert_eq!(app_client.deliveries().len(), 1);
         }
 

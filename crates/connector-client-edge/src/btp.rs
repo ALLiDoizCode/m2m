@@ -797,6 +797,36 @@ async fn handle_frame(
                     .connector
                     .peer_sale_purchase_would_be_refused(&prepare) =>
         {
+            // Issue #887's identity-keyed peek, mirroring `handle_ilp`
+            // (§9: the two carriages must not drift): the claim's own
+            // declared channel key, read without admitting it, refuses a
+            // rate-limited or row-capped purchase unpaid with the settle
+            // path's identical message. Sound because admission verifies
+            // the signature against exactly the declared channel.
+            if let Some(message) = connector_domain::client_claim::parse_client_claim(&json)
+                .ok()
+                .and_then(|claim| {
+                    state
+                        .connector
+                        .peer_sale_purchase_refusal_for_payer(&prepare, &claim.channel_key())
+                })
+            {
+                return reply(
+                    replies,
+                    reject_response(
+                        frame.request_id,
+                        Reject {
+                            code: RejectCode::f00_bad_request(),
+                            triggered_by: String::new(),
+                            message,
+                            data: Vec::new(),
+                            accumulated_cost: 0,
+                        },
+                        Vec::new(),
+                    ),
+                )
+                .await;
+            }
             match state.claim_gate.admit(&json, price).await {
                 Ok(accepted) => Some(accepted),
                 Err(rejection) => {

@@ -87,37 +87,32 @@ a config-shadowing prefix (ADR 0037), an arithmetic shortfall, and this issue's 
 cap. A stranger without so much as a channel can no longer cause a single charged refusal with
 any of them.
 
-**Identity-keyed bounds run after, and this is structural.** The remaining bounds are all about
-_this payer's_ history: the per-payer route cap
-and the purchase rate limit obviously so, and the total-row cap because it is deliberately not
-applied to a payer that already holds a row (a renewal never grows the table), which is a fact
-about the payer's identity like the other two. And the payer's identity does not exist as a
-checkable fact until
-`connector-client-edge::ClientClaimGate::admit` has verified the claim's signature against its
-channel, which is the same operation that advances the watermark. There is no cheaper "peek the
-verified identity" step to call first — this codebase's one precedent for judging identity ahead
-of full admission (`connector-client-edge::lookup_budget`, issue #613) does so with the claim's
-_self-declared, unverified_ signer, explicitly "a label for grouping and attribution, never a
-credential," and accepts the residual weakness that an adaptive sender can declare a fresh label
-per attempt. Extending that same weak-identity idiom to this issue's row cap and rate limit was
-considered and set aside for this pass: it would only protect a payer who _truthfully_ declares
-its own identity pre-admission, since a payer set on bypassing it can always declare something
-else and pay through to the authoritative post-admission check regardless — and it would need the
-same weak identity threaded through both HTTP and BTP carriages in `connector-client-edge` to reach
-a `connector-runtime` bound it does not otherwise need to know about.
+**Identity-keyed bounds refuse before payment too, via the declared-channel peek.** The
+remaining bounds are all about _this payer's_ history: the per-payer route cap and the purchase
+rate limit obviously so, and the total-row cap because it is deliberately not applied to a payer
+that already holds a row (a renewal never grows the table). Their pre-admission check
+(`Connector::peer_sale_purchase_refusal_for_payer`, consulted by both carriages) reads the claim
+header's **own declared channel key** without validating or admitting the claim — and unlike
+`lookup_budget`'s weak-identity label (issue #613), this is sound as a refusal basis, for a
+reason specific to how these bounds bind: admission verifies the claim's signature against
+exactly the channel the claim declares, so a sender declaring any *other* channel is rejected at
+admission and charged nothing regardless. The peek is therefore accurate for every payer who can
+actually be charged; lying about the key buys nothing but an unpaid rejection. The rate check in
+the peek is a pure read (`would_allow`): a refusal that charges nothing costs the payer none of
+their window either, and only judged, charged attempts count. `settle_peer_sale_purchase`
+re-derives the same answer post-admission from the same shared function — the authority for
+direct callers and for races into the window between peek and admission.
 
-**Net effect, stated plainly:** a malformed body, an invalid or config-shadowing prefix, an
-arithmetic shortfall, or an over-length prefix now refuses with **nothing charged** — the claim
-is never admitted, and the refusal message is byte-identical to the paid path's. What remains
-charged-then-refused is the identity-keyed set: the purchase rate limit, the per-payer route
-cap, the total-row cap (identity-keyed because a renewal never grows the table), and the
-on-chain channel-state re-check. That residual window is qualitatively different from the
-shape-refusal one closed above, which any stranger could open with a single malformed body:
-it is reachable only by a payer spending against **their own** channel, its
-frequency is bounded by this ADR's own rate limit, and every such charge is visible in the
-claim journal. Closing it too needs either the credit-refund ledger (#709) or a purpose-built
-pre-admission identity peek carried through both carriages — a separable, security-relevant
-change better scoped on its own ticket than folded into a bounds-and-defaults issue.
+**Net effect, stated plainly:** every bound this ADR names — shape-derived and identity-keyed
+alike — refuses with **nothing charged**: the claim is never admitted, and the refusal message is
+byte-identical to the paid path's. What remains charged-then-refused is exactly one check: the
+on-chain channel-state re-read (`verify_purchasing_channel_open`), which cannot move
+pre-admission without putting an RPC on the unpaid path — the #613 anti-pattern this codebase
+built the channel index to remove. That residual window is reachable only by a payer whose own
+channel went terminal between claim and delivery, and every such charge is visible in the claim
+journal. A post-admission race into the rate window or a cap (two purchases from one payer in
+flight at once) can still charge the loser; the credit-refund ledger (#709) is the named remedy
+if that ever matters in practice.
 
 ## Consequences
 
@@ -127,6 +122,11 @@ change better scoped on its own ticket than folded into a bounds-and-defaults is
   restated here as already satisfying #887's own containment acceptance criterion ("a purchased
   prefix cannot shadow a config-file prefix unless the precedence rule from C1 explicitly
   permits it") — no new code was needed for that bullet, only this record connecting it to #887.
-- The next reader closing the "before payment" gap fully has two named options above (#709, or a
-  self-declared pre-admission identity peek modeled on `lookup_budget`) rather than an open
-  question.
+- The declared-channel peek is now the codebase's second pre-admission identity idiom, distinct
+  from `lookup_budget`'s (#613): there the label is attribution-only and lying wins slack; here
+  the label is the charged channel itself and lying buys an unpaid rejection. A reader extending
+  either should keep that distinction — the peek idiom is sound only where admission binds the
+  same declared value it verifies.
+- The one refusal still on the paid side is the on-chain channel-state re-read; #709's
+  credit-refund ledger is the named remedy for it (and for post-admission races into a bound)
+  if either ever matters in practice.
