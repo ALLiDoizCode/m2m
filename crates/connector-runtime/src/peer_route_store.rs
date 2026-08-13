@@ -43,6 +43,7 @@ pub enum PeerRouteStoreError {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(from = "StoredPeerCompat")]
 struct StoredPeer {
     id: String,
     /// `None` for a peer added over the plain operator surface
@@ -52,6 +53,37 @@ struct StoredPeer {
     /// client role unless renewed (`Connector::upsert_runtime_peer_purchase`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     expires_at: Option<DateTime<Utc>>,
+}
+
+/// The two on-disk shapes a stored peer has ever had. Issue #884 wrote
+/// `peers` as a bare `Vec<String>`; #886 grew each entry into a struct to
+/// carry `expires_at`. `state_dir` is a persistent volume that outlives
+/// image upgrades (deploy/connector-rust/README.md), so a node that added
+/// a runtime peer before this change still holds the string form -- and a
+/// snapshot format has no version field to migrate on. Reading accepts
+/// both (a bare string is a permanent peer, `expires_at: None`, exactly
+/// what it meant when written); writing always produces the struct form.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredPeerCompat {
+    Bare(String),
+    Full {
+        id: String,
+        #[serde(default)]
+        expires_at: Option<DateTime<Utc>>,
+    },
+}
+
+impl From<StoredPeerCompat> for StoredPeer {
+    fn from(compat: StoredPeerCompat) -> StoredPeer {
+        match compat {
+            StoredPeerCompat::Bare(id) => StoredPeer {
+                id,
+                expires_at: None,
+            },
+            StoredPeerCompat::Full { id, expires_at } => StoredPeer { id, expires_at },
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -224,6 +256,36 @@ mod tests {
         );
         store.persist(&peers, &routes).expect("persist");
 
+        let (_store, read_peers, read_routes) = PeerRouteStore::open(&path).expect("re-open");
+        assert_eq!(read_peers, peers);
+        assert_eq!(read_routes, routes);
+    }
+
+    /// The exact bytes issue #884's format wrote -- `peers` as bare
+    /// strings -- still replay after #886 grew each entry into a struct:
+    /// `state_dir` outlives image upgrades, so a node that added a runtime
+    /// peer before the change boots with this very file on disk, and
+    /// refusing to parse it is a crash loop with no migration path (this
+    /// PR's review). A bare string means what it meant when written: a
+    /// permanent peer, no lease.
+    #[test]
+    fn a_pre_lease_snapshot_with_bare_string_peers_still_replays() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("runtime_peers.json");
+        fs::write(
+            &path,
+            r#"{"peers":["apex-relay-2"],"routes":[{"prefix":"g.example.relay2","peer_id":"apex-relay-2","fee":3,"price":25}]}"#,
+        )
+        .expect("write the #884-format file");
+
+        let (store, peers, routes) = PeerRouteStore::open(&path).expect("the old format parses");
+        assert_eq!(peers.get("apex-relay-2"), Some(&None));
+        assert_eq!(routes.len(), 1);
+
+        // And persisting rewrites it in the current struct form, which the
+        // next open reads back identically -- upgrade happens on first
+        // write, not by hand.
+        store.persist(&peers, &routes).expect("persist");
         let (_store, read_peers, read_routes) = PeerRouteStore::open(&path).expect("re-open");
         assert_eq!(read_peers, peers);
         assert_eq!(read_routes, routes);

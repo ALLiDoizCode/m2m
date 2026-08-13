@@ -5925,6 +5925,139 @@ mod tests {
             }
         }
 
+        /// An [`AppClient`] that parks every delivery until the test
+        /// releases it -- the "packet in flight" issue #886's expiry
+        /// criterion needs to hold open while the clock advances and the
+        /// reap runs. `arrived` fires when a delivery is parked; `release`
+        /// lets it complete.
+        struct HoldingAppClient {
+            outcome: AppOutcome,
+            arrived: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+
+        impl HoldingAppClient {
+            fn new(outcome: AppOutcome) -> HoldingAppClient {
+                HoldingAppClient {
+                    outcome,
+                    arrived: tokio::sync::Notify::new(),
+                    release: tokio::sync::Notify::new(),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl AppClient for HoldingAppClient {
+            async fn deliver(
+                &self,
+                _handler_url: &url::Url,
+                _request: &EnvelopeRequest,
+            ) -> AppOutcome {
+                self.arrived.notify_one();
+                self.release.notified().await;
+                self.outcome.clone()
+            }
+        }
+
+        /// Issue #886's "expiry is tested, including expiry while packets
+        /// are in flight", exercised for real (this PR's review): the
+        /// forward is parked mid-delivery at the second hop while the lease
+        /// lapses AND `reap_expired_peer_leases` demotes the peer -- and it
+        /// still completes, because `select_configured_route` cloned the
+        /// matched route out of the `ArcSwap` snapshot before the reap
+        /// swapped it. The packet arriving after the reap gets F02.
+        #[tokio::test]
+        async fn a_forward_in_flight_while_the_lease_lapses_and_the_reap_runs_still_completes() {
+            let second_hop_route =
+                StaticRoute::new("g.example.buyer", "http://localhost:4000").unwrap();
+            let holding = Arc::new(HoldingAppClient::new(answered(b"delivered mid-demotion")));
+            let second_hop = Arc::new(
+                Connector::new(
+                    vec![second_hop_route],
+                    vec![],
+                    holding.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(identity_signer()),
+            );
+
+            let backend = Arc::new(InMemorySettlementBackend::new());
+            let channel_id = backend
+                .open(b"buyer".to_vec(), Duration::seconds(3600))
+                .await
+                .expect("open");
+            let client_channel_id = format!("evm:{}", channel_id.0);
+
+            let mut peer_transport = InProcessPeerTransport::new();
+            peer_transport.add_peer(&client_channel_id, second_hop);
+
+            let clock = test_clock();
+            let connector = Arc::new(
+                Connector::new(
+                    vec![],
+                    vec![],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(peer_transport),
+                    clock.clone(),
+                )
+                .with_identity_signer(identity_signer())
+                .with_peer_sale(
+                    PEER_SALE_PREFIX,
+                    PEER_SALE_PRICE,
+                    Duration::seconds(PEER_SALE_LEASE_SECONDS),
+                )
+                .with_settlement(SettlementChain::Evm, backend),
+            );
+
+            let (sealed, _shared_secret) =
+                peer_sale_prepare(&purchase_body("g.example.buyer", 0, 0, 0));
+            let response = connector
+                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                .await;
+            assert!(matches!(response, PacketResponse::Fulfill(_)));
+
+            // Put a forward genuinely in flight: it parks inside the second
+            // hop's delivery and stays there until released.
+            let (sealed, shared_secret) = sealed_prepare_to("g.example.buyer", b"hello");
+            let in_flight = tokio::spawn({
+                let connector = Arc::clone(&connector);
+                async move { connector.handle_prepare(sealed, 0).await }
+            });
+            holding.arrived.notified().await;
+
+            // With the packet parked mid-delivery: lapse the lease and run
+            // the reap. The row is gone before the in-flight packet's
+            // delivery has completed.
+            clock.advance(Duration::seconds(PEER_SALE_LEASE_SECONDS));
+            let demoted = connector.reap_expired_peer_leases();
+            assert_eq!(demoted, vec![client_channel_id.clone()]);
+            assert!(connector.client_route("g.example.buyer").is_none());
+
+            // The demotion did not disturb the traffic that had already
+            // resolved its route.
+            holding.release.notify_one();
+            match in_flight.await.expect("the in-flight task completes") {
+                PacketResponse::Fulfill(fulfill) => {
+                    assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
+                    assert_eq!(
+                        open_sealed_envelope(&shared_secret, &fulfill.data),
+                        fulfill_envelope(b"delivered mid-demotion")
+                    );
+                }
+                other => panic!("expected the in-flight forward to complete, got {other:?}"),
+            }
+
+            // And the packet AFTER the reap is refused, not forwarded.
+            let (sealed, _shared_secret) = sealed_prepare_to("g.example.buyer", b"hello");
+            match connector.handle_prepare(sealed, 0).await {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code, RejectCode::f02_unreachable());
+                }
+                other => panic!("expected the reaped route to be unreachable, got {other:?}"),
+            }
+        }
+
         /// Issue #886's third acceptance criterion: paying again before the
         /// lease lapses extends the existing term rather than discarding
         /// its unused remainder and starting over from the moment of
