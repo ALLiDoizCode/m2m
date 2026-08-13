@@ -359,7 +359,7 @@ jobs:
               # container from it — the missing verb #948 needed to actually
               # roll a box onto a tag carrying its config's fields.
               if [ "$APPLY" != "true" ]; then
-                say "**Dry run.** Would run on \`$BOX\`: \`git pull --ff-only\`, then \`$COMPOSE pull $SERVICE && $COMPOSE up -d $SERVICE\`, then fail unless the running container's image id equals the id of the pin the refreshed checkout names."
+                say "**Dry run.** Would run on \`$BOX\`: \`git pull --ff-only\`, then \`$COMPOSE pull $SERVICE && $COMPOSE up -d --no-deps $SERVICE\`, then fail unless the running container's image id equals the id of the pin the refreshed checkout names."
                 exit 0
               fi
               # The box's checkout IS the deploy input: compose reads
@@ -375,7 +375,15 @@ jobs:
                 echo "::error::service '$SERVICE' names no image in $BOX's compose file set"
                 exit 1
               fi
-              sshbox "cd $REMOTE_REPO && $COMPOSE pull '$SERVICE' && $COMPOSE up -d '$SERVICE'"
+              # --no-deps, non-negotiable (issue #851's trap, documented in
+              # infra/devnet-manage.sh): `up -d` CREATES a named service's
+              # declared dependencies too -- `required: false` does not stop
+              # it -- and on the toon box `nginx` declares `depends_on:
+              # connector`, whose pinned image is purged from GHCR. Without
+              # the flag, a documented-valid dispatch (deploy nginx on toon)
+              # aborts on `manifest unknown` and takes the running stack
+              # down with it.
+              sshbox "cd $REMOTE_REPO && $COMPOSE pull '$SERVICE' && $COMPOSE up -d --no-deps '$SERVICE'"
               # Re-read OFF THE BOX (this file's own doctrine): the running
               # container's image id must be the id of the pin just pulled.
               # `docker ps` output alone cannot distinguish a no-op from a
