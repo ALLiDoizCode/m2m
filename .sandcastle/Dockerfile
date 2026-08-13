@@ -75,10 +75,10 @@ RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
 RUN curl -fsSL https://foundry.paradigm.xyz | bash \
   && /home/agent/.foundry/bin/foundryup --install v1.7.1
 
-# Solana CLI provides `solana-test-validator` (and `solana-keygen`, used to resolve the
-# checked-in program keypair's pubkey) for connector-settlement-solana's tests (issue #428) —
-# the same role Foundry plays above, needed for the same reason: without it the implementer
-# cannot run this crate's tests locally and only finds out they're broken once CI does.
+# Solana CLI provides `solana-test-validator` for connector-settlement-solana's tests
+# (issue #428) — the same role Foundry plays above, needed for the same reason: without it
+# the implementer cannot run this crate's tests locally and only finds out they're broken
+# once CI does.
 #
 # Pinned to v2.1.21, NOT the newer v3.x line ci.yml's pre-existing `solana-integration` job
 # installs: v3's solana-test-validator hard-requires io_uring, which this container's sandbox

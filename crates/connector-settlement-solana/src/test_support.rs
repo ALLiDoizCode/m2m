@@ -38,10 +38,12 @@ pub async fn fund(rpc: &RpcClient, pubkey: &Pubkey) {
 }
 
 /// The fixed program id this crate's tests load `payment_channel.so`
-/// under -- checked in at `deploy/payment_channel-keypair.json`, distinct
-/// from the real, deployed `2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip`
-/// on public devnet (`packages/solana-program/deployments/devnet-public.md`):
-/// this id exists only inside a disposable local validator's genesis.
+/// under -- passed to `solana-test-validator --bpf-program` as a bare id
+/// (see [`SolanaValidator::spawn`]), not resolved from any keypair file, so
+/// no keypair for it is tracked in this repo (issue #922). Distinct from the
+/// real, deployed `2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip` on public
+/// devnet (`packages/solana-program/deployments/devnet-public.md`): this id
+/// exists only inside a disposable local validator's genesis.
 pub const LOCAL_TEST_PROGRAM_ID: &str = "HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR";
 
 fn workspace_root() -> PathBuf {
