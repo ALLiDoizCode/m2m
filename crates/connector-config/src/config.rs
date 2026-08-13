@@ -1774,6 +1774,7 @@ key_file = "{}"
 [peer_sale]
 prefix = "g.example.node.peer-sale"
 price = 5000
+lease_seconds = 3600
 "#,
                 key_path.display()
             )
@@ -1783,6 +1784,7 @@ price = 5000
         let sale = config.peer_sale().expect("the section is present");
         assert_eq!(sale.prefix(), "g.example.node.peer-sale");
         assert_eq!(sale.price(), 5000);
+        assert_eq!(sale.lease_seconds(), 3600);
     }
 
     #[test]
@@ -1824,6 +1826,7 @@ price = 10
 [peer_sale]
 prefix = "g.example.node.peer-sale"
 price = 5000
+lease_seconds = 3600
 "#,
                 key_path.display()
             )

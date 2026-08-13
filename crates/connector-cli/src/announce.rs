@@ -488,6 +488,16 @@ pub struct IlpPeerInfo {
     pub preferred_tokens: BTreeMap<String, String>,
     #[serde(rename = "routePrices", skip_serializing_if = "BTreeMap::is_empty")]
     pub route_prices: BTreeMap<String, String>,
+    /// How long a peer-sale purchase leases peering for (issue #886),
+    /// present exactly when `[peer_sale]` is configured -- the lease is
+    /// part of what a purchase buys, so it is visible to a buyer before
+    /// paying, the same way `route_prices` already makes the price
+    /// visible.
+    #[serde(
+        rename = "peerSaleLeaseSeconds",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub peer_sale_lease_seconds: Option<u64>,
     #[serde(rename = "edgeIdentity", skip_serializing_if = "Option::is_none")]
     pub edge_identity: Option<EdgeIdentity>,
     pub routes: RouteHints,
@@ -630,6 +640,7 @@ pub fn build_announcement(config: &Config, runtime: &Runtime) -> IlpPeerInfo {
         token_networks,
         preferred_tokens,
         route_prices,
+        peer_sale_lease_seconds: config.peer_sale().map(|sale| sale.lease_seconds()),
         edge_identity,
         routes: RouteHints {
             publish: announce.route_publish().to_string(),
@@ -1835,6 +1846,7 @@ btp_endpoint = "wss://proxy.ario.example/ilp/btp"
             token_networks: BTreeMap::new(),
             preferred_tokens: BTreeMap::new(),
             route_prices: BTreeMap::new(),
+            peer_sale_lease_seconds: None,
             edge_identity: None,
             routes: RouteHints {
                 publish: "g.toon.ario".to_string(),
