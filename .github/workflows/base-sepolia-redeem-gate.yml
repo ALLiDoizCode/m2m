@@ -1,0 +1,217 @@
+# Base Sepolia redeem gate -- the opt-in check issue #577 asks for: a claim
+# signed by this workspace's PRODUCTION peer-wire signing path really
+# redeems against the TokenNetwork actually deployed and resolved on Base
+# Sepolia (crates/connector-bin/tests/base_sepolia_redeem_proof.rs), and a
+# claim signed under a deliberately wrong EIP-712 domain does not.
+#
+# ── WHY A SEPARATE FILE, AND NOT A cargo test ADDED TO ci.yml'S GATE ────────
+# `ci.yml`'s Rust Workspace Gate runs unconditionally on every push and pull
+# request. This check needs a funded EVM private key and spends real -- if
+# small -- testnet value on every run (`open`/`fund`/two deliberately
+# reverted `claimFromChannel` calls/one successful one), so it cannot be part
+# of that gate without either giving every PR a funded secret or having the
+# gate silently skip on forks, which issue #471's policy already rejects for
+# exactly this shape of test. `funded-ops.yml` solved the identical problem
+# for channel operations by being `workflow_dispatch`-only; this follows the
+# same shape, including where the secret lives and how it is derived.
+#
+# ── ONE JOB, DELIBERATELY ───────────────────────────────────────────────────
+# An earlier draft of this file split derivation and the actual `cargo test`
+# into two jobs, passing the derived key between them as a workflow
+# artifact. That is wrong and was caught before merging: `::add-mask::`
+# scrubs a secret from LOG OUTPUT, but an uploaded artifact is a file on
+# disk, not log output -- it is not scrubbed, and anyone who can read this
+# repo's Actions artifacts could have downloaded the funded key in the
+# clear. Everything from deriving the key to running the redeem test that
+# spends it happens in ONE job below, so the key only ever exists as a
+# masked step output and a job-scoped `GITHUB_ENV` entry, never a file
+# handed between jobs.
+#
+# ── FAILS LOUDLY ON A BLANK SECRET, NEVER SKIPS SILENTLY ────────────────────
+# `base_sepolia_redeem_proof.rs`'s own tests treat an ENTIRELY ABSENT
+# `BASE_SEPOLIA_PROOF_KEY` as a deliberate no-op -- an ordinary `cargo test`
+# run must not require a funded testnet key. But this workflow's whole job
+# is to actually drive that check, so IT must not let a blank or missing
+# `E2E_DEV_MNEMONIC` secret masquerade as "chose not to run" -- exactly
+# `funded-ops.yml`'s `ops.mjs`: `if (!MNEMONIC || !MNEMONIC.trim()) fail(...)`.
+# The self-test below (SDK vs. `ethers` agreeing on a PUBLIC BIP-39 vector)
+# also runs before the real secret is ever touched, so a broken derivation
+# library fails the job instead of quietly producing a wrong address.
+#
+# ── SAFETY ──────────────────────────────────────────────────────────────────
+#   * `apply` defaults to false. A dry run derives the receiver address,
+#     reads its ETH/USDC balance and the registry's resolved TokenNetwork,
+#     and prints what an apply run would spend -- it sends nothing, and the
+#     job stops there without ever installing the Rust toolchain.
+#   * The derived private key is registered with `::add-mask::` the instant
+#     it exists, before it is ever written anywhere else.
+#   * Same `concurrency: group: funded-ops` as `funded-ops.yml`: both spend
+#     from the same mnemonic-derived accounts, and two dispatches racing
+#     each other's nonces is exactly the hazard that group already exists to
+#     serialize against.
+
+name: base-sepolia-redeem-gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      account_index:
+        description: "NIP-06 account index to redeem as (m/44'/1237'/0'/0/i) -- this is the funded RECEIVER; the payer is generated fresh per run and holds nothing"
+        type: string
+        required: false
+        default: "0"
+      apply:
+        description: "Perform the real redeem proof (spends testnet gas + a trace of USDC). false = dry run: derive, check balances, print, send nothing."
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: funded-ops
+  cancel-in-progress: false
+
+jobs:
+  redeem-gate:
+    name: Base Sepolia redeem gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RPC_URL: https://base-sepolia-rpc.publicnode.com
+      REGISTRY: "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1"
+      TOKEN: "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+      DECIMALS: "6"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+
+      - name: Install derivation and chain libs
+        run: |
+          mkdir -p "$RUNNER_TEMP/ops"
+          cd "$RUNNER_TEMP/ops"
+          echo '{ "type": "module" }' > package.json
+          npm install --no-audit --no-fund \
+            @toon-protocol/sdk@0.6.0 \
+            ethers@^6.0.0
+
+      - name: Derive receiver key and check balances
+        env:
+          E2E_DEV_MNEMONIC: ${{ secrets.E2E_DEV_MNEMONIC }}
+          ACCOUNT_INDEX: ${{ inputs.account_index }}
+        run: |
+          cat > "$RUNNER_TEMP/ops/whoami.mjs" <<'SCRIPT'
+          // This file is ESM (`.mjs`, and the package.json written above says
+          // `"type": "module"`), so `require` does not exist here -- reaching
+          // for it throws `ReferenceError: require is not defined in ES module
+          // scope` on the first line that runs, which is why every appendFile
+          // below goes through this static import.
+          import { appendFileSync } from 'node:fs';
+          import { fromMnemonicFull } from '@toon-protocol/sdk';
+          import { Contract, HDNodeWallet, JsonRpcProvider, Mnemonic, formatUnits } from 'ethers';
+
+          const fail = (m) => { console.error(`::error::${m}`); process.exit(1); };
+          const mask = (v) => console.log(`::add-mask::${v}`);
+
+          const { E2E_DEV_MNEMONIC: MNEMONIC, RPC_URL, REGISTRY, TOKEN, DECIMALS, ACCOUNT_INDEX } = process.env;
+
+          // A blank secret must fail the job outright -- it must never look
+          // like the same "not opted in" the Rust test's own env-var gate
+          // treats an absent BASE_SEPOLIA_PROOF_KEY as.
+          if (!MNEMONIC || !MNEMONIC.trim()) {
+            fail('E2E_DEV_MNEMONIC is empty or not set. Nothing can be derived.');
+          }
+
+          // Self-test: a public BIP-39 vector, proving the SDK and ethers
+          // agree on the NIP-06 EVM path before the real secret is touched.
+          const TEST = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
+          for (const i of [0, 2]) {
+            const a = await fromMnemonicFull(TEST, { accountIndex: i });
+            const b = HDNodeWallet.fromMnemonic(Mnemonic.fromPhrase(TEST), `m/44'/1237'/0'/0/${i}`);
+            if (a.evmAddress.toLowerCase() !== b.address.toLowerCase()) {
+              fail(`Self-test FAILED at index ${i}: SDK ${a.evmAddress} != ethers ${b.address}.`);
+            }
+          }
+          console.error('Self-test passed: SDK and ethers agree on the NIP-06 EVM path.');
+
+          const idx = Number.parseInt(ACCOUNT_INDEX ?? '0', 10);
+          if (!Number.isInteger(idx) || idx < 0) fail(`Bad account_index: ${ACCOUNT_INDEX}`);
+          const id = await fromMnemonicFull(MNEMONIC, { accountIndex: idx });
+          const pk = id.evmPrivateKey ?? id.evm?.privateKey;
+          if (!pk) fail('Derived identity exposes no EVM private key; cannot sign.');
+          mask(pk);
+
+          const provider = new JsonRpcProvider(RPC_URL);
+          const erc20 = new Contract(TOKEN, ['function balanceOf(address) view returns (uint256)'], provider);
+          const registry = new Contract(REGISTRY, ['function getTokenNetwork(address) view returns (address)'], provider);
+          const tnAddr = await registry.getTokenNetwork(TOKEN);
+          if (!tnAddr || /^0x0+$/.test(tnAddr)) {
+            fail(`Registry ${REGISTRY} resolves no TokenNetwork for token ${TOKEN}.`);
+          }
+          const dec = Number(DECIMALS);
+          const [eth, usdc] = await Promise.all([provider.getBalance(id.evmAddress), erc20.balanceOf(id.evmAddress)]);
+
+          const summary = process.env.GITHUB_STEP_SUMMARY;
+          const say = (l) => { console.log(l); if (summary) appendFileSync(summary, l + '\n'); };
+          say(`## base-sepolia-redeem-gate -- receiver (index ${idx})`);
+          say('');
+          say(`TokenNetwork resolved from registry: ${tnAddr}`);
+          say(`receiver: \`${id.evmAddress}\`  ETH: ${formatUnits(eth, 18)}  USDC: ${formatUnits(usdc, dec)}`);
+          say('');
+          if (eth === 0n) say('> ⚠️ receiver holds no ETH -- an apply run cannot pay gas and will fail.');
+          if (usdc < 1000n) say('> ⚠️ receiver holds under 1000 base units of USDC -- an apply run funds a 1000-unit deposit and will fail.');
+
+          // GITHUB_ENV persists for later steps of THIS job only -- it never
+          // leaves the runner and is not the same thing as a workflow
+          // artifact (see this file's "ONE JOB, DELIBERATELY" note above).
+          const outEnv = process.env.GITHUB_ENV;
+          if (outEnv) appendFileSync(outEnv, `RECEIVER_KEY=${pk}\n`);
+          SCRIPT
+          node "$RUNNER_TEMP/ops/whoami.mjs"
+
+      # `apply` is declared `type: boolean`, and the `inputs` context keeps a
+      # workflow_dispatch boolean AS a boolean (only the legacy
+      # `github.event.inputs` stringifies it). Comparing it to the string
+      # `'true'` therefore makes GitHub cast both sides to a number --
+      # `true` -> 1, `'true'` -> NaN -- so `inputs.apply == 'true'` is ALWAYS
+      # false and every step behind it is dead. The boolean is used directly
+      # below for exactly that reason; do not reintroduce a string compare.
+      - name: Install Rust toolchain
+        if: ${{ inputs.apply }}
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and workspace target
+        if: ${{ inputs.apply }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: base-sepolia-redeem-gate-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            base-sepolia-redeem-gate-${{ runner.os }}-
+
+      - name: cargo test base_sepolia_redeem_proof
+        if: ${{ inputs.apply }}
+        env:
+          BASE_SEPOLIA_PROOF_KEY: ${{ env.RECEIVER_KEY }}
+          BASE_SEPOLIA_PROOF_RPC: ${{ env.RPC_URL }}
+          BASE_SEPOLIA_PROOF_REGISTRY: ${{ env.REGISTRY }}
+          BASE_SEPOLIA_PROOF_TOKEN: ${{ env.TOKEN }}
+          BASE_SEPOLIA_PROOF_DECIMALS: ${{ env.DECIMALS }}
+        run: |
+          cargo test -p connector --test base_sepolia_redeem_proof -- --nocapture
+
+      - name: Dry run -- nothing sent
+        if: ${{ !inputs.apply }}
+        run: |
+          echo "Dry run only -- re-dispatch with apply=true to actually redeem."
