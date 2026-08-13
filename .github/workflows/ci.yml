@@ -327,8 +327,10 @@ jobs:
   # comparison" -- that line matches the live bytes exactly in size and 99.66%
   # byte-identically; a zero-diff against the live program would additionally need the
   # deploy-time lockfile and build path, which were not preserved), and asserts the two
-  # artifacts hash identically. No deploy, no key material, no network beyond fetching
-  # the toolchain itself -- this proves the SOURCE rebuilds bit-for-bit from a clean
+  # artifacts hash identically. No deploy and no key material; the only network traffic
+  # is fetching the toolchain and the crate dependencies (this job restores no ~/.cargo
+  # cache, so build #1 resolves the dependency tree from crates.io against the pinned
+  # workspace Cargo.lock) -- this proves the SOURCE rebuilds bit-for-bit from a clean
   # SBF target, which is what the mainnet runbook's human deploy step relies on being
   # true before it ever runs.
   solana-program-reproducibility:
