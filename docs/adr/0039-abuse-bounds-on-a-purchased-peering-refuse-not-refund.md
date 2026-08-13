@@ -95,7 +95,7 @@ that already holds a row (a renewal never grows the table). Their pre-admission 
 header's **own declared channel key** without validating or admitting the claim — and unlike
 `lookup_budget`'s weak-identity label (issue #613), this is sound as a refusal basis, for a
 reason specific to how these bounds bind: admission verifies the claim's signature against
-exactly the channel the claim declares, so a sender declaring any *other* channel is rejected at
+exactly the channel the claim declares, so a sender declaring any _other_ channel is rejected at
 admission and charged nothing regardless. The peek is therefore accurate for every payer who can
 actually be charged; lying about the key buys nothing but an unpaid rejection. The rate check in
 the peek is a pure read (`would_allow`): a refusal that charges nothing costs the payer none of
