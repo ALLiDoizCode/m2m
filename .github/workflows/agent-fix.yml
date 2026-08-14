@@ -44,6 +44,21 @@ name: agent:fix
 on:
   pull_request:
     types: [labeled]
+  # Direct dispatch by the central PR repair pass (toon-meta's auto-merge.mjs)
+  # AFTER it applies `agent:fix`. This is not a convenience: a CONFLICTING PR
+  # has no merge ref, and GitHub does not fire `pull_request`-event workflows
+  # on a PR it cannot build a test merge for — so the labeled trigger above
+  # is structurally dead for the merge-conflict case, which is exactly the
+  # class toon-meta#357 calls the easy case (found live by the 2026-08-14
+  # repair drill on toon-meta#381: label applied, runner never fired). The
+  # pass therefore dispatches this workflow explicitly; the labeled trigger
+  # remains for red-check repairs and manual re-runs on mergeable PRs.
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number to repair (must already carry agent:fix)"
+        type: string
+        required: true
 
 permissions:
   contents: read
@@ -51,10 +66,11 @@ permissions:
 
 jobs:
   guard:
-    if: github.event.label.name == 'agent:fix'
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'agent:fix'
     runs-on: ubuntu-latest
     outputs:
       proceed: ${{ steps.check.outputs.proceed }}
+      pr: ${{ steps.check.outputs.pr }}
     steps:
       - name: Evaluate guards
         id: check
@@ -62,9 +78,31 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           ACTOR: ${{ github.actor }}
+          EVENT_PR: ${{ github.event.pull_request.number }}
+          INPUT_PR: ${{ inputs.pr }}
         run: |
           set -euo pipefail
           proceed=true
+          pr="${EVENT_PR:-${INPUT_PR:-}}"
+          echo "pr=${pr}" >> "$GITHUB_OUTPUT"
+
+          # Dispatch path only: the label event proves label+branch via the
+          # pass that applied it; a dispatch must re-verify both, or a typo'd
+          # PR number runs the fixer against an arbitrary PR.
+          if [ -z "${EVENT_PR:-}" ]; then
+            info=$(gh api "repos/${REPO}/pulls/${pr}" --jq '{head: .head.ref, labels: [.labels[].name]}')
+            head=$(echo "$info" | jq -r .head)
+            case "$head" in
+              sandcastle/*|agent/*) ;;
+              *)
+                echo "::warning::PR #${pr} head '${head}' is not a factory branch — skipping."
+                proceed=false ;;
+            esac
+            if ! echo "$info" | jq -e '.labels | index("agent:fix")' >/dev/null; then
+              echo "::warning::PR #${pr} does not carry agent:fix — skipping."
+              proceed=false
+            fi
+          fi
 
           # The labeler must have write access — refuses drive-by repair
           # requests from outsiders. The PR repair pass itself labels via
@@ -93,7 +131,7 @@ jobs:
     # the same budget as the review runner, not toon-meta's 25.)
     timeout-minutes: 45
     concurrency:
-      group: agent-fix-pr-${{ github.event.pull_request.number }}
+      group: agent-fix-pr-${{ github.event.pull_request.number || inputs.pr }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
@@ -140,7 +178,7 @@ jobs:
         # forensics steps still run.
         timeout-minutes: 40
         env:
-          SANDCASTLE_PR_NUMBER: ${{ github.event.pull_request.number }}
+          SANDCASTLE_PR_NUMBER: ${{ github.event.pull_request.number || needs.guard.outputs.pr }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           # For minting a fresh push credential mid-run (#462) — installation
