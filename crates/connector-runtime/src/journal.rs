@@ -26,7 +26,10 @@ pub enum JournalError {
 /// Durable storage for the sequence of [`JournalEntry`] values ADR 0005
 /// requires persisted. `append` MUST return only once `entry` is durable --
 /// callers rely on that to write the journal before considering value moved
-/// (ADR 0005's "Consequences").
+/// (ADR 0005's "Consequences"). [`Self::append_batch_unsynced`] is the one
+/// deliberate exception, added by issue #709 for the client edge alone; see
+/// its own doc and ADR 0005's "Update (issue #709)" for what a caller takes
+/// on by reaching for it instead.
 pub trait Journal: Send + Sync {
     fn append(&self, entry: &JournalEntry) -> Result<(), JournalError>;
 

@@ -2848,6 +2848,81 @@ key_file = "{key_path}"
         assert!(matches!(result, Err(ConfigError::ZeroBtpSessionWindow)));
     }
 
+    /// The claim journal's sync bound (issue #709): both halves are read as
+    /// written, the millisecond half arriving as a [`Duration`].
+    #[test]
+    fn the_claim_journal_sync_bound_is_read_from_config() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+journal_sync_max_advances = 25
+journal_sync_max_delay_ms = 40
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        })
+        .expect("a config naming the sync bound loads");
+
+        assert_eq!(config.journal_sync_max_advances(), Some(25));
+        assert_eq!(
+            config.journal_sync_max_delay(),
+            Some(std::time::Duration::from_millis(40))
+        );
+    }
+
+    /// An absent sync bound is `None` on both halves -- the client edge's
+    /// own defaults apply, never a guessed number of this crate's own.
+    #[test]
+    fn an_absent_claim_journal_sync_bound_defers_to_the_client_edge() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        })
+        .expect("a config not naming the sync bound loads");
+
+        assert_eq!(config.journal_sync_max_advances(), None);
+        assert_eq!(config.journal_sync_max_delay(), None);
+    }
+
+    /// Zero is coherent on either half -- "sync before every write is
+    /// answered", the pre-#709 behaviour -- and so, unlike every other
+    /// zero-checked knob here, it loads as written rather than being
+    /// refused.
+    #[test]
+    fn a_zero_claim_journal_sync_bound_loads_as_written() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+journal_sync_max_advances = 0
+journal_sync_max_delay_ms = 0
+
+[signer]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        })
+        .expect("a zero sync bound is a choice, not a misconfiguration");
+
+        assert_eq!(config.journal_sync_max_advances(), Some(0));
+        assert_eq!(
+            config.journal_sync_max_delay(),
+            Some(std::time::Duration::ZERO)
+        );
+    }
+
     /// The unresolvable-lookup budget (issue #613): what a node will spend
     /// discovering channels that turn out not to exist, per declared signer
     /// and in total. An operator on a metered settlement endpoint is

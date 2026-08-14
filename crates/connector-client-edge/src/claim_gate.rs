@@ -1017,16 +1017,21 @@ impl DurabilityTicket {
 #[derive(Debug)]
 pub struct FlushFailed;
 
-/// One channel's live count of watermark advances written to the journal
-/// but not yet `fsync`'d, and the total across every channel -- issue
-/// #709's operator-visible liability accounting. Mutated only by the
-/// committer thread; read by [`ClientClaimGate::unsynced_depth`] and the
-/// claim-state endpoint.
-#[derive(Default)]
-struct UnsyncedDepth {
-    total: u64,
-    by_channel: HashMap<String, u64>,
+impl std::fmt::Display for FlushFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the claim journal's unsynced watermark advances could not be flushed to disk")
+    }
 }
+
+impl std::error::Error for FlushFailed {}
+
+/// Every channel's live count of watermark advances written to the journal
+/// but not yet `fsync`'d, keyed the same as [`ClientClaimGate::watermarks`]
+/// -- issue #709's operator-visible liability accounting. A channel with
+/// nothing outstanding is simply absent. Mutated only by the committer
+/// thread; read by [`ClientClaimGate::unsynced_depth`] and the claim-state
+/// endpoint.
+type UnsyncedDepth = HashMap<String, u64>;
 
 /// One request into the committer's channel: a claim to write and journal
 /// order it in, or a demand that everything written so far be synced now
@@ -1144,7 +1149,6 @@ impl GroupCommitter {
         self.unsynced
             .read()
             .expect("unsynced depth lock poisoned")
-            .by_channel
             .get(channel_key)
             .copied()
             .unwrap_or(0)
@@ -1205,9 +1209,10 @@ fn sync_now(
 ) -> Result<(), JournalError> {
     match journal.sync() {
         Ok(()) => {
-            let mut depth = unsynced.write().expect("unsynced depth lock poisoned");
-            depth.total = 0;
-            depth.by_channel.clear();
+            unsynced
+                .write()
+                .expect("unsynced depth lock poisoned")
+                .clear();
             *unsynced_total = 0;
             *last_sync = Instant::now();
             Ok(())
@@ -1316,9 +1321,8 @@ fn group_commit_loop(
                         }
                         {
                             let mut depth = unsynced.write().expect("unsynced depth lock poisoned");
-                            depth.total += batch.len() as u64;
                             for (channel, delta) in per_channel {
-                                *depth.by_channel.entry(channel.to_string()).or_insert(0) += delta;
+                                *depth.entry(channel.to_string()).or_insert(0) += delta;
                             }
                         }
                         unsynced_total += batch.len() as u64;

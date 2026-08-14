@@ -10,8 +10,8 @@
 //!
 //! Issue #709 gave `Serve` a graceful shutdown trigger (`SIGTERM`/`SIGINT`):
 //! the server stops accepting new connections and `serve()` returns once
-//! in-flight requests finish, letting `main` fall off the end and drop
-//! `node` -- which is what makes "clean shutdown flushes the claim journal's
+//! in-flight requests finish, letting `main` fall off the end and release
+//! the node's router state -- which is what makes "clean shutdown flushes the claim journal's
 //! unsynced watermark advances to zero" actually true in production rather
 //! than only in a test that drops a gate directly. A bare `SIGTERM` with no
 //! handler installed tears the process down without running any `Drop`
@@ -52,18 +52,21 @@ async fn main() {
         eprintln!("{err}");
         std::process::exit(1);
     }
-    // `server` (and the `node.router` it consumed) drop here, on the way
-    // out of `main` -- the last reference to this node's `ClientClaimGate`
-    // goes with it, running its `Drop` and flushing the claim journal's
-    // unsynced watermark advances to zero before the process actually
-    // exits (issue #709).
+    // Awaiting `server` consumed it, and with it the make-service holding
+    // this node's router state. Whichever holder of that state is the last
+    // -- the make-service here, or a detached session task the runtime
+    // drops on its own way out below -- releases this node's
+    // `ClientClaimGate`, running its `Drop` and flushing the claim
+    // journal's unsynced watermark advances to zero before the process
+    // actually exits (issue #709).
     tracing::info!("connector shut down cleanly");
 }
 
-/// Resolves once this process receives `SIGINT` (`ctrl_c`, also what a
-/// plain `docker stop` without a custom stop signal sends) or, on Unix,
-/// `SIGTERM` (what `docker compose restart`/`stop` send by default) --
-/// whichever arrives first. Everything else about shutdown (draining
+/// Resolves once this process receives `SIGINT` (`ctrl_c` -- an operator's
+/// own Ctrl-C on an attached container) or, on Unix, `SIGTERM` (what
+/// `docker stop` and `docker compose restart`/`stop` send by default,
+/// before the grace period runs out and `SIGKILL` follows) -- whichever
+/// arrives first. Everything else about shutdown (draining
 /// in-flight requests, then dropping the node) is `axum`'s
 /// `with_graceful_shutdown` and ordinary `Drop`, not this function's job.
 async fn shutdown_signal() {

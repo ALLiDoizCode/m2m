@@ -103,8 +103,8 @@ tax:
 /ilp/claim-state` (`client-edge-spec.md` §1.10) now reports `unsyncedDepth` per channel
   alongside `available`/`cumulativeClaimed` — the same read surface an operator already polls,
   not a new one to learn. A channel sitting at a persistently high reading is either under
-  sustained load or behind a sync that keeps failing (logged at `error`, naming the channel and
-  the underlying I/O error, every time).
+  sustained load or behind a sync that keeps failing (logged at `error`, naming how many advances
+  are at risk and the underlying I/O error, every time).
 
 **The in-memory watermark itself never rolls back within a process lifetime for this reason.**
 Before this update, a failed batch (which meant a failed _write+fsync_ together) rolled the

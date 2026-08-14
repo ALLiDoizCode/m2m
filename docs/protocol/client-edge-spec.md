@@ -1027,7 +1027,8 @@ longer wants trusted.
       "cumulativeClaimed": "250000",
       "available": "750000",
       "nonce": 3,
-      "lastClaimTime": 1735680000
+      "lastClaimTime": 1735680000,
+      "unsyncedDepth": 0
     },
     {
       "blockchain": "solana",
@@ -1064,6 +1065,16 @@ endpoint reports, not a hypothetical one.
   MUST treat a `null` here as "unknown", never as "never claimed" — the deposit/cumulative/
   available/nonce figures beside it remain exact across a restart regardless, since those still
   come from the durable watermark.
+- `unsyncedDepth` — how many of this channel's watermark advances this connector has written to
+  its claim journal but not yet `fsync`'d (issue #709), `0` when nothing is outstanding. Since the
+  connector serves a packet once its claim's journal entry is _written_ and syncs on a bound
+  (`journal_sync_max_advances`, default 100, or `journal_sync_max_delay_ms`, default 10 ms,
+  whichever comes first — ADR 0005's issue-#709 update), this is the count of advances a crash
+  right now could lose: `unsyncedDepth × route price` is the connector's own worst-case
+  double-served liability on this channel, never the payer's. Ordinarily a small number that
+  returns to `0` continuously; a channel sitting at a persistently high reading is either under
+  sustained load or behind a sync that keeps failing on the connector's side. A clean connector
+  shutdown flushes every channel to `0` before exiting.
 
 **What a failed entry reveals.** `ok: false` carries only `error`, one of:
 

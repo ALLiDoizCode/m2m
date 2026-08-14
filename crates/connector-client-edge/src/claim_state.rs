@@ -1198,5 +1198,14 @@ mod tests {
             .as_u64()
             .expect("a recorded claim time");
         assert!(last_claim_time >= before);
+        // Issue #709: the sync bound's operator-visible half rides along on
+        // every verified channel. Its *value* races the committer's own
+        // schedule (this claim may or may not have been synced by now), so
+        // what is pinned here is the wire name and type -- the half a
+        // rename would break silently against `client-edge-spec.md` §1.10.
+        assert!(
+            entry["unsyncedDepth"].as_u64().is_some(),
+            "every verified channel reports its unsynced depth: {entry}"
+        );
     }
 }
