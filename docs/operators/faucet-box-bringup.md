@@ -23,8 +23,8 @@ move (a service moving to a new box) was done for the relay app.
   `GET /api/info` — only `/api/info`'s `chains` map changes (the `evm` leg is gone and the
   `solana`/`mina` legs now advertise their `usdc-request` route).
   `BASE_SEPOLIA_ETH_AMOUNT` is pinned to `'0'` in `docker-compose.faucet.yml` (the code's own
-  default — this box does not carry `infra/linode-node/docker-compose.node.yml`'s override to
-  `0.001`).
+  default — this box does not carry box 1's override to `0.001`, which went with the apex's own
+  compose file, connector#872).
 - `infra/devnet-manage.sh` — `NODE_LABELS`/`NODE_TYPES`/`NODE_PASSWORDS` know a `faucet` key; a
   targeted `faucet` case provisions the Linode (mirrors the `relay`/`store` cases, minus a
   `deploy_*_node` call — see "Who does what" below for why); a separate `faucet-cutover` case
@@ -65,13 +65,14 @@ every other infra-touching ticket in this repo's history records when it applies
 
 - `infra/linode-faucet/` config, compose file and scripts exist and are reviewed (this issue).
 - Box 1's `faucet` service (`infra/linode-node/docker-compose.node.yml`) keeps serving and is
-  untouched by this change — nothing here strips it. **(Since satisfied: box 1 was destroyed and
-  that compose file deleted by connector#872, after step 8 had run.)** It is removed only as part
-  of connector#872's apex teardown, and only after step 8 below. Note that it is _built from this
-  repo_, so the next
+  untouched by this change — nothing here strips it. It is removed only as part of connector#872's
+  apex teardown, and only after step 8 below. Note that it is _built from this repo_, so the next
   `./devnet-manage.sh redeploy` retires box 1's three native-token routes too — that is §4.6
   applied to the service itself, not to this box, and it is why box 1 must not be redeployed at a
   moment when someone still depends on those legs.
+  **Since satisfied:** step 8 ran, and connector#872 then destroyed box 1 and deleted that compose
+  file along with the rest of `infra/linode-node/`. Read this bullet as the ordering constraint it
+  was, not as a live precondition.
 - A funded devnet faucet / on-chain path exists to fund THIS box's fresh keys (§4.4) — there is no
   legacy identity to reproduce here, every key is new material.
 

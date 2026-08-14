@@ -229,14 +229,15 @@ pub(crate) fn parse_peer_exposure(value: Option<String>) -> Result<PeerExposure,
 ///
 /// * `secret_file` -- a path to a file holding it. This is the form a
 ///   deployed node uses, and the reason this field exists (issue #750):
-///   `infra/linode-node/connector-rust.toml` and its store twin are
-///   committed to a **public** repository, so a peering written with a
-///   literal cannot be committed at all, and the live apex↔store peering
-///   was configured on the boxes only -- exactly the untracked-config
-///   drift the Phase 0 reconciliation (#744) closed. Every other secret in
-///   those same files is already a file reference (`[signer] key_file`,
-///   `[settlement.*.key] key_file`); this makes the peering secret the
-///   same shape.
+///   this fleet's `connector-rust.toml` files are committed to a **public**
+///   repository, so a peering written with a literal cannot be committed at
+///   all, and the then-live apex↔store peering was configured on the boxes
+///   only -- exactly the untracked-config drift the Phase 0 reconciliation
+///   (#744) closed. (That peering, and the apex, are gone as of issue #872;
+///   the reason the field takes a path is unchanged for the next one.)
+///   Every other secret in those same files is already a file reference
+///   (`[signer] key_file`, `[settlement.*.key] key_file`); this makes the
+///   peering secret the same shape.
 /// * `secret` -- the literal. Still supported, and fine for a test fixture
 ///   or a config that is never committed.
 ///

@@ -319,15 +319,17 @@ price = 1000
 # "Known divergence" section named -- adding a dedicated apex forward row
 # for it at 1002/fee 2) is #820's resolution of that divergence.
 #
-# The apex's Rust route table has only ever declared `g.toon.relay` and
+# The apex's Rust route table only ever declared `g.toon.relay` and
 # `g.toon.ario`, never this name, so longest-prefix matching always dropped
 # `g.toon.relay.ario` into the `g.toon.relay` route -- which the apex
 # TERMINATED against `relay:3100` until #820, so every arrival here 404'd
-# for free. #820 turns `g.toon.relay` into a peer_id forward to the relay
+# for free. #820 turned `g.toon.relay` into a peer_id forward to the relay
 # box, whose own route table also declares only `g.toon.relay`, never a
-# `.ario` child -- so the SAME longest-prefix match would keep landing
+# `.ario` child -- so the SAME longest-prefix match would have kept landing
 # there, just after consuming a real signed claim on the apex<->relay
-# channel instead of failing for free. Retiring the name here (nothing in a
+# channel instead of failing for free. (The apex, and that forward, are gone
+# as of issue #872; the relay box terminates the prefix for its own clients
+# now, and still declares no `.ario` child.) Retiring the name here (nothing in a
 # shipped client addresses it; buzz pins `storeDestination: "g.toon.ario"`
 # in compiled code) closes the gap rather than relocating and pricing it.
 

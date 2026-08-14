@@ -184,21 +184,27 @@ the error.
   (`client-edge-spec.md:457-464`). Before that ADR a forwarded destination "was greeted with
   nothing, required no claim and was carried for free; that was a free gateway, not a design".
 
-**Live evidence, this fleet, 2026-08-07.** The store box pays box 1 **as a client, not as a peer**,
-even though an `apex-store` peering is configured between them. Both halves of that peering exist in
-the store box's config — the `[[peers]]` row at `infra/linode-store/connector-rust.toml:216-231` and
-the `[[peer_channels]]` row at `:238-258` — and the box nonetheless pays through `[announce]
+**Live evidence, this fleet, 2026-08-07** (recorded while the apex still ran — issue #872 has since
+removed it and the `apex-store` peering with it; see the note below). The store box paid box 1 **as a
+client, not as a peer**, even though an `apex-store` peering _was_ configured between them. Both
+halves of that peering were in the store box's config — a `[[peers]]` row and a `[[peer_channels]]`
+row in `infra/linode-store/connector-rust.toml` — and the box nonetheless paid through `[announce]
 pay_channel`, which that same file describes in as many words as "a funded EVM channel this box PAYS
-the g.toon box from, as an ordinary client … deliberately NOT a `[[client_channels]]` row"
-(`infra/linode-store/connector-rust.toml:333-338`). The peer channel has nothing to claim against:
-the committed row is still the issue #822 placeholder, and the live box's row names a real channel
-(`0x0bfd0b88…`) whose deposit is 0, so a claim on it is refused before it is ever signed —
-`InsufficientHeadroom`, because "a claim above what has actually been deposited could never be
-redeemed on chain" (`crates/connector-cli/src/announce.rs:227-233` for the error, `:1546-1559` for
-the check). It falls back to a client channel, and that fallback is the point: on that path every
-packet is covered by a claim, and an uncovered one is answered `402` with the x402 terms
-(`crates/connector-cli/src/announce.rs:294`). #868's rule is already what runs in production on the
-link that matters, with no shared credential anywhere in it.
+… as an ordinary client … deliberately NOT a `[[client_channels]]` row". The peer channel had
+nothing to claim against: the committed row was still the issue #822 placeholder, and the live box's
+row named a real channel (`0x0bfd0b88…`) whose deposit was 0, so a claim on it is refused before it
+is ever signed — `InsufficientHeadroom`, because "a claim above what has actually been deposited
+could never be redeemed on chain" (`crates/connector-cli/src/announce.rs:227-233` for the error,
+`:1546-1559` for the check). It fell back to a client channel, and that fallback is the point: on
+that path every packet is covered by a claim, and an uncovered one is answered `402` with the x402
+terms (`crates/connector-cli/src/announce.rs:294`). #868's rule was already what ran in production on
+the link that mattered, with no shared credential anywhere in it.
+
+**Still true after #872, and more so.** The apex is gone and neither surviving box carries a
+`[[peers]]`/`[[peer_channels]]` table at all, so the store box now buys relay writes over exactly
+that client path (`[announce] publish_to`/`pay_channel` naming the relay box, issue #871) with no
+peering to fall back from. The peer-carriage rules this spec states still describe what a peering
+must do; this fleet simply has none to demonstrate them on today.
 
 #### Superseded 2026-08-07 by #868 — the credit-window rationale for P1
 

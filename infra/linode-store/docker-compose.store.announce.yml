@@ -142,9 +142,9 @@ services:
     # logging `[announce] FAILED` forever. This repo's compose files are the
     # fleet's pin of record and lead the boxes, not the reverse (#948 is a
     # repo-only change; the cutover is separate and human-gated). See
-    # infra/linode-node/docker-compose.node.rust.yml's matching comment and
     # `EXPECTED_CONNECTOR_TAG` in
-    # crates/connector-bin/tests/devnet_configs_load.rs.
+    # crates/connector-bin/tests/devnet_configs_load.rs, which asserts every
+    # surviving overlay names this same tag.
     image: ghcr.io/toon-protocol/connector:rust-sha-415531a
     # `$$` throughout: compose interpolates a bare `$VAR`/`${VAR}` in this
     # file's own text against the HOST's environment at `up` time, same as

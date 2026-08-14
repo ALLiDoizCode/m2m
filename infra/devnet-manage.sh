@@ -303,11 +303,13 @@ faucet)
   # human (§4.4, never copied from box 1), so there is nothing this script
   # can write into a `.env` heredoc the way deploy_relay_node does for
   # RELAY_NOSTR_SECRET_KEY. And per the ordering §6.2 runbook, faucet.devnet
-  # must keep resolving to box 1 until the NEW box is live, funded and
-  # proven serving — flipping it here, at provision time, would prescribe
-  # the outage the runbook exists to prevent. Once that verification has
-  # passed, `./devnet-manage.sh faucet-cutover` (below) repoints the record
-  # — see docs/operators/faucet-box-bringup.md.
+  # must not be flipped at provision time — the record moves only once the
+  # NEW box is live, funded and proven serving, which is what stops this
+  # command from prescribing the outage the runbook exists to prevent. (It
+  # held the record on box 1 until then; that box is gone as of issue #872,
+  # so the cutover below has already run.) `./devnet-manage.sh
+  # faucet-cutover` (below) is what repoints it — see
+  # docs/operators/faucet-box-bringup.md.
   echo "==> [1/2] Provision faucet box"
   create_box faucet
   wait_box_running "${NODE_LABELS[faucet]}"

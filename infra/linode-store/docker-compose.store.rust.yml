@@ -3,8 +3,9 @@
 # ═══════════════════════════════════════════════════════════════════════════
 # ADDITIVE: adds a Rust connector to docker-compose.store.yml's stack on this
 # SAME box, WITHOUT editing that file and WITHOUT taking anything down. It is
-# the store-box mirror of infra/linode-node/docker-compose.node.rust.yml,
-# which has run beside the g.toon proxy's TypeScript connector since #601.
+# the store-box mirror of the apex's own Rust overlay, which ran beside the
+# g.toon proxy's TypeScript connector from #601 until issue #872 removed that
+# box; infra/linode-relay/docker-compose.relay.rust.yml is the surviving twin.
 # Since issue #901 this is the box's ONLY connector: the base file's own
 # retired TypeScript service is deleted.
 #
@@ -62,8 +63,8 @@ services:
     # #645 moved publishing, and is frozen at `sha-b908454`.
     #
     # Pinned to an exact `rust-sha-` tag, never the floating `rust-main`,
-    # matching infra/linode-node/docker-compose.node.rust.yml. Both overlays
-    # carry the SAME tag as of #735: rust-sha-54a967d, the first published tag
+    # matching every other fleet overlay. All of them carried the SAME tag as
+    # of #735: rust-sha-54a967d, the first published tag
     # whose connector-client-edge/src/lib.rs registers POST /ilp/claim-state
     # (connector#693) -- the tag this file was originally authored against
     # (rust-sha-380ffd1) predates that route, and #735 found the two overlays
@@ -81,10 +82,9 @@ services:
     # `notice_*` announce fields (issue #912, PR #915) this box's committed
     # `connector-rust.toml` now sets, and a binary that old would refuse to
     # boot on it (`RawAnnounceConfig` is `deny_unknown_fields`). A forward
-    # move only, not yet deployed to the box -- see
-    # infra/linode-node/docker-compose.node.rust.yml's matching comment and
-    # `EXPECTED_CONNECTOR_TAG` in
-    # crates/connector-bin/tests/devnet_configs_load.rs.
+    # move only, not yet deployed to the box -- see `EXPECTED_CONNECTOR_TAG`
+    # in crates/connector-bin/tests/devnet_configs_load.rs, which asserts
+    # every surviving overlay names this same tag.
     image: ghcr.io/toon-protocol/connector:rust-sha-415531a
     volumes:
       - ./connector-rust.toml:/app/config/connector.toml:ro
