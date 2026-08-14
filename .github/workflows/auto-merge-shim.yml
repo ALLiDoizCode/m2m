@@ -53,6 +53,13 @@ on:
 
 permissions:
   contents: read
+  # actions: write because the CALLED fleet pass (toon-meta auto-merge.yml)
+  # requests it for same-repo fix-runner dispatch (toon-meta#385) — a
+  # reusable workflow's permissions must be a SUBSET of its caller's, so a
+  # shim capped at contents:read startup-fails the whole call. Observed
+  # fleet-wide 2026-08-14 ~16:05Z: every shim run startup_failure, all
+  # event forwarding silently dead.
+  actions: write
 
 jobs:
   forward:
