@@ -185,8 +185,9 @@ jobs:
           # gate installs that exact version rather than whatever nightly is on
           # the day. A gate that exists to prove chain code works should not be
           # able to break from an upstream build we never ran against.
-          # NOTE: contracts.yml still uses `nightly` in two places -- same
-          # exposure, separate change.
+          # contracts.yml is pinned to the same version (was `nightly` until
+          # the 2026-08-14 1.8.0-nightly fork-test regression proved this
+          # comment's point).
           version: v1.7.1
         env:
           # foundryup curls api.github.com unauthenticated and gets 403 when the runner IP is
