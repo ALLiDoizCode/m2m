@@ -107,6 +107,15 @@ the `[settlement.*]` tables the node verified against a chain at startup, the ed
 purchase buys before it must be renewed) is likewise advertised unconditionally, as
 `peerSaleLeaseSeconds`.
 
+The **transport policy** comes from `[[routes]]` too, and there is nothing to set for it here. If
+every address in `addresses` resolves to a route pinned to the same non-default `transport` (issue
+#701 — `"btp"` on the devnet relay, for huddles' persistent sessions), the announce carries
+`requiredTransport` at the top level of its content, and a client reads the requirement before it
+pays rather than being refused after. If the covered routes disagree, or are left at the permissive
+default, the key is absent entirely — an announce never says `"both"`. **Do not add a config field
+for this**: a value set by hand here could disagree with the policy the client edge actually
+enforces, which is the whole failure the field exists to close.
+
 ```toml
 [announce]
 addresses     = ["g.toon.ario"]          # primary first; required
