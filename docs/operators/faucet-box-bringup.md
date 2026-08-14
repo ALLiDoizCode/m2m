@@ -29,6 +29,11 @@ move (a service moving to a new box) was done for the relay app.
   targeted `faucet` case provisions the Linode (mirrors the `relay`/`store` cases, minus a
   `deploy_*_node` call — see "Who does what" below for why); a separate `faucet-cutover` case
   repoints the DNS record once the box has cleared the gates below.
+- `infra/linode-faucet/generate-solana-treasury.sh` / `generate-mina-treasury.sh` (issue #919) —
+  step 4's fresh-key generation, scripted and reviewed rather than ad hoc. Neither ever prints a
+  private key; the Solana one also airdrops devnet SOL for tx fees (public, permissionless).
+  Executing them still needs a human on the box (see "Who does what" below) — what moved repo-side
+  is the tool, not the act of running it.
 
 ## What this runbook does not yet cover
 
@@ -40,17 +45,17 @@ instead is operator work in that repo, out of this document's scope.
 
 ## Who does what
 
-| Step                            |       Repo-side (PR, reviewable)       |        Human-only (SSH, key material, funds)         |
-| ------------------------------- | :------------------------------------: | :--------------------------------------------------: |
-| 1. Provision                    |     ✅ `./devnet-manage.sh faucet`     |             runs it, holds the API token             |
-| 2. DNS (initial — not yet live) |                                        |               nothing yet — see step 8               |
-| 3. Certs                        |        ✅ `init-letsencrypt.sh`        |                 runs it, on the box                  |
-| 4. Key generation (§4.4)        |                                        |    ✅ fresh on THIS box — never copied from box 1    |
-| 5. Funding                      |                                        |         ✅ devnet faucet / a human transfer          |
-| 6. Standalone verification      |     ✅ `bootstrap.sh`, curl checks     |             runs them, reads the output              |
-| 7. Mint-authority transfer      |                                        | ✅ transfer or fund fresh, before box 1 is destroyed |
-| 8. DNS cutover (§6.2 step 9)    | ✅ `./devnet-manage.sh faucet-cutover` |          runs it, only once gate (c) passes          |
-| 9. Rollback                     |        ✅ one `update_dns` call        |      repoints back at box 1, no restart needed       |
+| Step                            |       Repo-side (PR, reviewable)        |        Human-only (SSH, key material, funds)         |
+| ------------------------------- | :-------------------------------------: | :--------------------------------------------------: |
+| 1. Provision                    |     ✅ `./devnet-manage.sh faucet`      |             runs it, holds the API token             |
+| 2. DNS (initial — not yet live) |                                         |               nothing yet — see step 8               |
+| 3. Certs                        |        ✅ `init-letsencrypt.sh`         |                 runs it, on the box                  |
+| 4. Key generation (§4.4)        | ✅ `generate-{solana,mina}-treasury.sh` |   runs them, on THIS box — never copied from box 1   |
+| 5. Funding                      |                                         |         ✅ devnet faucet / a human transfer          |
+| 6. Standalone verification      |     ✅ `bootstrap.sh`, curl checks      |             runs them, reads the output              |
+| 7. Mint-authority transfer      |                                         | ✅ transfer or fund fresh, before box 1 is destroyed |
+| 8. DNS cutover (§6.2 step 9)    | ✅ `./devnet-manage.sh faucet-cutover`  |          runs it, only once gate (c) passes          |
+| 9. Rollback                     |        ✅ one `update_dns` call         |      repoints back at box 1, no restart needed       |
 
 Steps 1, 4, 5 and 7 need SSH, key material or funds this environment does not have — same posture
 every other infra-touching ticket in this repo's history records when it applies
@@ -94,7 +99,17 @@ every other infra-touching ticket in this repo's history records when it applies
      ETH for gas (the mock USDC mint itself is ungated).
    - A fresh Solana keypair written to `/root/keys/solana-usdc-treasury.json` (the path
      `docker-compose.faucet.yml` bind-mounts read-only) — this is a **file**, not an env var.
+     `./generate-solana-treasury.sh` (this directory) generates it in that exact spot and
+     airdrops devnet SOL for tx fees in one step; the private key is never printed, only the
+     resulting public key. USDC funding (step 5) is a separate, human step it does not attempt.
    - `MINA_USDC_TREASURY_KEY` — a fresh base58 Mina private key.
+     `./generate-mina-treasury.sh` (this directory) generates it and appends
+     `MINA_USDC_TREASURY_KEY=…` to a target `.env` file directly, again without ever printing the
+     key. It uses `mina-signer` (already a faucet dependency), not `o1js` — key generation needs
+     no zkApp circuit, so this avoids the faucet's own lazy ~3-minute circuit compile.
+
+   Both scripts refuse to overwrite an existing key/env line, so a re-run against a box that
+   already has a treasury is a safe no-op error, not a silent second key.
 
    Write `BASE_SEPOLIA_FAUCET_KEY` / `MINA_USDC_TREASURY_KEY` (+ `MINA_USDC_TOKEN` /
    `MINA_USDC_ADMIN_CONTRACT`, the deployed USDC token's addresses) into this box's `.env` and
@@ -133,7 +148,9 @@ up -d --build faucet`) to pick them up. Record how each key was generated somewh
 
 5. **Funding.** Fund the Base Sepolia EVM address (a little ETH for gas — the mock USDC mint is
    ungated) and the Solana treasury (USDC on the public Solana devnet; SOL only for tx fees — this
-   box airdrops no SOL, §4.6). SOL is a public, permissionless devnet airdrop; the USDC transfer is
+   box airdrops no SOL, §4.6). SOL is a public, permissionless devnet airdrop — `generate-solana-
+treasury.sh` (step 4) already does this airdrop as part of key generation, so nothing further is
+   needed for SOL specifically. The USDC transfer is
    not — `xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in`'s mint authority is the deployer key recorded
    in `packages/solana-program/deployments/devnet-public.md` ("Keypairs used for this deploy live
    outside the repo"), so funding this box's fresh treasury needs whoever holds that key to mint or
@@ -143,7 +160,12 @@ up -d --build faucet`) to pick them up. Record how each key was generated somewh
    different key for a different, no-longer-live mint. The Mina USDC leg self-mints its own
    replenishment on-chain (rate-limited, ≤1,000 USDC/~24h — see `packages/faucet/src/mina-usdc.mjs`),
    so it needs no privileged funding step, only ~1.2 devnet MINA of its own for tx fees (the public
-   `faucet.minaprotocol.com`, same as any other devnet account).
+   `faucet.minaprotocol.com`, same as any other devnet account). That MINA faucet has no
+   unauthenticated API to automate this against — confirmed live (2026-08-14): a plain HTTPS
+   request to `faucet.minaprotocol.com` returns Vercel's bot-detection "Security Checkpoint" page,
+   not MINA, matching `infra/mina/provision-mina.sh`'s own conclusion ("We can't auto-fund these on
+   public devnet"). Funding this key is a human, browser-driven step; `generate-mina-treasury.sh`
+   (step 4) prints the address to paste in.
 
 6. **Standalone verification.** With `./bootstrap.sh` already run in step 3:
 
