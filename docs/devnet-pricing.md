@@ -35,14 +35,19 @@ current source of truth for anything. The row survives only as the historical or
 figure: the Rust `connector announce` that replaced `selfAnnounce` configures no announce price at
 all, so there is no committed literal to repoint this citation at. See "`announcePrice` 2000" below.
 
-Last verified live against both boxes via the unauthenticated
+Last verified live **2026-08-14T12:14Z — post-cutover, against both surviving boxes' own
+edges** (the apex was destroyed earlier the same day, toon-meta#313), via the unauthenticated
 `GET /ilp/routes/price?destination=…` (ADR 0022 puts configuration answers on the free side of the
 answering/announcing line):
 
 ```
-relay g.toon.relay        -> 1
-store g.toon.ario         -> 1000
+relay box  proxy.relay.devnet  g.toon.relay -> 1
+store box  proxy.ario.devnet   g.toon.ario  -> 1000
 ```
+
+Both boxes were running `main@39f72a6e` on the `rust-sha-415531a` pin when probed
+(toon-meta#309's reconciliation), so these readings verify the committed config on the box that
+actually terminates each route — not a pre-#820 apex reading relabelled.
 
 ## Why the relay route is 1 and the store legs are 1000
 
