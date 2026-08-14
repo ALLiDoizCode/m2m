@@ -8,6 +8,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::Router;
@@ -1260,9 +1261,21 @@ fn client_claim_gate(
             PathBuf::from(CLIENT_EDGE_JOURNAL),
         ),
     };
-    let gate =
-        ClientClaimGate::restore(client_channels(config, evm_source, solana_source), journal)
-            .map_err(|source| RuntimeError::JournalUnreplayable { path, source })?;
+    // Issue #709: an operator's `journal_sync_max_advances`/
+    // `journal_sync_max_delay_ms` if set, else the client edge's own
+    // defaults -- same "absent means the edge's own default" pattern as
+    // every other knob in this function.
+    let gate = ClientClaimGate::restore_with_sync_policy(
+        client_channels(config, evm_source, solana_source),
+        journal,
+        config
+            .journal_sync_max_advances()
+            .unwrap_or(connector_client_edge::DEFAULT_JOURNAL_SYNC_MAX_ADVANCES),
+        config.journal_sync_max_delay().unwrap_or_else(|| {
+            Duration::from_millis(connector_client_edge::DEFAULT_JOURNAL_SYNC_MAX_DELAY_MS)
+        }),
+    )
+    .map_err(|source| RuntimeError::JournalUnreplayable { path, source })?;
     Ok(gate.with_payout_ledger(client_payout_ledger(config, signer)))
 }
 

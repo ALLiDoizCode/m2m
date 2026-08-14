@@ -205,6 +205,23 @@ struct RawConfig {
     /// `1` is the original lockstep session.
     #[serde(default)]
     btp_session_window: Option<u32>,
+    /// How many of the client edge's claim journal's watermark advances
+    /// may sit written but not yet `fsync`'d before the journal committer
+    /// forces a sync (issue #709) -- the lesser of this and
+    /// `journal_sync_max_delay_ms` wins. Absent means the client edge's
+    /// own default. `0` is a coherent, maximally conservative choice --
+    /// sync after every single write, the pre-#709 behaviour -- not a
+    /// footgun, so it is not refused: unlike the knobs above, there is no
+    /// number here an operator could write down by accident and regret.
+    #[serde(default)]
+    journal_sync_max_advances: Option<u32>,
+    /// The other half of the same bound, in milliseconds: how long an
+    /// unsynced watermark advance may sit before the committer forces a
+    /// sync regardless of `journal_sync_max_advances`. Absent means the
+    /// client edge's own default; `0` is coherent for the same reason as
+    /// above.
+    #[serde(default)]
+    journal_sync_max_delay_ms: Option<u64>,
 }
 
 /// The client edge's own defaults for the unresolvable-lookup shaper
@@ -263,6 +280,8 @@ pub struct Config {
     unresolvable_lookup_window: Option<Duration>,
     unresolvable_lookup_max_wait: Option<Duration>,
     btp_session_window: Option<NonZeroU32>,
+    journal_sync_max_advances: Option<u32>,
+    journal_sync_max_delay: Option<Duration>,
 }
 
 impl Config {
@@ -503,6 +522,12 @@ impl Config {
             Some(0) => return Err(ConfigError::ZeroBtpSessionWindow),
             other => other.and_then(NonZeroU32::new),
         };
+        // Issue #709: both halves of the claim journal's sync bound are
+        // left exactly as written, `0` included -- see the raw field's own
+        // doc for why `0` is coherent here and not refused, unlike every
+        // zero check above.
+        let journal_sync_max_advances = raw.journal_sync_max_advances;
+        let journal_sync_max_delay = raw.journal_sync_max_delay_ms.map(Duration::from_millis);
         // A per-signer rate above the node-wide one is not a stricter
         // setting, it is an inert one: the node-wide drain saturates first,
         // every time, so the number written for the per-signer axis could
@@ -575,6 +600,8 @@ impl Config {
             unresolvable_lookup_window,
             unresolvable_lookup_max_wait,
             btp_session_window,
+            journal_sync_max_advances,
+            journal_sync_max_delay,
         })
     }
 
@@ -631,6 +658,20 @@ impl Config {
     /// always a working window.
     pub fn btp_session_window(&self) -> Option<NonZeroU32> {
         self.btp_session_window
+    }
+
+    /// How many of the client edge's claim journal's watermark advances
+    /// may sit unsynced before its committer forces a sync (issue #709),
+    /// or `None` to use the client edge's own default.
+    pub fn journal_sync_max_advances(&self) -> Option<u32> {
+        self.journal_sync_max_advances
+    }
+
+    /// The other half of [`Self::journal_sync_max_advances`]'s bound: how
+    /// long an unsynced watermark advance may sit before a sync is forced
+    /// regardless, or `None` to use the client edge's own default.
+    pub fn journal_sync_max_delay(&self) -> Option<Duration> {
+        self.journal_sync_max_delay
     }
 
     /// The socket address the client edge binds.

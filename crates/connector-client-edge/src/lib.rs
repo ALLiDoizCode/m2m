@@ -90,7 +90,10 @@ pub use channels::{
     ClientChannelSource, DepositFloor, EvmChannel, InvalidChannelIdentifier, SolanaChannel,
     DEFAULT_LIVENESS_TTL, DEFAULT_MIN_REATTEMPT_INTERVAL, DEFAULT_SERVE_STALE_UNTIL,
 };
-pub use claim_gate::{ClaimIngestRejection, ClientClaimGate};
+pub use claim_gate::{
+    ClaimIngestRejection, ClientClaimGate, FlushFailed, DEFAULT_JOURNAL_SYNC_MAX_ADVANCES,
+    DEFAULT_JOURNAL_SYNC_MAX_DELAY_MS,
+};
 pub use lookup_budget::{
     LookupBudgetBound, LookupBudgetExhausted, UnresolvableLookupBudget,
     UnresolvableLookupBudgetPolicy, DEFAULT_UNRESOLVABLE_LOOKUPS_PER_SIGNER,

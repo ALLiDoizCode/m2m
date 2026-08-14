@@ -49,6 +49,36 @@ pub trait Journal: Send + Sync {
         Ok(())
     }
 
+    /// As [`Self::append_batch`], but MUST NOT wait for `entries` to reach
+    /// durable storage before returning -- issue #709: the client edge's
+    /// serving path waits for this call, not for [`Self::sync`], so a
+    /// caller may render service the instant it returns `Ok`. A crash
+    /// before the next [`Self::sync`] may lose `entries`; bounding how many
+    /// entries can ever be in that state is the caller's job (see
+    /// `connector_client_edge::claim_gate::GroupCommitter`), not this
+    /// trait's.
+    ///
+    /// The default delegates to [`Self::append_batch`], which is *stronger*
+    /// than this method's contract asks (already durable, not merely
+    /// written) -- correct for any implementation that has no cheaper
+    /// unsynced write, the same precedent [`Self::append_batch`]'s own
+    /// per-entry-loop default sets.
+    fn append_batch_unsynced(&self, entries: &[JournalEntry]) -> Result<(), JournalError> {
+        self.append_batch(entries)
+    }
+
+    /// Flush every entry written via [`Self::append_batch_unsynced`] since
+    /// the last call to `sync` to durable storage. Once this returns `Ok`,
+    /// every such entry survives a crash; before it returns, none of them
+    /// are guaranteed to.
+    ///
+    /// The default is a no-op, correct for any implementation whose
+    /// [`Self::append_batch_unsynced`] already syncs (see above) -- there is
+    /// nothing left to flush.
+    fn sync(&self) -> Result<(), JournalError> {
+        Ok(())
+    }
+
     /// Every entry ever appended, in the order they were written -- what a
     /// node folds into a [`connector_domain::Projection`] and replays into
     /// `ClaimBook` state on start.
@@ -225,6 +255,34 @@ impl Journal for FileJournal {
         Ok(())
     }
 
+    /// The write half of issue #709's split: `write_all`, no `sync_data`.
+    /// Durable only once [`Self::sync`] is called -- a crash between the
+    /// two loses whatever landed here since the last one.
+    fn append_batch_unsynced(&self, entries: &[JournalEntry]) -> Result<(), JournalError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut lines = String::new();
+        for entry in entries {
+            lines.push_str(&encode_line(entry));
+            lines.push('\n');
+        }
+        let mut file = self.file.lock().expect("file journal lock poisoned");
+        file.write_all(lines.as_bytes())?;
+        Ok(())
+    }
+
+    /// The sync half: `fsync` alone, over whatever `append_batch_unsynced`
+    /// has written since the last call. Takes the same lock as every other
+    /// operation -- a `sync_data()` fsyncs the whole file regardless of
+    /// which handle calls it, so nothing else needs to coordinate beyond
+    /// not racing the write itself.
+    fn sync(&self) -> Result<(), JournalError> {
+        let file = self.file.lock().expect("file journal lock poisoned");
+        file.sync_data()?;
+        Ok(())
+    }
+
     fn read_all(&self) -> Result<Vec<JournalEntry>, JournalError> {
         let file = File::open(&self.path)?;
         BufReader::new(file)
@@ -338,5 +396,40 @@ mod tests {
         for entry in sample_entries() {
             assert_eq!(decode_line(&encode_line(&entry)).unwrap(), entry);
         }
+    }
+
+    // -- issue #709: the write/sync split --
+
+    #[test]
+    fn append_batch_unsynced_is_readable_through_the_same_handle_without_a_sync_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = FileJournal::open(dir.path().join("journal.log")).unwrap();
+        journal.append_batch_unsynced(&sample_entries()).unwrap();
+
+        // No `sync()` call happened -- this is the write half alone. A real
+        // crash before `sync()` may still lose these bytes (that is the
+        // point), but the same process reading its own handle back always
+        // sees what it wrote, same as any buffered file.
+        assert_eq!(journal.read_all().unwrap(), sample_entries());
+    }
+
+    #[test]
+    fn sync_alone_appends_nothing_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = FileJournal::open(dir.path().join("journal.log")).unwrap();
+        journal.append(&sample_entries()[0]).unwrap();
+
+        journal.sync().unwrap();
+
+        assert_eq!(journal.read_all().unwrap(), sample_entries()[..1]);
+    }
+
+    #[test]
+    fn an_in_memory_journals_default_unsynced_write_and_sync_are_the_per_entry_loop_and_a_noop() {
+        let journal = InMemoryJournal::new();
+        journal.append_batch_unsynced(&sample_entries()).unwrap();
+        journal.sync().unwrap();
+
+        assert_eq!(journal.read_all().unwrap(), sample_entries());
     }
 }

@@ -79,28 +79,45 @@
 //!   way *out* of the journal too, so a node upgrading onto this build
 //!   recovers the watermarks its existing journal already holds instead
 //!   of orphaning them at a key nothing looks up any more.
-//! * A claim whose acceptance cannot be made durable is **refused**
+//! * A claim whose acceptance cannot be **written** is refused
 //!   ([`ClaimIngestRejection::NotDurable`]) and advances nothing, rather
-//!   than accepted against an in-memory watermark a crash would erase.
-//!   Since issue #686 the journal append is **group-committed**: the
+//!   than accepted against an in-memory watermark a crash would erase. The
 //!   write lock covers only the authoritative re-check, the watermark
-//!   advance and enqueueing the entry with a dedicated committer thread
-//!   -- microseconds, no I/O -- and the committer batches everything
-//!   queued into one journal write and one fsync
-//!   ([`Journal::append_batch`]). Enqueueing under the lock is what keeps
-//!   journal order identical to watermark order, so a replay still
-//!   reconstructs exactly the state the live gate held; and a claim is
-//!   only handed back for its packet to be routed once the committer
-//!   reports its batch durable, so ADR 0005's "journal written before
-//!   value is considered moved" still holds at the only boundary it ever
-//!   protected -- no service is rendered against an unfsync'd watermark.
-//!   A batch that cannot be made durable is rolled back: under the same
-//!   write lock every admission is decided under, every channel a failed
-//!   entry touched is restored to its watermark before the earliest
-//!   failed claim, and every waiting claim is refused as
-//!   [`ClaimIngestRejection::NotDurable`] -- so the refusal's contract is
-//!   unchanged, and the same claim resubmitted once the journal is
-//!   writable again is still good.
+//!   advance and enqueueing the entry with a dedicated committer thread --
+//!   microseconds, no I/O -- and the committer writes everything queued in
+//!   one journal write ([`Journal::append_batch_unsynced`]), under the same
+//!   lock order the watermark advanced in, so a replay still reconstructs
+//!   exactly the state the live gate held. **Since issue #709, a claim is
+//!   handed back once that write lands, not once it is `fsync`'d** -- see
+//!   the "Update (issue #709)" section of ADR 0005 for the amendment this
+//!   narrows and why. A write that fails is rolled back exactly as a
+//!   pre-#709 fsync failure was: under the same write lock every admission
+//!   is decided under, every channel a failed entry touched is restored to
+//!   its watermark before the earliest failed claim, and every waiting
+//!   claim is refused as [`ClaimIngestRejection::NotDurable`] -- the same
+//!   claim resubmitted once the journal is writable again is still good.
+//!
+//! * **The `fsync` itself moves off the serving path entirely** (issue
+//!   #709, group commit's issue-#686 amortization now finally has
+//!   something to batch on a sequential workload too): [`GroupCommitter`]
+//!   syncs on the lesser of `sync_max_advances` watermark advances or
+//!   `sync_max_delay` elapsed, both configurable
+//!   (`crates/connector-config`'s `journal_sync_max_advances`/
+//!   `journal_sync_max_delay_ms`). Between a write and its sync, the
+//!   advance is **unsynced**: recorded in this gate's own memory and on
+//!   disk, servable, but not yet proof against a crash. [`Self::unsynced_depth`]
+//!   reports exactly how many such advances a channel currently carries --
+//!   the operator-visible half of the trade, since `unsynced_depth × price`
+//!   is this connector's own worst-case double-served liability, not the
+//!   payer's. The committer never lets a channel's advance sit unsynced
+//!   past `sync_max_advances`: it caps how much it writes before forcing a
+//!   sync, so the bound is exact, not a rolling average. **The in-memory
+//!   watermark itself never rolls back for this reason once accepted** --
+//!   only a restart, replaying only what was actually synced, can ever see
+//!   an older watermark than the live gate held, and even then by at most
+//!   `sync_max_advances`. [`Self::flush`] (and this gate's `Drop`, so an
+//!   orderly process shutdown does it automatically) drains every channel's
+//!   unsynced depth to zero before returning.
 //!
 //! **The watermark key deliberately does not include the client-edge
 //! sender identity `resolve_identity` produces (issue #502).**
@@ -122,6 +139,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{mpsc, Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
@@ -354,8 +372,10 @@ pub struct ClientClaimGate {
     /// lock to roll a failed batch's advances back.
     watermarks: Arc<RwLock<HashMap<String, Watermark>>>,
     /// The group-commit seam between an acceptance and its durability
-    /// (issue #686): entries enqueued under the watermark lock, batched
-    /// into one journal write + fsync outside it.
+    /// (issue #686): entries enqueued under the watermark lock, written
+    /// outside it -- and, since issue #709, `fsync`'d on its own bounded
+    /// schedule rather than before the write's own caller is answered. See
+    /// this module's own doc and [`GroupCommitter`].
     committer: GroupCommitter,
     /// The moment (unix seconds) this gate last accepted a claim on a
     /// channel, keyed the same as [`Self::watermarks`] (issue #693's
@@ -401,6 +421,22 @@ pub struct ClientClaimGate {
     session_channels: RwLock<HashMap<String, String>>,
 }
 
+/// This module's own default for how many watermark advances may sit
+/// unsynced before the committer forces a sync (issue #709). Used by
+/// [`ClientClaimGate::restore`]; `crates/connector-cli`'s runtime wiring
+/// reads the same number whenever an operator has not set
+/// `journal_sync_max_advances`, so the two can never drift.
+pub const DEFAULT_JOURNAL_SYNC_MAX_ADVANCES: u32 = 100;
+
+/// This module's own default for [`ClientClaimGate::restore_with_sync_policy`]'s
+/// `sync_max_delay`, in milliseconds -- paired with
+/// [`DEFAULT_JOURNAL_SYNC_MAX_ADVANCES`]; whichever bound is reached first
+/// forces a sync. 10 ms keeps a lightly loaded node's tail latency close to
+/// the pre-#709 per-packet-fsync figure while still giving real concurrent
+/// load something to batch; an operator on a slower disk or a
+/// higher-value route reaches for the config knob, not a rebuild.
+pub const DEFAULT_JOURNAL_SYNC_MAX_DELAY_MS: u64 = 10;
+
 impl ClientClaimGate {
     /// A gate accepting claims on `channels` and no others, resuming from
     /// the watermarks `journal` already records (issue #605).
@@ -422,12 +458,47 @@ impl ClientClaimGate {
     /// cannot decode ([`JournalError::Corrupt`]). The caller must fail --
     /// per ADR 0009, before anything else starts -- rather than fall back
     /// to an empty set of watermarks.
+    ///
+    /// Syncs the journal on [`DEFAULT_JOURNAL_SYNC_MAX_ADVANCES`]/
+    /// [`DEFAULT_JOURNAL_SYNC_MAX_DELAY_MS`] -- see
+    /// [`Self::restore_with_sync_policy`] for a gate an operator has tuned
+    /// (`crates/connector-config`'s `journal_sync_max_advances`/
+    /// `journal_sync_max_delay_ms`, issue #709).
     pub fn restore(
         channels: ClientChannelRegistry,
         journal: Arc<dyn Journal>,
     ) -> Result<ClientClaimGate, JournalError> {
+        Self::restore_with_sync_policy(
+            channels,
+            journal,
+            DEFAULT_JOURNAL_SYNC_MAX_ADVANCES,
+            Duration::from_millis(DEFAULT_JOURNAL_SYNC_MAX_DELAY_MS),
+        )
+    }
+
+    /// As [`Self::restore`], but with the journal's sync trigger
+    /// (issue #709) set explicitly rather than left at this module's own
+    /// default: the committer syncs on the lesser of `sync_max_advances`
+    /// watermark advances written since the last sync or `sync_max_delay`
+    /// elapsed since it -- see this module's own doc for what "unsynced"
+    /// means and the liability bound it names. `sync_max_advances == 0` or
+    /// `sync_max_delay == Duration::ZERO` are both coherent, maximally
+    /// conservative choices -- every write syncs before its ticket
+    /// resolves, the pre-#709 behaviour -- not footguns, so neither is
+    /// refused.
+    pub fn restore_with_sync_policy(
+        channels: ClientChannelRegistry,
+        journal: Arc<dyn Journal>,
+        sync_max_advances: u32,
+        sync_max_delay: Duration,
+    ) -> Result<ClientClaimGate, JournalError> {
         let watermarks = Arc::new(RwLock::new(replay_watermarks(&journal.read_all()?)));
-        let committer = GroupCommitter::spawn(journal, Arc::clone(&watermarks));
+        let committer = GroupCommitter::spawn(
+            journal,
+            Arc::clone(&watermarks),
+            sync_max_advances,
+            sync_max_delay,
+        );
         Ok(ClientClaimGate {
             channels,
             watermarks,
@@ -436,6 +507,36 @@ impl ClientClaimGate {
             payout_ledger: None,
             session_channels: RwLock::new(HashMap::new()),
         })
+    }
+
+    /// Force every channel's unsynced watermark advances to disk now,
+    /// waiting for the result (issue #709): the deliberate half of "clean
+    /// shutdown flushes to zero unsynced depth". Also called automatically
+    /// from this gate's [`Drop`] impl, best-effort, so an orderly process
+    /// exit (`connector-bin`'s graceful shutdown) never needs to remember
+    /// to call this itself -- but a caller that wants to know whether the
+    /// flush actually succeeded (rather than merely being attempted on the
+    /// way out) should call it explicitly first.
+    ///
+    /// `Err` means the underlying [`Journal::sync`] failed -- logged, at
+    /// `error`, by the committer itself, since this is the one failure this
+    /// gate cannot resubmit its way out of. The unsynced depth is left
+    /// exactly as it was; a later flush (or the next scheduled sync) tries
+    /// again.
+    pub async fn flush(&self) -> Result<(), FlushFailed> {
+        self.committer.flush().await
+    }
+
+    /// The number of watermark advances on `channel_key` that have been
+    /// written to this gate's journal but not yet `fsync`'d (issue #709) --
+    /// `0` for a channel with nothing outstanding, including one this gate
+    /// has never accepted a claim on. This is the operator-visible half of
+    /// the bound this module's doc names: `unsynced_depth × price` is the
+    /// most this connector could ever double-serve on `channel_key` if it
+    /// crashed this instant, never more.
+    pub fn unsynced_depth(&self, channel_key: &str) -> u64 {
+        self.committer
+            .unsynced_depth(&canonical_channel_key(channel_key))
     }
 
     /// Bind `ledger` -- this connector's outbound claim ledger -- to this
@@ -713,21 +814,22 @@ impl ClientClaimGate {
     /// which is what makes two concurrent claims on one channel still
     /// serialise. The second evaluation is the authoritative one.
     ///
-    /// The advance is made durable before it is made *visible to the
-    /// caller* (issue #605): the accepted claim is enqueued for this
-    /// gate's journal under the write lock, and the claim only comes back
-    /// `Ok` once the committer reports the batch carrying it fsync'd --
-    /// group commit (issue #686), one write and one fsync amortized over
-    /// every claim that arrived while the previous batch was syncing,
-    /// instead of one fsync per claim under the global lock. The write
-    /// lock covers only the re-check, the advance and the enqueue --
-    /// microseconds, no I/O -- which is what lets concurrent sessions'
-    /// claims share an fsync instead of queueing behind each other's. A
-    /// batch that cannot be made durable refuses every claim in it as
-    /// [`ClaimIngestRejection::NotDurable`] and rolls their advances back
-    /// (see [`GroupCommitter`]), so this connector still never renders
-    /// service against a watermark a restart would forget, and a refused
-    /// claim is still resubmittable unchanged.
+    /// The advance is recorded before it is made *visible to the caller*
+    /// (issue #605): the accepted claim is enqueued for this gate's journal
+    /// under the write lock, and the claim only comes back `Ok` once the
+    /// committer reports the entry **written** -- not, since issue #709,
+    /// once it is `fsync`'d. The write lock covers only the re-check, the
+    /// advance and the enqueue -- microseconds, no I/O -- which is what
+    /// lets concurrent sessions' claims share a journal write instead of
+    /// queueing behind each other's, and the `fsync` itself happens later,
+    /// batched, off this call's critical path entirely (see this module's
+    /// own doc and [`GroupCommitter`]). A write that cannot be made durable
+    /// refuses every claim in its batch as
+    /// [`ClaimIngestRejection::NotDurable`] and rolls their advances back;
+    /// a *sync* that later fails does not -- the claim was already served,
+    /// and this gate's watermark never rolls back for that reason within a
+    /// process lifetime (only a restart, replaying only what was actually
+    /// synced, can ever see fewer advances than the live gate held).
     pub async fn ingest(
         &self,
         claim_json: &str,
@@ -749,10 +851,12 @@ impl ClientClaimGate {
     /// `admit(..).await` + `durable().await`, so no second admission
     /// pipeline exists to drift.
     ///
-    /// An `Ok` here is an *acceptance, not yet durable*: the watermark has
+    /// An `Ok` here is an *acceptance, not yet written*: the watermark has
     /// advanced and the entry is queued in acceptance order, but no
     /// service may be rendered for the claim until the ticket resolves --
-    /// that is the boundary ADR 0005 protects.
+    /// that is the boundary ADR 0005 (as amended by issue #709) protects.
+    /// The ticket resolves once the entry is durably **written**; it says
+    /// nothing about whether it has been `fsync`'d yet.
     pub(crate) async fn admit(
         &self,
         claim_json: &str,
@@ -854,17 +958,17 @@ impl ClientClaimGate {
     }
 }
 
-/// The most entries one journal batch carries -- a bound on the buffer a
-/// commit builds, not a tuning knob: the committer drains only what is
-/// already queued, so a batch is naturally sized by how many claims
-/// arrived during the previous batch's fsync. At ~200 bytes a line this
-/// caps a batch's buffer under a megabyte.
+/// The most entries one write step carries -- a bound on the buffer a
+/// commit builds, capped further still by `sync_max_advances` (see
+/// [`group_commit_loop`]): a write step never carries more than
+/// `sync_max_advances` unsynced entries at once, so this only matters when
+/// the sync bound is large or unset.
 const GROUP_COMMIT_MAX_BATCH: usize = 4096;
 
-/// An accepted-but-not-yet-durable claim, queued for the committer: the
+/// An accepted-but-not-yet-written claim, queued for the committer: the
 /// journal entry to write, and what the committer needs to *unwrite* the
 /// acceptance -- the channel it advanced and the watermark that channel
-/// held before it -- should the batch fail.
+/// held before it -- should the write fail.
 struct PendingAcceptance {
     entry: JournalEntry,
     channel_key: String,
@@ -876,18 +980,23 @@ struct PendingAcceptance {
 /// the gate (the sender) is dropped.
 struct CommitterGone;
 
-/// A claim's pending durability (issue #686): resolves once the journal
-/// batch carrying the claim's entry is fsync'd -- or refuses, if it could
-/// not be. [`ClientClaimGate::ingest`] awaits it before returning the
-/// claim; no caller may render service before it resolves, because until
-/// then the acceptance exists only in memory.
+/// A claim's pending durability (issue #605, narrowed by issue #709):
+/// resolves once the journal write carrying the claim's entry lands -- or
+/// refuses, if it could not be. [`ClientClaimGate::ingest`] awaits it
+/// before returning the claim; no caller may render service before it
+/// resolves, because until then the acceptance exists only in memory.
+///
+/// **Resolving `Ok` no longer means `fsync`'d** (see this module's own
+/// doc): the entry is written and will be synced within
+/// `sync_max_advances`/`sync_max_delay`, tracked meanwhile as
+/// [`ClientClaimGate::unsynced_depth`].
 pub struct DurabilityTicket {
     durable: tokio::sync::oneshot::Receiver<Result<(), ()>>,
 }
 
 impl DurabilityTicket {
-    /// Wait for the batch fsync. Any failure -- the batch could not be
-    /// written, or the committer is gone -- is
+    /// Wait for the journal write. Any failure -- the write could not be
+    /// made, or the committer is gone -- is
     /// [`ClaimIngestRejection::NotDurable`]: the watermark advance has
     /// already been rolled back by whoever discovered the failure, so the
     /// same claim resubmitted is still good.
@@ -899,135 +1008,418 @@ impl DurabilityTicket {
     }
 }
 
-/// The group-commit half of issue #686: a dedicated thread that drains
-/// every [`PendingAcceptance`] queued since the last batch, writes them as
-/// one [`Journal::append_batch`] -- one write, one fsync -- and only then
-/// resolves their tickets. Batching is what moves the fsync out from under
-/// the watermark lock without giving up durable-before-visible: claims
-/// admitted while a batch is syncing queue up and share the *next* fsync,
-/// so sustained throughput is bounded by claims-per-batch times the disk's
-/// fsync rate rather than by the fsync rate alone.
-///
-/// A dedicated OS thread rather than a tokio task because
-/// [`Journal::append_batch`] blocks on disk I/O, and this loop exists to
-/// do nothing else; it exits when the gate is dropped (the sender goes
-/// away) and takes nothing with it.
-///
-/// **Failure is rolled back, not just reported.** When a batch cannot be
-/// made durable, the watermarks its entries advanced are wrong: they
-/// promise a durable record that does not exist, and leaving them in
-/// place would burn every refused claim's nonce -- the client's perfectly
-/// good claim, resubmitted as [`ClaimIngestRejection::NotDurable`] invites,
-/// would bounce off its own ghost as `NonceNotAdvancing`. So the committer
-/// takes the same write lock every admission is decided under, drains
-/// whatever else was admitted against the now-unrecorded state (those
-/// entries could only have landed in this or a later batch, and there is
-/// no later batch until this loop comes back around), restores every
-/// touched channel to its watermark before the *earliest* failed claim,
-/// and only then refuses the waiters. Admissions blocked on the lock
-/// meanwhile re-check against the restored watermarks once they get it,
-/// so nothing is ever judged against an advance that was rolled back.
-struct GroupCommitter {
-    sender: mpsc::Sender<(
+/// [`ClientClaimGate::flush`] (or this gate's own `Drop`) could not confirm
+/// every unsynced watermark advance reached disk. The underlying
+/// [`JournalError`] is already logged by the committer at `error` -- this
+/// is only the caller-visible "it didn't work" signal, since there is
+/// nothing a caller can do with the I/O error itself beyond what the log
+/// line already says.
+#[derive(Debug)]
+pub struct FlushFailed;
+
+/// One channel's live count of watermark advances written to the journal
+/// but not yet `fsync`'d, and the total across every channel -- issue
+/// #709's operator-visible liability accounting. Mutated only by the
+/// committer thread; read by [`ClientClaimGate::unsynced_depth`] and the
+/// claim-state endpoint.
+#[derive(Default)]
+struct UnsyncedDepth {
+    total: u64,
+    by_channel: HashMap<String, u64>,
+}
+
+/// One request into the committer's channel: a claim to write and journal
+/// order it in, or a demand that everything written so far be synced now
+/// (issue #709's [`ClientClaimGate::flush`], and this gate's `Drop`).
+/// Unified into one channel, rather than two, so a flush request is seen
+/// by the committer's `recv_timeout` the instant it is sent instead of
+/// waiting for that call's own idle-poll cadence.
+enum CommitterMessage {
+    Entry(
         PendingAcceptance,
         tokio::sync::oneshot::Sender<Result<(), ()>>,
-    )>,
+    ),
+    Flush(mpsc::Sender<Result<(), ()>>),
+}
+
+/// The group-commit half of issues #686/#709: a dedicated thread that
+/// drains every [`PendingAcceptance`] queued since the last write step,
+/// writes them as one [`Journal::append_batch_unsynced`] call, and resolves
+/// their tickets **as soon as the write lands** -- not once the entry is
+/// `fsync`'d. `fsync` follows separately, on the lesser of
+/// `sync_max_advances` watermark advances written since the last sync or
+/// `sync_max_delay` elapsed since it, both fixed at
+/// [`GroupCommitter::spawn`] time from `crates/connector-config`'s
+/// `journal_sync_max_advances`/`journal_sync_max_delay_ms`. See this
+/// module's own doc for what living between a write and its sync means and
+/// the liability bound it names.
+///
+/// A dedicated OS thread rather than a tokio task because
+/// [`Journal::sync`] blocks on disk I/O, and this loop exists to do
+/// nothing else; it exits once the gate (the sender) is dropped, having
+/// already flushed everything outstanding first (see the `Disconnected`
+/// arm of [`group_commit_loop`]).
+///
+/// **A write failure is rolled back, exactly as a pre-#709 fsync failure
+/// was; a sync failure is not, and cannot be.** A write that cannot be
+/// made durable promises nothing yet -- no ticket has resolved for it --
+/// so the committer takes the same write lock every admission is decided
+/// under, drains whatever else was admitted against the now-unrecorded
+/// state, restores every touched channel to its watermark before the
+/// *earliest* failed claim, and only then refuses the waiters, the same as
+/// before issue #709. A sync failure is different in kind: every advance
+/// it was trying to make durable has *already* had its ticket resolved and
+/// its packet served, so there is nothing left to refuse or roll back --
+/// only to log loudly and retry, which is exactly what
+/// [`group_commit_loop`] does.
+struct GroupCommitter {
+    sender: mpsc::Sender<CommitterMessage>,
+    unsynced: Arc<RwLock<UnsyncedDepth>>,
 }
 
 impl GroupCommitter {
     fn spawn(
         journal: Arc<dyn Journal>,
         watermarks: Arc<RwLock<HashMap<String, Watermark>>>,
+        sync_max_advances: u32,
+        sync_max_delay: Duration,
     ) -> GroupCommitter {
         let (sender, receiver) = mpsc::channel();
+        let unsynced = Arc::new(RwLock::new(UnsyncedDepth::default()));
+        let loop_unsynced = Arc::clone(&unsynced);
         std::thread::Builder::new()
             .name("client-claim-journal-commit".to_string())
-            .spawn(move || group_commit_loop(receiver, journal, watermarks))
+            .spawn(move || {
+                group_commit_loop(
+                    receiver,
+                    journal,
+                    watermarks,
+                    loop_unsynced,
+                    sync_max_advances,
+                    sync_max_delay,
+                )
+            })
             .expect("spawning the journal committer thread");
-        GroupCommitter { sender }
+        GroupCommitter { sender, unsynced }
     }
 
-    /// Queue `pending` for the next batch. Callers hold the watermark
+    /// Queue `pending` for the next write step. Callers hold the watermark
     /// write lock while calling this -- that is the ordering guarantee,
     /// not an accident -- so the queue receives entries in exactly the
     /// order their watermarks advanced.
     fn enqueue(&self, pending: PendingAcceptance) -> Result<DurabilityTicket, CommitterGone> {
         let (durable_tx, durable_rx) = tokio::sync::oneshot::channel();
         self.sender
-            .send((pending, durable_tx))
+            .send(CommitterMessage::Entry(pending, durable_tx))
             .map_err(|_| CommitterGone)?;
         Ok(DurabilityTicket {
             durable: durable_rx,
         })
     }
+
+    /// Send a flush request and hand back the (blocking, `std::sync::mpsc`)
+    /// receiver its answer arrives on -- deliberately not a
+    /// `tokio::sync::oneshot`, so this gate's `Drop` (which cannot be
+    /// `async`) can wait on it directly.
+    fn request_flush(&self) -> Result<mpsc::Receiver<Result<(), ()>>, CommitterGone> {
+        let (ack_tx, ack_rx) = mpsc::channel();
+        self.sender
+            .send(CommitterMessage::Flush(ack_tx))
+            .map_err(|_| CommitterGone)?;
+        Ok(ack_rx)
+    }
+
+    /// [`ClientClaimGate::flush`]: force every unsynced advance to disk and
+    /// wait for the result, off the async runtime's own worker thread
+    /// (`request_flush`'s answer arrives via a blocking channel).
+    async fn flush(&self) -> Result<(), FlushFailed> {
+        let ack_rx = self.request_flush().map_err(|_| FlushFailed)?;
+        match tokio::task::spawn_blocking(move || ack_rx.recv()).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            _ => Err(FlushFailed),
+        }
+    }
+
+    fn unsynced_depth(&self, channel_key: &str) -> u64 {
+        self.unsynced
+            .read()
+            .expect("unsynced depth lock poisoned")
+            .by_channel
+            .get(channel_key)
+            .copied()
+            .unwrap_or(0)
+    }
 }
 
-type QueuedAcceptance = (
-    PendingAcceptance,
-    tokio::sync::oneshot::Sender<Result<(), ()>>,
-);
+/// How long this gate's `Drop` waits for its final flush before giving up
+/// (issue #709). Bounded, not indefinite: a disk wedged badly enough that
+/// `sync` never returns must not turn an operator's `docker stop` into a
+/// process that ignores `SIGTERM`/`SIGKILL`'s own grace period forever --
+/// the same backpressure-not-a-hang principle [`SYNC_RETRY_BACKOFF`]
+/// applies on the admission path applies here, on the way out.
+const DROP_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn group_commit_loop(
-    receiver: mpsc::Receiver<QueuedAcceptance>,
-    journal: Arc<dyn Journal>,
-    watermarks: Arc<RwLock<HashMap<String, Watermark>>>,
-) {
-    while let Ok(first) = receiver.recv() {
-        let mut batch = vec![first];
-        while batch.len() < GROUP_COMMIT_MAX_BATCH {
-            match receiver.try_recv() {
-                Ok(queued) => batch.push(queued),
-                Err(_) => break,
+impl Drop for GroupCommitter {
+    /// Best-effort: an orderly process exit flushes every unsynced
+    /// watermark advance to disk before this gate's journal handle goes
+    /// away (issue #709's "clean shutdown flushes to zero unsynced
+    /// depth"), so a caller does not need to remember
+    /// [`ClientClaimGate::flush`] itself for that guarantee to hold.
+    /// Blocking here is deliberate and sound: `Drop` cannot be `async`, and
+    /// the committer thread is still alive to answer -- `self.sender` is
+    /// the only [`mpsc::Sender`] for this committer, never cloned, so the
+    /// channel is still open until this call returns. Bounded by
+    /// [`DROP_FLUSH_TIMEOUT`] rather than waited on forever -- see its own
+    /// doc.
+    fn drop(&mut self) {
+        if let Ok(ack_rx) = self.request_flush() {
+            if ack_rx.recv_timeout(DROP_FLUSH_TIMEOUT).is_err() {
+                tracing::error!(
+                    "gave up waiting for the claim journal's final flush on shutdown after {:?} \
+                     -- some watermark advances may not be durable",
+                    DROP_FLUSH_TIMEOUT
+                );
             }
         }
-        let entries: Vec<JournalEntry> = batch
-            .iter()
-            .map(|(pending, _)| pending.entry.clone())
-            .collect();
-        match journal.append_batch(&entries) {
-            Ok(()) => {
-                for (_, ticket) in batch {
-                    // A receiver gone before its fsync means the ingest
-                    // future was dropped; the acceptance is durable
-                    // regardless, so there is nothing to do about it.
-                    let _ = ticket.send(Ok(()));
-                }
+    }
+}
+
+/// How long the committer sleeps between retries of a `sync` that failed
+/// while new writes are blocked on it (either because the unsynced bound
+/// was reached, or because an idle flush attempt itself failed) -- issue
+/// #709's backpressure against a broken disk. Bounded, not a fast spin: a
+/// disk that cannot sync at all still lets this thread log its retries at
+/// a sane rate instead of burning a core.
+const SYNC_RETRY_BACKOFF: Duration = Duration::from_millis(50);
+
+/// Force `journal.sync()`. On success, zeroes every channel's unsynced
+/// depth (a sync is always of everything written so far, never partial)
+/// and resets `last_sync`. On failure, logs at `error` -- naming how much
+/// is at risk -- and changes nothing, so the depth this gate reports stays
+/// exactly as elevated as it truly is until a later attempt succeeds.
+fn sync_now(
+    journal: &dyn Journal,
+    unsynced: &Arc<RwLock<UnsyncedDepth>>,
+    unsynced_total: &mut u64,
+    last_sync: &mut Instant,
+) -> Result<(), JournalError> {
+    match journal.sync() {
+        Ok(()) => {
+            let mut depth = unsynced.write().expect("unsynced depth lock poisoned");
+            depth.total = 0;
+            depth.by_channel.clear();
+            *unsynced_total = 0;
+            *last_sync = Instant::now();
+            Ok(())
+        }
+        Err(err) => {
+            tracing::error!(
+                %err,
+                unsynced_advances = *unsynced_total,
+                "journal sync failed -- unsynced watermark advances remain at risk of loss on a \
+                 crash; retrying"
+            );
+            Err(err)
+        }
+    }
+}
+
+/// The committer loop (issues #686, #709): writes every
+/// [`PendingAcceptance`] queued since the last write step, resolves
+/// tickets the instant the write lands, and syncs separately on the lesser
+/// of `sync_max_advances` watermark advances or `sync_max_delay` elapsed --
+/// never letting a single write step itself carry the unsynced count past
+/// `sync_max_advances`, which is what makes the bound exact rather than a
+/// rolling average (see the drain loop below).
+fn group_commit_loop(
+    receiver: mpsc::Receiver<CommitterMessage>,
+    journal: Arc<dyn Journal>,
+    watermarks: Arc<RwLock<HashMap<String, Watermark>>>,
+    unsynced: Arc<RwLock<UnsyncedDepth>>,
+    sync_max_advances: u32,
+    sync_max_delay: Duration,
+) {
+    let sync_max_advances = u64::from(sync_max_advances);
+    // At least 1: a write step must be able to carry its one triggering
+    // entry even when `sync_max_advances == 0` asks for "sync after every
+    // single write" -- the cap below stops it from carrying a second.
+    let drain_cap = sync_max_advances.max(1);
+    let mut unsynced_total: u64 = 0;
+    let mut last_sync = Instant::now();
+
+    loop {
+        // Back-pressure, not a rolling average (issue #709's exact bound):
+        // once `sync_max_advances` advances are unsynced, no further claim
+        // may be written-and-served until a sync clears them. A disk that
+        // cannot sync at all stalls new admissions here, retried on a
+        // fixed backoff, rather than silently accepting past the bound it
+        // promised.
+        while sync_max_advances > 0 && unsynced_total >= sync_max_advances {
+            if sync_now(
+                journal.as_ref(),
+                &unsynced,
+                &mut unsynced_total,
+                &mut last_sync,
+            )
+            .is_ok()
+            {
+                break;
             }
-            Err(err) => {
-                tracing::error!(
-                    %err,
-                    claims = batch.len(),
-                    "refusing a batch of valid claims: their acceptance could not be \
-                     durably recorded"
+            std::thread::sleep(SYNC_RETRY_BACKOFF);
+        }
+
+        let wait = if unsynced_total > 0 {
+            sync_max_delay.saturating_sub(last_sync.elapsed())
+        } else {
+            // Nothing outstanding -- there is no `sync_max_delay` deadline
+            // to wake up for, only new work.
+            Duration::from_secs(3600)
+        };
+
+        match receiver.recv_timeout(wait) {
+            Ok(CommitterMessage::Flush(ack)) => {
+                let result = sync_now(
+                    journal.as_ref(),
+                    &unsynced,
+                    &mut unsynced_total,
+                    &mut last_sync,
                 );
+                let _ = ack.send(result.map_err(|_| ()));
+            }
+            Ok(CommitterMessage::Entry(first, first_ticket)) => {
+                let mut batch = vec![(first, first_ticket)];
+                let mut pending_flush = None;
+                while batch.len() < GROUP_COMMIT_MAX_BATCH
+                    && unsynced_total + (batch.len() as u64) < drain_cap
                 {
-                    let mut watermarks = watermarks
-                        .write()
-                        .expect("client claim watermarks lock poisoned");
-                    // Everything still queued was admitted against the
-                    // watermarks this failed batch advanced -- it has no
-                    // durable batch to land in ahead of the rollback, so
-                    // it fails and rolls back with it.
-                    while let Ok(queued) = receiver.try_recv() {
-                        batch.push(queued);
+                    match receiver.try_recv() {
+                        Ok(CommitterMessage::Entry(pending, ticket)) => {
+                            batch.push((pending, ticket));
+                        }
+                        Ok(CommitterMessage::Flush(ack)) => {
+                            pending_flush = Some(ack);
+                            break;
+                        }
+                        Err(_) => break,
                     }
-                    let mut restored: HashSet<&str> = HashSet::new();
-                    for (pending, _) in &batch {
-                        // First failed entry per channel wins: entries are
-                        // in acceptance order, so its `previous` is the
-                        // last watermark with a durable record behind it.
-                        if restored.insert(pending.channel_key.as_str()) {
-                            restore_watermark(
-                                &mut watermarks,
-                                &pending.channel_key,
-                                pending.previous,
-                            );
+                }
+
+                let entries: Vec<JournalEntry> = batch
+                    .iter()
+                    .map(|(pending, _)| pending.entry.clone())
+                    .collect();
+                match journal.append_batch_unsynced(&entries) {
+                    Ok(()) => {
+                        let mut per_channel: HashMap<&str, u64> = HashMap::new();
+                        for (pending, _) in &batch {
+                            *per_channel.entry(pending.channel_key.as_str()).or_insert(0) += 1;
+                        }
+                        {
+                            let mut depth = unsynced.write().expect("unsynced depth lock poisoned");
+                            depth.total += batch.len() as u64;
+                            for (channel, delta) in per_channel {
+                                *depth.by_channel.entry(channel.to_string()).or_insert(0) += delta;
+                            }
+                        }
+                        unsynced_total += batch.len() as u64;
+                        for (_, ticket) in batch.drain(..) {
+                            // A receiver gone before the write means the
+                            // ingest future was dropped; the write already
+                            // landed regardless, so there is nothing to do
+                            // about it.
+                            let _ = ticket.send(Ok(()));
                         }
                     }
+                    Err(err) => {
+                        tracing::error!(
+                            %err,
+                            claims = batch.len(),
+                            "refusing a batch of valid claims: their acceptance could not be \
+                             written to the journal"
+                        );
+                        {
+                            let mut watermarks = watermarks
+                                .write()
+                                .expect("client claim watermarks lock poisoned");
+                            // Everything still queued was admitted against
+                            // the watermarks this failed write advanced --
+                            // it has no durable record to land ahead of the
+                            // rollback, so it fails and rolls back with it.
+                            while let Ok(msg) = receiver.try_recv() {
+                                match msg {
+                                    CommitterMessage::Entry(pending, ticket) => {
+                                        batch.push((pending, ticket));
+                                    }
+                                    CommitterMessage::Flush(ack) => {
+                                        let _ = ack.send(Err(()));
+                                    }
+                                }
+                            }
+                            let mut restored: HashSet<&str> = HashSet::new();
+                            for (pending, _) in &batch {
+                                // First failed entry per channel wins:
+                                // entries are in acceptance order, so its
+                                // `previous` is the last watermark with a
+                                // durable record behind it.
+                                if restored.insert(pending.channel_key.as_str()) {
+                                    restore_watermark(
+                                        &mut watermarks,
+                                        &pending.channel_key,
+                                        pending.previous,
+                                    );
+                                }
+                            }
+                        }
+                        for (_, ticket) in batch {
+                            let _ = ticket.send(Err(()));
+                        }
+                        pending_flush = None;
+                    }
                 }
-                for (_, ticket) in batch {
-                    let _ = ticket.send(Err(()));
+
+                if unsynced_total >= sync_max_advances || last_sync.elapsed() >= sync_max_delay {
+                    let _ = sync_now(
+                        journal.as_ref(),
+                        &unsynced,
+                        &mut unsynced_total,
+                        &mut last_sync,
+                    );
                 }
+                if let Some(ack) = pending_flush {
+                    let result = sync_now(
+                        journal.as_ref(),
+                        &unsynced,
+                        &mut unsynced_total,
+                        &mut last_sync,
+                    );
+                    let _ = ack.send(result.map_err(|_| ()));
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if unsynced_total > 0 && last_sync.elapsed() >= sync_max_delay {
+                    let _ = sync_now(
+                        journal.as_ref(),
+                        &unsynced,
+                        &mut unsynced_total,
+                        &mut last_sync,
+                    );
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // The gate is gone -- flush whatever remains, best-effort
+                // (issue #709's "clean shutdown flushes to zero"), then
+                // exit. Nothing is waiting on this specific flush (`Drop`
+                // already sent, and answered, its own request before the
+                // sender could disconnect), so the result is only logged.
+                if unsynced_total > 0 {
+                    let _ = sync_now(
+                        journal.as_ref(),
+                        &unsynced,
+                        &mut unsynced_total,
+                        &mut last_sync,
+                    );
+                }
+                break;
             }
         }
     }
@@ -4239,6 +4631,479 @@ mod tests {
                 signature.len(),
                 65,
                 "the raw 65-byte EIP-712 signature, not its hex text"
+            );
+        }
+    }
+
+    /// Issue #709: the journal write/sync split. Unlike `mod durability`
+    /// above (which proves a watermark survives a *restart*), these tests
+    /// are about the boundary *within* one process lifetime -- when a
+    /// claim is served relative to when its entry actually reaches disk --
+    /// so they build gates directly over fakes that distinguish a write
+    /// from a sync, rather than over a real [`FileJournal`].
+    mod async_durability {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+
+        /// A [`Journal`] that tracks writes and syncs as two distinct
+        /// events (ADR 0007's fake, not a mock): `append_batch_unsynced`
+        /// records entries and returns immediately; `sync` is what makes
+        /// them visible to [`Self::read_all`]. This is the pessimistic,
+        /// honest model of what a real crash does to a buffered write that
+        /// was never `fsync`'d -- `read_all` (what a restart replays
+        /// through) only ever returns the *synced* prefix, exactly the
+        /// worst case issue #709's bound is about.
+        #[derive(Default)]
+        struct CountingJournal {
+            written: Mutex<Vec<JournalEntry>>,
+            synced_len: Mutex<usize>,
+            write_calls: AtomicUsize,
+            sync_calls: AtomicUsize,
+        }
+
+        impl Journal for CountingJournal {
+            fn append(&self, entry: &JournalEntry) -> Result<(), JournalError> {
+                self.append_batch_unsynced(std::slice::from_ref(entry))?;
+                self.sync()
+            }
+
+            fn append_batch_unsynced(&self, entries: &[JournalEntry]) -> Result<(), JournalError> {
+                self.write_calls.fetch_add(1, Ordering::SeqCst);
+                self.written
+                    .lock()
+                    .expect("written lock poisoned")
+                    .extend_from_slice(entries);
+                Ok(())
+            }
+
+            fn sync(&self) -> Result<(), JournalError> {
+                self.sync_calls.fetch_add(1, Ordering::SeqCst);
+                let len = self.written.lock().expect("written lock poisoned").len();
+                *self.synced_len.lock().expect("synced_len lock poisoned") = len;
+                Ok(())
+            }
+
+            fn read_all(&self) -> Result<Vec<JournalEntry>, JournalError> {
+                let written = self.written.lock().expect("written lock poisoned");
+                let synced = *self.synced_len.lock().expect("synced_len lock poisoned");
+                Ok(written[..synced].to_vec())
+            }
+        }
+
+        /// A [`Journal`] whose `sync` blocks until the test releases it --
+        /// used only to prove serve-before-sync deterministically (no
+        /// polling, no race): if `ingest` returned while this journal's one
+        /// and only `sync` call is parked, admission cannot have waited for
+        /// it.
+        struct ParkedSyncJournal {
+            written: Mutex<Vec<JournalEntry>>,
+            sync_calls: AtomicUsize,
+            release: Mutex<mpsc::Receiver<()>>,
+        }
+
+        impl ParkedSyncJournal {
+            fn new() -> (Arc<ParkedSyncJournal>, mpsc::Sender<()>) {
+                let (tx, rx) = mpsc::channel();
+                (
+                    Arc::new(ParkedSyncJournal {
+                        written: Mutex::new(Vec::new()),
+                        sync_calls: AtomicUsize::new(0),
+                        release: Mutex::new(rx),
+                    }),
+                    tx,
+                )
+            }
+        }
+
+        impl Journal for ParkedSyncJournal {
+            fn append(&self, entry: &JournalEntry) -> Result<(), JournalError> {
+                self.append_batch_unsynced(std::slice::from_ref(entry))
+            }
+
+            fn append_batch_unsynced(&self, entries: &[JournalEntry]) -> Result<(), JournalError> {
+                self.written
+                    .lock()
+                    .expect("written lock poisoned")
+                    .extend_from_slice(entries);
+                Ok(())
+            }
+
+            fn sync(&self) -> Result<(), JournalError> {
+                self.sync_calls.fetch_add(1, Ordering::SeqCst);
+                // Blocks the committer thread here until the test lets go.
+                let _ = self.release.lock().expect("release lock poisoned").recv();
+                Ok(())
+            }
+
+            fn read_all(&self) -> Result<Vec<JournalEntry>, JournalError> {
+                Ok(self.written.lock().expect("written lock poisoned").clone())
+            }
+        }
+
+        /// Poll `condition` for up to a second -- these tests assert on
+        /// what a background committer thread eventually does, which is
+        /// not observable the instant `ingest` returns (see this module's
+        /// own doc). A generous ceiling, not a tuning knob: every assertion
+        /// below is expected to clear in well under a millisecond.
+        fn wait_until(mut condition: impl FnMut() -> bool) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(1);
+            while !condition() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "condition never became true within 1s"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        /// The acceptance criterion, verbatim: "the packet is served after
+        /// the journal *write*, not after the *sync*." A K of `1` means the
+        /// very first claim's write step immediately tries to sync -- and
+        /// that sync is parked, permanently, until this test releases it.
+        /// `ingest` returning `Ok` regardless is the proof: nothing on the
+        /// serving path waited for it.
+        #[tokio::test]
+        async fn a_claim_is_served_before_its_journal_entry_is_synced() {
+            let (journal, release) = ParkedSyncJournal::new();
+            let gate = ClientClaimGate::restore_with_sync_policy(
+                test_channels(),
+                journal.clone(),
+                1,
+                Duration::from_secs(3600),
+            )
+            .expect("an empty journal has nothing to replay");
+
+            let claim = gate
+                .ingest(&evm_claim_json(&channel_id(), 1, 100), 100)
+                .await;
+
+            assert!(
+                claim.is_ok(),
+                "serving must not wait for the parked sync: {claim:?}"
+            );
+            assert_eq!(
+                journal.sync_calls.load(Ordering::SeqCst),
+                1,
+                "the sync was attempted (and is parked) -- it just was not waited on"
+            );
+
+            // Deliberately leaked, not dropped: this gate's `Drop` would
+            // itself request a flush and block this test's own thread
+            // waiting for the committer to answer -- but the committer is
+            // still parked in the *first* `sync()` call above, and only
+            // one permit was ever queued for `release` to hand it. Forget
+            // the gate instead of racing a second permit against `Drop`;
+            // the committer thread's own release below lets it exit
+            // cleanly regardless.
+            let _ = release.send(());
+            std::mem::forget(gate);
+        }
+
+        /// The other half of the same acceptance criterion: the sync is
+        /// not skipped, only deferred, and it fires on its own once the
+        /// configured number of advances is reached -- with no explicit
+        /// flush from the caller.
+        #[tokio::test]
+        async fn sync_fires_automatically_after_the_configured_number_of_advances() {
+            let journal = Arc::new(CountingJournal::default());
+            let gate = ClientClaimGate::restore_with_sync_policy(
+                test_channels(),
+                journal.clone(),
+                3,
+                Duration::from_secs(3600),
+            )
+            .expect("an empty journal has nothing to replay");
+
+            for nonce in 1..3 {
+                gate.ingest(&evm_claim_json(&channel_id(), nonce, nonce * 100), 100)
+                    .await
+                    .expect("advances under the bound are served");
+                assert_eq!(
+                    journal.sync_calls.load(Ordering::SeqCst),
+                    0,
+                    "fewer than the configured bound must not sync yet"
+                );
+            }
+
+            gate.ingest(&evm_claim_json(&channel_id(), 3, 300), 100)
+                .await
+                .expect("the third advance reaches the bound");
+
+            wait_until(|| journal.sync_calls.load(Ordering::SeqCst) >= 1);
+            wait_until(|| gate.unsynced_depth(&format!("evm:{}", channel_id())) == 0);
+            assert_eq!(
+                journal.read_all().unwrap().len(),
+                3,
+                "a sync makes every prior write visible to a replay"
+            );
+        }
+
+        /// The lesser-of-K-or-T half: a channel that never reaches the
+        /// advance bound still syncs once the configured delay elapses.
+        #[tokio::test]
+        async fn sync_fires_after_the_configured_delay_even_under_the_advance_bound() {
+            let journal = Arc::new(CountingJournal::default());
+            let gate = ClientClaimGate::restore_with_sync_policy(
+                test_channels(),
+                journal.clone(),
+                1_000_000,
+                Duration::from_millis(20),
+            )
+            .expect("an empty journal has nothing to replay");
+
+            gate.ingest(&evm_claim_json(&channel_id(), 1, 100), 100)
+                .await
+                .expect("well under the advance bound");
+
+            wait_until(|| journal.sync_calls.load(Ordering::SeqCst) >= 1);
+            wait_until(|| gate.unsynced_depth(&format!("evm:{}", channel_id())) == 0);
+        }
+
+        /// Issue #709's operator-visible half, tracked separately per
+        /// channel rather than only in aggregate -- a busy channel must
+        /// not make a quiet one's own depth unreadable.
+        #[tokio::test]
+        async fn unsynced_depth_is_tracked_per_channel_and_zeroed_by_a_sync() {
+            let journal = Arc::new(CountingJournal::default());
+            let gate = ClientClaimGate::restore_with_sync_policy(
+                test_channels(),
+                journal.clone(),
+                1_000_000,
+                Duration::from_secs(3600),
+            )
+            .expect("an empty journal has nothing to replay");
+
+            assert_eq!(gate.unsynced_depth(&format!("evm:{}", channel_id())), 0);
+
+            gate.ingest(&evm_claim_json(&channel_id(), 1, 100), 100)
+                .await
+                .unwrap();
+            gate.ingest(&evm_claim_json(&channel_id(), 2, 200), 100)
+                .await
+                .unwrap();
+            gate.ingest(&evm_claim_json(&second_channel_id(), 1, 50), 50)
+                .await
+                .unwrap();
+
+            assert_eq!(gate.unsynced_depth(&format!("evm:{}", channel_id())), 2);
+            assert_eq!(
+                gate.unsynced_depth(&format!("evm:{}", second_channel_id())),
+                1
+            );
+            assert_eq!(
+                gate.unsynced_depth(&format!("evm:{}", unrecorded_channel_id())),
+                0,
+                "a channel with nothing outstanding reports zero, not an error"
+            );
+
+            gate.flush().await.expect("the journal accepts a sync");
+
+            assert_eq!(gate.unsynced_depth(&format!("evm:{}", channel_id())), 0);
+            assert_eq!(
+                gate.unsynced_depth(&format!("evm:{}", second_channel_id())),
+                0
+            );
+        }
+
+        /// "Clean shutdown flushes to zero unsynced depth" -- the
+        /// deliberate half, forced by an explicit call rather than left to
+        /// a background trigger that might not have fired yet.
+        #[tokio::test]
+        async fn flush_drains_every_channels_unsynced_depth_to_zero() {
+            let journal = Arc::new(CountingJournal::default());
+            let gate = ClientClaimGate::restore_with_sync_policy(
+                test_channels(),
+                journal.clone(),
+                1_000_000,
+                Duration::from_secs(3600),
+            )
+            .expect("an empty journal has nothing to replay");
+
+            for nonce in 1..=5 {
+                gate.ingest(&evm_claim_json(&channel_id(), nonce, nonce * 100), 100)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(gate.unsynced_depth(&format!("evm:{}", channel_id())), 5);
+
+            gate.flush().await.expect("the journal accepts a sync");
+
+            assert_eq!(gate.unsynced_depth(&format!("evm:{}", channel_id())), 0);
+            assert_eq!(journal.read_all().unwrap().len(), 5);
+        }
+
+        /// The automatic half: an orderly process exit does not need to
+        /// remember to call `flush` itself, because dropping the gate does
+        /// it. This is what makes the ADR 0005 update's "a crash is the
+        /// only way to ever observe the bounded window" true -- a clean
+        /// exit is not a crash, and must not leak an unsynced advance.
+        #[tokio::test]
+        async fn dropping_the_gate_flushes_the_journal_before_it_goes_away() {
+            let journal = Arc::new(CountingJournal::default());
+            let gate = ClientClaimGate::restore_with_sync_policy(
+                test_channels(),
+                journal.clone(),
+                1_000_000,
+                Duration::from_secs(3600),
+            )
+            .expect("an empty journal has nothing to replay");
+
+            gate.ingest(&evm_claim_json(&channel_id(), 1, 100), 100)
+                .await
+                .unwrap();
+            assert_eq!(journal.read_all().unwrap().len(), 0, "not yet synced");
+
+            drop(gate);
+
+            wait_until(|| journal.read_all().unwrap().len() == 1);
+        }
+
+        /// The crash-recovery acceptance criterion, in full: on restart the
+        /// watermark is never *ahead* of what was actually synced, and the
+        /// replay window is bounded by exactly the configured advance
+        /// count -- never more, however many claims arrived. `CountingJournal`
+        /// models the pessimistic, honest case (an unsynced write is lost)
+        /// by construction: `read_all` -- what `restore` replays through --
+        /// only ever returns the synced prefix.
+        #[tokio::test]
+        async fn a_restart_after_a_crash_never_replays_more_than_the_sync_bound_of_unsynced_advances(
+        ) {
+            const SYNC_MAX_ADVANCES: u32 = 5;
+            let journal = Arc::new(CountingJournal::default());
+            let gate = ClientClaimGate::restore_with_sync_policy(
+                test_channels(),
+                journal.clone(),
+                SYNC_MAX_ADVANCES,
+                Duration::from_secs(3600),
+            )
+            .expect("an empty journal has nothing to replay");
+
+            // Exactly one sync's worth, durable before the "crash".
+            for nonce in 1..=SYNC_MAX_ADVANCES as u64 {
+                gate.ingest(&evm_claim_json(&channel_id(), nonce, nonce * 100), 100)
+                    .await
+                    .unwrap();
+            }
+            wait_until(|| journal.sync_calls.load(Ordering::SeqCst) >= 1);
+            wait_until(|| gate.unsynced_depth(&format!("evm:{}", channel_id())) == 0);
+
+            // Three more, admitted and served, never synced -- exactly
+            // what a crash right now would lose. Strictly fewer than the
+            // bound, proving the bound is a ceiling, not a target.
+            let unsynced_this_time = 3u64;
+            for offset in 1..=unsynced_this_time {
+                let nonce = SYNC_MAX_ADVANCES as u64 + offset;
+                gate.ingest(&evm_claim_json(&channel_id(), nonce, nonce * 100), 100)
+                    .await
+                    .expect("still under the bound, still served");
+            }
+            assert_eq!(
+                gate.unsynced_depth(&format!("evm:{}", channel_id())),
+                unsynced_this_time,
+                "the live gate's own watermark already reflects all 8 claims"
+            );
+            assert_eq!(
+                gate.watermark(&format!("evm:{}", channel_id()))
+                    .unwrap()
+                    .nonce,
+                SYNC_MAX_ADVANCES as u64 + unsynced_this_time
+            );
+
+            // The "crash": a second gate over the *same* journal, built
+            // without ever calling `flush` or dropping the first gate (which
+            // would itself flush and defeat the point) -- exactly a process
+            // that stopped existing rather than exited cleanly.
+            let restarted = ClientClaimGate::restore_with_sync_policy(
+                test_channels(),
+                journal.clone(),
+                SYNC_MAX_ADVANCES,
+                Duration::from_secs(3600),
+            )
+            .expect("a journal holding only synced entries still replays cleanly");
+
+            let restored = restarted
+                .watermark(&format!("evm:{}", channel_id()))
+                .unwrap();
+            assert_eq!(
+                restored.nonce, SYNC_MAX_ADVANCES as u64,
+                "never ahead of what was synced"
+            );
+            let live = gate
+                .watermark(&format!("evm:{}", channel_id()))
+                .unwrap()
+                .nonce;
+            assert!(
+                live - restored.nonce <= u64::from(SYNC_MAX_ADVANCES),
+                "the replay window ({}) must never exceed the configured bound ({SYNC_MAX_ADVANCES})",
+                live - restored.nonce
+            );
+            assert_eq!(
+                live - restored.nonce,
+                unsynced_this_time,
+                "exactly what was left unsynced, not merely within the bound"
+            );
+
+            // The claims a restart no longer knows about are exactly the
+            // ones a payer could now replay -- proven the same way `mod
+            // durability` proves the opposite (a watermark the restart DID
+            // learn refuses a replay): nonce 6 is unspent as far as
+            // `restarted` is concerned.
+            assert_eq!(
+                restarted
+                    .ingest(&evm_claim_json(&channel_id(), 6, 600), 100)
+                    .await
+                    .map(|_| ()),
+                Ok(()),
+                "an unsynced-at-crash-time nonce is, correctly, still spendable after restart"
+            );
+        }
+
+        /// A write failure (as opposed to a sync failure) still rolls the
+        /// watermark back and refuses `NotDurable`, exactly as a pre-#709
+        /// fsync failure did -- nothing has been served yet when a write
+        /// itself cannot be made.
+        #[tokio::test]
+        async fn a_write_failure_still_rolls_back_the_watermark_and_refuses_notdurable() {
+            struct UnwritableJournal;
+            impl Journal for UnwritableJournal {
+                fn append(&self, _entry: &JournalEntry) -> Result<(), JournalError> {
+                    Err(JournalError::Io(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "read-only journal",
+                    )))
+                }
+                fn append_batch_unsynced(
+                    &self,
+                    _entries: &[JournalEntry],
+                ) -> Result<(), JournalError> {
+                    Err(JournalError::Io(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "read-only journal",
+                    )))
+                }
+                fn read_all(&self) -> Result<Vec<JournalEntry>, JournalError> {
+                    Ok(Vec::new())
+                }
+            }
+
+            let gate = ClientClaimGate::restore_with_sync_policy(
+                test_channels(),
+                Arc::new(UnwritableJournal),
+                100,
+                Duration::from_secs(3600),
+            )
+            .expect("an empty journal has nothing to replay");
+
+            let result = gate
+                .ingest(&evm_claim_json(&channel_id(), 1, 100), 100)
+                .await;
+
+            assert_eq!(result, Err(ClaimIngestRejection::NotDurable));
+            assert_eq!(
+                gate.watermark(&format!("evm:{}", channel_id())),
+                None,
+                "a claim that could not be written must not advance the watermark"
             );
         }
     }

@@ -187,6 +187,16 @@ struct VerifiedChannelState {
     /// best-effort and non-durable by design, unlike every other field
     /// here).
     last_claim_time: Option<u64>,
+    /// How many of this channel's watermark advances are written to this
+    /// connector's journal but not yet `fsync`'d (issue #709) -- `0` when
+    /// nothing is outstanding. `unsyncedDepth * price` is the most this
+    /// connector could ever double-serve on this channel if it crashed
+    /// this instant; a channel with a persistently high reading here is
+    /// either under sustained load or sitting behind a sync that keeps
+    /// failing (logged separately, at `error`, on this connector's own
+    /// side) -- either way, an operator watching this figure learns about
+    /// it without a debugger.
+    unsynced_depth: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -404,6 +414,7 @@ fn verified_state(
         available: available.map(|amount| amount.to_string()),
         nonce,
         last_claim_time: state.claim_gate.last_claim_time(channel_key),
+        unsynced_depth: state.claim_gate.unsynced_depth(channel_key),
     }
 }
 
