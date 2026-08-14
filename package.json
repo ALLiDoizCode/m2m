@@ -22,6 +22,7 @@
     "sandcastle": "npx tsx .sandcastle/main.ts",
     "sandcastle:plan": "npx tsx .sandcastle/plan-dry-run.ts",
     "sandcastle:implement": "npx tsx .sandcastle/agent-implement-issue.ts",
+    "sandcastle:fix": "npx tsx .sandcastle/agent-fix-pr.ts",
     "sandcastle:review": "npx tsx .sandcastle/agent-review-pr.ts",
     "publish:mina-zkapp": "npm run build --workspace=packages/mina-zkapp && npm publish --workspace=packages/mina-zkapp --access public",
     "prepare": "husky",
