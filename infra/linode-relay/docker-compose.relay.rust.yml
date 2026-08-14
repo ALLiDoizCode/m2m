@@ -3,9 +3,10 @@
 # ═══════════════════════════════════════════════════════════════════════════
 # Copy of infra/linode-store/docker-compose.store.rust.yml: same pinned
 # image, the same read-only key bind mounts, the same `connector_rust_state`
-# named volume, the same loopback-only `127.0.0.1:4000:4000` publish, and,
-# as of issue #820, the same shape of peering-credential mount (this box's
-# is `apex-relay.secret`, the accepting half of the apex<->relay peering).
+# named volume, and the same loopback-only `127.0.0.1:4000:4000` publish.
+# Issue #820 gave this box a peering-credential mount too (`apex-relay.secret`,
+# the accepting half of the apex<->relay peering); issue #872 removed it along
+# with the apex that was the only counterparty ever dialing in.
 #
 # Run alongside the base stack (never on its own — it has no relay service of
 # its own to front):
@@ -53,11 +54,7 @@ services:
       - ./signer-rust.key:/app/data/signer.key:ro
       - ./settlement-rust.key:/app/data/settlement.key:ro
       - ./settlement-solana-rust.key:/app/data/settlement-solana.key:ro
-      # The g.toon proxy<->relay peering's shared secret (issue #820), same
-      # handling as infra/linode-store/'s apex-store.secret: gitignored,
-      # generated once and copied byte-identical to both boxes.
-      - ./apex-relay.secret:/app/data/apex-relay.secret:ro
-      # The apex's announce identity (issue #870), carried over verbatim so
+      # The retired apex's announce identity (issue #870), carried over verbatim so
       # this box signs `g.toon.relay`'s kind:10032 announce under the SAME
       # pubkey the genesis peer seed already pins -- see
       # ./connector-rust.toml's `[announce] identity_key_file` comment. Must

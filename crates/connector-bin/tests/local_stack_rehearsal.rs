@@ -598,8 +598,9 @@ mod on_chain {
     /// `handler_url` with `Url::join`, and an absolute-path reference replaces
     /// the base's path (RFC 3986 §5.3), so a sender that says `"/"` reaches
     /// `http://relay:3100/` -- not `/write` -- no matter what the route
-    /// configures. `infra/linode-node/connector-rust.toml` says the connector
-    /// "takes no path from the packet"; this shows it does.
+    /// configures. The fleet's committed configs used to say the connector
+    /// "takes no path from the packet" (ADR 0025 records both copies of that
+    /// comment and why they were corrected); this shows it does.
     ///
     /// Note what the miss is NOT: it is not an `F99`. Under ADR 0020 a 404 is
     /// a real answer that consumed real work, so it rides home on a FULFILL

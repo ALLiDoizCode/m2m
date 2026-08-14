@@ -1,5 +1,12 @@
 # Bringing the relay box up as its own connector
 
+> **Historical as of issue #872** (toon-meta#310 / toon-meta#313's live cutover): this runbook's
+> bring-up already happened — the relay box has run its own connector since. Gates (a)-(c) below
+> describe proving the apex↔relay peering before the cutover; that peering, and the apex itself,
+> are gone. The relay box now terminates `g.toon.relay` directly for its own clients (see
+> `docs/devnet-pricing.md`). Kept as the record of how the box was proven safe to bring into the
+> fleet.
+
 Operator runbook for [#815](https://github.com/toon-protocol/connector/issues/815) (Shape A: one
 connector per box, each fronting its own app — decided on #714). Modeled on
 [`btp-peer-transport-bringup.md`](btp-peer-transport-bringup.md)'s "Order" and "Gates" sections,

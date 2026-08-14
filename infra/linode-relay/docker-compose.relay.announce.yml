@@ -56,6 +56,14 @@
 #                  up -d announce
 #
 # ── ORDER MATTERS ACROSS THE TWO BOXES (this box and the apex) ────────────
+# HISTORICAL as of issue #872: the apex has been destroyed (toon-meta#310 /
+# toon-meta#313's live cutover), this loop has long since taken over signing
+# under the adopted pubkey, and there is no longer an apex announcer to
+# coordinate with. Left as the record of the cutover this box already went
+# through, and as the template for the next time a publisher identity needs
+# to move between boxes (docs/operators/announcing-a-node.md, "Cutting over
+# under an adopted key").
+#
 # STOP THE APEX'S ANNOUNCER SIDECAR FIRST, confirm it stopped, and only THEN
 # bring this loop up. That is the REVERSE of the cutover order in
 # docs/operators/announcing-a-node.md, and the reason is `[announce]
@@ -89,30 +97,27 @@
 # it. The 600s `ttl_secs` binds only the kind:10036 seed-relay path -- keep
 # the handoff brisk, but it is not a correctness deadline.
 #
-# `g.toon.relay` is already dropped from `ANNOUNCER_ILP_ADDRESSES` in the
-# committed infra/linode-node/docker-compose.node.announcer.yml -- but that
-# is a different machine, so "same repo change" is not "same deployment
-# moment". Runbook of record: toon-meta#311. See also
+# `g.toon.relay` was already dropped from `ANNOUNCER_ILP_ADDRESSES` in the
+# apex's own docker-compose.node.announcer.yml (that file, and the rest of
+# infra/linode-node/, is gone as of issue #872) -- but that was a different
+# machine, so "same repo change" was not "same deployment moment". Runbook
+# of record: toon-meta#311. See also
 # docs/operators/announcing-a-node.md, "Cutting over under an adopted key".
 #
 # ── Its OWN state volume, deliberately not `connector_rust_state` ──────────
 # `connector announce` loads the SAME `./connector-rust.toml` the serving
 # `connector-rust` service does, and `Config::load` requires every key file
 # it names regardless of which subcommand reads it, so this service mounts
-# the same FIVE key files `docker-compose.relay.rust.yml` does -- the
-# `[signer]` key, the two `[settlement]` keys, `./announce.key` (issue
-# #870), and the `[[peers]]` credential `./apex-relay.secret` (issue #820).
-# That last one is not optional here even though this service never peers:
-# `Config::load` rejects a `secret_file` that is not on disk regardless of
-# whether the subcommand uses it (`PeerSecretFileNotFound` in
-# connector-config/src/error.rs, asserted by
-# `rejects_a_secret_file_that_does_not_exist` in
-# connector-config/src/config.rs), and compose merge cannot
-# supply it because the serving service's mount lives under a different
-# service name. Omitting it makes this service exit before it publishes
-# anything -- the failure #870's reviewer caught, where the adopted
-# identity would have announced nothing while the loop logged
-# `[announce] FAILED rc=...` every cycle.
+# the same FOUR key files `docker-compose.relay.rust.yml` does -- the
+# `[signer]` key, the two `[settlement]` keys and `./announce.key` (issue
+# #870). Compose merge cannot supply any of them because the serving
+# service's mount lives under a different service name, so omitting one
+# here makes this service exit before it publishes anything -- the failure
+# #870's reviewer caught, where the adopted identity would have announced
+# nothing while the loop logged `[announce] FAILED rc=...` every cycle.
+# (Issue #820 added a fifth mount here, the `[[peers]]` credential
+# `./apex-relay.secret`; issue #872 removed it along with the peering it
+# was for.)
 # `state_dir` gets a SEPARATE named volume: two processes sharing one
 # journal is a documented hazard (docs/operators/announcing-a-node.md,
 # "When it refuses to run beside a serving node"), and while that guard is
@@ -176,14 +181,7 @@ services:
       - ./signer-rust.key:/app/data/signer.key:ro
       - ./settlement-rust.key:/app/data/settlement.key:ro
       - ./settlement-solana-rust.key:/app/data/settlement-solana.key:ro
-      # The `[[peers]]` credential `./connector-rust.toml` names (issue #820).
-      # Mounted purely so `Config::load` succeeds -- this service runs
-      # `connector announce --via-own-routing`, which never opens the peering
-      # -- but the loader validates every `secret_file` the config names,
-      # not just the ones the subcommand reads. Same file, same read-only
-      # handling as docker-compose.relay.rust.yml's mount.
-      - ./apex-relay.secret:/app/data/apex-relay.secret:ro
-      # The apex's announce identity (issue #870), same file
+      # The retired apex's announce identity (issue #870), same file
       # docker-compose.relay.rust.yml mounts for the serving connector --
       # this is the process that actually SIGNS under it. See
       # ./connector-rust.toml's `[announce] identity_key_file` comment.

@@ -112,7 +112,7 @@ contract DeployTestnetCutoverScript is Script {
         console.log("");
         console.log("NEXT STEPS -- see docs/evm-deployment.md for the full runbook:");
         console.log("  1. Repoint [settlement.evm] contract_address to the registry address above in");
-        console.log("     infra/linode-node/connector-rust.toml AND infra/linode-store/connector-rust.toml");
+        console.log("     infra/linode-store/connector-rust.toml AND infra/linode-relay/connector-rust.toml");
         console.log("     (both boxes must agree, or a claim one accepts the other cannot resolve).");
         console.log("  2. Redeploy/restart both boxes, then re-run `connector announce` so the live");
         console.log("     kind:10032 event advertises the new TokenNetwork address.");

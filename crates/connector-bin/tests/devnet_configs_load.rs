@@ -5,12 +5,15 @@
 //! infrastructure credentials) can verify. Reachability of the peer or the
 //! apps behind any of these routes is explicitly NOT proven here.
 //!
-//! The fleet is THREE files as of issue #817: the apex
-//! (`infra/linode-node/`), the store (`infra/linode-store/`) and the relay
-//! (`infra/linode-relay/`, added by #816 -- client-edge-only until #820 gave
-//! it its own peering to the apex, mirroring the apex<->store shape). There
-//! are two cases per file (three for the apex), and they prove different
-//! things.
+//! The fleet is TWO files as of issue #872: the store (`infra/linode-store/`)
+//! and the relay (`infra/linode-relay/`, added by #816). It was three
+//! through issue #817 -- the apex (`infra/linode-node/`) sat in front of
+//! both, forwarding `g.toon.ario` and `g.toon.relay` across a paid peering
+//! to each. Issue #872 (toon-meta#310 / toon-meta#313's live cutover)
+//! deleted `infra/linode-node/` and both peerings entirely: with no apex to
+//! dial in, `infra/linode-store/` and `infra/linode-relay/` are
+//! client-edge-only connectors again, each terminating its own prefix
+//! directly. There are two cases per file, and they prove different things.
 //!
 //! **Verbatim** (`*_devnet_config_loads_and_serves_verbatim`) boots the file
 //! exactly as committed, substituting only what this sandbox physically
@@ -29,38 +32,32 @@
 //! through the configured `TokenNetworkRegistry` and there is no contract
 //! at that one (issue #542, issue #576).
 //!
-//! One more substitution joined that list when the apex file's
-//! `[settlement]` section went LIVE against Base Sepolia (#577), and the
-//! store file followed it live when the store box grew a Rust connector of
-//! its own (the relay file was committed live from day one, #816): a
-//! committed live section means the node cannot start without
-//! reaching that chain -- the fail-closed behaviour ADR 0009 asks for, and
-//! exactly the network dependency a test must not have. So ALL THREE
+//! One more substitution joined that list when the store file's
+//! `[settlement]` section went LIVE against Base Sepolia when the store box
+//! grew a Rust connector of its own (the relay file was committed live from
+//! day one, #816): a committed live section means the node cannot start
+//! without reaching that chain -- the fail-closed behaviour ADR 0009 asks
+//! for, and exactly the network dependency a test must not have. So BOTH
 //! verbatim cases now boot with their live settlement sections STRIPPED
 //! ([`without_live_settlement`]), and those sections are proven by the
-//! cases described below. This was module-doc'd here as "a decision to
-//! revisit deliberately" before #577 shipped; this is that decision.
+//! cases described below.
 //!
 //! The store file's settlement stopped being a commented template when that
 //! node became a counterparty rather than a terminus: it accepts client-edge
 //! claims of its own, on whichever chain the buyer chose, so an EVM-only
 //! node would refuse every Solana-paid write. Its section is asserted to
-//! name the SAME registry, program and mint the apex names, because a
+//! name the SAME registry, program and mint the relay names, because a
 //! buyer's channel lives on one deployment and a node pointed elsewhere
 //! cannot resolve it.
 //!
-//! Since #645 the apex file carries issue #628's KEYED per-chain shape --
+//! Since #645 both files carry issue #628's KEYED per-chain shape --
 //! `[settlement.evm]` + `[settlement.evm.key]` and `[settlement.solana]` +
 //! `[settlement.solana.key]` -- in place of the single flat `[settlement]`
-//! (`chain = "evm"`) table. That migration is precisely the drift this
-//! module exists to catch, and it caught it: [`without_live_settlement`]
-//! looked for a literal `"\n[settlement]\n"` that no longer existed, and
-//! the anvil case knew nothing of the second key file, so both apex cases
-//! failed against the committed config. They are keyed off the section
-//! HEADERS now ([`LIVE_SETTLEMENT_SECTIONS`]) rather than one literal
-//! marker, and stripping still panics when a named section is not there
-//! live -- a config that quietly loses its settlement must break this
-//! module, never coast through it.
+//! (`chain = "evm"`) table. They are keyed off the section HEADERS
+//! ([`LIVE_SETTLEMENT_SECTIONS`]) rather than one literal marker, and
+//! stripping still panics when a named section is not there live -- a
+//! config that quietly loses its settlement must break this module, never
+//! coast through it.
 //!
 //! The verbatim case also drives one claimless request at each file's own
 //! terminating route and asserts it is answered with the x402 greeting
@@ -72,41 +69,39 @@
 //!
 //! **Section** (`*_devnet_settlement_section_boots_against_a_deployed_contract`)
 //! points each file's live `[settlement.evm]`, as committed, at a freshly
-//! deployed contract on a disposable local `anvil`, and boots that. All
-//! three are on issue #628's keyed shape, and all three cases assert it
-//! rather than trusting a reader's eye, because the legacy flat table they
-//! left behind still parses and so a slide back would otherwise be silent.
-//! Committed config shapes rot; this keeps them demonstrably working and keeps
+//! deployed contract on a disposable local `anvil`, and boots that. Both are
+//! on issue #628's keyed shape, and both cases assert it rather than
+//! trusting a reader's eye, because the legacy flat table they left behind
+//! still parses and so a slide back would otherwise be silent. Committed
+//! config shapes rot; this keeps them demonstrably working and keeps
 //! `runtime::build`'s settlement construction path covered end to end by the
 //! real binary. It is skipped when no `anvil` is on `PATH`.
 //!
-//! The apex's `[settlement.solana]` leg is deliberately NOT booted. It is
-//! stripped alongside the rest for the verbatim case and stripped again
-//! for the anvil case, which boots the EVM leg only. There is no local
-//! `anvil` equivalent standing by here: the committed leg names public
-//! Solana devnet (`https://api.devnet.solana.com`) and a program deployed
-//! on that cluster, and `SolanaSettlementBackend::connect` does not merely
-//! read -- it fetches the program and mint accounts AND submits a
-//! transaction (`ensure_own_ata_exists`), so booting it would make this
-//! test suite depend on public-internet reachability, on a third party's
-//! rate limits, and on a FUNDED devnet account whose key this sandbox
-//! cannot have. A chain-backed Solana case would need a
-//! `solana-test-validator` with `packages/solana-program` deployed into
-//! it (the shape `connector-settlement-solana`'s own tests use) and a
-//! retargeted `program_id`/`token_address`; that is a different, heavier
-//! test than this module's "the committed file starts" question, and it is
-//! not written here.
-//!
-//! **Parse** (`the_apex_devnet_config_declares_both_committed_settlement_legs`)
-//! is what covers the Solana leg instead: it loads the committed apex file
-//! through the real `Config::load` -- substituting only the same paths the
-//! boot cases substitute -- and asserts both keyed legs parse into typed
-//! `SettlementConfig`s carrying the exact committed values. It reaches no
-//! chain at all, so it costs nothing and cannot flake, and it still fails
-//! loudly if the keyed shape is malformed, if a leg is dropped, or if a
-//! committed address/program id/`decimals` drifts. What it deliberately
-//! does NOT prove is that those Solana values are real on that cluster --
-//! only the fleet's own deploy can show that.
+//! The `[settlement.solana]` leg is deliberately NOT booted. It is stripped
+//! alongside the rest for the verbatim case and stripped again for the
+//! anvil case, which boots the EVM leg only. There is no local `anvil`
+//! equivalent standing by here: the committed leg names public Solana
+//! devnet (`https://api.devnet.solana.com`) and a program deployed on that
+//! cluster, and `SolanaSettlementBackend::connect` does not merely read --
+//! it fetches the program and mint accounts AND submits a transaction
+//! (`ensure_own_ata_exists`), so booting it would make this test suite
+//! depend on public-internet reachability, on a third party's rate limits,
+//! and on a FUNDED devnet account whose key this sandbox cannot have. A
+//! chain-backed Solana case would need a `solana-test-validator` with
+//! `packages/solana-program` deployed into it (the shape
+//! `connector-settlement-solana`'s own tests use) and a retargeted
+//! `program_id`/`token_address`; that is a different, heavier test than
+//! this module's "the committed file starts" question, and it is not
+//! written here. Both files' Solana identity is still checked, just more
+//! weakly and in fewer places than the EVM leg's: a substring `.contains`
+//! against the committed text, not a typed parse, and it lives in each
+//! file's own **section** case above -- so it is skipped along with that
+//! case wherever `anvil` is not on `PATH`. The EVM leg has a typed,
+//! network-free check that always runs
+//! ([`every_fleet_configs_settlement_evm_leg_matches_the_live_identity`]);
+//! the Solana leg has no equivalent, which is a known gap this issue did
+//! not widen -- the apex's own typed parse case that #872 removed covered
+//! the apex file only, never these two.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
@@ -120,25 +115,8 @@ use connector_settlement_evm::EvmSettlementBackend;
 mod support;
 use support::{parse_json_log_addr, write_config, write_raw_key_file};
 
-const APEX_CONFIG: &str = include_str!("../../../infra/linode-node/connector-rust.toml");
 const STORE_CONFIG: &str = include_str!("../../../infra/linode-store/connector-rust.toml");
 const RELAY_CONFIG: &str = include_str!("../../../infra/linode-relay/connector-rust.toml");
-
-/// The apex's announcer sidecar overlay (issue #833) -- committed separately
-/// from `APEX_CONFIG` because it configures a different process
-/// (`packages/announcer`, not the connector binary this module otherwise
-/// boots), but read here for the one property test that ties the two
-/// together: [`the_apex_announcer_never_advertises_a_prefix_it_forwards`].
-const ANNOUNCER_OVERLAY: &str =
-    include_str!("../../../infra/linode-node/docker-compose.node.announcer.yml");
-
-/// The apex's own Rust overlay (issue #490), read here for
-/// [`every_fleet_overlay_pins_the_connector_repos_pin_of_record`] -- the
-/// apex has no `announce` overlay of its own (it still announces through
-/// `packages/announcer`'s sidecar as of issue #848), so this is its only
-/// `image:` pin.
-const APEX_RUST_OVERLAY: &str =
-    include_str!("../../../infra/linode-node/docker-compose.node.rust.yml");
 
 /// The store box's two overlays, read here for one property they must share
 /// and which nothing else in this suite could see: they bind-mount the SAME
@@ -177,13 +155,13 @@ const RELAY_BASE_COMPOSE: &str =
 /// port range.
 const ANVIL_BASE_PORT: u16 = 18_500;
 
-/// Every LIVE (uncommented) settlement section any of the fleet's three
-/// files (apex, store, relay -- issue #817) commits, in issue #628's keyed
-/// per-chain shape as of #645 -- the sections [`without_live_settlement`]
-/// strips for the hermetic verbatim boot. All three name the exact same
-/// four headers, so one list covers all of them; a file that ever needs a
-/// different set is a reason to split this constant, not to widen it
-/// silently.
+/// Every LIVE (uncommented) settlement section either of the fleet's two
+/// files (store, relay -- issue #816/#817, apex removed by #872) commits, in
+/// issue #628's keyed per-chain shape as of #645 -- the sections
+/// [`without_live_settlement`] strips for the hermetic verbatim boot. Both
+/// name the exact same four headers, so one list covers both of them; a file
+/// that ever needs a different set is a reason to split this constant, not
+/// to widen it silently.
 ///
 /// Named exhaustively rather than matched by a `[settlement` prefix so that
 /// the list itself is the claim about what the committed file contains:
@@ -209,68 +187,24 @@ const SOLANA_SETTLEMENT_SECTIONS: &[&str] = &["[settlement.solana]", "[settlemen
 /// rather than something parsed back out of the file under test: a test
 /// that read the expected value from the thing it is testing would keep
 /// passing if that value went back to `0`, which is exactly the regression
-/// issue #557 exists to prevent. Parity with the TypeScript fleet's
-/// `price: '1000'` on the same box (`infra/linode-node/connector.yaml`).
+/// issue #557 exists to prevent. The figure's origin is parity with the
+/// retired TypeScript fleet's own `price: '1000'` -- see
+/// `docs/devnet-pricing.md`, which is the committed source of truth now
+/// that both files that carried that literal are deleted (#901, #872).
 const EXPECTED_STORE_PRICE: u64 = 1000;
 
-/// The `price` the apex file puts on `g.toon.relay`, which is **not** the
-/// store price and is deliberately not folded into one constant. Shared
-/// with the relay box's own file (`infra/linode-relay/connector-rust.toml`,
-/// issue #816/#817): its terminating route names the same literal, since
-/// it is deliberately the same per-frame price quoted for the same prefix,
-/// today just answered on a different box.
+/// The `price` the relay file puts on `g.toon.relay`, which is **not** the
+/// store price and is deliberately not folded into one constant.
 ///
-/// The apex box served `1` from 2026-08-03; the repo said `1000` while the
-/// comment above the value asserted parity with the TypeScript route on the
-/// same box. Owner decision 2026-08-04: **`1` is correct** -- 1 micro-USDC
-/// is the per-frame price the buzz huddles workload needs (49 fps over BTP,
-/// toon-meta#262), and a general-write price is the wrong frame for this
-/// route. The repo is moved to the box rather than the box to the repo.
-///
-/// Two separate literals, not one, because the two prices now genuinely
-/// differ and a single constant would have to be loosened to a range --
-/// which is how #557's guard would rot into asserting nothing. Each is
-/// still a literal for exactly the reason above.
-///
-/// **This is a live 1000x gap against the TypeScript fleet's own
-/// `g.toon.relay` (`price: '1000'`), which fronts the same `relay:3100`.**
-/// It is not an oversight and it does not need reconciling: TypeScript is
-/// being retired, and on the day the Rust connector becomes the default
-/// edge this value simply becomes the devnet's relay price.
+/// Until issue #872 removed the apex, this box's terminating route was fed
+/// by a `peer_id` forward from the apex's own client edge at a
+/// `price`/`fee` split of `1002`/`2` (`EXPECTED_APEX_FORWARD_PRICE`/`_FEE`,
+/// removed with the apex) that had to deliver exactly this literal net of
+/// its fee -- see docs/devnet-pricing.md's history for that arithmetic. Now
+/// that the relay terminates `g.toon.relay` directly for its own clients,
+/// this is simply the box's own price, same as `EXPECTED_STORE_PRICE` is
+/// the store's.
 const EXPECTED_RELAY_PRICE: u64 = 1;
-
-/// The `price` the apex charges its own client for `g.toon.ario`, which it
-/// FORWARDS across the peering rather than terminating.
-///
-/// A third literal rather than an expression over the other two, for the
-/// same reason they are literals: a value derived from the config would keep
-/// passing if the config drifted. What ties it to the others is the separate
-/// arithmetic assertion in
-/// [`the_forwarded_store_leg_delivers_exactly_the_far_ends_price`] below.
-const EXPECTED_APEX_FORWARD_PRICE: u64 = 1002;
-
-/// What the apex retains for carriage on that forward (ADR 0010/0028),
-/// matching the TypeScript fleet's own inter-node fee of 2.
-const EXPECTED_APEX_FORWARD_FEE: u64 = 2;
-
-/// The `price` the apex charges its own client for `g.toon.relay` as of
-/// issue #820, which it now FORWARDS across the apex<->relay peering rather
-/// than terminating. Numerically equal to [`EXPECTED_RELAY_PRICE`], but a
-/// separate literal for the same reason [`EXPECTED_APEX_FORWARD_PRICE`] is
-/// separate from [`EXPECTED_STORE_PRICE`]: the two prices are asserted
-/// independently and tied together only by the explicit arithmetic check in
-/// [`the_forwarded_relay_leg_delivers_exactly_the_far_ends_price`], not by
-/// sharing one constant.
-const EXPECTED_RELAY_FORWARD_PRICE: u64 = 1;
-
-/// What the apex retains for carriage on the `g.toon.relay` forward (owner
-/// decision 2026-08-06, docs/devnet-pricing.md's "The g.toon.relay forward:
-/// price/fee split"): zero, deliberately, unlike the store leg's fee of 2 --
-/// `g.toon.relay` carries buzz huddles at 49 fps over BTP, so any non-zero
-/// fee here would force `price` above the relay's own terminating price,
-/// doubling the per-frame client cost for a workload billed 49 times a
-/// second.
-const EXPECTED_RELAY_FORWARD_FEE: u64 = 0;
 
 /// `str::replace`, but a pattern that matches nothing is a test failure
 /// rather than a silent no-op -- otherwise renaming a line in a committed
@@ -286,27 +220,14 @@ fn replace_expecting_a_match(raw: &str, from: &str, to: &str) -> String {
     raw.replace(from, to)
 }
 
-/// A temp file holding a peering secret, for the `secret_file` the committed
-/// configs name (issue #750). The bytes are arbitrary -- nothing in a boot
-/// test compares them against a counterparty -- but the file must EXIST,
-/// because a `secret_file` that cannot be read is a refuse-to-start.
-fn write_peer_secret() -> tempfile::NamedTempFile {
-    use std::io::Write;
-    let mut file = tempfile::NamedTempFile::new().expect("temp peer secret");
-    file.write_all(b"sandbox-peering-secret\n")
-        .expect("write peer secret");
-    file.flush().expect("flush peer secret");
-    file
-}
-
 /// Substitute only what this sandbox physically cannot supply: the signer
 /// key file (real key material is never committed), the relay's carried-over
 /// `identity_key_file` when the file carries one (issue #870, same reason),
 /// the bind addresses (fixed ports collide across parallel test runs) and
 /// `state_dir` (the committed value is a container path, `/app/state`, which
 /// no test host can create). Every other line -- prefixes, handler URLs,
-/// peer id/addr, `price`, and every `[settlement]` value -- stays the
-/// literal committed content.
+/// `price`, and every `[settlement]` value -- stays the literal committed
+/// content.
 ///
 /// The `state_dir` substitution is a path swap, not a removal: the
 /// committed files must keep naming one, since a devnet box without it
@@ -315,13 +236,17 @@ fn write_peer_secret() -> tempfile::NamedTempFile {
 /// load-bearing -- deleting the line from any of the fleet's files fails
 /// this test rather than silently testing a node with no durable state.
 ///
-/// `peer_secret` is `Some` for a file that carries a peering and `None` for
-/// one that does not -- see the `match` at the end.
+/// No `secret_file` substitution any more: issue #872 removed the apex and
+/// with it the only two peerings this fleet had (`apex-store`, `apex-relay`)
+/// -- neither surviving file's `[[peers]]`/`[[peer_channels]]` tables exist
+/// to name one. The assert below is what used to be the `None` branch of a
+/// `Some`/`None` choice a caller had to make per file; now it is the only
+/// shape, and it still fails loudly rather than silently coasting through a
+/// peering nobody taught this helper to substitute if one is ever added back.
 fn with_sandbox_paths(
     raw: &str,
     key_path: &std::path::Path,
     state_dir: &std::path::Path,
-    peer_secret: Option<&std::path::Path>,
 ) -> String {
     let replaced = replace_expecting_a_match(
         raw,
@@ -342,85 +267,28 @@ fn with_sandbox_paths(
     // reasoning as the `[signer]` key_file above (real key material is
     // never committed, and `Config::load` checks `identity_key_file` exists
     // regardless of which subcommand reads it), but optional: only the
-    // relay file carries this line as of #870, so a plain `.replace` rather
-    // than `replace_expecting_a_match` leaves the apex and store files, which
-    // have no `identity_key_file` at all, untouched. A no-op here is still
-    // caught rather than silently skipped: if the committed path ever moves,
+    // relay file carries this line, so a plain `.replace` rather than
+    // `replace_expecting_a_match` leaves the store file, which has no
+    // `identity_key_file` at all, untouched. A no-op here is still caught
+    // rather than silently skipped: if the committed path ever moves,
     // `Config::load` refuses the container path with
     // `AnnounceIdentityKeyFileNotFound` and the caller's `.expect` fires.
     let replaced = replaced.replace(
         "identity_key_file = \"/app/data/announce.key\"",
         &format!("identity_key_file = \"{}\"", key_path.display()),
     );
-    // The peering's shared secret (issue #750), same substitution and same
-    // reason as the key files: the committed configs name a path on the box,
-    // never the bytes, and config load refuses a `secret_file` that is not
-    // there. Every `secret_file = "..."` line is replaced with the SAME temp
-    // path -- the apex file carries two as of issue #820 (`apex-store` and
-    // `apex-relay`), and a boot test does not compare bytes against a
-    // counterparty, so one shared sandbox secret for however many peerings a
-    // file declares is enough.
-    //
-    // `None` for a client-edge-only file with no `[[peers]]` table of its
-    // own at all -- the store and relay boxes both had this shape once
-    // (issues #816/#817), neither does any more as of #820. A caller that
-    // passes `None` against a file which DOES carry a `secret_file` gets a
-    // clear panic rather than `Config::load` refusing later with a confusing
-    // "file not found".
-    match peer_secret {
-        Some(peer_secret) => repoint_every_secret_file(&replaced, peer_secret),
-        None => {
-            assert!(
-                !replaced.contains("secret_file ="),
-                "this config carries a `secret_file` but was booted with no \
-                 peer secret -- pass `Some(..)` to `with_sandbox_paths` for it"
-            );
-            replaced
-        }
-    }
-}
-
-/// Point every `secret_file = "/app/data/…"` line in `raw` at `peer_secret`,
-/// keeping the rest of each line (an inline table's trailing ` }`) intact.
-///
-/// A line rewrite rather than a [`replace_expecting_a_match`] call per
-/// peering: the apex file carries two `secret_file` lines as of issue #820
-/// (`apex-store` and `apex-relay`) and would grow a third the day a third
-/// peering lands, so the substitution follows the file instead of having to
-/// be re-taught each committed path. Finding no line at all is a failure,
-/// for the same reason `replace_expecting_a_match` exists.
-fn repoint_every_secret_file(raw: &str, peer_secret: &std::path::Path) -> String {
-    const NEEDLE: &str = "secret_file = \"/app/data/";
-
-    let mut out = String::with_capacity(raw.len());
-    let mut replaced_any = false;
-    for line in raw.lines() {
-        match line.find(NEEDLE) {
-            Some(start) => {
-                let after_needle = &line[start + NEEDLE.len()..];
-                let close_quote = after_needle
-                    .find('"')
-                    .unwrap_or_else(|| panic!("`{NEEDLE}` line has no closing quote: {line:?}"));
-                out.push_str(&line[..start]);
-                out.push_str(&format!("secret_file = \"{}\"", peer_secret.display()));
-                out.push_str(&after_needle[close_quote + 1..]);
-                replaced_any = true;
-            }
-            None => out.push_str(line),
-        }
-        out.push('\n');
-    }
-
     assert!(
-        replaced_any,
-        "expected at least one `secret_file` line in the committed config \
-         text -- if every peering was removed, pass `None` instead of \
-         `Some(..)` here"
+        !replaced.contains("secret_file ="),
+        "no surviving box's committed config should carry a peering \
+         `secret_file` any more -- issue #872 removed the apex, and with it \
+         the only two peerings this fleet had (apex-store, apex-relay). If a \
+         new peering is intentional, teach this helper to substitute its \
+         secret_file again"
     );
-    out
+    replaced
 }
 
-/// The apex file's two settlement key files, each pointed at a real file
+/// A fleet file's two settlement key files, each pointed at a real file
 /// this sandbox can supply -- the same substitution the `[signer]` key gets
 /// in [`with_sandbox_paths`], and for the same reason: real key material is
 /// never committed, and config load refuses a `key_file` that is not there.
@@ -496,8 +364,8 @@ fn without_sections(raw: &str, headers: &[&str]) -> String {
 /// ([`LIVE_SETTLEMENT_SECTIONS`]) for the verbatim boot -- see the module
 /// docs: a committed live section is a startup-blocking chain dependency by
 /// design (ADR 0009), and the sections themselves are proven by the
-/// anvil-backed and parse cases below. Shared by all three fleet files
-/// (apex, store, relay), which all commit the same four headers.
+/// anvil-backed cases below. Shared by both fleet files (store, relay),
+/// which both commit the same four headers.
 ///
 /// Panics when a named section is not there live, and again when a live
 /// settlement section survives that this module has not been taught about
@@ -524,7 +392,7 @@ fn without_live_settlement(raw: &str) -> String {
 /// freshly deployed local chain. `decimals` and the key location stay the
 /// literal committed content.
 ///
-/// The committed values it looks for are the same [`APEX_LIVE_REGISTRY`] and
+/// The committed values it looks for are the same [`FLEET_LIVE_REGISTRY`] and
 /// [`EXPECTED_SETTLEMENT_TOKEN_ADDRESS`] constants the identity test asserts,
 /// rather than per-call arguments: every fleet file names that one pair, and
 /// reading both off one constant apiece is what keeps the substitution and
@@ -542,7 +410,7 @@ fn with_anvil_settlement(
     );
     let replaced = replace_expecting_a_match(
         &replaced,
-        &format!("contract_address = \"{APEX_LIVE_REGISTRY}\""),
+        &format!("contract_address = \"{FLEET_LIVE_REGISTRY}\""),
         &format!("contract_address = \"{contract_address:?}\""),
     );
     replace_expecting_a_match(
@@ -646,8 +514,8 @@ fn unpaid_prepare(destination: &str) -> Prepare {
 /// forwarded to the app -- the free-gateway failure mode this issue closes.
 ///
 /// The price is a parameter rather than one module constant because the
-/// apex prices `g.toon.relay` and its store legs differently (see
-/// [`EXPECTED_RELAY_PRICE`]). Every caller passes a literal, so the guard
+/// relay and store routes are priced differently (see [`EXPECTED_RELAY_PRICE`]
+/// and [`EXPECTED_STORE_PRICE`]). Every caller passes a literal, so the guard
 /// keeps the property #557 needs: the expectation is never read back out of
 /// the file under test.
 async fn assert_answered_with_x402_greeting(
@@ -687,58 +555,6 @@ async fn x402_terms(client_edge_addr: &str, destination: &str) -> serde_json::Va
 }
 
 #[tokio::test]
-async fn the_apex_relay_side_devnet_config_loads_and_serves_verbatim() {
-    assert!(APEX_CONFIG.contains("g.toon.relay"));
-    assert!(APEX_CONFIG.contains("g.toon.ario"));
-    // `g.toon.store` was retired on 2026-08-05 (owner decision): one name
-    // for one app. This asserts its ABSENCE, so re-adding the alias has to
-    // be a deliberate edit here too rather than drifting back in.
-    assert!(!APEX_CONFIG.contains("prefix = \"g.toon.store\""));
-
-    let key_file = write_raw_key_file(9);
-    let state_dir = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
-    // The live [settlement] tail is stripped for hermeticity (module
-    // docs); the anvil-backed case below boots it.
-    let connector = boot(&with_sandbox_paths(
-        &without_live_settlement(APEX_CONFIG),
-        key_file.path(),
-        state_dir.path(),
-        Some(peer_secret.path()),
-    ));
-
-    // Greeted at [`EXPECTED_RELAY_FORWARD_PRICE`], not [`EXPECTED_RELAY_PRICE`]
-    // (the relay box's own terminate price, asserted by the relay's own
-    // verbatim case below): since issue #820 this is a `peer_id` forward
-    // across the apex<->relay peering, not a local `handler_url` route, and
-    // the two prices are asserted independently even though they currently
-    // share the same literal (owner decision, docs/devnet-pricing.md).
-    assert_answered_with_x402_greeting(
-        &connector.client_edge_addr,
-        "g.toon.relay",
-        EXPECTED_RELAY_FORWARD_PRICE,
-    )
-    .await;
-    // The store leg (#600): `g.toon.ario` is the destination a shipped
-    // client actually dials (buzz pins it in compiled code), and since
-    // 2026-08-04 it is FORWARDED across the apex<->store peering rather than
-    // terminated here.
-    //
-    // Greeted at [`EXPECTED_APEX_FORWARD_PRICE`], not the store's own price:
-    // ADR 0028 gives a forwarded route a client-edge `price` and a `fee` the
-    // hop retains, so what a client pays here is strictly more than what the
-    // far end charges. That a `peer_id` route is greeted AT ALL is the #620
-    // property -- before it, a peer route greeted nothing and charged
-    // nothing, which is a free-write path on `g.toon`.
-    assert_answered_with_x402_greeting(
-        &connector.client_edge_addr,
-        "g.toon.ario",
-        EXPECTED_APEX_FORWARD_PRICE,
-    )
-    .await;
-}
-
-#[tokio::test]
 async fn the_store_side_devnet_config_loads_and_serves_verbatim() {
     // The one prefix this box terminates, and the reason the config exists:
     // a store box that did not answer `g.toon.ario` could not take over from
@@ -774,12 +590,10 @@ async fn the_store_side_devnet_config_loads_and_serves_verbatim() {
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
     let connector = boot(&with_sandbox_paths(
         &without_live_settlement(STORE_CONFIG),
         key_file.path(),
         state_dir.path(),
-        Some(peer_secret.path()),
     ));
 
     assert_answered_with_x402_greeting(
@@ -795,36 +609,32 @@ async fn the_store_side_devnet_config_loads_and_serves_verbatim() {
 /// The relay box's own file (issue #816/#817), modelled on the store's case
 /// above: a connector that terminates `g.toon.relay` against the relay app
 /// now co-located with it, in place of the apex's former local `handler_url`
-/// route to the same app -- and, as of issue #820, also carries the
-/// accept-only half of the apex<->relay peering (mirroring the store box's
-/// own accept-only shape).
+/// route to the same app. Issue #820 gave this box the accept-only half of
+/// an apex<->relay peering; issue #872 removed it along with the apex.
 #[tokio::test]
 async fn the_relay_side_devnet_config_loads_and_serves_verbatim() {
     assert!(RELAY_CONFIG.contains("g.toon.relay"));
 
-    // Issue #820: this box now peers with the apex. Line-anchored because
-    // the file's own header prose is free to *name* both tables while
-    // explaining them, so a substring match would trip on prose rather than
-    // an actual table.
+    // Issue #872: this box no longer peers with anything -- the apex that
+    // used to dial in is gone. Line-anchored because the file's own header
+    // prose is free to *name* either table while explaining their removal,
+    // so a substring match would trip on prose rather than an actual table.
     assert!(
-        RELAY_CONFIG.lines().any(|line| line.trim() == "[[peers]]")
-            && RELAY_CONFIG
+        !RELAY_CONFIG.lines().any(|line| line.trim() == "[[peers]]")
+            && !RELAY_CONFIG
                 .lines()
                 .any(|line| line.trim() == "[[peer_channels]]"),
-        "the relay box is expected to carry its own [[peers]]/\
-         [[peer_channels]] table as of issue #820 -- if that changed, this \
-         test's premise (and `with_sandbox_paths`'s peer-secret argument \
-         below) needs revisiting, not silently dropping the peer secret"
+        "the relay box must not carry a [[peers]]/[[peer_channels]] table \
+         any more -- issue #872 removed the apex, the only counterparty \
+         that ever dialed this box's peering"
     );
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
     let connector = boot(&with_sandbox_paths(
         &without_live_settlement(RELAY_CONFIG),
         key_file.path(),
         state_dir.path(),
-        Some(peer_secret.path()),
     ));
 
     assert_answered_with_x402_greeting(
@@ -835,249 +645,12 @@ async fn the_relay_side_devnet_config_loads_and_serves_verbatim() {
     .await;
 }
 
-/// ADR 0028's arithmetic, across the two committed files: what the apex
-/// forwards must be EXACTLY what the far end charges.
-///
-/// This replaces an equality test (`both configs price the prefix the same`)
-/// whose premise the peering retired. While the apex terminated the store leg
-/// at the store box's public nginx there genuinely were two doors into one
-/// handler, and an unequal pair was an arbitrage the cheaper door would win.
-/// Now there is one path: a client pays the apex `price`, the apex keeps
-/// `fee`, and `price - fee` arrives at a route the store box prices itself.
-///
-/// The relation is a stop-ship, not a tidiness check. Under-forwarding was
-/// survivable only while issue #752 was open -- a terminating connector did
-/// not charge its `price` for a peer-wire arrival, so the store box never
-/// checked. #754 landed that charge, so `price - fee` short of the far end's
-/// price is now an F03 on every forwarded write.
-#[test]
-fn the_forwarded_store_leg_delivers_exactly_the_far_ends_price() {
-    let forwarded = EXPECTED_APEX_FORWARD_PRICE - EXPECTED_APEX_FORWARD_FEE;
-    assert_eq!(
-        forwarded, EXPECTED_STORE_PRICE,
-        "the apex charges {EXPECTED_APEX_FORWARD_PRICE} and keeps \
-         {EXPECTED_APEX_FORWARD_FEE}, so {forwarded} reaches the store box -- \
-         which prices the same prefix at {EXPECTED_STORE_PRICE}. Since #754 a \
-         short-forward is an F03, not a silent subsidy"
-    );
-
-    // And the literals above must still be what the files say.
-    assert_eq!(
-        route_price(APEX_CONFIG, "g.toon.ario"),
-        EXPECTED_APEX_FORWARD_PRICE
-    );
-    assert_eq!(
-        route_price(STORE_CONFIG, "g.toon.ario"),
-        EXPECTED_STORE_PRICE
-    );
-}
-
-/// The relay sibling of the test above (issue #820): what the apex forwards
-/// across the apex<->relay peering must be EXACTLY what the relay box's own
-/// terminating route charges. Owner decision 2026-08-06 makes this a 1/0
-/// split rather than the store leg's 1002/2 -- see
-/// docs/devnet-pricing.md's "The g.toon.relay forward: price/fee split" for
-/// the full argument (a non-zero fee would force the apex's `price` above
-/// the relay's own `1`, doubling the per-frame cost of a 49fps workload) --
-/// but the property itself is the same #754 stop-ship: a short forward is an
-/// F03 on every write, not a silent subsidy.
-#[test]
-fn the_forwarded_relay_leg_delivers_exactly_the_far_ends_price() {
-    let forwarded = EXPECTED_RELAY_FORWARD_PRICE - EXPECTED_RELAY_FORWARD_FEE;
-    assert_eq!(
-        forwarded, EXPECTED_RELAY_PRICE,
-        "the apex charges {EXPECTED_RELAY_FORWARD_PRICE} and keeps \
-         {EXPECTED_RELAY_FORWARD_FEE}, so {forwarded} reaches the relay box -- \
-         which prices the same prefix at {EXPECTED_RELAY_PRICE}. Since #754 a \
-         short-forward is an F03, not a silent subsidy"
-    );
-
-    // And the literals above must still be what the files say.
-    assert_eq!(
-        route_price(APEX_CONFIG, "g.toon.relay"),
-        EXPECTED_RELAY_FORWARD_PRICE
-    );
-    assert_eq!(
-        route_price(RELAY_CONFIG, "g.toon.relay"),
-        EXPECTED_RELAY_PRICE
-    );
-}
-
-/// The `price` of the `[[routes]]` entry whose `prefix` matches, read from
-/// the committed text rather than from a loaded `Config` so this works
-/// without the settlement legs the loader would insist on reaching.
-fn route_price(raw: &str, prefix: &str) -> u64 {
-    let mut in_route = false;
-    for line in raw.lines().map(str::trim) {
-        if line == "[[routes]]" {
-            in_route = false;
-            continue;
-        }
-        if line == format!("prefix = \"{prefix}\"") {
-            in_route = true;
-            continue;
-        }
-        if in_route {
-            if let Some(value) = line.strip_prefix("price = ") {
-                return value.parse().expect("a numeric price");
-            }
-        }
-    }
-    panic!("no priced `{prefix}` route in the committed config text");
-}
-
-/// The value `key` is set to in the apex's announcer sidecar overlay, read
-/// straight off the committed line -- matching [`route_price`]'s precedent
-/// of reading a config-shape assertion off the committed text rather than
-/// pulling in a YAML parser for one env var.
-fn announcer_env(raw: &str, key: &str) -> String {
-    let needle = format!("{key}:");
-    raw.lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix(&needle))
-        .unwrap_or_else(|| panic!("the announcer overlay must set {key}"))
-        .trim()
-        .to_string()
-}
-
-/// The `ANNOUNCER_ILP_ADDRESSES` CSV value the apex's announcer sidecar
-/// overlay commits, split into its entries.
-///
-/// Each entry is trimmed individually, not just the value as a whole: YAML
-/// accepts `g.toon, g.toon.relay` for the same list, and an untrimmed
-/// ` g.toon.relay` would compare unequal to the route prefix it names --
-/// which would let the property test below pass over exactly the announce
-/// it exists to refuse.
-fn announcer_ilp_addresses(raw: &str) -> Vec<String> {
-    announcer_env(raw, "ANNOUNCER_ILP_ADDRESSES")
-        .split(',')
-        .map(|address| address.trim().to_string())
-        .collect()
-}
-
-/// Issue #833's core property: this node must never advertise, under its
-/// OWN identity, an address it FORWARDS rather than terminates. A stock
-/// client seals a gift wrap to whichever `edgeIdentity` published the
-/// announce it read -- ADR 0018 requires that be the TERMINATING
-/// connector's key, but nothing on the wire enforces a publisher only
-/// advertising what it terminates. An announce claiming a forwarded prefix
-/// under the forwarder's own key is exactly the defect that let a client
-/// pay `g.toon.ario`, seal to the apex, and be refused
-/// `F01 gift wrap could not be opened` at the store -- after the money was
-/// already spent.
-///
-/// Asserted as a PROPERTY over the apex's own committed `[[routes]]` table
-/// (which prefixes it forwards, via `Config::peer_routes()`) against the
-/// announcer overlay's committed `ANNOUNCER_ILP_ADDRESSES` (which prefixes
-/// it announces), rather than a literal "must not contain g.toon.ario"
-/// string: nothing before this test modelled two connectors with distinct
-/// identities where one forwards a prefix the other terminates, which is
-/// exactly why the defect survived every other gate. The same defect
-/// reproduces the moment `g.toon.relay` becomes a forwarded `peer_id` route
-/// (issue #820) if this sidecar is still announcing it then, and a property
-/// test catches that the day it happens rather than needing to be re-taught
-/// the new prefix by hand -- the issue's own "gate #820 on this".
-#[test]
-fn the_apex_announcer_never_advertises_a_prefix_it_forwards() {
-    let key_file = write_raw_key_file(9);
-    let state_dir = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
-    let text = with_sandbox_paths(
-        &without_live_settlement(APEX_CONFIG),
-        key_file.path(),
-        state_dir.path(),
-        Some(peer_secret.path()),
-    );
-    let config_file = write_config(&text);
-    let config = Config::load(config_file.path()).expect("the committed apex config must parse");
-
-    let forwarded: Vec<&str> = config.peer_routes().iter().map(|r| r.prefix()).collect();
-    assert!(
-        !forwarded.is_empty(),
-        "the apex config is expected to forward at least `g.toon.ario` \
-         across the apex-store peering -- if that changed, this test's \
-         premise needs revisiting, not silently passing over an empty set"
-    );
-
-    let announced = announcer_ilp_addresses(ANNOUNCER_OVERLAY);
-    for prefix in forwarded {
-        assert!(
-            !announced.iter().any(|a| a == prefix),
-            "the announcer sidecar's ANNOUNCER_ILP_ADDRESSES names `{prefix}`, \
-             which the apex config forwards (not terminates) via a peer_id \
-             route -- announcing it under the apex's OWN identity is issue \
-             #833's exact defect: a client seals its gift wrap to the \
-             publisher's key, pays, and the terminating node refuses to open \
-             it. Give the terminating node its own publisher instead (see \
-             infra/linode-store/connector-rust.toml's [announce] section) \
-             and drop the prefix from this list"
-        );
-    }
-}
-
-/// Issue #841 (extended by #843 to cover `ANNOUNCER_ROUTE_PUBLISH` too):
-/// `routes.store`/`routes.publish` in the kind:10032 announce are how a
-/// client finds where to upload/publish -- each must name a prefix this
-/// node actually has a route for (terminated or forwarded), or every client
-/// that trusts it gets `F02 no route`. Both hints are DERIVED when their
-/// override env var is unset (`deriveRouteHints`,
-/// `packages/announcer/src/config.ts`), off whichever `.store`/`.ario` or
-/// `.relay` entry is in `ANNOUNCER_ILP_ADDRESSES` -- and derivation falls
-/// through to guessing one hint FROM the other when its own suffix is
-/// absent from that list. #833 removing `g.toon.ario` silently fired the
-/// store guess (`g.toon.relay` -> `g.toon.store`, issue #841); #843 removing
-/// `g.toon.relay` would just as silently fire the PUBLISH guess the other
-/// way (`g.toon.ario` -> `g.toon.relay`'s spot, i.e. `routes.publish =
-/// g.toon.ario`) if the override were left unset. Both are pinned overrides
-/// now, and this test covers both rather than just the one #841 caught.
-///
-/// Asserted as a property over the apex's own committed route table rather
-/// than a literal on both sides -- a test that hardcodes the same string
-/// twice passes even if both are wrong together, which is exactly the shape
-/// #839's test missed this in.
-#[test]
-fn the_announced_route_hints_name_prefixes_the_apex_actually_routes() {
-    let key_file = write_raw_key_file(9);
-    let state_dir = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
-    let text = with_sandbox_paths(
-        &without_live_settlement(APEX_CONFIG),
-        key_file.path(),
-        state_dir.path(),
-        Some(peer_secret.path()),
-    );
-    let config_file = write_config(&text);
-    let config = Config::load(config_file.path()).expect("the committed apex config must parse");
-
-    let routed: Vec<&str> = config
-        .routes()
-        .iter()
-        .map(|r| r.prefix())
-        .chain(config.peer_routes().iter().map(|r| r.prefix()))
-        .collect();
-
-    for (env_key, announce_field) in [
-        ("ANNOUNCER_ROUTE_STORE", "routes.store"),
-        ("ANNOUNCER_ROUTE_PUBLISH", "routes.publish"),
-    ] {
-        let hint = announcer_env(ANNOUNCER_OVERLAY, env_key);
-        assert!(
-            routed.iter().any(|prefix| *prefix == hint),
-            "the announcer overlay's {env_key} names `{hint}`, which is not \
-             a prefix the apex's own committed connector-rust.toml routes at \
-             all (routed prefixes: {routed:?}) -- a client reading \
-             `{announce_field}` off the kind:10032 announce would get \
-             F02 no route. See issue #841/#843"
-        );
-    }
-}
-
 /// Issue #833's fix, terminating side: the store box announces
 /// `g.toon.ario` under its OWN `[signer]` identity -- the key that answers
 /// this node's `/ilp/identity` and opens every gift wrap it terminates
 /// (ADR 0018) -- rather than depending on the apex's now-removed stopgap
-/// announce (the property test above is what makes removing that stopgap
-/// safe to assert here rather than merely hoped for).
+/// announce (the apex, and its announcer sidecar, are gone entirely as of
+/// issue #872).
 #[test]
 fn the_store_devnet_config_announces_g_toon_ario_under_its_own_identity() {
     assert!(
@@ -1087,13 +660,7 @@ fn the_store_devnet_config_announces_g_toon_ario_under_its_own_identity() {
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
-    let text = with_sandbox_paths(
-        STORE_CONFIG,
-        key_file.path(),
-        state_dir.path(),
-        Some(peer_secret.path()),
-    );
+    let text = with_sandbox_paths(STORE_CONFIG, key_file.path(), state_dir.path());
     let text = with_sandbox_settlement_keys(&text, key_file.path());
     let config_file = write_config(&text);
     let config = Config::load(config_file.path()).expect("the committed store config must parse");
@@ -1128,8 +695,7 @@ fn the_store_devnet_config_announces_g_toon_ario_under_its_own_identity() {
 /// Asserted over the committed `[[routes]]` table rather than a literal
 /// `"g.toon.relay"` on both sides -- a test that hardcodes the same string
 /// twice passes when both are wrong together, which is exactly the shape
-/// that let #841 slip past #839's own test (see the module docs and
-/// [`the_apex_announcer_never_advertises_a_prefix_it_forwards`] above).
+/// that let #841 slip past #839's own test.
 ///
 /// Also covers issue #870's `identity_key_file` addition -- the property
 /// this test's name describes did not change (the relay still announces
@@ -1143,14 +709,8 @@ fn the_relay_devnet_config_announces_only_prefixes_it_terminates() {
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
     let text = with_sandbox_settlement_keys(
-        &with_sandbox_paths(
-            RELAY_CONFIG,
-            key_file.path(),
-            state_dir.path(),
-            Some(peer_secret.path()),
-        ),
+        &with_sandbox_paths(RELAY_CONFIG, key_file.path(), state_dir.path()),
         key_file.path(),
     );
     let config_file = write_config(&text);
@@ -1257,13 +817,7 @@ fn assert_carries_two_box_cutover_notice(
 fn the_store_devnet_config_carries_the_two_box_cutover_notice() {
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
-    let text = with_sandbox_paths(
-        STORE_CONFIG,
-        key_file.path(),
-        state_dir.path(),
-        Some(peer_secret.path()),
-    );
+    let text = with_sandbox_paths(STORE_CONFIG, key_file.path(), state_dir.path());
     let text = with_sandbox_settlement_keys(&text, key_file.path());
     let config_file = write_config(&text);
     let config = Config::load(config_file.path()).expect("the committed store config must parse");
@@ -1280,14 +834,8 @@ fn the_store_devnet_config_carries_the_two_box_cutover_notice() {
 fn the_relay_devnet_config_carries_the_two_box_cutover_notice() {
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
     let text = with_sandbox_settlement_keys(
-        &with_sandbox_paths(
-            RELAY_CONFIG,
-            key_file.path(),
-            state_dir.path(),
-            Some(peer_secret.path()),
-        ),
+        &with_sandbox_paths(RELAY_CONFIG, key_file.path(), state_dir.path()),
         key_file.path(),
     );
     let config_file = write_config(&text);
@@ -1300,8 +848,8 @@ fn the_relay_devnet_config_carries_the_two_box_cutover_notice() {
 }
 
 /// The trimmed lines of a committed `[announce]` section, or `None` for a
-/// file that has no such section -- [`route_price`]'s precedent again, no
-/// TOML dependency needed to read a couple of keys written one per line.
+/// file that has no such section -- read off the committed text by line, no
+/// TOML dependency needed for a couple of keys written one per line.
 fn announce_section(raw: &str) -> Option<Vec<&str>> {
     let mut lines = raw.lines().map(str::trim);
     lines.find(|line| *line == "[announce]")?;
@@ -1377,7 +925,6 @@ fn derived_route_store(addresses: &[String]) -> String {
 #[test]
 fn every_committed_announce_without_a_store_or_ario_address_pins_route_store() {
     for (label, raw) in [
-        ("infra/linode-node/connector-rust.toml", APEX_CONFIG),
         ("infra/linode-store/connector-rust.toml", STORE_CONFIG),
         ("infra/linode-relay/connector-rust.toml", RELAY_CONFIG),
     ] {
@@ -1406,8 +953,8 @@ fn every_committed_announce_without_a_store_or_ario_address_pins_route_store() {
 }
 
 /// The `image:` tag every service in a compose overlay pins, read off the
-/// committed text -- [`route_price`]'s precedent again, and for the same
-/// reason: one line, no YAML dependency.
+/// committed text by line -- [`announce_section`]'s precedent again, and for
+/// the same reason: one line, no YAML dependency.
 fn pinned_connector_images(raw: &str) -> Vec<String> {
     raw.lines()
         .map(str::trim)
@@ -1523,14 +1070,8 @@ fn relay_overlays_sharing_one_config_pin_one_image() {
 fn load_committed_store_config() -> Config {
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
     let text = with_sandbox_settlement_keys(
-        &with_sandbox_paths(
-            STORE_CONFIG,
-            key_file.path(),
-            state_dir.path(),
-            Some(peer_secret.path()),
-        ),
+        &with_sandbox_paths(STORE_CONFIG, key_file.path(), state_dir.path()),
         key_file.path(),
     );
     let config_file = write_config(&text);
@@ -1544,12 +1085,10 @@ fn load_committed_store_config() -> Config {
 fn load_committed_relay_config() -> Config {
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
     let text = with_sandbox_paths(
         &without_live_settlement(RELAY_CONFIG),
         key_file.path(),
         state_dir.path(),
-        Some(peer_secret.path()),
     );
     let config_file = write_config(&text);
     Config::load(config_file.path()).expect("the committed relay config must parse")
@@ -1651,145 +1190,14 @@ fn the_store_announces_through_the_relay_box_not_the_apex() {
     );
 }
 
-/// The new ERC-2771 `TokenNetwork` (#695/#811) the apex<->store
-/// `[[peer_channels]]` row must settle on -- the same address
-/// [`APEX_LIVE_REGISTRY`] resolves for client settlement, since the
-/// cutover created exactly one new `TokenNetwork` for the fleet's mock USDC
-/// (issue #822: the peer channel was deliberately left on the OLD
-/// TokenNetwork at cutover time, AC4, and this is the follow-up migration).
-const PEER_CHANNEL_LIVE_TOKEN_NETWORK: &str = "0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478";
-
-/// The OLD TokenNetwork the apex<->store channel settled on before issue
-/// #822 -- still the correct address for every _historical_ record
-/// (`BYTECODE-PROVENANCE.md`, `packages/contracts/deployments*`), but a
-/// live `[[peer_channels]]` row naming it is exactly the split-brain #822
-/// exists to end.
-const PEER_CHANNEL_OLD_TOKEN_NETWORK: &str = "0x1E95493fEF46707E034b4a1945f25a8C76A1823D";
-
-/// Sentinel `channel_id`/`counterparty_key` values (issue #822): the
-/// replacement channel does not exist yet, so there is no real channel_id to
-/// commit -- opening and funding it against the new `TokenNetwork`, then
-/// filling these in on both boxes at once, is a live, human step
-/// (`docs/operators/peer-channel-migration.md`), not something this repo
-/// diff can do. The pre-cutover channel is deliberately left OPEN on the old
-/// contract until that replacement is proven end to end, so its real
-/// channel_id must not be carried over here either -- it names a channel
-/// whose signing domain this row no longer describes. `0xdead...` rather
-/// than the zero address so a reader cannot mistake it for a real,
-/// merely-unfunded value.
-const PEER_CHANNEL_ID_PLACEHOLDER: &str =
-    "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead";
-const PEER_CHANNEL_COUNTERPARTY_KEY_PLACEHOLDER: &str =
-    "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead";
-
-/// The apex-relay peering's own placeholder (issue #820) -- deliberately a
-/// DIFFERENT literal from the apex-store row's above. `ClaimBook`/config
-/// load refuses two `[[peer_channels]]` rows naming the same `channel_id`
-/// (`ConfigError::PeerChannelDuplicate`), and once the apex carries both
-/// peerings in one file that collision is real, not hypothetical -- so a
-/// second dead-marker (`...beef` in place of the last `...dead` group,
-/// same length) is used rather than reusing the apex-store one verbatim.
-const APEX_RELAY_PEER_CHANNEL_ID_PLACEHOLDER: &str =
-    "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeadbeef";
-const APEX_RELAY_PEER_CHANNEL_COUNTERPARTY_KEY_PLACEHOLDER: &str =
-    "0xdeaddeaddeaddeaddeaddeaddeaddeaddeadbeef";
-
-/// Issue #822's repo-side AC: both boxes' `[[peer_channels]]` rows for
-/// `apex-store` name the new TokenNetwork, never the old one, and carry the
-/// placeholder `channel_id`/`counterparty_key` rather than the retired
-/// channel's real values -- a config that quietly kept the old domain, or
-/// reused the closed channel's id under the new one, must fail this rather
-/// than silently ship a claim the other box cannot resolve or a channel
-/// that was never actually opened against this domain.
-#[test]
-fn the_apex_store_peer_channel_names_the_new_token_network_with_placeholder_fields() {
-    for (label, raw) in [("apex", APEX_CONFIG), ("store", STORE_CONFIG)] {
-        assert!(
-            raw.contains(&format!(
-                "token_network = \"{PEER_CHANNEL_LIVE_TOKEN_NETWORK}\""
-            )),
-            "the {label} config's apex-store [[peer_channels]] row must settle on the new \
-             ERC-2771 TokenNetwork ({PEER_CHANNEL_LIVE_TOKEN_NETWORK}) -- both boxes must agree \
-             or a claim one accepts is unresolvable by the other"
-        );
-        assert!(
-            !raw.contains(&format!(
-                "token_network = \"{PEER_CHANNEL_OLD_TOKEN_NETWORK}\""
-            )),
-            "the {label} config must not still bind [[peer_channels]] to the OLD TokenNetwork \
-             ({PEER_CHANNEL_OLD_TOKEN_NETWORK}) -- that standing two-contract split-brain is \
-             exactly what issue #822 ends"
-        );
-        assert!(
-            raw.contains(&format!("channel_id = \"{PEER_CHANNEL_ID_PLACEHOLDER}\"")),
-            "the {label} config's apex-store channel_id must be the clearly-marked placeholder \
-             until the live migration opens a real channel against the new TokenNetwork -- the \
-             retired channel's id must never be reused under a different signing domain"
-        );
-        assert!(
-            raw.contains(&format!(
-                "counterparty_key = \"{PEER_CHANNEL_COUNTERPARTY_KEY_PLACEHOLDER}\""
-            )),
-            "the {label} config's apex-store counterparty_key must be the clearly-marked \
-             placeholder until the live migration step fills in the real value"
-        );
-    }
-}
-
-/// Issue #820's own version of the same convention, for the NEW apex-relay
-/// peering rather than a migration of an existing one: issue #821 already
-/// opened and funded a real channel against the same TokenNetwork, but this
-/// repo never commits a peering's live facts (see the apex-store test
-/// above) -- both boxes' `[[peer_channels]]` rows for `apex-relay` must
-/// carry the clearly-marked placeholder values
-/// [`APEX_RELAY_PEER_CHANNEL_ID_PLACEHOLDER`]/
-/// [`APEX_RELAY_PEER_CHANNEL_COUNTERPARTY_KEY_PLACEHOLDER`] -- a DIFFERENT
-/// literal from the apex-store row's own placeholder, since the apex now
-/// carries both rows in one file and `ConfigError::PeerChannelDuplicate`
-/// refuses two `[[peer_channels]]` rows naming the same `channel_id`. The
-/// real values are applied directly to both boxes' untracked files as part
-/// of #820's live cutover.
-#[test]
-fn the_apex_relay_peer_channel_names_the_new_token_network_with_placeholder_fields() {
-    for (label, raw) in [("apex", APEX_CONFIG), ("relay", RELAY_CONFIG)] {
-        assert!(
-            raw.contains(&format!(
-                "token_network = \"{PEER_CHANNEL_LIVE_TOKEN_NETWORK}\""
-            )),
-            "the {label} config's apex-relay [[peer_channels]] row must settle on the same new \
-             ERC-2771 TokenNetwork ({PEER_CHANNEL_LIVE_TOKEN_NETWORK}) the apex-store row uses -- \
-             issue #821 opened the real channel against it, so a config naming a different \
-             TokenNetwork here would disagree with the channel that actually exists on chain"
-        );
-        assert!(
-            raw.contains(&format!(
-                "channel_id = \"{APEX_RELAY_PEER_CHANNEL_ID_PLACEHOLDER}\""
-            )),
-            "the {label} config's apex-relay channel_id must be the clearly-marked placeholder -- \
-             the real value (issue #821) is applied directly to the live boxes, not committed here"
-        );
-        assert!(
-            raw.contains(&format!(
-                "counterparty_key = \"{APEX_RELAY_PEER_CHANNEL_COUNTERPARTY_KEY_PLACEHOLDER}\""
-            )),
-            "the {label} config's apex-relay counterparty_key must be the clearly-marked \
-             placeholder, for the same reason as channel_id above"
-        );
-        assert_ne!(
-            APEX_RELAY_PEER_CHANNEL_ID_PLACEHOLDER, PEER_CHANNEL_ID_PLACEHOLDER,
-            "the apex-relay and apex-store placeholders must differ -- the apex file carries \
-             both rows at once and ConfigError::PeerChannelDuplicate refuses a repeat"
-        );
-    }
-}
-
-/// Issue #853's own version of the #822 placeholder convention
-/// ([`PEER_CHANNEL_ID_PLACEHOLDER`] above), applied to `[announce]
-/// pay_channel` rather than a `[[peer_channels]]` row: the store box's real
-/// funded channel -- with the RELAY BOX as of issue #871, replacing the
-/// apex-funded channel #820's cutover made obsolete -- lives only on the
-/// box, so this repo commits a clearly-marked placeholder instead of either
-/// the live value or an absent field.
+/// Issue #853's placeholder convention (issue #822 established it for the
+/// now-removed apex peerings' `[[peer_channels]]` rows -- see git history for
+/// that pair, deleted along with the apex by issue #872), applied to
+/// `[announce] pay_channel` rather than a `[[peer_channels]]` row: the store
+/// box's real funded channel -- with the RELAY BOX as of issue #871,
+/// replacing the apex-funded channel #820's cutover made obsolete -- lives
+/// only on the box, so this repo commits a clearly-marked placeholder
+/// instead of either the live value or an absent field.
 const STORE_ANNOUNCE_PAY_CHANNEL_PLACEHOLDER: &str =
     "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeadc0de";
 
@@ -1811,14 +1219,8 @@ fn the_store_announce_pay_channel_is_a_clearly_marked_placeholder() {
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
     let text = with_sandbox_settlement_keys(
-        &with_sandbox_paths(
-            STORE_CONFIG,
-            key_file.path(),
-            state_dir.path(),
-            Some(peer_secret.path()),
-        ),
+        &with_sandbox_paths(STORE_CONFIG, key_file.path(), state_dir.path()),
         key_file.path(),
     );
     let config_file = write_config(&text);
@@ -1839,50 +1241,41 @@ fn the_store_announce_pay_channel_is_a_clearly_marked_placeholder() {
 /// for the one-shot anonymous uploads `channels.rs` calls "a first-class
 /// path, not a fallback".
 ///
-/// Issue #820 moved that pin off the apex: `transport` is illegal on a
-/// `peer_id` route (`ConfigError::PeerRouteHasTransport`), so the apex's
-/// `g.toon.relay` forward now carries none, and the pin lives solely on the
-/// relay box's own terminating route -- where it gates that box's own client
-/// edge and nothing else, since a peer-wire arrival is never transport-checked
-/// (docs/devnet-pricing.md's "apex therefore loses client-edge BTP
-/// enforcement on this prefix"). This test asserts that split directly: the
-/// apex's greeting for `g.toon.relay` no longer names a required transport
-/// at all (same shape as the store legs it never restricted), while the
-/// relay box's own greeting for the identical prefix still does.
+/// Until issue #872 removed the apex, this pin lived on the apex's
+/// `g.toon.relay` peer_id forward being unable to carry one at all
+/// (`transport` is illegal on a `peer_id` route,
+/// `ConfigError::PeerRouteHasTransport`) -- so the apex's own greeting never
+/// named a required transport, and only the relay box's own terminating
+/// route enforced it. Now that both boxes terminate their own prefixes
+/// directly, this test asserts the same split at the source: the relay
+/// box's own greeting for `g.toon.relay` requires BTP, and the store box's
+/// greeting for `g.toon.ario` does not.
 #[tokio::test]
 async fn the_relay_route_is_btp_only_and_the_store_routes_accept_both() {
+    // Line-anchored, like the peer_wire_addr check above: the store file's
+    // own header prose is free to *name* `transport = "btp"` while
+    // explaining why the relay (not the store) pins it, so a substring
+    // match would trip on prose rather than an actual route field.
     assert!(
-        !APEX_CONFIG.contains("transport = \"btp\""),
-        "the apex file must no longer set `transport` anywhere -- issue \
-         #820 moved the `g.toon.relay` pin to a `peer_id` route, which \
-         cannot carry one (`ConfigError::PeerRouteHasTransport`)"
+        !STORE_CONFIG
+            .lines()
+            .any(|line| line.trim() == "transport = \"btp\""),
+        "the store file must not restrict its routes to a transport -- \
+         one-shot anonymous uploads stay at the default (`both`)"
     );
     assert!(
         RELAY_CONFIG.contains("transport = \"btp\""),
         "the relay box's own file must restrict its terminating route to \
-         btp, per issue #701 -- now the ONLY place this prefix enforces it"
+         btp, per issue #701"
     );
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
     let connector = boot(&with_sandbox_paths(
-        &without_live_settlement(APEX_CONFIG),
+        &without_live_settlement(STORE_CONFIG),
         key_file.path(),
         state_dir.path(),
-        Some(peer_secret.path()),
     ));
-
-    let relay_terms = x402_terms(&connector.client_edge_addr, "g.toon.relay").await;
-    assert!(
-        relay_terms["accepts"][0]["extra"]
-            .get("requiredTransport")
-            .is_none(),
-        "the apex's own greeting for `g.toon.relay` must not carry \
-         requiredTransport any more -- that pin lives on the relay box's \
-         own terminating route now, not on this peer_id forward: {relay_terms}"
-    );
-
     let store_terms = x402_terms(&connector.client_edge_addr, "g.toon.ario").await;
     assert!(
         store_terms["accepts"][0]["extra"]
@@ -1893,12 +1286,10 @@ async fn the_relay_route_is_btp_only_and_the_store_routes_accept_both() {
 
     let relay_key_file = write_raw_key_file(10);
     let relay_state_dir = tempfile::tempdir().expect("temp state dir");
-    let relay_peer_secret = write_peer_secret();
     let relay_connector = boot(&with_sandbox_paths(
         &without_live_settlement(RELAY_CONFIG),
         relay_key_file.path(),
         relay_state_dir.path(),
-        Some(relay_peer_secret.path()),
     ));
     let relay_own_terms = x402_terms(&relay_connector.client_edge_addr, "g.toon.relay").await;
     assert_eq!(
@@ -1931,10 +1322,10 @@ async fn deploy_settlement_on_anvil() -> (Anvil, ethers::types::Address, ethers:
 /// `docs/evm-deployment.md`). The anvil cases replace exactly this committed
 /// value, so they double as the guard that the committed sections keep
 /// naming it; [`every_fleet_configs_settlement_evm_leg_matches_the_live_identity`]
-/// below asserts it directly, as parsed, for all three files.
-const APEX_LIVE_REGISTRY: &str = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1";
+/// below asserts it directly, as parsed, for both surviving files.
+const FLEET_LIVE_REGISTRY: &str = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1";
 
-/// The retired pre-ERC-2771 `TokenNetworkRegistry` [`APEX_LIVE_REGISTRY`]
+/// The retired pre-ERC-2771 `TokenNetworkRegistry` [`FLEET_LIVE_REGISTRY`]
 /// replaced -- `docs/evm-deployment.md`'s "Current live deployment
 /// (pre-cutover)" table and its "Rollback: one step" section, which names
 /// this exact address as what a rollback reverts `contract_address` to. Not
@@ -1944,52 +1335,13 @@ const APEX_LIVE_REGISTRY: &str = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1";
 const SETTLEMENT_CONTRACT_ADDRESS_ROLLBACK_TARGET: &str =
     "0xcC9079adE929b168B54145f6d25262b64FAB9D5b";
 
-#[tokio::test]
-async fn the_apex_devnet_settlement_section_boots_against_a_deployed_contract() {
-    if !require_anvil() {
-        return;
-    }
-    let (anvil, contract_address, token) = deploy_settlement_on_anvil().await;
-
-    let key_file = write_raw_key_file(9);
-    let state_dir = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
-    // The apex EVM section is LIVE as committed -- no template to
-    // uncomment. Its [settlement.evm.key] names its own file
-    // (/app/data/settlement.key, distinct from the signer's -- the live box
-    // mounts the funded settlement account there), so that path is
-    // substituted like the signer key's is.
-    //
-    // The Solana leg is stripped: this case has a local `anvil` to retarget
-    // the EVM leg at and no local stand-in for a Solana cluster, and
-    // booting the committed leg as-is would reach public devnet and spend
-    // from an account this sandbox has no key for. The parse case below is
-    // what covers it. See the module docs.
-    let text = without_sections(APEX_CONFIG, SOLANA_SETTLEMENT_SECTIONS);
-    let text = with_anvil_settlement(&text, &anvil.rpc_url, contract_address, token);
-    let text = replace_expecting_a_match(
-        &text,
-        "key_file = \"/app/data/settlement.key\"",
-        &format!("key_file = \"{}\"", key_file.path().display()),
-    );
-    let text = with_sandbox_paths(
-        &text,
-        key_file.path(),
-        state_dir.path(),
-        Some(peer_secret.path()),
-    );
-
-    drop(boot(&text));
-}
-
-/// The apex file's Solana leg (`https://api.devnet.solana.com`) and the
-/// deployed `payment-channel` program it settles through, wired in #633 --
-/// asserted as literals here, exactly like [`APEX_LIVE_REGISTRY`] and
+/// Both fleet files' Solana leg (`https://api.devnet.solana.com`) and the
+/// deployed `payment-channel` program they settle through, wired in #633 --
+/// asserted as literals here, exactly like [`FLEET_LIVE_REGISTRY`] and
 /// [`EXPECTED_STORE_PRICE`], so that reading the expected values back out of the
 /// file under test cannot make this pass on a file that drifted.
-const APEX_SOLANA_RPC_URL: &str = "https://api.devnet.solana.com";
-const APEX_SOLANA_PROGRAM_ID: &str = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip";
-const APEX_SOLANA_USDC_MINT: &str = "xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in";
+const FLEET_SOLANA_PROGRAM_ID: &str = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip";
+const FLEET_SOLANA_USDC_MINT: &str = "xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in";
 
 /// The settlement asset's scale on every chain this fleet settles on: ADR
 /// 0010's "6 decimals everywhere" (docs/usdc-cross-chain-settlement.md).
@@ -2000,7 +1352,7 @@ const EXPECTED_SETTLEMENT_DECIMALS: u8 = 6;
 
 /// The mock USDC ERC-20 every fleet config's `[settlement.evm]` leg settles
 /// in. Unchanged by the #695/#811 ERC-2771 registry cutover -- only the
-/// `TokenNetworkRegistry` moved (see [`APEX_LIVE_REGISTRY`]); the token being
+/// `TokenNetworkRegistry` moved (see [`FLEET_LIVE_REGISTRY`]); the token being
 /// registered through it did not (`docs/evm-deployment.md`: "never a new
 /// token, so no existing balance or faucet distribution is disturbed").
 /// [`with_anvil_settlement`] looks for this same literal before retargeting a
@@ -2008,90 +1360,15 @@ const EXPECTED_SETTLEMENT_DECIMALS: u8 = 6;
 /// check read one constant instead of two copies that could drift apart.
 const EXPECTED_SETTLEMENT_TOKEN_ADDRESS: &str = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce";
 
-/// Both of the apex file's keyed settlement legs parse, as committed, into
-/// the typed per-chain tables issue #628 introduced -- with no chain
-/// reached at all.
-///
-/// This is what covers `[settlement.solana]`, which neither boot case
-/// starts (module docs: booting it means public devnet plus a funded
-/// account). It is a weaker proof than a boot -- it says the committed
-/// shape and values are what the connector expects, not that they exist on
-/// that cluster -- but it is the proof available without a network
-/// dependency, and it fails on exactly the drift that broke this module
-/// when #645 migrated the flat `[settlement]` to the keyed shape.
-#[test]
-fn the_apex_devnet_config_declares_both_committed_settlement_legs() {
-    let key_file = write_raw_key_file(9);
-    let state_dir = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
-    let text = with_sandbox_paths(
-        APEX_CONFIG,
-        key_file.path(),
-        state_dir.path(),
-        Some(peer_secret.path()),
-    );
-    let text = with_sandbox_settlement_keys(&text, key_file.path());
-    let config_file = write_config(&text);
-
-    let config = Config::load(config_file.path()).expect("the committed apex config must parse");
-
-    let settlements = config.settlements();
-    assert_eq!(
-        settlements.len(),
-        2,
-        "the committed apex config must configure exactly the two settlement \
-         legs this fleet runs (EVM + Solana), found: {:?}",
-        settlements
-            .iter()
-            .map(|s| s.chain().name())
-            .collect::<Vec<_>>()
-    );
-
-    let evm = settlements
-        .iter()
-        .find_map(|settlement| match settlement {
-            SettlementConfig::Evm(evm) => Some(evm),
-            SettlementConfig::Solana(_) => None,
-        })
-        .expect("a live [settlement.evm] leg");
-    assert_eq!(
-        format!("0x{}", hex_lower(evm.contract_address().as_slice())).to_lowercase(),
-        APEX_LIVE_REGISTRY.to_lowercase(),
-        "the EVM leg must keep naming the deployed TokenNetworkRegistry"
-    );
-    assert_eq!(
-        format!("0x{}", hex_lower(evm.token_address().as_slice())).to_lowercase(),
-        EXPECTED_SETTLEMENT_TOKEN_ADDRESS.to_lowercase(),
-        "the EVM leg must keep naming the fleet's mock USDC"
-    );
-    assert_eq!(evm.decimals(), EXPECTED_SETTLEMENT_DECIMALS);
-
-    let solana = settlements
-        .iter()
-        .find_map(|settlement| match settlement {
-            SettlementConfig::Solana(solana) => Some(solana),
-            SettlementConfig::Evm(_) => None,
-        })
-        .expect("a live [settlement.solana] leg");
-    assert_eq!(solana.rpc_url(), APEX_SOLANA_RPC_URL);
-    assert_eq!(
-        solana.program_id(),
-        APEX_SOLANA_PROGRAM_ID,
-        "the Solana leg must keep naming the deployed payment-channel program"
-    );
-    assert_eq!(solana.token_address(), APEX_SOLANA_USDC_MINT);
-    assert_eq!(solana.decimals(), EXPECTED_SETTLEMENT_DECIMALS);
-}
-
 /// Lowercase hex, for comparing a parsed 20-byte EVM address back against
 /// the committed literal.
 fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Every fleet config's `[settlement.evm]` leg -- apex, store and relay
-/// alike -- must name the identical registry, asset and precision: a claim
-/// or channel a buyer opened against one `TokenNetworkRegistry`/token is
+/// Every fleet config's `[settlement.evm]` leg -- store and relay alike --
+/// must name the identical registry, asset and precision: a claim or
+/// channel a buyer opened against one `TokenNetworkRegistry`/token is
 /// unresolvable by a box pointed at a different one. The boot tests below
 /// assert the same property for store/relay with a substring `.contains`
 /// check against the committed text; this asserts it as PARSED, typed
@@ -2101,11 +1378,8 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// happens to contain the expected one as a substring.
 ///
 /// Reads no chain and boots nothing, so it runs even where `anvil` is not
-/// on `PATH` -- unlike the three
-/// `*_devnet_settlement_section_boots_against_a_deployed_contract` cases,
-/// which are skipped there. That is the same no-network proof
-/// [`the_apex_devnet_config_declares_both_committed_settlement_legs`]
-/// already relies on for the apex's own Solana leg.
+/// on `PATH` -- unlike the two `*_devnet_settlement_section_boots_against_a_deployed_contract`
+/// cases, which are skipped there.
 ///
 /// Failure messages name both the expected literal and the value actually
 /// found, per issue #852 -- including calling out
@@ -2114,20 +1388,10 @@ fn hex_lower(bytes: &[u8]) -> String {
 /// failed.
 #[test]
 fn every_fleet_configs_settlement_evm_leg_matches_the_live_identity() {
-    for (label, raw) in [
-        ("apex", APEX_CONFIG),
-        ("store", STORE_CONFIG),
-        ("relay", RELAY_CONFIG),
-    ] {
+    for (label, raw) in [("store", STORE_CONFIG), ("relay", RELAY_CONFIG)] {
         let key_file = write_raw_key_file(9);
         let state_dir = tempfile::tempdir().expect("temp state dir");
-        let peer_secret = write_peer_secret();
-        let text = with_sandbox_paths(
-            raw,
-            key_file.path(),
-            state_dir.path(),
-            Some(peer_secret.path()),
-        );
+        let text = with_sandbox_paths(raw, key_file.path(), state_dir.path());
         let text = with_sandbox_settlement_keys(&text, key_file.path());
         let config_file = write_config(&text);
 
@@ -2146,9 +1410,9 @@ fn every_fleet_configs_settlement_evm_leg_matches_the_live_identity() {
         let contract_address = format!("0x{}", hex_lower(evm.contract_address().as_slice()));
         assert_eq!(
             contract_address.to_lowercase(),
-            APEX_LIVE_REGISTRY.to_lowercase(),
+            FLEET_LIVE_REGISTRY.to_lowercase(),
             "the {label} config's [settlement.evm] contract_address must be the live \
-             TokenNetworkRegistry {APEX_LIVE_REGISTRY} (expected), found {contract_address} -- \
+             TokenNetworkRegistry {FLEET_LIVE_REGISTRY} (expected), found {contract_address} -- \
              {SETTLEMENT_CONTRACT_ADDRESS_ROLLBACK_TARGET} is the retired pre-ERC-2771 registry \
              and must not be accepted silently"
         );
@@ -2172,11 +1436,11 @@ fn every_fleet_configs_settlement_evm_leg_matches_the_live_identity() {
 }
 
 /// The store box's settlement is no longer a commented template waiting on a
-/// deployment -- it is live, and it names the SAME contracts the apex names,
-/// because a claim this node accepts was written against a channel the buyer
-/// opened on the shared devnet deployment. A store node pointed at a
-/// different registry cannot resolve that channel, so this asserts the two
-/// files agree rather than merely that each parses.
+/// deployment -- it is live, and it names the SAME contracts the relay box's
+/// own file names, because a claim this node accepts was written against a
+/// channel the buyer opened on the shared devnet deployment. A store node
+/// pointed at a different registry cannot resolve that channel, so this
+/// asserts the two files agree rather than merely that each parses.
 #[tokio::test]
 async fn the_store_devnet_settlement_section_boots_against_a_deployed_contract() {
     if !require_anvil() {
@@ -2186,7 +1450,6 @@ async fn the_store_devnet_settlement_section_boots_against_a_deployed_contract()
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
     // Issue #648: the store config followed the apex onto issue #628's KEYED
     // shape. The legacy flat `[settlement]` + `chain = "evm"` still parses,
     // so nothing below would fail if it slid back -- it would just quietly
@@ -2213,20 +1476,20 @@ async fn the_store_devnet_settlement_section_boots_against_a_deployed_contract()
          names its chain by its own key"
     );
     assert!(
-        STORE_CONFIG.contains(APEX_LIVE_REGISTRY),
-        "the store leg must name the same deployed TokenNetworkRegistry as \
-         the apex ({APEX_LIVE_REGISTRY}) -- a buyer's channel lives on one \
+        STORE_CONFIG.contains(FLEET_LIVE_REGISTRY),
+        "the store leg must name the fleet's deployed TokenNetworkRegistry \
+         ({FLEET_LIVE_REGISTRY}) -- a buyer's channel lives on one \
          deployment, and a node pointed elsewhere cannot resolve it"
     );
     assert!(
-        STORE_CONFIG.contains(APEX_SOLANA_PROGRAM_ID)
-            && STORE_CONFIG.contains(APEX_SOLANA_USDC_MINT),
-        "the store leg must name the same Solana payment-channel program and \
-         mint as the apex, for the same reason"
+        STORE_CONFIG.contains(FLEET_SOLANA_PROGRAM_ID)
+            && STORE_CONFIG.contains(FLEET_SOLANA_USDC_MINT),
+        "the store leg must name the fleet's Solana payment-channel program \
+         and mint, for the same reason"
     );
 
-    // Anvil stands in for Base Sepolia; the Solana leg is stripped for the
-    // same reason the apex's is -- there is no local validator in this test.
+    // Anvil stands in for Base Sepolia; the Solana leg is stripped because
+    // there is no local validator in this test (see the module docs).
     let text = without_sections(STORE_CONFIG, SOLANA_SETTLEMENT_SECTIONS);
     let text = with_anvil_settlement(&text, &anvil.rpc_url, contract_address, token);
     let text = replace_expecting_a_match(
@@ -2234,23 +1497,19 @@ async fn the_store_devnet_settlement_section_boots_against_a_deployed_contract()
         "key_file = \"/app/data/settlement.key\"",
         &format!("key_file = \"{}\"", key_file.path().display()),
     );
-    let text = with_sandbox_paths(
-        &text,
-        key_file.path(),
-        state_dir.path(),
-        Some(peer_secret.path()),
-    );
+    let text = with_sandbox_paths(&text, key_file.path(), state_dir.path());
 
     drop(boot(&text));
 }
 
 /// The relay box's own live `[settlement.evm]` leg (issue #816/#817), boots
-/// against a freshly deployed local chain exactly like the apex's and
-/// store's cases above. It names the SAME registry the other two fleet
-/// files name: its client edge already accepts an unaffiliated buyer's own
-/// on-chain channel (the relay file's own header, issue #556/#611), and
-/// that buyer's channel lives on the one shared deployment -- independent of
-/// the apex<->relay peering (issue #820) also carried in this file now.
+/// against a freshly deployed local chain exactly like the store's case
+/// above. It names the SAME registry the store file names: its client edge
+/// already accepts an unaffiliated buyer's own on-chain channel (the relay
+/// file's own header, issue #556/#611), and that buyer's channel lives on
+/// the one shared deployment. That was true independently of the
+/// apex<->relay peering issue #820 gave this box and issue #872 removed
+/// again -- it held before the peering existed and holds after it is gone.
 #[tokio::test]
 async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract() {
     if !require_anvil() {
@@ -2260,7 +1519,6 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
 
     let key_file = write_raw_key_file(9);
     let state_dir = tempfile::tempdir().expect("temp state dir");
-    let peer_secret = write_peer_secret();
 
     assert!(
         RELAY_CONFIG.contains("[settlement.evm]")
@@ -2268,25 +1526,23 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
             && RELAY_CONFIG.contains("[settlement.solana]")
             && RELAY_CONFIG.contains("[settlement.solana.key]"),
         "the relay config must carry both legs on the keyed \
-         `[settlement.<chain>]` shape (issue #628), like the apex and store"
+         `[settlement.<chain>]` shape (issue #628), like the store"
     );
     assert!(
-        RELAY_CONFIG.contains(APEX_LIVE_REGISTRY),
+        RELAY_CONFIG.contains(FLEET_LIVE_REGISTRY),
         "the relay leg must name the same deployed TokenNetworkRegistry as \
-         the apex and store ({APEX_LIVE_REGISTRY}) -- a buyer's channel \
-         lives on one deployment, and a node pointed elsewhere cannot \
-         resolve it"
+         the store ({FLEET_LIVE_REGISTRY}) -- a buyer's channel lives on one \
+         deployment, and a node pointed elsewhere cannot resolve it"
     );
     assert!(
-        RELAY_CONFIG.contains(APEX_SOLANA_PROGRAM_ID)
-            && RELAY_CONFIG.contains(APEX_SOLANA_USDC_MINT),
+        RELAY_CONFIG.contains(FLEET_SOLANA_PROGRAM_ID)
+            && RELAY_CONFIG.contains(FLEET_SOLANA_USDC_MINT),
         "the relay leg must name the same Solana payment-channel program and \
-         mint as the apex and store, for the same reason"
+         mint as the store, for the same reason"
     );
 
     // Anvil stands in for Base Sepolia; the Solana leg is stripped for the
-    // same reason the apex's and store's are -- there is no local validator
-    // in this test.
+    // same reason the store's is -- there is no local validator in this test.
     let text = without_sections(RELAY_CONFIG, SOLANA_SETTLEMENT_SECTIONS);
     let text = with_anvil_settlement(&text, &anvil.rpc_url, contract_address, token);
     let text = replace_expecting_a_match(
@@ -2294,12 +1550,7 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
         "key_file = \"/app/data/settlement.key\"",
         &format!("key_file = \"{}\"", key_file.path().display()),
     );
-    let text = with_sandbox_paths(
-        &text,
-        key_file.path(),
-        state_dir.path(),
-        Some(peer_secret.path()),
-    );
+    let text = with_sandbox_paths(&text, key_file.path(), state_dir.path());
 
     drop(boot(&text));
 }
@@ -2346,14 +1597,15 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
 ///   is a strict ancestor of both, so this is a forward move, not a
 ///   rollback.
 ///
-/// Scope: the legacy TypeScript `connector` services in
-/// `docker-compose.node.yml` and `docker-compose.store.yml` pin
-/// `3.36.3-solchan.0` and are deliberately NOT converged onto this tag.
-/// That is a different binary on its own release-tag scheme, reading a
-/// different config file (`connector.yaml`, not `connector-rust.toml`) --
-/// pointing it at a `rust-sha-` tag would not start. #848's drift is the
-/// `rust-sha-` pins only; retiring those two services is the cutover
-/// runbook's job (`docs/operators/rust-cutover-runbook.md`).
+/// Scope: `rust-sha-` pins only. Two legacy TypeScript `connector` services
+/// used to sit outside it, pinned to `3.36.3-solchan.0` and deliberately NOT
+/// converged onto this tag -- a different binary on its own release-tag
+/// scheme, reading a different config file (`connector.yaml`, not
+/// `connector-rust.toml`), which a `rust-sha-` tag would not start. Both are
+/// gone now (the store's with issue #901, the apex's with the whole of
+/// `infra/linode-node/`, issue #872), and
+/// [`no_surviving_box_pins_a_non_rust_connector_image`] is what keeps one
+/// from coming back.
 ///
 /// This is a forward move on every box, not yet deployed anywhere -- see
 /// each overlay's own "PIN OF RECORD" comment. Re-pin here FIRST on any
@@ -2361,18 +1613,18 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
 /// constant, not the other way around.
 const EXPECTED_CONNECTOR_TAG: &str = "rust-sha-415531a";
 
-/// Every `image:` pin this suite can see across the three-box fleet must
-/// name [`EXPECTED_CONNECTOR_TAG`] -- the property #848 exists to hold.
-/// Asserted against the literal (not merely "the five agree with each
-/// other", which [`store_overlays_sharing_one_config_pin_one_image`] and
+/// Every `image:` pin this suite can see across the surviving two-box fleet
+/// (issue #872 removed the apex's own overlay along with the apex) must name
+/// [`EXPECTED_CONNECTOR_TAG`] -- the property #848 exists to hold. Asserted
+/// against the literal (not merely "the four agree with each other", which
+/// [`store_overlays_sharing_one_config_pin_one_image`] and
 /// [`relay_overlays_sharing_one_config_pin_one_image`] already cover) so
-/// that all five silently drifting to some OTHER shared tag still fails --
+/// that all four silently drifting to some OTHER shared tag still fails --
 /// the exact shape #848's own investigation found (three artifacts, three
 /// different tags, none of them what the boxes ran).
 #[test]
 fn every_fleet_overlay_pins_the_connector_repos_pin_of_record() {
     let overlays: &[(&str, &str)] = &[
-        ("docker-compose.node.rust.yml", APEX_RUST_OVERLAY),
         ("docker-compose.store.rust.yml", STORE_RUST_OVERLAY),
         ("docker-compose.store.announce.yml", STORE_ANNOUNCE_OVERLAY),
         ("docker-compose.relay.rust.yml", RELAY_RUST_OVERLAY),
@@ -2398,14 +1650,14 @@ fn every_fleet_overlay_pins_the_connector_repos_pin_of_record() {
 
 /// Every committed compose file belonging to a box that survives the
 /// TypeScript retirement (issue #901 deleted the store's dead `connector`
-/// service; the apex's own equivalent is connector#872's job). Named
-/// explicitly rather than globbed `infra/*/docker-compose*.yml`: #872 is
-/// going to delete `infra/linode-node/*` in a separate PR, and a guard that
-/// walked the directory would silently start (or stop) covering that box
-/// the moment the filesystem changed under it, rather than only when a real
-/// image or port regression landed. Two boxes, three files each (the base
-/// file plus its two overlays) -- see [`no_surviving_box_pins_a_non_rust_connector_image`]
-/// and [`every_surviving_box_port_binding_is_host_ip_prefixed_or_allowlisted`].
+/// service; issue #872 deleted `infra/linode-node/*` entirely, the apex's
+/// own equivalent). Named explicitly rather than globbed
+/// `infra/*/docker-compose*.yml`: a guard that walked the directory would
+/// silently start (or stop) covering a box the moment the filesystem changed
+/// under it, rather than only when a real image or port regression landed.
+/// Two boxes, three files each (the base file plus its two overlays) -- see
+/// [`no_surviving_box_pins_a_non_rust_connector_image`] and
+/// [`every_surviving_box_port_binding_is_host_ip_prefixed_or_allowlisted`].
 const SURVIVING_BOX_COMPOSE_FILES: &[(&str, &str)] = &[
     (
         "infra/linode-store/docker-compose.store.yml",
@@ -2455,8 +1707,8 @@ fn no_surviving_box_pins_a_non_rust_connector_image() {
 }
 
 /// The `ports:` mappings a committed compose file's `ports:` block declares,
-/// verbatim, in commit order -- [`route_price`]'s line-scan precedent again:
-/// no YAML dependency, and indentation alone (not a parser) tells a
+/// verbatim, in commit order -- [`announce_section`]'s line-scan precedent
+/// again: no YAML dependency, and indentation alone (not a parser) tells a
 /// `ports:` list item apart from a `volumes:` one that also starts `- '`. A
 /// `#`-comment line inside the block (several overlays carry one explaining
 /// the loopback bind) is skipped rather than mistaken for a malformed entry.

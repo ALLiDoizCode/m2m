@@ -7,9 +7,12 @@
 // COMPILED ESM token+channel classes from packages/mina-zkapp/dist-esm/ (built by
 // `node packages/mina-zkapp/scripts/build-esm.mjs`) so o1js stays single-instance.
 //
-// Used by infra/linode-node/provision-mina-lightnet.sh during `/deploy-devnet up`:
-// the lightnet RESETS on every box recreate, so the zkApps must be (re)deployed
-// each provisioning. Funding comes from the o1labs accounts-manager
+// Was driven by infra/linode-node/provision-mina-lightnet.sh during
+// `/deploy-devnet up` -- that box, and its provisioning script, were removed
+// with the apex (issue #872), so this has no automated caller today and is run
+// by hand against a lightnet. The lightnet RESETS on every recreate, so the
+// zkApps must be (re)deployed each time. Funding comes from the o1labs
+// accounts-manager
 // (GET /acquire-account returns a fresh funded genesis keypair) — NO manual
 // faucet top-up. Requires glibc (o1js proving) — runs in node:22-bookworm, NOT
 // node:22-alpine (musl).

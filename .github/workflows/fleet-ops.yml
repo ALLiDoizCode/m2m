@@ -71,7 +71,7 @@ on:
         description: "Which box. `ario` is the store box's Linode label."
         type: choice
         required: true
-        options: [relay, ario, toon, faucet]
+        options: [relay, ario, faucet]
       operation:
         description: "box-status | config-read | pin-verify (reads) — config-apply | restart | deploy | announce (writes)"
         type: choice
@@ -160,7 +160,7 @@ jobs:
                  "$LINODE_API/linode/instances" \
                | jq -r --arg l "$BOX" '.data[] | select(.label==$l) | .ipv4[0]' | head -1)
           if [ -z "$ip" ] || [ "$ip" = "null" ]; then
-            echo "::error::No Linode labelled '$BOX'. Live labels are toon | ario | relay | faucet."
+            echo "::error::No Linode labelled '$BOX'. Live labels are ario | relay | faucet."
             exit 1
           fi
           echo "ip=$ip" >> "$GITHUB_OUTPUT"
@@ -209,17 +209,14 @@ jobs:
           # would target the wrong stack (issue #948).
           # COMPOSE_ANNOUNCE adds the box's announce overlay. Only the relay
           # and store overlays define the resident `announce` loop publisher
-          # (docs/operators/announcing-a-node.md) -- `toon`'s overlay carries
-          # the long-running TypeScript `announcer` sidecar instead (a
-          # different service, retiring under #872) and the faucet box
-          # announces nothing, so COMPOSE_ANNOUNCE is empty there and the
-          # `announce` operation below refuses those two boxes outright.
+          # (docs/operators/announcing-a-node.md) -- the faucet box announces
+          # nothing, so COMPOSE_ANNOUNCE is empty there and the `announce`
+          # operation below refuses it outright. The apex box ("toon") used
+          # to be a third case here, carrying the long-running TypeScript
+          # `announcer` sidecar instead of this loop -- removed along with
+          # the rest of `infra/linode-node/` by issue #872 (toon-meta#310 /
+          # toon-meta#313's live cutover); it is no longer a valid `$BOX`.
           case "$BOX" in
-            toon)
-              INFRA_DIR=infra/linode-node
-              COMPOSE="docker compose -f infra/linode-node/docker-compose.node.yml -f infra/linode-node/docker-compose.node.rust.yml"
-              COMPOSE_ANNOUNCE=""
-              ;;
             relay)
               INFRA_DIR=infra/linode-relay
               COMPOSE="docker compose -f infra/linode-relay/docker-compose.relay.yml -f infra/linode-relay/docker-compose.relay.rust.yml"
@@ -389,11 +386,17 @@ jobs:
               # --no-deps, non-negotiable (issue #851's trap, documented in
               # infra/devnet-manage.sh): `up -d` CREATES a named service's
               # declared dependencies too -- `required: false` does not stop
-              # it -- and on the toon box `nginx` declares `depends_on:
-              # connector`, whose pinned image is purged from GHCR. Without
-              # the flag, a documented-valid dispatch (deploy nginx on toon)
-              # aborts on `manifest unknown` and takes the running stack
-              # down with it.
+              # it. The box this bit for was the apex ("toon"), whose
+              # `nginx` declared `depends_on: connector` against an image
+              # purged from GHCR -- a documented-valid dispatch (deploy
+              # nginx on toon) aborted on `manifest unknown` and took the
+              # running stack down with it. That box is gone (issue #872),
+              # but the flag stays: neither surviving box's base compose
+              # file declares the retired TypeScript `connector` service
+              # any more (store's was deleted by #901, relay never had
+              # one), so nothing reproduces the hazard today -- `--no-deps`
+              # is cheap insurance against it coming back, not a fix for a
+              # live gap.
               sshbox "cd $REMOTE_REPO && $COMPOSE pull '$SERVICE' && $COMPOSE up -d --no-deps '$SERVICE'"
               # Re-read OFF THE BOX (this file's own doctrine): the running
               # container's image id must be the id of the pin just pulled.
@@ -415,7 +418,7 @@ jobs:
 
             announce)
               if [ -z "$COMPOSE_ANNOUNCE" ]; then
-                echo "::error::box '$BOX' runs no resident announce publisher ('toon' holds the legacy apex announcer sidecar, retiring under #872; the faucet announces nothing)"
+                echo "::error::box '$BOX' runs no resident announce publisher (the faucet announces nothing)"
                 exit 1
               fi
               if [ "$APPLY" != "true" ]; then

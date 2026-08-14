@@ -32,7 +32,8 @@ header, exactly as any buyer's write is. Your own routing table is not consulted
 - **no peering** to originate over,
 
 only a funded channel with the node you are paying. That is what makes this work from a node like
-the devnet store box, whose peering is accept-only and which serves no `g.toon.relay` route.
+the devnet store box, which carries no peering at all (issue #872) and serves no `g.toon.relay`
+route.
 
 ### Where the claim comes from — and why there is no second key
 
@@ -196,9 +197,10 @@ announce's own `routes.publish`.
    needs the scalar itself — a KMS-held `[signer]` cannot announce, unless
    `[announce] identity_key_file` supplies a file-based one instead (see above — this is the
    field that matters when retiring the sidecar).
-4. **A `--btp-url`, if the target's route is pinned to BTP** (issue #701). **The devnet apex pins
-   `g.toon.relay` to `transport = "btp"`**, so an announce there is paid over BTP and needs the
-   apex's `wss://…/ilp/btp` endpoint supplied. Without it the command refuses up front, before
+4. **A `--btp-url`, if the target's route is pinned to BTP** (issue #701). **The devnet relay box
+   pins `g.toon.relay` to `transport = "btp"`** on its own terminating route (the apex that used to
+   front that prefix is gone, issue #872), so an announce there is paid over BTP and needs the relay
+   box's `wss://…/ilp/btp` endpoint supplied. Without it the command refuses up front, before
    anything is signed.
 
 With `--via-own-routing`, replace (1) and (2) with: a `[[routes]]` entry reaching the relay's
@@ -213,6 +215,13 @@ already needs). (4) does not apply — the client-edge transport policy applies 
 > old one's key**, and under adoption the order below is exactly backwards. See
 > [Cutting over under an adopted key](#cutting-over-under-an-adopted-key) at the end of this section
 > before running any of it.
+>
+> **The two worked examples below (`g.toon.ario`, `g.toon.relay`) are HISTORY as of issue #872.**
+> Both cutovers ran, and the apex box whose announcer sidecar they move off has since been
+> destroyed (toon-meta#310 / toon-meta#313). Read their present-tense apex steps — "the apex is
+> still the box that terminates this today", "APEX box — retire the stopgap" — as a record of what
+> was done, not as instructions. The **ordering rule** they illustrate is unchanged and is why they
+> are kept.
 
 A prefix that moves from one node's announce to another node's announce is a **two-box, ordered**
 change, and the repo cannot do it for you: one half is a config file and one half is a running

@@ -84,12 +84,13 @@ registry at boot (`crates/connector-config/src/announce.rs`, `crates/connector-s
 lib.rs::connect`) -- there is no separate config field naming a `TokenNetwork` address directly, and
 **no Rust config carries the forwarder address at all**: it is baked immutably into the deployed
 `TokenNetwork`'s bytecode (`ERC2771Context`), and the connector itself never acts as a relayer, so
-nothing needs to be told about it. Repointing the announce is therefore exactly one config value,
-in exactly two files:
+nothing needs to be told about it. Repointing the announce is therefore exactly one config value, in
+exactly two files -- the fleet's surviving two boxes as of issue #872 (the apex, and its own
+`infra/linode-node/connector-rust.toml`, are retired):
 
-1. **`infra/linode-node/connector-rust.toml`** -- `[settlement.evm] contract_address` ->
+1. **`infra/linode-store/connector-rust.toml`** -- `[settlement.evm] contract_address` ->
    `BASE_REGISTRY_ADDRESS` from the broadcast.
-2. **`infra/linode-store/connector-rust.toml`** -- same field, same new value. Both boxes MUST agree
+2. **`infra/linode-relay/connector-rust.toml`** -- same field, same new value. Both boxes MUST agree
    -- a claim one box accepts against a channel opened on the new contract is unresolvable by a box
    still pointed at the old registry.
 
@@ -97,11 +98,16 @@ Then redeploy/restart both boxes and re-run `connector announce` (issue #784) so
 event advertises the new `TokenNetwork` address -- the next announce picks it up automatically, with
 no announce-side config change needed.
 
-### What this does NOT touch: the apex↔store peer channel
+### What this did NOT touch: the apex↔store peer channel (retired, issue #872)
 
-Both `.toml` files also have a `[[peer_channels]] token_network` literal
-(`0x1E95493fEF46707E034b4a1945f25a8C76A1823D` today) -- the EIP-712 signing domain for the existing
-apex↔store peer channel. That channel was opened **before** cutover, so per AC4 it keeps settling
+> **History.** This subsection describes a `[[peer_channels]]` row that no committed config carries
+> any more: issue #872 removed the apex and with it both of this fleet's peerings, so there is no
+> peer channel left for a repoint to touch or to leave alone. Kept because it records why the field
+> was deliberately excluded from #695's scope.
+
+Both `.toml` files also had a `[[peer_channels]] token_network` literal
+(`0x1E95493fEF46707E034b4a1945f25a8C76A1823D` at the time) -- the EIP-712 signing domain for the
+apex↔store peer channel. That channel was opened **before** cutover, so per AC4 it kept settling
 against the **old** deployment; this field is deliberately left unchanged by the cutover. Migrating
 that specific peering to the new contract (closing it and opening a fresh one) is a separate
 operational decision -- new channel funding and coordination between both box operators -- not part
@@ -116,7 +122,7 @@ not because the peer channel is still unmigrated.
 
 ### Bookkeeping that must be updated alongside the repoint
 
-- **`crates/connector-bin/tests/devnet_configs_load.rs`** -- `APEX_LIVE_REGISTRY` asserts the live
+- **`crates/connector-bin/tests/devnet_configs_load.rs`** -- `FLEET_LIVE_REGISTRY` asserts the live
   registry address as a literal against both `.toml` files; update it to the new registry or this
   test fails the moment the boxes are repointed.
 - **`packages/contracts/deployments.json`** and **`packages/contracts/deployments/base-sepolia.md`**
@@ -147,6 +153,7 @@ undo, since the new registry/`TokenNetwork`/forwarder simply stop being referenc
   and against local chain state by `test/TokenNetworkERC2771.t.sol` (#694).
 - Channels opened before cutover still settle and close against the old deployment -- the old
   registry/`TokenNetwork` are never touched, proven by
-  `testFork_Cutover_DoesNotDisturbTheOldLiveDeployment`; the apex↔store peer channel is a live
-  example that is deliberately left pointed at the old contract (see above).
+  `testFork_Cutover_DoesNotDisturbTheOldLiveDeployment`; the apex↔store peer channel was the worked
+  example of one deliberately left pointed at the old contract (see above -- that peering is gone
+  as of issue #872, but the property it demonstrated is a property of the deployment, not of it).
 - Rollback is one documented step -- "Rollback: one step" above.

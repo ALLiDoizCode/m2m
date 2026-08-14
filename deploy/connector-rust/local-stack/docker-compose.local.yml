@@ -2,7 +2,7 @@
 # Local deployment rehearsal: the Rust connector + the real published relay,
 # both in containers on one machine, settling against a local anvil.
 #
-# This mirrors what a devnet node runs (infra/linode-node/docker-compose.node.yml
+# This mirrors what a devnet node runs (infra/linode-relay/docker-compose.relay.yml
 # and .rust.yml): the same relay image, the same two ports, the same split
 # between a PAID write and a FREE read --
 #
@@ -31,7 +31,7 @@ services:
   # app. Its `POST /write` stores an event and knows nothing about channels,
   # claims, settlement or ILP conditions; it trusts whatever payment headers the
   # terminator injected without validating them. Same image, same environment as
-  # infra/linode-node/docker-compose.node.yml:32-47.
+  # infra/linode-relay/docker-compose.relay.yml's own `relay` service.
   relay:
     image: ${RELAY_IMAGE:-ghcr.io/toon-protocol/relay:sha-a8693a9}
     environment:

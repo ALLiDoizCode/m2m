@@ -22,9 +22,13 @@ Every claim below is cited to a line this document's author opened and read on 2
 `main` at `275ff378`. Line numbers drift; the citation is a pointer to a named item (a function, a
 field, a check), and the name is the durable part.
 
-**Terminology.** "Box 1" is the g.toon box — the connector a client sends to first. "Box 2" is the
-box it forwards to. Peer ids (`apex-store`, `apex-relay`), config keys and ILP addresses
-(`g.toon.ario`, `g.toon.relay`) are wire and config identifiers and appear verbatim.
+**Terminology.** "Box 1" is the connector a client sends to first — on the devnet fleet this worked
+example describes, that was the apex ("the g.toon box"), retired by issue #872 (toon-meta#310 /
+toon-meta#313's live cutover). Nothing answers at bare `g.toon` any more; it remains only the
+namespace root. "Box 2" is the box box 1 forwards to. Peer ids (`apex-store`, `apex-relay`), config
+keys and ILP addresses (`g.toon.ario`, `g.toon.relay`) are wire and config identifiers from that
+retired topology and appear verbatim as history — see `docs/devnet-pricing.md`'s "The apex forward
+(retired)" for the current, apex-free shape.
 
 ## The model in one paragraph
 
@@ -321,13 +325,21 @@ taken precisely to keep this arithmetic solvent.
 
 Note what the invariant is **not**: it is not enforced anywhere at config load. Nothing in
 `connector-config` compares one box's `price − fee` against another box's `price`, because no box can
-see another box's config. It is an operator obligation, checked by the fleet's own guards
-(`EXPECTED_APEX_FORWARD_PRICE` / `_FEE`, `EXPECTED_STORE_PRICE`, `docs/devnet-pricing.md:19-25`) and
-by the free `GET /ilp/routes/price?destination=…` answer on each box.
+see another box's config. It is an operator obligation -- checked, while the apex's forward existed,
+by `EXPECTED_APEX_FORWARD_PRICE` / `_FEE` against `EXPECTED_STORE_PRICE` (both removed by issue #872
+along with the apex and the peering they guarded -- see `docs/devnet-pricing.md`'s "The apex forward
+(retired)") -- and by the free `GET /ilp/routes/price?destination=…` answer each surviving box still
+gives for its own terminating route.
 
-## Worked example: `g.toon.ario` on the devnet fleet
+## Worked example: `g.toon.ario` on the devnet fleet (historical -- apex retired, issue #872)
 
-Numbers from the committed table (`docs/devnet-pricing.md:19-25`); base units of 6-decimal USDC.
+The concrete arithmetic below describes a two-hop forward (apex to store box) that no longer exists
+on this fleet; both boxes terminate their own prefix directly now (`docs/devnet-pricing.md`). Kept as
+the clearest illustration of the invariant this whole section explains, not as a description of the
+current topology.
+
+Numbers from the committed table as it stood before #872 (`docs/devnet-pricing.md`'s "The apex
+forward (retired)"); base units of 6-decimal USDC.
 
 | Leg                                           | price | fee | Result                                      |
 | --------------------------------------------- | ----- | --- | ------------------------------------------- |

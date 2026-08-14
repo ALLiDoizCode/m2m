@@ -1,9 +1,11 @@
 //! The proof issue #566 says nothing else in the epic can give: a claim
 //! signed by this workspace's *production* peer-wire signing path redeems
 //! against the `TokenNetwork` actually deployed and resolved on Base
-//! Sepolia -- through the same `TokenNetworkRegistry`
-//! `infra/linode-node/connector-rust.toml`'s `[settlement.evm]` names --
-//! not a disposable local `anvil` fixture (issue #577).
+//! Sepolia -- through the same `TokenNetworkRegistry` every fleet config's
+//! `[settlement.evm]` names (`infra/linode-store/connector-rust.toml` and
+//! `infra/linode-relay/connector-rust.toml`, asserted identical by
+//! `devnet_configs_load.rs`'s `FLEET_LIVE_REGISTRY`) -- not a disposable
+//! local `anvil` fixture (issue #577).
 //!
 //! Every other chain-backed test in this workspace (`contract_suite.rs`,
 //! `local_stack_rehearsal.rs`'s `on_chain` module, `gas_and_nonce.rs`)
@@ -49,8 +51,8 @@
 //!
 //! That single variable is also the ENTIRE opt-in gate. Once it is set,
 //! every other input below is read with a hard-coded default matching the
-//! committed `infra/linode-node/connector-rust.toml` `[settlement.evm]`
-//! section (`BASE_SEPOLIA_PROOF_RPC`/`_REGISTRY`/`_TOKEN`/`_DECIMALS` may
+//! committed fleet configs' `[settlement.evm]` section
+//! (`BASE_SEPOLIA_PROOF_RPC`/`_REGISTRY`/`_TOKEN`/`_DECIMALS` may
 //! override it, but nothing else silently no-ops). A caller that means to
 //! run this -- a dispatched gate job -- must itself refuse to proceed on a
 //! blank secret before it ever reaches `cargo test`, the same way
@@ -123,8 +125,9 @@ abigen!(
     ]"#
 );
 
-/// The public endpoint `infra/linode-node/connector-rust.toml` and
-/// `funded-ops.yml` both already use.
+/// The public endpoint both surviving fleet configs
+/// (`infra/linode-store/`, `infra/linode-relay/`) and `funded-ops.yml`
+/// already use.
 const DEFAULT_RPC: &str = "https://base-sepolia-rpc.publicnode.com";
 /// The `TokenNetworkRegistry` `[settlement.evm] contract_address` names --
 /// a factory, resolved to a `TokenNetwork` at connect time, never pinned

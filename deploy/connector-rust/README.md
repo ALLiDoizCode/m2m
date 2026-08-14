@@ -76,14 +76,14 @@ this is the key the connector signs claims and settlement transactions with
 (ADR 0012), and it should stay readable by exactly one uid.
 
 This applies to the key file wherever it lives, under whatever name. The
-devnet overlays under `infra/linode-node/` and `infra/linode-store/` mount
+devnet overlays under `infra/linode-store/` and `infra/linode-relay/` mount
 `./signer-rust.key` rather than this directory's `signer.key` -- same
 generation, same `chmod`, same `chown`, different path:
 
 ```bash
-openssl rand -hex 32 > infra/linode-node/signer-rust.key
-chmod 600 infra/linode-node/signer-rust.key
-chown 10001:10001 infra/linode-node/signer-rust.key
+openssl rand -hex 32 > infra/linode-store/signer-rust.key
+chmod 600 infra/linode-store/signer-rust.key
+chown 10001:10001 infra/linode-store/signer-rust.key
 ```
 
 ## 2. Generate an operator bearer token
@@ -188,7 +188,7 @@ backend to run it. Configure it and the node resolves the
 URL or a registry that does not answer `getTokenNetwork(token)` is an
 exit-1, not a runtime surprise. Only `chain = "evm"` is accepted today.
 
-`infra/linode-node/connector-rust.toml` carries a commented, annotated
+`infra/linode-store/connector-rust.toml` carries a commented, annotated
 `[settlement]` block to copy from; `crates/connector-bin/tests/devnet_configs_load.rs`
 boots exactly that block against a freshly deployed registry on anvil, so it
 is a template that is known to load.
@@ -250,7 +250,7 @@ and the node still starts, but every claim watermark it holds dies with the
 container — which is the whole of issue #605. In a compose file the equivalent
 is a `connector_rust_state:/app/state` entry under `volumes:` for the service,
 plus a top-level `volumes: { connector_rust_state: }` — see
-`infra/linode-node/docker-compose.node.rust.yml`.
+`infra/linode-store/docker-compose.store.rust.yml`.
 
 ## 7. Verify
 
