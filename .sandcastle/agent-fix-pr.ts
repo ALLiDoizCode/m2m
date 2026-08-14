@@ -272,6 +272,39 @@ async function main() {
           console.log(
             `\nVerified: PR branch '${headRef}' advanced to ${expectedSha} (the fix commits are pushed).`
           );
+          // Re-arm the verdict loop (found live by the 2026-08-14 drill on
+          // toon-meta#381): the fix push creates a NEW head, the factory-ops
+          // approval stays anchored to the OLD one, and the auto-merge
+          // evaluator's approval-staleness guard then blocks the PR forever —
+          // nothing re-reviews on its own, because `agent:review` was cleared
+          // when the previous verdict landed (toon-meta#355). Applying it
+          // here fires the review pass on the repaired head, and a clean
+          // verdict re-opens the merge chain. Best-effort by design: if this
+          // fails, the PR sits approval-stale until a human applies the label
+          // — worse observability, no wrong writes — so log loudly, never
+          // throw (the fix itself is already pushed and verified).
+          try {
+            execFileSync(
+              'gh',
+              [
+                'api',
+                '-X',
+                'POST',
+                `repos/${nwo}/issues/${prNumber}/labels`,
+                '-f',
+                'labels[]=agent:review',
+              ],
+              { stdio: ['ignore', 'ignore', 'inherit'] }
+            );
+            console.log(
+              `Applied 'agent:review' to PR #${prNumber} — the repaired head needs a fresh verdict.`
+            );
+          } catch (error) {
+            console.log(
+              `::warning::PR #${prNumber}: fix pushed, but applying 'agent:review' failed — ` +
+                `the PR will sit approval-stale until the label is applied by hand. ${String(error)}`
+            );
+          }
         } else {
           pushVerificationError =
             `\nERROR: the fix phase reported COMPLETE, but the PR branch ` +
