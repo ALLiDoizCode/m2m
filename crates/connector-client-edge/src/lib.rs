@@ -784,6 +784,11 @@ struct AdmittedClaim {
 /// speaks where admission would have said something else. Reads the two
 /// headers in the same precedence order admission does, for the same
 /// reason: a client presenting both is presenting one claim twice.
+///
+/// Not cheap -- a wrapped header costs a full ECDH open -- which is why
+/// it is handed to [`Connector::peer_sale_purchase_refusal_for_payer`]
+/// unevaluated, to run only for the packets that turn out to be peer-sale
+/// purchases rather than for every packet crossing this edge.
 fn peek_claimed_channel_key(headers: &HeaderMap, state: &ClientEdgeState) -> Option<String> {
     let (header_value, wrapped) = match headers.get(CLAIM_HEADER) {
         Some(value) => (value, false),
@@ -1207,14 +1212,17 @@ async fn handle_ilp(
         // nothing -- the peek is accurate for every payer who can
         // actually be charged. On a hit the refusal is raised here,
         // unpaid, with the identical message the settle path's
-        // authoritative (counting) copy produces.
-        if let Some(claimed) = peek_claimed_channel_key(&headers, &state) {
-            if let Some(message) = state
-                .connector
-                .peer_sale_purchase_refusal_for_payer(&prepare, &claimed)
-            {
-                return packet_response(PacketResponse::Reject(peer_sale_bound_reject(message)));
-            }
+        // authoritative (counting) copy produces. The peek is handed over
+        // unevaluated: every ordinary packet reaches this line, and only
+        // a purchase for this node's sale route may pay for decoding a
+        // header the claim gate is about to decode anyway.
+        if let Some(message) = state
+            .connector
+            .peer_sale_purchase_refusal_for_payer(&prepare, || {
+                peek_claimed_channel_key(&headers, &state)
+            })
+        {
+            return packet_response(PacketResponse::Reject(peer_sale_bound_reject(message)));
         }
         match extract_and_validate_claim(&headers, price, &state).await {
             Err(rejection) => return claim_rejected_response(rejection, price),

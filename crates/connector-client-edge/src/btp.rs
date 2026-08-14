@@ -803,13 +803,14 @@ async fn handle_frame(
             // rate-limited or row-capped purchase unpaid with the settle
             // path's identical message. Sound because admission verifies
             // the signature against exactly the declared channel.
-            if let Some(message) = connector_domain::client_claim::parse_client_claim(&json)
-                .ok()
-                .and_then(|claim| {
-                    state
-                        .connector
-                        .peer_sale_purchase_refusal_for_payer(&prepare, &claim.channel_key())
-                })
+            if let Some(message) =
+                state
+                    .connector
+                    .peer_sale_purchase_refusal_for_payer(&prepare, || {
+                        connector_domain::client_claim::parse_client_claim(&json)
+                            .ok()
+                            .map(|claim| claim.channel_key())
+                    })
             {
                 return reply(
                     replies,

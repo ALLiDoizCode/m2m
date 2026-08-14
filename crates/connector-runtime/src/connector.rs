@@ -665,6 +665,18 @@ enum PeerSalePeek {
     Purchase(PeerSaleRequest),
 }
 
+/// Whether a peer-sale bound check may spend the payer's rate window
+/// (issue #887) -- named rather than a bare `bool`, since which side of
+/// claim admission the caller is on is exactly what decides it.
+#[derive(Clone, Copy)]
+enum RateWindow {
+    /// The judged, charged side ([`Connector::settle_peer_sale_purchase`]):
+    /// this attempt counts against the window.
+    Spend,
+    /// The pre-admission probe: read the window, spend none of it.
+    Peek,
+}
+
 /// [`Connector`]'s default probe rate limit absent
 /// [`Connector::with_probe_rate_limit`] -- a deliberately conservative
 /// figure (issue #426): probing costs a sender nothing, so the safe default
@@ -2436,7 +2448,9 @@ impl Connector {
         // window between the probe and here. The renewal semantics (a
         // repeat purchase never grows a table, so neither cap applies to
         // it) live inside the shared function.
-        if let Some(message) = self.peer_sale_identity_refusal(channel_id, &purchase, true) {
+        if let Some(message) =
+            self.peer_sale_identity_refusal(channel_id, &purchase, RateWindow::Spend)
+        {
             tracing::warn!(
                 channel_id,
                 %message,
@@ -2818,23 +2832,22 @@ impl Connector {
     /// sides of claim admission exactly like
     /// [`Self::peer_sale_shape_refusal`]:
     /// [`Self::peer_sale_purchase_refusal_for_payer`] asks it before the
-    /// client edge admits the claim (with `count_rate_attempt: false`, a
-    /// pure peek -- a refusal that charged nothing must cost none of the
-    /// payer's window either), and [`Self::settle_peer_sale_purchase`]
-    /// asks it after (counting), the authoritative copy for callers that
-    /// reach it directly. Same order both sides: rate, then caps.
+    /// client edge admits the claim (with [`RateWindow::Peek`] -- a
+    /// refusal that charged nothing must cost none of the payer's window
+    /// either), and [`Self::settle_peer_sale_purchase`] asks it after
+    /// (with [`RateWindow::Spend`]), the authoritative copy for callers
+    /// that reach it directly. Same order both sides: rate, then caps.
     fn peer_sale_identity_refusal(
         &self,
         channel_id: &str,
         purchase: &PeerSaleRequest,
-        count_rate_attempt: bool,
+        window: RateWindow,
     ) -> Option<String> {
         let bounds = self.peer_sale_bounds;
         let now = self.clock.now();
-        let rate_ok = if count_rate_attempt {
-            self.peer_sale_rate_limiter.allow(channel_id, now)
-        } else {
-            self.peer_sale_rate_limiter.would_allow(channel_id, now)
+        let rate_ok = match window {
+            RateWindow::Spend => self.peer_sale_rate_limiter.allow(channel_id, now),
+            RateWindow::Peek => self.peer_sale_rate_limiter.would_allow(channel_id, now),
         };
         if !rate_ok {
             return Some(format!(
@@ -2917,15 +2930,25 @@ impl Connector {
     ///
     /// The edge consults [`Self::peer_sale_purchase_would_be_refused`]
     /// first, so a shape-doomed purchase never reaches this.
+    ///
+    /// `claimed_channel` is a closure, not a `&str`, because reading it
+    /// costs the caller real work on every packet -- on the HTTP carriage
+    /// a wrapped claim header is a whole ECDH open -- and only a packet
+    /// that actually is a purchase for this node's sale route ever needs
+    /// it. `None` from the closure (no claim header, or one that does not
+    /// decode) declines to judge: admission answers that shape
+    /// authoritatively a moment later.
     pub fn peer_sale_purchase_refusal_for_payer(
         &self,
         prepare: &Prepare,
-        claimed_channel: &str,
+        claimed_channel: impl FnOnce() -> Option<String>,
     ) -> Option<String> {
         let PeerSalePeek::Purchase(purchase) = self.open_peer_sale_purchase(prepare) else {
             return None;
         };
-        let refusal = self.peer_sale_identity_refusal(claimed_channel, &purchase, false);
+        let claimed_channel = claimed_channel()?;
+        let refusal =
+            self.peer_sale_identity_refusal(&claimed_channel, &purchase, RateWindow::Peek);
         if let Some(message) = &refusal {
             // #887's "every rejected purchase logs the payer identity and
             // the bound it hit": this probe's answer IS the refusal the
@@ -2933,7 +2956,7 @@ impl Connector {
             // afterwards, so no later stage exists to log it. One log site
             // covers both carriages.
             tracing::warn!(
-                channel_id = claimed_channel,
+                channel_id = %claimed_channel,
                 prefix = %purchase.prefix,
                 %message,
                 "peer-sale purchase refused pre-admission on an identity-keyed bound"
@@ -6649,7 +6672,9 @@ mod tests {
                 let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
                 for _ in 0..5 {
                     assert_eq!(
-                        connector.peer_sale_purchase_refusal_for_payer(&sealed, &client_channel_id),
+                        connector.peer_sale_purchase_refusal_for_payer(&sealed, || Some(
+                            client_channel_id.clone()
+                        )),
                         None
                     );
                 }
@@ -6665,7 +6690,9 @@ mod tests {
                 // predicts the settle path's own rate refusal.
                 let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.buyer", 3, 26, 10));
                 let predicted = connector
-                    .peer_sale_purchase_refusal_for_payer(&sealed, &client_channel_id)
+                    .peer_sale_purchase_refusal_for_payer(&sealed, || {
+                        Some(client_channel_id.clone())
+                    })
                     .expect("the spent window is predicted");
                 assert!(predicted.contains("rate limit"), "got: {predicted}");
             }
