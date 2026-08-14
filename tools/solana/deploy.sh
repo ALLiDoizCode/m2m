@@ -9,10 +9,17 @@
 #   ./tools/solana/deploy.sh --network devnet --keypair deployer.json --upgrade-authority authority.json
 #   make solana-deploy-devnet
 #
+#   ./tools/solana/deploy.sh --network mainnet-beta --keypair deployer.json \
+#     --upgrade-authority-decision transfer --upgrade-authority authority.json
+#   (see docs/solana-deployment.md's "Mainnet Deployment Runbook" for the full
+#   mainnet-beta procedure, including the two decisions --upgrade-authority-decision
+#   and --max-len require you to make before this command is run)
+#
 # Prerequisites:
 #   - Solana CLI >= 3.1.12 installed (solana --version)
 #   - Deployer keypair funded (devnet: solana airdrop 5 --url devnet)
-#   - Program built: cargo build-sbf (produces target/deploy/payment_channel.so)
+#   - Program built: cargo build-sbf --tools-version v1.52 (produces
+#     target/deploy/payment_channel.so; this script rebuilds with the same pin)
 #
 # Deployment cost estimate:
 #   ~$19-38 in refundable rent-exempt SOL at ~$89.67/SOL (March 2026).
@@ -38,8 +45,31 @@
 #        --url <RPC_URL>
 #
 #   WARNING: Setting --final is irreversible. The program can never be upgraded again.
+#   On mainnet-beta, --upgrade-authority-decision (required) forces this choice to be
+#   made and recorded before the deploy command runs, rather than defaulted into
+#   silently (issue #954). --final itself stays a deliberate, separate follow-up step
+#   (this script never passes --final on your behalf) since it is irreversible.
+#
+# Mainnet-beta defaults (both flags parse on any network; what is mainnet-only is
+# their defaulting and validation -- on devnet --token-mint is only echoed back and
+# recorded, and --max-len is passed through exactly as given):
+#   --token-mint records which SPL mint channels opened against this program instance
+#   are expected to settle in (default: Circle's native USDC mint on Solana mainnet,
+#   EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v). This is documentation only -- the
+#   payment-channel program takes no mint at deploy time; each channel names its own
+#   mint when it is opened later. This script contains no mint-creation code path at
+#   all (unlike infra/solana/create-usdc-mint.sh, the devnet mock-USDC tool, which
+#   refuses to run against a mainnet-beta RPC), so creating a mint from this path is
+#   structurally impossible, not merely unused.
+#
+#   --max-len sizes the deployed ProgramData account with upgrade headroom instead of
+#   exactly the binary (see "Deployment Cost Estimates" / "Upgrade headroom" in
+#   docs/solana-deployment.md). On mainnet-beta, an initial deploy with no --max-len
+#   computes a default headroom automatically and prints the rent it costs.
 #
 # Story: 33.3 (creates the script), Story 33.8 (executes the deployment)
+# Issue #954 (mainnet deploy path: token-mint recording, upgrade-authority-decision
+# gate, max_len headroom)
 # =============================================================================
 
 set -euo pipefail
@@ -54,11 +84,33 @@ PROGRAM_DIR="$PROJECT_ROOT/packages/solana-program"
 # packages/solana-program is a member of the root Cargo workspace, so build
 # output lands in the workspace-root target/, not a per-crate one.
 PROGRAM_SO="$PROJECT_ROOT/target/deploy/payment_channel.so"
-PROGRAM_ID_FILE="$SCRIPT_DIR/program-id.json"
+# Set below, once NETWORK is parsed: program-id.json for devnet (unchanged
+# filename, existing tooling/docs keep working), program-id.mainnet.json for
+# mainnet-beta (a separate file so neither record can clobber the other).
+PROGRAM_ID_FILE=""
 
 # Network RPC URLs
 DEVNET_URL="https://api.devnet.solana.com"
 MAINNET_URL="https://api.mainnet-beta.solana.com"
+
+# Circle's native USDC mint on Solana mainnet (https://www.circle.com/multi-chain-usdc).
+# The default --token-mint on mainnet-beta -- see the header comment above for why this
+# is a recorded convention, not an on-chain constraint the program enforces.
+MAINNET_USDC_MINT="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+# The one platform-tools line every artifact statement in this repo is made
+# about: CI's reproducibility gate builds with it (.github/workflows/ci.yml),
+# the devnet provenance record was produced by it
+# (packages/solana-program/deployments/devnet-public.md — a default-tools
+# build of the same source differs, 112,513 vs 109,401 bytes), and the
+# max_len/rent figures this script prints assume its output size. A bare
+# `cargo build-sbf` here would broadcast a binary none of those cover.
+PLATFORM_TOOLS_VERSION="v1.52"
+
+# Default upgrade headroom for a mainnet-beta INITIAL deploy with no explicit --max-len:
+# 25% over the built binary's size, giving a later upgrade room to grow into without a
+# separate `solana program extend` call. See "Deployment Cost Estimates" in
+# docs/solana-deployment.md for the rent-exemption formula this headroom costs against.
+DEFAULT_MAINNET_HEADROOM_PERCENT=25
 
 # =============================================================================
 # Argument Parsing
@@ -68,22 +120,40 @@ NETWORK=""
 KEYPAIR=""
 UPGRADE_AUTHORITY=""
 EXISTING_PROGRAM_ID=""
+TOKEN_MINT="${TOKEN_MINT:-}"
+MAX_LEN="${MAX_LEN:-}"
+UPGRADE_AUTHORITY_DECISION="${UPGRADE_AUTHORITY_DECISION:-}"
 
 usage() {
     echo "Usage: $0 --network <devnet|mainnet-beta> --keypair <path> [--upgrade-authority <path>] [--program-id <pubkey>]"
+    echo "          [--token-mint <pubkey>] [--max-len <bytes>] [--upgrade-authority-decision <deployer|transfer>]"
     echo ""
     echo "Options:"
-    echo "  --network             Target network: devnet or mainnet-beta (required)"
-    echo "  --keypair             Path to deployer keypair JSON file (required)"
-    echo "  --upgrade-authority   Path to upgrade authority keypair JSON file (optional)"
-    echo "                        If not specified, the deployer keypair retains upgrade authority."
-    echo "  --program-id          Existing program ID for upgrade deployments (optional)"
-    echo "                        If specified, deploys as an upgrade to the existing program."
+    echo "  --network                     Target network: devnet or mainnet-beta (required)"
+    echo "  --keypair                     Path to deployer keypair JSON file (required)"
+    echo "  --upgrade-authority           Path to upgrade authority keypair JSON file (optional)"
+    echo "                                If not specified, the deployer keypair retains upgrade authority."
+    echo "  --program-id                  Existing program ID for upgrade deployments (optional)"
+    echo "                                If specified, deploys as an upgrade to the existing program."
+    echo "  --token-mint                  Base58 SPL mint channels opened against this program are"
+    echo "                                expected to settle in. On mainnet-beta it is validated and"
+    echo "                                defaults to Circle's native USDC mint"
+    echo "                                ($MAINNET_USDC_MINT); elsewhere it is"
+    echo "                                recorded as given. Documentation only -- see the header comment."
+    echo "  --max-len                     ProgramData size (bytes) to allocate, giving upgrade headroom"
+    echo "                                beyond the built binary. On a mainnet-beta initial deploy,"
+    echo "                                defaults to +${DEFAULT_MAINNET_HEADROOM_PERCENT}% of the binary size if omitted."
+    echo "  --upgrade-authority-decision  Required for mainnet-beta: 'deployer' (deployer keypair keeps"
+    echo "                                upgrade authority) or 'transfer' (requires --upgrade-authority)."
+    echo "                                Forces this decision to be made and recorded before the deploy"
+    echo "                                runs -- see docs/solana-deployment.md's mainnet runbook."
     echo ""
     echo "Examples:"
     echo "  $0 --network devnet --keypair ~/.config/solana/deployer.json"
     echo "  $0 --network devnet --keypair deployer.json --upgrade-authority authority.json"
     echo "  $0 --network devnet --keypair deployer.json --program-id <PROGRAM_PUBKEY>"
+    echo "  $0 --network mainnet-beta --keypair deployer.json \\"
+    echo "     --upgrade-authority-decision transfer --upgrade-authority authority.json"
     exit 1
 }
 
@@ -103,6 +173,18 @@ while [[ $# -gt 0 ]]; do
             ;;
         --program-id)
             EXISTING_PROGRAM_ID="$2"
+            shift 2
+            ;;
+        --token-mint)
+            TOKEN_MINT="$2"
+            shift 2
+            ;;
+        --max-len)
+            MAX_LEN="$2"
+            shift 2
+            ;;
+        --upgrade-authority-decision)
+            UPGRADE_AUTHORITY_DECISION="$2"
             shift 2
             ;;
         --help|-h)
@@ -130,15 +212,94 @@ fi
 case "$NETWORK" in
     devnet)
         RPC_URL="$DEVNET_URL"
+        PROGRAM_ID_FILE="$SCRIPT_DIR/program-id.json"
         ;;
     mainnet-beta)
         RPC_URL="$MAINNET_URL"
+        PROGRAM_ID_FILE="$SCRIPT_DIR/program-id.mainnet.json"
         ;;
     *)
         echo "Error: Invalid network '$NETWORK'. Must be 'devnet' or 'mainnet-beta'."
         exit 1
         ;;
 esac
+
+# =============================================================================
+# Mainnet-beta-only validation (issue #954)
+#
+# Runs before any file/network check below so a misconfigured mainnet-beta
+# invocation fails immediately on the decisions themselves, not partway
+# through a build.
+# =============================================================================
+
+if [[ "$NETWORK" == "mainnet-beta" ]]; then
+    # The upgrade-authority decision must be made and recorded before this
+    # command runs, not defaulted into silently. --final (making the program
+    # immutable) is deliberately NOT an option here: it is an irreversible,
+    # separate follow-up step (see the header comment and
+    # docs/solana-deployment.md), never something this script does on your
+    # behalf as a side effect of an initial deploy.
+    case "$UPGRADE_AUTHORITY_DECISION" in
+        deployer)
+            # The decision and the flags must agree, both ways: 'transfer'
+            # without a target is refused below, and 'deployer' WITH a
+            # target is refused here -- otherwise the run would print
+            # "Authority decision: deployer" and then hand authority to the
+            # co-passed key anyway, the opposite of the recorded decision,
+            # on the one action this gate exists to make binding.
+            if [[ -n "$UPGRADE_AUTHORITY" ]]; then
+                echo "Error: --upgrade-authority-decision deployer means the deployer keypair KEEPS"
+                echo "upgrade authority; a co-passed --upgrade-authority contradicts that decision."
+                echo "Drop --upgrade-authority, or record the decision as 'transfer'."
+                exit 1
+            fi
+            ;;
+        transfer)
+            if [[ -z "$UPGRADE_AUTHORITY" ]]; then
+                echo "Error: --upgrade-authority-decision transfer requires --upgrade-authority <path>."
+                exit 1
+            fi
+            ;;
+        "")
+            echo "Error: --upgrade-authority-decision is required for --network mainnet-beta."
+            echo "Record the decision first (see docs/solana-deployment.md's mainnet runbook), then pass"
+            echo "--upgrade-authority-decision deployer  (deployer keypair keeps upgrade authority), or"
+            echo "--upgrade-authority-decision transfer --upgrade-authority <path>  (transfer it now)."
+            exit 1
+            ;;
+        *)
+            echo "Error: --upgrade-authority-decision must be 'deployer' or 'transfer', got '$UPGRADE_AUTHORITY_DECISION'."
+            exit 1
+            ;;
+    esac
+
+    # Bind (record) the settlement mint. This script never creates a mint --
+    # see the header comment for why "impossible", not merely "skipped".
+    if [[ -z "$TOKEN_MINT" ]]; then
+        TOKEN_MINT="$MAINNET_USDC_MINT"
+        echo "No --token-mint given; defaulting to Circle's native USDC mint on Solana mainnet: $TOKEN_MINT"
+    fi
+    if [[ ! "$TOKEN_MINT" =~ ^[1-9A-HJ-NP-Za-km-z]{32,44}$ ]]; then
+        echo "Error: --token-mint '$TOKEN_MINT' is not a valid base58 Solana pubkey."
+        exit 1
+    fi
+    if [[ "$TOKEN_MINT" != "$MAINNET_USDC_MINT" ]]; then
+        echo "WARNING: --token-mint does not match Circle's known native USDC mint on Solana mainnet"
+        echo "($MAINNET_USDC_MINT). Proceeding with the explicitly given mint -- this script"
+        echo "never creates or verifies a mint on-chain, it only records which one this deploy expects"
+        echo "channels to settle in."
+    fi
+
+    # --max-len must be a positive integer if given; the binary-size-relative
+    # default is computed after the build below, once PROGRAM_SIZE is known.
+    if [[ -n "$MAX_LEN" && ! "$MAX_LEN" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Error: --max-len '$MAX_LEN' must be a positive integer (bytes)."
+        exit 1
+    fi
+elif [[ -n "$TOKEN_MINT" ]]; then
+    echo "Note: --token-mint is recorded for documentation only outside --network mainnet-beta;"
+    echo "this script never creates or binds a mint on-chain on any network."
+fi
 
 # Validate keypair file exists
 if [[ ! -f "$KEYPAIR" ]]; then
@@ -179,6 +340,10 @@ if [[ -n "$EXISTING_PROGRAM_ID" ]]; then
     echo "Upgrade target:     $EXISTING_PROGRAM_ID"
 else
     echo "Deployment type:    initial (new program)"
+fi
+if [[ "$NETWORK" == "mainnet-beta" ]]; then
+    echo "Token mint:         $TOKEN_MINT (recorded only -- see header comment)"
+    echo "Authority decision: $UPGRADE_AUTHORITY_DECISION"
 fi
 echo ""
 
@@ -221,20 +386,41 @@ fi
 
 echo "Building program..."
 cd "$PROGRAM_DIR"
-cargo build-sbf
+# Pinned, never bare: see PLATFORM_TOOLS_VERSION's comment — the gate, the
+# provenance record and the printed size figures all describe the v1.52
+# artifact, not whatever an operator's CLI happens to default to.
+cargo build-sbf --tools-version "$PLATFORM_TOOLS_VERSION"
 echo "Build complete: $PROGRAM_SO"
 echo ""
 
 # Verify the .so file exists
 if [[ ! -f "$PROGRAM_SO" ]]; then
     echo "Error: Program binary not found at $PROGRAM_SO"
-    echo "Run 'cargo build-sbf' from $PROGRAM_DIR"
+    echo "Run 'cargo build-sbf --tools-version $PLATFORM_TOOLS_VERSION' from $PROGRAM_DIR"
     exit 1
 fi
 
 PROGRAM_SIZE=$(wc -c < "$PROGRAM_SO" | tr -d ' ')
 echo "Program binary size: $PROGRAM_SIZE bytes"
 echo ""
+
+# On a mainnet-beta INITIAL deploy (no --program-id: an upgrade reuses the
+# existing ProgramData account's max_len, which cannot be changed here) with
+# no explicit --max-len, allocate upgrade headroom instead of sizing
+# ProgramData to exactly the binary -- see the header comment and
+# docs/solana-deployment.md's "Mainnet Deployment Runbook" for why and how
+# much. The rent this headroom costs is refundable (see "Rent Economics"),
+# but it is real SOL escrowed upfront, so it is printed here, not silent.
+if [[ "$NETWORK" == "mainnet-beta" && -z "$EXISTING_PROGRAM_ID" && -z "$MAX_LEN" ]]; then
+    HEADROOM_BYTES=$(( PROGRAM_SIZE * DEFAULT_MAINNET_HEADROOM_PERCENT / 100 ))
+    MAX_LEN=$(( PROGRAM_SIZE + HEADROOM_BYTES ))
+    HEADROOM_RENT_LAMPORTS=$(( HEADROOM_BYTES * 6960 ))
+    echo "No --max-len given; allocating +${DEFAULT_MAINNET_HEADROOM_PERCENT}% upgrade headroom:"
+    echo "  max_len:        $MAX_LEN bytes ($PROGRAM_SIZE binary + $HEADROOM_BYTES headroom)"
+    echo "  extra rent:     $HEADROOM_RENT_LAMPORTS lamports for the headroom alone (refundable; see"
+    echo "                  docs/solana-deployment.md's rent-exemption formula)"
+    echo ""
+fi
 
 # =============================================================================
 # Deploy Program
@@ -247,6 +433,9 @@ trap 'rm -f "$DEPLOY_STDERR_FILE"' EXIT
 DEPLOY_ARGS=("$PROGRAM_SO" --url "$RPC_URL" --keypair "$KEYPAIR" --output json)
 if [[ -n "$EXISTING_PROGRAM_ID" ]]; then
     DEPLOY_ARGS+=(--program-id "$EXISTING_PROGRAM_ID")
+fi
+if [[ -n "$MAX_LEN" ]]; then
+    DEPLOY_ARGS+=(--max-len "$MAX_LEN")
 fi
 
 DEPLOY_OUTPUT=$(solana program deploy "${DEPLOY_ARGS[@]}" 2>"$DEPLOY_STDERR_FILE") || {
@@ -311,7 +500,9 @@ if command -v jq &> /dev/null; then
         --arg ts "$DEPLOY_TIMESTAMP" \
         --arg dpk "$DEPLOYER_PUBKEY" \
         --argjson sz "$PROGRAM_SIZE" \
-        '{programId: $pid, network: $net, rpcUrl: $rpc, deployedAt: $ts, deployerPubkey: $dpk, binarySize: $sz}' \
+        --arg mint "$TOKEN_MINT" \
+        --argjson maxlen "${MAX_LEN:-null}" \
+        '{programId: $pid, network: $net, rpcUrl: $rpc, deployedAt: $ts, deployerPubkey: $dpk, binarySize: $sz, tokenMint: (if $mint == "" then null else $mint end), maxLen: $maxlen}' \
         > "$PROGRAM_ID_FILE"
 else
     # Sanitize values for safe JSON embedding (escape backslashes and double quotes)
@@ -320,6 +511,10 @@ else
     _safe_rpc="${RPC_URL//\\/\\\\}"; _safe_rpc="${_safe_rpc//\"/\\\"}"
     _safe_ts="${DEPLOY_TIMESTAMP//\\/\\\\}"; _safe_ts="${_safe_ts//\"/\\\"}"
     _safe_dpk="${DEPLOYER_PUBKEY//\\/\\\\}"; _safe_dpk="${_safe_dpk//\"/\\\"}"
+    _safe_mint="${TOKEN_MINT//\\/\\\\}"; _safe_mint="${_safe_mint//\"/\\\"}"
+    _token_mint_json="null"
+    [[ -n "$TOKEN_MINT" ]] && _token_mint_json="\"${_safe_mint}\""
+    _max_len_json="${MAX_LEN:-null}"
     cat > "$PROGRAM_ID_FILE" <<ENDJSON
 {
   "programId": "${_safe_pid}",
@@ -327,7 +522,9 @@ else
   "rpcUrl": "${_safe_rpc}",
   "deployedAt": "${_safe_ts}",
   "deployerPubkey": "${_safe_dpk}",
-  "binarySize": $PROGRAM_SIZE
+  "binarySize": $PROGRAM_SIZE,
+  "tokenMint": ${_token_mint_json},
+  "maxLen": ${_max_len_json}
 }
 ENDJSON
 fi

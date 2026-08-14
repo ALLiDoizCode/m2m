@@ -26,6 +26,13 @@
 # worked. `config-apply` therefore ALWAYS restarts the service that reads the
 # file, and then re-reads the file OFF THE BOX to prove what is actually there.
 #
+# `deploy` is not an exception to that rule but its other half: a bumped
+# `image:` pin reaches a box only by recreating the CONTAINER, which is
+# exactly what `up -d` does and what `restart` does not. So `deploy` pulls the
+# pin the box's checkout names, recreates the service, and then proves the
+# running container's image id IS that pin's — the same re-read doctrine,
+# applied to the image instead of the file.
+#
 # ── SAFETY ──────────────────────────────────────────────────────────────────
 #   * `apply` defaults to false. A dry run reads the box, prints the exact diff
 #     it would write, and changes nothing.
@@ -66,13 +73,13 @@ on:
         required: true
         options: [relay, ario, toon, faucet]
       operation:
-        description: "box-status | config-read | pin-verify (reads) — config-apply | restart | announce (writes)"
+        description: "box-status | config-read | pin-verify (reads) — config-apply | restart | deploy | announce (writes)"
         type: choice
         required: true
         default: box-status
-        options: [box-status, config-read, pin-verify, config-apply, restart, announce]
+        options: [box-status, config-read, pin-verify, config-apply, restart, deploy, announce]
       service:
-        description: "restart: compose service name (connector-rust, relay, store, nginx, faucet)"
+        description: "restart/deploy: compose service name (connector-rust, relay, store, nginx, faucet)"
         type: string
         required: false
         default: "connector-rust"
@@ -194,11 +201,40 @@ jobs:
 
           # Per-box paths. INFRA_DIR is the box's directory in this repo, which
           # is also its path inside /root/connector on the box itself.
+          # COMPOSE is the box's OWN compose file set, spelled with explicit
+          # `-f` exactly like infra/devnet-manage.sh's deploy legs and each
+          # box's bootstrap.sh: bare `docker compose` in /root/connector
+          # resolves the repo-root dev-stack file, which defines no
+          # `connector-rust` service at all, so every compose verb below
+          # would target the wrong stack (issue #948).
+          # COMPOSE_ANNOUNCE adds the box's announce overlay. Only the relay
+          # and store overlays define the resident `announce` loop publisher
+          # (docs/operators/announcing-a-node.md) -- `toon`'s overlay carries
+          # the long-running TypeScript `announcer` sidecar instead (a
+          # different service, retiring under #872) and the faucet box
+          # announces nothing, so COMPOSE_ANNOUNCE is empty there and the
+          # `announce` operation below refuses those two boxes outright.
           case "$BOX" in
-            toon)   INFRA_DIR=infra/linode-node ;;
-            relay)  INFRA_DIR=infra/linode-relay ;;
-            ario)   INFRA_DIR=infra/linode-store ;;
-            faucet) INFRA_DIR=infra/linode-faucet ;;
+            toon)
+              INFRA_DIR=infra/linode-node
+              COMPOSE="docker compose -f infra/linode-node/docker-compose.node.yml -f infra/linode-node/docker-compose.node.rust.yml"
+              COMPOSE_ANNOUNCE=""
+              ;;
+            relay)
+              INFRA_DIR=infra/linode-relay
+              COMPOSE="docker compose -f infra/linode-relay/docker-compose.relay.yml -f infra/linode-relay/docker-compose.relay.rust.yml"
+              COMPOSE_ANNOUNCE="$COMPOSE -f infra/linode-relay/docker-compose.relay.announce.yml"
+              ;;
+            ario)
+              INFRA_DIR=infra/linode-store
+              COMPOSE="docker compose -f infra/linode-store/docker-compose.store.yml -f infra/linode-store/docker-compose.store.rust.yml"
+              COMPOSE_ANNOUNCE="$COMPOSE -f infra/linode-store/docker-compose.store.announce.yml"
+              ;;
+            faucet)
+              INFRA_DIR=infra/linode-faucet
+              COMPOSE="docker compose -f infra/linode-faucet/docker-compose.faucet.yml"
+              COMPOSE_ANNOUNCE=""
+              ;;
           esac
           CONF_REL="$INFRA_DIR/connector-rust.toml"
           REMOTE_REPO=/root/connector
@@ -285,44 +321,147 @@ jobs:
 
               # THE POINT OF THIS FILE: a bind-mounted file is not reloaded by
               # `up -d`. Restart the service that reads it, or nothing happened.
-              sshbox "cd $REMOTE_REPO && docker compose restart connector-rust" || true
+              sshbox "cd $REMOTE_REPO && $COMPOSE restart connector-rust" || true
 
               # Re-read OFF THE BOX. An scp exit code is not proof.
               sshbox "cat '$REMOTE_CONF'" > /tmp/after.toml
               if ! diff -q /tmp/after.toml "$CONF_REL" >/dev/null; then
                 say ""
                 say "**FAILED** — the box does not match the committed file after writing."
-                say "Restore: \`cp $REMOTE_CONF.bak.$STAMP $REMOTE_CONF && docker compose restart connector-rust\`"
+                say "Restore: \`cp $REMOTE_CONF.bak.$STAMP $REMOTE_CONF && $COMPOSE restart connector-rust\`"
                 echo "::error::post-write read-back does not match; box left with backup at $REMOTE_CONF.bak.$STAMP"
                 exit 1
               fi
               say ""
               say "**Applied and verified.** Backup: \`$REMOTE_CONF.bak.$STAMP\`"
-              say "Restore: \`cp $REMOTE_CONF.bak.$STAMP $REMOTE_CONF && docker compose restart connector-rust\`"
+              say "Restore: \`cp $REMOTE_CONF.bak.$STAMP $REMOTE_CONF && $COMPOSE restart connector-rust\`"
               ;;
 
             restart)
               if [ "$APPLY" != "true" ]; then
-                say "**Dry run.** Would run: \`docker compose restart $SERVICE\` on \`$BOX\`."
+                say "**Dry run.** Would run: \`$COMPOSE restart $SERVICE\` on \`$BOX\`."
                 exit 0
               fi
-              sshbox "cd $REMOTE_REPO && docker compose restart '$SERVICE'"
+              sshbox "cd $REMOTE_REPO && $COMPOSE restart '$SERVICE'"
               say "Restarted \`$SERVICE\`."
               say '```'
               sshbox "docker ps --format 'table {{.Names}}\t{{.Status}}'" | tee -a "$GITHUB_STEP_SUMMARY"
               say '```'
               ;;
 
-            announce)
+            deploy)
+              # `restart` only restarts the CONTAINER THAT IS ALREADY RUNNING —
+              # it does not re-resolve the compose file's `image:` pin, so a
+              # committed pin bump (bumping `EXPECTED_CONNECTOR_TAG` and the
+              # `image:` lines, as #948 did) never reaches the box through
+              # `restart` or `config-apply` alone. `deploy` pulls the pin this
+              # checkout's compose file currently names and recreates the
+              # container from it — the missing verb #948 needed to actually
+              # roll a box onto a tag carrying its config's fields.
+              #
+              # ORDER MATTERS, and only one order is safe: `deploy` FIRST,
+              # `config-apply` SECOND. `RawAnnounceConfig`/`RawConfig` are
+              # `deny_unknown_fields`, so a config carrying a field the
+              # running binary predates is not ignored — it is a load error.
+              # `config-apply` restarts `connector-rust` as its whole point,
+              # so applying such a config to a box still on the old pin exits
+              # the container and takes the box's client edge down until
+              # someone restores the backup. The new binary reading the OLD
+              # config is harmless by comparison, which is why the pin goes
+              # first.
               if [ "$APPLY" != "true" ]; then
-                say "**Dry run.** Would run the one-shot announce on \`$BOX\`."
+                say "**Dry run.** Would run on \`$BOX\`: \`git pull --ff-only\`, then \`$COMPOSE pull $SERVICE && $COMPOSE up -d --no-deps $SERVICE\`, then fail unless the running container's image id equals the id of the pin the refreshed checkout names."
+                exit 0
+              fi
+              # The box's checkout IS the deploy input: compose reads
+              # /root/connector, so a stale checkout silently redeploys the
+              # OLD pin (issue #948).
+              # infra/devnet-manage.sh's deploy legs pull for the same
+              # reason -- but fail-closed here, no `|| true`: a diverged
+              # or detached checkout means the pin about to deploy is not
+              # the committed one, which is this verb's whole job.
+              sshbox "cd $REMOTE_REPO && git pull --ff-only"
+              PINNED=$(sshbox "cd $REMOTE_REPO && $COMPOSE config --format json" | jq -r --arg s "$SERVICE" '.services[$s].image // empty')
+              if [ -z "$PINNED" ]; then
+                echo "::error::service '$SERVICE' names no image in $BOX's compose file set"
+                exit 1
+              fi
+              # --no-deps, non-negotiable (issue #851's trap, documented in
+              # infra/devnet-manage.sh): `up -d` CREATES a named service's
+              # declared dependencies too -- `required: false` does not stop
+              # it -- and on the toon box `nginx` declares `depends_on:
+              # connector`, whose pinned image is purged from GHCR. Without
+              # the flag, a documented-valid dispatch (deploy nginx on toon)
+              # aborts on `manifest unknown` and takes the running stack
+              # down with it.
+              sshbox "cd $REMOTE_REPO && $COMPOSE pull '$SERVICE' && $COMPOSE up -d --no-deps '$SERVICE'"
+              # Re-read OFF THE BOX (this file's own doctrine): the running
+              # container's image id must be the id of the pin just pulled.
+              # `docker ps` output alone cannot distinguish a no-op from a
+              # rollout (issue #948).
+              RUNNING=$(sshbox "cd $REMOTE_REPO && docker inspect -f '{{.Image}}' \$($COMPOSE ps -q '$SERVICE')")
+              PULLED=$(sshbox "docker image inspect -f '{{.Id}}' '$PINNED'")
+              if [ -z "$RUNNING" ] || [ "$RUNNING" != "$PULLED" ]; then
+                say ""
+                say "**FAILED** — running image (\`${RUNNING:-none}\`) is not the pulled pin \`$PINNED\` (\`$PULLED\`)."
+                echo "::error::post-deploy read-back: the running image does not match the pinned tag"
+                exit 1
+              fi
+              say "Pulled and redeployed \`$SERVICE\` — running image verified as \`$PINNED\`."
+              say '```'
+              sshbox "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'" | tee -a "$GITHUB_STEP_SUMMARY"
+              say '```'
+              ;;
+
+            announce)
+              if [ -z "$COMPOSE_ANNOUNCE" ]; then
+                echo "::error::box '$BOX' runs no resident announce publisher ('toon' holds the legacy apex announcer sidecar, retiring under #872; the faucet announces nothing)"
+                exit 1
+              fi
+              if [ "$APPLY" != "true" ]; then
+                say "**Dry run.** Would force \`$BOX\`'s resident announce publisher to publish now (\`up -d announce && restart announce\`), then fail unless its log prints \`[announce] OK\` within 90s."
                 say "Announce is a PAID write through the node's own routing (ADR 0030)."
                 exit 0
               fi
               # ADR 0030: an operator announces a node; the node never does.
-              # One-shot, from the box that holds the identity key.
-              sshbox "cd $REMOTE_REPO && docker compose run --rm announce" 2>&1 \
-                | tail -40 | tee -a "$GITHUB_STEP_SUMMARY"
+              # The `announce` service is a RESIDENT loop publisher --
+              # publish, sleep, repeat (its overlay's own header explains
+              # why) -- NOT a one-shot: `run --rm` would hang this job on
+              # the loop while standing up a SECOND publisher issuing
+              # duplicate PAID writes beside the box's own (issue #948).
+              # Restarting the resident service re-enters the loop
+              # at its first iteration: one publish, now, from the box that
+              # holds the identity key -- and the loop's greppable verdict
+              # line is the read-back this file's doctrine demands.
+              sshbox "cd $REMOTE_REPO && $COMPOSE_ANNOUNCE up -d announce && $COMPOSE_ANNOUNCE restart announce"
+              # Anchor the read-back at the restarted container's own
+              # StartedAt, never a relative window: `restart` reuses the
+              # container and its log file, and the loop publishes every
+              # 240s on its own, so `--since 90s` could match an OK (or a
+              # FAILED) printed BEFORE the restart -- a verdict about a
+              # publish this run never triggered (issue #948). Every line
+              # `--since $STARTED_AT` matches is from the forced run.
+              STARTED_AT=$(sshbox "cd $REMOTE_REPO && docker inspect -f '{{.State.StartedAt}}' \$($COMPOSE_ANNOUNCE ps -q announce)")
+              if [ -z "$STARTED_AT" ]; then
+                echo "::error::could not read the restarted announce container's StartedAt"
+                exit 1
+              fi
+              VERDICT=""
+              LOGS=""
+              for i in $(seq 1 18); do
+                sleep 5
+                LOGS=$(sshbox "cd $REMOTE_REPO && $COMPOSE_ANNOUNCE logs --since '$STARTED_AT' announce" 2>/dev/null || true)
+                if echo "$LOGS" | grep -q '\[announce\] OK'; then VERDICT=ok; break; fi
+                if echo "$LOGS" | grep -q '\[announce\] FAILED'; then VERDICT=failed; break; fi
+              done
+              say '```'
+              echo "$LOGS" | tail -10 | tee -a "$GITHUB_STEP_SUMMARY"
+              say '```'
+              if [ "$VERDICT" != "ok" ]; then
+                echo "::error::announce publisher did not report '[announce] OK' (verdict: ${VERDICT:-none within 90s})"
+                exit 1
+              fi
+              say "**Published and verified** — the resident publisher reported \`[announce] OK\`."
               ;;
           esac
 
@@ -334,7 +473,7 @@ jobs:
       - name: Verify the box still serves
         if: >-
           inputs.apply && inputs.box != 'faucet' &&
-          (inputs.operation == 'config-apply' || inputs.operation == 'restart')
+          (inputs.operation == 'config-apply' || inputs.operation == 'restart' || inputs.operation == 'deploy')
         env:
           BOX_IP: ${{ steps.box.outputs.ip }}
         run: |
