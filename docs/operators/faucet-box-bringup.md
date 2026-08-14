@@ -102,6 +102,30 @@ every other infra-touching ticket in this repo's history records when it applies
 up -d --build faucet`) to pick them up. Record how each key was generated somewhere off this
    box — there is no legacy identity to fall back to if it is lost.
 
+   `MINA_USDC_TOKEN` / `MINA_USDC_ADMIN_CONTRACT` are **not secrets** — they identify the shared,
+   already-deployed devnet USDC token, the same one box 1 (the apex) carries and every other devnet
+   consumer (the relay/store boxes, `packages/mina-usdc-faucet-web`) already targets. Reuse the
+   values verbatim; only the treasury _key_ must be fresh (issue #919, which records these here
+   before toon-meta#313 destroys the apex and they become unrecoverable from it):
+
+   ```
+   MINA_USDC_TOKEN=B62qqN1Pu3kF2KGmqLA8EwpqfWrnFTVZJGDSDHQuQRoVt5BCFjhNz3d
+   MINA_USDC_ADMIN_CONTRACT=B62qpeGPgEhz6Vbd9E11PoTzz2EZZCJjqhwALxJ2BnkdozFm2rZtmRB
+   ```
+
+   Cross-checked against `packages/mina-usdc-faucet-web/README.md`'s "Live token (devnet)" table
+   (canonical as of 2026-07-19) and against the truncated values issue #919 itself quotes off the
+   apex — both agree. `packages/faucet/src/mina-usdc.mjs` doc: the admin contract is
+   `RateLimitedUsdcAdmin`, mint is **permissionless** (capped 1,000 USDC/address/~24h) and requires
+   no admin key at all — so the fresh treasury key needs no authority transfer from the apex, only
+   ~1.2 devnet MINA of its own for proving-tx fees (see step 5). `infra/mina/usdc-token.json`'s
+   `B62qnZnmV3jAD…` token is a **stale, pre-2026-07-19 identity** — do not use it here.
+
+   The Solana USDC mint needs no equivalent recording: `SOLANA_USDC_MINT` already defaults (in
+   `docker-compose.faucet.yml`) to `xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in`, the same public
+   Solana-devnet mock-USDC mint recorded in `packages/solana-program/deployments/devnet-public.md`
+   and used fleet-wide — it is not apex-specific and needs no separate extraction before #313.
+
    No Mina endpoint needs setting: `MINA_GRAPHQL_URL` defaults to the public Mina devnet
    (`api.minascan.io`), the same node the faucet code defaults to. `.env.example` carries it
    commented out as an override only — do not point it at `mina.$DOMAIN`, the self-hosted
@@ -109,9 +133,17 @@ up -d --build faucet`) to pick them up. Record how each key was generated somewh
 
 5. **Funding.** Fund the Base Sepolia EVM address (a little ETH for gas — the mock USDC mint is
    ungated) and the Solana treasury (USDC on the public Solana devnet; SOL only for tx fees — this
-   box airdrops no SOL, §4.6). The Mina USDC leg self-mints its own replenishment on-chain (rate-
-   limited, ≤1,000 USDC/~24h — see `packages/faucet/src/mina-usdc.mjs`), so it needs no separate
-   funding step beyond the treasury key itself existing.
+   box airdrops no SOL, §4.6). SOL is a public, permissionless devnet airdrop; the USDC transfer is
+   not — `xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in`'s mint authority is the deployer key recorded
+   in `packages/solana-program/deployments/devnet-public.md` ("Keypairs used for this deploy live
+   outside the repo"), so funding this box's fresh treasury needs whoever holds that key to mint or
+   transfer to it. `infra/solana/fund-solana.sh` does **not** reach this mint — it signs with the
+   committed `infra/solana/usdc-authority.json`, which is the _local-validator_ mint's authority
+   (`H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H`, deleted per `infra/linode/README.md`), a
+   different key for a different, no-longer-live mint. The Mina USDC leg self-mints its own
+   replenishment on-chain (rate-limited, ≤1,000 USDC/~24h — see `packages/faucet/src/mina-usdc.mjs`),
+   so it needs no privileged funding step, only ~1.2 devnet MINA of its own for tx fees (the public
+   `faucet.minaprotocol.com`, same as any other devnet account).
 
 6. **Standalone verification.** With `./bootstrap.sh` already run in step 3:
 
