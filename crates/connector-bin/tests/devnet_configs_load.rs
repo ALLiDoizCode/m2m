@@ -1673,11 +1673,53 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
 /// [`no_surviving_box_pins_a_non_rust_connector_image`] is what keeps one
 /// from coming back.
 ///
-/// This is a forward move on every box, not yet deployed anywhere -- see
-/// each overlay's own "PIN OF RECORD" comment. Re-pin here FIRST on any
-/// future bump; the compose files below are asserted to agree with this
-/// constant, not the other way around.
-const EXPECTED_CONNECTOR_TAG: &str = "rust-sha-415531a";
+/// - Bumped again (issue #970) from `rust-sha-415531a` to
+///   `rust-sha-1204220` = `12042209ed94a4b9c68d061ea7e8ca242e24869c`, the
+///   commit that lands #970's two live-devnet fixes: the announce now emits
+///   `requiredTransport`, and the EVM channel index sync filters its
+///   `eth_getLogs` by contract address. Unlike every prior bump, this one is
+///   recorded AFTER the fact rather than as a forward move -- see below.
+/// - `git merge-base --is-ancestor 415531a1b22ab78c727158cf2f443593b6ab790f
+///   12042209ed94a4b9c68d061ea7e8ca242e24869c` succeeds (forward move, not a
+///   rollback); `--is-ancestor 5b7932f6110f72f251ce5d99863e30d614fe9fce
+///   12042209...` succeeds, so the `notice_*` schema the boxes' configs set
+///   is still carried; `--is-ancestor 12042209... HEAD` succeeds, so the
+///   tag's commit is on `main`. The publish run for this sha completed
+///   successfully (`publish-connector-rust-image.yml`, 2026-08-14T23:13Z,
+///   tagged `rust-sha-1204220` + `rust-main`).
+///
+/// UNLIKE the bumps above, this pin was verified on the live fleet BEFORE
+/// being written here, rather than being a forward move awaiting a deploy.
+/// Both boxes were rolled to `rust-sha-1204220` on 2026-08-14 (relay first,
+/// then store) and the paid-write path was exercised end to end against
+/// them: a publish to `g.toon.relay` on the client's DEFAULT transport, a
+/// publish with BTP forced, an `openChannel("g.toon.ario")` whose on-chain
+/// counterparty is ario's own settlement address
+/// `0x6B6c2DACf7Ac1F1273F72beF2E6084F9Ee6D3bff`, and a store upload that the
+/// store app logged as `kind:5094 ... -> txId=...` with a real Arweave
+/// txid. The relay's post-deploy announce carries `requiredTransport: "btp"`
+/// at the content root (event `94b4b93e34efc5f4...`), which is what the
+/// client actually reads -- and the `-32701` "specify an address" error that
+/// had kept the channel index from EVER advancing is gone from both boxes.
+///
+/// Two things this deploy taught that are NOT captured by any assertion
+/// here, recorded so the next bump does not rediscover them:
+///
+/// - Recreating the connector container changes its Docker network IP, and
+///   the long-lived `nginx` container caches the old one -- the store edge
+///   answered `502 connect() failed (111: Connection refused)` until nginx
+///   was restarted. A pin bump is not complete until the edge is re-probed.
+/// - The address-filter fix exposes a SECOND, unrelated limit: the public
+///   `base-sepolia-rpc.publicnode.com` now answers `-32005 Rate limit
+///   exceeded`, so the sync oscillates failed/recovered rather than failing
+///   steadily. That defeats #970's "repeats are logged at debug"
+///   suppression, since each alternation is a *changed* state -- the WARN
+///   volume went UP (~20 lines/min, from ~12). The index-address defect is
+///   fixed; the RPC choice is the next thing to address.
+///
+/// Re-pin here FIRST on any future bump; the compose files below are
+/// asserted to agree with this constant, not the other way around.
+const EXPECTED_CONNECTOR_TAG: &str = "rust-sha-1204220";
 
 /// Every `image:` pin this suite can see across the surviving two-box fleet
 /// (issue #872 removed the apex's own overlay along with the apex) must name
