@@ -37,7 +37,11 @@ pub use identity::ClientIdentityConfig;
 pub use operator::OperatorConfig;
 pub use peer::{ClaimEnforcement, PeerCarriage, PeerConfig, PeerCredential, PeerExposure};
 pub use peer_channel::{EvmPeerChannelConfig, PeerChannelConfig, SolanaPeerChannelConfig};
-pub use peer_sale::PeerSaleConfig;
+pub use peer_sale::{
+    PeerSaleConfig, DEFAULT_MAX_PREFIX_LENGTH, DEFAULT_MAX_PURCHASED_ROWS,
+    DEFAULT_MAX_ROUTES_PER_PAYER, DEFAULT_PURCHASE_RATE_LIMIT,
+    DEFAULT_PURCHASE_RATE_WINDOW_SECONDS,
+};
 pub use route::{PeerRouteConfig, StaticRoute, TransportPolicy};
 pub use secret::SecretLocation;
 pub use settlement::{

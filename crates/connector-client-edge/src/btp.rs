@@ -787,9 +787,41 @@ async fn handle_frame(
     // is, so that claim is left entirely unadmitted rather than spent on
     // a packet already known to be going nowhere. `finish_frame` below
     // still routes `prepare` unchanged and raises the identical F00
-    // itself.
+    // itself. Issue #887 extends the same seam to a peer-sale purchase
+    // whose own shape already dooms it, for the same reason: the shape
+    // refusal is identical with or without the claim.
     let admitted = match claim_json {
-        Some(json) if !state.connector.envelope_target_would_be_refused(&prepare) => {
+        Some(json)
+            if !state.connector.envelope_target_would_be_refused(&prepare)
+                && !state
+                    .connector
+                    .peer_sale_purchase_would_be_refused(&prepare) =>
+        {
+            // Issue #887's identity-keyed peek, mirroring `handle_ilp`
+            // (§9: the two carriages must not drift): the claim's own
+            // declared channel key, read without admitting it, refuses a
+            // rate-limited or row-capped purchase unpaid with the settle
+            // path's identical message. Sound because admission verifies
+            // the signature against exactly the declared channel.
+            if let Some(message) =
+                state
+                    .connector
+                    .peer_sale_purchase_refusal_for_payer(&prepare, || {
+                        connector_domain::client_claim::parse_client_claim(&json)
+                            .ok()
+                            .map(|claim| claim.channel_key())
+                    })
+            {
+                return reply(
+                    replies,
+                    reject_response(
+                        frame.request_id,
+                        crate::peer_sale_bound_reject(message),
+                        Vec::new(),
+                    ),
+                )
+                .await;
+            }
             match state.claim_gate.admit(&json, price).await {
                 Ok(accepted) => Some(accepted),
                 Err(rejection) => {

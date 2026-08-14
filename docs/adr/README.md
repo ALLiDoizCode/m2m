@@ -1,6 +1,6 @@
 # Architecture decision records
 
-37 records, and they do **three different jobs**. Most readers only need one group.
+39 records, and they do **three different jobs**. Most readers only need one group.
 
 The numbers are permanent and are never reused or renumbered — they are cited over a thousand
 times across this repo and from `toon-meta`, `relay` and `store`. This index groups them by
@@ -8,7 +8,7 @@ scope; it does not move them.
 
 | If you are…                                                                 | Read                                                               |
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| changing the connector's code or structure                                  | **[Connector architecture](#connector-architecture)** — 12 records |
+| changing the connector's code or structure                                  | **[Connector architecture](#connector-architecture)** — 14 records |
 | writing or fixing another implementation (a client SDK, a second connector) | **[Protocol law](#protocol-law)** — 22 records                     |
 | deploying, migrating or operating the fleet                                 | **[Fleet and operations](#fleet-and-operations)** — 3 records      |
 
@@ -39,6 +39,7 @@ not change what anything else must do.
 | [0034](0034-a-runtime-peer-route-table-never-shadows-the-config-file.md)              | A runtime peer/route table never shadows the config file               | current — extends 0009       |
 | [0037](0037-a-purchased-peering-is-a-terminated-route-whose-work-is-a-table-write.md) | A purchased peering is a terminated route whose work is a table write  | current — extends 0028, 0034 |
 | [0038](0038-a-peer-sale-lease-demotes-at-match-time-and-reaps-off-the-hot-path.md)    | A peer-sale lease demotes at match time and reaps off the hot path     | current — extends 0034, 0037 |
+| [0039](0039-abuse-bounds-on-a-purchased-peering-refuse-not-refund.md)                 | Abuse bounds on a purchased peering refuse, not refund                 | current — extends 0037       |
 
 ---
 

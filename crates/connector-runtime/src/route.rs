@@ -4,6 +4,10 @@
 //! most specific prefix across both kinds without caring which one it is.
 
 use chrono::{DateTime, Duration, Utc};
+use connector_config::{
+    DEFAULT_MAX_PREFIX_LENGTH, DEFAULT_MAX_PURCHASED_ROWS, DEFAULT_MAX_ROUTES_PER_PAYER,
+    DEFAULT_PURCHASE_RATE_LIMIT, DEFAULT_PURCHASE_RATE_WINDOW_SECONDS,
+};
 
 /// A route whose traffic this connector forwards to a peer's connector for
 /// the next hop, rather than terminating it at an app of its own.
@@ -179,6 +183,96 @@ impl PeerSaleRoute {
     }
 }
 
+/// Abuse bounds on a purchased peering (issue #887, C4, part of #867 "sell
+/// peering"). `Default` gives every bound a value even on a node that
+/// never overrides one -- the same "fails closed" shape
+/// `connector_runtime::Connector`'s probe rate limiter already takes,
+/// since a purchase pays a stranger into this node's routing table and a
+/// forgotten limit should not mean an unbounded one.
+///
+/// `max_purchased_rows` and `max_routes_per_payer` bound two different
+/// tables, deliberately. A "peer row" is an entry in the runtime *peer*
+/// table -- one per distinct payer, since a channel can only ever buy
+/// itself one peer identity (`peer_id` IS the channel key that paid, ADR
+/// 0037). A per-payer cap on *that* table would always be 0 or 1 and mean
+/// nothing, so [`Self::max_purchased_rows`] bounds it globally instead:
+/// how many distinct payers may hold a purchased peering at once. What a
+/// single payer *can* grow without bound is how many *routes* (prefixes)
+/// forward to the one peer id it bought -- that is what
+/// [`Self::max_routes_per_payer`] counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerSaleBounds {
+    max_purchased_rows: u64,
+    max_routes_per_payer: u64,
+    max_prefix_length: usize,
+    purchase_rate_limit: u32,
+    purchase_rate_window: Duration,
+}
+
+impl PeerSaleBounds {
+    pub fn new(
+        max_purchased_rows: u64,
+        max_routes_per_payer: u64,
+        max_prefix_length: usize,
+        purchase_rate_limit: u32,
+        purchase_rate_window: Duration,
+    ) -> PeerSaleBounds {
+        PeerSaleBounds {
+            max_purchased_rows,
+            max_routes_per_payer,
+            max_prefix_length,
+            purchase_rate_limit,
+            purchase_rate_window,
+        }
+    }
+
+    /// The total number of distinct payers this node will hold a
+    /// purchased peering for at once.
+    pub fn max_purchased_rows(&self) -> u64 {
+        self.max_purchased_rows
+    }
+
+    /// The number of purchased routes (prefixes) a single payer's peer id
+    /// may have inserted at once.
+    pub fn max_routes_per_payer(&self) -> u64 {
+        self.max_routes_per_payer
+    }
+
+    /// The longest a purchased prefix may be, in bytes.
+    pub fn max_prefix_length(&self) -> usize {
+        self.max_prefix_length
+    }
+
+    /// The number of purchase attempts, successful or not, a single payer
+    /// may make within [`Self::purchase_rate_window`].
+    pub fn purchase_rate_limit(&self) -> u32 {
+        self.purchase_rate_limit
+    }
+
+    /// The window [`Self::purchase_rate_limit`] is counted over.
+    pub fn purchase_rate_window(&self) -> Duration {
+        self.purchase_rate_window
+    }
+}
+
+impl Default for PeerSaleBounds {
+    /// Reads `connector_config`'s own `[peer_sale]` defaults rather than
+    /// restating them, so a node with no `[peer_sale]` section is bounded
+    /// exactly like one whose section leaves every bound unwritten. This
+    /// is what a `Connector` starts with before any section is read, and
+    /// what `with_peer_sale_bounds` overrides from that section's fields
+    /// precisely like price and lease already are.
+    fn default() -> PeerSaleBounds {
+        PeerSaleBounds {
+            max_purchased_rows: DEFAULT_MAX_PURCHASED_ROWS,
+            max_routes_per_payer: DEFAULT_MAX_ROUTES_PER_PAYER,
+            max_prefix_length: DEFAULT_MAX_PREFIX_LENGTH as usize,
+            purchase_rate_limit: DEFAULT_PURCHASE_RATE_LIMIT,
+            purchase_rate_window: Duration::seconds(DEFAULT_PURCHASE_RATE_WINDOW_SECONDS as i64),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +292,26 @@ mod tests {
         assert_eq!(sale.prefix(), "g.example.node.peer-sale");
         assert_eq!(sale.price(), 1000);
         assert_eq!(sale.lease(), Duration::seconds(3600));
+    }
+
+    #[test]
+    fn peer_sale_bounds_exposes_every_field() {
+        let bounds = PeerSaleBounds::new(2, 1, 16, 3, Duration::seconds(30));
+        assert_eq!(bounds.max_purchased_rows(), 2);
+        assert_eq!(bounds.max_routes_per_payer(), 1);
+        assert_eq!(bounds.max_prefix_length(), 16);
+        assert_eq!(bounds.purchase_rate_limit(), 3);
+        assert_eq!(bounds.purchase_rate_window(), Duration::seconds(30));
+    }
+
+    #[test]
+    fn peer_sale_bounds_default_is_tight_but_nonzero() {
+        let bounds = PeerSaleBounds::default();
+        assert_eq!(bounds.max_purchased_rows(), 32);
+        assert_eq!(bounds.max_routes_per_payer(), 4);
+        assert_eq!(bounds.max_prefix_length(), 128);
+        assert_eq!(bounds.purchase_rate_limit(), 5);
+        assert_eq!(bounds.purchase_rate_window(), Duration::seconds(60));
     }
 
     #[test]

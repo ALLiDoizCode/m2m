@@ -1787,6 +1787,41 @@ lease_seconds = 3600
         assert_eq!(sale.lease_seconds(), 3600);
     }
 
+    /// Issue #887: `[peer_sale]`'s abuse-bound fields load from TOML end to
+    /// end, alongside the price and lease #885 already wrote.
+    #[test]
+    fn loads_a_peer_sale_section_with_abuse_bounds() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[peer_sale]
+prefix = "g.example.node.peer-sale"
+price = 5000
+lease_seconds = 3600
+max_purchased_rows = 8
+max_routes_per_payer = 2
+max_prefix_length = 64
+purchase_rate_limit = 3
+purchase_rate_window_seconds = 30
+"#,
+                key_path.display()
+            )
+        })
+        .expect("load");
+
+        let sale = config.peer_sale().expect("the section is present");
+        assert_eq!(sale.max_purchased_rows(), 8);
+        assert_eq!(sale.max_routes_per_payer(), 2);
+        assert_eq!(sale.max_prefix_length(), 64);
+        assert_eq!(sale.purchase_rate_limit(), 3);
+        assert_eq!(sale.purchase_rate_window_seconds(), 30);
+    }
+
     #[test]
     fn a_config_with_no_peer_sale_section_sells_no_peering() {
         let config = with_key_file(|key_path| {

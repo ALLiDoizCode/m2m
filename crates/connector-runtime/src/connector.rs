@@ -33,7 +33,7 @@ use crate::operator_view::{
 use crate::outbound_client::{ClaimStateSource, EvmDomain, OutboundClientLedger};
 use crate::peer_route_store::{PeerRouteStore, PeerRouteStoreError, RuntimePeers};
 use crate::peer_transport::PeerTransport;
-use crate::route::{LeasedRoute, PeerRoute, PeerSaleRoute};
+use crate::route::{LeasedRoute, PeerRoute, PeerSaleBounds, PeerSaleRoute};
 
 /// A reject this connector originates before a gift wrap's shared secret
 /// could be recovered -- no identity key configured, or the wrap itself
@@ -161,40 +161,43 @@ pub enum ProbeDenied {
     RateLimited,
 }
 
-/// A fixed-window rate limiter for probe traffic, keyed by sender identity
-/// (issue #426, ADR 0011's consequence: "a probe traverses the network and
-/// pays nothing ... so it is ... rate-limited per that identity"). Counted
-/// against this connector's own injected [`Clock`] rather than wall time, so
-/// tests control it deterministically instead of racing real elapsed time.
-struct ProbeRateLimiter {
+/// A fixed-window rate limiter, keyed by sender identity. Counted against
+/// this connector's own injected [`Clock`] rather than wall time, so tests
+/// control it deterministically instead of racing real elapsed time.
+///
+/// One instance per budget, never one shared across budgets: this
+/// connector holds two (probe traffic, issue #426 / ADR 0011's "a probe
+/// traverses the network and pays nothing ... so it is ... rate-limited
+/// per that identity"; and peer-sale purchase attempts, issue #887's
+/// "rate limit on purchase attempts per identity"), and a flood against
+/// one must not starve the other's.
+struct FixedWindowRateLimiter {
     max_per_window: u32,
     window: Duration,
     /// A plain [`Mutex`] rather than [`RwLock`] like `known_channels`
-    /// below -- every access here mutates (recording an attempt), so
-    /// there is no read-only path to give a reader/writer lock any
+    /// below -- the counting path mutates on every access, and the one
+    /// read-only path ([`Self::would_allow`], issue #887's pre-admission
+    /// peek) is far too infrequent to give a reader/writer lock any
     /// advantage over mutual exclusion.
     windows: Mutex<HashMap<String, (DateTime<Utc>, u32)>>,
 }
 
-impl ProbeRateLimiter {
-    fn new(max_per_window: u32, window: Duration) -> ProbeRateLimiter {
-        ProbeRateLimiter {
+impl FixedWindowRateLimiter {
+    fn new(max_per_window: u32, window: Duration) -> FixedWindowRateLimiter {
+        FixedWindowRateLimiter {
             max_per_window,
             window,
             windows: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Record one probe attempt from `identity` at `now`, returning whether
-    /// it is allowed. A window starts on an identity's first attempt (or
-    /// its first attempt after its previous window elapsed) and admits up
-    /// to `max_per_window` attempts before refusing the rest until the next
+    /// Record one attempt from `identity` at `now`, returning whether it
+    /// is allowed. A window starts on an identity's first attempt (or its
+    /// first attempt after its previous window elapsed) and admits up to
+    /// `max_per_window` attempts before refusing the rest until the next
     /// window starts.
     fn allow(&self, identity: &str, now: DateTime<Utc>) -> bool {
-        let mut windows = self
-            .windows
-            .lock()
-            .expect("probe rate limiter lock poisoned");
+        let mut windows = self.windows.lock().expect("rate limiter lock poisoned");
         match windows.get_mut(identity) {
             Some((started_at, count)) if now < *started_at + self.window => {
                 if *count >= self.max_per_window {
@@ -208,6 +211,21 @@ impl ProbeRateLimiter {
                 windows.insert(identity.to_string(), (now, 1));
                 true
             }
+        }
+    }
+
+    /// Whether an attempt from `identity` at `now` WOULD be allowed,
+    /// recording nothing (issue #887's pre-admission peek). Only
+    /// [`Self::allow`] ever counts, so a purchase refused before its claim
+    /// was admitted -- charged nothing -- also costs the payer none of
+    /// their window.
+    fn would_allow(&self, identity: &str, now: DateTime<Utc>) -> bool {
+        let windows = self.windows.lock().expect("rate limiter lock poisoned");
+        match windows.get(identity) {
+            Some((started_at, count)) if now < *started_at + self.window => {
+                *count < self.max_per_window
+            }
+            _ => true,
         }
     }
 }
@@ -419,6 +437,22 @@ pub struct Connector {
     /// node (issue #885). `None` on a node that sells no peering, in
     /// which case its would-be prefix simply matches nothing here.
     peer_sale: Option<PeerSaleRoute>,
+    /// Issue #887 (C4): abuse bounds on a purchased peering -- row caps,
+    /// the purchased-prefix length cap, and the purchase-attempt rate
+    /// limit `peer_sale_rate_limiter` below is sized from. Always
+    /// populated ([`PeerSaleBounds::default`] until
+    /// [`Self::with_peer_sale_bounds`] overrides it), the same "a bound
+    /// exists even if nobody configured one" shape `probe_rate_limiter`
+    /// below already takes; consulted only when `peer_sale` is `Some` and
+    /// a purchase is actually attempted.
+    peer_sale_bounds: PeerSaleBounds,
+    /// Issue #887 (C4): the purchase-attempt rate limit half of
+    /// `peer_sale_bounds` -- kept apart because it needs mutable
+    /// per-identity state, unlike the plain data the rest of the bounds
+    /// are. Rebuilt by [`Self::with_peer_sale_bounds`] whenever the bounds
+    /// it is sized from change, so the two can never disagree about the
+    /// limit currently in force.
+    peer_sale_rate_limiter: FixedWindowRateLimiter,
     /// Routes pushed at runtime over the operator surface with a time
     /// limit (ADR 0006, issue #427), keyed by prefix so pushing the same
     /// prefix again renews it rather than adding a duplicate entry. Lives
@@ -482,7 +516,7 @@ pub struct Connector {
     /// above, this fails *closed* rather than open: probing pays nothing,
     /// so a node that never configures a limit still gets one rather than
     /// unbounded free traversal.
-    probe_rate_limiter: ProbeRateLimiter,
+    probe_rate_limiter: FixedWindowRateLimiter,
     /// Payment channels this connector has seen a valid claim on at its own
     /// client edge (issue #548), and therefore recognizes as belonging to a
     /// sender that holds a channel with it -- the other half of
@@ -615,11 +649,46 @@ enum CoverOutcome {
     Failed(String),
 }
 
+/// How much of a packet [`Connector::open_peer_sale_purchase`] could read,
+/// for the two pre-admission peer-sale probes (issue #887).
+enum PeerSalePeek {
+    /// Nothing this probe may judge: `prepare` is not a packet this node's
+    /// peer-sale route will terminate (no peer-sale route, an outranking
+    /// lease), or it is one this node cannot read (no identity key, a gift
+    /// wrap or envelope that does not open). Every one of those is
+    /// answered by the delivery path before any claim is spent, so a probe
+    /// declines to guess at them.
+    NotJudgeable,
+    /// A peer-sale packet whose body does not parse as a purchase.
+    Malformed,
+    /// The parsed purchase.
+    Purchase(PeerSaleRequest),
+}
+
+/// Whether a peer-sale bound check may spend the payer's rate window
+/// (issue #887) -- named rather than a bare `bool`, since which side of
+/// claim admission the caller is on is exactly what decides it.
+#[derive(Clone, Copy)]
+enum RateWindow {
+    /// The judged, charged side ([`Connector::settle_peer_sale_purchase`]):
+    /// this attempt counts against the window.
+    Spend,
+    /// The pre-admission probe: read the window, spend none of it.
+    Peek,
+}
+
 /// [`Connector`]'s default probe rate limit absent
 /// [`Connector::with_probe_rate_limit`] -- a deliberately conservative
 /// figure (issue #426): probing costs a sender nothing, so the safe default
 /// is a small allowance rather than none at all.
 const DEFAULT_PROBE_LIMIT: u32 = 60;
+
+/// What a refusal log names as the payer when the refusal was reached
+/// without a claim ever having been admitted (issue #887): the shape
+/// refusals the client edge predicts pre-admission arrive here with no
+/// channel bound, and "no payer was charged for this" is the honest thing
+/// for the log to say.
+const UNADMITTED_PAYER: &str = "<unadmitted>";
 
 /// [`Connector`]'s default probe rate limit window, paired with
 /// [`DEFAULT_PROBE_LIMIT`].
@@ -649,10 +718,16 @@ impl Connector {
         peer_transport: Arc<dyn PeerTransport>,
         clock: Arc<dyn Clock>,
     ) -> Connector {
+        let peer_sale_bounds = PeerSaleBounds::default();
         Connector {
             routes,
             peer_routes,
             peer_sale: None,
+            peer_sale_bounds,
+            peer_sale_rate_limiter: FixedWindowRateLimiter::new(
+                peer_sale_bounds.purchase_rate_limit(),
+                peer_sale_bounds.purchase_rate_window(),
+            ),
             leased_routes: ArcSwap::from_pointee(HashMap::new()),
             app_client,
             peer_transport,
@@ -662,7 +737,10 @@ impl Connector {
             known_channels: RwLock::new(Vec::new()),
             claims: ClaimBook::new(None, HashMap::new(), HashMap::new()),
             identity_signer: None,
-            probe_rate_limiter: ProbeRateLimiter::new(DEFAULT_PROBE_LIMIT, default_probe_window()),
+            probe_rate_limiter: FixedWindowRateLimiter::new(
+                DEFAULT_PROBE_LIMIT,
+                default_probe_window(),
+            ),
             recognized_channels: RwLock::new(HashSet::new()),
             outbound_client: None,
             outbound_client_hops: HashMap::new(),
@@ -695,6 +773,20 @@ impl Connector {
         lease: Duration,
     ) -> Self {
         self.peer_sale = Some(PeerSaleRoute::new(prefix, price, lease));
+        self
+    }
+
+    /// Override issue #887's abuse bounds on purchased peering from
+    /// `[peer_sale]`'s own fields, exactly like [`Self::with_peer_sale`]
+    /// overrides price and lease from the same section. A node that never
+    /// calls this still has bounds -- [`PeerSaleBounds::default`] applies
+    /// as soon as [`Self::new`] returns.
+    pub fn with_peer_sale_bounds(mut self, bounds: PeerSaleBounds) -> Self {
+        self.peer_sale_rate_limiter = FixedWindowRateLimiter::new(
+            bounds.purchase_rate_limit(),
+            bounds.purchase_rate_window(),
+        );
+        self.peer_sale_bounds = bounds;
         self
     }
 
@@ -799,7 +891,7 @@ impl Connector {
     /// `max_per_window` probe attempts per sender identity within `window`,
     /// checked against this connector's own injected clock.
     pub fn with_probe_rate_limit(mut self, max_per_window: u32, window: Duration) -> Self {
-        self.probe_rate_limiter = ProbeRateLimiter::new(max_per_window, window);
+        self.probe_rate_limiter = FixedWindowRateLimiter::new(max_per_window, window);
         self
     }
 
@@ -1096,11 +1188,21 @@ impl Connector {
     /// route or a peer-forwarding route -- the set of prefixes a runtime
     /// write may never add, update or remove.
     fn config_owns_prefix(&self, prefix: &str) -> bool {
-        self.routes.iter().any(|route| route.prefix() == prefix)
-            || self
-                .peer_routes
-                .iter()
-                .any(|route| route.prefix() == prefix)
+        self.config_prefixes().any(|owned| owned == prefix)
+    }
+
+    /// Every prefix the config file itself serves: app routes, peer
+    /// forwarding routes, and -- when configured -- the `[peer_sale]`
+    /// route (this PR's review, fourth finding: the sale prefix is as
+    /// config-owned as any `[[routes]]` row, and omitting it here let a
+    /// buyer purchase a prefix strictly beneath the sale address and
+    /// outrank the sale route for its whole subtree).
+    fn config_prefixes(&self) -> impl Iterator<Item = &str> {
+        self.routes
+            .iter()
+            .map(|route| route.prefix())
+            .chain(self.peer_routes.iter().map(|route| route.prefix()))
+            .chain(self.peer_sale.as_ref().map(|sale| sale.prefix()))
     }
 
     /// Whether `prefix` sits strictly inside address space a config-file
@@ -1110,17 +1212,40 @@ impl Connector {
     /// Route selection ranks matched prefix length first, so a durable row
     /// inserted here would outrank the configured route for that whole
     /// subtree: without this guard, one peer-sale purchase (issue #885,
-    /// ADR 0037) permanently diverts the seller's own app route.
+    /// ADR 0037) permanently diverts the seller's own app route -- or,
+    /// per this PR's review, the seller's own sale route.
     fn config_owns_ancestor_of(&self, prefix: &str) -> bool {
-        self.routes
-            .iter()
-            .map(|route| route.prefix())
-            .chain(self.peer_routes.iter().map(|route| route.prefix()))
-            .any(|owned| {
-                prefix.len() > owned.len()
-                    && prefix.starts_with(owned)
-                    && prefix.as_bytes()[owned.len()] == b'.'
-            })
+        self.config_prefixes().any(|owned| {
+            prefix.len() > owned.len()
+                && prefix.starts_with(owned)
+                && prefix.as_bytes()[owned.len()] == b'.'
+        })
+    }
+
+    /// How many distinct payers currently hold a runtime-purchased peer
+    /// row (issue #887, C4) -- a lease is issue #886's own signal that a
+    /// row came from a purchase and not the plain `POST /peers` operator
+    /// surface, so this is the count [`PeerSaleBounds::max_purchased_rows`]
+    /// bounds, not the whole `runtime_peers` table.
+    fn purchased_peer_count(&self) -> usize {
+        self.runtime_peers_snapshot()
+            .values()
+            .filter(|expires_at| expires_at.is_some())
+            .count()
+    }
+
+    /// How many runtime routes already forward to `payer_id` -- the count
+    /// [`PeerSaleBounds::max_routes_per_payer`] bounds (issue #887, C4).
+    /// `payer_id` is always a purchase's own channel key, so every route
+    /// this finds is one a purchase inserted; an operator's own
+    /// `POST /routes/peers` write pointed at the same peer id would count
+    /// too, which is the honest answer to "how many prefixes reach this
+    /// peer" regardless of which surface added them.
+    fn purchased_route_count_for_payer(&self, payer_id: &str) -> usize {
+        self.runtime_peer_routes_snapshot()
+            .values()
+            .filter(|route| route.peer_id() == payer_id)
+            .count()
     }
 
     /// Add or update a runtime peer-forwarding route (issue #884):
@@ -2263,6 +2388,45 @@ impl Connector {
             }
         };
 
+        // Shape-derived refusals come FIRST, before the payment binding
+        // is even looked at (issue #887's "refuse BEFORE taking
+        // payment"): these are exactly the refusals the client edge's
+        // pre-admission probe (`Self::peer_sale_purchase_would_be_refused`)
+        // predicts from the packet alone, and a packet whose claim was
+        // therefore never admitted must re-derive the identical answer
+        // here -- the #869 two-sided pattern. The prior order ran the
+        // rate limit before the parse to throttle garbage bodies, but
+        // that property was already spent the moment the edge's probe
+        // began parsing every attempt pre-admission; the rate limit still
+        // throttles per-identity judged attempts below.
+        //
+        // Issue #887's "refusal is loud" still names the payer wherever
+        // there is one to name -- but a shape refusal is judged before any
+        // payment was bound, so on the pre-admission path (the ordinary
+        // one for these) there is no admitted channel and the log says so
+        // rather than inventing an identity.
+        let payer = client_channel_id.unwrap_or(UNADMITTED_PAYER);
+        let purchase: PeerSaleRequest = match serde_json::from_slice(&request.body) {
+            Ok(purchase) => purchase,
+            Err(error) => {
+                tracing::warn!(
+                    channel_id = payer,
+                    %error,
+                    "peer-sale purchase refused: malformed request body"
+                );
+                return refuse(format!("malformed peer-sale request body: {error}"));
+            }
+        };
+        if let Some(message) = self.peer_sale_shape_refusal(&purchase) {
+            tracing::warn!(
+                channel_id = payer,
+                prefix = %purchase.prefix,
+                %message,
+                "peer-sale purchase refused on the request's own shape"
+            );
+            return refuse(message);
+        }
+
         let Some(channel_id) = client_channel_id else {
             tracing::warn!(
                 "peer-sale purchase refused: no client channel admitted this payment to bind"
@@ -2274,67 +2438,25 @@ impl Connector {
             );
         };
 
-        let purchase: PeerSaleRequest = match serde_json::from_slice(&request.body) {
-            Ok(purchase) => purchase,
-            Err(error) => {
-                tracing::warn!(channel_id, %error, "peer-sale purchase refused: malformed request body");
-                return refuse(format!("malformed peer-sale request body: {error}"));
-            }
-        };
-
-        if !is_valid_ilp_address(&purchase.prefix) {
+        // Issue #887 (C4): the identity-keyed bounds -- the purchase rate
+        // limit, then the row caps -- via the same
+        // `peer_sale_identity_refusal` the client edge's pre-admission
+        // probe consults (the #869 two-sided pattern), counting the rate
+        // attempt on this, the judged-and-charged side only. In the normal
+        // edge flow the probe has already refused these unpaid; this copy
+        // is the authority for direct callers and for races against the
+        // window between the probe and here. The renewal semantics (a
+        // repeat purchase never grows a table, so neither cap applies to
+        // it) live inside the shared function.
+        if let Some(message) =
+            self.peer_sale_identity_refusal(channel_id, &purchase, RateWindow::Spend)
+        {
             tracing::warn!(
                 channel_id,
-                prefix = %purchase.prefix,
-                "peer-sale purchase refused: invalid prefix"
+                %message,
+                "peer-sale purchase refused on an identity-keyed bound"
             );
-            return refuse(format!("'{}' is not a valid ILP address", purchase.prefix));
-        }
-
-        // Config-owned address space is not for sale (ADR 0037): a
-        // purchased row is durable with no expiry, and longest-prefix
-        // selection would hand the buyer every packet for a subtree of
-        // the seller's own routes. Refused before anything is inserted.
-        // Exact collisions are already refused by
-        // `upsert_runtime_peer_route`'s `config_owns_prefix` guard; this
-        // is the strict-containment case that guard deliberately does not
-        // cover, opened only when the write became purchasable. #887's
-        // abuse bounds cover rates and quantities, not containment.
-        if self.config_owns_ancestor_of(&purchase.prefix) {
-            tracing::warn!(
-                channel_id,
-                prefix = %purchase.prefix,
-                "peer-sale purchase refused: prefix sits under a configured route"
-            );
-            return refuse(format!(
-                "'{}' sits under address space a configured route already serves; \
-                 config-owned space is not for sale",
-                purchase.prefix
-            ));
-        }
-
-        // Issue #885's own arithmetic bound: what this connector forwards
-        // to the new peer (`price - fee`) must be enough to cover what the
-        // buyer itself declares it needs to relay onward, or the peering
-        // being purchased could never break even one hop further out.
-        // `checked_sub`, so a fee exceeding the price is refused here like
-        // any other shortfall rather than underflowing.
-        let covers_next_hop = purchase
-            .price
-            .checked_sub(purchase.fee)
-            .is_some_and(|forwarded| forwarded >= purchase.next_hop_price);
-        if !covers_next_hop {
-            tracing::warn!(
-                channel_id,
-                fee = purchase.fee,
-                price = purchase.price,
-                next_hop_price = purchase.next_hop_price,
-                "peer-sale purchase refused: price - fee does not cover the declared next-hop price"
-            );
-            return refuse(format!(
-                "price ({}) minus fee ({}) must be at least next_hop_price ({})",
-                purchase.price, purchase.fee, purchase.next_hop_price
-            ));
+            return refuse(message);
         }
 
         if let Err(message) = self.verify_purchasing_channel_open(channel_id).await {
@@ -2611,35 +2733,10 @@ impl Connector {
         else {
             return false;
         };
-        // The same winner rule the router applies: an active lease beats
-        // the app route only on a strictly longer prefix (equal length
-        // ties break to the app -- `RouteRank::App > RouteRank::Leased`).
-        // When a lease wins, this packet is *forwarded* with its data
-        // opaque at this hop, so there is no envelope-shape refusal to
-        // predict -- and answering `true` off the outranked app route
-        // would let the forwarded packet skip claim admission entirely
-        // and ride for free (the review's finding on issue #869).
-        let leased_routes = self.leased_routes_snapshot();
-        let now = self.clock.now();
-        let active_leased: Vec<&LeasedRoute> = leased_routes
-            .values()
-            .filter(|route| !is_expired(route.expires_at(), now))
-            .collect();
-        let leased_prefixes: Vec<&str> = active_leased.iter().map(|route| route.prefix()).collect();
-        if let Some(index) = select_route(&prepare.destination, &leased_prefixes) {
-            if active_leased[index].prefix().len() > configured_len {
-                return false;
-            }
+        if self.active_lease_outranks(&prepare.destination, configured_len) {
+            return false;
         }
-        let Some(identity_signer) = self.identity_signer.as_ref() else {
-            return false;
-        };
-        let Ok((envelope_bytes, _shared_secret)) =
-            open_request(&prepare.data, identity_signer.as_ref())
-        else {
-            return false;
-        };
-        let Ok(request) = EnvelopeRequest::decode(&envelope_bytes) else {
+        let Some(request) = self.opened_envelope_request(&prepare.data) else {
             return false;
         };
         crate::app_client::resolve_target_under_handler(
@@ -2647,6 +2744,246 @@ impl Connector {
             &request.target,
         )
         .is_err()
+    }
+
+    /// Whether a strictly longer-prefix active lease beats the configured
+    /// route of prefix length `configured_len` that `destination` already
+    /// resolved to -- the same winner rule the router applies (equal
+    /// length ties break to the configured route, `RouteRank::App >
+    /// RouteRank::Leased`). Both pre-admission probes below ask this
+    /// before they judge anything: when a lease wins, the packet is
+    /// *forwarded* with its data opaque at this hop, so there is no
+    /// refusal to predict -- and answering `true` off the outranked
+    /// configured route would let the forwarded packet skip claim
+    /// admission entirely and ride for free (the review's findings on
+    /// issues #869 and #944).
+    fn active_lease_outranks(&self, destination: &str, configured_len: usize) -> bool {
+        let leased_routes = self.leased_routes_snapshot();
+        let now = self.clock.now();
+        let active_leased: Vec<&LeasedRoute> = leased_routes
+            .values()
+            .filter(|route| !is_expired(route.expires_at(), now))
+            .collect();
+        let leased_prefixes: Vec<&str> = active_leased.iter().map(|route| route.prefix()).collect();
+        select_route(destination, &leased_prefixes)
+            .is_some_and(|index| active_leased[index].prefix().len() > configured_len)
+    }
+
+    /// Open a terminated packet's gift wrap with this node's identity key
+    /// and decode the envelope inside, for a pre-admission probe that has
+    /// already established the packet terminates here. `None` when there
+    /// is no identity key configured, the wrap does not open, or the
+    /// envelope does not decode -- three packets a probe cannot read, so
+    /// it cannot tell "refused for its shape" from "unreadable" and
+    /// declines to guess. Discards the shared secret: nothing is sealed
+    /// on this path, and the delivery path derives its own.
+    fn opened_envelope_request(&self, data: &[u8]) -> Option<EnvelopeRequest> {
+        let identity_signer = self.identity_signer.as_ref()?;
+        let (envelope_bytes, _shared_secret) = open_request(data, identity_signer.as_ref()).ok()?;
+        EnvelopeRequest::decode(&envelope_bytes).ok()
+    }
+
+    /// The purchase refusals derivable from the request's own shape --
+    /// prefix validity, config containment (ADR 0037), the price/fee
+    /// arithmetic, and the prefix-length bound (issue #887) -- with no
+    /// payer identity involved. One function, consulted from BOTH sides
+    /// of claim admission: [`Self::peer_sale_purchase_would_be_refused`]
+    /// asks it before the client edge admits the covering claim, and
+    /// [`Self::settle_peer_sale_purchase`] re-derives the identical
+    /// answer after, so the two can never disagree (the #869 pattern)
+    /// and a shape-refused purchase is never charged (issue #887's own
+    /// "refuse BEFORE taking payment").
+    fn peer_sale_shape_refusal(&self, purchase: &PeerSaleRequest) -> Option<String> {
+        if !is_valid_ilp_address(&purchase.prefix) {
+            return Some(format!("'{}' is not a valid ILP address", purchase.prefix));
+        }
+        if self.config_owns_ancestor_of(&purchase.prefix) {
+            return Some(format!(
+                "'{}' sits under address space a configured route already serves; \
+                 config-owned space is not for sale",
+                purchase.prefix
+            ));
+        }
+        let covers_next_hop = purchase
+            .price
+            .checked_sub(purchase.fee)
+            .is_some_and(|forwarded| forwarded >= purchase.next_hop_price);
+        if !covers_next_hop {
+            return Some(format!(
+                "price ({}) minus fee ({}) must be at least next_hop_price ({})",
+                purchase.price, purchase.fee, purchase.next_hop_price
+            ));
+        }
+        let max_prefix_length = self.peer_sale_bounds.max_prefix_length();
+        if purchase.prefix.len() > max_prefix_length {
+            return Some(format!(
+                "'{}' is {} bytes, over this node's {max_prefix_length}-byte purchased-prefix \
+                 limit",
+                purchase.prefix,
+                purchase.prefix.len(),
+            ));
+        }
+        None
+    }
+
+    /// The purchase refusals keyed by the payer's identity -- the purchase
+    /// rate limit and the two row caps (issue #887) -- evaluated for
+    /// `channel_id` against `purchase`. One function, consulted from BOTH
+    /// sides of claim admission exactly like
+    /// [`Self::peer_sale_shape_refusal`]:
+    /// [`Self::peer_sale_purchase_refusal_for_payer`] asks it before the
+    /// client edge admits the claim (with [`RateWindow::Peek`] -- a
+    /// refusal that charged nothing must cost none of the payer's window
+    /// either), and [`Self::settle_peer_sale_purchase`] asks it after
+    /// (with [`RateWindow::Spend`]), the authoritative copy for callers
+    /// that reach it directly. Same order both sides: rate, then caps.
+    fn peer_sale_identity_refusal(
+        &self,
+        channel_id: &str,
+        purchase: &PeerSaleRequest,
+        window: RateWindow,
+    ) -> Option<String> {
+        let bounds = self.peer_sale_bounds;
+        let now = self.clock.now();
+        let rate_ok = match window {
+            RateWindow::Spend => self.peer_sale_rate_limiter.allow(channel_id, now),
+            RateWindow::Peek => self.peer_sale_rate_limiter.would_allow(channel_id, now),
+        };
+        if !rate_ok {
+            return Some(format!(
+                "purchase rate limit exceeded for '{channel_id}': at most {} attempts per {} \
+                 seconds",
+                bounds.purchase_rate_limit(),
+                bounds.purchase_rate_window().num_seconds()
+            ));
+        }
+        let is_new_payer = !self.runtime_peers_snapshot().contains_key(channel_id);
+        if is_new_payer {
+            let total = self.purchased_peer_count();
+            // Widen the count, never narrow the configured cap: `as usize`
+            // on the cap truncates on a 32-bit target.
+            if total as u64 >= bounds.max_purchased_rows() {
+                return Some(format!(
+                    "this node already holds {total} purchased peer rows, at its limit of {}",
+                    bounds.max_purchased_rows()
+                ));
+            }
+        }
+        let route_already_owned_by_payer = self
+            .runtime_peer_routes_snapshot()
+            .get(&purchase.prefix)
+            .is_some_and(|route| route.peer_id() == channel_id);
+        if !route_already_owned_by_payer {
+            let payer_routes = self.purchased_route_count_for_payer(channel_id);
+            if payer_routes as u64 >= bounds.max_routes_per_payer() {
+                return Some(format!(
+                    "'{channel_id}' already holds {payer_routes} purchased routes, at this \
+                     node's limit of {}",
+                    bounds.max_routes_per_payer()
+                ));
+            }
+        }
+        None
+    }
+
+    /// Whether `prepare` names this node's peer-sale route with a purchase
+    /// its own shape already dooms (issue #887). The client edge consults
+    /// this BEFORE admitting the packet's covering claim -- the same seam
+    /// as [`Self::envelope_target_would_be_refused`] -- so a shape-refused
+    /// purchase spends nothing: routing still runs unchanged, and
+    /// [`Self::settle_peer_sale_purchase`] raises the identical refusal
+    /// from the same [`Self::peer_sale_shape_refusal`], only with no
+    /// watermark moved getting there.
+    ///
+    /// The identity-keyed bounds -- the purchase rate limit and the row
+    /// caps -- need a payer to judge, so they are not answerable from the
+    /// packet alone and live in
+    /// [`Self::peer_sale_purchase_refusal_for_payer`], which the edge
+    /// consults second, off the claim's own declared channel key. ADR
+    /// 0039 records why that peek is a sound refusal basis unadmitted.
+    pub fn peer_sale_purchase_would_be_refused(&self, prepare: &Prepare) -> bool {
+        match self.open_peer_sale_purchase(prepare) {
+            PeerSalePeek::NotJudgeable => false,
+            // A body that does not parse dooms the purchase as surely as
+            // any bound -- no identity could make it insertable -- so it
+            // is predicted here too, and `settle_peer_sale_purchase`
+            // raises the identical malformed-body refusal on the
+            // unadmitted path.
+            PeerSalePeek::Malformed => true,
+            PeerSalePeek::Purchase(purchase) => self.peer_sale_shape_refusal(&purchase).is_some(),
+        }
+    }
+
+    /// The identity-keyed half of the pre-admission peer-sale probe
+    /// (issue #887): the refusal `claimed_channel` would hit -- rate limit
+    /// or a row cap -- for the purchase `prepare` carries, or `None` when
+    /// it would clear them. `claimed_channel` is the claim's own declared
+    /// channel key, read WITHOUT admitting it: that is sound because
+    /// admission verifies the claim's signature against that exact
+    /// channel's registered signer, so a payer declaring any other channel
+    /// is rejected at admission and charged nothing -- the peek is
+    /// accurate for every payer who can actually be charged. The rate
+    /// check is a pure peek: a refusal that charges nothing costs none of
+    /// the payer's window. [`Self::settle_peer_sale_purchase`] re-derives
+    /// the same answer post-admission (counting), the authority for
+    /// direct callers and races.
+    ///
+    /// The edge consults [`Self::peer_sale_purchase_would_be_refused`]
+    /// first, so a shape-doomed purchase never reaches this.
+    ///
+    /// `claimed_channel` is a closure, not a `&str`, because reading it
+    /// costs the caller real work on every packet -- on the HTTP carriage
+    /// a wrapped claim header is a whole ECDH open -- and only a packet
+    /// that actually is a purchase for this node's sale route ever needs
+    /// it. `None` from the closure (no claim header, or one that does not
+    /// decode) declines to judge: admission answers that shape
+    /// authoritatively a moment later.
+    pub fn peer_sale_purchase_refusal_for_payer(
+        &self,
+        prepare: &Prepare,
+        claimed_channel: impl FnOnce() -> Option<String>,
+    ) -> Option<String> {
+        let PeerSalePeek::Purchase(purchase) = self.open_peer_sale_purchase(prepare) else {
+            return None;
+        };
+        let claimed_channel = claimed_channel()?;
+        let refusal =
+            self.peer_sale_identity_refusal(&claimed_channel, &purchase, RateWindow::Peek);
+        if let Some(message) = &refusal {
+            // #887's "every rejected purchase logs the payer identity and
+            // the bound it hit": this probe's answer IS the refusal the
+            // client edge returns -- the packet is never routed
+            // afterwards, so no later stage exists to log it. One log site
+            // covers both carriages.
+            tracing::warn!(
+                channel_id = %claimed_channel,
+                prefix = %purchase.prefix,
+                %message,
+                "peer-sale purchase refused pre-admission on an identity-keyed bound"
+            );
+        }
+        refusal
+    }
+
+    /// The shared front half of both peer-sale probes: how much of a
+    /// packet a pre-admission probe can actually read -- see
+    /// [`PeerSalePeek`].
+    fn open_peer_sale_purchase(&self, prepare: &Prepare) -> PeerSalePeek {
+        let Some((configured_len, ConfiguredTarget::PeerSale { .. })) =
+            self.select_configured_route(&prepare.destination)
+        else {
+            return PeerSalePeek::NotJudgeable;
+        };
+        if self.active_lease_outranks(&prepare.destination, configured_len) {
+            return PeerSalePeek::NotJudgeable;
+        }
+        let Some(request) = self.opened_envelope_request(&prepare.data) else {
+            return PeerSalePeek::NotJudgeable;
+        };
+        match serde_json::from_slice::<PeerSaleRequest>(&request.body) {
+            Ok(purchase) => PeerSalePeek::Purchase(purchase),
+            Err(_) => PeerSalePeek::Malformed,
+        }
     }
 
     /// This node's static routes, for the operator surface's read-only
@@ -5527,6 +5864,47 @@ mod tests {
                 .any(|peer| peer.id == client_channel_id));
         }
 
+        /// The sale route's own subtree is config-owned too (this PR's
+        /// review, fourth finding): a purchase strictly beneath the
+        /// `[peer_sale]` prefix would outrank the sale route by length and
+        /// hijack the purchase endpoint itself. Predicted by the probe,
+        /// refused unpaid, and the sale route still terminates its
+        /// subtree afterwards.
+        #[tokio::test]
+        async fn a_purchase_under_the_sale_prefix_itself_is_refused() {
+            let backend = Arc::new(InMemorySettlementBackend::new());
+            let channel_id = backend
+                .open(b"buyer".to_vec(), Duration::seconds(3600))
+                .await
+                .expect("open");
+            let client_channel_id = format!("evm:{}", channel_id.0);
+            let connector = peer_sale_connector(backend);
+
+            let evil_prefix = format!("{PEER_SALE_PREFIX}.evil");
+            let (sealed, _s) = peer_sale_prepare(&purchase_body(&evil_prefix, 3, 25, 10));
+            assert!(connector.peer_sale_purchase_would_be_refused(&sealed));
+
+            let response = connector
+                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                .await;
+            match response {
+                PacketResponse::Reject(reject) => assert!(
+                    reject
+                        .message
+                        .contains("config-owned space is not for sale"),
+                    "expected the containment refusal, got: {}",
+                    reject.message
+                ),
+                other => panic!("expected a reject, got {other:?}"),
+            }
+            assert!(connector.peers().is_empty());
+            // The sale route still wins its own subtree.
+            assert!(matches!(
+                connector.select_configured_route(&format!("{evil_prefix}.x")),
+                Some((_, ConfiguredTarget::PeerSale { .. }))
+            ));
+        }
+
         /// Config-owned address space is not for sale (ADR 0037): with an
         /// app route on `g.example.node.app`, a purchase of
         /// `g.example.node.app.sub` would otherwise insert a durable,
@@ -6211,6 +6589,322 @@ mod tests {
 
             // Calling again with nothing lapsed does nothing.
             assert!(connector.reap_expired_peer_leases().is_empty());
+        }
+
+        /// Issue #887 (C4): abuse bounds on purchased peering, each tested
+        /// at its own edge with tight, test-local overrides
+        /// ([`Connector::with_peer_sale_bounds`]) rather than the real
+        /// defaults -- exhausting the default of 32 distinct payers to
+        /// prove the total-row cap would need 32 real channels for no
+        /// added coverage.
+        mod abuse_bounds {
+            use super::*;
+
+            async fn open_channel(backend: &InMemorySettlementBackend, label: &[u8]) -> String {
+                let id = backend
+                    .open(label.to_vec(), Duration::seconds(3600))
+                    .await
+                    .expect("open");
+                format!("evm:{}", id.0)
+            }
+
+            /// Issue #887's "refuse BEFORE taking payment", the probe half
+            /// (the review's finding on this PR): every refusal derivable
+            /// from the request's own shape is predicted by
+            /// `peer_sale_purchase_would_be_refused` before the covering
+            /// claim is admitted, and the unadmitted packet -- exactly what
+            /// the client edge produces once the probe answers true -- is
+            /// refused by the settle path with the same bound's message and
+            /// `accumulated_cost` 0, never the "requires paying" refusal
+            /// that would misname the problem.
+            #[tokio::test]
+            async fn a_shape_doomed_purchase_is_predicted_pre_admission_and_refused_unpaid() {
+                let backend = Arc::new(InMemorySettlementBackend::new());
+                let connector = peer_sale_connector(backend).with_peer_sale_bounds(
+                    PeerSaleBounds::new(32, 4, 32, 100, Duration::seconds(60)),
+                );
+
+                // Over the 32-byte prefix bound: predicted...
+                let long_prefix = format!("g.example.{}", "a".repeat(40));
+                let (sealed, _s) = peer_sale_prepare(&purchase_body(&long_prefix, 3, 25, 10));
+                assert!(connector.peer_sale_purchase_would_be_refused(&sealed));
+
+                // ...and refused identically, unpaid, on the unadmitted path.
+                let response = connector.handle_prepare(sealed, 0).await;
+                match response {
+                    PacketResponse::Reject(reject) => {
+                        assert!(
+                            reject.message.contains("purchased-prefix limit"),
+                            "expected the length bound's own message, got: {}",
+                            reject.message
+                        );
+                        assert_eq!(reject.accumulated_cost, 0);
+                    }
+                    other => panic!("expected a reject, got {other:?}"),
+                }
+
+                // The arithmetic bound is predicted the same way.
+                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.ok", 5, 1, 0));
+                assert!(connector.peer_sale_purchase_would_be_refused(&sealed));
+
+                // A well-shaped purchase is NOT predicted refused --
+                // identity-keyed bounds are the paid side's business
+                // (ADR 0039).
+                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.ok", 3, 25, 10));
+                assert!(!connector.peer_sale_purchase_would_be_refused(&sealed));
+            }
+
+            /// The identity-keyed half of the pre-admission probe (this
+            /// PR's review, second finding): the payer's rate window and
+            /// row caps are peeked off the claim's declared channel key
+            /// before admission, the peek itself never counts, and the
+            /// predicted refusal is the settle path's own message.
+            #[tokio::test]
+            async fn the_identity_probe_predicts_rate_refusals_without_counting() {
+                let backend = Arc::new(InMemorySettlementBackend::new());
+                let client_channel_id = open_channel(&backend, b"buyer").await;
+                let connector = peer_sale_connector(backend).with_peer_sale_bounds(
+                    PeerSaleBounds::new(32, 4, 128, 1, Duration::seconds(60)),
+                );
+
+                // A fresh payer clears the peek -- however many times it is
+                // peeked, because a peek never counts.
+                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
+                for _ in 0..5 {
+                    assert_eq!(
+                        connector.peer_sale_purchase_refusal_for_payer(&sealed, || Some(
+                            client_channel_id.clone()
+                        )),
+                        None
+                    );
+                }
+
+                // The one judged attempt still succeeds: the five peeks
+                // above consumed none of the window...
+                let response = connector
+                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                    .await;
+                assert!(matches!(response, PacketResponse::Fulfill(_)));
+
+                // ...and with the window now genuinely spent, the peek
+                // predicts the settle path's own rate refusal.
+                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.buyer", 3, 26, 10));
+                let predicted = connector
+                    .peer_sale_purchase_refusal_for_payer(&sealed, || {
+                        Some(client_channel_id.clone())
+                    })
+                    .expect("the spent window is predicted");
+                assert!(predicted.contains("rate limit"), "got: {predicted}");
+            }
+
+            #[tokio::test]
+            async fn a_new_payer_is_refused_once_the_total_row_cap_is_reached() {
+                let backend = Arc::new(InMemorySettlementBackend::new());
+                let first_id = open_channel(&backend, b"buyer-a").await;
+                let second_id = open_channel(&backend, b"buyer-b").await;
+                let connector = peer_sale_connector(backend).with_peer_sale_bounds(
+                    PeerSaleBounds::new(1, 4, 128, 100, Duration::seconds(60)),
+                );
+
+                let (sealed, _s) =
+                    peer_sale_prepare(&purchase_body("g.example.buyer-a", 3, 25, 10));
+                let response = connector
+                    .handle_prepare_with_client_channel(sealed, 0, Some(&first_id))
+                    .await;
+                assert!(matches!(response, PacketResponse::Fulfill(_)));
+
+                let (sealed, _s) =
+                    peer_sale_prepare(&purchase_body("g.example.buyer-b", 3, 25, 10));
+                let response = connector
+                    .handle_prepare_with_client_channel(sealed, 0, Some(&second_id))
+                    .await;
+                match response {
+                    PacketResponse::Reject(reject) => assert!(
+                        reject.message.contains("purchased peer rows"),
+                        "expected the refusal to name the row cap, got: {}",
+                        reject.message
+                    ),
+                    other => panic!("expected a reject, got {other:?}"),
+                }
+                assert!(connector.client_route("g.example.buyer-b").is_none());
+
+                // The first payer renewing its own row is not a new row,
+                // so it still succeeds even with the cap already reached.
+                let (sealed, _s) =
+                    peer_sale_prepare(&purchase_body("g.example.buyer-a", 3, 40, 10));
+                let response = connector
+                    .handle_prepare_with_client_channel(sealed, 0, Some(&first_id))
+                    .await;
+                assert!(matches!(response, PacketResponse::Fulfill(_)));
+            }
+
+            #[tokio::test]
+            async fn a_payer_is_refused_a_new_route_once_its_own_route_cap_is_reached() {
+                let backend = Arc::new(InMemorySettlementBackend::new());
+                let client_channel_id = open_channel(&backend, b"buyer").await;
+                let connector = peer_sale_connector(backend).with_peer_sale_bounds(
+                    PeerSaleBounds::new(32, 1, 128, 100, Duration::seconds(60)),
+                );
+
+                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.first", 3, 25, 10));
+                let response = connector
+                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                    .await;
+                assert!(matches!(response, PacketResponse::Fulfill(_)));
+
+                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.second", 3, 25, 10));
+                let response = connector
+                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                    .await;
+                match response {
+                    PacketResponse::Reject(reject) => assert!(
+                        reject.message.contains("purchased routes"),
+                        "expected the refusal to name the per-payer route cap, got: {}",
+                        reject.message
+                    ),
+                    other => panic!("expected a reject, got {other:?}"),
+                }
+                assert!(connector.client_route("g.example.second").is_none());
+
+                // Renewing the first prefix is still fine at the cap: it
+                // is not a new row.
+                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.first", 3, 40, 10));
+                let response = connector
+                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                    .await;
+                assert!(matches!(response, PacketResponse::Fulfill(_)));
+            }
+
+            #[tokio::test]
+            async fn a_prefix_at_the_length_bound_succeeds_and_one_byte_over_is_refused() {
+                let backend = Arc::new(InMemorySettlementBackend::new());
+                let client_channel_id = open_channel(&backend, b"buyer").await;
+                let at_limit = "g.example.buyer";
+                let over_limit = "g.example.buyerx";
+                let connector = peer_sale_connector(backend).with_peer_sale_bounds(
+                    PeerSaleBounds::new(32, 4, at_limit.len(), 100, Duration::seconds(60)),
+                );
+
+                let (sealed, _s) = peer_sale_prepare(&purchase_body(at_limit, 3, 25, 10));
+                let response = connector
+                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                    .await;
+                assert!(matches!(response, PacketResponse::Fulfill(_)));
+
+                let (sealed, _s) = peer_sale_prepare(&purchase_body(over_limit, 3, 25, 10));
+                let response = connector
+                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                    .await;
+                match response {
+                    PacketResponse::Reject(reject) => assert!(
+                        reject.message.contains("byte"),
+                        "expected the refusal to name the length bound, got: {}",
+                        reject.message
+                    ),
+                    other => panic!("expected a reject, got {other:?}"),
+                }
+                assert!(connector.client_route(over_limit).is_none());
+            }
+
+            #[tokio::test]
+            async fn purchase_attempts_are_rate_limited_and_the_window_resets() {
+                let backend = Arc::new(InMemorySettlementBackend::new());
+                let client_channel_id = open_channel(&backend, b"buyer").await;
+                let clock = test_clock();
+                let connector =
+                    peer_sale_connector_with_clock(backend, clock.clone()).with_peer_sale_bounds(
+                        PeerSaleBounds::new(32, 4, 128, 1, Duration::seconds(60)),
+                    );
+
+                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.first", 3, 25, 10));
+                let response = connector
+                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                    .await;
+                assert!(matches!(response, PacketResponse::Fulfill(_)));
+
+                // A second attempt within the window is rate-limited, even
+                // though this purchase (a different, otherwise-valid
+                // prefix) would otherwise succeed.
+                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.second", 3, 25, 10));
+                let response = connector
+                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                    .await;
+                match response {
+                    PacketResponse::Reject(reject) => assert!(
+                        reject.message.contains("rate limit"),
+                        "expected the refusal to name the rate limit, got: {}",
+                        reject.message
+                    ),
+                    other => panic!("expected a reject, got {other:?}"),
+                }
+                assert!(connector.client_route("g.example.second").is_none());
+
+                clock.advance(Duration::seconds(60));
+
+                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.second", 3, 25, 10));
+                let response = connector
+                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                    .await;
+                assert!(matches!(response, PacketResponse::Fulfill(_)));
+            }
+
+            /// The rate limit counts every attempt, not only ones that go
+            /// on to succeed -- a malformed body still occupies a slot, so
+            /// a sender cannot dodge the limit by sending garbage.
+            #[tokio::test]
+            async fn a_malformed_attempt_refuses_unpaid_and_only_judged_attempts_count() {
+                let backend = Arc::new(InMemorySettlementBackend::new());
+                let client_channel_id = open_channel(&backend, b"buyer").await;
+                let connector = peer_sale_connector(backend).with_peer_sale_bounds(
+                    PeerSaleBounds::new(32, 4, 128, 1, Duration::seconds(60)),
+                );
+
+                // A malformed body is a SHAPE refusal now (issue #887's
+                // "refuse before taking payment"): it refuses before the
+                // payment binding is looked at, costs nothing, and — the
+                // flip side of costing nothing — does not count against
+                // the payer's rate window. The window meters judged,
+                // charged attempts, which malformed ones no longer are.
+                let (sealed, _s) = peer_sale_prepare(b"not json");
+                assert!(connector.peer_sale_purchase_would_be_refused(&sealed));
+                let response = connector
+                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                    .await;
+                match response {
+                    PacketResponse::Reject(reject) => {
+                        assert!(
+                            reject.message.contains("malformed"),
+                            "expected the malformed-body refusal, got: {}",
+                            reject.message
+                        );
+                        assert_eq!(reject.accumulated_cost, 0);
+                    }
+                    other => panic!("expected a reject, got {other:?}"),
+                }
+
+                // The window is untouched: the payer's one allowed judged
+                // attempt still succeeds...
+                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
+                let response = connector
+                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                    .await;
+                assert!(matches!(response, PacketResponse::Fulfill(_)));
+
+                // ...and the next judged attempt is the one the limit
+                // refuses.
+                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.buyer", 3, 26, 10));
+                let response = connector
+                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
+                    .await;
+                match response {
+                    PacketResponse::Reject(reject) => assert!(
+                        reject.message.contains("rate limit"),
+                        "expected the second judged attempt to be rate-limited, got: {}",
+                        reject.message
+                    ),
+                    other => panic!("expected a reject, got {other:?}"),
+                }
+            }
         }
     }
 
