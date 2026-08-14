@@ -25,7 +25,9 @@ key_file = "/app/secrets/signer.key"
 # ── The one locally-terminated, priced route ─────────────────────────────────
 # `price` is what issue #520 made mandatory on a terminated route and what
 # issue #526's x402 greeting quotes back to an unpaid caller. 1000 matches what
-# devnet's own terminated routes charge (infra/linode-node/connector-rust.toml).
+# devnet's store box charges for `g.toon.ario`
+# (infra/linode-store/connector-rust.toml; docs/devnet-pricing.md is the
+# committed source of truth for every route's price).
 #
 # `/write`, not the bare origin -- the same value devnet's `g.toon.relay` route
 # carries, and for the same reason: the relay serves only `POST /write` and

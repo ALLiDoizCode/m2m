@@ -428,7 +428,6 @@ dns)
 endpoints)
   EVM_IP=$(get_box_ip toon-devnet-evm)
   SOL_IP=$(get_box_ip toon-devnet-sol)
-  MINA_IP=$(get_box_ip toon-devnet-mina)
   STORE_IP=$(get_box_ip toon-devnet-store)
   cat <<JSON
 {

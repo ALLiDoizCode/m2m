@@ -134,25 +134,24 @@ live price instead of needing a hand-maintained buffer like `2000`.
 
 ## The TypeScript fleet
 
-Both boxes serve the **Rust** connector on the public door — verified by
+Both surviving boxes (store, relay) serve the **Rust** connector on the public
+door — verified by
 `GET /ilp/identity` answering, by `invalid packet type byte` (a string that
 exists only in `crates/connector-domain/src/error.rs`), and by nginx returning
 `410 Gone` for the transitional `/rust/` prefix because Rust took over
 `location /`.
 
-The apex's TypeScript `connector.yaml` remains in the repo but no longer fronts
-traffic; the store's own copy is deleted (issue #901) along with the retired
-`connector` service in `infra/linode-store/docker-compose.store.yml` that read
-it. Neither is a second source of pricing truth, and the retirement is tracked
-in #714 (apex removal itself is #872).
+No TypeScript `connector.yaml` is left in this repo at all: the store's copy went
+with issue #901, along with the retired `connector` service in
+`infra/linode-store/docker-compose.store.yml` that read it, and the apex's went
+with the rest of `infra/linode-node/` (issue #872). Neither was ever a second
+source of pricing truth; the TypeScript retirement itself is tracked in #714.
 
-`infra/devnet-manage.sh redeploy` no longer resurrects the apex's dead service
-(#851, simplified by #901): the apex leg composes its base file with its Rust
-overlay and names only the services that should run, since its base file still
-declares a TypeScript `connector` service pinned to an image purged from GHCR.
-The store and relay legs need no such list — neither box's base compose file
-declares that service any more (the store's was deleted here; the relay never
-had one, #816) — so both simply bring up their whole file set, like the relay
-leg always did. The provisioning paths (`up`, `store`) are a separate matter:
-they still run each box's `bootstrap.sh`, which brings up the base file alone
-— the apex's `connector` included, the store's no longer.
+`infra/devnet-manage.sh redeploy` no longer needs to dodge a dead service (#851,
+simplified by #901, finished by #872): neither surviving box's base compose file
+declares a TypeScript `connector` any more — the store's was deleted, the relay
+never had one (#816), and the apex's went with the box — so both legs simply
+compose their base file with their Rust overlay and bring up the whole file set,
+with no service list and no `--no-deps`, like the relay leg always did. The
+provisioning paths (`up`, `store`) are a separate matter: they still run each
+box's `bootstrap.sh`, which brings up the base file alone.

@@ -65,8 +65,10 @@ every other infra-touching ticket in this repo's history records when it applies
 
 - `infra/linode-faucet/` config, compose file and scripts exist and are reviewed (this issue).
 - Box 1's `faucet` service (`infra/linode-node/docker-compose.node.yml`) keeps serving and is
-  untouched by this change — nothing here strips it. It is removed only as part of connector#872's
-  apex teardown, and only after step 8 below. Note that it is _built from this repo_, so the next
+  untouched by this change — nothing here strips it. **(Since satisfied: box 1 was destroyed and
+  that compose file deleted by connector#872, after step 8 had run.)** It is removed only as part
+  of connector#872's apex teardown, and only after step 8 below. Note that it is _built from this
+  repo_, so the next
   `./devnet-manage.sh redeploy` retires box 1's three native-token routes too — that is §4.6
   applied to the service itself, not to this box, and it is why box 1 must not be redeployed at a
   moment when someone still depends on those legs.

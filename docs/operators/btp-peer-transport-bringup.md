@@ -31,7 +31,13 @@ Operator runbook for
 > box's edge was renamed `proxy.store.devnet` → `proxy.ario.devnet` (#774) to match the
 > `g.toon.ario` prefix it serves. `proxy.store` survives only as a deprecated alias — same
 > certificate, same upstream — and is slated for removal, so read every `proxy.store` URL below as
-> the name that host had at the time. The live shape is `infra/linode-node/connector-rust.toml`.
+> the name that host had at the time.
+>
+> **Further superseded by issue #872.** The apex box this bring-up peered the store to has since
+> been destroyed (toon-meta#310 / toon-meta#313) and `infra/linode-node/` deleted. There is no
+> peering on this fleet at all today: both surviving boxes are client-edge-only and terminate their
+> own prefix. The mechanism below (BTP carriage, the shared-secret `secret_file`, the accept/dial
+> split) is unchanged and is what a future peering would use.
 
 Verify before touching anything — both boxes run hand-tuned **bind-mounted** configs that lead the
 repo copies.

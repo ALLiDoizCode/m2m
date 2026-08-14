@@ -1,5 +1,17 @@
 # Cutting the apex edge over to Rust, and removing the TypeScript connectors
 
+> **HISTORY — do not execute (issue #872).** This runbook was written against a live apex box
+> (`104.237.150.177`, `linode-node-*`) that has since been cut over, then destroyed
+> (toon-meta#310 / toon-meta#313), and its repo files deleted along with the rest of
+> `infra/linode-node/`. The store box's own TypeScript connector went with issue #901. Nothing at
+> bare `g.toon` answers any more — where the verification steps below say "today `g.toon` returns
+> 200 with an ILP REJECT", read that as what the apex answered on 2026-08-04, not as a check to
+> run. Kept as the record of how the edge was moved to Rust; the current fleet is two boxes, store
+> and relay, each terminating its own prefix (see [`../devnet-pricing.md`](../devnet-pricing.md)).
+>
+> The "Nothing in this document has been executed" line immediately below was true when it was
+> written and is no longer.
+
 Execution runbook for [#714](https://github.com/toon-protocol/connector/issues/714) (the gated
 tracking ticket — **it stays open**; this document is its execution child, issue
 [#737](https://github.com/toon-protocol/connector/issues/737)). Written for whoever holds the

@@ -93,8 +93,15 @@
 //! `program_id`/`token_address`; that is a different, heavier test than
 //! this module's "the committed file starts" question, and it is not
 //! written here. Both files' Solana identity is still checked, just more
-//! weakly: a substring `.contains` against the committed text in each
-//! file's own verbatim-boot test, not a typed parse.
+//! weakly and in fewer places than the EVM leg's: a substring `.contains`
+//! against the committed text, not a typed parse, and it lives in each
+//! file's own **section** case above -- so it is skipped along with that
+//! case wherever `anvil` is not on `PATH`. The EVM leg has a typed,
+//! network-free check that always runs
+//! ([`every_fleet_configs_settlement_evm_leg_matches_the_live_identity`]);
+//! the Solana leg has no equivalent, which is a known gap this issue did
+//! not widen -- the apex's own typed parse case that #872 removed covered
+//! the apex file only, never these two.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
@@ -180,8 +187,10 @@ const SOLANA_SETTLEMENT_SECTIONS: &[&str] = &["[settlement.solana]", "[settlemen
 /// rather than something parsed back out of the file under test: a test
 /// that read the expected value from the thing it is testing would keep
 /// passing if that value went back to `0`, which is exactly the regression
-/// issue #557 exists to prevent. Parity with the TypeScript fleet's
-/// `price: '1000'` on the same box (`infra/linode-node/connector.yaml`).
+/// issue #557 exists to prevent. The figure's origin is parity with the
+/// retired TypeScript fleet's own `price: '1000'` -- see
+/// `docs/devnet-pricing.md`, which is the committed source of truth now
+/// that both files that carried that literal are deleted (#901, #872).
 const EXPECTED_STORE_PRICE: u64 = 1000;
 
 /// The `price` the relay file puts on `g.toon.relay`, which is **not** the
@@ -383,7 +392,7 @@ fn without_live_settlement(raw: &str) -> String {
 /// freshly deployed local chain. `decimals` and the key location stay the
 /// literal committed content.
 ///
-/// The committed values it looks for are the same [`APEX_LIVE_REGISTRY`] and
+/// The committed values it looks for are the same [`FLEET_LIVE_REGISTRY`] and
 /// [`EXPECTED_SETTLEMENT_TOKEN_ADDRESS`] constants the identity test asserts,
 /// rather than per-call arguments: every fleet file names that one pair, and
 /// reading both off one constant apiece is what keeps the substitution and
@@ -401,7 +410,7 @@ fn with_anvil_settlement(
     );
     let replaced = replace_expecting_a_match(
         &replaced,
-        &format!("contract_address = \"{APEX_LIVE_REGISTRY}\""),
+        &format!("contract_address = \"{FLEET_LIVE_REGISTRY}\""),
         &format!("contract_address = \"{contract_address:?}\""),
     );
     replace_expecting_a_match(
@@ -839,8 +848,8 @@ fn the_relay_devnet_config_carries_the_two_box_cutover_notice() {
 }
 
 /// The trimmed lines of a committed `[announce]` section, or `None` for a
-/// file that has no such section -- [`route_price`]'s precedent again, no
-/// TOML dependency needed to read a couple of keys written one per line.
+/// file that has no such section -- read off the committed text by line, no
+/// TOML dependency needed for a couple of keys written one per line.
 fn announce_section(raw: &str) -> Option<Vec<&str>> {
     let mut lines = raw.lines().map(str::trim);
     lines.find(|line| *line == "[announce]")?;
@@ -944,8 +953,8 @@ fn every_committed_announce_without_a_store_or_ario_address_pins_route_store() {
 }
 
 /// The `image:` tag every service in a compose overlay pins, read off the
-/// committed text -- [`route_price`]'s precedent again, and for the same
-/// reason: one line, no YAML dependency.
+/// committed text by line -- [`announce_section`]'s precedent again, and for
+/// the same reason: one line, no YAML dependency.
 fn pinned_connector_images(raw: &str) -> Vec<String> {
     raw.lines()
         .map(str::trim)
@@ -1185,11 +1194,10 @@ fn the_store_announces_through_the_relay_box_not_the_apex() {
 /// now-removed apex peerings' `[[peer_channels]]` rows -- see git history for
 /// that pair, deleted along with the apex by issue #872), applied to
 /// `[announce] pay_channel` rather than a `[[peer_channels]]` row: the store
-/// box's real
-/// funded channel -- with the RELAY BOX as of issue #871, replacing the
-/// apex-funded channel #820's cutover made obsolete -- lives only on the
-/// box, so this repo commits a clearly-marked placeholder instead of either
-/// the live value or an absent field.
+/// box's real funded channel -- with the RELAY BOX as of issue #871,
+/// replacing the apex-funded channel #820's cutover made obsolete -- lives
+/// only on the box, so this repo commits a clearly-marked placeholder
+/// instead of either the live value or an absent field.
 const STORE_ANNOUNCE_PAY_CHANNEL_PLACEHOLDER: &str =
     "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeadc0de";
 
@@ -1314,10 +1322,10 @@ async fn deploy_settlement_on_anvil() -> (Anvil, ethers::types::Address, ethers:
 /// `docs/evm-deployment.md`). The anvil cases replace exactly this committed
 /// value, so they double as the guard that the committed sections keep
 /// naming it; [`every_fleet_configs_settlement_evm_leg_matches_the_live_identity`]
-/// below asserts it directly, as parsed, for all three files.
-const APEX_LIVE_REGISTRY: &str = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1";
+/// below asserts it directly, as parsed, for both surviving files.
+const FLEET_LIVE_REGISTRY: &str = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1";
 
-/// The retired pre-ERC-2771 `TokenNetworkRegistry` [`APEX_LIVE_REGISTRY`]
+/// The retired pre-ERC-2771 `TokenNetworkRegistry` [`FLEET_LIVE_REGISTRY`]
 /// replaced -- `docs/evm-deployment.md`'s "Current live deployment
 /// (pre-cutover)" table and its "Rollback: one step" section, which names
 /// this exact address as what a rollback reverts `contract_address` to. Not
@@ -1329,11 +1337,11 @@ const SETTLEMENT_CONTRACT_ADDRESS_ROLLBACK_TARGET: &str =
 
 /// Both fleet files' Solana leg (`https://api.devnet.solana.com`) and the
 /// deployed `payment-channel` program they settle through, wired in #633 --
-/// asserted as literals here, exactly like [`APEX_LIVE_REGISTRY`] and
+/// asserted as literals here, exactly like [`FLEET_LIVE_REGISTRY`] and
 /// [`EXPECTED_STORE_PRICE`], so that reading the expected values back out of the
 /// file under test cannot make this pass on a file that drifted.
-const APEX_SOLANA_PROGRAM_ID: &str = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip";
-const APEX_SOLANA_USDC_MINT: &str = "xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in";
+const FLEET_SOLANA_PROGRAM_ID: &str = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip";
+const FLEET_SOLANA_USDC_MINT: &str = "xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in";
 
 /// The settlement asset's scale on every chain this fleet settles on: ADR
 /// 0010's "6 decimals everywhere" (docs/usdc-cross-chain-settlement.md).
@@ -1344,7 +1352,7 @@ const EXPECTED_SETTLEMENT_DECIMALS: u8 = 6;
 
 /// The mock USDC ERC-20 every fleet config's `[settlement.evm]` leg settles
 /// in. Unchanged by the #695/#811 ERC-2771 registry cutover -- only the
-/// `TokenNetworkRegistry` moved (see [`APEX_LIVE_REGISTRY`]); the token being
+/// `TokenNetworkRegistry` moved (see [`FLEET_LIVE_REGISTRY`]); the token being
 /// registered through it did not (`docs/evm-deployment.md`: "never a new
 /// token, so no existing balance or faucet distribution is disturbed").
 /// [`with_anvil_settlement`] looks for this same literal before retargeting a
@@ -1402,9 +1410,9 @@ fn every_fleet_configs_settlement_evm_leg_matches_the_live_identity() {
         let contract_address = format!("0x{}", hex_lower(evm.contract_address().as_slice()));
         assert_eq!(
             contract_address.to_lowercase(),
-            APEX_LIVE_REGISTRY.to_lowercase(),
+            FLEET_LIVE_REGISTRY.to_lowercase(),
             "the {label} config's [settlement.evm] contract_address must be the live \
-             TokenNetworkRegistry {APEX_LIVE_REGISTRY} (expected), found {contract_address} -- \
+             TokenNetworkRegistry {FLEET_LIVE_REGISTRY} (expected), found {contract_address} -- \
              {SETTLEMENT_CONTRACT_ADDRESS_ROLLBACK_TARGET} is the retired pre-ERC-2771 registry \
              and must not be accepted silently"
         );
@@ -1428,11 +1436,11 @@ fn every_fleet_configs_settlement_evm_leg_matches_the_live_identity() {
 }
 
 /// The store box's settlement is no longer a commented template waiting on a
-/// deployment -- it is live, and it names the SAME contracts the apex names,
-/// because a claim this node accepts was written against a channel the buyer
-/// opened on the shared devnet deployment. A store node pointed at a
-/// different registry cannot resolve that channel, so this asserts the two
-/// files agree rather than merely that each parses.
+/// deployment -- it is live, and it names the SAME contracts the relay box's
+/// own file names, because a claim this node accepts was written against a
+/// channel the buyer opened on the shared devnet deployment. A store node
+/// pointed at a different registry cannot resolve that channel, so this
+/// asserts the two files agree rather than merely that each parses.
 #[tokio::test]
 async fn the_store_devnet_settlement_section_boots_against_a_deployed_contract() {
     if !require_anvil() {
@@ -1468,20 +1476,20 @@ async fn the_store_devnet_settlement_section_boots_against_a_deployed_contract()
          names its chain by its own key"
     );
     assert!(
-        STORE_CONFIG.contains(APEX_LIVE_REGISTRY),
-        "the store leg must name the same deployed TokenNetworkRegistry as \
-         the apex ({APEX_LIVE_REGISTRY}) -- a buyer's channel lives on one \
+        STORE_CONFIG.contains(FLEET_LIVE_REGISTRY),
+        "the store leg must name the fleet's deployed TokenNetworkRegistry \
+         ({FLEET_LIVE_REGISTRY}) -- a buyer's channel lives on one \
          deployment, and a node pointed elsewhere cannot resolve it"
     );
     assert!(
-        STORE_CONFIG.contains(APEX_SOLANA_PROGRAM_ID)
-            && STORE_CONFIG.contains(APEX_SOLANA_USDC_MINT),
-        "the store leg must name the same Solana payment-channel program and \
-         mint as the apex, for the same reason"
+        STORE_CONFIG.contains(FLEET_SOLANA_PROGRAM_ID)
+            && STORE_CONFIG.contains(FLEET_SOLANA_USDC_MINT),
+        "the store leg must name the fleet's Solana payment-channel program \
+         and mint, for the same reason"
     );
 
-    // Anvil stands in for Base Sepolia; the Solana leg is stripped for the
-    // same reason the apex's is -- there is no local validator in this test.
+    // Anvil stands in for Base Sepolia; the Solana leg is stripped because
+    // there is no local validator in this test (see the module docs).
     let text = without_sections(STORE_CONFIG, SOLANA_SETTLEMENT_SECTIONS);
     let text = with_anvil_settlement(&text, &anvil.rpc_url, contract_address, token);
     let text = replace_expecting_a_match(
@@ -1495,12 +1503,13 @@ async fn the_store_devnet_settlement_section_boots_against_a_deployed_contract()
 }
 
 /// The relay box's own live `[settlement.evm]` leg (issue #816/#817), boots
-/// against a freshly deployed local chain exactly like the apex's and
-/// store's cases above. It names the SAME registry the other two fleet
-/// files name: its client edge already accepts an unaffiliated buyer's own
-/// on-chain channel (the relay file's own header, issue #556/#611), and
-/// that buyer's channel lives on the one shared deployment -- independent of
-/// the apex<->relay peering (issue #820) also carried in this file now.
+/// against a freshly deployed local chain exactly like the store's case
+/// above. It names the SAME registry the store file names: its client edge
+/// already accepts an unaffiliated buyer's own on-chain channel (the relay
+/// file's own header, issue #556/#611), and that buyer's channel lives on
+/// the one shared deployment. That was true independently of the
+/// apex<->relay peering issue #820 gave this box and issue #872 removed
+/// again -- it held before the peering existed and holds after it is gone.
 #[tokio::test]
 async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract() {
     if !require_anvil() {
@@ -1517,25 +1526,23 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
             && RELAY_CONFIG.contains("[settlement.solana]")
             && RELAY_CONFIG.contains("[settlement.solana.key]"),
         "the relay config must carry both legs on the keyed \
-         `[settlement.<chain>]` shape (issue #628), like the apex and store"
+         `[settlement.<chain>]` shape (issue #628), like the store"
     );
     assert!(
-        RELAY_CONFIG.contains(APEX_LIVE_REGISTRY),
+        RELAY_CONFIG.contains(FLEET_LIVE_REGISTRY),
         "the relay leg must name the same deployed TokenNetworkRegistry as \
-         the apex and store ({APEX_LIVE_REGISTRY}) -- a buyer's channel \
-         lives on one deployment, and a node pointed elsewhere cannot \
-         resolve it"
+         the store ({FLEET_LIVE_REGISTRY}) -- a buyer's channel lives on one \
+         deployment, and a node pointed elsewhere cannot resolve it"
     );
     assert!(
-        RELAY_CONFIG.contains(APEX_SOLANA_PROGRAM_ID)
-            && RELAY_CONFIG.contains(APEX_SOLANA_USDC_MINT),
+        RELAY_CONFIG.contains(FLEET_SOLANA_PROGRAM_ID)
+            && RELAY_CONFIG.contains(FLEET_SOLANA_USDC_MINT),
         "the relay leg must name the same Solana payment-channel program and \
-         mint as the apex and store, for the same reason"
+         mint as the store, for the same reason"
     );
 
     // Anvil stands in for Base Sepolia; the Solana leg is stripped for the
-    // same reason the apex's and store's are -- there is no local validator
-    // in this test.
+    // same reason the store's is -- there is no local validator in this test.
     let text = without_sections(RELAY_CONFIG, SOLANA_SETTLEMENT_SECTIONS);
     let text = with_anvil_settlement(&text, &anvil.rpc_url, contract_address, token);
     let text = replace_expecting_a_match(
@@ -1699,8 +1706,8 @@ fn no_surviving_box_pins_a_non_rust_connector_image() {
 }
 
 /// The `ports:` mappings a committed compose file's `ports:` block declares,
-/// verbatim, in commit order -- [`route_price`]'s line-scan precedent again:
-/// no YAML dependency, and indentation alone (not a parser) tells a
+/// verbatim, in commit order -- [`announce_section`]'s line-scan precedent
+/// again: no YAML dependency, and indentation alone (not a parser) tells a
 /// `ports:` list item apart from a `volumes:` one that also starts `- '`. A
 /// `#`-comment line inside the block (several overlays carry one explaining
 /// the loopback bind) is skipped rather than mistaken for a malformed entry.

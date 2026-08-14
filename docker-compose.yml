@@ -110,7 +110,7 @@ services:
       # Build context is the repo ROOT (not packages/faucet): the multi-stage
       # Dockerfile compiles the mina-zkapp ESM bundle from packages/mina-zkapp/
       # so the faucet's USDC admin-mint shares ONE o1js instance. See the
-      # Dockerfile header and infra/linode-node/docker-compose.node.yml.
+      # Dockerfile header and infra/linode-faucet/docker-compose.faucet.yml.
       context: .
       dockerfile: packages/faucet/Dockerfile
     # Runs under BOTH evm and solana so a single host can drip every chain.
