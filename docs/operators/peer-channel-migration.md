@@ -1,5 +1,11 @@
 # Migrating the apex↔store peer channel to the new TokenNetwork
 
+> **Superseded by issue #872** (toon-meta#310 / toon-meta#313's live cutover): the apex box is
+> destroyed and the apex↔store peering this runbook migrates — the `[[peers]]`/`[[peer_channels]]`
+> rows it names, on both sides — no longer exists in any committed config. There is no channel left
+> to migrate. Kept as the historical record of the ERC-2771 TokenNetwork split-brain and how it was
+> resolved while the peering was still live.
+
 Operator runbook for [issue #822](https://github.com/toon-protocol/connector/issues/822): the
 apex↔store `[[peer_channels]]` row still settles on the OLD `TokenNetwork`
 (`0x1E95493fEF46707E034b4a1945f25a8C76A1823D`) after the ERC-2771 cutover (#695/#811) repointed

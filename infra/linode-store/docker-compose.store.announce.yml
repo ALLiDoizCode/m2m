@@ -5,18 +5,19 @@
 # the `[signer]` key `./connector-rust.toml`'s `[announce]` section names,
 # which is the exact key `GET /ilp/identity` answers with and every gift wrap
 # this node opens is sealed to (ADR 0018). Before this overlay, the only
-# publisher of `g.toon.ario` was the g.toon proxy's announcer sidecar
-# (infra/linode-node/docker-compose.node.announcer.yml), advertising the
-# PROXY's identity for a prefix the proxy FORWARDS rather than terminates. A
-# stock client sealing to that advertised identity is refused
-# `F01 gift wrap could not be opened` at THIS box, after paying at the client
-# edge -- issue #833. The proxy's stopgap announce of this same prefix is
-# retired in the same change; see that file's own comment.
+# publisher of `g.toon.ario` was the apex's announcer sidecar
+# (docker-compose.node.announcer.yml, removed along with the rest of
+# infra/linode-node/ by issue #872), advertising the PROXY's identity for a
+# prefix the proxy FORWARDS rather than terminates. A stock client sealing
+# to that advertised identity is refused `F01 gift wrap could not be
+# opened` at THIS box, after paying at the client edge -- issue #833. The
+# proxy's stopgap announce of this same prefix was retired in the same
+# change; that file is gone now.
 #
-# Issue #871: the through-URL below now names the RELAY BOX, not the apex.
-# toon-meta#310 is retiring the apex; the relay box is the fleet's only
-# public write ingress once it goes, so this box buys relay writes directly,
-# like any other client, instead of paying through the apex's client edge.
+# Issue #871: the through-URL below names the RELAY BOX, not the apex. The
+# apex is retired (toon-meta#310 / toon-meta#313, issue #872); the relay box
+# is the fleet's only public write ingress now, so this box buys relay
+# writes directly, like any other client.
 #
 # ── Why a shell loop, not `restart: unless-stopped` on the bare subcommand ──
 # `connector announce` (crates/connector-cli/src/announce.rs, issue #784) is
@@ -90,10 +91,10 @@
 # ── Its OWN state volume, deliberately not `connector_rust_state` ──────────
 # `connector announce` loads the SAME `./connector-rust.toml` the serving
 # `connector-rust` service does, and `Config::load` requires every key file
-# and secret the file names -- the signer, both settlement legs, and the
-# apex-store peering secret -- regardless of which subcommand reads it, so
-# this service mounts all four exactly as `docker-compose.store.rust.yml`
-# does. `state_dir`, though, gets a SEPARATE named volume: building a runtime
+# the file names -- the signer and both settlement legs -- regardless of
+# which subcommand reads it, so this service mounts all three exactly as
+# `docker-compose.store.rust.yml` does. `state_dir`, though, gets a SEPARATE
+# named volume: building a runtime
 # replays the peer- and client-claim journals under `state_dir` into memory
 # at startup, and docs/operators/announcing-a-node.md documents a real hazard
 # from two processes sharing one journal. That hazard is scoped to
@@ -173,7 +174,6 @@ services:
       - ./signer-rust.key:/app/data/signer.key:ro
       - ./settlement-rust.key:/app/data/settlement.key:ro
       - ./settlement-solana-rust.key:/app/data/settlement-solana.key:ro
-      - ./apex-store.secret:/app/data/apex-store.secret:ro
       - store_announce_state:/app/state
     restart: unless-stopped
 

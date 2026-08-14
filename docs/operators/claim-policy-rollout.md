@@ -1,5 +1,16 @@
 # Rolling out the peer claim policy: order, the transition setting, and the 3-box fleet
 
+> **Partially superseded by issue #872** (toon-meta#310 / toon-meta#313's live cutover): the apex
+> box ("box 1 / `g.toon`") is destroyed, and with it BOTH peerings this runbook was written to
+> migrate (`apex-store`, `apex-relay`) — neither is a `[[peers]]` row in any committed config any
+> more, so there is nothing left to flip from `"observe"` to `"enforce"` on either leg, and no live
+> peering traffic on this fleet at all as of #872. The mechanism this document explains
+> (`claim_enforcement`, the transition setting, the rollout order and why it matters) is unchanged
+> and still the runbook to reach for the day this fleet — or any other — grows a new peering. Read
+> every apex-specific step below (SSH to `104.237.150.177`, the apex-store/apex-relay sections, the
+> "3-box fleet" framing) as history, not as a live instruction: this fleet is two boxes with no
+> peering between them today.
+
 Operator runbook for [issue #883](https://github.com/toon-protocol/connector/issues/883) (part of
 [toon-meta#316](https://github.com/toon-protocol/toon-meta/issues/316), child B6 of the claim
 policy umbrella [#868](https://github.com/toon-protocol/connector/issues/868)). This is the

@@ -84,12 +84,13 @@ registry at boot (`crates/connector-config/src/announce.rs`, `crates/connector-s
 lib.rs::connect`) -- there is no separate config field naming a `TokenNetwork` address directly, and
 **no Rust config carries the forwarder address at all**: it is baked immutably into the deployed
 `TokenNetwork`'s bytecode (`ERC2771Context`), and the connector itself never acts as a relayer, so
-nothing needs to be told about it. Repointing the announce is therefore exactly one config value,
-in exactly two files:
+nothing needs to be told about it. Repointing the announce is therefore exactly one config value, in exactly two files -- the fleet's
+surviving two boxes as of issue #872 (the apex, and its own `infra/linode-node/connector-rust.toml`,
+are retired):
 
-1. **`infra/linode-node/connector-rust.toml`** -- `[settlement.evm] contract_address` ->
+1. **`infra/linode-store/connector-rust.toml`** -- `[settlement.evm] contract_address` ->
    `BASE_REGISTRY_ADDRESS` from the broadcast.
-2. **`infra/linode-store/connector-rust.toml`** -- same field, same new value. Both boxes MUST agree
+2. **`infra/linode-relay/connector-rust.toml`** -- same field, same new value. Both boxes MUST agree
    -- a claim one box accepts against a channel opened on the new contract is unresolvable by a box
    still pointed at the old registry.
 

@@ -14,41 +14,34 @@ All prices are in **base units of 6-decimal USDC** (ADR 0010;
 across EVM/Solana/Mina, not a TypeScript-only asset config). So `1000` is
 0.001 USDC and `1` is 1 µUSDC.
 
+**The apex is retired (issue #872, toon-meta#310 / toon-meta#313's live
+cutover).** Every row below that used to be a forward THROUGH the apex is
+gone along with it; the fleet is two boxes now, each terminating its own
+prefix directly for its own clients. `g.toon` remains the namespace root in
+the wire protocol, but nothing answers at it — see "The apex forward
+(retired)" below for the history this replaces.
+
 ## The table
 
-| Route                                                  | Price    | Fee   | Where                                    | Guarded by                             |
-| ------------------------------------------------------ | -------- | ----- | ---------------------------------------- | -------------------------------------- |
-| apex `g.toon.relay` — forward to relay\*               | **1**    | **0** | `infra/linode-node/connector-rust.toml`  | —                                      |
-| relay `g.toon.relay` — terminate                       | **1**    | —     | `infra/linode-relay/connector-rust.toml` | —                                      |
-| apex `g.toon.ario` — forward to store                  | **1002** | 2     | `infra/linode-node/connector-rust.toml`  | `EXPECTED_APEX_FORWARD_PRICE` / `_FEE` |
-| store `g.toon.ario` — terminate                        | **1000** | —     | `infra/linode-store/connector-rust.toml` | `EXPECTED_STORE_PRICE`                 |
-| store `announcePrice` (retired TypeScript concept)\*\* | **2000** | —     | — (historical, file deleted #901)        | —                                      |
+| Route                                                | Price    | Fee | Where                                    | Guarded by             |
+| ---------------------------------------------------- | -------- | --- | ---------------------------------------- | ---------------------- |
+| relay `g.toon.relay` — terminate                     | **1**    | —   | `infra/linode-relay/connector-rust.toml` | `EXPECTED_RELAY_PRICE` |
+| store `g.toon.ario` — terminate                      | **1000** | —   | `infra/linode-store/connector-rust.toml` | `EXPECTED_STORE_PRICE` |
+| store `announcePrice` (retired TypeScript concept)\* | **2000** | —   | — (historical, file deleted #901)        | —                      |
 
-\* **Repo change landed in #820, live boxes NOT cut over yet.** `infra/linode-node/
-connector-rust.toml`'s `g.toon.relay` route is now a `peer_id` forward to `apex-relay` (the row that
-used to terminate locally against a co-located `relay:3100` is gone — that app has moved to its own
-box, `infra/linode-relay/`). The `[[peers]]`/`[[peer_channels]]` rows #820 committed carry PLACEHOLDER
-values (matching the apex-store row's own convention); the real channel, DNS, TLS and container
-restarts are a separate live/human step (#820's own "Live steps" section), not done by merging the
-repo change. Until that step runs, the live apex box still answers as a terminate route, per the last
-live verification below (also pre-#820: `g.toon.relay.ario` was still live at the time, on the store
-box's own terminating route retired by #820's repo change — see "Retired names" below).
-
-\*\* The retired TypeScript config that carried this figure, `infra/linode-store/connector.yaml`, is
+\* The retired TypeScript config that carried this figure, `infra/linode-store/connector.yaml`, is
 deleted (issue #901) — it no longer fronted traffic (see "The TypeScript fleet" below) and was not a
 current source of truth for anything. The row survives only as the historical origin of the `2000`
 figure: the Rust `connector announce` that replaced `selfAnnounce` configures no announce price at
 all, so there is no committed literal to repoint this citation at. See "`announcePrice` 2000" below.
 
-Last verified live (pre-#820) against both boxes via the unauthenticated
+Last verified live against both boxes via the unauthenticated
 `GET /ilp/routes/price?destination=…` (ADR 0022 puts configuration answers on the free side of the
 answering/announcing line):
 
 ```
-apex  g.toon.relay        -> 1   (terminate, pre-#820 shape)
-apex  g.toon.ario         -> 1002
+relay g.toon.relay        -> 1
 store g.toon.ario         -> 1000
-store g.toon.relay.ario   -> 1000   (retired by #820's repo change, see below)
 ```
 
 ## Why the relay route is 1 and the store legs are 1000
@@ -64,46 +57,36 @@ from an arbitrary buyer, not a high-frequency stream. Nothing amortises a
 handshake there, which is also why the relay route pins `transport = "btp"`
 (#701) while the store legs keep the default `both`.
 
-**The apex forward is 1002, not 1000, deliberately.** ADR 0028's arithmetic is
-`amount == price`: the hop collects `price`, forwards `price - fee`, and earns
-`fee`. The store terminates at its own committed 1000, so it must _receive_
-1000; at 1000/fee 2 it would receive 998 and refuse. #754 made a terminating
-connector charge its price on a peer-wire arrival, so 1002 is correct and
-stays correct. The client's cost for that prefix is 1002.
+## The apex forward (retired, issue #872)
 
-## The `g.toon.relay` forward: price/fee split (decided, repo change landed #820)
+Until issue #872 removed it, the apex sat in front of both boxes and forwarded to them over a paid
+peering — this section is kept as the historical record of the arithmetic that governed it, not as a
+description of anything currently live.
 
-The apex no longer terminates `g.toon.relay` against a co-located `relay:3100` and instead forwards
-it over a peering to the relay's own box (`infra/linode-relay/`, #816/#821/#820), so ADR 0028's
-arithmetic applies: the apex's client edge charges its own `price`, forwards `price - fee` over the
-peer wire, and the relay box charges its own `price` again on arrival. A forward that is short —
-`apex.price - apex.fee < relay.price` — is not a subsidy, it is an **F03** on every single write,
-because ADR 0028 requires `amount == price` at each hop and #754 makes the terminating side charge
-its own price against a peer-wire arrival.
+The apex charged its own client `1002` for `g.toon.ario`, kept a `fee` of `2`, and forwarded the
+remaining `1000` to the store's own terminating route — ADR 0028's arithmetic (`amount == price` at
+each hop) made a short forward an F03 rather than a silent subsidy once #754 made a terminating
+connector charge its price on a peer-wire arrival, so `1002`/`2` was the only pair that both paid the
+store its `1000` and matched that rule.
 
-**Decided (owner, 2026-08-06): `apex.price = 1, apex.fee = 0`; `relay.price = 1`.** Client cost per
-write is unchanged (still 1 µUSDC) and the apex earns nothing for carriage on this leg —
-deliberate, not an oversight, and not to be "fixed" by a later reader. `g.toon.relay` carries buzz
-huddles at 49 fps (above), so any non-zero apex fee would have required raising `apex.price` above
-`relay.price` to keep the arithmetic solvent, which at minimum doubles the per-frame client cost
-(1 → 2 µUSDC/frame) for a workload billed per frame, 49 times a second. Zero fee is what keeps that
-cost flat while the arithmetic still holds: `1 - 0 = 1 >= 1`.
+For `g.toon.relay` the apex charged `1` and kept a `fee` of `0` (owner decision, 2026-08-06): the
+relay carries buzz huddles at 49 fps, so any non-zero apex fee would have forced `apex.price` above
+`relay.price`, doubling the per-frame client cost for a workload billed 49 times a second. Zero fee
+kept that cost flat while the arithmetic still held: `1 - 0 = 1 >= 1`.
 
-**`transport = "btp"` moves with the terminating route.** It is only legal alongside `handler_url`
-— `ConfigError::PeerRouteHasTransport` refuses it on a `peer_id` route
-(`crates/connector-config/src/error.rs:125`) — so the pin the apex used to carry
-(`infra/linode-node/connector-rust.toml`, issue #701) is gone from there, and lives only on
-`infra/linode-relay/connector-rust.toml`'s own terminating route (committed in #816/#823).
-**The apex therefore loses client-edge BTP enforcement on this prefix, and nothing downstream
-restores it**: transport policy is a client-edge gate only — `handle_peer_prepare`
-(`crates/connector-runtime/src/connector.rs`) gates a peer-wire arrival on the route's price, never
-on its transport policy, and the apex→relay carriage is BTP regardless. (It gated on the exposure
-ceiling too until [ADR 0033](adr/0033-the-exposure-machinery-is-retired-not-restated.md), issue
-#882, retired it; that made no difference to transport policy either.) An
-HTTP client paying the apex for `g.toon.relay` is therefore served end to end; the relay box's pin
-refuses only clients arriving directly at its own client edge over HTTP. #701's decision-11 pin is
-now a statement about the relay's direct edge rather than about the prefix fleet-wide — a
-deliberate consequence of the flip, not an oversight.
+The `EXPECTED_APEX_FORWARD_PRICE`/`EXPECTED_APEX_FORWARD_FEE` (and their relay-forward siblings)
+constants that guarded this arithmetic in `crates/connector-bin/tests/devnet_configs_load.rs` are
+removed by issue #872 along with the peering and the `infra/linode-node/` config that named them —
+with no hop, there is no fee and no peer arrival, so the F03 peer-arrival case they guarded against
+cannot arise on this fleet any more. `EXPECTED_RELAY_PRICE` and `EXPECTED_STORE_PRICE` still guard
+each surviving box's own terminating price directly.
+
+`transport = "btp"` was only ever legal alongside `handler_url` —
+`ConfigError::PeerRouteHasTransport` refuses it on a `peer_id` route
+(`crates/connector-config/src/error.rs:125`) — so the pin always lived on the relay's own
+terminating route (committed in #816/#823), never on the apex's forward. That is unchanged by the
+apex's removal: the relay box's `[[routes]]` entry for `g.toon.relay` still pins `btp` for its own
+direct clients.
 
 ## `announcePrice` 2000
 

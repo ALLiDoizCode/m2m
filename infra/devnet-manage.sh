@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TOON devnet lifecycle manager — provision, deploy, tear down, or probe the
-# devnet fleet: TOON connector (apex) / Store-DVM / Relay.
+# devnet fleet: Store-DVM / Relay.
+#
+# The apex ("toon"/g.toon proxy box) is GONE (issue #872, toon-meta#310 /
+# toon-meta#313's live cutover): the fleet is two connector-bearing boxes now
+# -- store and relay -- plus the separate, connector-less faucet box
+# (connector#898). There is no forwarding hop and no peering left to verify;
+# `g.toon` remains the namespace root in the wire protocol but nothing
+# answers at it any more, so this script cannot target it either.
 #
 # The self-hosted EVM/Solana/Mina chain boxes this script once managed were
 # deleted 2026-07-19 — the devnet settles on PUBLIC chains now (Base Sepolia,
@@ -18,7 +25,6 @@
 #   ./devnet-manage.sh destroy   Delete all Linode boxes (loses chain state)
 #   ./devnet-manage.sh status    Probe every public HTTPS endpoint
 #   ./devnet-manage.sh redeploy  Pull latest images + restart containers
-#   ./devnet-manage.sh verify-routes  Assert apex forwards g.proxy.relay.store + g.proxy.store → store-box
 #   ./devnet-manage.sh ips       Print current box IPs
 #   ./devnet-manage.sh dns       Sync Porkbun A-records to current box IPs
 #   ./devnet-manage.sh endpoints Generate endpoints.json from live nodes
@@ -54,13 +60,14 @@ PORKBUN_API="https://api.porkbun.com/api/json/v3"
 
 # Node definitions: label | type | root password.
 # Live-verified 2026-08-06 against the Linode API (issue #819 comment): the
-# fleet is `toon` (apex, label "toon") + `ario` (store, label "ario") + the
-# new `relay` box (label "relay") — all g6-standard-2. The `store` key's
-# label used to read "toon-devnet-store", which does not match the live
-# "ario" label; get_box_ip would find nothing and `create_box` would stand up
-# a SECOND store box.
-declare -A NODE_LABELS=( [toon]=toon [store]=ario [relay]=relay [faucet]=faucet )
-declare -A NODE_TYPES=(  [toon]=g6-standard-2 [store]=g6-standard-2 [relay]=g6-standard-2 [faucet]=g6-standard-2 )
+# fleet was `toon` (apex, label "toon") + `ario` (store, label "ario") + the
+# `relay` box (label "relay") — all g6-standard-2. Issue #872 (toon-meta#310 /
+# toon-meta#313's live cutover) destroyed the apex; `toon` is no longer a key
+# this script can create, deploy, or target. The `store` key's label reads
+# "ario", not "toon-devnet-store" — get_box_ip would find nothing under the
+# old name and `create_box` would stand up a SECOND store box.
+declare -A NODE_LABELS=( [store]=ario [relay]=relay [faucet]=faucet )
+declare -A NODE_TYPES=(  [store]=g6-standard-2 [relay]=g6-standard-2 [faucet]=g6-standard-2 )
 # Root passwords are GENERATED PER CREATE and thrown away — never committed,
 # never printed, never reused. Nothing needs them: every path into a box in this
 # file is `ssh -i "$SSH_KEY"` (see ssh_run below), and infra/harden-ssh.sh turns
@@ -112,7 +119,7 @@ wait_box_running() {
   echo "ERROR: $label never reached running status" >&2; return 1
 }
 
-create_box() {  # key: toon|store|relay|faucet
+create_box() {  # key: store|relay|faucet
   local label="${NODE_LABELS[$1]}" type="${NODE_TYPES[$1]}"
   existing_ip="$(get_box_ip "$label")"
   if [ -n "$existing_ip" ]; then
@@ -150,28 +157,6 @@ wait_ssh() {
   echo "ERROR: can't SSH to $ip" >&2; return 1
 }
 
-deploy_toon_node() {  # ip, toon_mnemonic
-  local ip=$1 mnemonic=$2
-  wait_ssh "$ip"
-  ssh_run "$ip" "
-    set -e
-    command -v git >/dev/null || apt-get install -y git curl
-    [ -d /root/connector ] || git clone -b '$BRANCH' '$REPO_URL' /root/connector
-    cd /root/connector && git pull --ff-only origin '$BRANCH' 2>/dev/null || true
-    cat > infra/linode-node/.env <<'ENV'
-DOMAIN=$DOMAIN
-LETSENCRYPT_STAGING=0
-LETSENCRYPT_EMAIL=dev.jonathan.green@gmail.com
-TOON_MNEMONIC=$mnemonic
-MINA_FAUCET_KEY=
-RELAY_NOSTR_SECRET_KEY=0000000000000000000000000000000000000000000000000000000000000002
-LOG_LEVEL=info
-ENV
-    chmod +x infra/linode-node/bootstrap.sh infra/linode-node/init-letsencrypt.sh infra/linode-node/firewall.sh
-    ./infra/linode-node/bootstrap.sh
-  "
-}
-
 deploy_store_node() {  # ip, toon_mnemonic
   local ip=$1 mnemonic=$2
   wait_ssh "$ip"
@@ -195,9 +180,8 @@ ENV
 deploy_relay_node() {  # ip, toon_mnemonic
   # Modeled on deploy_store_node — infra/linode-relay/ mirrors infra/linode-store/
   # file for file (issue #816). RELAY_NOSTR_SECRET_KEY must carry over
-  # byte-identical from deploy_toon_node's heredoc above: it is the relay
-  # app's own Nostr identity, and clients already discovered it under this
-  # pubkey (infra/linode-relay/.env.example).
+  # byte-identical: it is the relay app's own Nostr identity, and clients
+  # already discovered it under this pubkey (infra/linode-relay/.env.example).
   local ip=$1 mnemonic=$2
   wait_ssh "$ip"
   ssh_run "$ip" "
@@ -227,78 +211,11 @@ probe() {  # url, label
 }
 
 print_ips() {
-  for key in toon store relay; do
+  for key in store relay; do
     local label="${NODE_LABELS[$key]}"
     local ip; ip=$(get_box_ip "$label")
     printf "  %-20s %s\n" "$label" "${ip:-not-found}"
   done
-}
-
-# Post-deploy regression guard for the apex routing table. The apex once dropped
-# its store forward routes and paid writes to g.proxy.relay.store silently 404'd on
-# the relay (the TOON client's DEFAULT write dest is g.proxy.relay.store, which —
-# being MORE specific than the locally-terminated g.proxy.relay route — falls
-# through to that terminate route under longest-prefix matching unless an explicit
-# forward route exists). This queries the apex connector's LIVE route table via its
-# keyless admin API from inside the toon box's docker network and asserts the store
-# forward routes survived the deploy. Exits non-zero on a missing/mis-pointed route
-# so a redeploy that drops them fails LOUDLY instead of silently misrouting.
-#   g.proxy.relay.store -> store-box   (the client default write dest)
-#   g.proxy.store       -> store-box
-verify_routes() {
-  local ip; ip=$(get_box_ip "${NODE_LABELS[toon]}")
-  if [ -z "$ip" ]; then
-    echo "  ❌  verify-routes: toon (apex) box not found" >&2
-    return 1
-  fi
-  echo "==> Verifying apex route table (g.proxy.relay.store, g.proxy.store → store-box)"
-  # Discover the connector container (compose names it *connector*) and dump the
-  # live admin route table from inside the box's docker network (port 8081, keyless,
-  # bound to the docker bridge only — not reachable from off-box).
-  local routes_json
-  routes_json="$(ssh_run "$ip" '
-    c="$(docker ps --filter name=connector --format "{{.Names}}" | head -1)"
-    [ -z "$c" ] && { echo "NO_CONNECTOR_CONTAINER" >&2; exit 3; }
-    docker exec "$c" wget -qO- http://127.0.0.1:8081/admin/routes
-  ' 2>/dev/null || true)"
-
-  if [ -z "$routes_json" ] || printf '%s' "$routes_json" | grep -q NO_CONNECTOR_CONTAINER; then
-    echo "  ❌  verify-routes: could not read /admin/routes from the apex connector" >&2
-    return 1
-  fi
-
-  # GET /admin/routes returns Array<{prefix,nextHop,priority}>; use python3 for a
-  # robust JSON check (avoids brittle ordering-dependent greps).
-  local ok=1 prefix
-  for prefix in g.proxy.relay.store g.proxy.store; do
-    if printf '%s' "$routes_json" | ROUTES_PREFIX="$prefix" python3 -c '
-import json, os, sys
-prefix = os.environ["ROUTES_PREFIX"]
-try:
-    routes = json.load(sys.stdin)
-except Exception as e:
-    sys.stderr.write("  bad JSON from /admin/routes: %s\n" % e)
-    sys.exit(2)
-routes = routes.get("routes", routes) if isinstance(routes, dict) else routes
-match = next((r for r in routes if r.get("prefix") == prefix), None)
-if match is None:
-    sys.exit(1)
-sys.exit(0 if match.get("nextHop") == "store-box" else 1)
-'; then
-      echo "  ✅  route $prefix → store-box"
-    else
-      echo "  ❌  route $prefix → store-box  (MISSING or wrong nextHop)"
-      ok=0
-    fi
-  done
-
-  if [ "$ok" != 1 ]; then
-    echo "  FAIL: apex routing regression — a required store forward route is missing." >&2
-    echo "        Re-apply infra/linode-node/connector.yaml and redeploy the toon node." >&2
-    return 1
-  fi
-  echo "  PASS: apex store forward routes intact."
-  return 0
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -307,21 +224,13 @@ case "${1:-help}" in
 up)
   TOON_MNEMONIC="${TOON_MNEMONIC:-giant goat guide develop boy wolf target embody leave sunny paddle neutral}"
   echo "==> [1/4] Provision boxes"
-  for key in toon store relay; do create_box "$key"; done
-  for key in toon store relay; do wait_box_running "${NODE_LABELS[$key]}"; done
+  for key in store relay; do create_box "$key"; done
+  for key in store relay; do wait_box_running "${NODE_LABELS[$key]}"; done
 
-  TOON_IP=$(get_box_ip "${NODE_LABELS[toon]}")
   STORE_IP=$(get_box_ip "${NODE_LABELS[store]}")
   RELAY_IP=$(get_box_ip "${NODE_LABELS[relay]}")
 
   echo "==> [2/4] Update DNS"
-  update_dns "proxy.devnet"         "$TOON_IP"
-  # Still box 1, deliberately: the faucet moves to its OWN box with no
-  # connector (toon-meta#310 §4, connector#898 — `./devnet-manage.sh faucet`
-  # provisions it), but the record only repoints once that box is live,
-  # funded and proven serving (§6.2's ordered runbook) — not as a side
-  # effect of routine fleet bring-up. See docs/operators/faucet-box-bringup.md.
-  update_dns "faucet.devnet"        "$TOON_IP"
   # `proxy.ario` is the store box's paid edge, matching the g.toon.ario
   # prefix it serves. It replaced `proxy.store.devnet` on 2026-08-05; that
   # name is RETIRED -- record deleted, dropped from the certificate and from
@@ -331,40 +240,25 @@ up)
   update_dns "proxy.ario.devnet"    "$STORE_IP"
   update_dns "dvm.devnet"           "$STORE_IP"
   update_dns "proxy.relay.devnet"   "$RELAY_IP"
-  # `relay-ws.devnet` points at the RELAY box, not the apex (#820 / #815).
-  # It used to point at the apex because the apex's TLS lineage was NAMED
-  # relay-ws.devnet.toonprotocol.dev and carried proxy.devnet + faucet.devnet
-  # as SANs on it, so moving the record before the SAN came off would have
-  # failed renewal for all three sixty days later. Both preconditions are now
-  # met in this tree: the apex's nginx no longer names relay-ws in any
-  # server_name or backend map, its lineage is re-primaried on
-  # proxy.devnet.toonprotocol.dev (infra/linode-node/nginx/conf.d/node.conf,
-  # infra/linode-node/init-letsencrypt.sh) and the relay container is gone
-  # from that box. The relay box serves relay-ws itself, off a SEPARATELY
-  # issued cert lineage of its own (#830 — never bundled into one
+  # `relay-ws.devnet` points at the RELAY box (#820 / #815), off its own
+  # SEPARATELY issued cert lineage (#830 — never bundled into one
   # all-or-nothing SAN request): infra/linode-relay/nginx/conf.d/node.conf +
-  # infra/linode-relay/init-letsencrypt.sh.
+  # infra/linode-relay/init-letsencrypt.sh. The apex it used to point at
+  # (before that split landed) is gone entirely as of issue #872.
   update_dns "relay-ws.devnet"      "$RELAY_IP"
 
   echo "==> [3/4] Deploy all nodes (parallel)"
-  deploy_toon_node "$TOON_IP" "$TOON_MNEMONIC" &
-  PID_TOON=$!
-
   deploy_store_node "$STORE_IP" "$TOON_MNEMONIC" &
   PID_STORE=$!
 
   deploy_relay_node "$RELAY_IP" "$TOON_MNEMONIC" &
   PID_RELAY=$!
 
-  wait $PID_TOON  && echo "  ✅ TOON done"  || echo "  ❌ TOON failed"
   wait $PID_STORE && echo "  ✅ Store done" || echo "  ❌ Store failed"
   wait $PID_RELAY && echo "  ✅ Relay done" || echo "  ❌ Relay failed"
 
   echo "==> [4/4] Status check"
   "$0" status
-
-  echo "==> [post-deploy] Route guard"
-  verify_routes
   ;;
 
 store)
@@ -436,20 +330,19 @@ faucet-cutover)
   ;;
 
 down)
-  # toon/store/relay only — the faucet box is brought up and down on the box
+  # store/relay only — the faucet box is brought up and down on the box
   # itself (infra/linode-faucet/bootstrap.sh), not from here. Same for
-  # `redeploy` below. See docs/operators/faucet-box-bringup.md.
-  echo "==> Stopping containers on the toon/store/relay nodes"
-  for key in toon store relay; do
+  # `redeploy` below. See docs/operators/faucet-box-bringup.md. The apex
+  # ("toon") that used to sit alongside them here is gone (issue #872).
+  echo "==> Stopping containers on the store/relay nodes"
+  for key in store relay; do
     local_label="${NODE_LABELS[$key]}"
     ip=$(get_box_ip "$local_label") || continue
     [ -z "$ip" ] && echo "  $local_label: not found" && continue
     echo "  Stopping $local_label ($ip)..."
     ssh_run "$ip" "
       cd /root/connector 2>/dev/null || exit 0
-      if [ '$key' = 'toon' ]; then
-        docker compose -f infra/linode-node/docker-compose.node.yml down 2>/dev/null || true
-      elif [ '$key' = 'store' ]; then
+      if [ '$key' = 'store' ]; then
         docker compose -f infra/linode-store/docker-compose.store.yml down 2>/dev/null || true
       else
         docker compose -f infra/linode-relay/docker-compose.relay.yml down 2>/dev/null || true
@@ -459,14 +352,16 @@ down)
   ;;
 
 destroy)
-  # Covers the three CONNECTOR-BEARING boxes only. The faucet box (connector#898)
+  # Covers the two CONNECTOR-BEARING boxes only. The faucet box (connector#898)
   # is provisioned by its own targeted case above and is not in this loop, so a
   # `destroy` here cannot take the faucet down with the fleet — delete it
-  # explicitly if that is what you want.
-  echo "==> Deleting the toon/store/relay devnet boxes (irreversible; NOT the faucet box)"
+  # explicitly if that is what you want. The apex ("toon") this loop once
+  # covered too was destroyed live under toon-meta#313 and removed from this
+  # script by issue #872 -- there is no key left here for it to target.
+  echo "==> Deleting the store/relay devnet boxes (irreversible; NOT the faucet box)"
   read -r -p "Are you sure? [y/N] " ans
   [[ "$ans" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 1; }
-  for key in toon store relay; do
+  for key in store relay; do
     local_label="${NODE_LABELS[$key]}"
     id=$(get_box_id "$local_label") || continue
     [ -z "$id" ] && echo "  $local_label: not found" && continue
@@ -480,12 +375,11 @@ status)
   echo
   echo "Public endpoints:"
   probe "https://faucet.$DOMAIN/health"          "faucet"
-  probe "https://proxy.$DOMAIN/health"           "proxy/connector"
   probe "https://relay-ws.$DOMAIN"               "relay-ws"
-  # store/relay nginx has no `/health` location (only the apex's does, mapped
-  # to /ilp/identity server-side) -- probing /health on either 404s even when
-  # the box is healthy. /ilp/identity is the same unauthenticated liveness
-  # read the operator runbook and both boxes' own CORS location use.
+  # store/relay nginx has no `/health` location -- probing /health on either
+  # 404s even when the box is healthy. /ilp/identity is the same
+  # unauthenticated liveness read the operator runbook and both boxes' own
+  # CORS location use.
   probe "https://proxy.ario.$DOMAIN/ilp/identity"  "store (ario) proxy/connector"
   probe "https://dvm.$DOMAIN/health"               "store dvm"
   probe "https://proxy.relay.$DOMAIN/ilp/identity" "relay proxy/connector"
@@ -493,80 +387,40 @@ status)
 
 redeploy)
   echo "==> Redeploying containers on all nodes (pulls latest images)"
-  for key in toon store relay; do
+  for key in store relay; do
     local_label="${NODE_LABELS[$key]}"
     ip=$(get_box_ip "$local_label") || continue
     [ -z "$ip" ] && echo "  $local_label: not found" && continue
     echo "  Redeploying $local_label ($ip)..."
-    # The apex still declares the TypeScript `connector` service in its base
-    # compose file (issue #872 is its removal; out of scope here) -- redeploy
-    # must bring up the RUST connector on the public door (verified live:
-    # `GET /ilp/identity` answers, nginx 410s the transitional `/rust/` prefix
-    # because Rust took over `location /`) without starting that service,
-    # which is pinned to `ghcr.io/toon-protocol/connector:3.36.3-solchan.0`,
-    # an image purged from GHCR -- a blanket `pull`/`up -d` over the whole
-    # file fails outright on it (issue #851).
-    #
-    # Naming services is NOT enough to exclude it: `nginx` declares
-    # `depends_on: connector` in the base file (docker-compose.node.yml), and
-    # `up` pulls a named service's dependencies into the graph anyway.
-    # `required: false` does not help -- it tolerates a dependency that is
-    # missing or unhealthy, it does not stop compose from creating one that IS
-    # declared, so the purged image is still fetched and the whole `up` aborts
-    # on `manifest unknown`, taking nginx and connector-rust down with it.
-    # `--no-deps` is what actually excludes it. (`pull` needs no such flag:
-    # it ignores dependencies already.) `compose`/`services` are split out
-    # only so these lines stay readable: the leg names its file set twice
-    # (`pull` then `up`) and its service set twice, and the two must not
-    # drift from each other.
-    #
-    # store and relay have no TypeScript service left to dodge (issue #901
-    # deleted the store's, along with its now-dangling `nginx` `depends_on`;
-    # the relay leg never had one, issue #816) -- both simply compose their
-    # base file with their Rust overlay and bring up every service in the
-    # file set, no service list and no `--no-deps` needed.
-    if [ "$key" = "toon" ]; then
-      compose="docker compose -f infra/linode-node/docker-compose.node.yml -f infra/linode-node/docker-compose.node.rust.yml"
-      services="relay faucet nginx certbot connector-rust"
-      ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && $compose pull $services && $compose up --build -d --no-deps $services" &
-    elif [ "$key" = "store" ]; then
+    # Neither surviving box has a TypeScript service left to dodge (issue
+    # #901 deleted the store's, along with its now-dangling `nginx`
+    # `depends_on`; the relay leg never had one, issue #816; the apex's own
+    # copy of this hazard is gone with the apex itself, issue #872) -- both
+    # simply compose their base file with their Rust overlay and bring up
+    # every service in the file set, no service list and no `--no-deps`
+    # needed.
+    if [ "$key" = "store" ]; then
       compose="docker compose -f infra/linode-store/docker-compose.store.yml -f infra/linode-store/docker-compose.store.rust.yml"
-      ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && $compose pull && $compose up -d" &
     else
-      # Always both files together, since the connector-rust service is only
-      # defined in the overlay -- see the store leg's note above, which this
-      # leg's shape is now identical to.
       compose="docker compose -f infra/linode-relay/docker-compose.relay.yml -f infra/linode-relay/docker-compose.relay.rust.yml"
-      ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && $compose pull && $compose up -d" &
     fi
+    ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && $compose pull && $compose up -d" &
   done
   wait
   "$0" status
-
-  echo "==> [post-deploy] Route guard"
-  verify_routes
   ;;
-
-verify-routes) verify_routes ;;
 
 ips) print_ips ;;
 
 dns)
   echo "==> Syncing Porkbun DNS to current box IPs"
-  TOON_IP=$(get_box_ip "${NODE_LABELS[toon]}")
   STORE_IP=$(get_box_ip "${NODE_LABELS[store]}")
   RELAY_IP=$(get_box_ip "${NODE_LABELS[relay]}")
-  [ -n "$TOON_IP" ] && update_dns "proxy.devnet" "$TOON_IP"        || echo "  ${NODE_LABELS[toon]} not found"
-  # faucet.devnet stays on box 1 here too, for the same reason as the `up)`
-  # case above — this command syncs to CURRENT state, and box 1 is still
-  # current until the ordered runbook (docs/operators/faucet-box-bringup.md)
-  # cuts over.
-  [ -n "$TOON_IP" ] && update_dns "faucet.devnet" "$TOON_IP"       || true
   [ -n "$STORE_IP" ] && update_dns "proxy.ario.devnet" "$STORE_IP"  || echo "  ${NODE_LABELS[store]} not found"
   [ -n "$STORE_IP" ] && update_dns "dvm.devnet" "$STORE_IP"        || true
   [ -n "$RELAY_IP" ] && update_dns "proxy.relay.devnet" "$RELAY_IP" || echo "  ${NODE_LABELS[relay]} not found"
-  # relay-ws.devnet follows the relay box, not the apex, post-#820 — see the
-  # `up)` case's comment.
+  # relay-ws.devnet follows the relay box, post-#820 — see the `up)` case's
+  # comment. The apex it used to follow before that split is gone (#872).
   [ -n "$RELAY_IP" ] && update_dns "relay-ws.devnet" "$RELAY_IP"    || true
   echo "Done."
   ;;
@@ -575,20 +429,10 @@ endpoints)
   EVM_IP=$(get_box_ip toon-devnet-evm)
   SOL_IP=$(get_box_ip toon-devnet-sol)
   MINA_IP=$(get_box_ip toon-devnet-mina)
-  TOON_IP=$(get_box_ip toon)
   STORE_IP=$(get_box_ip toon-devnet-store)
-  # Pull the live Mina zkApp addresses the toon node was provisioned with (the
-  # lightnet deploy is per-recreate, so read them from the box's connector.yaml).
-  MINA_TOKEN=""; MINA_TOKENID=""; MINA_CHANNEL=""
-  if [ -n "$TOON_IP" ]; then
-    MINA_YAML="$(ssh_run "$TOON_IP" "sed -n '/chainType: mina/,/txFeeNanomina/p' /root/connector/infra/linode-node/connector.yaml" 2>/dev/null || true)"
-    MINA_TOKEN="$(printf '%s' "$MINA_YAML"   | grep -E "tokenAddress:"  | sed -E "s/.*'(B62[^']+)'.*/\1/" || true)"
-    MINA_TOKENID="$(printf '%s' "$MINA_YAML" | grep -E "tokenId:"       | sed -E "s/.*'([0-9]+)'.*/\1/"  || true)"
-    MINA_CHANNEL="$(printf '%s' "$MINA_YAML" | grep -E "zkAppAddress:"  | sed -E "s/.*'(B62[^']+)'.*/\1/" || true)"
-  fi
   cat <<JSON
 {
-  "_note": "TOON devnet — separate nodes per chain. Generated by devnet-manage.sh.",
+  "_note": "TOON devnet — separate nodes per chain. Generated by devnet-manage.sh. The apex (g.toon proxy) is retired (issue #872) -- nothing answers at g.toon any more.",
   "evm": {
     "rpcUrl": "https://evm-rpc.${DOMAIN}",
     "chainId": 31337,
@@ -604,28 +448,6 @@ endpoints)
     "tokenMint": "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H",
     "tokenDecimals": 6,
     "nodeIp": "${SOL_IP}"
-  },
-  "mina": {
-    "graphqlUrl": "https://mina.${DOMAIN}/graphql",
-    "accountsUrl": "https://mina-accounts.${DOMAIN}",
-    "tokenAddress": "${MINA_TOKEN}",
-    "tokenId": "${MINA_TOKENID}",
-    "paymentChannelZkApp": "${MINA_CHANNEL}",
-    "tokenDecimals": 6,
-    "nodeIp": "${MINA_IP}",
-    "_note": "zkApps deployed to the lightnet by provision-mina-lightnet.sh on each up (lightnet resets on recreate)"
-  },
-  "toon": {
-    "relayWs": "wss://relay-ws.${DOMAIN}",
-    "proxyIlp": "https://proxy.${DOMAIN}/ilp",
-    "faucetUrl": "https://faucet.${DOMAIN}",
-    "ilpAddress": "g.proxy.relay",
-    "settlementAddresses": {
-      "evm": "0xF29fD62C4848B9573C9b90adbF61b664F386d9CF",
-      "solana": "A3FG5y6rfBNJQrsGYTNNR7UHAXCREPJgV362LdTQGNwK",
-      "mina": "B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq"
-    },
-    "nodeIp": "${TOON_IP}"
   },
   "store": {
     "proxyIlp": "https://proxy.store.${DOMAIN}/ilp",
