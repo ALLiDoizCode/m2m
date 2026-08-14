@@ -51,20 +51,22 @@ if [ -f "$ENV_FILE" ] && grep -q '^MINA_USDC_TREASURY_KEY=.\+' "$ENV_FILE"; then
 fi
 
 echo "==> Generating a fresh Mina keypair"
-KEYS_JSON="$(node -e '
-const Client = require("mina-signer");
-const C = Client.default || Client;
-const kp = new C({ network: "testnet" }).genKeys();
-process.stdout.write(JSON.stringify(kp));
-')"
-PUBKEY="$(node -e "console.log(JSON.parse(process.argv[1]).publicKey)" "$KEYS_JSON")"
-PRIVKEY="$(node -e "console.log(JSON.parse(process.argv[1]).privateKey)" "$KEYS_JSON")"
-unset KEYS_JSON
 
+# Tighten permissions BEFORE any secret lands in the file, so the key is never
+# briefly world-readable.
 touch "$ENV_FILE"
 chmod 600 "$ENV_FILE"
-printf 'MINA_USDC_TREASURY_KEY=%s\n' "$PRIVKEY" >> "$ENV_FILE"
-unset PRIVKEY
+
+# One node invocation on purpose: the private key goes straight from keygen
+# into ENV_FILE, never through argv (which `ps` exposes to every local user)
+# nor through a shell variable. Only the public key crosses back to the shell.
+PUBKEY="$(node -e '
+const Client = require("mina-signer");
+const C = Client.default || Client;
+const { publicKey, privateKey } = new C({ network: "testnet" }).genKeys();
+require("fs").appendFileSync(process.argv[1], `MINA_USDC_TREASURY_KEY=${privateKey}\n`);
+process.stdout.write(publicKey);
+' "$ENV_FILE")"
 
 echo "==> Treasury public key: $PUBKEY"
 echo "==> Appended MINA_USDC_TREASURY_KEY to $ENV_FILE (never printed)."

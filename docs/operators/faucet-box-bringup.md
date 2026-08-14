@@ -109,7 +109,15 @@ every other infra-touching ticket in this repo's history records when it applies
      no zkApp circuit, so this avoids the faucet's own lazy ~3-minute circuit compile.
 
    Both scripts refuse to overwrite an existing key/env line, so a re-run against a box that
-   already has a treasury is a safe no-op error, not a silent second key.
+   already has a treasury is a safe no-op error, not a silent second key. Neither one's tooling is
+   installed by `bootstrap.sh` (it installs docker, git, jq, gettext-base, openssl, ufw, curl,
+   iptables and nothing else): install the Solana CLI (`solana`, `solana-keygen`) before running
+   `generate-solana-treasury.sh`, and `node` plus this repo's `node_modules` (`npm ci` at the repo
+   root — that is where `mina-signer` resolves from) before running `generate-mina-treasury.sh`.
+   Each script checks for its binaries up front and exits with a clear error rather than
+   half-doing the work. A `.env` copied from `.env.example` already carries an _empty_
+   `MINA_USDC_TREASURY_KEY=` line — which is why the overwrite check only trips on a non-empty
+   one — so delete that empty line after running the script and leave exactly one definition.
 
    Write `BASE_SEPOLIA_FAUCET_KEY` / `MINA_USDC_TREASURY_KEY` (+ `MINA_USDC_TOKEN` /
    `MINA_USDC_ADMIN_CONTRACT`, the deployed USDC token's addresses) into this box's `.env` and
@@ -148,15 +156,15 @@ up -d --build faucet`) to pick them up. Record how each key was generated somewh
 
 5. **Funding.** Fund the Base Sepolia EVM address (a little ETH for gas — the mock USDC mint is
    ungated) and the Solana treasury (USDC on the public Solana devnet; SOL only for tx fees — this
-   box airdrops no SOL, §4.6). SOL is a public, permissionless devnet airdrop — `generate-solana-
-treasury.sh` (step 4) already does this airdrop as part of key generation, so nothing further is
-   needed for SOL specifically. The USDC transfer is
-   not — `xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in`'s mint authority is the deployer key recorded
-   in `packages/solana-program/deployments/devnet-public.md` ("Keypairs used for this deploy live
+   box airdrops no SOL, §4.6). SOL is a public, permissionless devnet airdrop —
+   `generate-solana-treasury.sh` (step 4) already does that airdrop as part of key generation, so
+   SOL needs nothing further here. The USDC transfer is not permissionless:
+   `xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in`'s mint authority is the deployer key recorded in
+   `packages/solana-program/deployments/devnet-public.md` ("Keypairs used for this deploy live
    outside the repo"), so funding this box's fresh treasury needs whoever holds that key to mint or
    transfer to it. `infra/solana/fund-solana.sh` does **not** reach this mint — it signs with the
-   committed `infra/solana/usdc-authority.json`, which is the _local-validator_ mint's authority
-   (`H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H`, deleted per `infra/linode/README.md`), a
+   committed `infra/solana/usdc-authority.json`, which is the authority for the _local-validator_
+   mint `H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H` (deleted per `infra/linode/README.md`) — a
    different key for a different, no-longer-live mint. The Mina USDC leg self-mints its own
    replenishment on-chain (rate-limited, ≤1,000 USDC/~24h — see `packages/faucet/src/mina-usdc.mjs`),
    so it needs no privileged funding step, only ~1.2 devnet MINA of its own for tx fees (the public

@@ -26,8 +26,9 @@
 #                 treasury's OWN outgoing-transfer fees)
 #     RPC_URL     default https://api.devnet.solana.com
 #
-# Requires solana-keygen + solana on PATH (both present in the devnet tooling
-# already used by infra/solana/*.sh).
+# Requires solana-keygen + solana on PATH. The faucet box's bootstrap.sh does
+# NOT install the Solana CLI (it installs docker, git, jq, gettext-base,
+# openssl, ufw, curl, iptables) -- install it on the box before running this.
 set -euo pipefail
 
 OUT_PATH="${1:-/root/keys/solana-usdc-treasury.json}"
@@ -62,7 +63,8 @@ echo "==> Airdropping $SOL_AMOUNT SOL (tx fees) via $RPC_URL"
 if solana airdrop "$SOL_AMOUNT" "$PUBKEY" --url "$RPC_URL"; then
   echo "    Airdrop succeeded."
 else
-  echo "    Airdrop failed (devnet airdrop is rate-limited per IP/address) -- retry" >&2
+  echo "    Airdrop failed (the devnet airdrop is rate-limited per IP/address, and the" >&2
+  echo "    RPC itself can be unreachable) -- retry" >&2
   echo "    later with: solana airdrop $SOL_AMOUNT $PUBKEY --url $RPC_URL" >&2
 fi
 
@@ -73,8 +75,9 @@ cat <<EOF
        to $PUBKEY. This needs the mint's deployer/mint-authority key, which
        lives outside this repo (packages/solana-program/deployments/devnet-public.md) --
        whoever holds it must mint or transfer to this address.
-    2. Point docker-compose.faucet.yml's bind mount at $OUT_PATH (already the
-       default path) and restart the faucet service to pick it up.
+    2. Restart the faucet service to pick the keypair up. Only if $OUT_PATH is
+       not the default /root/keys/solana-usdc-treasury.json, repoint
+       docker-compose.faucet.yml's bind mount at it first.
     3. Verify: POST /api/solana/usdc-request against this box and confirm the
        recipient's USDC balance rises (faucet-box-bringup.md gate (c)).
 
