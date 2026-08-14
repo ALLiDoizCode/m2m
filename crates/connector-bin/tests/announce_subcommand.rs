@@ -305,6 +305,87 @@ fn a_dry_run_quotes_the_price_and_prints_a_genuinely_signed_event_without_paying
     // written before they existed is unaffected.
     assert!(info.get("supportedChains").is_none(), "{info}");
     assert!(info.get("settlementAddresses").is_none(), "{info}");
+    // This route is left at the permissive default (issue #701), so there
+    // is no transport requirement to declare -- and the same "absent, not
+    // empty" rule applies to it.
+    assert!(info.get("requiredTransport").is_none(), "{info}");
+}
+
+/// A route pinned `transport = "btp"` (issue #701) SAYS SO on the announce.
+///
+/// The requirement was enforced from the day #701 landed and advertised
+/// from none of them: verified live 2026-08-14 against the devnet fleet on
+/// `connector:rust-sha-415531a`, the relay box terminates `g.toon.relay`
+/// with `transport = "btp"` and its kind:10032 carried no
+/// `requiredTransport` key at all -- nor did any other announce in the
+/// corpus. toon-client's `terminatorRequiresBtp` guard (toon-client#558)
+/// reads exactly this key off the raw content, so with the key missing it
+/// could never fire: every client fell through to HTTP-ILP and was refused
+/// by the very policy the announce should have warned it about.
+///
+/// The key is asserted at the ROOT of the content on purpose. The x402
+/// greeting nests the same fact under `extra.requiredTransport`, and a
+/// kind:10032 content has no `extra` block -- nesting it here would satisfy
+/// a reader's memory of the greeting and nothing else.
+#[test]
+fn a_btp_only_route_declares_the_transport_it_requires_on_the_announce() {
+    let ingress = RecordingIngress::start();
+    let key_file = support::write_raw_key_file(23);
+    let config = write(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{key_file}"
+
+[[routes]]
+prefix = "g.test.relay"
+handler_url = "http://{ingress}/write"
+price = 1000
+transport = "btp"
+
+[announce]
+addresses = ["g.test.relay"]
+http_endpoint = "https://node.test.example/ilp"
+btp_endpoint = "wss://node.test.example/ilp/btp"
+publish_to = "g.test.relay"
+"#,
+        key_file = key_file.path().display(),
+        ingress = ingress.addr,
+    ));
+    let node = support::spawn_connector(config.path());
+
+    let (ok, stdout, stderr) = run_connector(&[
+        "announce",
+        "--config",
+        &config.path().display().to_string(),
+        &format!("http://{}/ilp", node.client_edge_addr),
+        "--dry-run",
+    ]);
+
+    assert!(ok, "dry run failed:\nstdout: {stdout}\nstderr: {stderr}");
+    let printed: serde_json::Value = serde_json::from_str(
+        stdout
+            .split_once('{')
+            .map(|(_, rest)| format!("{{{rest}"))
+            .expect("the dry run prints the event")
+            .trim(),
+    )
+    .expect("the printed event is JSON");
+    let info: serde_json::Value =
+        serde_json::from_str(printed["content"].as_str().expect("content is a string"))
+            .expect("the content is an IlpPeerInfo");
+
+    assert_eq!(
+        info["requiredTransport"], "btp",
+        "the transport policy is read off this node's own `[[routes]]`, the same table the \
+         price came from: {info}"
+    );
+    assert!(
+        info.get("extra").is_none(),
+        "toon-client reads JSON.parse(content)['requiredTransport'] off the root, not out of \
+         an `extra` block (which a kind:10032 content does not have): {info}"
+    );
 }
 
 /// #784's `relay_url` rule, at the far end of the pipe: a node that fronts

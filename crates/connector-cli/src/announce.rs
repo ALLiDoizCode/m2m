@@ -85,7 +85,7 @@ use std::time::Duration;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use chrono::{Duration as ChronoDuration, Utc};
-use connector_config::{AnnounceConfig, Config, SecretLocation, SettlementConfig};
+use connector_config::{AnnounceConfig, Config, SecretLocation, SettlementConfig, TransportPolicy};
 use connector_domain::{
     derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, PacketResponse, Prepare, Reject,
 };
@@ -488,6 +488,43 @@ pub struct IlpPeerInfo {
     pub preferred_tokens: BTreeMap<String, String>,
     #[serde(rename = "routePrices", skip_serializing_if = "BTreeMap::is_empty")]
     pub route_prices: BTreeMap<String, String>,
+    /// The client transport the routes this announce covers REQUIRE (issue
+    /// #701's `transport = "btp"`), when they agree on one that is not the
+    /// permissive default. Absent whenever they do not -- which is every
+    /// ordinary node, so an announce is unchanged by this field existing.
+    ///
+    /// The requirement was ENFORCED long before it was advertised, and that
+    /// gap is the defect this field closes. The devnet relay box pins
+    /// `g.toon.relay` to `transport = "btp"` (huddles' 49 fps sessions), so
+    /// its client edge refuses a paid write that arrived over `POST /ilp`
+    /// -- and its kind:10032 announce said nothing about it. Verified live
+    /// 2026-08-14 on `connector:rust-sha-415531a`: NOT ONE announce in the
+    /// fleet's corpus carried a `requiredTransport` key in any form. A
+    /// stock client therefore had no way to learn the requirement except by
+    /// being refused: toon-client's `terminatorRequiresBtp` guard
+    /// (toon-client#558) reads exactly this key, found nothing, fell
+    /// through to HTTP, and was refused on every relay publish.
+    ///
+    /// Two things about the shape are load-bearing and neither is
+    /// negotiable from this side:
+    ///
+    ///   * it is **top level**, not inside an `extra` object. The x402
+    ///     GREETING spells it `extra.requiredTransport` (see [`Terms`],
+    ///     which parses that one), but a kind:10032 content has no `extra`
+    ///     block at all, and toon-client's reader
+    ///     (`packages/client/src/discovery-subscription.ts`'s
+    ///     `extractRequiredTransport`) takes `JSON.parse(content)
+    ///     ['requiredTransport']` off the root. Nested, it would be
+    ///     invisible to the only consumer there is;
+    ///   * it is **per node**, not per route, because that reader keys it
+    ///     by the announcing pubkey and applies it to whichever terminator
+    ///     claim wins. That is why [`announced_required_transport`] emits
+    ///     nothing unless the covered routes AGREE -- a scalar cannot
+    ///     honestly describe a node whose routes disagree, and over-
+    ///     claiming would push a client onto BTP for a route that never
+    ///     needed it.
+    #[serde(rename = "requiredTransport", skip_serializing_if = "Option::is_none")]
+    pub required_transport: Option<String>,
     /// How long a peer-sale purchase leases peering for (issue #886),
     /// present exactly when `[peer_sale]` is configured -- the lease is
     /// part of what a purchase buys, so it is visible to a buyer before
@@ -605,6 +642,26 @@ pub fn build_announcement(config: &Config, runtime: &Runtime) -> IlpPeerInfo {
             route_prices.insert(address.clone(), price.to_string());
         }
     }
+    // And which carriage it will accept the packet over, off the SAME
+    // lookup for the same reason (see `IlpPeerInfo::required_transport`):
+    // the transport policy and the price are two halves of one answer, and
+    // a client that reads one from the announce and discovers the other by
+    // being refused has paid to learn it.
+    //
+    // Only the addresses this announce COVERS are consulted. A peer-sale
+    // prefix is deliberately not, even though its price is folded in above:
+    // it reports `TransportPolicy::Both` by construction (see
+    // `Connector::client_route`), so including it would break the agreement
+    // below and silently drop the field from an announce that both
+    // terminates a BTP-only route and sells peering -- and it cannot need
+    // the field anyway, since a prefix absent from `addresses` never wins a
+    // terminator claim on the reading side.
+    let required_transport = announced_required_transport(announce.addresses(), |address| {
+        runtime
+            .connector
+            .client_route(address)
+            .map(|route| route.transport_policy)
+    });
     // Issue #885: a node selling peering advertises its price here
     // unconditionally, whether or not an operator also remembered to list
     // the peer-sale prefix in `[announce].addresses` -- the whole point of
@@ -640,6 +697,7 @@ pub fn build_announcement(config: &Config, runtime: &Runtime) -> IlpPeerInfo {
         token_networks,
         preferred_tokens,
         route_prices,
+        required_transport,
         peer_sale_lease_seconds: config.peer_sale().map(|sale| sale.lease_seconds()),
         edge_identity,
         routes: RouteHints {
@@ -648,6 +706,50 @@ pub fn build_announcement(config: &Config, runtime: &Runtime) -> IlpPeerInfo {
         },
         notice: announce.notice().map(Notice::from),
     }
+}
+
+/// The one transport every announced address's route requires, or `None`
+/// when there is no single honest answer -- the value behind
+/// [`IlpPeerInfo::required_transport`].
+///
+/// `route_transport` is the per-address lookup rather than a `&Connector`
+/// so this rule can be exercised without standing up a runtime: the rule is
+/// the part that has to be right.
+///
+/// `None` in three distinct cases, all of which mean "say nothing":
+///
+///   * no announced address resolves to a route this node serves (the store
+///     box's `[announce].addresses` before it terminated anything, and any
+///     node whose announce runs ahead of its routing table);
+///   * the routes that do resolve disagree, which no per-node scalar can
+///     describe -- see [`IlpPeerInfo::required_transport`] on why the field
+///     is per node in the first place;
+///   * they agree on [`TransportPolicy::Both`], the permissive default
+///     every route had before issue #701. Emitting `"both"` would be true
+///     but useless, and it would put a new key on every announce in the
+///     fleet to say nothing -- against this schema's own standing rule that
+///     a parser written before a field existed must be unaffected by it.
+///
+/// `pub` for one reason: `crates/connector-bin/tests/devnet_configs_load.rs`
+/// runs it over the COMMITTED devnet files, so "the relay box's announce
+/// declares the requirement its route enforces" is a property of the files
+/// in this repo rather than of a config a test wrote for itself.
+pub fn announced_required_transport(
+    addresses: &[String],
+    route_transport: impl Fn(&str) -> Option<TransportPolicy>,
+) -> Option<String> {
+    let mut policies = addresses
+        .iter()
+        .filter_map(|address| route_transport(address));
+    let first = policies.next()?;
+    if !policies.all(|policy| policy == first) {
+        return None;
+    }
+    // `name()` is the same spelling the x402 greeting's
+    // `extra.requiredTransport` already uses (`connector-client-edge`'s
+    // `x402_terms_body`), so the two surfaces cannot drift into describing
+    // one policy by two names.
+    (first != TransportPolicy::Both).then(|| first.name().to_string())
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -1846,6 +1948,7 @@ btp_endpoint = "wss://proxy.ario.example/ilp/btp"
             token_networks: BTreeMap::new(),
             preferred_tokens: BTreeMap::new(),
             route_prices: BTreeMap::new(),
+            required_transport: None,
             peer_sale_lease_seconds: None,
             edge_identity: None,
             routes: RouteHints {
@@ -1907,5 +2010,115 @@ btp_endpoint = "wss://proxy.ario.example/ilp/btp"
         assert_eq!(notice.severity, "info");
         assert_eq!(notice.summary, "summary");
         assert_eq!(notice.url, "https://example.com");
+    }
+
+    // ── requiredTransport (issue #701's policy, finally advertised) ──────
+
+    fn addresses(list: &[&str]) -> Vec<String> {
+        list.iter().map(|address| address.to_string()).collect()
+    }
+
+    /// The devnet relay box's exact shape: one announced address, one
+    /// route, pinned `transport = "btp"`. This is the case that was live
+    /// and silent -- the enforcement was already there, the advertisement
+    /// was not.
+    #[test]
+    fn a_btp_only_announced_route_advertises_the_transport_it_requires() {
+        let required = announced_required_transport(&addresses(&["g.toon.relay"]), |address| {
+            (address == "g.toon.relay").then_some(TransportPolicy::Btp)
+        });
+        assert_eq!(required.as_deref(), Some("btp"));
+    }
+
+    /// The store box's shape, and every other ordinary node's: the route is
+    /// left at the default, so the announce is byte-identical to one built
+    /// before this field existed.
+    #[test]
+    fn a_default_transport_route_advertises_nothing() {
+        let required = announced_required_transport(&addresses(&["g.toon.ario"]), |_| {
+            Some(TransportPolicy::Both)
+        });
+        assert_eq!(required, None);
+    }
+
+    /// An address with no route contributes nothing rather than counting as
+    /// a disagreement -- `relay_fronting_config`'s `["g.test",
+    /// "g.test.relay"]` in `crates/connector-bin/tests/announce_subcommand.rs`
+    /// is exactly this, and it is also why `routePrices` can be shorter
+    /// than `ilpAddresses`.
+    #[test]
+    fn an_announced_address_with_no_route_does_not_veto_the_transport() {
+        let required =
+            announced_required_transport(&addresses(&["g.test", "g.test.relay"]), |address| {
+                (address == "g.test.relay").then_some(TransportPolicy::Btp)
+            });
+        assert_eq!(required.as_deref(), Some("btp"));
+    }
+
+    /// Routes that disagree cannot be described by a per-node scalar, so
+    /// the field is omitted rather than guessed at from the first or the
+    /// strictest. Over-claiming here would push a client onto BTP for the
+    /// HTTP-only route, which is the failure this whole field exists to
+    /// prevent, arrived at from the other side.
+    #[test]
+    fn routes_that_disagree_advertise_nothing() {
+        let required =
+            announced_required_transport(&addresses(&["g.test.relay", "g.test.web"]), |address| {
+                match address {
+                    "g.test.relay" => Some(TransportPolicy::Btp),
+                    "g.test.web" => Some(TransportPolicy::Http),
+                    _ => None,
+                }
+            });
+        assert_eq!(required, None);
+
+        // Including the case a reader is likeliest to get wrong: the
+        // permissive default disagreeing with a pinned one.
+        let required =
+            announced_required_transport(&addresses(&["g.test.relay", "g.test.web"]), |address| {
+                match address {
+                    "g.test.relay" => Some(TransportPolicy::Btp),
+                    "g.test.web" => Some(TransportPolicy::Both),
+                    _ => None,
+                }
+            });
+        assert_eq!(required, None);
+    }
+
+    #[test]
+    fn a_node_announcing_addresses_it_has_no_routes_for_advertises_nothing() {
+        assert_eq!(
+            announced_required_transport(&addresses(&["g.toon.relay"]), |_| None),
+            None
+        );
+        assert_eq!(announced_required_transport(&[], |_| None), None);
+    }
+
+    /// The wire shape toon-client's `extractRequiredTransport` reads: a
+    /// TOP-LEVEL string on the kind:10032 content, not nested under an
+    /// `extra` object (which a kind:10032 content does not have) and not a
+    /// null when absent.
+    #[test]
+    fn required_transport_rides_at_the_root_of_the_content_and_is_omitted_when_absent() {
+        let content = serde_json::to_string(&minimal_info(None)).expect("serialize");
+        assert!(
+            !content.contains("requiredTransport"),
+            "an unconfigured node's announce must carry no key at all: {content}"
+        );
+
+        let mut info = minimal_info(None);
+        info.required_transport = Some("btp".to_string());
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&info).expect("serialize")).expect("parse");
+        assert_eq!(
+            parsed["requiredTransport"], "btp",
+            "toon-client reads JSON.parse(content)['requiredTransport'] off the root \
+             (packages/client/src/discovery-subscription.ts): {parsed}"
+        );
+        assert!(
+            parsed.get("extra").is_none(),
+            "a kind:10032 content has no `extra` block -- nesting the key would hide it \
+             from the only consumer there is: {parsed}"
+        );
     }
 }

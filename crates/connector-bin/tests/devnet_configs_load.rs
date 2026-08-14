@@ -107,6 +107,7 @@ use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 
 use chrono::{Duration as ChronoDuration, Utc};
+use connector_cli::announced_required_transport;
 use connector_config::{Config, SettlementConfig, TransportPolicy};
 use connector_domain::{derive_condition, EnvelopeRequest, Prepare};
 use connector_settlement_evm::test_support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
@@ -1149,6 +1150,71 @@ fn the_store_announce_carries_a_btp_endpoint_when_its_target_route_demands_one()
              [announce] section"
         );
     }
+}
+
+/// The longest committed route prefix matching `address` at a segment
+/// boundary -- the router's own selection rule, over one file's static
+/// `[[routes]]`, so the transport a committed announce would declare is
+/// read the same way the client edge would read it.
+fn committed_transport_policy(config: &Config, address: &str) -> Option<TransportPolicy> {
+    config
+        .routes()
+        .iter()
+        .filter(|route| {
+            let prefix = route.prefix();
+            address == prefix
+                || (address.starts_with(prefix) && address.as_bytes()[prefix.len()] == b'.')
+        })
+        .max_by_key(|route| route.prefix().len())
+        .map(|route| route.transport_policy())
+}
+
+/// The other half of issue #701, and the one the fleet ran WITHOUT for as
+/// long as the policy has existed: a box that ENFORCES a transport must
+/// ADVERTISE it.
+///
+/// Verified live 2026-08-14 against `connector:rust-sha-415531a`: the relay
+/// box refuses an HTTP-carried paid write to `g.toon.relay` (its committed
+/// route below is `transport = "btp"`) and its kind:10032 announce carried
+/// no `requiredTransport` key -- nor did any other announce in the fleet's
+/// corpus. toon-client's `terminatorRequiresBtp` guard (toon-client#558)
+/// reads exactly that key, so it could never fire and every client was
+/// refused after falling through to HTTP.
+///
+/// Run over the COMMITTED files through `build_announcement`'s own rule
+/// rather than a literal, so this follows the configs: unpin the relay's
+/// route and the relay assertion below changes with it, pin the store's and
+/// the store assertion does.
+#[test]
+fn each_boxs_announce_declares_the_transport_its_own_committed_routes_require() {
+    let relay = load_committed_relay_config();
+    let relay_announce = relay
+        .announce()
+        .expect("the relay config's [announce] section must parse");
+    assert_eq!(
+        announced_required_transport(relay_announce.addresses(), |address| {
+            committed_transport_policy(&relay, address)
+        })
+        .as_deref(),
+        Some("btp"),
+        "the relay terminates `g.toon.relay` with `transport = \"btp\"` for huddles' \
+         persistent sessions, so its announce has to say so -- a client that cannot read \
+         the requirement discovers it by being refused a write it has already paid to send"
+    );
+
+    let store = load_committed_store_config();
+    let store_announce = store
+        .announce()
+        .expect("the store config's [announce] section must parse");
+    assert_eq!(
+        announced_required_transport(store_announce.addresses(), |address| {
+            committed_transport_policy(&store, address)
+        }),
+        None,
+        "the store's route is left at the permissive default, so its announce must carry no \
+         `requiredTransport` key at all -- an announce that names the default would put a new \
+         key on the wire to say nothing"
+    );
 }
 
 /// Issue #871's own AC: `publish_btp_url` names the RELAY box, not the

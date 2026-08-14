@@ -49,7 +49,8 @@ use axum::Router;
 use connector_config::{Config, ConfigError};
 
 pub use announce::{
-    announce as run_announce, AnnounceError, AnnounceOptions, AnnounceOutcome, IlpPeerInfo,
+    announce as run_announce, announced_required_transport, AnnounceError, AnnounceOptions,
+    AnnounceOutcome, IlpPeerInfo,
 };
 pub use runtime::{build, router, Runtime, RuntimeError};
 
