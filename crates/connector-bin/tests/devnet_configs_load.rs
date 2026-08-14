@@ -1597,14 +1597,15 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
 ///   is a strict ancestor of both, so this is a forward move, not a
 ///   rollback.
 ///
-/// Scope: the legacy TypeScript `connector` services in
-/// `docker-compose.node.yml` and `docker-compose.store.yml` pin
-/// `3.36.3-solchan.0` and are deliberately NOT converged onto this tag.
-/// That is a different binary on its own release-tag scheme, reading a
-/// different config file (`connector.yaml`, not `connector-rust.toml`) --
-/// pointing it at a `rust-sha-` tag would not start. #848's drift is the
-/// `rust-sha-` pins only; retiring those two services is the cutover
-/// runbook's job (`docs/operators/rust-cutover-runbook.md`).
+/// Scope: `rust-sha-` pins only. Two legacy TypeScript `connector` services
+/// used to sit outside it, pinned to `3.36.3-solchan.0` and deliberately NOT
+/// converged onto this tag -- a different binary on its own release-tag
+/// scheme, reading a different config file (`connector.yaml`, not
+/// `connector-rust.toml`), which a `rust-sha-` tag would not start. Both are
+/// gone now (the store's with issue #901, the apex's with the whole of
+/// `infra/linode-node/`, issue #872), and
+/// [`no_surviving_box_pins_a_non_rust_connector_image`] is what keeps one
+/// from coming back.
 ///
 /// This is a forward move on every box, not yet deployed anywhere -- see
 /// each overlay's own "PIN OF RECORD" comment. Re-pin here FIRST on any
