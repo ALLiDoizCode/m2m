@@ -137,7 +137,7 @@ use connector_signer::{verify_evm_balance_proof, verify_solana_balance_proof, Ev
 
 use crate::channels::{
     decode_base58_bytes, decode_hex_bytes, ChannelResolutionError, ClientChannelRegistry,
-    DepositFloor,
+    DepositFloor, SolanaSettlementIdentity,
 };
 use crate::lookup_budget::LookupBudgetBound;
 use crate::outbound_ledger::ClientPayoutLedger;
@@ -1714,6 +1714,45 @@ async fn verify_evm_claim_signature(
     }
 }
 
+/// Cross-check a Solana claim's own declared chain identity -- `programId`
+/// and `cluster` -- against this node's configured `[settlement.solana]`
+/// (issue #975). A claim naming a different program or cluster than this
+/// node actually runs is wrong, not merely unverifiable, and no signature
+/// check on its balance proof can make it right: the proof binds the amount
+/// to the channel account alone, never to which program or cluster that
+/// account lives on.
+///
+/// `Ok(())` when there is nothing to disagree with, which is two cases and
+/// not one: a node with no `[settlement.solana]` table has no configured
+/// identity at all (`identity` is `None`), and a claim that omits the
+/// optional `cluster` declares no cluster to compare -- as does a node
+/// whose `rpc_url` names no cluster this connector recognises
+/// (`SolanaSettlementConfig::cluster_hint`).
+fn check_solana_chain_identity(
+    identity: Option<SolanaSettlementIdentity>,
+    claim: &SolanaClientClaim,
+) -> Result<(), ClaimIngestRejection> {
+    let Some(identity) = identity else {
+        return Ok(());
+    };
+    if decode_base58_bytes::<32>(&claim.program_id) != Some(identity.program_id) {
+        return Err(ClaimIngestRejection::SolanaIdentityMismatch(format!(
+            "claim declares programId '{}', which is not this node's configured \
+             [settlement.solana] program",
+            claim.program_id
+        )));
+    }
+    if let (Some(declared_cluster), Some(configured_cluster)) = (&claim.cluster, identity.cluster) {
+        if declared_cluster != configured_cluster {
+            return Err(ClaimIngestRejection::SolanaIdentityMismatch(format!(
+                "claim declares cluster '{declared_cluster}', but this node's \
+                 [settlement.solana] rpc_url names cluster '{configured_cluster}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
 async fn verify_solana_claim_signature(
     channels: &ClientChannelRegistry,
     claim: &SolanaClientClaim,
@@ -1727,33 +1766,10 @@ async fn verify_solana_claim_signature(
         return Err(ClaimIngestRejection::UnknownChannel);
     };
 
-    // Cross-check the claim's own declared chain identity against this
-    // node's configured `[settlement.solana]`, before spending a lookup on
-    // its channel (issue #975): a claim naming a different program or
-    // cluster than this node actually runs is wrong, not merely
-    // unverifiable, and no signature check on its balance proof can make it
-    // right -- the proof binds the amount to the channel account alone, not
-    // to which program or cluster that account lives on.
-    if let Some(identity) = channels.solana_identity() {
-        let declared_program_id = decode_base58_bytes::<32>(&claim.program_id);
-        if declared_program_id != Some(identity.program_id) {
-            return Err(ClaimIngestRejection::SolanaIdentityMismatch(format!(
-                "claim declares programId '{}', which is not this node's configured \
-                 [settlement.solana] program",
-                claim.program_id
-            )));
-        }
-        if let (Some(declared_cluster), Some(configured_cluster)) =
-            (&claim.cluster, identity.cluster)
-        {
-            if declared_cluster != configured_cluster {
-                return Err(ClaimIngestRejection::SolanaIdentityMismatch(format!(
-                    "claim declares cluster '{declared_cluster}', but this node's \
-                     [settlement.solana] rpc_url names cluster '{configured_cluster}'"
-                )));
-            }
-        }
-    }
+    // Before spending a lookup on the claim's channel (issue #975): like
+    // the decode above, a disagreement here is a fact this connector
+    // already knows without a chain read.
+    check_solana_chain_identity(channels.solana_identity(), claim)?;
 
     // Declared, or -- for a channel nothing declared -- resolved from the
     // chain via a registered `ClaimChain::Solana` source (issue #631).

@@ -188,6 +188,23 @@ never reaches the terminating app:
    correctly with a key of their own and declares themselves the payer is refused here, because
    that key is not the channel's counterparty.
 
+   A `solana` claim's self-declared **chain identity is cross-checked** before its channel is
+   resolved ([issue #975](https://github.com/toon-protocol/connector/issues/975)). A connector
+   running a `[settlement.solana]` table of its own MUST refuse, under its own reason, a claim
+   whose `programId` is not the program that table names, and one whose optional `cluster` — when
+   present — names a different cluster than the table's `rpc_url` does. Neither field is an
+   authority the check reads _from_; both are assertions the claim makes, and a claim naming a
+   different program or a different chain than the connector runs is **wrong, not merely
+   unverifiable** — the balance proof binds the amount to the channel account alone, never to
+   which program or cluster that account lives on, so no signature check can make such a claim
+   right. Silently normalising instead would leave a settlement on one chain permanently recorded
+   under another's label, invisible to both parties: the claim is the artifact each side keeps.
+   The check is skipped where there is nothing to disagree with — a connector with no
+   `[settlement.solana]` table has no chain identity of its own, a claim that omits `cluster`
+   declares none, and an `rpc_url` naming no recognisable cluster (a third-party RPC provider's,
+   say) implies none. A connector MUST NOT guess a cluster from such a URL: a wrong guess refuses
+   every genuine claim it ever receives.
+
    A claim naming a channel the connector has **no record of** is refused with its own reason,
    distinguishable from a bad signature and from an underpayment — there is nothing to verify it
    against, and unverifiable is never accepted. A node that can vouch for no channel therefore
