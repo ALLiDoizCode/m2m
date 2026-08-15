@@ -681,12 +681,18 @@ jobs:
                 fail(`Deployed contract's challengePeriod() = ${onChainChallenge}, expected ${challengePeriod}.`);
               }
 
+              // The one EIP-712 domain both checks below hash against: the
+              // spec's (name, version) bound to the pair that ACTUALLY exists
+              // on chain. Declared once so the domain-separator check and the
+              // digest check can never drift apart.
+              const domain = {
+                name: 'RollingSwapChannel', version: '2', chainId: Number(CHAIN_ID), verifyingContract: address,
+              };
+
               // AC3: domainSeparator() must match an independently-computed
               // EIP-712 domain hash for the pair this contract actually
               // deployed at — not merely the constructor's request.
-              const expectedDomainSep = TypedDataEncoder.hashDomain({
-                name: 'RollingSwapChannel', version: '2', chainId: Number(CHAIN_ID), verifyingContract: address,
-              });
+              const expectedDomainSep = TypedDataEncoder.hashDomain(domain);
               if (onChainDomainSep.toLowerCase() !== expectedDomainSep.toLowerCase()) {
                 fail(`domainSeparator() mismatch: chain says ${onChainDomainSep}, off-chain computes `
                   + `${expectedDomainSep} for (chainId=${CHAIN_ID}, verifyingContract=${address}).`);
@@ -708,7 +714,7 @@ jobs:
                 sample.channelId, sample.cumulativeAmount, sample.nonce, sample.recipient,
               );
               const offChainDigest = TypedDataEncoder.hash(
-                { name: 'RollingSwapChannel', version: '2', chainId: Number(CHAIN_ID), verifyingContract: address },
+                domain,
                 { ClaimBalanceProof: [
                   { name: 'channelId', type: 'bytes32' },
                   { name: 'cumulativeAmount', type: 'uint256' },

@@ -19,9 +19,11 @@ roots, run in parallel with the `swap` repo's signer migration (T1).
 **Blocked on workflow dispatch**, not on missing tooling: the deploy verb
 below exists and is reviewed, but this session's token has no
 `actions:write` (`gh api repos/toon-protocol/connector --jq .permissions` ->
-`push:false`; `gh workflow run` would 403). Per this repo's own doctrine
-("add the verb, don't ask for a credential" -- `docs/adr/README.md`), the
-verb was added rather than escalated; a session with a token that can
+`push:false`; `gh workflow run` would 403). Per the boundary
+`.github/workflows/funded-ops.yml`'s own header states (toon-meta#312 --
+`E2E_DEV_MNEMONIC` reaches a reviewed, committed workflow on a GitHub-hosted
+runner and never a container running agent-authored code), the verb was
+added rather than a credential requested; a session with a token that can
 dispatch workflows still needs to run it. See "What's left" below.
 
 ## Why a workflow, not a local `forge script --broadcast`
