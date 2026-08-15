@@ -54,6 +54,23 @@ pub enum JournalEntry {
     /// pre-#882 build already wrote still decodes; [`Projection::apply`]
     /// folds it into nothing.
     InboundFulfillmentRecorded { channel_id: String, amount: u64 },
+    /// `channel_id`'s watermark was durably reset because this connector
+    /// discovered the chain no longer vouches for it -- settled,
+    /// deallocated, or otherwise gone (issue #977). Written only by
+    /// `connector_client_edge::ClientClaimGate::reset_watermark`, into the
+    /// client edge's own journal -- a channel's deterministic on-chain
+    /// address means a reopened channel reuses the exact key its settled
+    /// predecessor's watermark was filed under, and without this entry a
+    /// reopened channel would inherit that predecessor's watermark forever,
+    /// charging its payer again for units already settled on chain (or, at
+    /// the limit, refusing every claim it could ever present). Folds into
+    /// nothing here: [`Projection`] tracks the peer wire's own book, which
+    /// this entry kind is never written to (see the client edge's own
+    /// journal file, kept separate from the peer wire's for exactly this
+    /// reason) -- it is in this shared alphabet only so both journals'
+    /// entries decode through one enum, matching every other entry kind
+    /// here.
+    InboundClaimWatermarkReset { channel_id: String },
 }
 
 /// Balances, derived in memory by folding a journal (ADR 0005). Never a
@@ -110,6 +127,9 @@ impl Projection {
             // pre-#882 journal may still carry these, but nothing is
             // tracked from them any more.
             JournalEntry::InboundFulfillmentRecorded { .. } => {}
+            // Written only to the client edge's own journal, never this
+            // one (issue #977) -- see the variant's own doc.
+            JournalEntry::InboundClaimWatermarkReset { .. } => {}
         }
     }
 

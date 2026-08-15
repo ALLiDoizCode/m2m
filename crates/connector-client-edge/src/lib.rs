@@ -138,7 +138,7 @@ const PEER_ID_HEADER: &str = "ilp-peer-id";
 struct ClientEdgeState {
     connector: Arc<Connector>,
     signer: Arc<dyn Signer>,
-    claim_gate: ClientClaimGate,
+    claim_gate: Arc<ClientClaimGate>,
     /// This connector's own NIP-59 receiver key, used to unwrap a
     /// privacy-wrapped claim (client-edge-spec.md §1.3). `None` means this
     /// instance is not configured to receive wrapped claims -- one is
@@ -275,7 +275,7 @@ pub fn router_with_identities(
         connector,
         signer,
         wrap_receiver_secret,
-        claim_gate,
+        Arc::new(claim_gate),
         None,
         Vec::new(),
         DEFAULT_BTP_SESSION_WINDOW,
@@ -375,7 +375,7 @@ pub fn router_with_peer_carriages(
         connector,
         signer,
         wrap_receiver_secret,
-        claim_gate,
+        Arc::new(claim_gate),
         settlement_terms,
         settlements,
         btp_session_window,
@@ -399,7 +399,7 @@ pub fn router_with_bootstrap_identity(
     connector: Arc<Connector>,
     signer: Arc<dyn Signer>,
     wrap_receiver_secret: Option<[u8; 32]>,
-    claim_gate: ClientClaimGate,
+    claim_gate: Arc<ClientClaimGate>,
     settlement_terms: Option<X402SettlementTerms>,
     settlements: Vec<X402ChainSettlementTerms>,
     btp_session_window: NonZeroU32,
@@ -2557,7 +2557,7 @@ mod tests {
             connector,
             test_signer(),
             None,
-            test_gate(ClientChannelRegistry::new()),
+            Arc::new(test_gate(ClientChannelRegistry::new())),
             None,
             Vec::new(),
             DEFAULT_BTP_SESSION_WINDOW,
@@ -4723,7 +4723,7 @@ mod tests {
                     test_clock(),
                 )),
                 signer: test_signer(),
-                claim_gate,
+                claim_gate: claim_gate.into(),
                 wrap_receiver_secret: Some([2u8; 32]),
                 settlement_terms: None,
                 settlements: Vec::new(),

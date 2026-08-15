@@ -403,7 +403,7 @@ mod tests {
         ClientEdgeState {
             connector,
             signer: test_signer(),
-            claim_gate,
+            claim_gate: claim_gate.into(),
             wrap_receiver_secret: None,
             settlement_terms: None,
             settlements: Vec::new(),

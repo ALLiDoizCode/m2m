@@ -137,6 +137,9 @@ fn encode_line(entry: &JournalEntry) -> String {
         JournalEntry::InboundFulfillmentRecorded { channel_id, amount } => {
             format!("inbound_fulfillment_recorded\t{channel_id}\t{amount}")
         }
+        JournalEntry::InboundClaimWatermarkReset { channel_id } => {
+            format!("inbound_claim_watermark_reset\t{channel_id}")
+        }
     }
 }
 
@@ -165,6 +168,11 @@ fn decode_line(line: &str) -> Result<JournalEntry, JournalError> {
             Ok(JournalEntry::InboundFulfillmentRecorded {
                 channel_id: channel_id.to_string(),
                 amount: parse_u64(amount)?,
+            })
+        }
+        ["inbound_claim_watermark_reset", channel_id] => {
+            Ok(JournalEntry::InboundClaimWatermarkReset {
+                channel_id: channel_id.to_string(),
             })
         }
         _ => Err(corrupt()),
@@ -255,6 +263,9 @@ mod tests {
             JournalEntry::InboundFulfillmentRecorded {
                 channel_id: "channel-c".to_string(),
                 amount: 25,
+            },
+            JournalEntry::InboundClaimWatermarkReset {
+                channel_id: "solana:channel-c".to_string(),
             },
         ]
     }
