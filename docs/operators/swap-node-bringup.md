@@ -61,7 +61,13 @@ material or funds this environment does not have.
   — which chain(s) it accepts leg-A payment on, at what rate, with what inventory — is a business
   decision neither toon-meta#402 nor this ticket pins. A human sets this once the maker is meant to
   actually trade.
-- **The `swap_node_state` named volume's ownership** is resolved image-side, not here: toon-protocol/swap PR #125's Dockerfile creates and chowns `/app/state` before its `USER swap` line, so a fresh volume inherits uid 10001 ownership on first mount and the maker can write its boot snapshot to `statePath` (`/app/state/swap-node-state.json`, matching `docker-compose.relay.swap.yml`'s mount point). Re-verify this once #125 actually merges; if it ever regresses, fall back to a host bind mount pre-chowned the same `chown 10001:10001` way step 3 below already does for the key files, in place of the named volume.
+- **The `swap_node_state` named volume's ownership** is resolved image-side, not here:
+  toon-protocol/swap PR #125's Dockerfile creates and chowns `/app/state` before its `USER swap`
+  line, so a fresh volume inherits uid 10001 ownership on first mount and the maker can write its
+  boot snapshot to `statePath` (`/app/state/swap-node-state.json`, matching
+  `docker-compose.relay.swap.yml`'s mount point). Re-verify this once #125 actually merges; if it
+  ever regresses, fall back to a host bind mount pre-chowned the same `chown 10001:10001` way
+  step 3 below already does for the key files, in place of the named volume.
 - **A SECOND funded channel, beyond what toon-meta#402 enumerated.** toon-meta#402's checklist lists
   "gas + leg-B channel" as the human-gated settlement step. Building the paid-announce loop
   surfaced a step that checklist did not separately call out: the announce loop
@@ -84,7 +90,7 @@ material or funds this environment does not have.
 | 5. Leg-B channel + gas                   |                                                    | ✅ RollingSwapChannel open/fund (toon-meta#402)  |
 | 6. Trading pair / inventory config       |                                                    |               ✅ business decision               |
 | 7. Bring the sidecar up                  | ✅ compose files, config skeleton, nginx locations |        ✅ runs `docker compose ... up -d`        |
-| 8. Verify                                |                         —                          |    ✅ curls + reads the announce loop's logs     |
+| 8. Verify                                |                                                    |    ✅ curls + reads the announce loop's logs     |
 
 ## Order — image through verification
 
@@ -161,10 +167,11 @@ material or funds this environment does not have.
 
    and that the announce loop's log carries `[swap-announce] OK -- g.toon.swap.maker published`
    (`fleet-ops.yml`'s `announce` operation reads this back itself and fails the job if it does not
-   appear within 90s). Confirm the published kind:10032 content carries `btpEndpoint:
-"wss://proxy.relay.devnet.toonprotocol.dev/swap/ilp/btp"` and the `evm:84532` settlement facts —
-   the same content-not-author verification `docs/operators/announcing-a-node.md` already asks for
-   when two publishers might be confused, here between the relay's own announce and the maker's.
+   appear within 90s). Confirm the published kind:10032 content carries the maker's own
+   `btpEndpoint` (`wss://proxy.relay.devnet.toonprotocol.dev/swap/ilp/btp`) and the `evm:84532`
+   settlement facts — the same content-not-author verification
+   `docs/operators/announcing-a-node.md` already asks for when two publishers might be confused,
+   here between the relay's own announce and the maker's.
 
    Proving an actual swap against the deployed maker (a stock client discovering the announce,
    direct-dialing the BTP endpoint, completing a rolling swap, redeeming the leg-B claim on-chain)
@@ -174,8 +181,9 @@ material or funds this environment does not have.
 ## Rollback
 
 `docker compose ... stop swap-node swap-announce` (or `down`) removes the sidecar and its announce
-loop without touching the relay's own `connector-rust`/`announce` services — they are independent
-compose services on independent networks-within-the-project, sharing nothing but the box. The
+loop without touching the relay's own `connector-rust`/`announce` services — they are separate
+compose services sharing nothing but the compose project's default network (which is how nginx
+resolves `swap-node` at all): no config file, no key material and no state volume in common. The
 `/swap/ilp*` nginx locations answer `502`/connection-refused once the container is stopped, which is
 the correct failure mode (not a silent fallback to the relay's own edge — `location =` blocks are
 exact-match and never fall through to `location /`).
