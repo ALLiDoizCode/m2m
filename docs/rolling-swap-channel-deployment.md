@@ -7,24 +7,32 @@ this before dispatching the workflow it names; `docs/evm-deployment.md` is the
 sibling runbook for the `TokenNetwork` ERC-2771 cutover and follows the same
 shape.
 
-## Status: NOT YET DEPLOYED
+## Status: BROADCAST 2026-08-15
 
-`RollingSwapChannel` is merged and has never been broadcast anywhere -- no
-address for it exists in `packages/contracts/deployments.json`,
-`packages/contracts/deployments/base-sepolia.md`, or any infra config. The
-epic this closes is toon-meta#394 ("the rolling swap cannot complete a
+| | |
+| --- | --- |
+| address | `0xd329aBf86ceae23F904641F992ca90e3721FeF83` |
+| deploy tx | `0x23bbebaf8bea0976861eb51883db3322c5cfafdd69fee82207e83dcb8b06c3a2` |
+| block | 45515248 |
+| deployer | `0x2B00c21af9926F9222bC29B87f7e03004AbAd43e` (NIP-06 account index 0) |
+| chain | `evm:84532` (Base Sepolia) |
+| token | `0x49beE1Bca5d15Fb0963117923403F9498119a9Ce` (mock USDC, 6 dp) |
+| challengePeriod | 86400s |
+| workflow runs | dry run 31885868413, apply 31885961037 (`funded-ops.yml`) |
+
+The apply run's post-deploy verification all passed against the LIVE
+contract: `domainSeparator()` matched the independently computed EIP-712
+domain hash for `(RollingSwapChannel, "2", 84532, 0xd329aBf8…)` (AC3), the
+spec's golden-vector sample hashed via `claimDigest(...)` matched the same
+struct hashed off-chain for this real `(chainId, address)` pair (AC5), and
+`updateBalance(...)` against a never-opened channel reverted
+`InvalidChannelState()` (AC4). The first dry run also caught (and this
+branch fixed) a dead key-extraction path: `fromMnemonicFull` exposes the
+EVM key as the 32-byte NIP-06 `secretKey`, not an `evmPrivateKey` field.
+
+The epic this closes is toon-meta#394 ("the rolling swap cannot complete a
 packet"); this repo's slice (connector#973, "T4") is one of two unblocked
 roots, run in parallel with the `swap` repo's signer migration (T1).
-
-**Blocked on workflow dispatch**, not on missing tooling: the deploy verb
-below exists and is reviewed, but this session's token has no
-`actions:write` (`gh api repos/toon-protocol/connector --jq .permissions` ->
-`push:false`; `gh workflow run` would 403). Per the boundary
-`.github/workflows/funded-ops.yml`'s own header states (toon-meta#312 --
-`E2E_DEV_MNEMONIC` reaches a reviewed, committed workflow on a GitHub-hosted
-runner and never a container running agent-authored code), the verb was
-added rather than a credential requested; a session with a token that can
-dispatch workflows still needs to run it. See "What's left" below.
 
 ## Why a workflow, not a local `forge script --broadcast`
 
