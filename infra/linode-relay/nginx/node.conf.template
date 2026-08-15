@@ -106,9 +106,23 @@ server {
     # (./docker-compose.relay.swap-announce.yml), never through this box's
     # `connector-rust` routing table — there is no `[[routes]]` entry
     # forwarding to it and there should not be.
+    #
+    # `proxy_pass` names the upstream through a variable, not the literal
+    # `swap-node` hostname: nginx resolves a literal upstream hostname at
+    # config-PARSE time, and an unresolvable name is a hard `[emerg] host not
+    # found in upstream` that exits the whole master process — taking BOTH
+    # server blocks in this file down, not just these two locations. Since
+    # this compose service does not run until a human brings it up
+    # (docker-compose.relay.swap.yml's own header), that would violate this
+    # unit's "no live-box change by itself" — reloading nginx with only this
+    # diff applied would kill the connector edge and relay-ws too. Routing
+    # through `$swap_upstream` defers resolution to request time (the
+    # `resolver` directive above already covers this block), so an absent
+    # sidecar is a 502 on these two paths only.
     location = /swap/ilp/btp {
+        set $swap_upstream swap-node;
         limit_req zone=relay burst=60 nodelay;
-        proxy_pass http://swap-node:3400/ilp/btp;
+        proxy_pass http://$swap_upstream:3400/ilp/btp;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -129,8 +143,9 @@ server {
     # box's own `connector-rust:4000` already uses (`/ilp` and `/ilp/btp`
     # side by side on the SAME upstream).
     location = /swap/ilp {
+        set $swap_upstream swap-node;
         limit_req zone=relay burst=60 nodelay;
-        proxy_pass http://swap-node:3400/ilp;
+        proxy_pass http://$swap_upstream:3400/ilp;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

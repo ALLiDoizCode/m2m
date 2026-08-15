@@ -61,6 +61,7 @@ material or funds this environment does not have.
   — which chain(s) it accepts leg-A payment on, at what rate, with what inventory — is a business
   decision neither toon-meta#402 nor this ticket pins. A human sets this once the maker is meant to
   actually trade.
+- **The `swap_node_state` named volume's ownership** is resolved image-side, not here: toon-protocol/swap PR #125's Dockerfile creates and chowns `/app/state` before its `USER swap` line, so a fresh volume inherits uid 10001 ownership on first mount and the maker can write its boot snapshot to `statePath` (`/app/state/swap-node-state.json`, matching `docker-compose.relay.swap.yml`'s mount point). Re-verify this once #125 actually merges; if it ever regresses, fall back to a host bind mount pre-chowned the same `chown 10001:10001` way step 3 below already does for the key files, in place of the named volume.
 - **A SECOND funded channel, beyond what toon-meta#402 enumerated.** toon-meta#402's checklist lists
   "gas + leg-B channel" as the human-gated settlement step. Building the paid-announce loop
   surfaced a step that checklist did not separately call out: the announce loop

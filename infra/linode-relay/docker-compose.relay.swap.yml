@@ -101,6 +101,18 @@ services:
       # phrase (D12-011). Generate with any BIP-39 tool that supports
       # account-index derivation and never let the phrase leave this box.
       - ./swap-mnemonic.secret:/app/keys/swap-mnemonic:ro
+      # A fresh named volume is root-owned by default; the container runs as
+      # uid 10001 (`swap`, per toon-protocol/swap PR #125's Dockerfile) and
+      # needs to write its boot snapshot to `statePath`
+      # (swap.config.json's `/app/state/swap-node-state.json`, matching this
+      # mount point exactly). Resolved image-side, not here: PR #125's
+      # Dockerfile creates and chowns `/app/state` before its `USER swap`
+      # line, so a fresh volume inherits the right ownership on first mount
+      # — re-verify this once #125 actually merges. If that ever regresses,
+      # the belt-and-braces fallback is a host bind mount pre-chowned the
+      # same `chown 10001:10001` way docs/operators/swap-node-bringup.md
+      # already has a human do for the key files, in place of this named
+      # volume.
       - swap_node_state:/app/state
     ports:
       - '127.0.0.1:3400:3400'
