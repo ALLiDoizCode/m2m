@@ -793,6 +793,12 @@ impl ClaimBook {
                     );
                 }
                 JournalEntry::InboundFulfillmentRecorded { .. } => {}
+                // Written only to the client edge's own journal (issue
+                // #977) -- see the variant's own doc. `ClaimBook` is the
+                // peer wire's book and never sees one of these in practice,
+                // but the two journals share this enum, so every entry kind
+                // in it must still be handled here.
+                JournalEntry::InboundClaimWatermarkReset { .. } => {}
             }
         }
         for ledger in outbound.values_mut() {

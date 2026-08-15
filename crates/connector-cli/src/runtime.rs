@@ -1121,6 +1121,40 @@ async fn reap_expired_peer_leases_periodically(connector: Arc<Connector>) {
     }
 }
 
+/// How often [`router`]'s spawned loop sweeps the client edge's channels
+/// for one the chain no longer vouches for (issue #977).
+///
+/// What this interval bounds is *detection*, and only that. A watermark is
+/// reset only while the chain still reports its channel gone
+/// ([`ClientClaimGate::reap_unresolvable_channels`]), so a sweep clears a
+/// settled channel within one interval of the settle becoming visible --
+/// but a channel reopened at the same deterministic address before any
+/// sweep lands is one this node never observes settled at all, and it
+/// keeps its predecessor's watermark. A shorter interval narrows that
+/// window; nothing short of re-keying a watermark per incarnation (the
+/// alternative issue #977 itself names) closes it.
+///
+/// Five minutes: short enough to catch the settle of a channel whose payer
+/// takes a beat to reopen it, long enough that a node with few or no
+/// client channels open pays nothing worth naming for the sweep -- and on
+/// the same order as `DEFAULT_SERVE_STALE_UNTIL`'s own ten-minute
+/// staleness ceiling for the same channels.
+const CLIENT_CHANNEL_REAP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Sweep `gate`'s channels for one whose watermark should be reset every
+/// [`CLIENT_CHANNEL_REAP_INTERVAL`], forever -- the periodic wrapper around
+/// [`ClientClaimGate::reap_unresolvable_channels`], which does the actual
+/// resolution and reset and is otherwise chain- and I/O-agnostic. Never
+/// returns, so it is spawned rather than awaited, mirroring
+/// `reap_expired_peer_leases_periodically`'s own shape.
+async fn reap_unresolvable_client_channels_periodically(gate: Arc<ClientClaimGate>) {
+    let mut interval = tokio::time::interval(CLIENT_CHANNEL_REAP_INTERVAL);
+    loop {
+        interval.tick().await;
+        gate.reap_unresolvable_channels().await;
+    }
+}
+
 /// The channels this node accepts client-edge claims on, and whose
 /// counterparty each claim's signature must recover to (issues #558,
 /// #556, #631): everything `[[client_channels]]` declares, plus -- when
@@ -1323,16 +1357,26 @@ pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError
     // a receiver public key, a sender can wrap to no other one. No new
     // config section exists or is needed for this.
     let wrap_receiver_secret = Some(read_signer_secret(config.signer_key())?);
+    let claim_gate = Arc::new(client_claim_gate(
+        config,
+        signer.clone(),
+        runtime.client_channel_source_evm.clone(),
+        runtime.client_channel_source_solana.clone(),
+    )?);
+    // Issue #977: a channel's deterministic on-chain address means a
+    // reopened channel reuses its settled predecessor's watermark key, and
+    // nothing on the claim path itself can ever discover a reopen (see
+    // `ClientClaimGate::reap_unresolvable_channels`'s own doc for why).
+    // Spawned once per gate, never awaited on the startup path, mirroring
+    // `reap_expired_peer_leases_periodically`'s own shape.
+    tokio::spawn(reap_unresolvable_client_channels_periodically(Arc::clone(
+        &claim_gate,
+    )));
     let app = connector_client_edge::router_with_bootstrap_identity(
         connector.clone(),
         signer.clone(),
         wrap_receiver_secret,
-        client_claim_gate(
-            config,
-            signer.clone(),
-            runtime.client_channel_source_evm.clone(),
-            runtime.client_channel_source_solana.clone(),
-        )?,
+        claim_gate,
         runtime.settlement_terms.clone(),
         runtime.settlements.clone(),
         config

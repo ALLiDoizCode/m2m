@@ -1152,7 +1152,7 @@ mod tests {
                 clock,
             )),
             signer: Arc::new(LocalSigner::generate("session-signer")),
-            claim_gate,
+            claim_gate: claim_gate.into(),
             wrap_receiver_secret: None,
             settlement_terms: None,
             settlements: Vec::new(),
