@@ -387,8 +387,14 @@ jobs:
             const idx = Number.parseInt(ACCOUNT_INDEX ?? '0', 10);
             if (!Number.isInteger(idx) || idx < 0) fail(`Bad account_index: ${ACCOUNT_INDEX}`);
             const id = await derive(idx);
-            const pk = id.evmPrivateKey ?? id.evm?.privateKey;
-            if (!pk) fail('Derived identity exposes no EVM private key; cannot sign.');
+            // fromMnemonicFull exposes no evmPrivateKey field: the 32-byte
+            // NIP-06 `secretKey` IS the EVM key (id.evmAddress is derived
+            // from it) — the address cross-check below proves it every run.
+            const sk = id.secretKey;
+            if (!(sk instanceof Uint8Array) || sk.length !== 32) {
+              fail('Derived identity exposes no 32-byte secret key; cannot sign.');
+            }
+            const pk = '0x' + Buffer.from(sk).toString('hex');
             mask(pk);
             const signer = new Wallet(pk, provider);
             if (signer.address.toLowerCase() !== id.evmAddress.toLowerCase()) {
@@ -575,8 +581,14 @@ jobs:
             const idx = Number.parseInt(ACCOUNT_INDEX ?? '0', 10);
             if (!Number.isInteger(idx) || idx < 0) fail(`Bad account_index: ${ACCOUNT_INDEX}`);
             const id = await derive(idx);
-            const pk = id.evmPrivateKey ?? id.evm?.privateKey;
-            if (!pk) fail('Derived identity exposes no EVM private key; cannot sign.');
+            // fromMnemonicFull exposes no evmPrivateKey field: the 32-byte
+            // NIP-06 `secretKey` IS the EVM key (id.evmAddress is derived
+            // from it) — the address cross-check below proves it every run.
+            const sk = id.secretKey;
+            if (!(sk instanceof Uint8Array) || sk.length !== 32) {
+              fail('Derived identity exposes no 32-byte secret key; cannot sign.');
+            }
+            const pk = '0x' + Buffer.from(sk).toString('hex');
             mask(pk);
             const deployer = new Wallet(pk, provider);
             if (deployer.address.toLowerCase() !== id.evmAddress.toLowerCase()) {
