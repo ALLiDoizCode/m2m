@@ -149,6 +149,29 @@ const RELAY_ANNOUNCE_OVERLAY: &str =
 const RELAY_BASE_COMPOSE: &str =
     include_str!("../../../infra/linode-relay/docker-compose.relay.yml");
 
+/// The relay box's rolling-swap maker sidecar and the maker's OWN announce
+/// loop (issue #983), plus the config that second loop reads.
+///
+/// The sidecar itself runs somebody else's image (`ghcr.io/toon-protocol/
+/// swap`), so the connector-pin guards below simply find no pin in it -- but
+/// its `ports:` block is a live-box surface like every other, and the
+/// announce overlay beside it IS this fleet's connector, on the fleet's one
+/// pin. Both belong to [`SURVIVING_BOX_COMPOSE_FILES`] for exactly the
+/// reason that list exists: a guard that cannot see a committed file cannot
+/// refuse anything about it.
+const RELAY_SWAP_OVERLAY: &str =
+    include_str!("../../../infra/linode-relay/docker-compose.relay.swap.yml");
+const RELAY_SWAP_ANNOUNCE_OVERLAY: &str =
+    include_str!("../../../infra/linode-relay/docker-compose.relay.swap-announce.yml");
+const RELAY_SWAP_ANNOUNCE_CONFIG: &str =
+    include_str!("../../../infra/linode-relay/connector-rust.swap-announce.toml");
+
+/// The relay box's RENDERED nginx config (the file its `nginx` service
+/// actually bind-mounts), read here so the endpoints the maker announces
+/// can be checked against the locations that serve them. See
+/// [`the_relays_swap_announce_config_speaks_for_the_maker_not_the_relay`].
+const RELAY_NGINX_CONF: &str = include_str!("../../../infra/linode-relay/nginx/conf.d/node.conf");
+
 /// This test binary's own base port for [`Anvil::spawn`] -- distinct from
 /// other test binaries' bases (`connector-settlement-evm`'s own tests use
 /// 18_600; `connector-cli`'s use 18_700/18_800) so that binaries running
@@ -928,6 +951,10 @@ fn every_committed_announce_without_a_store_or_ario_address_pins_route_store() {
     for (label, raw) in [
         ("infra/linode-store/connector-rust.toml", STORE_CONFIG),
         ("infra/linode-relay/connector-rust.toml", RELAY_CONFIG),
+        (
+            "infra/linode-relay/connector-rust.swap-announce.toml",
+            RELAY_SWAP_ANNOUNCE_CONFIG,
+        ),
     ] {
         let Some(section) = announce_section(raw) else {
             continue;
@@ -1264,7 +1291,12 @@ fn the_store_announces_through_the_relay_box_not_the_apex() {
 /// replacing the apex-funded channel #820's cutover made obsolete -- lives
 /// only on the box, so this repo commits a clearly-marked placeholder
 /// instead of either the live value or an absent field.
-const STORE_ANNOUNCE_PAY_CHANNEL_PLACEHOLDER: &str =
+///
+/// Fleet-wide rather than store-specific: issue #983's swap-maker announce
+/// commits the SAME value for the same reason, and asserting both against
+/// one constant is what keeps "clearly marked" meaning one recognizable
+/// literal rather than a per-file invention.
+const ANNOUNCE_PAY_CHANNEL_PLACEHOLDER: &str =
     "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeadc0de";
 
 /// Issue #853's repo-side AC: the store's `[announce]` section carries the
@@ -1276,7 +1308,7 @@ const STORE_ANNOUNCE_PAY_CHANNEL_PLACEHOLDER: &str =
 fn the_store_announce_pay_channel_is_a_clearly_marked_placeholder() {
     assert!(
         STORE_CONFIG.contains(&format!(
-            "pay_channel = \"{STORE_ANNOUNCE_PAY_CHANNEL_PLACEHOLDER}\""
+            "pay_channel = \"{ANNOUNCE_PAY_CHANNEL_PLACEHOLDER}\""
         )),
         "the store config's [announce] pay_channel must be the clearly-marked placeholder -- \
          the real funded channel id lives only on the box (issue #853) and must never be \
@@ -1295,6 +1327,122 @@ fn the_store_announce_pay_channel_is_a_clearly_marked_placeholder() {
     let announce = config
         .announce()
         .expect("the store config's [announce] section must parse");
+    assert!(
+        announce.pay_channel().is_some(),
+        "the placeholder must decode as a valid 32-byte channel id, not merely appear as text"
+    );
+}
+
+/// The relay box's SECOND committed announce config (issue #983): the one
+/// the rolling-swap maker's own publisher loads. It is not a serving
+/// connector config -- nothing binds against it -- so the verbatim boot
+/// cases above have nothing to say about it, and without this case the
+/// only committed `[announce]` section on this fleet that no test loads
+/// would be the one describing a node that is not even a Rust connector.
+///
+/// The properties it asserts, each of which a hand-edit could break
+/// silently:
+///
+///   * it PARSES under the binary its overlay pins -- `RawConfig` and
+///     `RawAnnounceConfig` are `deny_unknown_fields`, and the loop that
+///     reads this file survives its own failures by design (it logs
+///     `[swap-announce] FAILED` and sleeps), so a config that cannot load
+///     announces nothing forever while the container stays up;
+///   * it speaks for the MAKER, not for the relay: a different primary
+///     address, and a `[signer]` key file that is not the relay's own. The
+///     two loops run side by side on one box under two identities, and the
+///     failure mode of confusing them is a kind:10032 published under a
+///     pubkey that cannot open the gift wraps sealed to it (ADR 0018);
+///   * the public endpoints it announces are the ones this box's nginx
+///     actually serves. The announce is the only place those URLs are
+///     published, and `location =` is exact-match: a renamed location
+///     leaves the announced URL answering 404 with nothing else noticing.
+///
+/// It pays THROUGH the relay, so its `publish_to`/`publish_btp_url` are
+/// asserted against the relay's OWN committed announce rather than against
+/// literals -- the same follow-the-config discipline
+/// [`the_store_announce_carries_a_btp_endpoint_when_its_target_route_demands_one`]
+/// applies across the two boxes.
+#[test]
+fn the_relays_swap_announce_config_speaks_for_the_maker_not_the_relay() {
+    let key_file = write_raw_key_file(9);
+    let text = replace_expecting_a_match(
+        RELAY_SWAP_ANNOUNCE_CONFIG,
+        "key_file = \"/app/data/swap-signer.key\"",
+        &format!("key_file = \"{}\"", key_file.path().display()),
+    );
+    let text = replace_expecting_a_match(
+        &text,
+        "key_file = \"/app/data/swap-settlement.key\"",
+        &format!("key_file = \"{}\"", key_file.path().display()),
+    );
+    let config_file = write_config(&text);
+    let config =
+        Config::load(config_file.path()).expect("the committed swap-announce config must parse");
+
+    let announce = config
+        .announce()
+        .expect("the swap-announce config's [announce] section must parse");
+
+    let relay = load_committed_relay_config();
+    let relay_announce = relay
+        .announce()
+        .expect("the relay config's [announce] section must parse");
+    assert_ne!(
+        announce.primary_address(),
+        relay_announce.primary_address(),
+        "the maker's announce must describe the MAKER -- a second publisher on this box \
+         announcing the relay's own address would be two loops racing for one \
+         (pubkey, kind:10032) slot"
+    );
+    // Asserted on the committed TEXT, not on the loaded value: the loaded
+    // one is a sandbox temp path by the time this test sees it, so only the
+    // text can say which key file the box will actually read.
+    assert!(
+        !RELAY_SWAP_ANNOUNCE_CONFIG.contains("key_file = \"/app/data/signer.key\""),
+        "the maker's announce must sign under the MAKER's own identity key file, never \
+         the relay's `/app/data/signer.key` -- see connector-rust.swap-announce.toml's \
+         own header for the ADR 0018 hazard that confusing them creates"
+    );
+
+    for (field, endpoint) in [
+        ("btp_endpoint", announce.btp_endpoint()),
+        ("http_endpoint", announce.http_endpoint()),
+    ] {
+        let path = endpoint
+            .split_once("://")
+            .and_then(|(_, rest)| rest.find('/').map(|start| rest[start..].to_string()))
+            .unwrap_or_else(|| panic!("the maker's [announce] {field} must name a path on this box's own domain, found `{endpoint}`"));
+        assert!(
+            RELAY_NGINX_CONF.contains(&format!("location = {path} {{")),
+            "the maker's [announce] {field} (`{endpoint}`) is published to the whole \
+             network, but infra/linode-relay/nginx/conf.d/node.conf serves no \
+             `location = {path}` -- an exact-match location is the only thing that \
+             answers it, so a renamed one leaves the announced URL dead"
+        );
+    }
+
+    assert_eq!(
+        announce.publish_to(),
+        Some(relay_announce.primary_address()),
+        "the maker sits behind the relay's client edge and pays it like any other \
+         client, so its `publish_to` is the relay's own announced address"
+    );
+    assert_eq!(
+        announce.publish_btp_url(),
+        Some(relay_announce.btp_endpoint()),
+        "`g.toon.relay` is pinned `transport = \"btp\"` (issue #701), so this loop must \
+         name the relay's OWN btp_endpoint -- `pay_the_through_url` refuses \
+         `NoBtpEndpoint` before signing anything"
+    );
+    assert!(
+        RELAY_SWAP_ANNOUNCE_CONFIG.contains(&format!(
+            "pay_channel     = \"{ANNOUNCE_PAY_CHANNEL_PLACEHOLDER}\""
+        )),
+        "the maker's [announce] pay_channel must be the same clearly-marked placeholder \
+         every other box commits (issue #853) -- the real funded channel id lives only \
+         on the box"
+    );
     assert!(
         announce.pay_channel().is_some(),
         "the placeholder must decode as a valid 32-byte channel id, not merely appear as text"
@@ -1695,6 +1843,10 @@ fn every_fleet_overlay_pins_the_connector_repos_pin_of_record() {
         ("docker-compose.store.announce.yml", STORE_ANNOUNCE_OVERLAY),
         ("docker-compose.relay.rust.yml", RELAY_RUST_OVERLAY),
         ("docker-compose.relay.announce.yml", RELAY_ANNOUNCE_OVERLAY),
+        (
+            "docker-compose.relay.swap-announce.yml",
+            RELAY_SWAP_ANNOUNCE_OVERLAY,
+        ),
     ];
 
     for (name, overlay) in overlays {
@@ -1721,7 +1873,9 @@ fn every_fleet_overlay_pins_the_connector_repos_pin_of_record() {
 /// `infra/*/docker-compose*.yml`: a guard that walked the directory would
 /// silently start (or stop) covering a box the moment the filesystem changed
 /// under it, rather than only when a real image or port regression landed.
-/// Two boxes, three files each (the base file plus its two overlays) -- see
+/// Two boxes: the store's three files (its base file plus its two overlays)
+/// and the relay's five (the same three, plus issue #983's rolling-swap
+/// maker sidecar and that maker's own announce overlay) -- see
 /// [`no_surviving_box_pins_a_non_rust_connector_image`] and
 /// [`every_surviving_box_port_binding_is_host_ip_prefixed_or_allowlisted`].
 const SURVIVING_BOX_COMPOSE_FILES: &[(&str, &str)] = &[
@@ -1748,6 +1902,14 @@ const SURVIVING_BOX_COMPOSE_FILES: &[(&str, &str)] = &[
     (
         "infra/linode-relay/docker-compose.relay.announce.yml",
         RELAY_ANNOUNCE_OVERLAY,
+    ),
+    (
+        "infra/linode-relay/docker-compose.relay.swap.yml",
+        RELAY_SWAP_OVERLAY,
+    ),
+    (
+        "infra/linode-relay/docker-compose.relay.swap-announce.yml",
+        RELAY_SWAP_ANNOUNCE_OVERLAY,
     ),
 ];
 
