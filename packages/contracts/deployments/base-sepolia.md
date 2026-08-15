@@ -110,11 +110,9 @@ The live kind:10032 announce advertises the new `TokenNetwork` (`tokenNetworks["
 
 ## RollingSwapChannel deployment (2026-08-15)
 
-The rolling-swap leg-B settlement contract (connector#973, epic
-toon-meta#394), deployed via `funded-ops.yml`'s
-`deploy-rolling-swap-channel` verb (dry run 31885868413, apply run
-31885961037) — see `docs/rolling-swap-channel-deployment.md` for the full
-runbook and verification detail.
+The rolling-swap leg-B settlement contract (connector#973, epic toon-meta#394), deployed via
+`funded-ops.yml`'s `deploy-rolling-swap-channel` verb (dry run 31885868413, apply run 31885961037).
+See `docs/rolling-swap-channel-deployment.md` for the full runbook and verification detail.
 
 - **Network:** Base Sepolia (`chainId 84532`, chain key `evm:84532`)
 - **RPC:** https://base-sepolia-rpc.publicnode.com
@@ -126,23 +124,23 @@ runbook and verification detail.
 | ------------------ | -------------------------------------------- | -------------------------------------------------------------------- |
 | RollingSwapChannel | `0xd329aBf86ceae23F904641F992ca90e3721FeF83` | `0x23bbebaf8bea0976861eb51883db3322c5cfafdd69fee82207e83dcb8b06c3a2` |
 
-Constructor args: `token = 0x49beE1Bca5d15Fb0963117923403F9498119a9Ce` (the
-same mock USDC every other devnet contract settles), `challengePeriod =
-86400s` (the contract's own floor).
+Constructor args: `token = 0x49beE1Bca5d15Fb0963117923403F9498119a9Ce` (the same mock USDC every
+other devnet contract settles), `challengePeriod = 86400s` (the contract's own floor).
 
-Verified on-chain after broadcast (by the apply run itself, never from the
-receipt alone):
+Verified on-chain after broadcast (by the apply run itself, never from the receipt alone):
 
 - `token() == 0x49beE1Bca5…` and `challengePeriod() == 86400`
-- `domainSeparator()` == the independently computed EIP-712 domain hash for
-  `(name="RollingSwapChannel", version="2", chainId=84532,
-  verifyingContract=0xd329aBf86ceae23F904641F992ca90e3721FeF83)`
-- `claimDigest(...)` for the golden-vector sample in
-  `docs/rolling-swap-v2-digest-spec.md` == the same struct hashed off-chain
-  via `TypedDataEncoder` for this deployment's real `(chainId, address)` pair
-- `updateBalance(...)` against a never-opened channel reverts
-  `InvalidChannelState()` — the entrypoint is live contract code
+- `domainSeparator()` == the independently computed EIP-712 domain hash for the domain below
+- `claimDigest(...)` for the golden-vector sample in `docs/rolling-swap-v2-digest-spec.md` == the
+  same struct hashed off-chain via `TypedDataEncoder` for this deployment's real
+  `(chainId, address)` pair
+- `updateBalance(...)` against a never-opened channel reverts `InvalidChannelState()` — the
+  entrypoint is live contract code
 
-No live announce advertises this address yet: advertising it under
-`tokenNetworks["evm:84532"]` is the swap node's job (swap#102), blocked on
-the signer migration (swap#101), not on this deploy.
+```
+EIP712Domain(name="RollingSwapChannel", version="2", chainId=84532,
+             verifyingContract=0xd329aBf86ceae23F904641F992ca90e3721FeF83)
+```
+
+No live announce advertises this address yet: advertising it under `tokenNetworks["evm:84532"]` is
+the swap node's job (swap#102), blocked on the signer migration (swap#101), not on this deploy.

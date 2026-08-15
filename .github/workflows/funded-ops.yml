@@ -325,6 +325,35 @@ jobs:
             return id;
           };
 
+          // The only path from the mnemonic to something that can sign.
+          // fromMnemonicFull exposes no evmPrivateKey field: the 32-byte
+          // NIP-06 `secretKey` IS the EVM key (id.evmAddress is derived from
+          // it) — the address cross-check here proves it every run. Returns
+          // the raw key too, for the one caller (deploy-rolling-swap-channel)
+          // that hands it to `forge script` rather than signing in-process.
+          const signerFor = async (i) => {
+            const id = await derive(i);
+            const sk = id.secretKey;
+            if (!(sk instanceof Uint8Array) || sk.length !== 32) {
+              fail('Derived identity exposes no 32-byte secret key; cannot sign.');
+            }
+            const privateKey = '0x' + Buffer.from(sk).toString('hex');
+            mask(privateKey);
+            const wallet = new Wallet(privateKey, provider);
+            if (wallet.address.toLowerCase() !== id.evmAddress.toLowerCase()) {
+              fail('Derived key does not match its own address. Refusing to sign.');
+            }
+            return { wallet, privateKey };
+          };
+
+          // Shared by every verb that signs: `account_index` is which NIP-06
+          // identity acts.
+          const accountIndex = () => {
+            const i = Number.parseInt(ACCOUNT_INDEX ?? '0', 10);
+            if (!Number.isInteger(i) || i < 0) fail(`Bad account_index: ${ACCOUNT_INDEX}`);
+            return i;
+          };
+
           // ── whoami ───────────────────────────────────────────────────────
           if (OPERATION === 'whoami') {
             const n = Number.parseInt(SCAN_COUNT ?? '8', 10);
@@ -384,22 +413,8 @@ jobs:
               fail(`total_base_units must be a positive integer (absolute TARGET total), got: ${TOTAL_BASE_UNITS}`);
             }
 
-            const idx = Number.parseInt(ACCOUNT_INDEX ?? '0', 10);
-            if (!Number.isInteger(idx) || idx < 0) fail(`Bad account_index: ${ACCOUNT_INDEX}`);
-            const id = await derive(idx);
-            // fromMnemonicFull exposes no evmPrivateKey field: the 32-byte
-            // NIP-06 `secretKey` IS the EVM key (id.evmAddress is derived
-            // from it) — the address cross-check below proves it every run.
-            const sk = id.secretKey;
-            if (!(sk instanceof Uint8Array) || sk.length !== 32) {
-              fail('Derived identity exposes no 32-byte secret key; cannot sign.');
-            }
-            const pk = '0x' + Buffer.from(sk).toString('hex');
-            mask(pk);
-            const signer = new Wallet(pk, provider);
-            if (signer.address.toLowerCase() !== id.evmAddress.toLowerCase()) {
-              fail('Derived key does not match its own address. Refusing to sign.');
-            }
+            const idx = accountIndex();
+            const { wallet: signer } = await signerFor(idx);
 
             const c = await tn.channels(CHANNEL_ID);
             if (Number(c.state) !== 1) {
@@ -573,27 +588,14 @@ jobs:
           // this is devnet-only and what "verified against the live
           // deployment" (connector#973) means concretely.
           else if (OPERATION === 'deploy-rolling-swap-channel') {
-            const challengePeriod = BigInt(CHALLENGE_PERIOD || '86400');
-            if (challengePeriod < 86400n) {
+            let challengePeriod;
+            try { challengePeriod = BigInt(CHALLENGE_PERIOD || '86400'); } catch { challengePeriod = null; }
+            if (challengePeriod === null || challengePeriod < 86400n) {
               fail(`challenge_period must be >= 86400s (1 day; the contract's own floor), got: ${CHALLENGE_PERIOD}`);
             }
 
-            const idx = Number.parseInt(ACCOUNT_INDEX ?? '0', 10);
-            if (!Number.isInteger(idx) || idx < 0) fail(`Bad account_index: ${ACCOUNT_INDEX}`);
-            const id = await derive(idx);
-            // fromMnemonicFull exposes no evmPrivateKey field: the 32-byte
-            // NIP-06 `secretKey` IS the EVM key (id.evmAddress is derived
-            // from it) — the address cross-check below proves it every run.
-            const sk = id.secretKey;
-            if (!(sk instanceof Uint8Array) || sk.length !== 32) {
-              fail('Derived identity exposes no 32-byte secret key; cannot sign.');
-            }
-            const pk = '0x' + Buffer.from(sk).toString('hex');
-            mask(pk);
-            const deployer = new Wallet(pk, provider);
-            if (deployer.address.toLowerCase() !== id.evmAddress.toLowerCase()) {
-              fail('Derived key does not match its own address. Refusing to sign.');
-            }
+            const idx = accountIndex();
+            const { wallet: deployer, privateKey: pk } = await signerFor(idx);
 
             say(`## Deploy RollingSwapChannel — ${apply ? 'APPLY' : 'DRY RUN'}`);
             say('');

@@ -9,16 +9,16 @@ shape.
 
 ## Status: BROADCAST 2026-08-15
 
-| | |
-| --- | --- |
-| address | `0xd329aBf86ceae23F904641F992ca90e3721FeF83` |
-| deploy tx | `0x23bbebaf8bea0976861eb51883db3322c5cfafdd69fee82207e83dcb8b06c3a2` |
-| block | 45515248 |
-| deployer | `0x2B00c21af9926F9222bC29B87f7e03004AbAd43e` (NIP-06 account index 0) |
-| chain | `evm:84532` (Base Sepolia) |
-| token | `0x49beE1Bca5d15Fb0963117923403F9498119a9Ce` (mock USDC, 6 dp) |
-| challengePeriod | 86400s |
-| workflow runs | dry run 31885868413, apply 31885961037 (`funded-ops.yml`) |
+|                 |                                                                       |
+| --------------- | --------------------------------------------------------------------- |
+| address         | `0xd329aBf86ceae23F904641F992ca90e3721FeF83`                          |
+| deploy tx       | `0x23bbebaf8bea0976861eb51883db3322c5cfafdd69fee82207e83dcb8b06c3a2`  |
+| block           | 45515248                                                              |
+| deployer        | `0x2B00c21af9926F9222bC29B87f7e03004AbAd43e` (NIP-06 account index 0) |
+| chain           | `evm:84532` (Base Sepolia)                                            |
+| token           | `0x49beE1Bca5d15Fb0963117923403F9498119a9Ce` (mock USDC, 6 dp)        |
+| challengePeriod | 86400s                                                                |
+| workflow runs   | dry run 31885868413, apply 31885961037 (`funded-ops.yml`)             |
 
 The apply run's post-deploy verification all passed against the LIVE
 contract: `domainSeparator()` matched the independently computed EIP-712
@@ -112,44 +112,43 @@ A run that reaches "✅ RollingSwapChannel deployed and verified against the
 live contract" in its job summary has satisfied AC3, AC4 and AC5 for the
 address it prints.
 
-## Bookkeeping that must be updated once a real address exists
+## Where the address is recorded
 
-Once a dispatch above succeeds, before this ticket is closed:
+The broadcast above is written down in three places, and a re-deploy (a new
+`apply=true` dispatch supersedes the old contract; nothing migrates) must
+update all three together:
 
-1. **`packages/contracts/deployments.json`** -- add a `RollingSwapChannel`
-   entry under `networks.base-sepolia.contracts`, following the existing
-   entries' shape (`address`, `deployer`, `deployTxHash`, `blockNumber`,
+1. **`packages/contracts/deployments.json`** -- the `RollingSwapChannel`
+   entry under `networks.base-sepolia.contracts`, in the same shape as the
+   entries beside it (`address`, `deployer`, `deployTxHash`, `blockNumber`,
    `deployedAt`, a free-text `note` naming the token and challenge period).
-2. **`packages/contracts/deployments/base-sepolia.md`** -- add a dated
-   section recording the broadcast, mirroring the "ERC-2771 cutover
+2. **`packages/contracts/deployments/base-sepolia.md`** -- the dated
+   "RollingSwapChannel deployment" section, mirroring the "ERC-2771 cutover
    deployment" section's shape (network, RPC, deployer, block, script, a
    table of the deployed address and its deploy tx, and the on-chain
    verification performed -- the workflow's job summary has all of it).
-3. **This document's "Status" section** -- replace "NOT YET DEPLOYED" with
-   the broadcast date, deployer, block, and address, mirroring
-   `docs/evm-deployment.md`'s "Status: BROADCAST …" pattern.
-4. **Where operators and kind:10032 announces can reference it** -- AC2
-   asks for the address to be keyed by the same chain-key form used
-   elsewhere (`evm:84532`, matching `docs/rolling-swap-v2-digest-spec.md`'s
-   "derive both from one source" note and the live announce's own
-   `tokenNetworks["evm:84532"]` key). That keying lives in steps 1-3 above;
-   no infra `connector-rust.toml` in this repo carries a
-   `RollingSwapChannel` field to populate yet -- **no swap node is live**
-   (toon-meta#394's own honest-notes section: zero swap pairs across 5,000
-   live announces), so there is nothing here to repoint. Advertising the
-   address in a live announce is `swap#102` ("swap node advertises its
-   verifying contract"), which lives in the `swap` repo and is blocked on
-   `swap#101`, not on this deploy.
+3. **This document's "Status" section.**
 
-## What's left
+AC2 asks for the address to be keyed by the same chain-key form used
+elsewhere -- `evm:84532`, matching `docs/rolling-swap-v2-digest-spec.md`'s
+"derive both from one source" note and the live announce's own
+`tokenNetworks["evm:84532"]` key. That keying lives in the three records
+above. No infra `connector-rust.toml` in this repo carries a
+`RollingSwapChannel` field to populate: **no swap node is live**
+(toon-meta#394's own honest-notes section: zero swap pairs across 5,000 live
+announces), so there is nothing here to repoint. Advertising the address in a
+live announce is `swap#102` ("swap node advertises its verifying contract"),
+which lives in the `swap` repo and is blocked on `swap#101`, not on this
+deploy.
 
-- Dispatch the `deploy-rolling-swap-channel` dry run, confirm the deployer
-  holds Base-Sepolia gas ETH, then dispatch with `apply=true` -- needs a
-  token with `actions:write` on this repo, which this session does not
-  have.
-- Complete the four bookkeeping steps above against the resulting real
-  address.
-- Once done, this satisfies connector#973 in full: AC1 (deployed via
-  funded-ops), AC2 (recorded, keyed `evm:84532`), AC3-AC5 (proven by the
-  workflow's own post-deploy verification), AC6 (this document + the
-  workflow are the reproducible record).
+## What this leaves open
+
+connector#973 is satisfied in full: AC1 (deployed via funded-ops run
+31885961037), AC2 (recorded above, keyed `evm:84532`), AC3-AC5 (proven by the
+apply run's own post-deploy calls against the live contract), AC6 (this
+document plus the workflow verb are the reproducible record).
+
+Not in this repo's scope, and still open: a swap node advertising this
+address as its `verifyingContract` (`swap#102`, blocked on the signer
+migration `swap#101`). Until that lands the contract is deployed and
+verifiable but nothing on the network points at it.
