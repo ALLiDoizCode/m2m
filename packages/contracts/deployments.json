@@ -53,6 +53,16 @@
           "deployedAt": "2026-08-06",
           "token": "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce",
           "note": "Same mock USDC as the pre-cutover TokenNetwork; created via registry.createTokenNetwork."
+        },
+        "RollingSwapChannel": {
+          "address": "0xd329aBf86ceae23F904641F992ca90e3721FeF83",
+          "deployer": "0x2B00c21af9926F9222bC29B87f7e03004AbAd43e",
+          "deployTxHash": "0x23bbebaf8bea0976861eb51883db3322c5cfafdd69fee82207e83dcb8b06c3a2",
+          "blockNumber": 45515248,
+          "deployedAt": "2026-08-15",
+          "token": "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce",
+          "challengePeriod": 86400,
+          "note": "Rolling-swap leg-B settlement (connector#973, toon-meta#394). EIP-712 domain (RollingSwapChannel, \"2\", 84532, this address); domainSeparator()/claimDigest()/updateBalance() live-verified by funded-ops run 31885961037. Advertise under the SAME chain key claims carry: evm:84532."
         }
       }
     },
