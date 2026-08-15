@@ -30,12 +30,14 @@
 #
 # ── The image tag is a PENDING placeholder ──────────────────────────────────
 # `PENDING-swap-124` names no real image. toon-protocol/swap#124 (GHCR
-# publish workflow for the maker runtime) has an open, unmerged PR
-# (toon-protocol/swap#125) as of this change — no pushed tag exists yet.
-# That PR's `publish-swap-image.yml` tags `ghcr.io/toon-protocol/swap` as
-# `sha-<short-sha>` (immutable) and `main` (floating, default-branch only);
-# repoint this line to the immutable `sha-` tag once a run has actually
-# pushed one, mirroring how this box's own `connector-rust` image is pinned
+# publish workflow for the maker runtime) landed as toon-protocol/swap#125,
+# which merged only after this file was written — its
+# `publish-swap-image.yml` tags `ghcr.io/toon-protocol/swap` as
+# `sha-<short-sha>` (immutable) and `main` (floating, default-branch only),
+# and has since pushed `sha-5af4a75`. Repoint this line to that immutable
+# `sha-` tag (a small, reviewable repo PR of its own — see
+# docs/operators/swap-node-bringup.md step 1), mirroring how this box's own
+# `connector-rust` image is pinned
 # by sha (docker-compose.relay.rust.yml's own comment on
 # `EXPECTED_CONNECTOR_TAG`). `docker compose config` validates this file's
 # shape without resolving the tag — Compose does not need the image to exist
@@ -53,12 +55,12 @@
 # text only commits to "a mounted file or SWAP_MNEMONIC", so this file does
 # the file-to-env bridge itself and calls `node /app/dist/cli.js --config`
 # directly rather than the `toon-swap` bin. toon-protocol/swap#124's runtime
-# Dockerfile (toon-protocol/swap PR #125, unmerged as of this change) has its
-# own ENTRYPOINT invoke `node dist/cli.js` from WORKDIR `/app` and never puts
+# Dockerfile (merged as toon-protocol/swap#125) has its own ENTRYPOINT invoke
+# `node dist/cli.js` from WORKDIR `/app` and never puts
 # `node_modules/.bin` on PATH, so `toon-swap` is not guaranteed to resolve as
 # a bare command even though `package.json` declares it as a bin — matching
 # the Dockerfile's own invocation is the one assumption this file needs to
-# hold about the (still-unpublished) image's contents.
+# hold about the image's contents.
 #
 # The SAME mnemonic derives BOTH identities this maker needs (toon-meta#402):
 #   * index 0 (NIP-06) — the Nostr/node identity `ilpAddress`'s pubkey and
@@ -102,13 +104,13 @@ services:
       # account-index derivation and never let the phrase leave this box.
       - ./swap-mnemonic.secret:/app/keys/swap-mnemonic:ro
       # A fresh named volume is root-owned by default; the container runs as
-      # uid 10001 (`swap`, per toon-protocol/swap PR #125's Dockerfile) and
-      # needs to write its boot snapshot to `statePath`
+      # uid 10001 (`swap`, per toon-protocol/swap#125's merged Dockerfile)
+      # and needs to write its boot snapshot to `statePath`
       # (swap.config.json's `/app/state/swap-node-state.json`, matching this
-      # mount point exactly). Resolved image-side, not here: PR #125's
-      # Dockerfile creates and chowns `/app/state` before its `USER swap`
-      # line, so a fresh volume inherits the right ownership on first mount
-      # — re-verify this once #125 actually merges. If that ever regresses,
+      # mount point exactly). Resolved image-side, not here: that Dockerfile
+      # creates and chowns `/app/state` before its `USER swap` line, so a
+      # fresh volume inherits the right ownership on first mount. If that
+      # ever regresses,
       # the belt-and-braces fallback is a host bind mount pre-chowned the
       # same `chown 10001:10001` way docs/operators/swap-node-bringup.md
       # already has a human do for the key files, in place of this named

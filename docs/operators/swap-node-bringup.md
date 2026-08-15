@@ -41,33 +41,35 @@ material or funds this environment does not have.
 
 - **The maker runtime image.** `docker-compose.relay.swap.yml` pins
   `ghcr.io/toon-protocol/swap:PENDING-swap-124` — a placeholder. toon-protocol/swap#124 (the GHCR
-  publish workflow for the maker image) has an open, unmerged PR (toon-protocol/swap#125) as of
-  this change; no pushed tag exists yet. Repoint the `image:` line to the real `sha-<short-sha>` tag
-  once `publish-swap-image.yml` actually pushes one. The compose service's command invokes
-  `node /app/dist/cli.js --config ...` directly (not the `toon-swap` bin) — matching PR #125's own
-  Dockerfile `ENTRYPOINT`, which does the same and never puts `node_modules/.bin` on `PATH` — so
-  nothing else in this unit depends on the image's contents beyond that file existing at that path
-  under `WORKDIR /app`.
+  publish workflow for the maker image) landed as toon-protocol/swap#125, which merged only after
+  the compose file was written; `publish-swap-image.yml` has since pushed `sha-5af4a75`. Repoint the
+  `image:` line to that immutable `sha-<short-sha>` tag (step 1 below). The compose service's
+  command invokes `node /app/dist/cli.js --config ...` directly (not the `toon-swap` bin) —
+  matching that Dockerfile's own `ENTRYPOINT`, which does the same and never puts
+  `node_modules/.bin` on `PATH` — so nothing else in this unit depends on the image's contents
+  beyond that file existing at that path under `WORKDIR /app`.
 - **`swap.config.json`'s `settlementPrivateKey` is an obviously-fake placeholder.**
   `packages/swap/src/cli.ts`'s env overlay (`SWAP_MNEMONIC`) does **not** derive or set this field —
   it only sets `mnemonic`/`secretKey`. A human must compute the on-box mnemonic's BIP-44
   account-index-2 key (D12-011 — the same key used for leg-B claim signing) and set it in a
   box-local, **uncommitted** copy of `swap.config.json` before the maker can issue a redeemable
-  claim. This is a real gap in the current `toon-swap` CLI config surface (see swap#124's own text:
-  "verify the CLI config surface actually covers this... if it has gaps, either extend the CLI or
-  bake a thin entrypoint") — closing it belongs to whichever ticket finishes swap#124, not this one.
+  claim. This is a real gap in the current `toon-swap` CLI config surface, and swap#124 (merged as
+  swap#125) did not close it: its own text asked to "verify the CLI config surface actually covers
+  this... if it has gaps, either extend the CLI or bake a thin entrypoint", and the env overlay it
+  shipped still sets only `mnemonic`/`secretKey`. Closing it belongs to a follow-up on the
+  toon-swap CLI, not to this ticket.
 - **`swap.config.json`'s `swapPairs` is a placeholder pair** (same-chain USDC at parity on
   `evm:84532`), present only so the maker boots. The actual trading pair(s) this maker should quote
   — which chain(s) it accepts leg-A payment on, at what rate, with what inventory — is a business
   decision neither toon-meta#402 nor this ticket pins. A human sets this once the maker is meant to
   actually trade.
 - **The `swap_node_state` named volume's ownership** is resolved image-side, not here:
-  toon-protocol/swap PR #125's Dockerfile creates and chowns `/app/state` before its `USER swap`
+  toon-protocol/swap#125's merged Dockerfile creates and chowns `/app/state` before its `USER swap`
   line, so a fresh volume inherits uid 10001 ownership on first mount and the maker can write its
   boot snapshot to `statePath` (`/app/state/swap-node-state.json`, matching
-  `docker-compose.relay.swap.yml`'s mount point). Re-verify this once #125 actually merges; if it
-  ever regresses, fall back to a host bind mount pre-chowned the same `chown 10001:10001` way
-  step 3 below already does for the key files, in place of the named volume.
+  `docker-compose.relay.swap.yml`'s mount point). If that ever regresses, fall back to a host bind
+  mount pre-chowned the same `chown 10001:10001` way step 3 below already does for the key files,
+  in place of the named volume.
 - **A SECOND funded channel, beyond what toon-meta#402 enumerated.** toon-meta#402's checklist lists
   "gas + leg-B channel" as the human-gated settlement step. Building the paid-announce loop
   surfaced a step that checklist did not separately call out: the announce loop
@@ -83,7 +85,7 @@ material or funds this environment does not have.
 
 | Step                                     |                Repo-side (this PR)                 |      Human-only (SSH, key material, funds)       |
 | ---------------------------------------- | :------------------------------------------------: | :----------------------------------------------: |
-| 1. Maker runtime image                   |                                                    |      ✅ swap#124 publishes; repoint the tag      |
+| 1. Maker runtime image                   |                                                    |      ✅ swap#124 published; repoint the tag      |
 | 2. Identity generation (BIP-39 mnemonic) |                                                    |          ✅ generated ON the relay box           |
 | 3. Extract the two derived key files     |                                                    | ✅ index-0 Nostr key, index-2 EVM settlement key |
 | 4. Announce-loop pay channel             |                                                    |          ✅ opened + funded (see above)          |
@@ -94,7 +96,8 @@ material or funds this environment does not have.
 
 ## Order — image through verification
 
-1. **Maker runtime image.** Confirm toon-protocol/swap#124 has pushed a pullable tag. Edit
+1. **Maker runtime image.** `publish-swap-image.yml` (toon-protocol/swap#125) has pushed
+   `ghcr.io/toon-protocol/swap:sha-5af4a75`; confirm it is still the tag you want, then edit
    `infra/linode-relay/docker-compose.relay.swap.yml`'s `image:` line to name it (a small,
    reviewable repo PR — not a live-box step by itself).
 
@@ -162,7 +165,11 @@ material or funds this environment does not have.
 8. **Verify.**
 
    ```sh
-   curl -sf https://proxy.relay.devnet.toonprotocol.dev/swap/ilp   # reaches the maker's HTTP surface
+   # Reaches the maker's HTTP surface. The embedded connector's BTP listener serves only
+   # `POST /ilp` and 404s everything else, so a GET answering `404` IS the pass here — it is
+   # the maker's own answer. `502` is the failure: that is nginx reporting an absent or
+   # crash-looping `swap-node` container, not the maker replying.
+   curl -s -o /dev/null -w '%{http_code}\n' https://proxy.relay.devnet.toonprotocol.dev/swap/ilp
    ```
 
    and that the announce loop's log carries `[swap-announce] OK -- g.toon.swap.maker published`
