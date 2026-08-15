@@ -1512,6 +1512,22 @@ fn client_channels(
     if let Some(source) = solana_source {
         channels = channels.with_solana_source(source);
     }
+    // Cross-check a Solana claim's self-declared `programId`/`cluster`
+    // against this node's own `[settlement.solana]` identity (issue #975).
+    // `program_id` is guaranteed to parse -- `build_solana_settlement_backend`
+    // already ran the identical `Pubkey::from_str` against it and refused
+    // startup if it did not (ADR 0009), and `build()` always runs before
+    // this function does.
+    if let Some(SettlementConfig::Solana(solana)) = config
+        .settlements()
+        .iter()
+        .find(|s| s.chain() == SettlementChain::Solana)
+    {
+        let program_id = Pubkey::from_str(solana.program_id())
+            .expect("build() already validated [settlement.solana] program_id as a base58 pubkey")
+            .to_bytes();
+        channels = channels.with_solana_identity(program_id, solana.cluster_hint());
+    }
     // The liveness knobs a config file turns (issue #649): how long a
     // chain-resolved channel's mutable facts may be believed, how long its
     // last good reading may still be served while the chain is
@@ -2723,6 +2739,71 @@ counterparty = "{counterparty}"
         };
         assert_eq!(solana.channel_account(), account);
         assert_eq!(solana.counterparty(), counterparty);
+    }
+
+    /// Issue #975's wiring, end to end from a config file: a node with
+    /// `[settlement.solana]` configured must refuse a claim naming a
+    /// different `programId` than that table's own -- the live defect the
+    /// issue reports (a mainnet payment recording itself as devnet). Needs
+    /// no live validator: the check runs before any chain read, on the
+    /// claim's own declared fields against what `client_channels` read out
+    /// of `config.settlements()`.
+    #[tokio::test]
+    async fn a_claim_naming_a_different_program_than_settlement_solana_is_refused() {
+        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{key_path}"
+
+[settlement.solana]
+rpc_url = "https://api.mainnet-beta.solana.com"
+program_id = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+token_address = "SoLMint11111111111111111111111111111111111"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "{key_path}"
+"#,
+                key_path = key_path.display(),
+            )
+        });
+
+        let channels = client_channels(&config, None, None);
+        let gate = ClientClaimGate::restore(channels, Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay");
+
+        // The channel this claim names has no record at all -- deliberately:
+        // the identity mismatch is a fact this connector already knows
+        // without spending a lookup, so it must be caught before the
+        // (nonexistent) channel is even looked up.
+        let claim = r#"{
+            "version": "1.0",
+            "blockchain": "solana",
+            "messageId": "msg-1",
+            "timestamp": "2026-02-02T12:00:00.000Z",
+            "senderId": "peer-mallory",
+            "programId": "11111111111111111111111111111111",
+            "channelAccount": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+            "nonce": 1,
+            "transferredAmount": "100",
+            "signature": "AAAA",
+            "signerPublicKey": "8pM1DN3RiT8vbom5u1sNryaNT1nyL8CTTW3b5PwWXRBH"
+        }"#;
+
+        let rejection = gate
+            .ingest(claim, 0)
+            .await
+            .expect_err("a claim naming a different program must be refused");
+        assert!(
+            matches!(
+                rejection,
+                connector_client_edge::ClaimIngestRejection::SolanaIdentityMismatch(_)
+            ),
+            "expected a SolanaIdentityMismatch refusal, got: {rejection:?}"
+        );
     }
 
     /// Issue #605's startup half: a node that names a `state_dir` gets a

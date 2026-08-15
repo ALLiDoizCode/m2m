@@ -262,6 +262,16 @@ pub enum ClaimIngestRejection {
     NotDurable,
     WrapUnsupported,
     WrapFailed(String),
+    /// A Solana claim's self-declared `programId` or `cluster` disagrees
+    /// with this node's own `[settlement.solana]` identity (issue #975).
+    /// Checked before the claim's channel is even resolved -- like
+    /// [`ClaimIngestRejection::UnknownChannel`], it is a fact this
+    /// connector already knows without spending a chain read. Refused
+    /// rather than silently accepted and recorded under the claim's own
+    /// unverified label: a claim is the payer's signed statement of what
+    /// they paid and where, and the balance proof it carries verifying
+    /// against the resolved channel does not make that statement true.
+    SolanaIdentityMismatch(String),
 }
 
 impl ClaimIngestRejection {
@@ -331,6 +341,9 @@ impl ClaimIngestRejection {
                 .to_string(),
             ClaimIngestRejection::WrapFailed(reason) => {
                 format!("claim rejected: failed to unwrap claim: {reason}")
+            }
+            ClaimIngestRejection::SolanaIdentityMismatch(reason) => {
+                format!("claim rejected: {reason}")
             }
         }
     }
@@ -1713,6 +1726,35 @@ async fn verify_solana_claim_signature(
     let Some(channel_account) = decode_base58_bytes::<32>(&claim.channel_account) else {
         return Err(ClaimIngestRejection::UnknownChannel);
     };
+
+    // Cross-check the claim's own declared chain identity against this
+    // node's configured `[settlement.solana]`, before spending a lookup on
+    // its channel (issue #975): a claim naming a different program or
+    // cluster than this node actually runs is wrong, not merely
+    // unverifiable, and no signature check on its balance proof can make it
+    // right -- the proof binds the amount to the channel account alone, not
+    // to which program or cluster that account lives on.
+    if let Some(identity) = channels.solana_identity() {
+        let declared_program_id = decode_base58_bytes::<32>(&claim.program_id);
+        if declared_program_id != Some(identity.program_id) {
+            return Err(ClaimIngestRejection::SolanaIdentityMismatch(format!(
+                "claim declares programId '{}', which is not this node's configured \
+                 [settlement.solana] program",
+                claim.program_id
+            )));
+        }
+        if let (Some(declared_cluster), Some(configured_cluster)) =
+            (&claim.cluster, identity.cluster)
+        {
+            if declared_cluster != configured_cluster {
+                return Err(ClaimIngestRejection::SolanaIdentityMismatch(format!(
+                    "claim declares cluster '{declared_cluster}', but this node's \
+                     [settlement.solana] rpc_url names cluster '{configured_cluster}'"
+                )));
+            }
+        }
+    }
+
     // Declared, or -- for a channel nothing declared -- resolved from the
     // chain via a registered `ClaimChain::Solana` source (issue #631).
     let channel = match channels.solana(&channel_account, requester).await {
@@ -2630,6 +2672,53 @@ mod tests {
         )
     }
 
+    /// [`genuine_solana_claim_json`], with `programId`/`cluster` set
+    /// explicitly instead of the fixed default -- issue #975's cross-check
+    /// covers neither field in the signed balance-proof message, so a
+    /// genuine signature stays genuine however either is declared.
+    fn genuine_solana_claim_json_with_identity(
+        channel_account_bytes: &[u8; 32],
+        nonce: u64,
+        transferred_amount: u64,
+        program_id: &str,
+        cluster: Option<&str>,
+    ) -> String {
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine;
+        use ed25519_dalek::Signer as Ed25519Signer;
+
+        let keypair = solana_signer();
+        let message = connector_signer::solana_balance_proof_message(
+            channel_account_bytes,
+            nonce,
+            transferred_amount,
+        );
+        let signature = keypair.sign(&message);
+        let cluster_field = match cluster {
+            Some(cluster) => format!(r#", "cluster": "{cluster}""#),
+            None => String::new(),
+        };
+        format!(
+            r#"{{
+                "version": "1.0",
+                "blockchain": "solana",
+                "messageId": "msg-{nonce}",
+                "timestamp": "2026-02-02T12:00:00.000Z",
+                "senderId": "peer-carol",
+                "programId": "{program_id}",
+                "channelAccount": "{}",
+                "nonce": {nonce},
+                "transferredAmount": "{transferred_amount}",
+                "signature": "{}",
+                "signerPublicKey": "{}"
+                {cluster_field}
+            }}"#,
+            base58_encode(channel_account_bytes),
+            BASE64.encode(signature.to_bytes()),
+            base58_encode(&keypair.public.to_bytes()),
+        )
+    }
+
     #[tokio::test]
     async fn a_genuine_solana_signature_is_accepted() {
         let gate = gate();
@@ -2749,6 +2838,120 @@ mod tests {
 
         let result = gate.ingest(&claim, 0).await;
         assert_eq!(result, Err(ClaimIngestRejection::SignatureInvalid));
+    }
+
+    // -- Chain identity: a claim's `programId`/`cluster` vs. this node's own
+    // -- `[settlement.solana]` (issue #975) --
+
+    const CONFIGURED_SOLANA_PROGRAM_ID: [u8; 32] = [0xab; 32];
+    const ANOTHER_SOLANA_PROGRAM_ID: [u8; 32] = [0xcd; 32];
+
+    /// A gate with a record of [`test_channels`] whose registry also
+    /// carries a configured `[settlement.solana]` identity -- the shape
+    /// `connector-cli` builds when the config file names one.
+    fn gate_with_solana_identity(
+        program_id: [u8; 32],
+        cluster: Option<&'static str>,
+    ) -> ClientClaimGate {
+        gate_over(test_channels().with_solana_identity(program_id, cluster))
+    }
+
+    /// The live defect issue #975 reports: a claim naming a program this
+    /// node does not run must be refused, however genuine its signature is
+    /// -- the balance proof only binds the amount to the channel account,
+    /// never to which program or cluster that account lives on.
+    #[tokio::test]
+    async fn a_solana_claim_naming_a_different_program_than_this_nodes_settlement_is_rejected() {
+        let gate = gate_with_solana_identity(CONFIGURED_SOLANA_PROGRAM_ID, None);
+        let claim = genuine_solana_claim_json_with_identity(
+            &SOLANA_CHANNEL_ACCOUNT,
+            1,
+            100,
+            &base58_encode(&ANOTHER_SOLANA_PROGRAM_ID),
+            None,
+        );
+        assert_eq!(
+            gate.ingest(&claim, 0).await,
+            Err(ClaimIngestRejection::SolanaIdentityMismatch(format!(
+                "claim declares programId '{}', which is not this node's configured \
+                 [settlement.solana] program",
+                base58_encode(&ANOTHER_SOLANA_PROGRAM_ID)
+            )))
+        );
+    }
+
+    /// The issue's own live repro: a claim whose `cluster` disagrees with
+    /// this node's configured cluster is refused even though its program
+    /// matches and its signature is genuine -- a mainnet payment can no
+    /// longer record itself as devnet.
+    #[tokio::test]
+    async fn a_solana_claim_declaring_a_different_cluster_than_this_node_runs_is_rejected() {
+        let gate = gate_with_solana_identity(CONFIGURED_SOLANA_PROGRAM_ID, Some("mainnet-beta"));
+        let claim = genuine_solana_claim_json_with_identity(
+            &SOLANA_CHANNEL_ACCOUNT,
+            1,
+            100,
+            &base58_encode(&CONFIGURED_SOLANA_PROGRAM_ID),
+            Some("devnet"),
+        );
+        assert_eq!(
+            gate.ingest(&claim, 0).await,
+            Err(ClaimIngestRejection::SolanaIdentityMismatch(
+                "claim declares cluster 'devnet', but this node's [settlement.solana] rpc_url \
+                 names cluster 'mainnet-beta'"
+                    .to_string()
+            ))
+        );
+    }
+
+    /// A claim whose `programId` and `cluster` both agree with this node's
+    /// configured identity is accepted, same as before issue #975.
+    #[tokio::test]
+    async fn a_solana_claim_agreeing_with_this_nodes_settlement_identity_is_accepted() {
+        let gate = gate_with_solana_identity(CONFIGURED_SOLANA_PROGRAM_ID, Some("mainnet-beta"));
+        let claim = genuine_solana_claim_json_with_identity(
+            &SOLANA_CHANNEL_ACCOUNT,
+            1,
+            100,
+            &base58_encode(&CONFIGURED_SOLANA_PROGRAM_ID),
+            Some("mainnet-beta"),
+        );
+        assert!(gate.ingest(&claim, 0).await.is_ok());
+    }
+
+    /// A claim that omits `cluster` entirely -- always legal, the field is
+    /// optional (client-edge-spec.md §1.3) -- is accepted against a node
+    /// with a configured cluster identity as long as `programId` agrees:
+    /// there is nothing declared to disagree with.
+    #[tokio::test]
+    async fn a_solana_claim_with_no_declared_cluster_is_accepted_when_the_program_agrees() {
+        let gate = gate_with_solana_identity(CONFIGURED_SOLANA_PROGRAM_ID, Some("mainnet-beta"));
+        let claim = genuine_solana_claim_json_with_identity(
+            &SOLANA_CHANNEL_ACCOUNT,
+            1,
+            100,
+            &base58_encode(&CONFIGURED_SOLANA_PROGRAM_ID),
+            None,
+        );
+        assert!(gate.ingest(&claim, 0).await.is_ok());
+    }
+
+    /// A node with no `[settlement.solana]` configured -- [`test_channels`]'s
+    /// own default, a declared-only Solana channel -- has no chain identity
+    /// to cross-check against, so a claim's `programId`/`cluster` are
+    /// accepted however they are declared, unchanged from before issue
+    /// #975.
+    #[tokio::test]
+    async fn a_solana_claim_is_unchecked_when_no_settlement_identity_is_configured() {
+        let gate = gate();
+        let claim = genuine_solana_claim_json_with_identity(
+            &SOLANA_CHANNEL_ACCOUNT,
+            1,
+            100,
+            &base58_encode(&ANOTHER_SOLANA_PROGRAM_ID),
+            Some("devnet"),
+        );
+        assert!(gate.ingest(&claim, 0).await.is_ok());
     }
 
     // -- Collateral binding: the cap at the on-chain deposit (issue #646) --

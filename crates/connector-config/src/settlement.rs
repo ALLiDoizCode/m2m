@@ -305,6 +305,30 @@ impl SolanaSettlementConfig {
     pub fn key(&self) -> &SecretLocation {
         &self.key
     }
+
+    /// The Solana cluster this table's `rpc_url` names, when it is one of
+    /// the well-known public endpoints or a loopback address -- `None` for
+    /// any other host, e.g. a paid third-party RPC provider (Helius,
+    /// Alchemy, QuickNode, ...) whose URL names no cluster at all (issue
+    /// #975). Guessing wrong from a substring match would be worse than not
+    /// checking, so this only recognises an exact, canonical hostname.
+    pub fn cluster_hint(&self) -> Option<&'static str> {
+        cluster_hint_for_rpc_url(&self.rpc_url)
+    }
+}
+
+/// [`SolanaSettlementConfig::cluster_hint`]'s free-function half, split out
+/// so it is testable against a bare URL string without building a whole
+/// resolved config.
+fn cluster_hint_for_rpc_url(rpc_url: &str) -> Option<&'static str> {
+    let host = Url::parse(rpc_url).ok()?.host_str()?.to_ascii_lowercase();
+    match host.as_str() {
+        "api.mainnet-beta.solana.com" => Some("mainnet-beta"),
+        "api.devnet.solana.com" => Some("devnet"),
+        "api.testnet.solana.com" => Some("testnet"),
+        "localhost" | "127.0.0.1" => Some("localnet"),
+        _ => None,
+    }
 }
 
 /// One fully validated per-chain settlement table -- typed by chain (issue
@@ -855,6 +879,43 @@ key_file = "{}"
             SettlementConfig::Evm(_) => panic!("expected a solana settlement config"),
         }
         assert_eq!(resolved[0].chain(), SettlementChain::Solana);
+    }
+
+    #[test]
+    fn cluster_hint_recognises_the_canonical_public_solana_rpc_hosts() {
+        assert_eq!(
+            cluster_hint_for_rpc_url("https://api.mainnet-beta.solana.com"),
+            Some("mainnet-beta")
+        );
+        assert_eq!(
+            cluster_hint_for_rpc_url("https://api.devnet.solana.com"),
+            Some("devnet")
+        );
+        assert_eq!(
+            cluster_hint_for_rpc_url("https://api.testnet.solana.com"),
+            Some("testnet")
+        );
+        assert_eq!(
+            cluster_hint_for_rpc_url("http://127.0.0.1:8899"),
+            Some("localnet")
+        );
+        assert_eq!(
+            cluster_hint_for_rpc_url("http://localhost:8899"),
+            Some("localnet")
+        );
+    }
+
+    /// A third-party RPC provider's URL names no cluster at all -- this must
+    /// answer `None`, not guess, since a wrong guess would refuse every
+    /// genuine claim a node configured against it ever receives (issue
+    /// #975).
+    #[test]
+    fn cluster_hint_is_none_for_an_rpc_host_it_does_not_recognise() {
+        assert_eq!(
+            cluster_hint_for_rpc_url("https://solana-mainnet.g.alchemy.com/v2/abc123"),
+            None
+        );
+        assert_eq!(cluster_hint_for_rpc_url("https://example.com"), None);
     }
 
     #[test]
