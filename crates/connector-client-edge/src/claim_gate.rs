@@ -883,10 +883,9 @@ impl ClientClaimGate {
                 .watermarks
                 .write()
                 .expect("client claim watermarks lock poisoned");
-            let Some(previous) = watermarks.get(&key).copied() else {
+            let Some(previous) = watermarks.remove(&key) else {
                 return Ok(());
             };
-            watermarks.remove(&key);
             match self.committer.enqueue(PendingAcceptance {
                 entry: JournalEntry::InboundClaimWatermarkReset {
                     channel_id: key.clone(),
@@ -978,29 +977,39 @@ impl ClientClaimGate {
     /// [`Self::reap_unresolvable_channels`]'s own rules for what counts.
     /// Split out so that function reads as the sweep it is, not the two
     /// chains' decoding.
+    ///
+    /// A key this cannot take apart -- an unknown namespace, or an
+    /// identifier that does not decode to its chain's 32 bytes -- is
+    /// answered `false`, the same "leave it alone" a failed lookup gets:
+    /// nothing here may reset a watermark on anything but a chain's own
+    /// answer.
     async fn channel_is_gone(&self, key: &str) -> bool {
         let requester = format!("sweep:{key}");
-        if let Some(hex_id) = key.strip_prefix(&format!("{EVM_NAMESPACE}:")) {
-            let Some(channel_id) = decode_hex_bytes::<32>(hex_id) else {
-                return false;
-            };
-            return matches!(
-                self.channels.refresh_evm(&channel_id, &requester).await,
-                Ok(None) | Err(ChannelResolutionError::Terminal(_))
-            );
+        // Split on the namespace exactly as `canonical_channel_key` does,
+        // since that is the function whose output this is taking apart.
+        match key.split_once(':') {
+            Some((EVM_NAMESPACE, channel_id)) => {
+                let Some(channel_id) = decode_hex_bytes::<32>(channel_id) else {
+                    return false;
+                };
+                matches!(
+                    self.channels.refresh_evm(&channel_id, &requester).await,
+                    Ok(None) | Err(ChannelResolutionError::Terminal(_))
+                )
+            }
+            Some((SOLANA_NAMESPACE, channel_account)) => {
+                let Some(channel_account) = decode_base58_bytes::<32>(channel_account) else {
+                    return false;
+                };
+                matches!(
+                    self.channels
+                        .refresh_solana(&channel_account, &requester)
+                        .await,
+                    Ok(None) | Err(ChannelResolutionError::Terminal(_))
+                )
+            }
+            _ => false,
         }
-        if let Some(account) = key.strip_prefix(&format!("{SOLANA_NAMESPACE}:")) {
-            let Some(channel_account) = decode_base58_bytes::<32>(account) else {
-                return false;
-            };
-            return matches!(
-                self.channels
-                    .refresh_solana(&channel_account, &requester)
-                    .await,
-                Ok(None) | Err(ChannelResolutionError::Terminal(_))
-            );
-        }
-        false
     }
 }
 
@@ -3165,6 +3174,68 @@ mod tests {
                 gate.ingest(&evm_claim_json(&channel, 5, 999), 0).await,
                 Err(ClaimIngestRejection::NonceNotAdvancing),
                 "a declared channel's watermark is config-scoped and must survive a sweep"
+            );
+        }
+
+        /// [`chain_resolved_solana`]'s EVM twin, over
+        /// [`unrecorded_channel_id`] -- a channel resolved from the chain
+        /// rather than declared.
+        fn chain_resolved_evm(deposit: u64) -> (Arc<FakeChannelSource>, ClientClaimGate) {
+            let (_secret, address) = evm_signer();
+            let source = Arc::new(FakeChannelSource::knowing(vec![(
+                resolved_evm_channel_id(),
+                EvmChannel {
+                    counterparty: address,
+                    chain_id: EVM_CHAIN_ID,
+                    token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+                    deposit_floor: DepositFloor::AtLeast(deposit),
+                },
+            )]));
+            let gate = gate_over(
+                ClientChannelRegistry::new()
+                    .with_source(source.clone())
+                    .with_liveness_policy(unsuppressed()),
+            );
+            (source, gate)
+        }
+
+        fn resolved_evm_channel_id() -> [u8; 32] {
+            decode_hex_bytes::<32>(&unrecorded_channel_id()).expect("a valid test channel id")
+        }
+
+        /// The issue's own "Note on scope": it was observed on Solana, but
+        /// an EVM `channelId` is derived rather than random too, so the
+        /// same reopen collides there and the sweep has to cover both
+        /// chains rather than the one it was reported on.
+        #[tokio::test]
+        async fn a_sweep_lets_a_reopened_evm_channel_be_paid_on_again() {
+            let channel = unrecorded_channel_id();
+            let (source, gate) = chain_resolved_evm(5_000_000);
+            let (_secret, counterparty) = evm_signer();
+
+            gate.ingest(&evm_claim_json(&channel, 9, 5_000_000), 0)
+                .await
+                .expect("the original incarnation spends its whole deposit");
+
+            source.now_says(resolved_evm_channel_id(), None);
+            gate.reap_unresolvable_channels().await;
+
+            source.now_says(
+                resolved_evm_channel_id(),
+                Some(EvmChannel {
+                    counterparty,
+                    chain_id: EVM_CHAIN_ID,
+                    token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+                    deposit_floor: DepositFloor::AtLeast(5_000_000),
+                }),
+            );
+
+            assert!(
+                gate.ingest(&evm_claim_json(&channel, 1, 100), 0)
+                    .await
+                    .is_ok(),
+                "an EVM channel reopened at its own derived id is judged from a clean \
+                 watermark, exactly as the Solana one is"
             );
         }
 

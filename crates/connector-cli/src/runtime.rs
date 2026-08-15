@@ -1122,14 +1122,23 @@ async fn reap_expired_peer_leases_periodically(connector: Arc<Connector>) {
 }
 
 /// How often [`router`]'s spawned loop sweeps the client edge's channels
-/// for one the chain no longer vouches for (issue #977) -- frequent enough
-/// that a reopened channel is stuck behind its predecessor's watermark for
-/// at most one interval, infrequent enough that a node with few or no
-/// client channels open pays nothing worth naming for it. Five minutes:
-/// on the same order as `DEFAULT_SERVE_STALE_UNTIL`'s own ten-minute
-/// staleness ceiling for the same channels, which is itself sized against
-/// how long a real settlement (a close, a challenge period, then a settle)
-/// actually takes -- this does not need to be tighter than that.
+/// for one the chain no longer vouches for (issue #977).
+///
+/// What this interval bounds is *detection*, and only that. A watermark is
+/// reset only while the chain still reports its channel gone
+/// ([`ClientClaimGate::reap_unresolvable_channels`]), so a sweep clears a
+/// settled channel within one interval of the settle becoming visible --
+/// but a channel reopened at the same deterministic address before any
+/// sweep lands is one this node never observes settled at all, and it
+/// keeps its predecessor's watermark. A shorter interval narrows that
+/// window; nothing short of re-keying a watermark per incarnation (the
+/// alternative issue #977 itself names) closes it.
+///
+/// Five minutes: short enough to catch the settle of a channel whose payer
+/// takes a beat to reopen it, long enough that a node with few or no
+/// client channels open pays nothing worth naming for the sweep -- and on
+/// the same order as `DEFAULT_SERVE_STALE_UNTIL`'s own ten-minute
+/// staleness ceiling for the same channels.
 const CLIENT_CHANNEL_REAP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Sweep `gate`'s channels for one whose watermark should be reset every
