@@ -7,7 +7,7 @@
       "rate": "1.0"
     }
   ],
-  "_swapPairs_comment": "PLACEHOLDER pair, same-chain USDC at parity — enough for the CLI's non-empty-swapPairs precondition and for `docker compose config`/CLI-boot smoke testing. The real trading pair(s) this maker quotes (which chain(s) it accepts leg-A payment on, at what rate) are a business decision toon-meta#402 does not pin; a human must replace this before the maker is useful. See docs/operators/swap-node-bringup.md's 'What this runbook does not decide'.",
+  "_swapPairs_comment": "PLACEHOLDER pair, same-chain USDC at parity — enough for the CLI's non-empty-swapPairs precondition and for `docker compose config`/CLI-boot smoke testing. The real trading pair(s) this maker quotes (which chain(s) it accepts leg-A payment on, at what rate) are a business decision toon-meta#402 does not pin; a human must replace this before the maker is useful. See docs/operators/swap-node-bringup.md's 'What this leaves open'.",
   "chains": ["evm"],
   "channels": {
     "evm:84532": [

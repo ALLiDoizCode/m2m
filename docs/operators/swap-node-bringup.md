@@ -4,7 +4,7 @@ Operator runbook for [connector#983](https://github.com/toon-protocol/connector/
 (connector-infra half of [toon-meta#402](https://github.com/toon-protocol/toon-meta/issues/402),
 itself a child of toon-meta#394). Modeled on
 [`relay-box-bringup.md`](relay-box-bringup.md) and
-[`faucet-box-bringup.md`](../operators/faucet-box-bringup.md)'s "Who does what" split — most of what
+[`faucet-box-bringup.md`](faucet-box-bringup.md)'s "Who does what" split — most of what
 this ticket asks for is a reviewable repo diff; a small, enumerated set of steps needs SSH, key
 material or funds this environment does not have.
 
@@ -82,7 +82,7 @@ material or funds this environment does not have.
 | 4. Announce-loop pay channel             |                                                    |          ✅ opened + funded (see above)          |
 | 5. Leg-B channel + gas                   |                                                    | ✅ RollingSwapChannel open/fund (toon-meta#402)  |
 | 6. Trading pair / inventory config       |                                                    |               ✅ business decision               |
-| 7. Bring the sidecar up                  | ✅ compose files, config skeleton, nginx locations |         runs `docker compose ... up -d`          |
+| 7. Bring the sidecar up                  | ✅ compose files, config skeleton, nginx locations |        ✅ runs `docker compose ... up -d`        |
 | 8. Verify                                |                         —                          |    ✅ curls + reads the announce loop's logs     |
 
 ## Order — image through verification
@@ -109,6 +109,13 @@ material or funds this environment does not have.
      `[settlement.evm.key]`) **and** set it as `settlementPrivateKey` in a box-local,
      **uncommitted** copy of `swap.config.json` (see "What this leaves open" above — the committed
      file's value is a deliberately-fake placeholder).
+
+   Both files — and step 2's `swap-mnemonic.secret` — are bind-mounted read-only into containers
+   that run as **uid 10001** (`connector` in the Rust image, `swap` in the maker image). A bind
+   mount keeps the HOST's ownership, so a root-owned `0600` file is unreadable inside the
+   container: the announce loop exits before it publishes anything, and the maker's entrypoint
+   `cat` fails under `set -eu`. `chown 10001:10001` all three before the first `up -d`, exactly as
+   `deploy/connector-rust/README.md` step 1 already requires for `signer-rust.key`.
 
 4. **Announce-loop pay channel.** Open and fund an ordinary EVM payment channel (the fleet's
    standard `TokenNetworkRegistry`, `0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1`) from the

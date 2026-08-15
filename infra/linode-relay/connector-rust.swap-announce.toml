@@ -53,8 +53,7 @@
 # settlement identity, two consumers) — but note this needs its OWN,
 # SEPARATE funded on-chain channel with the relay, additional to the leg-B
 # RollingSwapChannel toon-meta#402 already lists as a human step. See
-# docs/operators/swap-node-bringup.md, "What this surfaces that toon-meta
-# #402 did not enumerate".
+# docs/operators/swap-node-bringup.md, "What this leaves open".
 #
 # ── `pay_channel`/`route_publish`/`route_store` — same placeholder policy
 #    as every other box's `[announce]` section (issues #822/#853/#871) ─────
