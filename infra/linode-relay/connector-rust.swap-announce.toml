@@ -1,0 +1,97 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# TOON devnet — rolling-swap MAKER's own kind:10032 publisher config (issue
+# #983, connector-infra half of toon-meta#402)
+# ═══════════════════════════════════════════════════════════════════════════
+# NOT a serving connector config — nothing ever binds `client_edge_addr`
+# against this file; it exists only so `connector announce` (crates/
+# connector-cli/src/announce.rs, issue #784) has something to sign and pay
+# with. Consumed by ./docker-compose.relay.swap-announce.yml's loop, which
+# mirrors ./docker-compose.relay.announce.yml and infra/linode-store/
+# docker-compose.store.announce.yml's shape exactly: `connector announce`
+# is a general-purpose tool that publishes on behalf of whatever identity
+# and facts a config describes, whether or not a live server sits behind
+# it — this file is what lets it speak for the swap maker (a TypeScript
+# process, not a Rust connector) using the SAME on-chain settlement identity
+# that maker signs leg-B claims with.
+#
+# ── Why a SEPARATE file from connector-rust.toml, not a shared one ─────────
+# This box's own `connector-rust.toml` describes the RELAY's identity,
+# routes and settlement. The swap maker is a DIFFERENT node with a
+# DIFFERENT identity (generated on-box per docs/operators/
+# swap-node-bringup.md, never the relay's `[signer]`) and a DIFFERENT
+# settlement key (its BIP-44 account-index-2 key, distinct from the relay's
+# own settlement identity). One `[signer]`/`[settlement.evm]` table cannot
+# honestly describe both nodes, so this is its own file with its own
+# `[announce]` section, loaded by its own compose service.
+#
+# ── `[signer]` MUST be the maker's identity key, not a fresh one ───────────
+# A kind:10032's pubkey IS the identity a client seals swap-request gift
+# wraps to (NIP-59, via `@toon-protocol/sdk`'s `createSwapHandler`). If this
+# file's `[signer]` scalar differs from the raw secp256k1 key
+# `swap.config.json`'s `SWAP_MNEMONIC` (index 0, NIP-06) derives inside the
+# swap-node container, this loop publishes a technically-valid announce
+# under a pubkey the maker itself cannot open gift wraps sealed to — the
+# exact ADR 0018 hazard `crates/connector-cli/src/announce.rs`'s module doc
+# warns about, just self-inflicted rather than a forwarding-hop mistake.
+# `./swap-signer.key` MUST hold the raw 32-byte (or 64-hex) scalar for that
+# SAME index-0 identity — see docs/operators/swap-node-bringup.md for how a
+# human extracts it from the on-box mnemonic.
+#
+# ── `[settlement.evm]` pays for the WRITE, and is NOT the leg-B contract ───
+# This is the ordinary TokenNetworkRegistry/PaymentChannel deployment every
+# other box on this fleet pays the relay from (SAME `contract_address` as
+# infra/linode-relay/connector-rust.toml's own `[settlement.evm]`) — a ADR
+# 0030 client channel that pays for THIS ANNOUNCE's write, nothing more. It
+# is deliberately NOT `swap.config.json`'s `chainProviders[].channelAddress`
+# (the deployed RollingSwapChannel, issue #974) — that is a DIFFERENT
+# on-chain settlement mechanism (the maker's leg-B claim signer, verified
+# under its own v2 EIP-712 domain by `@toon-protocol/swap`'s claim-issuer,
+# not by this fleet's ClaimReceiver). Paying an ordinary relay write with a
+# leg-B claim would be signed against the wrong verifying contract and
+# refused. `[settlement.evm.key]` is the SAME index-2 key
+# `swap.config.json`'s `settlementPrivateKey` names (toon-meta#402: one
+# settlement identity, two consumers) — but note this needs its OWN,
+# SEPARATE funded on-chain channel with the relay, additional to the leg-B
+# RollingSwapChannel toon-meta#402 already lists as a human step. See
+# docs/operators/swap-node-bringup.md, "What this surfaces that toon-meta
+# #402 did not enumerate".
+#
+# ── `pay_channel`/`route_publish`/`route_store` — same placeholder policy
+#    as every other box's `[announce]` section (issues #822/#853/#871) ─────
+# `0xdead...` below names no channel that exists; a human replaces it once
+# the channel above is opened and funded. `route_publish`/`route_store` are
+# pinned explicitly to this maker's own address, rather than left to
+# `derive_route_hints`' `.relay`/`.store`/`.ario` suffix guess (crates/
+# connector-config/src/announce.rs) — `g.toon.swap.maker` matches none of
+# those suffixes, and an unpinned guess here would silently fall back to the
+# primary address anyway, so pinning both explicitly documents that as a
+# decision rather than leaving a reader to wonder if it was.
+# ═══════════════════════════════════════════════════════════════════════════
+
+client_edge_addr = "127.0.0.1:4100"
+
+[signer]
+key_file = "/app/data/swap-signer.key"
+
+[announce]
+addresses       = ["g.toon.swap.maker"]
+http_endpoint   = "https://proxy.relay.devnet.toonprotocol.dev/swap/ilp"
+btp_endpoint    = "wss://proxy.relay.devnet.toonprotocol.dev/swap/ilp/btp"
+# The relay box's OWN terminating route — this loop pays THROUGH it, same
+# as infra/linode-store/connector-rust.toml's identical field.
+publish_to      = "g.toon.relay"
+# `g.toon.relay` is pinned `transport = "btp"` (issue #701); without this,
+# `pay_the_through_url` refuses `NoBtpEndpoint` before signing anything.
+publish_btp_url = "wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp"
+pay_channel     = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeadc0de"
+route_publish   = "g.toon.swap.maker"
+route_store     = "g.toon.swap.maker"
+
+[settlement.evm]
+rpc_url           = "https://base-sepolia-rpc.publicnode.com"
+contract_address  = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1"
+token_address     = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+decimals          = 6
+
+[settlement.evm.key]
+key_file = "/app/data/swap-settlement.key"

@@ -1,0 +1,93 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# TOON devnet — rolling-swap MAKER's own kind:10032 publisher (issue #983)
+# ═══════════════════════════════════════════════════════════════════════════
+# Mirrors infra/linode-relay/docker-compose.relay.announce.yml and
+# infra/linode-store/docker-compose.store.announce.yml's shape exactly: the
+# SAME pinned `connector-rust` image, run as a `connector announce` one-shot
+# under a `/bin/sh` publish-sleep-repeat loop rather than `restart:
+# unless-stopped` on the bare subcommand (a one-shot re-run on every exit
+# would pay for a fresh announce as fast as the container restarts — see
+# either sibling overlay's own header for the full reasoning, unchanged
+# here). Service name is `swap-announce`, deliberately distinct from the
+# relay's own `announce` service, so both loops can run side by side under
+# one compose project without a name collision — this box announces TWO
+# nodes (itself, and the maker it fronts), under two different identities.
+#
+# ── Config: ./connector-rust.swap-announce.toml, not ./connector-rust.toml ─
+# This loop signs and pays as the MAKER, not as the relay — see that file's
+# own header for why one shared config cannot describe both. It has no
+# `[[routes]]`/`state_dir`, so it is not a second writer on the relay's own
+# claim journal, and `docker compose up -d` recreating it never touches the
+# relay's own `connector-rust`/`announce` services.
+#
+# ── `--via-own-routing` is NOT used here, unlike the relay's own loop ──────
+# The relay terminates `g.toon.relay` itself, so ITS announce (./docker-
+# compose.relay.announce.yml) routes through its own table for free. This
+# maker terminates nothing on the relay's connector — by design, per the
+# direct-dial model (./docker-compose.relay.swap.yml's header) — so it pays
+# the relay's client edge as an ordinary client, exactly like the store
+# box's own loop.
+#
+# ── Bring up alongside the relay's Rust edge AND the maker sidecar ─────────
+#   docker compose -f infra/linode-relay/docker-compose.relay.yml \
+#                  -f infra/linode-relay/docker-compose.relay.rust.yml \
+#                  -f infra/linode-relay/docker-compose.relay.swap.yml \
+#                  -f infra/linode-relay/docker-compose.relay.swap-announce.yml \
+#                  up -d swap-announce
+#
+# There is no ordering hazard against the relay's own `announce` loop the
+# way ./docker-compose.relay.announce.yml documents against the retired
+# apex: the two loops publish under two DIFFERENT pubkeys to two DIFFERENT
+# `addresses` (`g.toon.relay` vs `g.toon.swap.maker`), so there is no shared
+# slot for a "last writer wins" race to land on.
+#
+# ── What this needs before it can do anything (live/operator, NOT provided
+#    by this file) ───────────────────────────────────────────────────────
+# The maker's identity key files (below) must exist and hold the SAME
+# scalars `swap.config.json`'s on-box mnemonic derives, and
+# `./connector-rust.swap-announce.toml`'s `[announce] pay_channel` is a
+# clearly-marked `0xdead...` placeholder — a funded channel from the
+# maker's settlement identity to the relay, opened and funded by a human.
+# See docs/operators/swap-node-bringup.md.
+# ═══════════════════════════════════════════════════════════════════════════
+
+services:
+  swap-announce:
+    # PIN: intentionally the SAME tag docker-compose.relay.rust.yml and
+    # docker-compose.relay.announce.yml pin — this is the general-purpose
+    # `connector announce` tool, not a swap-specific binary, so it tracks
+    # the fleet's one Rust connector pin like every other announce loop on
+    # this box. See EXPECTED_CONNECTOR_TAG in
+    # crates/connector-bin/tests/devnet_configs_load.rs.
+    image: ghcr.io/toon-protocol/connector:rust-sha-415531a
+    # `$$` throughout: compose interpolates a bare `$VAR`/`${VAR}` in this
+    # file's own text against the HOST's environment at `up` time — `$$` is
+    # what survives that pass as a literal `$`, so the shell below sees it,
+    # not compose. Same precedent as the relay's and store's own loops.
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        set -eu
+        REFRESH_SECS="$${SWAP_ANNOUNCE_REFRESH_SECS:-240}"
+        while true; do
+          echo "[swap-announce] publishing g.toon.swap.maker via g.toon.relay..."
+          if /usr/local/bin/connector announce \
+            --config /app/config/connector-swap-announce.toml \
+            https://proxy.relay.devnet.toonprotocol.dev/ilp; then
+            echo "[swap-announce] OK -- g.toon.swap.maker published"
+          else
+            echo "[swap-announce] FAILED rc=$$? -- g.toon.swap.maker NOT published; retrying in $${REFRESH_SECS}s"
+          fi
+          sleep "$$REFRESH_SECS"
+        done
+    environment:
+      SWAP_ANNOUNCE_REFRESH_SECS: '240'
+    volumes:
+      - ./connector-rust.swap-announce.toml:/app/config/connector-swap-announce.toml:ro
+      # The maker's OWN identity + settlement keys — see
+      # ./connector-rust.swap-announce.toml's header for why these must be
+      # the SAME scalars the swap-node container derives from its mounted
+      # mnemonic, not fresh material of their own.
+      - ./swap-signer.key:/app/data/swap-signer.key:ro
+      - ./swap-settlement.key:/app/data/swap-settlement.key:ro
+    restart: unless-stopped

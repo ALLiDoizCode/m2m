@@ -79,7 +79,7 @@ on:
         default: box-status
         options: [box-status, config-read, pin-verify, config-apply, restart, deploy, announce]
       service:
-        description: "restart/deploy: compose service name (connector-rust, relay, store, nginx, faucet)"
+        description: "restart/deploy: compose service name (connector-rust, relay, store, nginx, faucet, swap-node on relay). announce: which resident publisher to force -- announce (default) or swap-announce (relay only, issue #983)."
         type: string
         required: false
         default: "connector-rust"
@@ -216,21 +216,38 @@ jobs:
           # `announcer` sidecar instead of this loop -- removed along with
           # the rest of `infra/linode-node/` by issue #872 (toon-meta#310 /
           # toon-meta#313's live cutover); it is no longer a valid `$BOX`.
+          #
+          # The relay's own COMPOSE also carries docker-compose.relay.swap.yml
+          # (issue #983): the rolling-swap maker sidecar lives ONLY on the
+          # relay box (co-located with the box it announces through), so
+          # `service=swap-node` resolves for `restart`/`deploy` there and
+          # nowhere else -- `deploy`/`restart` against `ario`/`faucet` with
+          # that service name fails the same way any other undefined service
+          # name would (compose itself refuses it), which is the correct
+          # refusal: there is no swap-node service to target on those boxes.
+          # COMPOSE_SWAP_ANNOUNCE is the maker's OWN announce overlay --
+          # separate from COMPOSE_ANNOUNCE (the box's own kind:10032) because
+          # the two loops sign under two different identities and must be
+          # forceable independently. Empty wherever the maker sidecar does
+          # not exist, same convention as COMPOSE_ANNOUNCE on the faucet box.
           case "$BOX" in
             relay)
               INFRA_DIR=infra/linode-relay
-              COMPOSE="docker compose -f infra/linode-relay/docker-compose.relay.yml -f infra/linode-relay/docker-compose.relay.rust.yml"
+              COMPOSE="docker compose -f infra/linode-relay/docker-compose.relay.yml -f infra/linode-relay/docker-compose.relay.rust.yml -f infra/linode-relay/docker-compose.relay.swap.yml"
               COMPOSE_ANNOUNCE="$COMPOSE -f infra/linode-relay/docker-compose.relay.announce.yml"
+              COMPOSE_SWAP_ANNOUNCE="$COMPOSE -f infra/linode-relay/docker-compose.relay.swap-announce.yml"
               ;;
             ario)
               INFRA_DIR=infra/linode-store
               COMPOSE="docker compose -f infra/linode-store/docker-compose.store.yml -f infra/linode-store/docker-compose.store.rust.yml"
               COMPOSE_ANNOUNCE="$COMPOSE -f infra/linode-store/docker-compose.store.announce.yml"
+              COMPOSE_SWAP_ANNOUNCE=""
               ;;
             faucet)
               INFRA_DIR=infra/linode-faucet
               COMPOSE="docker compose -f infra/linode-faucet/docker-compose.faucet.yml"
               COMPOSE_ANNOUNCE=""
+              COMPOSE_SWAP_ANNOUNCE=""
               ;;
           esac
           CONF_REL="$INFRA_DIR/connector-rust.toml"
@@ -417,17 +434,38 @@ jobs:
               ;;
 
             announce)
-              if [ -z "$COMPOSE_ANNOUNCE" ]; then
-                echo "::error::box '$BOX' runs no resident announce publisher (the faucet announces nothing)"
+              # `service` (default `connector-rust`, meaningful for
+              # restart/deploy) doubles here as WHICH resident announce loop
+              # to force: the box's own kind:10032 (`announce`, the
+              # default -- left at `connector-rust` a dispatch behaves
+              # exactly as it did before this branch existed) or the relay's
+              # swap-maker sidecar (`swap-announce`, issue #983). Two
+              # different identities publish two different addresses, so
+              # they must be forceable independently rather than sharing one
+              # verdict line.
+              ANNOUNCE_SERVICE="$SERVICE"
+              if [ "$ANNOUNCE_SERVICE" = "connector-rust" ]; then
+                ANNOUNCE_SERVICE="announce"
+              fi
+              case "$ANNOUNCE_SERVICE" in
+                announce)      ANNOUNCE_COMPOSE="$COMPOSE_ANNOUNCE" ;;
+                swap-announce) ANNOUNCE_COMPOSE="$COMPOSE_SWAP_ANNOUNCE" ;;
+                *)
+                  echo "::error::operation 'announce' only knows services 'announce' and 'swap-announce', got '$ANNOUNCE_SERVICE'"
+                  exit 1
+                  ;;
+              esac
+              if [ -z "$ANNOUNCE_COMPOSE" ]; then
+                echo "::error::box '$BOX' runs no resident '$ANNOUNCE_SERVICE' publisher"
                 exit 1
               fi
               if [ "$APPLY" != "true" ]; then
-                say "**Dry run.** Would force \`$BOX\`'s resident announce publisher to publish now (\`up -d announce && restart announce\`), then fail unless its log prints \`[announce] OK\` within 90s."
+                say "**Dry run.** Would force \`$BOX\`'s resident \`$ANNOUNCE_SERVICE\` publisher to publish now (\`up -d $ANNOUNCE_SERVICE && restart $ANNOUNCE_SERVICE\`), then fail unless its log prints \`[$ANNOUNCE_SERVICE] OK\` within 90s."
                 say "Announce is a PAID write through the node's own routing (ADR 0030)."
                 exit 0
               fi
               # ADR 0030: an operator announces a node; the node never does.
-              # The `announce` service is a RESIDENT loop publisher --
+              # Every announce service is a RESIDENT loop publisher --
               # publish, sleep, repeat (its overlay's own header explains
               # why) -- NOT a one-shot: `run --rm` would hang this job on
               # the loop while standing up a SECOND publisher issuing
@@ -436,7 +474,7 @@ jobs:
               # at its first iteration: one publish, now, from the box that
               # holds the identity key -- and the loop's greppable verdict
               # line is the read-back this file's doctrine demands.
-              sshbox "cd $REMOTE_REPO && $COMPOSE_ANNOUNCE up -d announce && $COMPOSE_ANNOUNCE restart announce"
+              sshbox "cd $REMOTE_REPO && $ANNOUNCE_COMPOSE up -d $ANNOUNCE_SERVICE && $ANNOUNCE_COMPOSE restart $ANNOUNCE_SERVICE"
               # Anchor the read-back at the restarted container's own
               # StartedAt, never a relative window: `restart` reuses the
               # container and its log file, and the loop publishes every
@@ -444,27 +482,27 @@ jobs:
               # FAILED) printed BEFORE the restart -- a verdict about a
               # publish this run never triggered (issue #948). Every line
               # `--since $STARTED_AT` matches is from the forced run.
-              STARTED_AT=$(sshbox "cd $REMOTE_REPO && docker inspect -f '{{.State.StartedAt}}' \$($COMPOSE_ANNOUNCE ps -q announce)")
+              STARTED_AT=$(sshbox "cd $REMOTE_REPO && docker inspect -f '{{.State.StartedAt}}' \$($ANNOUNCE_COMPOSE ps -q $ANNOUNCE_SERVICE)")
               if [ -z "$STARTED_AT" ]; then
-                echo "::error::could not read the restarted announce container's StartedAt"
+                echo "::error::could not read the restarted $ANNOUNCE_SERVICE container's StartedAt"
                 exit 1
               fi
               VERDICT=""
               LOGS=""
               for i in $(seq 1 18); do
                 sleep 5
-                LOGS=$(sshbox "cd $REMOTE_REPO && $COMPOSE_ANNOUNCE logs --since '$STARTED_AT' announce" 2>/dev/null || true)
-                if echo "$LOGS" | grep -q '\[announce\] OK'; then VERDICT=ok; break; fi
-                if echo "$LOGS" | grep -q '\[announce\] FAILED'; then VERDICT=failed; break; fi
+                LOGS=$(sshbox "cd $REMOTE_REPO && $ANNOUNCE_COMPOSE logs --since '$STARTED_AT' $ANNOUNCE_SERVICE" 2>/dev/null || true)
+                if echo "$LOGS" | grep -q "\[$ANNOUNCE_SERVICE\] OK"; then VERDICT=ok; break; fi
+                if echo "$LOGS" | grep -q "\[$ANNOUNCE_SERVICE\] FAILED"; then VERDICT=failed; break; fi
               done
               say '```'
               echo "$LOGS" | tail -10 | tee -a "$GITHUB_STEP_SUMMARY"
               say '```'
               if [ "$VERDICT" != "ok" ]; then
-                echo "::error::announce publisher did not report '[announce] OK' (verdict: ${VERDICT:-none within 90s})"
+                echo "::error::$ANNOUNCE_SERVICE publisher did not report '[$ANNOUNCE_SERVICE] OK' (verdict: ${VERDICT:-none within 90s})"
                 exit 1
               fi
-              say "**Published and verified** — the resident publisher reported \`[announce] OK\`."
+              say "**Published and verified** — the resident \`$ANNOUNCE_SERVICE\` publisher reported \`[$ANNOUNCE_SERVICE] OK\`."
               ;;
           esac
 

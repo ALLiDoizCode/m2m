@@ -1,0 +1,48 @@
+{
+  "_comment": "TOON devnet — rolling-swap maker config skeleton (issue #983, toon-meta#402). Consumed by `toon-swap --config` (toon-protocol/swap packages/swap/src/cli.ts) inside the swap-node service (./docker-compose.relay.swap.yml). Standalone-maker wiring per toon-meta#402's proven rig: no `connector`/`connectorUrl` set, so the CLI auto-creates an embedded, parentless ConnectorNode gated on `btpServerPort` — the direct-dial model swap#105 proved, where a client reaches this maker by dialing its public `btpEndpoint` rather than through the relay's own routing table. `mnemonic`/`secretKey` are deliberately ABSENT: identity is generated on-box (never committed) and injected as `SWAP_MNEMONIC` by ./docker-compose.relay.swap.yml's entrypoint, which reads it from a mounted key-file path — see docs/operators/swap-node-bringup.md.",
+  "swapPairs": [
+    {
+      "from": { "assetCode": "USDC", "assetScale": 6, "chain": "evm:84532" },
+      "to": { "assetCode": "USDC", "assetScale": 6, "chain": "evm:84532" },
+      "rate": "1.0"
+    }
+  ],
+  "_swapPairs_comment": "PLACEHOLDER pair, same-chain USDC at parity — enough for the CLI's non-empty-swapPairs precondition and for `docker compose config`/CLI-boot smoke testing. The real trading pair(s) this maker quotes (which chain(s) it accepts leg-A payment on, at what rate) are a business decision toon-meta#402 does not pin; a human must replace this before the maker is useful. See docs/operators/swap-node-bringup.md's 'What this runbook does not decide'.",
+  "chains": ["evm"],
+  "channels": {
+    "evm:84532": [
+      {
+        "channelId": "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeadc0de",
+        "cumulativeAmount": "0",
+        "nonce": "0",
+        "updatedAt": 0
+      }
+    ]
+  },
+  "_channels_comment": "channelId is the clearly-marked placeholder convention this repo uses elsewhere for a not-yet-opened on-chain channel (issues #822/#853/#871's `0xdead...` values). Replaced with the REAL leg-B RollingSwapChannel channel id once a human opens and funds it (docs/operators/swap-node-bringup.md step 'Leg-B channel + gas').",
+  "inventory": {
+    "evm:84532": "0"
+  },
+  "_inventory_comment": "0 until the leg-B channel above is actually funded — an unfunded maker quoting nonzero inventory would issue claims it cannot honor.",
+  "chainProviders": [
+    {
+      "chainType": "evm",
+      "chainId": "evm:84532",
+      "rpcUrl": "https://base-sepolia-rpc.publicnode.com",
+      "registryAddress": "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1",
+      "tokenAddress": "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce",
+      "channelAddress": "0xd329aBf86ceae23F904641F992ca90e3721FeF83"
+    }
+  ],
+  "_chainProviders_comment": "registryAddress/tokenAddress are the SAME TokenNetworkRegistry/USDC deployment infra/linode-relay/connector-rust.toml's own [settlement.evm] uses (fleet-wide agreement, ADR: a claim resolves against one deployment). channelAddress is the deployed RollingSwapChannel (issue #974/#973) — the leg-B contract this maker signs v2 EIP-712 balance-proof claims against. `keyId` is left unset: swap-node.ts defaults it to `settlementPrivateKey` below.",
+  "settlementPrivateKey": "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeadc0de",
+  "_settlementPrivateKey_comment": "Same `0xdead...` placeholder-policy value as `channels` above, chosen so it passes the CLI's `0x[0-9a-fA-F]{64}` boot-time format check but is obviously not a real key. This is NOT overwritten by the `SWAP_MNEMONIC` env overlay — packages/swap/src/cli.ts's `applyEnvOverlay` only sets `mnemonic`/`secretKey` from env, never `settlementPrivateKey` — so a box that boots with only SWAP_MNEMONIC set would sign leg-B claims with THIS placeholder scalar, not the derived key, and every claim would be worthless. toon-meta#402's proven wiring requires the BIP-44 account-index-2 key here (the same key `deriveSwapNodeKeys`/D12-011 derives, distinct from the index-0 Nostr identity `mnemonic` yields), and the CLI has no 'derive index-2 and use it here' knob yet (open gap, packages/swap/src/cli.ts). A human must compute that key from the on-box mnemonic and set it in a box-local, UNCOMMITTED copy of this file before the maker can issue a redeemable claim. See docs/operators/swap-node-bringup.md.",
+  "relayUrls": [],
+  "_relayUrls_comment": "Empty: this maker never writes to a Nostr relay directly (the SimplePool/relayUrls publish path is refused by a pay-to-write TOON relay anyway — see swap-node.ts's `peerInfoIlpDestination` doc). Its kind:10032 is instead published by the SEPARATE paid-announce loop, ./docker-compose.relay.swap-announce.yml, mirroring how infra/linode-relay/docker-compose.relay.announce.yml and infra/linode-store/docker-compose.store.announce.yml announce THEIR nodes. (swap-node.ts's own `peerInfoIlpDestination`/`peerInfoPricePerByte` boot-time self-publish is NOT used here: packages/swap/src/cli.ts's CliRawConfig does not forward either field from the JSON config yet, so it is not reachable via `toon-swap --config` until swap#124 closes that CLI gap.)",
+  "btpServerPort": 3400,
+  "ilpAddress": "g.toon.swap.maker",
+  "btpEndpoint": "wss://proxy.relay.devnet.toonprotocol.dev/swap/ilp/btp",
+  "advertisedAsset": { "assetCode": "USDC", "assetScale": 6 },
+  "statePath": "/app/state/swap-node-state.json",
+  "blsPort": 8080
+}
