@@ -30,14 +30,17 @@
 #
 # ── The image tag is a PENDING placeholder ──────────────────────────────────
 # `PENDING-swap-124` names no real image. toon-protocol/swap#124 (GHCR
-# publish workflow for the maker runtime) had not landed a pushed tag as of
-# this change — see that issue for the moving/sha tag convention this line
-# must be repointed to once it does, mirroring how this box's own
-# `connector-rust` image is pinned by sha
-# (docker-compose.relay.rust.yml's own comment on `EXPECTED_CONNECTOR_TAG`).
-# `docker compose config` validates this file's shape without resolving the
-# tag — Compose does not need the image to exist to parse the file — but
-# `up -d swap-node` will fail to pull until this is repointed.
+# publish workflow for the maker runtime) has an open, unmerged PR
+# (toon-protocol/swap#125) as of this change — no pushed tag exists yet.
+# That PR's `publish-swap-image.yml` tags `ghcr.io/toon-protocol/swap` as
+# `sha-<short-sha>` (immutable) and `main` (floating, default-branch only);
+# repoint this line to the immutable `sha-` tag once a run has actually
+# pushed one, mirroring how this box's own `connector-rust` image is pinned
+# by sha (docker-compose.relay.rust.yml's own comment on
+# `EXPECTED_CONNECTOR_TAG`). `docker compose config` validates this file's
+# shape without resolving the tag — Compose does not need the image to exist
+# to parse the file — but `up -d swap-node` will fail to pull until this is
+# repointed.
 #
 # ── Identity + key material — generated on-box, never committed ────────────
 # `./swap-mnemonic.secret` is a BIP-39 mnemonic, the SAME convention
@@ -48,9 +51,14 @@
 # `SWAP_MNEMONIC` rather than relying on an image-side `_FILE` convention
 # this container's own entrypoint may or may not support — swap#124's own
 # text only commits to "a mounted file or SWAP_MNEMONIC", so this file does
-# the file-to-env bridge itself and calls `toon-swap --config` directly,
-# which is guaranteed correct regardless of what the image's default
-# ENTRYPOINT ends up being.
+# the file-to-env bridge itself and calls `node /app/dist/cli.js --config`
+# directly rather than the `toon-swap` bin. toon-protocol/swap#124's runtime
+# Dockerfile (toon-protocol/swap PR #125, unmerged as of this change) has its
+# own ENTRYPOINT invoke `node dist/cli.js` from WORKDIR `/app` and never puts
+# `node_modules/.bin` on PATH, so `toon-swap` is not guaranteed to resolve as
+# a bare command even though `package.json` declares it as a bin — matching
+# the Dockerfile's own invocation is the one assumption this file needs to
+# hold about the (still-unpublished) image's contents.
 #
 # The SAME mnemonic derives BOTH identities this maker needs (toon-meta#402):
 #   * index 0 (NIP-06) — the Nostr/node identity `ilpAddress`'s pubkey and
@@ -82,7 +90,7 @@ services:
       - |
         set -eu
         export SWAP_MNEMONIC="$$(cat /app/keys/swap-mnemonic)"
-        exec toon-swap --config /app/config/swap.config.json
+        exec node /app/dist/cli.js --config /app/config/swap.config.json
     volumes:
       - ./swap.config.json:/app/config/swap.config.json:ro
       # Raw BIP-39 mnemonic, FRESH on-box material (see header) — never

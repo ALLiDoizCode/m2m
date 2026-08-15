@@ -41,9 +41,13 @@ material or funds this environment does not have.
 
 - **The maker runtime image.** `docker-compose.relay.swap.yml` pins
   `ghcr.io/toon-protocol/swap:PENDING-swap-124` — a placeholder. toon-protocol/swap#124 (the GHCR
-  publish workflow for the maker image) had not landed a pushed tag as of this change. Repoint the
-  `image:` line to the real tag once it does; nothing else in this unit depends on the image's
-  contents beyond "the `toon-swap` binary is on `PATH`".
+  publish workflow for the maker image) has an open, unmerged PR (toon-protocol/swap#125) as of
+  this change; no pushed tag exists yet. Repoint the `image:` line to the real `sha-<short-sha>` tag
+  once `publish-swap-image.yml` actually pushes one. The compose service's command invokes
+  `node /app/dist/cli.js --config ...` directly (not the `toon-swap` bin) — matching PR #125's own
+  Dockerfile `ENTRYPOINT`, which does the same and never puts `node_modules/.bin` on `PATH` — so
+  nothing else in this unit depends on the image's contents beyond that file existing at that path
+  under `WORKDIR /app`.
 - **`swap.config.json`'s `settlementPrivateKey` is an obviously-fake placeholder.**
   `packages/swap/src/cli.ts`'s env overlay (`SWAP_MNEMONIC`) does **not** derive or set this field —
   it only sets `mnemonic`/`secretKey`. A human must compute the on-box mnemonic's BIP-44
