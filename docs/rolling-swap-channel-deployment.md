@@ -1,0 +1,145 @@
+# EVM devnet deployment: `RollingSwapChannel`
+
+The committed runbook for connector#973 -- deploying the rolling-swap chain-B
+settlement contract (`packages/contracts/src/RollingSwapChannel.sol`,
+connector#315/#324) to Base Sepolia devnet and recording its address. Read
+this before dispatching the workflow it names; `docs/evm-deployment.md` is the
+sibling runbook for the `TokenNetwork` ERC-2771 cutover and follows the same
+shape.
+
+## Status: NOT YET DEPLOYED
+
+`RollingSwapChannel` is merged and has never been broadcast anywhere -- no
+address for it exists in `packages/contracts/deployments.json`,
+`packages/contracts/deployments/base-sepolia.md`, or any infra config. The
+epic this closes is toon-meta#394 ("the rolling swap cannot complete a
+packet"); this repo's slice (connector#973, "T4") is one of two unblocked
+roots, run in parallel with the `swap` repo's signer migration (T1).
+
+**Blocked on workflow dispatch**, not on missing tooling: the deploy verb
+below exists and is reviewed, but this session's token has no
+`actions:write` (`gh api repos/toon-protocol/connector --jq .permissions` ->
+`push:false`; `gh workflow run` would 403). Per this repo's own doctrine
+("add the verb, don't ask for a credential" -- `docs/adr/README.md`), the
+verb was added rather than escalated; a session with a token that can
+dispatch workflows still needs to run it. See "What's left" below.
+
+## Why a workflow, not a local `forge script --broadcast`
+
+Unlike the mainnet policy in `packages/contracts/README.md` (issues
+#388/#405 -- no funded deployer key ever reaches CI, broadcasts stay
+human-only), this is a **devnet** deploy against Base Sepolia with a devnet
+mock USDC token, the same class of operation `.github/workflows/
+funded-ops.yml`'s existing `deposit`/`open-channel` verbs already perform
+with a CI-derived key. connector#973's own text asks for exactly this:
+"Privileged devnet operations go through the reviewed funded-ops workflow
+rather than credentials held by the runner." No deployer private key is ever
+generated for or held by an agent; `E2E_DEV_MNEMONIC` reaches only the
+GitHub-hosted runner executing the reviewed workflow file, same boundary as
+every other write in that file.
+
+## The deploy
+
+`.github/workflows/funded-ops.yml`'s `deploy-rolling-swap-channel` operation
+runs the already-committed `packages/contracts/script/
+DeployRollingSwapChannel.s.sol` via `forge script` against Base Sepolia
+(`RPC_URL`/`CHAIN_ID` are the same job-level constants the other verbs use),
+binding it to the fleet's existing devnet mock USDC
+(`TOKEN = 0x49beE1Bca5d15Fb0963117923403F9498119a9Ce`) and a challenge period
+of `challenge_period` seconds (default `86400` = 1 day, the contract's own
+floor).
+
+Dry run first (reads chain state, simulates the deploy, sends nothing):
+
+```shell
+gh workflow run funded-ops.yml \
+  -f operation=deploy-rolling-swap-channel \
+  -f account_index=0 \
+  -f challenge_period=86400 \
+  -f apply=false
+```
+
+Read the run's summary (`gh run view --log`), confirm the deployer address
+holds enough Base-Sepolia ETH for gas (the dry run prints its balance), then
+re-dispatch with `apply=true` to broadcast:
+
+```shell
+gh workflow run funded-ops.yml \
+  -f operation=deploy-rolling-swap-channel \
+  -f account_index=0 \
+  -f challenge_period=86400 \
+  -f apply=true
+```
+
+### What the apply run verifies before calling the job green
+
+Per this repo's own rule that a transaction receipt is never the authority
+(connector#907), the workflow does not stop at a mined deploy transaction. It
+reads the deployed address out of the script's own
+`broadcast/DeployRollingSwapChannel.s.sol/84532/run-latest.json` (never out
+of console text), then calls the **live deployment**:
+
+- `token()` / `challengePeriod()` equal what was requested.
+- `domainSeparator()` equals an independently-computed EIP-712 domain hash for
+  the domain `name="RollingSwapChannel"`, `version="2"`, `chainId=84532`,
+  `verifyingContract=<the deployed address>` -- connector#973 AC3.
+- `claimDigest(...)` for the exact sample `docs/rolling-swap-v2-digest-spec.md`'s
+  golden vector uses (`channelId=0x5b`, `cumulativeAmount=24_000_000`,
+  `nonce=24`, `recipient=0x…DEADBEEF`) equals the same `ClaimBalanceProof`
+  struct hashed off-chain by ethers' `TypedDataEncoder` for THIS deployment's
+  real `(chainId, address)` pair -- connector#973 AC5. This is deliberately
+  not a comparison against the spec's own pinned digest literal: that fixture
+  is deployed at a synthetic address on chainId 8453 in
+  `packages/contracts/test/RollingSwapChannel.t.sol`, unrelated to any real
+  devnet address. What's proven here is that the same algorithm agrees
+  on-chain and off-chain for the pair that actually exists.
+- `updateBalance(...)` is called (a static call, no state change) against a
+  channel id that was never opened and must revert with the contract's own
+  `InvalidChannelState()` -- proving the entrypoint is live on-chain, not
+  merely present in the compiled ABI -- connector#973 AC4.
+
+A run that reaches "✅ RollingSwapChannel deployed and verified against the
+live contract" in its job summary has satisfied AC3, AC4 and AC5 for the
+address it prints.
+
+## Bookkeeping that must be updated once a real address exists
+
+Once a dispatch above succeeds, before this ticket is closed:
+
+1. **`packages/contracts/deployments.json`** -- add a `RollingSwapChannel`
+   entry under `networks.base-sepolia.contracts`, following the existing
+   entries' shape (`address`, `deployer`, `deployTxHash`, `blockNumber`,
+   `deployedAt`, a free-text `note` naming the token and challenge period).
+2. **`packages/contracts/deployments/base-sepolia.md`** -- add a dated
+   section recording the broadcast, mirroring the "ERC-2771 cutover
+   deployment" section's shape (network, RPC, deployer, block, script, a
+   table of the deployed address and its deploy tx, and the on-chain
+   verification performed -- the workflow's job summary has all of it).
+3. **This document's "Status" section** -- replace "NOT YET DEPLOYED" with
+   the broadcast date, deployer, block, and address, mirroring
+   `docs/evm-deployment.md`'s "Status: BROADCAST …" pattern.
+4. **Where operators and kind:10032 announces can reference it** -- AC2
+   asks for the address to be keyed by the same chain-key form used
+   elsewhere (`evm:84532`, matching `docs/rolling-swap-v2-digest-spec.md`'s
+   "derive both from one source" note and the live announce's own
+   `tokenNetworks["evm:84532"]` key). That keying lives in steps 1-3 above;
+   no infra `connector-rust.toml` in this repo carries a
+   `RollingSwapChannel` field to populate yet -- **no swap node is live**
+   (toon-meta#394's own honest-notes section: zero swap pairs across 5,000
+   live announces), so there is nothing here to repoint. Advertising the
+   address in a live announce is `swap#102` ("swap node advertises its
+   verifying contract"), which lives in the `swap` repo and is blocked on
+   `swap#101`, not on this deploy.
+
+## What's left
+
+- Dispatch the `deploy-rolling-swap-channel` dry run, confirm the deployer
+  holds Base-Sepolia gas ETH, then dispatch with `apply=true` -- needs a
+  token with `actions:write` on this repo, which this session does not
+  have.
+- Complete the four bookkeeping steps above against the resulting real
+  address.
+- Once done, this satisfies connector#973 in full: AC1 (deployed via
+  funded-ops), AC2 (recorded, keyed `evm:84532`), AC3-AC5 (proven by the
+  workflow's own post-deploy verification), AC6 (this document + the
+  workflow are the reproducible record).
