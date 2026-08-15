@@ -116,6 +116,14 @@ default, the key is absent entirely — an announce never says `"both"`. **Do no
 for this**: a value set by hand here could disagree with the policy the client edge actually
 enforces, which is the whole failure the field exists to close.
 
+**`solana_chain_id` is the one exception to "everything else comes from the running
+configuration".** It is a static default (`solana:devnet`) that nothing cross-checks against the
+`rpc_url`, `program_id` and `token_address` the same announce publishes beside it, so a node
+repointed at another cluster keeps labelling the new cluster's facts with the old cluster's name
+until an operator sets this by hand. Legal values are `solana:devnet`, `solana:testnet` and
+`solana:mainnet`. Issue #981 tracks deriving it from `[settlement.solana]` and refusing on
+disagreement, which would retire the field as anything but an override.
+
 ```toml
 [announce]
 addresses     = ["g.toon.ario"]          # primary first; required
@@ -128,7 +136,8 @@ btp_endpoint  = "wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp"
 # route_publish / route_store            # override the `.relay`/`.store` suffix heuristic
 # asset_code = "USDC"                    # default
 # asset_scale = 6                        # default
-# solana_chain_id = "solana:devnet"      # default; qualifies the greeting's bare "solana"
+# solana_chain_id = "solana:devnet"      # default; qualifies the greeting's bare "solana".
+#                                        # one of solana:devnet | solana:testnet | solana:mainnet
 # ttl_secs = 600                         # default; NIP-40 expiration
 # identity_key_file = "/root/keys/announce.key"  # carry over a durable Nostr identity; see below
 
