@@ -9,9 +9,10 @@ name: Publish connector-rust image
 # `rust-release` (#989, part of toon-meta#403's fleet-wide :release +
 # Watchtower convention) is the moving target a box's label-scoped
 # Watchtower would follow. Adding the tag here does NOT wire any box to
-# follow it -- the relay+store boxes intentionally pin `rust-sha-1204220`
-# (connector#972, an open deliberate hold) while main is ahead, and
-# repointing them is a separate, gated step.
+# follow it -- the relay+store boxes intentionally stay on an immutable
+# `rust-sha-` pin (#972, an open deliberate hold) while main is ahead, and
+# repointing them is a separate, gated step. `devnet_configs_load.rs`
+# asserts that committed overlays pin `rust-sha-`, never a floating tag.
 #
 # NAME HISTORY (reversal, connector#633): #487 originally shipped this as a
 # SEPARATE package `connector-rust`, to avoid colliding with the TypeScript

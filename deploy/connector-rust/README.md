@@ -22,11 +22,11 @@ workflow header for why the Rust binary reclaimed the canonical name.
 
 Tags:
 
-| Tag                    | Meaning                                                                                                                                                                                                                                                                                |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `rust-sha-<short-sha>` | Immutable — pins the exact commit the binary was built from. Use this for any deployment that needs a reproducible pin (e.g. #490's devnet overlay).                                                                                                                                   |
-| `rust-main`            | Floating — always the most recent build off `main`. Convenience only; do not pin a deployment to it.                                                                                                                                                                                   |
-| `rust-release`         | Floating — same content as `rust-main` (moves on every green push to `main`). This is the tag a box's label-scoped Watchtower would follow under toon-meta#403's fleet-wide `:release` convention; no box is wired to it yet (connector#989) — that repoint is a separate, gated step. |
+| Tag                    | Meaning                                                                                                                                                                                                                                                      |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `rust-sha-<short-sha>` | Immutable — pins the exact commit the binary was built from. Use this for any deployment that needs a reproducible pin (e.g. #490's devnet overlay).                                                                                                         |
+| `rust-main`            | Floating — always the most recent build off `main`. Convenience only; do not pin a deployment to it.                                                                                                                                                         |
+| `rust-release`         | Floating — moves with `rust-main`, same build, same content. This is the tag a box's label-scoped Watchtower would follow under toon-meta#403's fleet-wide `:release` convention; no box is wired to it yet (#989) — that repoint is a separate, gated step. |
 
 There is no semver tag series here: no crate under `crates/` has a release
 process yet, and inventing one for the image alone would claim a stability
