@@ -240,9 +240,11 @@ program_id = "…"            # the base58 program id this channel was opened un
 
 A Solana row with no `program_id` fails load: unlike an EVM claim's `chainId`/`tokenNetworkAddress`,
 a Solana claim's `programId` is a required wire field, so there is no "render without it" fallback.
-This row's `program_id` reaches claim rendering; `ClaimBook`'s Solana verification key and signer
-still have no config wiring (a later issue's job), so this alone does not yet make the peering able
-to accept or sign a claim on that channel.
+This row's `program_id` reaches claim rendering, and (issue #998) `channel_account`/`counterparty_key`
+reach `ClaimBook`'s Solana verification key the same way an EVM row's `channel_id`/`counterparty_key`
+do -- a Solana row is wired into `accept_inbound` and outbound signing exactly like an EVM one, under
+the `[settlement.solana]` key as its outbound identity (the Solana counterpart of the EVM peer-claim
+signer, ADR 0024).
 
 ### `credential` — `secret_file` on a deployed node, `secret` only when the config is private
 

@@ -72,10 +72,18 @@
 //!
 //! Peer claims are EIP-712 balance proofs; `ClaimBook` verifies nothing else
 //! here. `[[peer_channels]]` itself grew a Solana shape (issue #759,
-//! `program_id` alongside `channel_account`/`counterparty_key`), but
-//! `ClaimBook` still has no `Connector` builder wiring a Solana row's
-//! verification key or signer from config -- issue #759's own follow-up
-//! note -- so this fixture's chain setup stays EVM. Everything below is
+//! `program_id` alongside `channel_account`/`counterparty_key`), and issue
+//! #998 gave `connector-cli::runtime::wire_peer_channels` the Solana arm
+//! that wires it into `ClaimBook` (`Connector::with_solana_channel`/
+//! `with_solana_signer`) -- so a Solana row is no longer inert at the
+//! config level, unit- and connector-level-tested in
+//! `connector-runtime::connector::tests::
+//! forwarding_to_a_solana_peer_signs_and_is_accepted_as_a_solana_claim` and
+//! `connector-cli::runtime::tests::solana_peer_channels_reach_the_claim_ledger`.
+//! This fixture's chain setup stays EVM regardless: proving it here needs a
+//! disposable `solana-test-validator` running the real `payment-channel`
+//! program alongside `anvil` in the same fixture, which is its own,
+//! separately-scoped follow-up, not part of #998. Everything below is
 //! therefore parameterised by *carriage*, never by chain, and the chain
 //! setup is one function ([`PeerFixture::spawn`]). A future issue extends
 //! this file by giving that function a Solana arm and the claim signer a

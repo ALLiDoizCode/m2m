@@ -15,7 +15,7 @@ use connector_domain::{
 };
 use connector_settlement::{ChannelId, ChannelStatus, Claim, SettlementBackend, SettlementError};
 use connector_signer::giftwrap::{derive_fulfillment, open_request, seal_response};
-use connector_signer::{Address, Signer};
+use connector_signer::{Address, Ed25519Signer, Signer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::Instrument;
@@ -23,7 +23,8 @@ use tracing::Instrument;
 use crate::app_client::{AppClient, AppOutcome};
 use crate::attribution::{apply_payment_attribution, PaymentAttribution};
 use crate::claim::{
-    ChannelDomain, ClaimAckOutcome, ClaimBook, ClaimSignature, InvalidChannelId, WireClaim,
+    ChannelDomain, ClaimAckOutcome, ClaimBook, ClaimSignature, InvalidChannelId,
+    InvalidSolanaChannel, WireClaim,
 };
 use crate::clock::Clock;
 use crate::journal::{Journal, JournalError};
@@ -953,6 +954,32 @@ impl Connector {
         Ok(self)
     }
 
+    /// Configure `channel_account`'s Solana peer binding (issue #732/#998):
+    /// the base58 Ed25519 public key whose signature this node accepts on a
+    /// claim for it. The Solana counterpart of both
+    /// [`Connector::with_channel_verification_key`] and
+    /// [`Connector::with_channel_domain`] in one call -- see
+    /// [`ClaimBook::set_solana_channel`] for why the two cannot be
+    /// separated on this chain.
+    pub fn with_solana_channel(
+        mut self,
+        channel_account: impl Into<String>,
+        counterparty_public_key: &str,
+    ) -> Result<Self, InvalidSolanaChannel> {
+        self.claims
+            .set_solana_channel(channel_account, counterparty_public_key)?;
+        Ok(self)
+    }
+
+    /// Configure this node's own ed25519 identity (issue #742/#998), used to
+    /// sign every outbound claim on a channel registered via
+    /// [`Connector::with_solana_channel`] -- the Solana counterpart of
+    /// [`Connector::with_signer`].
+    pub fn with_solana_signer(mut self, signer: Arc<dyn Ed25519Signer>) -> Self {
+        self.claims.set_solana_signer(signer);
+        self
+    }
+
     /// Configure the settlement backend a node's channel-lifecycle writes
     /// (issue #459) are driven against on `chain` -- callable once per
     /// chain (issue #630), so a node with both `[settlement.evm]` and
@@ -1604,6 +1631,18 @@ impl Connector {
                 .read()
                 .expect("recognized channels lock poisoned")
                 .contains(channel_id)
+    }
+
+    /// Whether `channel_account` is a Solana peer-wire channel this
+    /// connector recognizes -- the Solana counterpart of
+    /// [`Connector::recognizes_channel`] (issue #732/#998). A separate
+    /// query rather than folded into `recognizes_channel`: an EVM
+    /// `channel_id` and a Solana `channel_account` are drawn from disjoint
+    /// spellings (`0x` + 64 hex vs. base58), so there is no name either
+    /// chain's config could hand this connector that the other chain would
+    /// also recognize.
+    pub fn recognizes_solana_channel(&self, channel_account: &str) -> bool {
+        self.claims.has_solana_channel(channel_account)
     }
 
     /// Entry point for a probe -- an ordinary packet a sender expects to be
@@ -4170,6 +4209,94 @@ mod tests {
         // flat fee of 7.
         assert_eq!(second_hop_app_client.deliveries().len(), 1);
         assert_eq!(first_hop.claims()[0].cumulative_amount, 93);
+    }
+
+    /// Issue #998: a `[[peer_channels]]` row on Solana must wire `ClaimBook`
+    /// exactly as an EVM row does (`forwarding_to_a_peer_subtracts_that_
+    /// relations_flat_fee`, above), or a Solana-settled peering can load
+    /// and never exchange a claim. `with_solana_signer` +
+    /// `with_peer_claim_channel` + `with_solana_channel` on the payer, and
+    /// `with_solana_channel` alone on the receiver (the Solana counterpart
+    /// of `with_channel_verification_key` -- there is no separate domain
+    /// call, see `ClaimBook::set_solana_channel`'s own doc), together prove
+    /// both directions: an outbound claim signed under the payer's own
+    /// ed25519 identity, and an inbound claim the receiver actually
+    /// verified and recorded a watermark for -- not merely one that was
+    /// sent.
+    ///
+    /// A claim rides the packet *after* the one it pays for
+    /// (peer-wire-spec.md §3.3/§3.5, `record_fulfillment`'s own doc), so
+    /// this sends two PREPAREs: the first only arms the outbound claim, and
+    /// the second is what actually carries it to the receiver for
+    /// `accept_inbound` to judge.
+    #[tokio::test]
+    async fn forwarding_to_a_solana_peer_signs_and_is_accepted_as_a_solana_claim() {
+        use connector_signer::LocalEd25519Signer;
+
+        let channel_account = bs58::encode([0x11u8; 32]).into_string();
+        let second_hop_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+        let second_hop_app_client = Arc::new(FakeAppClient::new());
+        second_hop_app_client.respond(
+            second_hop_route.handler_url(),
+            answered(b"delivered by the second hop"),
+        );
+        let payer_signer: Arc<dyn Ed25519Signer> = Arc::new(LocalEd25519Signer::generate());
+        let payer_public_key = bs58::encode(payer_signer.public_key()).into_string();
+        let second_hop = Arc::new(
+            Connector::new(
+                vec![second_hop_route],
+                vec![],
+                second_hop_app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_identity_signer(identity_signer())
+            .with_solana_channel(channel_account.clone(), &payer_public_key)
+            .expect("a real base58 32-byte account and public key"),
+        );
+        let mut peer_transport = InProcessPeerTransport::new();
+        peer_transport.add_peer("second-hop", second_hop.clone());
+        let first_hop = Connector::new(
+            vec![],
+            vec![PeerRoute::new("g.example.app", "second-hop", 7)],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(peer_transport),
+            test_clock(),
+        )
+        .with_solana_signer(payer_signer)
+        .with_peer_claim_channel("second-hop", channel_account.clone())
+        .with_solana_channel(channel_account.clone(), &payer_public_key)
+        .expect("a real base58 32-byte account and public key");
+
+        let first = first_hop
+            .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+            .await;
+        assert!(matches!(first, PacketResponse::Fulfill(_)));
+        let second = first_hop
+            .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+            .await;
+        assert!(matches!(second, PacketResponse::Fulfill(_)));
+
+        assert_eq!(second_hop_app_client.deliveries().len(), 2);
+        // Signed and armed on the payer's own outbound ledger, minus this
+        // peer relationship's flat fee of 7, each packet.
+        let outbound = first_hop.claims();
+        assert_eq!(outbound.len(), 1);
+        assert_eq!(outbound[0].channel_id, channel_account);
+        assert_eq!(outbound[0].cumulative_amount, 186);
+        // And the first claim was actually verified and watermarked on the
+        // receiving side, riding the second PREPARE -- proving
+        // `with_solana_channel`'s counterparty key is what `accept_inbound`
+        // checked the ed25519 signature against, not merely that a claim
+        // was signed.
+        let inbound = second_hop.claims();
+        assert_eq!(inbound.len(), 1);
+        assert_eq!(
+            inbound[0].direction,
+            crate::operator_view::ClaimDirection::Inbound
+        );
+        assert_eq!(inbound[0].channel_id, channel_account);
+        assert_eq!(inbound[0].cumulative_amount, 93);
     }
 
     #[tokio::test]
