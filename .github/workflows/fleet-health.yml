@@ -113,9 +113,17 @@
 # `dvm.devnet.toonprotocol.dev` (the store app's public name) is deliberately
 # NOT probed: it is currently unreachable for an unrelated reason — the box
 # serves a certificate whose only SAN is `proxy.ario.devnet.toonprotocol.dev`,
-# so every request fails the TLS handshake. Adding it would make this workflow
-# alert forever on a pre-existing cert gap rather than on a deploy. Tracked
-# separately; see docs/operators/fleet-release-and-health.md.
+# so every request fails hostname verification. Adding it would make this
+# workflow alert forever on a pre-existing cert gap rather than on a deploy.
+#
+# ADD IT HERE once — and only once — the certificate is fixed on the box.
+# docs/operators/fleet-release-and-health.md, "The store box's `dvm.` name has
+# no certificate", is the runbook (issue #1004): it establishes that the name is
+# NOT vestigial (nginx already routes it to the store app's health server and
+# `curl -k …/health` answers today), so the fix is a `certonly --expand` on the
+# existing lineage, not a hostname retirement. The probe to add is
+# `https://dvm.devnet.toonprotocol.dev/health` expecting 200; delete this whole
+# comment block at the same time.
 
 name: fleet-health
 

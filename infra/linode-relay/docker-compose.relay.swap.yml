@@ -121,6 +121,40 @@ services:
     # more; a restart keeps the same identity via the state volume.
     environment:
       SWAP_AUTOGEN_IDENTITY: '1'
+    # ── CWD is the state volume, and that is load-bearing (issue #1004) ──────
+    # Applied by hand to the live relay box and never committed; found by
+    # diffing the box against `main`. Without it the container's CWD is the
+    # image's own `WORKDIR /app`, which is NOT a volume.
+    #
+    # What lives at a CWD-relative path: the embedded ConnectorNode's SQLite
+    # ledgers. `@toon-protocol/connector`'s `connector-node.js` builds all
+    # three as literal `./data/...` strings —
+    # `./data/claims-<nodeId>.db` (the claims this maker has ISSUED),
+    # `./data/received-claims-<nodeId>.db` (the claims it has been PAID, i.e.
+    # the redeemable ones) and `./data/registry-<nodeId>.db` — so the
+    # directory they land in is decided by CWD alone. There is no config knob
+    # for it and `statePath` does not cover it: that setting is read by the
+    # swap CLI for its own boot snapshot, not by the connector library.
+    #
+    # So with CWD at `/app` those three DBs are written into the container's
+    # writable layer, and `swap-node` is precisely the service that gets
+    # RECREATED without warning — it is this fleet's one Watchtower
+    # auto-redeploy target (`swap:release`, see `labels` above). Every
+    # `swap:release` publish would silently discard the maker's claim ledger,
+    # which is the record of money owed to and by it. `/app/state` is the
+    # `swap_node_state` volume, so `./data/` resolves inside it and survives.
+    #
+    # Verified live on the relay box 2026-08-16: `/app/state/data/` holds the
+    # three `.db` files, alongside `identity.json` and
+    # `swap-node-state.json`. Guarded by
+    # `the_swap_node_runs_with_its_state_volume_as_cwd` in
+    # crates/connector-bin/tests/devnet_configs_load.rs.
+    #
+    # (`identity.json` is NOT why this line exists — `resolveIdentityFilePath`
+    # in the swap CLI derives that from `dirname(statePath)`, so the autogen
+    # identity would persist either way. Only the `./data/` ledgers depend on
+    # CWD.)
+    working_dir: /app/state
     entrypoint: ['/bin/sh', '-c']
     command:
       - |

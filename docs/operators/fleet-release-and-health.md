@@ -187,11 +187,135 @@ fleet that stays down for an hour would otherwise open four.
 
 ### Known gap, not alerted on
 
-`dvm.devnet.toonprotocol.dev` — the store app's public name — currently fails its TLS handshake.
+`dvm.devnet.toonprotocol.dev` — the store app's public name — currently fails hostname verification.
 DNS resolves to the store box and nginx routes the name correctly, but the box serves a certificate
 whose only `subjectAltName` is `proxy.ario.devnet.toonprotocol.dev`; it was never reissued to cover
 `dvm`. The store app therefore has no working public URL, and its health is observable only on-box.
 
 It is deliberately **not** a fleet-health probe: it would alert forever on a pre-existing certificate
-gap rather than on a deploy, which is how a monitor gets ignored. Fixing the certificate is separate
-work.
+gap rather than on a deploy, which is how a monitor gets ignored. The runbook below closes the gap;
+**add the probe only once it is applied**, not before.
+
+## The store box's `dvm.` name has no certificate
+
+### The verdict: reissue the certificate, do not retire the name
+
+`dvm.devnet.toonprotocol.dev` is **not** vestigial, and the evidence was gathered before proposing
+either direction (issue #1004):
+
+- The repo already intends it to work, in four committed places: the `map $host $backend` entry
+  (`infra/linode-store/nginx/conf.d/node.conf`) that routes it to `store:3400`, both `server_name`
+  lines in the same file, the `DOMAINS=(…)` array in `infra/linode-store/init-letsencrypt.sh`, and
+  three `update_dns "dvm.devnet" "$STORE_IP"` call sites plus a `status` probe and an `endpoints`
+  JSON field in `infra/devnet-manage.sh`. Exactly one thing is out of step — the certificate.
+- **The name still serves.** `curl -k https://dvm.devnet.toonprotocol.dev/health` returns the store
+  app's live `DvmHealthResponse` (verified 2026-08-16). Only certificate _name verification_ fails,
+  so every client that validates — which is all of them — is locked out.
+- **It is the store app's only public liveness surface.** `proxy.ario…/ilp/identity` proves the
+  _connector_ is up, not the app behind it. Retiring `dvm.` would delete the very thing this
+  document calls a gap.
+- **It is not a free door.** `store:3400` is the BLS health server, and `startStore`'s Hono app
+  registers exactly one route on it: `GET /health`. This is a different port from `store:3300`, the
+  payment-oblivious handler that serves `POST /store` — the free door removed on 2026-08-05 (see
+  `node.conf`'s own `location /store` gravestone). Putting a valid certificate on `dvm.` exposes a
+  read-only health JSON and nothing else.
+
+Retiring it instead would mean edits in six committed places plus a DNS change, in a strict order
+(`init-letsencrypt.sh`'s `DOMAINS` **first**, DNS record last — a lineage that lists a name which no
+longer resolves fails HTTP-01 for _every_ name on it, taking the live paid edge down at the renewal
+mark), to remove a surface nothing else provides. Reissuing costs one certbot run.
+
+### The one repo-side defect this exposed
+
+`init-letsencrypt.sh` issued under `--cert-name "${PRIMARY}"` = `proxy.ario.${DOMAIN}`, while the live
+box's `nginx/conf.d/node.conf` loads `/etc/letsencrypt/live/proxy.store.devnet.toonprotocol.dev/`
+(the inherited pre-rename lineage, kept on purpose). Running the script on that box as committed
+would have issued a correct certificate into a **second** lineage nginx never reads — a silent
+no-op. The script now takes a `CERT_NAME` override, defaulting to `PRIMARY` so a fresh box is
+unaffected.
+
+### Box commands (operator runs these; all four are on the store box)
+
+```bash
+ssh root@45.79.173.113
+cd /root/connector
+```
+
+**1. Confirm the starting state** — one SAN, and the lineage nginx actually loads.
+
+```bash
+docker run --rm -v linode-store_store_certbot_conf:/etc/letsencrypt \
+  --entrypoint sh certbot/certbot -c \
+  'openssl x509 -noout -subject -dates -ext subjectAltName \
+     -in /etc/letsencrypt/live/proxy.store.devnet.toonprotocol.dev/fullchain.pem'
+```
+
+Expect `subject=CN=proxy.ario.devnet.toonprotocol.dev` and a `Subject Alternative Name` listing only
+`DNS:proxy.ario.devnet.toonprotocol.dev`. If it already lists `DNS:dvm.devnet.toonprotocol.dev`,
+stop — the gap is closed and only the nginx reload in step 3 is outstanding.
+
+**2. Expand the existing lineage.** This is `certonly … --expand` rather than
+`./infra/linode-store/init-letsencrypt.sh`, deliberately: that script's not-ok path calls
+`seed_dummy`, which **overwrites the live `fullchain.pem`/`privkey.pem` with a self-signed pair**
+before it deletes and re-requests the lineage. If issuance then failed, the next nginx reload would
+serve a self-signed certificate on `proxy.ario…` — the live paid edge. `certonly --expand` never
+touches the lineage on disk unless issuance succeeds.
+
+```bash
+docker compose -f infra/linode-store/docker-compose.store.yml \
+  run --rm --entrypoint certbot certbot \
+  certonly --webroot -w /var/www/certbot \
+  --cert-name proxy.store.devnet.toonprotocol.dev \
+  -d proxy.ario.devnet.toonprotocol.dev \
+  -d dvm.devnet.toonprotocol.dev \
+  --expand --agree-tos --no-eff-email --non-interactive
+```
+
+_What this can destroy:_ on success, the lineage's `live/` symlinks move to a new certificate — the
+previous one stays in `archive/` and nothing else on the box is touched. On failure, nothing changes
+at all. No container is restarted. `--expand` is required because the name set differs from the
+existing certificate's; without it certbot refuses rather than guessing. No `--email`: the account
+(`4d89f17f…`) already exists in the volume and passing an address could rewrite it. Do **not** add
+`--staging`; the live lineage is production-issued.
+
+Re-run step 1 to confirm two SANs before continuing.
+
+**3. Reload nginx** — it holds the certificate in memory from load time, so step 2 alone changes
+nothing that a client sees.
+
+```bash
+docker compose -f infra/linode-store/docker-compose.store.yml exec nginx nginx -t
+docker compose -f infra/linode-store/docker-compose.store.yml exec nginx nginx -s reload
+```
+
+`nginx -t` first: a reload with a bad config leaves the old worker serving, but there is no reason to
+find out that way. Neither command restarts the container or drops a connection.
+
+**4. Verify from off-box** (run this from your workstation, not the box):
+
+```bash
+curl -sS https://dvm.devnet.toonprotocol.dev/health   # no -k
+curl -sS https://proxy.ario.devnet.toonprotocol.dev/ilp/identity
+```
+
+The first must return the store's health JSON **without** `-k`. The second is the regression check
+that the paid edge still validates on its own name — it shares the lineage, so it is the thing an
+expansion could break.
+
+### Follow-up, only after step 4 passes
+
+Add `https://dvm.devnet.toonprotocol.dev/health` to `.github/workflows/fleet-health.yml`'s probe set
+(and delete the "deliberately not probed" comment above the probe list), and drop the "Known gap"
+section above. Shipping the probe before the certificate is fixed is the failure mode that section
+exists to avoid.
+
+### Unrelated defect found while confirming the dependents
+
+`rig`'s `DEVNET_DVM_URL` (`packages/rig/src/cli/name.ts`) defaults `--via` to
+`https://dvm.devnet.toonprotocol.dev` for `rig name buy` / `rig name set` on devnet, and posts to
+`${via}/store`. That path cannot work through this hostname even with a valid certificate: `dvm.`
+maps to `store:3400`, the health server, while `POST /store` is served on `store:3300` and is not
+exposed under any hostname (it was deleted as a free door on 2026-08-05). Fixing the certificate does
+not fix the brokered ArNS buy. Tracked as toon-protocol/rig#101, which reaches the same conclusion
+from the connector side — no node serves an unpaid `POST /store`, by design — and where this box's
+half of the evidence is recorded.
