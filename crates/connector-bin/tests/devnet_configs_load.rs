@@ -331,6 +331,63 @@ const EXPECTED_RELAY_PRICE: u64 = 1;
 /// rather than a silent no-op -- otherwise renaming a line in a committed
 /// file would quietly turn one of the substitutions below into nothing at
 /// all, and the test would go on passing while testing something else.
+/// Does this TOML line assign `field`, as opposed to merely mentioning it?
+/// Comment lines never count: every committed fleet file explains its own
+/// settings by name in prose, so a substring match reads the header rather
+/// than the config.
+fn assigns(line: &str, field: &str) -> bool {
+    let line = line.trim_start();
+    !line.starts_with('#')
+        && line
+            .split_once('=')
+            .is_some_and(|(key, _)| key.trim() == field)
+}
+
+/// The two files the store box's committed `[operator]` section points at
+/// (issue #1003), substituted for the container paths the same way the key
+/// files are -- and for the same reason: neither is committed, and config
+/// load refuses a `bearer_token_file`/`write_keys_file` that is not there.
+///
+/// A process-wide `OnceLock` rather than a per-test temp file, so that every
+/// existing caller of [`with_sandbox_paths`] picks the substitution up
+/// without threading two more arguments through fourteen call sites -- and,
+/// more usefully, so that a NEW test cannot forget to. The `TempDir` is held
+/// inside the `OnceLock` for the lifetime of the test binary; dropping it
+/// would delete the files out from under a still-running test.
+///
+/// The contents are what an operator would actually write: a hex token, and
+/// an allowlist with a comment line above one 64-hex public key.
+struct SandboxOperatorFiles {
+    _dir: tempfile::TempDir,
+    bearer_token: std::path::PathBuf,
+    write_keys: std::path::PathBuf,
+}
+
+fn sandbox_operator_files() -> &'static SandboxOperatorFiles {
+    static FILES: std::sync::OnceLock<SandboxOperatorFiles> = std::sync::OnceLock::new();
+    FILES.get_or_init(|| {
+        let dir = tempfile::tempdir().expect("temp operator dir");
+        let bearer_token = dir.path().join("operator-bearer-token");
+        std::fs::write(
+            &bearer_token,
+            "1f0e6a4c9b2d8e7f3a5c1b9d0e2f4a6c8b0d2e4f6a8c0b2d4e6f8a0c2b4d6e8f\n",
+        )
+        .expect("write sandbox operator bearer token");
+        let write_keys = dir.path().join("operator-write-keys");
+        std::fs::write(
+            &write_keys,
+            "# the sandbox's one allowlisted operator\n\
+             0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+        )
+        .expect("write sandbox operator allowlist");
+        SandboxOperatorFiles {
+            _dir: dir,
+            bearer_token,
+            write_keys,
+        }
+    })
+}
+
 fn replace_expecting_a_match(raw: &str, from: &str, to: &str) -> String {
     assert!(
         raw.contains(from),
@@ -344,11 +401,12 @@ fn replace_expecting_a_match(raw: &str, from: &str, to: &str) -> String {
 /// Substitute only what this sandbox physically cannot supply: the signer
 /// key file (real key material is never committed), the relay's carried-over
 /// `identity_key_file` when the file carries one (issue #870, same reason),
-/// the bind addresses (fixed ports collide across parallel test runs) and
-/// `state_dir` (the committed value is a container path, `/app/state`, which
-/// no test host can create). Every other line -- prefixes, handler URLs,
-/// `price`, and every `[settlement]` value -- stays the literal committed
-/// content.
+/// the store's `[operator]` credential files (issue #1003, same reason
+/// again), the bind addresses (fixed ports collide across parallel test
+/// runs) and `state_dir` (the committed value is a container path,
+/// `/app/state`, which no test host can create). Every other line --
+/// prefixes, handler URLs, `price`, and every `[settlement]` value -- stays
+/// the literal committed content.
 ///
 /// The `state_dir` substitution is a path swap, not a removal: the
 /// committed files must keep naming one, since a devnet box without it
@@ -398,6 +456,42 @@ fn with_sandbox_paths(
         "identity_key_file = \"/app/data/announce.key\"",
         &format!("identity_key_file = \"{}\"", key_path.display()),
     );
+    // The `[operator]` section's two files (issue #1003) -- same reasoning
+    // as the key files above, and optional in the same way: only the store
+    // file carries the section today, so plain `.replace` leaves the relay
+    // file untouched. [`sandbox_operator_files`] owns the substitutes; a
+    // path that ever moves in the committed file fails at `Config::load`
+    // with `OperatorFileNotFound` rather than being silently skipped.
+    let operator = sandbox_operator_files();
+    let replaced = replaced.replace(
+        "bearer_token_file = \"/app/data/operator-bearer-token\"",
+        &format!(
+            "bearer_token_file = \"{}\"",
+            operator.bearer_token.display()
+        ),
+    );
+    let replaced = replaced.replace(
+        "write_keys_file = \"/app/data/operator-write-keys\"",
+        &format!("write_keys_file = \"{}\"", operator.write_keys.display()),
+    );
+    // The regression guard for issue #1003 itself. A committed fleet config
+    // must name its operator credentials BY PATH and never carry one: a
+    // literal `bearer_token`/`write_keys` line here is a credential in a
+    // public repository, and it is also the drift that made the store box's
+    // operator surface uncommittable in the first place. Line-anchored on
+    // the key left of the `=`, because the file's own header prose names
+    // both settings at length while explaining them, and because
+    // `bearer_token_file` starts with `bearer_token`.
+    for field in ["bearer_token", "write_keys"] {
+        assert!(
+            !replaced.lines().any(|line| assigns(line, field)),
+            "a committed fleet config carries an inline `{field} = …`. That is \
+             a credential (or an authorization decision) in a PUBLIC \
+             repository, and it is the exact drift issue #1003 closed -- use \
+             `{field}_file` and put the file on the box (see \
+             infra/linode-store/connector-rust.toml's [operator] header)"
+        );
+    }
     assert!(
         !replaced.contains("secret_file ="),
         "no surviving box's committed config should carry a peering \
@@ -808,6 +902,62 @@ fn the_store_devnet_config_announces_g_toon_ario_under_its_own_identity() {
         announce.relay_url(),
         None,
         "the store fronts no relay and must not advertise reads it does not serve"
+    );
+}
+
+/// Issue #1003: the store box's operator surface (ADR 0008, live since
+/// toon-meta#312) is now IN the committed config, and reachable from it.
+///
+/// The bug this closes was not a wrong value — it was an absent section.
+/// `main` carried no `[operator]` at all, because the only spelling
+/// available was an inline bearer token that a public repository must never
+/// hold; so the surface lived on the box alone, and a `fleet-ops` reconcile
+/// of the committed tree would have deleted a live capability with nothing
+/// anywhere recording that it had. Two halves, both asserted here:
+///
+/// * the section is present and file-backed (the inline-literal half of the
+///   property is enforced for every fleet file in [`with_sandbox_paths`],
+///   since a future relay `[operator]` deserves the same guard); and
+/// * it actually RESOLVES — `Config::load` returns an authenticated surface,
+///   not merely a section that parses. `Config` refuses to return a
+///   half-configured one, so a `Some` here is the whole guarantee.
+#[test]
+fn the_store_devnet_config_commits_its_operator_surface_by_file_reference() {
+    assert!(
+        STORE_CONFIG.lines().any(|line| line.trim() == "[operator]"),
+        "the store config must carry its own [operator] section -- issue \
+         #1003. This box has served an authenticated operator surface since \
+         toon-meta#312; a committed config without the section is a config \
+         that deletes it on the next reconcile"
+    );
+    for field in ["bearer_token_file", "write_keys_file"] {
+        assert!(
+            STORE_CONFIG.lines().any(|line| assigns(line, field)),
+            "the store config's [operator] section must name `{field}` -- \
+             the file forms are the only ones a public repository can carry"
+        );
+    }
+
+    let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let text = with_sandbox_paths(STORE_CONFIG, key_file.path(), state_dir.path());
+    let text = with_sandbox_settlement_keys(&text, key_file.path());
+    let config_file = write_config(&text);
+    let config = Config::load(config_file.path()).expect("the committed store config must parse");
+
+    let operator = config
+        .operator()
+        .expect("the committed store config must resolve an operator surface");
+    assert!(
+        !operator.bearer_token().is_empty(),
+        "an operator surface with an empty bearer token would have no read \
+         authentication -- Config::load should have refused it"
+    );
+    assert_eq!(
+        operator.write_keys().len(),
+        1,
+        "the sandbox allowlist holds exactly one key, and its comment line \
+         must not have become a second one"
     );
 }
 

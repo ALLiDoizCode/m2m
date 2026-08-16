@@ -357,3 +357,59 @@ decimals = 6
 
 [settlement.solana.key]
 key_file = "/app/data/settlement-solana.key"
+
+# ── Operator surface (ADR 0008; toon-meta#311/#312) ────────────────────────
+# This box's operator surface: the authenticated read/write control plane
+# (`GET /peers`, `/routes`, `/channels`, `/claims`, `/metrics`; `POST
+# /packets`) that ADR 0008 splits into a bearer-token read half and an RFC
+# 9421 signed-write half. Its PRESENCE here is what enables it — an absent
+# `[operator]` section means the surface is not started at all.
+#
+# It has been live on this box since toon-meta#312 and, until issue #1003,
+# existed ONLY on this box: the section was written with inline literals, a
+# literal bearer token cannot be committed to a public repository, and so
+# `main` carried no `[operator]` section at all. That made the surface
+# invisible drift in the most literal sense — the only record that this box
+# had the capability was the box, and any `fleet-ops` reconcile of the
+# committed tree would have deleted it without a word. #1003 added the
+# `*_file` forms below so the section itself is committable.
+#
+# The `0xdead…c0de` placeholder convention (#822/#853/#871) is deliberately
+# NOT what was used. A placeholder channel id fails loudly; a placeholder
+# bearer token is a working credential-shaped value, which is worse than
+# absent.
+#
+# ── The two files, which are NOT in git ────────────────────────────────────
+# Both paths are container paths, mounted by ./docker-compose.store.rust.yml
+# from files that must exist on the box before `up -d`, exactly like the
+# three key files that service already mounts:
+#
+#   /app/data/operator-bearer-token  ← ./operator-bearer-token.secret
+#       The read credential. A random hex string; generate with
+#       `openssl rand -hex 32`. Gitignored by `infra/linode-store/*.secret`.
+#
+#   /app/data/operator-write-keys    ← ./operator-write-keys.allow
+#       The write allowlist: one 64-hex ed25519 PUBLIC key per line, `#`
+#       starts a comment. No secret — the private halves never come near
+#       this box — but a file rather than a literal because ADR 0008 revokes
+#       write authority by removing a key and restarting, and ADR 0009 makes
+#       config immutable for the process lifetime: behind a file that is an
+#       edit on the box, behind a committed array it is a PR, a green CI run
+#       and a promotion. Gitignored by `infra/linode-store/*.allow`.
+#
+# Both must be readable by uid 10001 (`chown 10001:10001`, `chmod 600` on
+# the token). A missing, unreadable or empty file is a refuse-to-start
+# naming the setting — an operator surface that cannot read its own
+# authentication authenticates nobody, so it must not come up at all
+# (ADR 0009 applied to ADR 0008's fail-closed requirement).
+#
+# ── IMAGE FLOOR (ADR 0041) ─────────────────────────────────────────────────
+# `[operator]` is `deny_unknown_fields`, so an image built before #1003 does
+# not merely ignore `bearer_token_file` — it EXITS 1 on config load. Do not
+# apply this file to a box whose `connector-rust` is older than #1003's
+# image; promote first, then reconcile. This is the same rollback constraint
+# ./docker-compose.store.rust.yml records for `state_dir` (#605) and the
+# fresh state volume (#614).
+[operator]
+bearer_token_file = "/app/data/operator-bearer-token"
+write_keys_file = "/app/data/operator-write-keys"

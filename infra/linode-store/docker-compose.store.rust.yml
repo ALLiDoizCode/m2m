@@ -122,6 +122,21 @@ services:
       - ./signer-rust.key:/app/data/signer.key:ro
       - ./settlement-rust.key:/app/data/settlement.key:ro
       - ./settlement-solana-rust.key:/app/data/settlement-solana.key:ro
+      # The operator surface's two settings, as files (issue #1003) — see
+      # ./connector-rust.toml's `[operator]` header for what each holds and
+      # how to generate it. Neither is in git: the token is a credential
+      # (`infra/linode-store/*.secret`), the allowlist is public key material
+      # kept off a public repo because it is per-box authorization state that
+      # an operator edits to revoke (`infra/linode-store/*.allow`).
+      #
+      # Same pre-`up -d` requirement as the three key files above, and the
+      # same failure mode if it is missed — but with one Docker-specific
+      # trap: bind-mounting a path that does not exist on the host makes
+      # Docker CREATE IT AS A DIRECTORY, so a forgotten file presents as
+      # "not a file" rather than "not found". Config load refuses either
+      # way, by name, at startup.
+      - ./operator-bearer-token.secret:/app/data/operator-bearer-token:ro
+      - ./operator-write-keys.allow:/app/data/operator-write-keys:ro
       # Durable claim watermarks (#605). Named, not bind-mounted: the replay
       # of this journal is what stops a restart from re-accepting a spent
       # claim, so it must outlive the container.
