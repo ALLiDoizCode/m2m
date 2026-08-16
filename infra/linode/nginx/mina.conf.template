@@ -15,9 +15,15 @@
 # lightnet is exactly the kind of container that is sometimes down.
 #
 # The `proxy_pass` lines carry NO URI part: with a variable upstream nginx does
-# not do the literal form's prefix substitution (issue #987), so the request
-# `$uri` is forwarded as-is. Both locations wanted that already — `location
+# not do the literal form's prefix substitution, so the request `$uri` and its
+# args are forwarded as-is. Both locations wanted that already — `location
 # /graphql` proxied to `.../graphql`, an identity — so no `rewrite` is needed.
+# A URI part here would NOT be ignored (issue #987 said it would; issue #1023
+# measured otherwise on nginx 1.18 through 1.31) — it would be honoured as a
+# STATIC path replacing the whole request URI, query string included. That is
+# what the sibling `devnet.conf.template` mina block deliberately relies on,
+# and the only exemption in
+# `no_variable_upstream_carries_a_static_uri_part`.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 limit_req_zone $binary_remote_addr zone=rpc:10m rate=30r/s;
