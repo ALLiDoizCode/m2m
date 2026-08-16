@@ -31,6 +31,14 @@ prices without ever interpreting what it carries. `Config::load` refuses two dif
 routes pointing at one handler, since an app provably cannot tell them apart and the cheaper price
 would always win.
 
+> **Narrowed by [ADR 0040](0040-a-verified-payment-is-stated-to-the-app.md).** The paragraph
+> below stands for everything the connector cannot honestly assert, and for every delivery it did
+> not take the payment for — but a delivery whose covering client claim this connector verified
+> itself now states `X-TOON-Payer` / `X-TOON-Amount` / `X-TOON-Chain`, sourced from that claim's
+> own chain-namespaced channel key and this route's own price. The objection recorded here was to
+> the prototype's _sources_ (the previous hop; the destination's second label), and ADR 0040
+> reuses neither. "Not even which destination was addressed" is untouched.
+
 **The app is told nothing about the payment that brought the packet to it** — not who paid, not
 how much, not on what chain, and not even which destination was addressed. Not the payer or the
 chain: ADR 0017 found both wrong by construction, not merely omittable — `X-TOON-Payer` names the
@@ -96,3 +104,8 @@ terminating connector as fabricating a success. That consequence is recorded the
 An app fronted by this connector cannot log, bill or rate-limit by payer from what a handler
 receives — nothing on that path names one. Anything that needs that attribution must get it from
 somewhere other than the packet path.
+
+> **Reversed by [ADR 0040](0040-a-verified-payment-is-stated-to-the-app.md).** A handler now
+> receives the paying channel key on the deliveries this connector took the payment for, and can
+> log, bill and rate-limit by it. On the deliveries it did not, the paragraph above still holds
+> exactly — which is why an app must treat the attribution as optional rather than assuming it.

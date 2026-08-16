@@ -21,6 +21,7 @@ use thiserror::Error;
 use tracing::Instrument;
 
 use crate::app_client::{AppClient, AppOutcome};
+use crate::attribution::{apply_payment_attribution, PaymentAttribution};
 use crate::claim::{
     ChannelDomain, ClaimAckOutcome, ClaimBook, ClaimSignature, InvalidChannelId, WireClaim,
 };
@@ -1781,7 +1782,9 @@ impl Connector {
         let peer_route: Cow<'_, PeerRoute> = match target {
             RouteTarget::App(index) => {
                 tracing::debug!(handler_url = %self.routes[index].handler_url(), "routed to app");
-                let response = self.deliver_to_app(&self.routes[index], prepare).await;
+                let response = self
+                    .deliver_to_app(&self.routes[index], prepare, client_channel_id)
+                    .await;
                 return self.finish(response);
             }
             RouteTarget::PeerSale { price, lease } => {
@@ -2188,7 +2191,21 @@ impl Connector {
     /// REJECT raised at the termination are both sealed with it (ADR 0018);
     /// only [`Self::open_termination_request`]'s own two failures, which
     /// happen before any secret is recovered, stay plaintext.
-    async fn deliver_to_app(&self, route: &StaticRoute, prepare: Prepare) -> PacketResponse {
+    ///
+    /// `client_channel_id` is the client channel whose covering claim
+    /// admitted this packet at this connector's own edge, or `None` when
+    /// nothing did (a peer-wire arrival, an unpriced or unclaimed
+    /// request). It is the sole source of the attribution headers the
+    /// delivery carries (ADR 0040, `crate::attribution`) -- which is why a
+    /// packet that reached here across another hop states no payer at all
+    /// rather than naming the hop it arrived from, the failure ADR 0017
+    /// found in the TypeScript prototype's own header.
+    async fn deliver_to_app(
+        &self,
+        route: &StaticRoute,
+        prepare: Prepare,
+        client_channel_id: Option<&str>,
+    ) -> PacketResponse {
         let condition = prepare.execution_condition;
 
         let (envelope_bytes, shared_secret) = match self.open_termination_request(&prepare.data) {
@@ -2197,7 +2214,13 @@ impl Connector {
         };
 
         let inner = self
-            .deliver_opened_envelope(route, &condition, &shared_secret, &envelope_bytes)
+            .deliver_opened_envelope(
+                route,
+                &condition,
+                &shared_secret,
+                &envelope_bytes,
+                client_channel_id,
+            )
             .await;
         Self::seal_termination_response(inner, &shared_secret)
     }
@@ -2231,8 +2254,9 @@ impl Connector {
         condition: &[u8; 32],
         shared_secret: &[u8; 32],
         envelope_bytes: &[u8],
+        client_channel_id: Option<&str>,
     ) -> PacketResponse {
-        let request = match EnvelopeRequest::decode(envelope_bytes) {
+        let mut request = match EnvelopeRequest::decode(envelope_bytes) {
             Ok(request) => request,
             Err(error) => {
                 return PacketResponse::Reject(Reject {
@@ -2244,6 +2268,18 @@ impl Connector {
                 });
             }
         };
+
+        // ADR 0040: state what this connector itself verified about the
+        // payment -- and, whether or not there is anything to state, remove
+        // whatever the sender wrote under those same names first, so an app
+        // reading them is reading this connector or reading nothing.
+        apply_payment_attribution(
+            &mut request,
+            client_channel_id.map(|channel_key| PaymentAttribution {
+                channel_key,
+                price: route.price(),
+            }),
+        );
 
         match self.app_client.deliver(route.handler_url(), &request).await {
             // ADR 0020: an HTTP status is envelope content, never a packet
@@ -3313,8 +3349,9 @@ mod tests {
     use crate::test_support::{
         answered, answered_with_status, expected_fulfillment, fulfill_envelope,
         fulfill_envelope_with_status, identity_signer, matching_condition, open_sealed_envelope,
-        sealed_envelope_request_data, sealed_envelope_request_data_with_target,
-        test_channel_domain, test_channel_id, with_test_channel,
+        sealed_envelope_request_data, sealed_envelope_request_data_with_headers,
+        sealed_envelope_request_data_with_target, test_channel_domain, test_channel_id,
+        with_test_channel,
     };
     use async_trait::async_trait;
     use chrono::{Duration, TimeZone, Utc};
@@ -3447,6 +3484,192 @@ mod tests {
         let deliveries = app_client.deliveries();
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].request.body, b"hello app");
+    }
+
+    /// ADR 0040 (issue #994): what a terminating connector tells the app
+    /// about the payment that brought a packet to it. Every case here
+    /// asserts the headers a `FakeAppClient` actually recorded receiving,
+    /// never the call site -- including the cases whose whole content is
+    /// that a header is *absent*.
+    mod payment_attribution {
+        use super::*;
+        use crate::attribution::{AMOUNT_HEADER, CHAIN_HEADER, PAYER_HEADER};
+        use crate::Delivery;
+
+        /// The channel key the client edge admits a covering EVM claim
+        /// under -- `ClientClaim::channel_key`'s own spelling.
+        const PAYING_CHANNEL: &str =
+            "evm:0x1111111111111111111111111111111111111111111111111111111111111111";
+
+        const PRICE: u64 = 1000;
+
+        fn header<'a>(delivery: &'a Delivery, name: &str) -> Option<&'a str> {
+            delivery
+                .request
+                .headers
+                .iter()
+                .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        }
+
+        fn one_delivery(app_client: &FakeAppClient) -> Delivery {
+            let deliveries = app_client.deliveries();
+            assert_eq!(deliveries.len(), 1, "expected exactly one delivery");
+            deliveries.into_iter().next().expect("one delivery")
+        }
+
+        /// Deliver one sealed packet to a route priced at `price`, admitted
+        /// by `client_channel_id` (or by nothing, when `None`), and return
+        /// what the app was handed.
+        async fn deliver(
+            price: u64,
+            client_channel_id: Option<&str>,
+            sealed_data: Vec<u8>,
+            shared_secret: [u8; 32],
+        ) -> Delivery {
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", price).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"stored"));
+            let connector = connector_with(vec![route], app_client.clone(), test_clock());
+            let prepare = Prepare {
+                data: sealed_data,
+                execution_condition: matching_condition(&shared_secret),
+                ..prepare("g.example.app", b"unused")
+            };
+
+            let response = connector
+                .handle_prepare_with_client_channel(prepare, 0, client_channel_id)
+                .await;
+            assert!(
+                matches!(response, PacketResponse::Fulfill(_)),
+                "expected the delivery to fulfil, got {response:?}"
+            );
+            one_delivery(&app_client)
+        }
+
+        /// The defect this ADR closes, stated as the delivery the store
+        /// behind this connector actually receives: a paid write names the
+        /// channel that paid for it, what it paid, and the chain that
+        /// channel settles on.
+        #[tokio::test]
+        async fn a_paid_delivery_names_the_channel_whose_claim_admitted_it() {
+            let (data, secret) = sealed_envelope_request_data(b"an event");
+
+            let delivery = deliver(PRICE, Some(PAYING_CHANNEL), data, secret).await;
+
+            assert_eq!(header(&delivery, PAYER_HEADER), Some(PAYING_CHANNEL));
+            assert_eq!(header(&delivery, AMOUNT_HEADER), Some("1000"));
+            assert_eq!(header(&delivery, CHAIN_HEADER), Some("evm"));
+        }
+
+        /// The chain is read off the admitted claim's own namespace, not
+        /// off the destination address (ADR 0017's objection to the
+        /// TypeScript header): the same destination, paid from a Solana
+        /// channel, says `solana`.
+        #[tokio::test]
+        async fn the_chain_comes_from_the_claim_not_the_destination() {
+            let (data, secret) = sealed_envelope_request_data(b"an event");
+
+            let delivery = deliver(
+                PRICE,
+                Some("solana:9xQeWvG816bUx9EPjHmaT23yvVM2ZHbGrX"),
+                data,
+                secret,
+            )
+            .await;
+
+            assert_eq!(header(&delivery, CHAIN_HEADER), Some("solana"));
+        }
+
+        /// Nothing admitted this packet at this connector's own edge -- a
+        /// peer-wire arrival, or an unclaimed request -- so there is no
+        /// payer to name and none is invented. This is the case that makes
+        /// ADR 0017's "on a longer path the header names the wrong party"
+        /// unreachable rather than merely avoided.
+        #[tokio::test]
+        async fn a_delivery_no_claim_admitted_states_no_attribution() {
+            let (data, secret) = sealed_envelope_request_data(b"an event");
+
+            let delivery = deliver(PRICE, None, data, secret).await;
+
+            assert_eq!(header(&delivery, PAYER_HEADER), None);
+            assert_eq!(header(&delivery, AMOUNT_HEADER), None);
+            assert_eq!(header(&delivery, CHAIN_HEADER), None);
+        }
+
+        /// A free route charged nothing, so there is no payment to
+        /// attribute even when a claim rode along with the request.
+        #[tokio::test]
+        async fn a_free_routes_delivery_states_no_attribution() {
+            let (data, secret) = sealed_envelope_request_data(b"an event");
+
+            let delivery = deliver(0, Some(PAYING_CHANNEL), data, secret).await;
+
+            assert_eq!(header(&delivery, PAYER_HEADER), None);
+            assert_eq!(header(&delivery, AMOUNT_HEADER), None);
+            assert_eq!(header(&delivery, CHAIN_HEADER), None);
+        }
+
+        /// The spoof defence: a sender who seals its own `X-TOON-Payer`
+        /// into the envelope has it overwritten by the channel that
+        /// actually paid, not appended alongside it.
+        #[tokio::test]
+        async fn a_spoofed_payer_is_overwritten_by_the_admitted_one() {
+            let (data, secret) = sealed_envelope_request_data_with_headers(
+                "/",
+                vec![
+                    (
+                        "X-TOON-Payer".to_string(),
+                        "evm:0xdeadbeef-someone-else".to_string(),
+                    ),
+                    ("x-toon-amount".to_string(), "1".to_string()),
+                    ("X-Toon-Chain".to_string(), "solana".to_string()),
+                ],
+                b"an event",
+            );
+
+            let delivery = deliver(PRICE, Some(PAYING_CHANNEL), data, secret).await;
+
+            assert_eq!(header(&delivery, PAYER_HEADER), Some(PAYING_CHANNEL));
+            assert_eq!(header(&delivery, AMOUNT_HEADER), Some("1000"));
+            assert_eq!(header(&delivery, CHAIN_HEADER), Some("evm"));
+            assert_eq!(
+                delivery
+                    .request
+                    .headers
+                    .iter()
+                    .filter(|(name, _)| name.eq_ignore_ascii_case(PAYER_HEADER))
+                    .count(),
+                1,
+                "the sender's spelling must be removed, not joined by ours"
+            );
+        }
+
+        /// And the harder half of the same defence: on a delivery this
+        /// connector states nothing about, a sender's own headers are
+        /// still removed -- otherwise addressing a free (or peer-reached)
+        /// route would be all it takes to hand an app a forged payer.
+        #[tokio::test]
+        async fn a_spoofed_payer_does_not_survive_an_unattributed_delivery() {
+            let spoofed = vec![
+                ("X-TOON-Payer".to_string(), "evm:0xvictim".to_string()),
+                ("X-TOON-Amount".to_string(), "999999".to_string()),
+                ("X-TOON-Chain".to_string(), "evm".to_string()),
+                ("Content-Type".to_string(), "application/json".to_string()),
+            ];
+            let (data, secret) =
+                sealed_envelope_request_data_with_headers("/", spoofed, b"an event");
+
+            let delivery = deliver(0, None, data, secret).await;
+
+            assert_eq!(header(&delivery, PAYER_HEADER), None);
+            assert_eq!(header(&delivery, AMOUNT_HEADER), None);
+            assert_eq!(header(&delivery, CHAIN_HEADER), None);
+            // The sender's other headers are its own business and reach
+            // the app untouched.
+            assert_eq!(header(&delivery, "content-type"), Some("application/json"));
+        }
     }
 
     #[tokio::test]

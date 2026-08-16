@@ -1,6 +1,7 @@
 //! The packet plane and its ports. See ADR 0001.
 
 mod app_client;
+mod attribution;
 mod claim;
 mod clock;
 mod connector;
@@ -15,6 +16,11 @@ mod route;
 mod test_support;
 
 pub use app_client::{AppClient, AppOutcome, Delivery, FakeAppClient, HttpAppClient};
+// The three request headers a terminating connector states to the app
+// about the payment that brought a packet to it (ADR 0040) -- exported so
+// a test, an operator tool or a second implementation names them from one
+// place rather than retyping a string literal.
+pub use attribution::{AMOUNT_HEADER, CHAIN_HEADER, PAYER_HEADER};
 pub use claim::{
     ChannelDomain, ClaimAckOutcome, ClaimBook, ClaimRejectReason, ClaimSignature, InvalidChannelId,
     InvalidSolanaChannel, SolanaChannel, WireClaim,

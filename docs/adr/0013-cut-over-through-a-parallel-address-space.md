@@ -27,6 +27,14 @@ store app without touching it, and the app cannot tell which connector is in fro
 > not who paid, not how much, not on what chain — so those headers have no successor rather than a
 > Rust reimplementation (#505). What makes a migration safe is the new fleet being good enough on
 > its own terms, which is the supersession recorded under Consequences below.
+>
+> **The headers did get a successor, three months later** (#994,
+> [ADR 0040](0040-a-verified-payment-is-stated-to-the-app.md)): the Rust connector states
+> `X-TOON-Payer`/`X-TOON-Amount`/`X-TOON-Chain` for a payment it verified itself, sourced from the
+> admitted client claim rather than from the previous hop or the destination address. So the
+> falsified clause above — "the app cannot tell which connector is in front of it" — is now false
+> in a second way, and it no longer costs the app its attribution. The parallel fleet this record
+> is about was switched off long before that (issue #872); nothing here changes.
 
 This removes the flag day that ADR 0003 accepted as the cost of a clean-room peer wire. The two
 peer wires never have to interoperate, because the two networks never have to be one network.

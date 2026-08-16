@@ -187,23 +187,48 @@ fn solana_claim_json(
     )
 }
 
+/// One request the recording app below actually received, over its own
+/// socket: the body it was sent, and the headers that came with it. The
+/// headers are part of the record because ADR 0040's attribution
+/// (`X-TOON-Payer`/`-Amount`/`-Chain`) is only real if it survives the whole
+/// path -- a real connector binary, a real HTTP hop -- and a test reading
+/// them off an in-process fake would not prove that.
+#[derive(Clone)]
+struct RecordedWrite {
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+}
+
+/// What `header` this write carried, as a string, or `None` if it carried
+/// none -- the two outcomes ADR 0040 distinguishes.
+fn recorded_header<'a>(write: &'a RecordedWrite, header: &str) -> Option<&'a str> {
+    write
+        .headers
+        .get(header)
+        .map(|value| value.to_str().expect("header is valid ASCII"))
+}
+
 /// A real, independently queryable app: a genuine `axum` HTTP server bound
 /// to its own OS-assigned socket, reachable only over that socket (never
 /// invoked in-process) -- so "the app recorded the write" and "the app
 /// recorded nothing" are facts about a second real process boundary, not
 /// trust in the packet's own echoed response.
-async fn spawn_recording_app() -> (String, Arc<Mutex<Vec<Bytes>>>) {
+async fn spawn_recording_app() -> (String, Arc<Mutex<Vec<RecordedWrite>>>) {
     #[derive(Clone)]
     struct RecordingState {
-        recorded: Arc<Mutex<Vec<Bytes>>>,
+        recorded: Arc<Mutex<Vec<RecordedWrite>>>,
     }
 
-    async fn record(State(state): State<RecordingState>, body: Bytes) -> StatusCode {
+    async fn record(
+        State(state): State<RecordingState>,
+        headers: axum::http::HeaderMap,
+        body: Bytes,
+    ) -> StatusCode {
         state
             .recorded
             .lock()
             .expect("recorded-writes lock poisoned")
-            .push(body);
+            .push(RecordedWrite { headers, body });
         StatusCode::OK
     }
 
@@ -423,7 +448,22 @@ token_network_address = "{token_network}"
         1,
         "the app recorded exactly one write for the fulfilled, correctly-priced packet"
     );
-    assert_eq!(after_paid[0].as_ref(), b"paid write");
+    assert_eq!(after_paid[0].body.as_ref(), b"paid write");
+
+    // ADR 0040 (issue #994), over the whole real path: the app is told
+    // which channel paid for this write, how much, and on what chain --
+    // and the payer is the channel the claim above was actually verified
+    // against, not anything the sender wrote.
+    assert_eq!(
+        recorded_header(&after_paid[0], "x-toon-payer"),
+        Some(format!("evm:{}", paid_channel.0.to_ascii_lowercase()).as_str()),
+        "the app is told which channel paid for this write"
+    );
+    assert_eq!(
+        recorded_header(&after_paid[0], "x-toon-amount"),
+        Some(ROUTE_PRICE.to_string().as_str())
+    );
+    assert_eq!(recorded_header(&after_paid[0], "x-toon-chain"), Some("evm"));
 
     // AC2/AC3: redeem that exact claim against the real chain, through the
     // connector's own operator surface -- not inferred from the fulfil, and
@@ -626,7 +666,7 @@ price = {ROUTE_PRICE}
         1,
         "the app recorded the unaffiliated buyer's write"
     );
-    assert_eq!(after_paid[0].as_ref(), b"unaffiliated write");
+    assert_eq!(after_paid[0].body.as_ref(), b"unaffiliated write");
 
     // And the guarantee #607 established is intact: a claim on the same,
     // genuinely on-chain channel, signed by somebody who is not its
@@ -932,7 +972,19 @@ price = {SOLANA_ROUTE_PRICE}
         1,
         "the app recorded the unaffiliated buyer's write"
     );
-    assert_eq!(after_paid[0].as_ref(), b"unaffiliated solana write");
+    assert_eq!(after_paid[0].body.as_ref(), b"unaffiliated solana write");
+
+    // ADR 0040's other chain, end to end: the namespace the app is told
+    // comes from the claim that was verified, so the same handler behind
+    // the same connector says `solana` here and `evm` above.
+    assert_eq!(
+        recorded_header(&after_paid[0], "x-toon-payer"),
+        Some(format!("solana:{}", channel.0).as_str())
+    );
+    assert_eq!(
+        recorded_header(&after_paid[0], "x-toon-chain"),
+        Some("solana")
+    );
 
     // And the guarantee issue #558 established is intact: a claim on the
     // same, genuinely on-chain channel, signed by somebody who is not its

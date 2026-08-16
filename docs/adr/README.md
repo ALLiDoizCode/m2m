@@ -1,6 +1,6 @@
 # Architecture decision records
 
-39 records, and they do **three different jobs**. Most readers only need one group.
+40 records, and they do **three different jobs**. Most readers only need one group.
 
 The numbers are permanent and are never reused or renumbered — they are cited over a thousand
 times across this repo and from `toon-meta`, `relay` and `store`. This index groups them by
@@ -9,7 +9,7 @@ scope; it does not move them.
 | If you are…                                                                 | Read                                                               |
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------ |
 | changing the connector's code or structure                                  | **[Connector architecture](#connector-architecture)** — 14 records |
-| writing or fixing another implementation (a client SDK, a second connector) | **[Protocol law](#protocol-law)** — 22 records                     |
+| writing or fixing another implementation (a client SDK, a second connector) | **[Protocol law](#protocol-law)** — 23 records                     |
 | deploying, migrating or operating the fleet                                 | **[Fleet and operations](#fleet-and-operations)** — 3 records      |
 
 > **Scope note.** A record's group says _who is bound by it_, not where it is implemented.
@@ -56,7 +56,7 @@ outside this repository.
 | [0004](0004-value-moves-on-fulfilment.md)                                        | Value moves on fulfilment, one claim per packet                                      | current                                                                                                             |
 | [0010](0010-flat-per-packet-fee-and-minimum-delivery.md)                         | A hop charges a flat per-packet fee; packets declare a minimum delivery              | current                                                                                                             |
 | [0011](0011-rejects-accumulate-fees-and-probes-discover-cost.md)                 | Rejects accumulate fees; a probe is how cost is discovered                           | current                                                                                                             |
-| [0020](0020-a-price-is-flat-and-attaches-to-a-handler.md)                        | A price is flat, attaches to a handler, and buys an answer                           | current                                                                                                             |
+| [0020](0020-a-price-is-flat-and-attaches-to-a-handler.md)                        | A price is flat, attaches to a handler, and buys an answer                           | current — its "the app is told nothing" clause is narrowed by 0040                                                  |
 | [0024](0024-peer-wire-claims-sign-the-eip-712-balance-proof.md)                  | Peer-wire claims sign the EIP-712 balance-proof digest                               | current                                                                                                             |
 | [0028](0028-a-forwarded-route-is-priced-at-the-client-edge.md)                   | A forwarded route is priced at the client edge, and carries no more than it was paid | current                                                                                                             |
 | [0029](0029-a-peer-wire-arrival-to-a-priced-termination-must-cover-its-price.md) | A peer-wire arrival to a priced termination must cover its price                     | **partly retired** — its `F03` price check stands; the exposure ceiling and `T04` it references are retired by 0033 |
@@ -83,7 +83,8 @@ outside this repository.
 | [0019](0019-a-terminating-connector-derives-the-fulfilment.md)          | A terminating connector derives the fulfilment it is paid against      | current                                                                                                                   |
 | [0025](0025-an-envelope-target-is-confined-beneath-the-handler-path.md) | An envelope target is confined beneath the route's handler path        | current                                                                                                                   |
 | [0032](0032-a-client-destination-is-never-a-route-termination.md)       | A client destination is never a route termination                      | current — bounds 0018 and 0019                                                                                            |
-| [0036](0036-a-paid-deliverys-attribution-stays-on-the-connector.md)     | A paid delivery's attribution stays on the connector, never on the app | current — extends 0014                                                                                                    |
+| [0036](0036-a-paid-deliverys-attribution-stays-on-the-connector.md)     | A paid delivery's attribution stays on the connector, never on the app | **partly superseded** — its records and reasoning stand; its "no successor header" conclusion is reversed by 0040         |
+| [0040](0040-a-verified-payment-is-stated-to-the-app.md)                 | A verified payment is stated to the app; an unverified one by nobody   | current — supersedes 0036's conclusion, bounds 0020                                                                       |
 
 ### Discovery
 
