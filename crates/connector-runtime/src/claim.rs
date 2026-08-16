@@ -808,6 +808,10 @@ impl ClaimBook {
                 // but the two journals share this enum, so every entry kind
                 // in it must still be handled here.
                 JournalEntry::InboundClaimWatermarkReset { .. } => {}
+                // Written only to the client edge's own journal (issue
+                // #1012) -- see the variant's own doc; same reasoning as
+                // `InboundClaimWatermarkReset` above.
+                JournalEntry::InboundClaimRolledBack { .. } => {}
             }
         }
         for ledger in outbound.values_mut() {

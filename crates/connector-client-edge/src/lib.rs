@@ -774,6 +774,13 @@ struct AdmittedClaim {
     /// so a wrapped-only claim is never a source for one, by construction:
     /// this field is the one place that rule is enforced.
     plaintext_signer: Option<String>,
+    /// This claim's own nonce and transferred (cumulative) amount -- what
+    /// [`crate::claim_gate::ClientClaimGate::admit`] just advanced
+    /// [`Self::channel_key`]'s watermark to, kept so a forwarded route
+    /// whose next hop terminally rejects can name exactly this claim to
+    /// [`crate::claim_gate::ClientClaimGate::roll_back`] (issue #1012).
+    nonce: u64,
+    cumulative_amount: u64,
 }
 
 /// The claim header's own declared channel key, read WITHOUT validating
@@ -854,6 +861,8 @@ async fn extract_and_validate_claim(
     let claim = state.claim_gate.ingest(&claim_json, price).await?;
     let channel_key = claim.channel_key();
     let plaintext_signer = (!wrapped).then(|| claim.signer().to_string());
+    let nonce = claim.nonce();
+    let cumulative_amount = claim.transferred_amount();
     // Best-effort liveness bookkeeping for issue #693's claim-state
     // endpoint (`ClientClaimGate::note_claim_time`'s own doc): happens only
     // after `ingest` has already returned durable, never inside it.
@@ -861,6 +870,8 @@ async fn extract_and_validate_claim(
     Ok(Some(AdmittedClaim {
         channel_key,
         plaintext_signer,
+        nonce,
+        cumulative_amount,
     }))
 }
 
@@ -1178,6 +1189,11 @@ async fn handle_ilp(
     // `None` for an unclaimed request (unpriced/unmatched destination), the
     // only shape that reaches routing without one.
     let mut client_channel_id = None;
+    // Issue #1012: this claim's own nonce/cumulative amount, kept only so
+    // a forwarded route whose next hop terminally rejects can name exactly
+    // this claim to `ClientClaimGate::roll_back` below. `None` on every
+    // path `client_channel_id` is also `None` on.
+    let mut admitted_claim_watermark = None;
     // Issue #869: the converse of the invariant stated above -- a packet
     // whose envelope will be refused for its own target shape
     // (`AppOutcome::Refused`, F00) is never going to reach the app either,
@@ -1233,6 +1249,7 @@ async fn handle_ilp(
             Ok(Some(admitted)) => {
                 state.connector.recognize_channel(&admitted.channel_key);
                 plaintext_claim_signer = admitted.plaintext_signer;
+                admitted_claim_watermark = Some((admitted.nonce, admitted.cumulative_amount));
                 client_channel_id = Some(admitted.channel_key);
             }
             Ok(None) => {}
@@ -1258,9 +1275,63 @@ async fn handle_ilp(
     // Issue #736: routing is `Connector::handle_prepare`'s three configured
     // sources first, then whatever client session `state.session_registry`
     // has bound to this destination -- see `session_route::route_prepare`.
-    packet_response(
-        session_route::route_prepare(&state, prepare, price, client_channel_id.as_deref()).await,
+    let is_forwarded_route = matches!(
+        client_route.map(|route| route.kind),
+        Some(ClientRouteKind::Forwarded)
+    );
+    let response =
+        session_route::route_prepare(&state, prepare, price, client_channel_id.as_deref()).await;
+    roll_back_uncarried_forward(
+        &state,
+        is_forwarded_route,
+        client_channel_id.as_deref(),
+        admitted_claim_watermark,
+        &response,
     )
+    .await;
+    packet_response(response)
+}
+
+/// Issue #1012: a client-priced forwarded route (ADR 0028) admits the
+/// client's covering claim before learning whether the next hop will
+/// fulfil it -- `Connector::forward_via_peer_route` can only greet, retry
+/// and finally accept or reject once it has actually tried the peer. A
+/// terminal reject reaching here means the packet this claim paid for was
+/// never carried, so the claim is not counted against the client: its
+/// watermark is rolled back to what it was immediately before this
+/// request, via [`crate::claim_gate::ClientClaimGate::roll_back`], which
+/// itself no-ops (rather than corrupts) if a later claim on the same
+/// channel has since moved on. A no-op on every other shape -- an
+/// unforwarded route, a fulfilment, or a request that admitted no claim at
+/// all -- so this changes nothing about what those already do.
+pub(crate) async fn roll_back_uncarried_forward(
+    state: &ClientEdgeState,
+    is_forwarded_route: bool,
+    client_channel_id: Option<&str>,
+    admitted_claim_watermark: Option<(u64, u64)>,
+    response: &PacketResponse,
+) {
+    if !is_forwarded_route || !matches!(response, PacketResponse::Reject(_)) {
+        return;
+    }
+    let (Some(channel_key), Some((nonce, cumulative_amount))) =
+        (client_channel_id, admitted_claim_watermark)
+    else {
+        return;
+    };
+    if let Err(error) = state
+        .claim_gate
+        .roll_back(channel_key, nonce, cumulative_amount)
+        .await
+    {
+        tracing::error!(
+            channel = channel_key,
+            error = %error.message(),
+            "a forwarded route's next hop rejected this packet, but this claim's watermark \
+             could not be durably rolled back -- the client remains charged for a packet \
+             this connector never carried"
+        );
+    }
 }
 
 /// `POST /ilp/probe` -- a probe's ingress (client-edge-spec.md §1.6, ADR
@@ -4472,6 +4543,90 @@ mod tests {
             let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
             Fulfill::decode(&bytes).expect("a deliberately free forwarded route still carries");
             assert_eq!(remote_app.deliveries().len(), 1);
+        }
+
+        /// Issue #1012: a client-priced forwarded route (ADR 0028) admits
+        /// the client's claim before learning whether the next hop will
+        /// carry the packet at all. When it refuses -- here, the next hop
+        /// has no route for the destination, the same shape
+        /// `a_reject_with_no_route_at_the_second_hop_reaches_the_original_client`
+        /// exercises unpriced, but this time over a route that actually
+        /// admitted a claim -- that claim must not count against the
+        /// client. Proven behaviourally rather than by reaching into the
+        /// gate's internals: the exact same claim (identical nonce and
+        /// cumulative amount) presented a second time is judged exactly as
+        /// fresh as the first, which is only possible if this connector
+        /// rolled its watermark back rather than leaving it charged. Left
+        /// charged, `ClientClaimGate::admit` would refuse the resubmission
+        /// as a stale nonce (F01) before the packet is ever routed a
+        /// second time -- rolled back, it is admitted again, forwarded
+        /// again, and meets the identical F02 the first attempt did.
+        #[tokio::test]
+        async fn a_forwarded_routes_next_hop_reject_does_not_charge_the_client() {
+            let signer = test_signer();
+            let payee = Arc::new(Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+            let mut transport = InProcessPeerTransport::new();
+            transport.add_peer(PEER_ID, payee);
+            let payer = Arc::new(
+                Connector::new(
+                    vec![],
+                    vec![PeerRoute::new_priced(
+                        FORWARD_PREFIX,
+                        PEER_ID,
+                        FORWARD_FEE,
+                        FORWARD_PRICE,
+                    )],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(transport),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone()),
+            );
+            let app = router_with_gate(payer, signer.clone(), None, test_gate(test_channels()));
+
+            let claim_json = evm_claim_json(1, FORWARD_PRICE);
+            let attempt = |app: axum::Router| {
+                let claim_json = claim_json.clone();
+                let signer = signer.clone();
+                async move {
+                    let (prepare, _shared_secret) = sealed_sample_prepare_with_amount(
+                        REMOTE_APP,
+                        FORWARD_PRICE,
+                        &signer.public_key().unwrap(),
+                    );
+                    let response = app
+                        .oneshot(request_with_claim_header(
+                            &prepare,
+                            CLAIM_HEADER,
+                            &claim_json,
+                        ))
+                        .await
+                        .unwrap();
+                    let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+                    Reject::decode(&bytes).expect("no route at the next hop is a reject")
+                }
+            };
+
+            let first = attempt(app.clone()).await;
+            assert_eq!(
+                first.code.as_str(),
+                "F02",
+                "the next hop's own refusal, reached because the claim WAS admitted and forwarded"
+            );
+
+            let second = attempt(app).await;
+            assert_eq!(
+                second.code.as_str(),
+                "F02",
+                "the identical claim reached the peer again rather than being refused as a \
+                 stale nonce -- the first reject did not charge the client"
+            );
         }
 
         /// §1.7: `GET /ilp/routes/price` answers for a destination this

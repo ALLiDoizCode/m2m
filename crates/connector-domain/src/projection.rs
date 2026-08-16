@@ -71,6 +71,32 @@ pub enum JournalEntry {
     /// entries decode through one enum, matching every other entry kind
     /// here.
     InboundClaimWatermarkReset { channel_id: String },
+    /// `channel_id`'s watermark was durably rolled back to `nonce`/
+    /// `cumulative_amount` because the PREPARE the claim that reached that
+    /// watermark covered is now known never to have been carried: a
+    /// client-priced forwarded route (ADR 0028) admits the client's claim
+    /// before learning whether the next hop will fulfil it, and the next
+    /// hop's own terminal reject (F06 after a covered retry, T01
+    /// unreachable) is discoverable only after admission (issue #1012).
+    /// Written only by `connector_client_edge::ClientClaimGate::roll_back`,
+    /// into the client edge's own journal, immediately after the
+    /// `InboundClaimAccepted` entry it undoes -- never speculatively, and
+    /// never for a claim a later admission has already superseded.
+    ///
+    /// Unlike `InboundClaimAccepted`, whose replay folds by componentwise
+    /// max (this module's own doc), a replay of this entry SETS the
+    /// watermark directly, matching `InboundClaimWatermarkReset`: it exists
+    /// specifically to move a watermark down, which a legitimately
+    /// advancing claim never does, so folding it by max would silently
+    /// undo the very thing it records. Folds into nothing here: like
+    /// `InboundClaimWatermarkReset`, this entry kind is written only to the
+    /// client edge's own journal, and [`Projection`] tracks the peer
+    /// wire's own book.
+    InboundClaimRolledBack {
+        channel_id: String,
+        nonce: u64,
+        cumulative_amount: u64,
+    },
 }
 
 /// Balances, derived in memory by folding a journal (ADR 0005). Never a
@@ -130,6 +156,9 @@ impl Projection {
             // Written only to the client edge's own journal, never this
             // one (issue #977) -- see the variant's own doc.
             JournalEntry::InboundClaimWatermarkReset { .. } => {}
+            // Written only to the client edge's own journal, never this
+            // one (issue #1012) -- see the variant's own doc.
+            JournalEntry::InboundClaimRolledBack { .. } => {}
         }
     }
 

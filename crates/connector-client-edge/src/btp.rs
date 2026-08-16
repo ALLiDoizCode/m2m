@@ -50,6 +50,7 @@ use connector_btp::{
 };
 use connector_domain::client_claim::{ClientClaim, EVM_NAMESPACE};
 use connector_domain::{condition_is_present, PacketResponse, Prepare, Reject, RejectCode};
+use connector_runtime::ClientRouteKind;
 use connector_signer::{verify_evm_claim_state_challenge, EvmClaimStateChallenge};
 
 use crate::channels::decode_hex_bytes;
@@ -840,13 +841,23 @@ async fn handle_frame(
         _ => None,
     };
 
+    // Issue #1012: read before `client_route` would otherwise go unused
+    // past this point -- see `handle_ilp`'s mirror of this on the HTTP
+    // carriage.
+    let is_forwarded_route = matches!(
+        client_route.map(|route| route.kind),
+        Some(ClientRouteKind::Forwarded)
+    );
     let session_address = binding.as_ref().map(|(address, _)| address.clone());
     let permit = window_slot(window).await;
     let task = finish_frame(
         Arc::clone(state),
         admitted,
-        prepare,
-        price,
+        MatchedRoute {
+            prepare,
+            price,
+            is_forwarded_route,
+        },
         frame.request_id,
         replies.clone(),
         session_address,
@@ -856,6 +867,19 @@ async fn handle_frame(
         task.await;
     });
     Ok(())
+}
+
+/// [`finish_frame`]'s own `prepare` plus the two facts about its matched
+/// route (issue #701, ADR 0028) that finishing it needs -- bundled so
+/// `finish_frame` stays under clippy's argument-count lint rather than
+/// growing a ninth loose parameter for issue #1012.
+struct MatchedRoute {
+    prepare: Prepare,
+    price: u64,
+    /// Whether `prepare`'s destination matched a *forwarded* route --
+    /// see [`roll_back_uncarried_forward`](crate::roll_back_uncarried_forward)'s
+    /// own doc for why `finish_frame` needs to know.
+    is_forwarded_route: bool,
 }
 
 /// A judged frame's remaining, order-insensitive work (issue #688), run
@@ -868,17 +892,28 @@ async fn handle_frame(
 async fn finish_frame(
     state: Arc<ClientEdgeState>,
     admitted: Option<(ClientClaim, DurabilityTicket)>,
-    prepare: Prepare,
-    price: u64,
+    matched: MatchedRoute,
     request_id: u32,
     replies: mpsc::Sender<Vec<u8>>,
     session_address: Option<String>,
 ) {
+    let MatchedRoute {
+        prepare,
+        price,
+        is_forwarded_route,
+    } = matched;
     // Issue #535/ADR 0036: the channel a covering claim admitted this
     // packet on, read before `admitted` is consumed below, so it can ride
     // into the `"packet"` span the same way the HTTP carriage's `handle_ilp`
     // threads its own `admitted.channel_key` through.
     let client_channel_id = admitted.as_ref().map(|(claim, _)| claim.channel_key());
+    // Issue #1012: this claim's own nonce/cumulative amount, kept for the
+    // same reason `handle_ilp`'s HTTP carriage keeps them -- so a
+    // forwarded route whose next hop terminally rejects can roll back
+    // exactly this claim.
+    let admitted_claim_watermark = admitted
+        .as_ref()
+        .map(|(claim, _)| (claim.nonce(), claim.transferred_amount()));
 
     if let Some((claim, durability)) = admitted {
         match durability.durable().await {
@@ -904,14 +939,18 @@ async fn finish_frame(
     // Issue #736: the same fourth routing arm `handle_ilp`'s HTTP carriage
     // uses -- a configured route first, then whatever client session
     // `state.session_registry` has bound to this destination.
-    let response = match crate::session_route::route_prepare(
+    let packet_response =
+        crate::session_route::route_prepare(&state, prepare, price, client_channel_id.as_deref())
+            .await;
+    crate::roll_back_uncarried_forward(
         &state,
-        prepare,
-        price,
+        is_forwarded_route,
         client_channel_id.as_deref(),
+        admitted_claim_watermark,
+        &packet_response,
     )
-    .await
-    {
+    .await;
+    let response = match packet_response {
         PacketResponse::Fulfill(fulfill) => encode_response(request_id, &[], &fulfill.encode()),
         PacketResponse::Reject(reject) => reject_response(request_id, reject, Vec::new()),
     };

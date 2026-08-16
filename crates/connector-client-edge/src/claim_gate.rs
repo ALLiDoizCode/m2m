@@ -353,6 +353,22 @@ pub struct ClientClaimGate {
     /// gate held. Shared with the committer thread, which needs the same
     /// lock to roll a failed batch's advances back.
     watermarks: Arc<RwLock<HashMap<String, Watermark>>>,
+    /// What each channel in [`Self::watermarks`] held immediately before
+    /// its *current* entry there -- i.e. exactly what [`Self::roll_back`]
+    /// restores when the packet that advanced a channel to its current
+    /// watermark turns out never to have been carried (issue #1012).
+    /// Written by [`Self::admit`] at the moment it advances a channel,
+    /// under the same write lock; consumed (and removed) by
+    /// [`Self::roll_back`]. Deliberately **not** durable and **not**
+    /// shared with [`GroupCommitter`]: a rollback is only ever attempted
+    /// within the same request that admitted the claim being rolled back
+    /// (the client edge learns the next hop's answer synchronously, before
+    /// replying), so nothing here needs to survive a restart, unlike
+    /// `GroupCommitter`'s own `previous` bookkeeping on
+    /// [`PendingAcceptance`], which undoes a *failed-durability* advance
+    /// rather than a *reported-uncarried* one and is computed fresh for
+    /// the batch it is undoing.
+    previous_watermarks: RwLock<HashMap<String, Option<Watermark>>>,
     /// The group-commit seam between an acceptance and its durability
     /// (issue #686): entries enqueued under the watermark lock, batched
     /// into one journal write + fsync outside it.
@@ -431,6 +447,7 @@ impl ClientClaimGate {
         Ok(ClientClaimGate {
             channels,
             watermarks,
+            previous_watermarks: RwLock::new(HashMap::new()),
             committer,
             last_claim_seen: RwLock::new(HashMap::new()),
             payout_ledger: None,
@@ -833,7 +850,18 @@ impl ClientClaimGate {
             channel_key: key.clone(),
             previous,
         }) {
-            Ok(ticket) => ticket,
+            Ok(ticket) => {
+                // Recorded only now the advance is actually queued for the
+                // journal (issue #1012): `Self::roll_back` restores exactly
+                // this value, so it must agree with what `previous` on the
+                // `PendingAcceptance` above would also restore on a failed
+                // batch.
+                self.previous_watermarks
+                    .write()
+                    .expect("client claim previous-watermark lock poisoned")
+                    .insert(key.clone(), previous);
+                ticket
+            }
             Err(CommitterGone) => {
                 // The committer thread is gone -- nothing will ever fsync
                 // this entry. Undo the advance while still holding the
@@ -851,6 +879,104 @@ impl ClientClaimGate {
         drop(watermarks);
 
         Ok((claim, ticket))
+    }
+
+    /// Undo [`Self::admit`]'s watermark advance for the claim that reached
+    /// exactly `nonce`/`cumulative_amount` on `channel_key` -- because the
+    /// PREPARE it covered is now known never to have been carried across a
+    /// forwarded route (issue #1012, ADR 0028): the client edge admits the
+    /// client's claim before learning whether the next hop will fulfil it,
+    /// and the next hop's own terminal reject (F06 after a covered retry,
+    /// T01 unreachable) is discoverable only after that admission --
+    /// unlike the cases [`crate::Connector::cover_forward`] (or an
+    /// equivalent pre-admission check) can already predict before this
+    /// gate is ever consulted, this is the seam for the ones it cannot.
+    ///
+    /// A no-op -- correctly, not a bug -- in two cases:
+    ///
+    /// * a later claim has since advanced `channel_key` past
+    ///   `nonce`/`cumulative_amount`. That claim's own admission is
+    ///   unrelated to this reject, and unwinding it here would erase state
+    ///   this call has no business touching, so it is left alone -- this
+    ///   call only ever acts while the claim it names is still the
+    ///   channel's current watermark.
+    /// * this gate holds no [`Self::previous_watermarks`] record for
+    ///   `channel_key`. Every call this connector itself makes provides
+    ///   one -- `admit` records it at the exact moment it advances the
+    ///   channel -- so this can only be reached by a rollback attempted
+    ///   outside the request that admitted the claim, which nothing in
+    ///   this codebase does (see the field's own doc for why that is safe
+    ///   to assume).
+    ///
+    /// Durable exactly like `admit`'s own advance: the in-memory watermark
+    /// moves and the entry is enqueued under the same write lock every
+    /// acceptance is decided under, and this call does not resolve until
+    /// the committer reports it fsync'd -- a rollback a restart could
+    /// forget would leave the client durably charged for a packet this
+    /// connector itself decided not to count.
+    pub(crate) async fn roll_back(
+        &self,
+        channel_key: &str,
+        nonce: u64,
+        cumulative_amount: u64,
+    ) -> Result<(), ClaimIngestRejection> {
+        let key = canonical_channel_key(channel_key);
+        let ticket = {
+            let mut watermarks = self
+                .watermarks
+                .write()
+                .expect("client claim watermarks lock poisoned");
+            let current = watermarks.get(&key).copied();
+            if current
+                != Some(Watermark {
+                    nonce,
+                    cumulative_amount,
+                })
+            {
+                return Ok(());
+            }
+            let mut previous_watermarks = self
+                .previous_watermarks
+                .write()
+                .expect("client claim previous-watermark lock poisoned");
+            let Some(previous) = previous_watermarks.remove(&key) else {
+                tracing::warn!(
+                    channel = %key,
+                    "asked to roll back a claim this gate has no prior watermark recorded \
+                     for; leaving it charged rather than guessing"
+                );
+                return Ok(());
+            };
+            let entry = match previous {
+                Some(watermark) => JournalEntry::InboundClaimRolledBack {
+                    channel_id: key.clone(),
+                    nonce: watermark.nonce,
+                    cumulative_amount: watermark.cumulative_amount,
+                },
+                None => JournalEntry::InboundClaimWatermarkReset {
+                    channel_id: key.clone(),
+                },
+            };
+            restore_watermark(&mut watermarks, &key, previous);
+            match self.committer.enqueue(PendingAcceptance {
+                entry,
+                channel_key: key.clone(),
+                previous: current,
+            }) {
+                Ok(ticket) => ticket,
+                Err(CommitterGone) => {
+                    restore_watermark(&mut watermarks, &key, current);
+                    previous_watermarks.insert(key.clone(), previous);
+                    tracing::error!(
+                        channel = %key,
+                        "could not durably record a claim rollback: the journal committer \
+                         is gone"
+                    );
+                    return Err(ClaimIngestRejection::NotDurable);
+                }
+            }
+        };
+        ticket.durable().await
     }
 
     /// Reset `channel_key`'s watermark, durably (issue #977): the next
@@ -1303,6 +1429,27 @@ fn replay_watermarks(entries: &[JournalEntry]) -> HashMap<String, Watermark> {
             // first accepted, reproduced on every replay.
             JournalEntry::InboundClaimWatermarkReset { channel_id } => {
                 watermarks.remove(&canonical_channel_key(channel_id));
+            }
+            // Issue #1012: a rollback exists precisely to move a
+            // watermark DOWN, which componentwise `max` above would
+            // silently undo -- so, like the reset above, this SETS the
+            // channel's watermark directly rather than folding into it.
+            // Sound for the same reason: `Self::roll_back` only ever
+            // writes this entry immediately after the `InboundClaimAccepted`
+            // it undoes, so replay sees the two in the same order they were
+            // decided in.
+            JournalEntry::InboundClaimRolledBack {
+                channel_id,
+                nonce,
+                cumulative_amount,
+            } => {
+                watermarks.insert(
+                    canonical_channel_key(channel_id),
+                    Watermark {
+                        nonce: *nonce,
+                        cumulative_amount: *cumulative_amount,
+                    },
+                );
             }
             _ => continue,
         }

@@ -83,6 +83,24 @@ and is known locally, so no traversal is needed to discover it; and free travers
 a way to make this connector sign a peer claim it was not paid for. An unpriced forwarded route
 still traverses and accumulates fees, which is ADR 0011's mechanism and is untouched.
 
+**A forwarded route charges on the forward's FULFILL, never on its REJECT** (issue #1012). The
+client edge admits the client's covering claim and only then forwards — it has to: whether the
+next hop will carry the packet at all is not knowable before trying it, so "refuse before
+admitting" (the seam issues #869/#944 and #887 already use for every refusal this connector can
+predict from the packet alone) cannot cover a refusal only the peer wire itself produces. When the
+next hop terminally rejects — `F06` after a covered retry, `T01` unreachable, or any other genuine
+peer-wire refusal `forward_via_peer_route` relays rather than retries — the claim that admitted at
+this edge is rolled back: `ClientClaimGate::roll_back` restores the channel's watermark to what it
+held immediately before that claim, durably, via its own `InboundClaimRolledBack` journal entry
+(a direct overwrite on replay, unlike `InboundClaimAccepted`'s componentwise-max fold, since a
+rollback exists specifically to move a watermark down). The client is told the same refusal it
+would have been told anyway; only the fact that nothing was charged reaching it is new. A forward
+that FULFILLs is unaffected and still advances the watermark by exactly `price`, as it always has.
+This is the same "charged for an attempt the connector itself decided not to render" defect issues
+#869/#944 closed one hop earlier — here the hop is the hand-off to the next connector rather than
+this one's own app, and the claim can only be evaluated after the fact rather than predicted before
+it, so the fix is a rollback rather than a pre-admission refusal.
+
 ## What this does not change
 
 **The peer-facing direction.** `peer-carriage-spec.md` §3.1 stands verbatim: a connector MUST NOT
