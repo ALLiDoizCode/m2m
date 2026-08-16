@@ -2,8 +2,16 @@ name: Publish connector-rust image
 
 # Publishes the Rust connector (crates/connector-bin, built via
 # deploy/connector-rust/Dockerfile) to GHCR as ghcr.io/toon-protocol/connector,
-# tagged `rust-sha-<short-sha>` (immutable, content-pinned) and `rust-main`
-# (floating). #429 added the Dockerfile, #465 left publishing to #487.
+# tagged `rust-sha-<short-sha>` (immutable, content-pinned), `rust-main` and
+# `rust-release` (both floating, moved to the newest green main build).
+# #429 added the Dockerfile, #465 left publishing to #487.
+#
+# `rust-release` (#989, part of toon-meta#403's fleet-wide :release +
+# Watchtower convention) is the moving target a box's label-scoped
+# Watchtower would follow. Adding the tag here does NOT wire any box to
+# follow it -- the relay+store boxes intentionally pin `rust-sha-1204220`
+# (connector#972, an open deliberate hold) while main is ahead, and
+# repointing them is a separate, gated step.
 #
 # NAME HISTORY (reversal, connector#633): #487 originally shipped this as a
 # SEPARATE package `connector-rust`, to avoid colliding with the TypeScript
@@ -81,6 +89,7 @@ jobs:
           tags: |
             type=raw,value=rust-sha-${{ steps.sha.outputs.short }}
             type=raw,value=rust-main,enable={{is_default_branch}}
+            type=raw,value=rust-release,enable={{is_default_branch}}
 
       - name: Build and push connector-rust image
         uses: docker/build-push-action@v5
