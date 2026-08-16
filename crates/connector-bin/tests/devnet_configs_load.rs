@@ -174,6 +174,13 @@ const RELAY_SWAP_ANNOUNCE_CONFIG: &str =
 const RELAY_WATCHTOWER_OVERLAY: &str =
     include_str!("../../../infra/linode-relay/docker-compose.relay.watchtower.yml");
 
+/// The store box's own label-scoped Watchtower overlay (issue #992), the
+/// sibling of [`RELAY_WATCHTOWER_OVERLAY`]. Committed a week later than the
+/// relay's only because the relay box was the epic's proving ground; both
+/// boxes have run one since 2026-08-16.
+const STORE_WATCHTOWER_OVERLAY: &str =
+    include_str!("../../../infra/linode-store/docker-compose.store.watchtower.yml");
+
 /// The relay box's RENDERED nginx config (the file its `nginx` service
 /// actually bind-mounts), read here so the endpoints the maker announces
 /// can be checked against the locations that serve them. See
@@ -1094,12 +1101,36 @@ fn assert_overlays_sharing_one_config_pin_one_image(
          stale one -- do not add a second config",
         announcing[0], serving[0]
     );
-    assert!(
-        serving[0].starts_with("rust-sha-"),
-        "the {box_label} overlays must pin an immutable `rust-sha-` tag, \
-         never a floating one (`rust-main`): a floating tag makes the \
-         agreement above unfalsifiable"
-    );
+    // Until toon-meta#403 this asserted `serving[0].starts_with("rust-sha-")`
+    // -- an immutable tag, because a floating one would make the agreement
+    // above unfalsifiable: two files could name the same moving tag and still
+    // be running different binaries.
+    //
+    // That is still exactly right, and it is still what is asserted. What
+    // changed is HOW a moving tag can be made falsifiable. Both services on a
+    // box are recreated by the SAME label-scoped Watchtower sweep, so if both
+    // carry the enable label they move to the same digest together, and the
+    // agreement holds at the digest rather than at the tag string. If only
+    // ONE of the pair is labelled, the tag string agrees while the digests
+    // silently diverge -- which is the original defect wearing a disguise, and
+    // is the case this refuses.
+    if !serving[0].starts_with("rust-sha-") {
+        for (overlay, name) in [
+            (rust_overlay, rust_overlay_name),
+            (announce_overlay, announce_overlay_name),
+        ] {
+            assert!(
+                declares_watchtower_label(overlay),
+                "the {box_label} overlays share the MOVING tag `{}`, but \
+                 {name} does not carry `{WATCHTOWER_ENABLE_LABEL_KEY}`. Both \
+                 services mount the same connector-rust.toml and must run the \
+                 same binary; on a moving tag the only thing that keeps them \
+                 together is being recreated by the same Watchtower sweep. \
+                 Label both, or pin both to an immutable `rust-sha-` tag",
+                serving[0]
+            );
+        }
+    }
 }
 
 #[test]
@@ -1808,63 +1839,100 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
     drop(boot(&text));
 }
 
-/// The fleet's **pin of record** (issue #848). This repo's infra compose
-/// files decide which `connector` image the fleet runs -- the boxes follow
-/// them, not the reverse. #848 was filed while three artifacts named three
-/// different tags: the overlays here (`rust-sha-b31a7c9`), the live boxes
-/// (`rust-sha-33f10e2`, set by hand) and the store/relay deploy bundles
-/// (`rust-sha-bc9749b`). The overlays had since been reconciled to the
-/// boxes' `rust-sha-33f10e2` (#837), but nothing asserted that agreement
-/// and the tag predates the announce-identity fix. This constant moves
-/// them forward off it and makes the agreement a gate.
+/// The connector image reference EVERY overlay on the surviving two-box
+/// fleet must name -- the fleet's pin of record.
 ///
-/// The value is a literal, not something derived from `git`, for the same
-/// reason every other `EXPECTED_*` constant in this module is: `cargo test`
-/// may run from a shallow checkout with no history for `git merge-base` to
-/// walk, and a value read back out of the files under test would keep
-/// passing if one of them regressed. The evidence for THIS literal was
-/// gathered once, by hand, and is recorded here rather than only in a PR
-/// diff:
+/// # This was an immutable `rust-sha-*` literal until toon-meta#403
 ///
-/// - Bumped (issue #948) from `rust-sha-440eab7` -- which predates the
-///   `notice_*` fields issue #912 (PR #915) added to `[announce]` -- because
-///   #948's committed configs now SET `notice_id`/`notice_severity`/
-///   `notice_summary`/`notice_url`. `RawAnnounceConfig` is
-///   `deny_unknown_fields` (`connector-config/src/announce.rs`), so a binary
-///   built before #912 would refuse to boot on either box's config, not
-///   silently ignore the fields -- a config/pin pair that must move
-///   together, or the box does not come up at all.
-/// - `rust-sha-415531a` is `415531a1b22ab78c727158cf2f443593b6ab790f`, the
-///   merge commit that lands issue #944 -- itself several commits after
-///   `5b7932f6110f72f251ce5d99863e30d614fe9fce` (PR #915, issue #912), so it
-///   carries the `notice_*` schema by construction. Chosen over #912's own
-///   merge commit only because it is the most recent commit this suite could
-///   confirm was actually built and published successfully
-///   (`publish-connector-rust-image.yml` run history, 2026-08-13); any
-///   ancestor of it back through `5b7932f6` would also qualify.
-/// - `git merge-base --is-ancestor 5b7932f6110f72f251ce5d99863e30d614fe9fce
-///   415531a1b22ab78c727158cf2f443593b6ab790f` succeeds, confirming #912 is
-///   carried; `git merge-base --is-ancestor
-///   415531a1b22ab78c727158cf2f443593b6ab790f HEAD` succeeds, confirming the
-///   tag's commit is on `main`. The fleet's prior floor, `rust-sha-440eab7`,
-///   is a strict ancestor of both, so this is a forward move, not a
-///   rollback.
+/// It named `rust-sha-415531a`, and the doctrine behind it was that no
+/// connector image reaches a box without a human having bumped a literal in
+/// a reviewed PR. toon-meta#403 gave each box a label-scoped Watchtower
+/// (`infra/linode-*/docker-compose.*.watchtower.yml`) polling ONE tag and
+/// recreating the labelled containers when its digest moves, and repointed
+/// `connector-rust` and `announce` on both boxes at
+/// `ghcr.io/toon-protocol/connector:rust-release`. Issues #988 and #992 are
+/// the repo half of that; this constant is the part of it that had to be
+/// DECIDED rather than transcribed.
 ///
-/// Scope: `rust-sha-` pins only. Two legacy TypeScript `connector` services
-/// used to sit outside it, pinned to `3.36.3-solchan.0` and deliberately NOT
-/// converged onto this tag -- a different binary on its own release-tag
-/// scheme, reading a different config file (`connector.yaml`, not
-/// `connector-rust.toml`), which a `rust-sha-` tag would not start. Both are
-/// gone now (the store's with issue #901, the apex's with the whole of
-/// `infra/linode-node/`, issue #872), and
-/// [`no_surviving_box_pins_a_non_rust_connector_image`] is what keeps one
-/// from coming back.
+/// The pin of record has not been dropped. It has moved from a literal in
+/// four compose files to a tag pointer in GHCR, and this constant now names
+/// that pointer. The two cannot coexist: an immutable literal makes
+/// Watchtower's poll a permanent no-op, since a `rust-sha-*` tag's digest
+/// never moves. So the choice was never "keep the pin or lose it" -- it was
+/// whether the repo describes the fleet that exists.
 ///
-/// This is a forward move on every box, not yet deployed anywhere -- see
-/// each overlay's own "PIN OF RECORD" comment. Re-pin here FIRST on any
-/// future bump; the compose files below are asserted to agree with this
-/// constant, not the other way around.
-const EXPECTED_CONNECTOR_TAG: &str = "rust-sha-415531a";
+/// It did not. Before this change these four files said `rust-sha-415531a`
+/// while both boxes had followed `:rust-release` since 2026-08-16, and a
+/// `fleet-ops` reconcile would have rolled the fleet BACKWARDS onto a build
+/// weeks older than the one it was running -- the #848 failure mode (an
+/// artifact naming a tag that is not what the boxes run) reappearing with
+/// the sign flipped. A pin that lies is worse than no pin.
+///
+/// # What this constant still refuses, and it is most of what it ever did
+///
+/// #848's actual finding was three artifacts naming three different tags,
+/// none of them what the boxes ran. That property is asserted here
+/// unchanged, against a literal, by
+/// [`every_fleet_overlay_pins_the_connector_repos_pin_of_record`]: all four
+/// overlays must name THIS reference, so they cannot drift apart from each
+/// other, and cannot all drift together onto some other tag either. What it
+/// no longer refuses is the specific string `rust-release`.
+///
+/// Two guards make a moving reference safe in a way a bare floating tag is
+/// not, and they are the reason this could change at all:
+///
+/// * [`no_unwatched_fleet_service_follows_a_floating_tag`] -- a service may
+///   name a moving tag ONLY if it carries the Watchtower enable label. An
+///   unwatched floating tag is strictly worse than either alternative: it
+///   changes under the box on the next unrelated `docker compose up`, with
+///   no diff to review and no poll to observe. The store's `store:latest`
+///   was exactly that until #992.
+/// * [`assert_overlays_sharing_one_config_pin_one_image`] -- a box's
+///   `connector-rust` and `announce` mount the same `connector-rust.toml`,
+///   so on a moving tag BOTH must be labelled: only being recreated in the
+///   same Watchtower sweep keeps them on one digest.
+///
+/// # The build the fleet is actually on, and how to read it back
+///
+/// A tag pointer is only a pin if you can say what it points at. Recorded
+/// from the live boxes on 2026-08-16, read-only:
+///
+/// ```text
+/// ghcr.io/toon-protocol/connector@sha256:ea14c68d947f17d8ec517781018a1e94859afac437aaa7917fc1617d93c130d7
+/// org.opencontainers.image.revision = 902daf92471798de80d221c89dea8e4d86451570
+/// ```
+///
+/// Identical on BOTH boxes, and `902daf92` is the merge of #997 on `main`.
+/// So `:rust-release` is currently behaving as auto-on-green: Watchtower had
+/// both boxes on that build within a minute of the merge, with no human
+/// step. Relay and store edges both answered `200` on `/ilp/identity` while
+/// running it. That is the ground truth, and it is why this constant does
+/// NOT claim promotion semantics it cannot back.
+///
+/// Note the asymmetry that keeps the ROLLBACK story intact: the moving tag
+/// is what a box follows, but every build also keeps its own immutable
+/// `rust-sha-<short-sha>` tag (`publish-connector-rust-image.yml` pushes
+/// both). Pinning one of those back into these four overlays is still the
+/// documented way to hold a box on a known build, and doing so re-arms the
+/// immutable branch of every assertion above automatically.
+///
+/// # Open, and deliberately not decided here
+///
+/// toon-meta#403's closing comment describes `:rust-release` as a supervised
+/// PROMOTION tag -- a manual dispatch retagging a validated `rust-sha-*` --
+/// which would preserve the validation gate #972 argues for while still
+/// automating the deploy. No such workflow exists:
+/// `publish-connector-rust-image.yml` moves the tag on `is_default_branch`,
+/// and the digests above show it moving that way in practice. Whether it
+/// stays auto-on-green or becomes a promotion tag is being decided
+/// separately (#972, ADR 0034).
+///
+/// Nothing here presumes an answer. Under EITHER outcome the fleet overlays
+/// name `:rust-release` and the assertions above hold unchanged; only this
+/// doc comment's account of who moves the tag would need editing, and a
+/// promotion workflow would then be the natural place to reintroduce a
+/// `rust-sha-*` literal -- as the promotion TARGET, not as a box pin.
+const EXPECTED_CONNECTOR_TAG: &str = "rust-release";
 
 /// Every `image:` pin this suite can see across the surviving two-box fleet
 /// (issue #872 removed the apex's own overlay along with the apex) must name
@@ -1882,11 +1950,30 @@ fn every_fleet_overlay_pins_the_connector_repos_pin_of_record() {
         ("docker-compose.store.announce.yml", STORE_ANNOUNCE_OVERLAY),
         ("docker-compose.relay.rust.yml", RELAY_RUST_OVERLAY),
         ("docker-compose.relay.announce.yml", RELAY_ANNOUNCE_OVERLAY),
-        (
-            "docker-compose.relay.swap-announce.yml",
-            RELAY_SWAP_ANNOUNCE_OVERLAY,
-        ),
     ];
+
+    // `docker-compose.relay.swap-announce.yml` was in this list and is not
+    // any more. It runs the same connector binary, but it is the ONE
+    // connector service on the fleet that mounts a different config file
+    // (`connector-rust.swap-announce.toml`, not `connector-rust.toml`), is
+    // not brought up on the box, and is not opted into Watchtower. So the
+    // agreement this test is about -- the four services that share the two
+    // boxes' `connector-rust.toml` all running one binary -- was never the
+    // property that bound it, and it cannot follow the moving tag without
+    // becoming the unwatched-floating-tag case
+    // `no_unwatched_fleet_service_follows_a_floating_tag` refuses.
+    //
+    // It is not unguarded: that test requires it to stay immutable, and
+    // `no_surviving_box_pins_a_non_rust_connector_image` still covers it.
+    assert!(
+        pinned_connector_images(RELAY_SWAP_ANNOUNCE_OVERLAY)
+            .iter()
+            .all(|tag| tag.starts_with("rust-sha-")),
+        "docker-compose.relay.swap-announce.yml must keep an immutable \
+         `rust-sha-` pin: it mounts its own config, is not brought up on the \
+         box, and carries no Watchtower label, so nothing would ever pull a \
+         moving tag for it on purpose"
+    );
 
     for (name, overlay) in overlays {
         let pins = pinned_connector_images(overlay);
@@ -1912,10 +1999,10 @@ fn every_fleet_overlay_pins_the_connector_repos_pin_of_record() {
 /// `infra/*/docker-compose*.yml`: a guard that walked the directory would
 /// silently start (or stop) covering a box the moment the filesystem changed
 /// under it, rather than only when a real image or port regression landed.
-/// Two boxes: the store's three files (its base file plus its two overlays)
-/// and the relay's six (the same three, plus issue #983's rolling-swap
-/// maker sidecar, that maker's own announce overlay, and issue #988's
-/// label-scoped Watchtower overlay) -- see
+/// Two boxes: the store's four files (its base file, its two overlays and
+/// issue #992's label-scoped Watchtower overlay) and the relay's six (the
+/// same, plus issue #983's rolling-swap maker sidecar and that maker's own
+/// announce overlay) -- see
 /// [`no_surviving_box_pins_a_non_rust_connector_image`] and
 /// [`every_surviving_box_port_binding_is_host_ip_prefixed_or_allowlisted`].
 const SURVIVING_BOX_COMPOSE_FILES: &[(&str, &str)] = &[
@@ -1954,6 +2041,10 @@ const SURVIVING_BOX_COMPOSE_FILES: &[(&str, &str)] = &[
     (
         "infra/linode-relay/docker-compose.relay.watchtower.yml",
         RELAY_WATCHTOWER_OVERLAY,
+    ),
+    (
+        "infra/linode-store/docker-compose.store.watchtower.yml",
+        STORE_WATCHTOWER_OVERLAY,
     ),
 ];
 
@@ -2067,57 +2158,224 @@ const WATCHTOWER_ENABLE_LABEL: &str = "com.centurylinklabs.watchtower.enable: 't
 /// spelled any other legal compose way -- `"true"`, `key=true` under a
 /// `labels:` sequence, `enable: true` -- still trips the assertion below,
 /// which is the whole point of scoping Watchtower by label.
+/// Every `<service>:` block a committed compose file declares, as (name,
+/// lines). A line scan for the same reason [`compose_ports`] is one: no YAML
+/// dependency in this tree, and indentation alone separates a service header
+/// (exactly two spaces, ending `:`) from everything nested under it. A block
+/// runs to the next two-space header or the next top-level key
+/// (`volumes:`/`networks:`), so a service's `labels:` and its `image:` are
+/// read together -- which is the whole point, since the guards below are
+/// about a service having BOTH or NEITHER.
+fn compose_service_blocks<'a>(name: &str, raw: &'a str) -> Vec<(String, Vec<&'a str>)> {
+    let mut blocks: Vec<(String, Vec<&str>)> = Vec::new();
+    let mut in_services = false;
+    for line in raw.lines() {
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        if !line.starts_with(' ') && !line.trim().is_empty() {
+            in_services = line.trim() == "services:";
+            continue;
+        }
+        if !in_services {
+            continue;
+        }
+        let is_service_header = line.starts_with("  ")
+            && !line.starts_with("   ")
+            && line.trim_end().ends_with(':')
+            && !line.trim().trim_end_matches(':').contains(' ');
+        if is_service_header {
+            let service = line.trim().trim_end_matches(':').to_string();
+            assert!(
+                !blocks.iter().any(|(seen, _)| *seen == service),
+                "{name} declares `{service}:` twice -- this scan reads the \
+                 first block only, so the second would go unguarded"
+            );
+            blocks.push((service, Vec::new()));
+        } else if let Some((_, body)) = blocks.last_mut() {
+            body.push(line);
+        }
+    }
+    blocks
+}
+
+/// One named service's block out of [`compose_service_blocks`].
+fn compose_service_block<'a>(name: &str, raw: &'a str, service: &str) -> Option<Vec<&'a str>> {
+    compose_service_blocks(name, raw)
+        .into_iter()
+        .find(|(found, _)| found == service)
+        .map(|(_, body)| body)
+}
+
 fn declares_watchtower_label(raw: &str) -> bool {
     raw.lines()
         .filter(|line| !line.trim_start().starts_with('#'))
         .any(|line| line.contains(WATCHTOWER_ENABLE_LABEL_KEY))
 }
 
-/// Watchtower is label-scoped SPECIFICALLY so it can share the relay box
-/// with services that must never auto-update on an unattended image pull --
-/// `connector-rust`, `relay` and `nginx` all follow the fleet's reviewed-PR
-/// pin doctrine (`EXPECTED_CONNECTOR_TAG` below). `--label-enable` makes that
-/// true only as long as the enable label is not just present, but present on
-/// EXACTLY the one opted-in service. A label that leaked onto a second
-/// service (or a watchtower invocation missing `--label-enable`, which would
-/// make it fleet-wide again) is the failure this test exists to catch.
+/// Every service on the fleet that is opted INTO Watchtower's
+/// auto-recreate, and the file that declares it. Named explicitly, one row
+/// per service, because the opt-in is a security-relevant decision per
+/// service and a list is the only form in which it can be reviewed: a rule
+/// like "everything with a moving tag" would grow silently.
+///
+/// A service appears here iff it carries the enable label; the reverse
+/// direction (nothing else may carry it) is
+/// [`only_the_opted_in_fleet_services_carry_the_watchtower_label`], and the
+/// reason each one is allowed to follow a moving tag is
+/// [`no_unwatched_fleet_service_follows_a_floating_tag`].
+const WATCHTOWER_OPTED_IN_SERVICES: &[(&str, &str)] = &[
+    ("docker-compose.relay.yml", "relay"),
+    ("docker-compose.relay.rust.yml", "connector-rust"),
+    ("docker-compose.relay.announce.yml", "announce"),
+    ("docker-compose.relay.swap.yml", "swap-node"),
+    ("docker-compose.store.yml", "store"),
+    ("docker-compose.store.rust.yml", "connector-rust"),
+    ("docker-compose.store.announce.yml", "announce"),
+];
+
+/// Watchtower is label-scoped SPECIFICALLY so it can share a box with
+/// services that must never be recreated by an unattended image pull.
+/// `--label-enable` makes that true only as long as the enable label is
+/// present on EXACTLY the opted-in services. A label that leaked onto a
+/// further service, or a watchtower invocation missing `--label-enable`
+/// (which would make it fleet-wide again), is the failure this catches.
+///
+/// Issue #988 committed this as "`swap-node` and nothing else", which was
+/// already untrue of the live boxes; issue #992's reconciliation is what
+/// makes the repo say what the fleet does. The list grew, the property did
+/// not change.
+///
+/// What must NEVER be labelled, and is asserted here:
+///
+/// * `nginx` -- each box's TLS edge, and the holder of the `resolver` that
+///   lets every OTHER service's recreate self-heal (issue #993). Recreating
+///   it on an upstream `nginx:alpine` push would be an unreviewed change to
+///   the one component whose job is surviving the others being replaced.
+/// * `certbot` -- holds the renewal timer.
+/// * `watchtower` itself -- a self-recreating watcher is a way to lose the
+///   watcher.
+/// * `swap-announce` -- the maker's one-shot announce sidecar, which is not
+///   brought up on the box and pins an immutable tag; unlabelled and
+///   immutable is the consistent pair.
 #[test]
-fn swap_node_carries_the_watchtower_label_and_no_other_relay_service_does() {
-    assert!(
-        RELAY_SWAP_OVERLAY.contains(WATCHTOWER_ENABLE_LABEL),
-        "docker-compose.relay.swap.yml no longer carries `{WATCHTOWER_ENABLE_LABEL}` -- \
-         the label-scoped Watchtower overlay would then recreate nothing at all."
-    );
+fn only_the_opted_in_fleet_services_carry_the_watchtower_label() {
+    for (file, service) in WATCHTOWER_OPTED_IN_SERVICES {
+        let raw = SURVIVING_BOX_COMPOSE_FILES
+            .iter()
+            .find(|(path, _)| path.ends_with(file))
+            .unwrap_or_else(|| panic!("{file} is not in SURVIVING_BOX_COMPOSE_FILES"))
+            .1;
+        let block = compose_service_block(file, raw, service)
+            .unwrap_or_else(|| panic!("{file} no longer declares a `{service}:` service"));
+        assert!(
+            block
+                .iter()
+                .any(|line| line.contains(WATCHTOWER_ENABLE_LABEL)),
+            "{file}'s `{service}` no longer carries `{WATCHTOWER_ENABLE_LABEL}` \
+             -- it follows a moving tag, so without the label nothing ever \
+             pulls the new digest and the box quietly freezes on whatever it \
+             last ran. Remove it from WATCHTOWER_OPTED_IN_SERVICES and pin it \
+             to an immutable tag if that is the intent"
+        );
+    }
+
+    for (path, raw) in SURVIVING_BOX_COMPOSE_FILES {
+        for (service, block) in compose_service_blocks(path, raw) {
+            let opted_in = WATCHTOWER_OPTED_IN_SERVICES
+                .iter()
+                .any(|(file, name)| path.ends_with(file) && *name == service);
+            if opted_in {
+                continue;
+            }
+            assert!(
+                !block
+                    .iter()
+                    .filter(|line| !line.trim_start().starts_with('#'))
+                    .any(|line| line.contains(WATCHTOWER_ENABLE_LABEL_KEY)),
+                "{path}'s `{service}` declares \
+                 `{WATCHTOWER_ENABLE_LABEL_KEY}` but is not in \
+                 WATCHTOWER_OPTED_IN_SERVICES -- opting a service into \
+                 unattended recreate is a per-service decision that has to be \
+                 reviewed in that list, not acquired by an edit to one \
+                 compose file"
+            );
+        }
+    }
+
     for (name, raw) in [
-        ("docker-compose.relay.yml", RELAY_BASE_COMPOSE),
-        ("docker-compose.relay.rust.yml", RELAY_RUST_OVERLAY),
-        ("docker-compose.relay.announce.yml", RELAY_ANNOUNCE_OVERLAY),
-        (
-            "docker-compose.relay.swap-announce.yml",
-            RELAY_SWAP_ANNOUNCE_OVERLAY,
-        ),
         (
             "docker-compose.relay.watchtower.yml",
             RELAY_WATCHTOWER_OVERLAY,
         ),
+        (
+            "docker-compose.store.watchtower.yml",
+            STORE_WATCHTOWER_OVERLAY,
+        ),
     ] {
         assert!(
-            !declares_watchtower_label(raw),
-            "{name} declares `{WATCHTOWER_ENABLE_LABEL_KEY}` -- only \
-             docker-compose.relay.swap.yml's `swap-node` service should opt \
-             into Watchtower's auto-redeploy-on-`:release` model \
-             (issue #988); every other relay service still follows the \
-             fleet's reviewed-PR pin doctrine and must never be recreated by \
-             an unattended background pull."
+            raw.contains("--label-enable"),
+            "{name} no longer passes `--label-enable` -- without it \
+             Watchtower auto-updates EVERY container on the box, not just \
+             the ones carrying `{WATCHTOWER_ENABLE_LABEL_KEY}`."
         );
     }
+}
 
-    assert!(
-        RELAY_WATCHTOWER_OVERLAY.contains("--label-enable"),
-        "docker-compose.relay.watchtower.yml no longer passes `--label-enable` \
-         -- without it Watchtower auto-updates EVERY container on the box, \
-         not just the ones carrying `{WATCHTOWER_ENABLE_LABEL_KEY}`."
-    );
+/// A moving image reference is only as safe as the thing that observes it
+/// moving. A service that follows one WITHOUT the Watchtower label is the
+/// worst of the three options: nothing polls it, so the box freezes on
+/// whatever digest it happened to pull, and then changes to a different one
+/// with no diff and no announcement the next time anything runs
+/// `docker compose up` for an unrelated reason. The store's `store:latest`
+/// was precisely that until issue #992 -- worse than the `rust-sha-*` pin it
+/// sat next to AND worse than the watched `:release` that replaced it.
+///
+/// So: this org's own images may name a moving tag only on an opted-in
+/// service, and must otherwise be immutable (`sha-*` / `rust-sha-*`). The
+/// relay's `swap-announce` sidecar is the case that proves the rule -- it is
+/// unlabelled and pins an immutable tag.
+///
+/// Scoped to `ghcr.io/toon-protocol/` deliberately. `nginx:alpine` and
+/// `certbot/certbot` are third-party images on third-party release cadences,
+/// deliberately unwatched, and pinning them is a different decision from
+/// this one.
+#[test]
+fn no_unwatched_fleet_service_follows_a_floating_tag() {
+    const OURS: &str = "ghcr.io/toon-protocol/";
+
+    for (path, raw) in SURVIVING_BOX_COMPOSE_FILES {
+        for (service, block) in compose_service_blocks(path, raw) {
+            let Some(image) = block
+                .iter()
+                .map(|line| line.trim())
+                .filter(|line| !line.starts_with('#'))
+                .find_map(|line| line.strip_prefix("image: "))
+            else {
+                continue;
+            };
+            let Some(rest) = image.strip_prefix(OURS) else {
+                continue;
+            };
+            let tag = rest.rsplit(':').next().unwrap_or_default();
+            if tag.starts_with("sha-") || tag.starts_with("rust-sha-") {
+                continue;
+            }
+            let opted_in = WATCHTOWER_OPTED_IN_SERVICES
+                .iter()
+                .any(|(file, name)| path.ends_with(file) && *name == service);
+            assert!(
+                opted_in,
+                "{path}'s `{service}` names the moving tag `{image}` but is \
+                 not opted into Watchtower. An unwatched moving tag is worse \
+                 than either alternative: nothing pulls it on purpose, and it \
+                 changes under the box on the next unrelated \
+                 `docker compose up` with no diff to review. Either label the \
+                 service (and add it to WATCHTOWER_OPTED_IN_SERVICES) or pin \
+                 an immutable `sha-`/`rust-sha-` tag"
+            );
+        }
+    }
 }
 
 /// The maker's own moving watch target (issue #988, toon-meta#403): swap#131
@@ -2147,25 +2405,38 @@ fn swap_node_pins_the_moving_release_tag() {
 /// 1.25 and refuses a newer daemon without this pinned -- see the overlay's
 /// own header).
 #[test]
-fn relay_watchtower_pins_an_explicit_version_and_sets_docker_api_version() {
-    assert!(
-        RELAY_WATCHTOWER_OVERLAY.contains("image: containrrr/watchtower:")
-            && !RELAY_WATCHTOWER_OVERLAY.contains("containrrr/watchtower:latest"),
-        "docker-compose.relay.watchtower.yml must pin an explicit \
-         `containrrr/watchtower:<version>` tag, never `:latest`."
-    );
-    assert!(
-        RELAY_WATCHTOWER_OVERLAY.contains("DOCKER_API_VERSION"),
-        "docker-compose.relay.watchtower.yml no longer sets \
-         `DOCKER_API_VERSION` -- Watchtower's bundled docker client defaults \
-         to API 1.25 and refuses to talk to this box's 1.44+ daemon without \
-         it."
-    );
-    assert!(
-        RELAY_WATCHTOWER_OVERLAY.contains("/var/run/docker.sock:/var/run/docker.sock"),
-        "docker-compose.relay.watchtower.yml no longer mounts the docker \
-         socket -- Watchtower cannot recreate containers without it."
-    );
+fn every_box_watchtower_pins_an_explicit_version_and_sets_docker_api_version() {
+    for (name, raw) in [
+        (
+            "docker-compose.relay.watchtower.yml",
+            RELAY_WATCHTOWER_OVERLAY,
+        ),
+        (
+            "docker-compose.store.watchtower.yml",
+            STORE_WATCHTOWER_OVERLAY,
+        ),
+    ] {
+        assert!(
+            raw.contains("image: containrrr/watchtower:")
+                && !raw.contains("containrrr/watchtower:latest"),
+            "{name} must pin an explicit `containrrr/watchtower:<version>` \
+             tag, never `:latest` -- a future Watchtower release would \
+             otherwise change this box's deploy behaviour with no reviewable \
+             diff. Both live boxes ran the untagged image as drift; that is \
+             the thing being reconciled, not preserved."
+        );
+        assert!(
+            raw.contains("DOCKER_API_VERSION"),
+            "{name} no longer sets `DOCKER_API_VERSION` -- Watchtower's \
+             bundled docker client defaults to API 1.25 and refuses to talk \
+             to these boxes' 1.44+ daemons without it."
+        );
+        assert!(
+            raw.contains("/var/run/docker.sock:/var/run/docker.sock"),
+            "{name} no longer mounts the docker socket -- Watchtower cannot \
+             recreate containers without it."
+        );
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

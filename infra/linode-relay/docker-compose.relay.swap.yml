@@ -37,9 +37,13 @@
 # the `com.centurylinklabs.watchtower.enable` label below) whenever the tag's
 # digest changes — image-only, no git pull, no config churn. This
 # DELIBERATELY supersedes the immutable-sha deliberate-pin doctrine
-# (`EXPECTED_CONNECTOR_TAG`, still in force for the `connector-rust` image in
-# ./docker-compose.relay.rust.yml) for this one opted-in service — an
-# owner-decided trade-off accepted for devnet:
+# (`EXPECTED_CONNECTOR_TAG`) for this service — an owner-decided trade-off
+# accepted for devnet. It was the FIRST service to do so and, when this text
+# was written, the only one; issue #992 reconciled the rest of the box, so
+# `connector-rust`, `announce` and `relay` now follow moving tags too. The
+# difference that remains is which kind: this one and `relay` move on green
+# `main`, while the connector's `:rust-release` is a supervised promotion tag
+# (see `EXPECTED_CONNECTOR_TAG`'s own doc comment). The trade-off:
 # `:release` moving only on green `main` is the gate, not a human PR bumping
 # a sha. Proven live: Watchtower 1.7.1 auto-recreated this container on a new
 # `:release` digest (`Scanned=1 Updated=1`), the maker came back with its
