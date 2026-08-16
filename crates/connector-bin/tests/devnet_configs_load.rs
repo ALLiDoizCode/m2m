@@ -180,6 +180,37 @@ const RELAY_WATCHTOWER_OVERLAY: &str =
 /// [`the_relays_swap_announce_config_speaks_for_the_maker_not_the_relay`].
 const RELAY_NGINX_CONF: &str = include_str!("../../../infra/linode-relay/nginx/conf.d/node.conf");
 
+/// Every nginx file the two Watchtower-managed boxes commit: the RENDERED
+/// config each box's `nginx` service bind-mounts, and the `.template` that
+/// `init-letsencrypt.sh` renders it from. Both, because the pair drift
+/// independently -- issue #987's broken `/swap` form was fixed in one and
+/// left in the other once already -- and the template is what a rebuilt box
+/// starts from.
+///
+/// The faucet box (`infra/linode-faucet/`) and the chain box
+/// (`infra/linode/`) are deliberately NOT here: neither runs a Watchtower,
+/// their images are built on-box, and nothing recreates their upstreams
+/// behind nginx's back. Add a box to this list when it gets a Watchtower,
+/// not before -- see [`no_watchtower_box_nginx_names_a_literal_upstream`].
+const WATCHTOWER_BOX_NGINX_FILES: &[(&str, &str)] = &[
+    (
+        "infra/linode-relay/nginx/conf.d/node.conf",
+        RELAY_NGINX_CONF,
+    ),
+    (
+        "infra/linode-relay/nginx/node.conf.template",
+        include_str!("../../../infra/linode-relay/nginx/node.conf.template"),
+    ),
+    (
+        "infra/linode-store/nginx/conf.d/node.conf",
+        include_str!("../../../infra/linode-store/nginx/conf.d/node.conf"),
+    ),
+    (
+        "infra/linode-store/nginx/node.conf.template",
+        include_str!("../../../infra/linode-store/nginx/node.conf.template"),
+    ),
+];
+
 /// This test binary's own base port for [`Anvil::spawn`] -- distinct from
 /// other test binaries' bases (`connector-settlement-evm`'s own tests use
 /// 18_600; `connector-cli`'s use 18_700/18_800) so that binaries running
@@ -2432,4 +2463,93 @@ fn the_relay_announce_loop_waits_for_its_edge_then_retries_fast() {
 fn the_relay_swap_announce_loop_waits_for_its_edge_then_retries_fast() {
     let (name, raw) = ANNOUNCE_LOOPS[2];
     assert_announce_loop_waits_for_its_edge_then_retries_fast(name, raw);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Box nginx upstreams re-resolve (issue #993, and issue #987's URI gotcha)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The `proxy_pass` argument of every non-comment `proxy_pass` line in an
+/// nginx file, with its trailing `;` stripped. A line scan, for the same
+/// reason [`pinned_connector_images`] and [`compose_ports`] are line scans:
+/// no nginx parser exists in this tree, and the shape being read is one this
+/// repo writes by hand.
+fn proxy_pass_targets(raw: &str) -> Vec<&str> {
+    raw.lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.strip_prefix("proxy_pass "))
+        .map(|rest| rest.trim_end_matches(';').trim())
+        .collect()
+}
+
+/// nginx resolves a LITERAL upstream hostname once, at config-parse time,
+/// and caches the address for the worker's life. On a box where something
+/// recreates containers unattended -- the label-scoped Watchtower of
+/// toon-meta#403 pulling a new `:release` digest -- the recreated container
+/// comes back on a NEW address and this edge answers `502` until a human
+/// runs `nginx -s reload`. That is the outage this test exists to prevent;
+/// it happened on the store box on 2026-08-16.
+///
+/// Naming the upstream through a variable moves resolution to request time,
+/// where each file's `resolver 127.0.0.11 valid=10s` applies, and the edge
+/// self-heals inside the TTL. Proven live on both boxes by forcing an
+/// upstream onto a new address (relay `swap-node` .7 -> .8, store
+/// `connector-rust` .4 -> .8): both back inside 3s with no reload.
+///
+/// A literal upstream has a second failure mode this also refuses: an
+/// upstream container that is not running at parse time is `[emerg] host not
+/// found in upstream`, which exits the whole nginx master -- every server
+/// block in the file, not just the one location. `nginx -t` on the relay
+/// file as committed before this test failed exactly that way.
+#[test]
+fn no_watchtower_box_nginx_names_a_literal_upstream() {
+    for (name, raw) in WATCHTOWER_BOX_NGINX_FILES {
+        for target in proxy_pass_targets(raw) {
+            assert!(
+                target.starts_with("http://$") || target.starts_with('$'),
+                "{name} proxies to `{target}` -- a literal upstream hostname \
+                 is resolved ONCE at config-parse time, so a Watchtower \
+                 recreate of that container 502s this edge until someone \
+                 reloads nginx (issue #993). Name the upstream through a \
+                 variable (`set $upstream <container>;`) so the file's own \
+                 `resolver` re-resolves it per request."
+            );
+        }
+    }
+}
+
+/// The other half of the same fix, and the defect issue #987 filed: with a
+/// VARIABLE upstream, nginx does not do the literal form's prefix
+/// substitution. `proxy_pass http://$upstream:3400/ilp/btp;` forwards the
+/// original `$request_uri` and silently ignores the appended `/ilp/btp`, so
+/// the maker saw `/swap/ilp/btp` and 404'd -- a config that looks like it
+/// strips a prefix and does not. The working form, live on the relay box, is
+/// `rewrite ^.*$ /<target> break;` followed by a `proxy_pass` carrying NO
+/// URI part at all, which forwards the rewritten `$uri`.
+///
+/// So a variable `proxy_pass` here must name host and port only. Appending
+/// `$uri`/`$request_uri` is refused by the same rule, and deliberately: that
+/// is the double-apply that produced `/swap/ilp/btp/swap/ilp/btp`.
+#[test]
+fn no_variable_upstream_appends_a_uri_that_nginx_will_ignore() {
+    for (name, raw) in WATCHTOWER_BOX_NGINX_FILES {
+        for target in proxy_pass_targets(raw) {
+            let Some(rest) = target.strip_prefix("http://$") else {
+                // A bare `$backend`-style variable carries its whole URL,
+                // including the scheme, from a `map`; there is no URI to
+                // append and nothing here to check.
+                continue;
+            };
+            assert!(
+                !rest.contains('/'),
+                "{name} proxies to `{target}` -- with a variable upstream \
+                 nginx IGNORES the URI part and forwards the original \
+                 request URI, so this does not strip what it looks like it \
+                 strips (issue #987: the maker 404'd). Use `rewrite ^.*$ \
+                 /<target> break;` and a `proxy_pass` with host and port \
+                 only."
+            );
+        }
+    }
 }
