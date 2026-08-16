@@ -17,8 +17,8 @@ decisions, not one.
 Every difference between a box and `main` is one of:
 
 - **(a) Already committed, or obsolete** — discard on the box. Most of what `git status` shows is
-  not drift at all; it is the box being eleven commits behind while the same change landed in the
-  repo, or config for the retired apex that `main` deleted outright.
+  not drift at all; it is the box being 22 commits behind (9 of them touching `infra/`) while the
+  same change landed in the repo, or config for the retired apex that `main` deleted outright.
 - **(b) Genuinely box-local** — must survive the pull. Secrets, generated key material, and the live
   on-chain facts the repo commits a placeholder for on purpose.
 - **(c) Uncaptured drift** — had to be committed before this runbook could be honest. Found one; see
