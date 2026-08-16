@@ -212,12 +212,14 @@ pub struct BtpPeerTransport {
     /// of `signer_address` (issue #742), rendered as `senderId`/
     /// `signerPublicKey` on a claim `ClaimBook` signed through its
     /// `solana_signer`. `None` until something configures one with
-    /// [`Self::set_solana_signer_public_key`]; no `[[peer_channels]]` row
-    /// carries a Solana identity yet, so today that is always -- this
-    /// mirrors `ClaimBook::solana_signer`'s own "unconfigured means no
-    /// claim" contract at the transport's edge of it: a claim this
-    /// connector never had a Solana identity to sign never had one to
-    /// render either.
+    /// [`Self::set_solana_signer_public_key`], which
+    /// `connector-cli::peer_transport::build_peer_transport` does from the
+    /// `[settlement.solana]` key -- the same key `ClaimBook` signs a Solana
+    /// peer claim with (issue #998) -- so this is `None` on exactly the
+    /// nodes that have no such table. That mirrors
+    /// `ClaimBook::solana_signer`'s own "unconfigured means no claim"
+    /// contract at the transport's edge of it: a claim this connector never
+    /// had a Solana identity to sign never had one to render either.
     solana_signer_public_key: Option<[u8; 32]>,
     clock: Arc<dyn Clock>,
     relations: HashMap<String, RelationState>,

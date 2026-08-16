@@ -602,6 +602,15 @@ impl ClaimBook {
         self.counterparties.contains_key(channel_id)
     }
 
+    /// Whether `channel_account` is a Solana channel this connector has a
+    /// counterparty key configured for (issue #732/#998) -- the Solana
+    /// counterpart of [`ClaimBook::has_verification_key`], for the same
+    /// reason: a channel registered here can `accept_inbound` a claim
+    /// naming it.
+    pub fn has_solana_channel(&self, channel_account: &str) -> bool {
+        self.solana_channels.contains_key(channel_account)
+    }
+
     /// Whether `channel_id` already has a signing domain configured (issue
     /// #780) -- lets a caller that discovers channels dynamically (a
     /// client-edge payout resolved on demand rather than declared in

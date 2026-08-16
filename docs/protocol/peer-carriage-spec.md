@@ -1120,9 +1120,11 @@ Required surface:
   EVM claim's optional `chainId`/`tokenNetworkAddress`). The EVM shape is the surface whose absence makes ADR
   0024 inert (#620 gap 3); it MUST actually wire `ClaimBook`'s signer, verification key and
   EIP-712 domain, with **no code-only setters left on the config path**. The Solana shape's
-  `program_id` reaches claim rendering the same way; `ClaimBook`'s Solana verification key and
-  signer still have no `Connector` builder to wire from config (issue #742's own follow-up note),
-  so a Solana row does not yet make this connector able to accept or sign a claim on that channel.
+  `program_id` reaches claim rendering the same way, and (issue #998) `channel_account`/
+  `counterparty_key` reach `ClaimBook`'s Solana verification key and signer through the same
+  no-code-only-setters rule -- `Connector::with_solana_channel`/`with_solana_signer`, wired from
+  `[[peer_channels]]` and `[settlement.solana]` respectively, so a Solana row can both
+  `accept_inbound` and sign an outbound claim on that channel.
 
 Named load-time errors this specification requires (spelling #677's, identity ours):
 
