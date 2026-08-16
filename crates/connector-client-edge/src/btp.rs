@@ -50,7 +50,6 @@ use connector_btp::{
 };
 use connector_domain::client_claim::{ClientClaim, EVM_NAMESPACE};
 use connector_domain::{condition_is_present, PacketResponse, Prepare, Reject, RejectCode};
-use connector_runtime::ClientRouteKind;
 use connector_signer::{verify_evm_claim_state_challenge, EvmClaimStateChallenge};
 
 use crate::channels::decode_hex_bytes;
@@ -841,13 +840,10 @@ async fn handle_frame(
         _ => None,
     };
 
-    // Issue #1012: read before `client_route` would otherwise go unused
-    // past this point -- see `handle_ilp`'s mirror of this on the HTTP
-    // carriage.
-    let is_forwarded_route = matches!(
-        client_route.map(|route| route.kind),
-        Some(ClientRouteKind::Forwarded)
-    );
+    // Issue #1012: decided here, off the one route lookup above, because
+    // `finish_frame` runs detached from it -- the same fact `handle_ilp`
+    // reads inline on the HTTP carriage, through the same helper.
+    let is_forwarded_route = crate::is_forwarded_route(client_route);
     let session_address = binding.as_ref().map(|(address, _)| address.clone());
     let permit = window_slot(window).await;
     let task = finish_frame(
@@ -907,13 +903,13 @@ async fn finish_frame(
     // into the `"packet"` span the same way the HTTP carriage's `handle_ilp`
     // threads its own `admitted.channel_key` through.
     let client_channel_id = admitted.as_ref().map(|(claim, _)| claim.channel_key());
-    // Issue #1012: this claim's own nonce/cumulative amount, kept for the
-    // same reason `handle_ilp`'s HTTP carriage keeps them -- so a
+    // Issue #1012: the watermark this claim advanced its channel to, kept
+    // for the same reason `handle_ilp`'s HTTP carriage keeps it -- so a
     // forwarded route whose next hop terminally rejects can roll back
     // exactly this claim.
     let admitted_claim_watermark = admitted
         .as_ref()
-        .map(|(claim, _)| (claim.nonce(), claim.transferred_amount()));
+        .map(|(claim, _)| crate::AdmittedWatermark::of(claim));
 
     if let Some((claim, durability)) = admitted {
         match durability.durable().await {

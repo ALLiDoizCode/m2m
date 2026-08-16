@@ -70,9 +70,10 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use connector_config::TransportPolicy;
+use connector_domain::client_claim::ClientClaim;
 use connector_domain::identity::{anonymous_identity, resolve_identity, ConfiguredIdentity};
 use connector_domain::{condition_is_present, PacketResponse, Prepare, Reject, RejectCode};
-use connector_runtime::{ClientRouteKind, Connector, ProbeDenied};
+use connector_runtime::{ClientRouteFacts, ClientRouteKind, Connector, ProbeDenied};
 use connector_signer::nip59::{unwrap_claim, WrappedClaim};
 use connector_signer::{PublicKeyBytes, Signer};
 
@@ -774,13 +775,35 @@ struct AdmittedClaim {
     /// so a wrapped-only claim is never a source for one, by construction:
     /// this field is the one place that rule is enforced.
     plaintext_signer: Option<String>,
-    /// This claim's own nonce and transferred (cumulative) amount -- what
-    /// [`crate::claim_gate::ClientClaimGate::admit`] just advanced
-    /// [`Self::channel_key`]'s watermark to, kept so a forwarded route
-    /// whose next hop terminally rejects can name exactly this claim to
-    /// [`crate::claim_gate::ClientClaimGate::roll_back`] (issue #1012).
+    /// What [`crate::claim_gate::ClientClaimGate::admit`] just advanced
+    /// [`Self::channel_key`]'s watermark to (issue #1012).
+    watermark: AdmittedWatermark,
+}
+
+/// The watermark one admitted claim advanced its channel to (issue
+/// #1012): exactly the pair [`crate::claim_gate::ClientClaimGate::roll_back`]
+/// names when a forwarded route's next hop turns out never to have carried
+/// the packet that claim paid for.
+///
+/// A named pair rather than a loose `(u64, u64)` because both carriages
+/// thread it from their admission to their rollback, and two fields of the
+/// same type transposed anywhere along that path would still compile --
+/// [`Self::of`] is the only way to build one, so the two can only ever come
+/// from the claim itself, in the order the gate reads them back in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AdmittedWatermark {
     nonce: u64,
     cumulative_amount: u64,
+}
+
+impl AdmittedWatermark {
+    /// Read `claim`'s own nonce and transferred (cumulative) amount.
+    pub(crate) fn of(claim: &ClientClaim) -> AdmittedWatermark {
+        AdmittedWatermark {
+            nonce: claim.nonce(),
+            cumulative_amount: claim.transferred_amount(),
+        }
+    }
 }
 
 /// The claim header's own declared channel key, read WITHOUT validating
@@ -861,8 +884,7 @@ async fn extract_and_validate_claim(
     let claim = state.claim_gate.ingest(&claim_json, price).await?;
     let channel_key = claim.channel_key();
     let plaintext_signer = (!wrapped).then(|| claim.signer().to_string());
-    let nonce = claim.nonce();
-    let cumulative_amount = claim.transferred_amount();
+    let watermark = AdmittedWatermark::of(&claim);
     // Best-effort liveness bookkeeping for issue #693's claim-state
     // endpoint (`ClientClaimGate::note_claim_time`'s own doc): happens only
     // after `ingest` has already returned durable, never inside it.
@@ -870,8 +892,7 @@ async fn extract_and_validate_claim(
     Ok(Some(AdmittedClaim {
         channel_key,
         plaintext_signer,
-        nonce,
-        cumulative_amount,
+        watermark,
     }))
 }
 
@@ -1189,10 +1210,10 @@ async fn handle_ilp(
     // `None` for an unclaimed request (unpriced/unmatched destination), the
     // only shape that reaches routing without one.
     let mut client_channel_id = None;
-    // Issue #1012: this claim's own nonce/cumulative amount, kept only so
-    // a forwarded route whose next hop terminally rejects can name exactly
-    // this claim to `ClientClaimGate::roll_back` below. `None` on every
-    // path `client_channel_id` is also `None` on.
+    // Issue #1012: the watermark this packet's covering claim advanced its
+    // channel to, kept only so a forwarded route whose next hop terminally
+    // rejects can name exactly this claim to `ClientClaimGate::roll_back`
+    // below. `None` on every path `client_channel_id` is also `None` on.
     let mut admitted_claim_watermark = None;
     // Issue #869: the converse of the invariant stated above -- a packet
     // whose envelope will be refused for its own target shape
@@ -1249,7 +1270,7 @@ async fn handle_ilp(
             Ok(Some(admitted)) => {
                 state.connector.recognize_channel(&admitted.channel_key);
                 plaintext_claim_signer = admitted.plaintext_signer;
-                admitted_claim_watermark = Some((admitted.nonce, admitted.cumulative_amount));
+                admitted_claim_watermark = Some(admitted.watermark);
                 client_channel_id = Some(admitted.channel_key);
             }
             Ok(None) => {}
@@ -1275,21 +1296,30 @@ async fn handle_ilp(
     // Issue #736: routing is `Connector::handle_prepare`'s three configured
     // sources first, then whatever client session `state.session_registry`
     // has bound to this destination -- see `session_route::route_prepare`.
-    let is_forwarded_route = matches!(
-        client_route.map(|route| route.kind),
-        Some(ClientRouteKind::Forwarded)
-    );
     let response =
         session_route::route_prepare(&state, prepare, price, client_channel_id.as_deref()).await;
     roll_back_uncarried_forward(
         &state,
-        is_forwarded_route,
+        is_forwarded_route(client_route),
         client_channel_id.as_deref(),
         admitted_claim_watermark,
         &response,
     )
     .await;
     packet_response(response)
+}
+
+/// Whether the single route lookup both carriages make (issue #701)
+/// matched a *forwarded* route -- the one shape
+/// [`roll_back_uncarried_forward`] acts on. One definition, called from
+/// both carriages, for the same reason every other rule the two share has
+/// one: what the HTTP path charges and what the BTP path charges must not
+/// drift.
+pub(crate) fn is_forwarded_route(client_route: Option<ClientRouteFacts>) -> bool {
+    matches!(
+        client_route.map(|route| route.kind),
+        Some(ClientRouteKind::Forwarded)
+    )
 }
 
 /// Issue #1012: a client-priced forwarded route (ADR 0028) admits the
@@ -1308,20 +1338,18 @@ pub(crate) async fn roll_back_uncarried_forward(
     state: &ClientEdgeState,
     is_forwarded_route: bool,
     client_channel_id: Option<&str>,
-    admitted_claim_watermark: Option<(u64, u64)>,
+    admitted_claim_watermark: Option<AdmittedWatermark>,
     response: &PacketResponse,
 ) {
     if !is_forwarded_route || !matches!(response, PacketResponse::Reject(_)) {
         return;
     }
-    let (Some(channel_key), Some((nonce, cumulative_amount))) =
-        (client_channel_id, admitted_claim_watermark)
-    else {
+    let (Some(channel_key), Some(watermark)) = (client_channel_id, admitted_claim_watermark) else {
         return;
     };
     if let Err(error) = state
         .claim_gate
-        .roll_back(channel_key, nonce, cumulative_amount)
+        .roll_back(channel_key, watermark.nonce, watermark.cumulative_amount)
         .await
     {
         tracing::error!(
@@ -4626,6 +4654,75 @@ mod tests {
                 "F02",
                 "the identical claim reached the peer again rather than being refused as a \
                  stale nonce -- the first reject did not charge the client"
+            );
+        }
+
+        /// Issue #1012's converse, and the guard that the rollback above
+        /// stays confined to the reject: a forward that FULFILLs still
+        /// advances the watermark by exactly `price`, as it always has.
+        /// Proven the same behavioural way, since the gate's watermarks
+        /// are not reachable from here: after the fulfilment the identical
+        /// claim is refused as a stale nonce (`F01`), and the next claim
+        /// must clear a cumulative amount a full `FORWARD_PRICE` higher --
+        /// one base unit short of that is an underpayment (`F03`), exactly
+        /// on it fulfils again. Nothing but a watermark sitting at
+        /// precisely `FORWARD_PRICE` produces all three answers.
+        #[tokio::test]
+        async fn a_forwarded_routes_fulfilment_still_advances_the_watermark_by_the_price() {
+            let signer = test_signer();
+            let (payer, remote_app) = payer_over_a_priced_peering(signer.clone());
+            let app = router_with_gate(payer, signer.clone(), None, test_gate(test_channels()));
+
+            let attempt = |app: axum::Router, claim_json: String| {
+                let signer = signer.clone();
+                async move {
+                    let (prepare, _shared_secret) = sealed_sample_prepare_with_amount(
+                        REMOTE_APP,
+                        FORWARD_PRICE,
+                        &signer.public_key().unwrap(),
+                    );
+                    let response = app
+                        .oneshot(request_with_claim_header(
+                            &prepare,
+                            CLAIM_HEADER,
+                            &claim_json,
+                        ))
+                        .await
+                        .unwrap();
+                    hyper::body::to_bytes(response.into_body()).await.unwrap()
+                }
+            };
+
+            let first = attempt(app.clone(), evm_claim_json(1, FORWARD_PRICE)).await;
+            Fulfill::decode(&first).expect("a paid forwarded packet fulfils");
+
+            let replayed = attempt(app.clone(), evm_claim_json(1, FORWARD_PRICE)).await;
+            assert_eq!(
+                Reject::decode(&replayed)
+                    .expect("a replayed claim is rejected")
+                    .code
+                    .as_str(),
+                "F01",
+                "the fulfilled packet's claim stayed charged -- the watermark did not roll back"
+            );
+
+            let short = attempt(app.clone(), evm_claim_json(2, 2 * FORWARD_PRICE - 1)).await;
+            assert_eq!(
+                Reject::decode(&short)
+                    .expect("an underpaying claim is rejected")
+                    .code
+                    .as_str(),
+                "F03",
+                "the watermark sits at exactly FORWARD_PRICE, so advancing by one less than \
+                 the price underpays"
+            );
+
+            let second = attempt(app, evm_claim_json(2, 2 * FORWARD_PRICE)).await;
+            Fulfill::decode(&second).expect("a claim advancing by a full price fulfils again");
+            assert_eq!(
+                remote_app.deliveries().len(),
+                2,
+                "exactly the two paid packets crossed the peering"
             );
         }
 

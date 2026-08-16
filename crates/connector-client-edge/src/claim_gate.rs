@@ -4888,6 +4888,139 @@ mod tests {
             assert!(!replay_watermarks(&entries).contains_key("solana:abc"));
         }
 
+        /// Issue #1012: a rollback entry SETS the channel's watermark back
+        /// to the value it names rather than folding into it by
+        /// componentwise `max`, which -- the fold every accepted claim uses
+        /// -- would silently undo the very thing the entry records.
+        #[test]
+        fn replay_watermarks_puts_a_rolled_back_channel_back_to_the_named_watermark() {
+            let entries = vec![
+                JournalEntry::InboundClaimAccepted {
+                    channel_id: "evm:0xabc".to_string(),
+                    nonce: 9,
+                    cumulative_amount: 900,
+                    signature: vec![1],
+                },
+                JournalEntry::InboundClaimAccepted {
+                    channel_id: "evm:0xabc".to_string(),
+                    nonce: 10,
+                    cumulative_amount: 1_000,
+                    signature: vec![2],
+                },
+                JournalEntry::InboundClaimRolledBack {
+                    channel_id: "evm:0xabc".to_string(),
+                    nonce: 9,
+                    cumulative_amount: 900,
+                },
+            ];
+
+            assert_eq!(
+                replay_watermarks(&entries).get("evm:0xabc").copied(),
+                Some(Watermark {
+                    nonce: 9,
+                    cumulative_amount: 900
+                }),
+                "the rolled-back value, not the `max` of it and the claim it undoes"
+            );
+        }
+
+        /// The other half of the same rule: the claim the client resubmits
+        /// after a rollback advances the channel again, from the restored
+        /// watermark.
+        #[test]
+        fn replay_watermarks_advances_again_after_a_rollback() {
+            let entries = vec![
+                JournalEntry::InboundClaimAccepted {
+                    channel_id: "evm:0xabc".to_string(),
+                    nonce: 10,
+                    cumulative_amount: 1_000,
+                    signature: vec![1],
+                },
+                JournalEntry::InboundClaimRolledBack {
+                    channel_id: "evm:0xabc".to_string(),
+                    nonce: 9,
+                    cumulative_amount: 900,
+                },
+                JournalEntry::InboundClaimAccepted {
+                    channel_id: "evm:0xabc".to_string(),
+                    nonce: 10,
+                    cumulative_amount: 1_000,
+                    signature: vec![2],
+                },
+            ];
+
+            assert_eq!(
+                replay_watermarks(&entries).get("evm:0xabc").copied(),
+                Some(Watermark {
+                    nonce: 10,
+                    cumulative_amount: 1_000
+                })
+            );
+        }
+
+        /// Issue #1012, end to end through the gate rather than through
+        /// `replay_watermarks` alone: a rollback is durable, so a restart
+        /// recovers the pre-claim watermark and judges the resubmitted
+        /// claim as fresh. A rollback a restart could forget would leave
+        /// the client durably charged for a packet this connector decided
+        /// not to count.
+        #[tokio::test]
+        async fn a_rolled_back_claim_is_forgotten_across_a_restart() {
+            let key = format!("evm:{}", channel_id());
+            let journal = Arc::new(InMemoryJournal::new());
+            let gate = ClientClaimGate::restore(test_channels(), journal.clone())
+                .expect("nothing to replay");
+            gate.ingest(&evm_claim_json(&channel_id(), 3, 300), 0)
+                .await
+                .expect("accepted");
+            gate.roll_back(&key, 3, 300)
+                .await
+                .expect("the rollback is durably recorded");
+
+            assert_eq!(gate.watermark(&key), None);
+            let restarted = ClientClaimGate::restore(test_channels(), journal)
+                .expect("the journal replays, rollback and all");
+            assert_eq!(
+                restarted.watermark(&key),
+                None,
+                "the rollback survived the restart"
+            );
+            restarted
+                .ingest(&evm_claim_json(&channel_id(), 3, 300), 0)
+                .await
+                .expect("the identical claim is judged as fresh as it was the first time");
+        }
+
+        /// Issue #1012's first documented no-op: a rollback naming a claim
+        /// a later one has already superseded leaves the channel exactly
+        /// where that later claim put it. Unwinding it would erase state
+        /// the reject that provoked this call has nothing to do with.
+        #[tokio::test]
+        async fn rolling_back_a_superseded_claim_leaves_the_later_one_alone() {
+            let key = format!("evm:{}", channel_id());
+            let journal = Arc::new(InMemoryJournal::new());
+            let gate =
+                ClientClaimGate::restore(test_channels(), journal).expect("nothing to replay");
+            gate.ingest(&evm_claim_json(&channel_id(), 3, 300), 0)
+                .await
+                .expect("accepted");
+            gate.ingest(&evm_claim_json(&channel_id(), 4, 400), 0)
+                .await
+                .expect("accepted");
+
+            gate.roll_back(&key, 3, 300)
+                .await
+                .expect("a no-op is not an error");
+
+            assert_eq!(
+                gate.watermark(&key),
+                Some(Watermark {
+                    nonce: 4,
+                    cumulative_amount: 400
+                })
+            );
+        }
+
         /// The journal keeps the claim itself, not merely its watermark:
         /// a watermark says what was spent, but only the signed claim is
         /// redeemable on chain (issue #425), and this edge's claims are
