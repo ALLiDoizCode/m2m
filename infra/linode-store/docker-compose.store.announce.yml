@@ -54,6 +54,39 @@
 # `[announce] FAILED rc=<n> -- g.toon.ario NOT published`, and the success
 # branch says so too -- "publishing..." alone never meant "published".
 #
+# ── Wait for the edge; retry fast when it still fails (issue #996) ─────────
+# The defect this shape was fixed for was observed on the RELAY box, whose
+# announce publishes through its OWN co-located edge and therefore raced it
+# when Watchtower recreated both containers in one sweep: the first publish
+# hit a `502` from an nginx that had not re-resolved the new container, and
+# the loop then sat out a full 240 s. That gap is an availability defect,
+# because client-side discovery is fail-closed and only snapshotted at client
+# startup -- a client that boots into it refuses every paid write with
+# `TERMINATOR_UNRESOLVED` until it is restarted.
+#
+# This box's loop did NOT hit it (its through-URL is the relay box, a
+# different machine, so nothing recreates underneath it at the same moment),
+# but it carried the identical shape, so it is fixed identically -- see
+# ../linode-relay/docker-compose.relay.announce.yml's header for the full
+# argument, including the local reproduction showing that Watchtower ignores
+# compose `depends_on` entirely and recreates in whatever order it likes.
+# Keeping the two loops the same is the point: the next loop copied from one
+# of these must not reintroduce the sit-out.
+#
+#   * `wait_for_edge` polls the through-URL's own `/ilp/identity` -- the
+#     exact URL `fetch_identity` (crates/connector-cli/src/announce.rs)
+#     reads, built the same way -- before spending an attempt. Free,
+#     unauthenticated, and through the public hostname so it also sees an
+#     nginx holding a stale upstream IP (issue #993). It FAILS OPEN after
+#     `READY_TIMEOUT_SECS`: the gate is an optimization, the backoff below is
+#     the guarantee, and a probe that can never succeed must not be able to
+#     stop this loop publishing forever.
+#   * a failed publish sleeps `BACKOFF_SECS` (5 s, doubling, capped at
+#     `REFRESH_SECS`, reset on success) instead of the full refresh
+#     interval -- five attempts inside the first ~75 s where the old shape
+#     made one and went quiet. It costs nothing extra: only a SUCCESSFUL
+#     announce is a paid write, and success resets the backoff.
+#
 # ── What this needs before it can do anything (live/operator, issue #833's
 #    own scope boundary -- NOT provided by this file) ──────────────────────
 # `./connector-rust.toml`'s `[announce] pay_channel` is a clearly-marked
@@ -155,17 +188,44 @@ services:
     command:
       - |
         set -eu
+        THROUGH_URL="https://proxy.relay.devnet.toonprotocol.dev/ilp"
         REFRESH_SECS="$${STORE_ANNOUNCE_REFRESH_SECS:-240}"
+        READY_POLL_SECS="$${ANNOUNCE_READY_POLL_SECS:-5}"
+        READY_TIMEOUT_SECS="$${ANNOUNCE_READY_TIMEOUT_SECS:-90}"
+        FIRST_BACKOFF_SECS="$${ANNOUNCE_FIRST_BACKOFF_SECS:-5}"
+        wait_for_edge() {
+          waited=0
+          while ! wget -q -T 5 -O /dev/null "$$THROUGH_URL/identity"; do
+            if [ "$$waited" -ge "$$READY_TIMEOUT_SECS" ]; then
+              echo "[announce] edge $$THROUGH_URL still not serving after $${waited}s -- publishing anyway"
+              return 1
+            fi
+            echo "[announce] edge $$THROUGH_URL not serving yet ($${waited}s) -- re-probing in $${READY_POLL_SECS}s"
+            sleep "$$READY_POLL_SECS"
+            waited=$$((waited + READY_POLL_SECS))
+          done
+          return 0
+        }
+        BACKOFF_SECS="$$FIRST_BACKOFF_SECS"
         while true; do
+          wait_for_edge || true
           echo "[announce] publishing g.toon.ario via g.toon.relay..."
           if /usr/local/bin/connector announce \
             --config /app/config/connector.toml \
-            https://proxy.relay.devnet.toonprotocol.dev/ilp; then
-            echo "[announce] OK -- g.toon.ario published"
+            "$$THROUGH_URL"; then
+            echo "[announce] OK -- g.toon.ario published; next refresh in $${REFRESH_SECS}s"
+            BACKOFF_SECS="$$FIRST_BACKOFF_SECS"
+            SLEEP_SECS="$$REFRESH_SECS"
           else
-            echo "[announce] FAILED rc=$$? -- g.toon.ario NOT published; retrying in $${REFRESH_SECS}s"
+            RC=$$?
+            echo "[announce] FAILED rc=$$RC -- g.toon.ario NOT published; retrying in $${BACKOFF_SECS}s"
+            SLEEP_SECS="$$BACKOFF_SECS"
+            BACKOFF_SECS=$$((BACKOFF_SECS * 2))
+            if [ "$$BACKOFF_SECS" -gt "$$REFRESH_SECS" ]; then
+              BACKOFF_SECS="$$REFRESH_SECS"
+            fi
           fi
-          sleep "$$REFRESH_SECS"
+          sleep "$$SLEEP_SECS"
         done
     environment:
       STORE_ANNOUNCE_REFRESH_SECS: '240'

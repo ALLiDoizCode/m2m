@@ -20,6 +20,26 @@
 # claim journal, and `docker compose up -d` recreating it never touches the
 # relay's own `connector-rust`/`announce` services.
 #
+# ── Wait for the edge; retry fast when it still fails (issue #996) ─────────
+# This loop pays the relay box's OWN client edge (below), and it lives on
+# that same box — so on a Watchtower sweep that recreates `connector-rust`
+# it races exactly the way ./docker-compose.relay.announce.yml did when this
+# defect was caught live on 2026-08-16: first publish into a still-booting
+# edge, `502` instead of x402 terms, then a full 240 s of silence. Fixed
+# identically here, and the full argument (including the local reproduction
+# showing Watchtower ignores compose `depends_on` outright and recreates in
+# whatever order it likes) is in that sibling's header:
+#
+#   * `wait_for_edge` polls the through-URL's own `/ilp/identity` — the same
+#     URL `fetch_identity` (crates/connector-cli/src/announce.rs) reads,
+#     built the same way — before spending an attempt, through the PUBLIC
+#     hostname so it also catches an nginx holding a stale upstream IP
+#     (issue #993). It fails OPEN after `READY_TIMEOUT_SECS`: the gate is an
+#     optimization, the backoff is the guarantee.
+#   * a failed publish sleeps `BACKOFF_SECS` (5 s, doubling, capped at
+#     `REFRESH_SECS`, reset on success) rather than the whole refresh
+#     interval.
+#
 # ── `--via-own-routing` is NOT used here, unlike the relay's own loop ──────
 # The relay terminates `g.toon.relay` itself, so ITS announce (./docker-
 # compose.relay.announce.yml) routes through its own table for free. This
@@ -68,17 +88,44 @@ services:
     command:
       - |
         set -eu
+        THROUGH_URL="https://proxy.relay.devnet.toonprotocol.dev/ilp"
         REFRESH_SECS="$${SWAP_ANNOUNCE_REFRESH_SECS:-240}"
+        READY_POLL_SECS="$${ANNOUNCE_READY_POLL_SECS:-5}"
+        READY_TIMEOUT_SECS="$${ANNOUNCE_READY_TIMEOUT_SECS:-90}"
+        FIRST_BACKOFF_SECS="$${ANNOUNCE_FIRST_BACKOFF_SECS:-5}"
+        wait_for_edge() {
+          waited=0
+          while ! wget -q -T 5 -O /dev/null "$$THROUGH_URL/identity"; do
+            if [ "$$waited" -ge "$$READY_TIMEOUT_SECS" ]; then
+              echo "[swap-announce] edge $$THROUGH_URL still not serving after $${waited}s -- publishing anyway"
+              return 1
+            fi
+            echo "[swap-announce] edge $$THROUGH_URL not serving yet ($${waited}s) -- re-probing in $${READY_POLL_SECS}s"
+            sleep "$$READY_POLL_SECS"
+            waited=$$((waited + READY_POLL_SECS))
+          done
+          return 0
+        }
+        BACKOFF_SECS="$$FIRST_BACKOFF_SECS"
         while true; do
+          wait_for_edge || true
           echo "[swap-announce] publishing g.toon.swap.maker via g.toon.relay..."
           if /usr/local/bin/connector announce \
             --config /app/config/connector-swap-announce.toml \
-            https://proxy.relay.devnet.toonprotocol.dev/ilp; then
-            echo "[swap-announce] OK -- g.toon.swap.maker published"
+            "$$THROUGH_URL"; then
+            echo "[swap-announce] OK -- g.toon.swap.maker published; next refresh in $${REFRESH_SECS}s"
+            BACKOFF_SECS="$$FIRST_BACKOFF_SECS"
+            SLEEP_SECS="$$REFRESH_SECS"
           else
-            echo "[swap-announce] FAILED rc=$$? -- g.toon.swap.maker NOT published; retrying in $${REFRESH_SECS}s"
+            RC=$$?
+            echo "[swap-announce] FAILED rc=$$RC -- g.toon.swap.maker NOT published; retrying in $${BACKOFF_SECS}s"
+            SLEEP_SECS="$$BACKOFF_SECS"
+            BACKOFF_SECS=$$((BACKOFF_SECS * 2))
+            if [ "$$BACKOFF_SECS" -gt "$$REFRESH_SECS" ]; then
+              BACKOFF_SECS="$$REFRESH_SECS"
+            fi
           fi
-          sleep "$$REFRESH_SECS"
+          sleep "$$SLEEP_SECS"
         done
     environment:
       SWAP_ANNOUNCE_REFRESH_SECS: '240'
