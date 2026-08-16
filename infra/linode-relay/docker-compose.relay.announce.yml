@@ -49,6 +49,64 @@
 # published`, never a bare `|| true` that leaves `docker logs` showing
 # nothing but a cheerful "publishing..." whether or not anything published.
 #
+# ── The startup race, and why "the next scheduled attempt" was not enough ──
+# (issue #996.) "The next scheduled attempt is the retry" is a fine answer for
+# a steady-state failure and the WRONG one for a startup failure. Observed
+# live 2026-08-16: the box's label-scoped Watchtower (issue #988) recreated
+# `connector-rust` and this `announce` container in the SAME sweep -- both
+# follow `ghcr.io/toon-protocol/connector:rust-release` on the live box -- and
+# this loop fired its first publish while the edge was still booting behind an
+# nginx that had not re-resolved it. It got `502 Bad Gateway` where an x402
+# greeting should have been, logged `FAILED`, and then sat out a FULL 240 s.
+#
+# That sit-out is an availability defect, not a cosmetic one. This kind:10032
+# announce is how a client learns who terminates `g.toon.relay`; client-side
+# discovery is FAIL-CLOSED (no announce -> every paid write refused
+# `TERMINATOR_UNRESOLVED`) and it is snapshotted at CLIENT STARTUP, so a
+# client that boots inside the gap does not recover when the announce
+# eventually lands -- it has to be restarted. A four-minute unpublished
+# window is therefore an unbounded outage for whoever started up inside it.
+# On 2026-08-16 it took a manual `docker restart` of this container to clear.
+#
+# Two changes below, in the order they matter:
+#
+#   1. DON'T RACE. `wait_for_edge` polls the through-URL's own
+#      `/ilp/identity` -- the same URL `fetch_identity`
+#      (crates/connector-cli/src/announce.rs) reads, built the same way, by
+#      appending `/identity` -- and only publishes once it answers. It is a
+#      free, unauthenticated GET, and it is deliberately probed through the
+#      PUBLIC hostname rather than the container directly, so it also catches
+#      the nginx-has-a-stale-container-IP half of the failure (issue #993)
+#      rather than only "the connector process is not up yet".
+#
+#      Compose `depends_on` cannot do this job, and that was VERIFIED rather
+#      than assumed: Watchtower does not read compose's ordering at all. In a
+#      local reproduction (watchtower 1.7.1, `--label-enable`, two labelled
+#      services where the dependent declared `depends_on: {edge: {condition:
+#      service_healthy}}`) compose brought them up in order and waited for
+#      health, then Watchtower recreated them on a moved tag in the REVERSE
+#      order -- `Creating /probe` at :46, `Creating /edge` at :47 -- and the
+#      dependent's first request failed with `bad address` before the edge
+#      container even started. Compose records the dependency as a container
+#      label (`com.docker.compose.depends_on=edge:service_healthy:false`);
+#      Watchtower ignores it. It honours only its OWN
+#      `com.centurylinklabs.watchtower.depends-on` label, and even that just
+#      orders the restarts -- it never waits for readiness. So the wait has
+#      to live here, in the process that needs the edge.
+#
+#   2. WHEN IT STILL FAILS, RETRY FAST AND BOUNDED. A failed publish now
+#      sleeps `BACKOFF_SECS` (5 s, doubling: 5, 10, 20, 40, 80, 160) rather
+#      than the full refresh interval, capped AT `REFRESH_SECS` so a
+#      genuinely broken edge settles into the steady-state cadence instead of
+#      hammering, and reset to 5 s on the first success. Five attempts inside
+#      the first ~75 s, where the old shape made one and then went quiet.
+#
+# The readiness gate FAILS OPEN on purpose -- after `READY_TIMEOUT_SECS` it
+# logs and publishes anyway. The gate is an optimization; the backoff is the
+# guarantee. A probe that can never succeed (no `wget` in some future base
+# image, an nginx that stops serving `/ilp/identity`) must not be able to
+# stop this loop from ever publishing again.
+#
 # ── Bring up alongside the relay's Rust edge (never on its own) ────────────
 #   docker compose -f infra/linode-relay/docker-compose.relay.yml \
 #                  -f infra/linode-relay/docker-compose.relay.rust.yml \
@@ -160,19 +218,46 @@ services:
     command:
       - |
         set -eu
+        THROUGH_URL="https://proxy.relay.devnet.toonprotocol.dev/ilp"
         REFRESH_SECS="$${RELAY_ANNOUNCE_REFRESH_SECS:-240}"
+        READY_POLL_SECS="$${ANNOUNCE_READY_POLL_SECS:-5}"
+        READY_TIMEOUT_SECS="$${ANNOUNCE_READY_TIMEOUT_SECS:-90}"
+        FIRST_BACKOFF_SECS="$${ANNOUNCE_FIRST_BACKOFF_SECS:-5}"
+        wait_for_edge() {
+          waited=0
+          while ! wget -q -T 5 -O /dev/null "$$THROUGH_URL/identity"; do
+            if [ "$$waited" -ge "$$READY_TIMEOUT_SECS" ]; then
+              echo "[announce] edge $$THROUGH_URL still not serving after $${waited}s -- publishing anyway"
+              return 1
+            fi
+            echo "[announce] edge $$THROUGH_URL not serving yet ($${waited}s) -- re-probing in $${READY_POLL_SECS}s"
+            sleep "$$READY_POLL_SECS"
+            waited=$$((waited + READY_POLL_SECS))
+          done
+          return 0
+        }
+        BACKOFF_SECS="$$FIRST_BACKOFF_SECS"
         while true; do
+          wait_for_edge || true
           echo "[announce] publishing g.toon.relay via its own routing..."
           if /usr/local/bin/connector announce \
             --config /app/config/connector.toml \
             --via-own-routing \
             --to g.toon.relay \
-            https://proxy.relay.devnet.toonprotocol.dev/ilp; then
-            echo "[announce] OK -- g.toon.relay published"
+            "$$THROUGH_URL"; then
+            echo "[announce] OK -- g.toon.relay published; next refresh in $${REFRESH_SECS}s"
+            BACKOFF_SECS="$$FIRST_BACKOFF_SECS"
+            SLEEP_SECS="$$REFRESH_SECS"
           else
-            echo "[announce] FAILED rc=$$? -- g.toon.relay NOT published; retrying in $${REFRESH_SECS}s"
+            RC=$$?
+            echo "[announce] FAILED rc=$$RC -- g.toon.relay NOT published; retrying in $${BACKOFF_SECS}s"
+            SLEEP_SECS="$$BACKOFF_SECS"
+            BACKOFF_SECS=$$((BACKOFF_SECS * 2))
+            if [ "$$BACKOFF_SECS" -gt "$$REFRESH_SECS" ]; then
+              BACKOFF_SECS="$$REFRESH_SECS"
+            fi
           fi
-          sleep "$$REFRESH_SECS"
+          sleep "$$SLEEP_SECS"
         done
     environment:
       RELAY_ANNOUNCE_REFRESH_SECS: '240'

@@ -2136,3 +2136,300 @@ fn relay_watchtower_pins_an_explicit_version_and_sets_docker_api_version() {
          socket -- Watchtower cannot recreate containers without it."
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The announce loops' startup race (issue #996)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Every kind:10032 publisher on this fleet is a `/bin/sh` loop embedded in a
+// compose `command:` block. Nothing else in this suite could ever have seen
+// what that loop DOES -- and what it did, until #996, was fire one publish
+// the moment its container started and then, if that publish failed, sit out
+// a full `REFRESH_SECS` (240 s).
+//
+// That is an availability defect rather than an untidy one. Observed live on
+// 2026-08-16: the relay box's label-scoped Watchtower (issue #988) recreated
+// `connector-rust` and `announce` in the SAME sweep -- both follow
+// `:rust-release` on the box -- so the loop published into an edge that was
+// still booting behind an nginx that had not re-resolved it, got a `502`
+// where x402 terms should have been, and went quiet for four minutes. Client
+// discovery is fail-closed and snapshotted at CLIENT STARTUP, so every client
+// that booted inside that window refused every paid write with
+// `TERMINATOR_UNRESOLVED` and could not recover without being restarted. It
+// took a manual `docker restart` to clear.
+//
+// The two properties the fix rests on are behavioural, so they are asserted
+// behaviourally: the committed block scalar is extracted, un-escaped the way
+// compose un-escapes it, pointed at stub `wget`/`connector` binaries, and
+// actually RUN. A `.contains("BACKOFF_SECS")` would have passed against a
+// loop that computed a backoff and then slept on the wrong variable.
+
+/// Every committed announce loop on the surviving two-box fleet. All three
+/// are the same shape deliberately (each header says so, and each was copied
+/// from the one before it), which is exactly why the guard has to cover all
+/// three: the defect propagated by copy, and so would its return.
+const ANNOUNCE_LOOPS: &[(&str, &str)] = &[
+    ("docker-compose.store.announce.yml", STORE_ANNOUNCE_OVERLAY),
+    ("docker-compose.relay.announce.yml", RELAY_ANNOUNCE_OVERLAY),
+    (
+        "docker-compose.relay.swap-announce.yml",
+        RELAY_SWAP_ANNOUNCE_OVERLAY,
+    ),
+];
+
+/// The `/bin/sh` program a compose overlay's `command:` block holds, dedented
+/// out of its `- |` block scalar. A line scan for the same reason
+/// [`pinned_connector_images`] and [`compose_ports`] are line scans: no YAML
+/// dependency, and the shape being read is one this repo writes by hand and
+/// keeps identical across the three files.
+fn announce_loop_block_scalar(name: &str, raw: &str) -> String {
+    let mut lines = raw.lines();
+    while let Some(line) = lines.next() {
+        if line.trim() != "command:" {
+            continue;
+        }
+        let opener = lines
+            .next()
+            .unwrap_or_else(|| panic!("{name}: `command:` is the last line of the file"));
+        assert_eq!(
+            opener.trim(),
+            "- |",
+            "{name}: this helper only understands a `command:` holding a \
+             single `- |` block scalar, the shape all three announce loops \
+             use -- teach it the new shape rather than dropping the guard"
+        );
+        let mut body: Vec<&str> = Vec::new();
+        let mut base: Option<usize> = None;
+        for line in lines.by_ref() {
+            if line.trim().is_empty() {
+                body.push("");
+                continue;
+            }
+            let indent = line.len() - line.trim_start().len();
+            let base = *base.get_or_insert(indent);
+            if indent < base {
+                break;
+            }
+            body.push(&line[base..]);
+        }
+        assert!(
+            !body.is_empty(),
+            "{name}: the `command:` block scalar is empty"
+        );
+        return body.join("\n");
+    }
+    panic!("{name}: no `command:` block found")
+}
+
+/// What the container's `/bin/sh` actually receives. Compose interpolates a
+/// bare `$VAR`/`${VAR}` in a compose file's own text against the HOST's
+/// environment at `up` time, and `$$` is what survives that pass as a literal
+/// `$` -- the escaping every one of these files' headers explains. A LONE `$`
+/// left in a committed loop is therefore not a style slip: it is a variable
+/// the operator's shell expands (to nothing, on a box where it is unset)
+/// before the container ever sees it, which is why that is refused here
+/// rather than merely un-escaped.
+fn as_the_container_shell_sees_it(name: &str, block: &str) -> String {
+    let script = block.replace("$$", "\u{0}");
+    assert!(
+        !script.contains('$'),
+        "{name}: the `command:` block contains a lone `$` -- compose \
+         interpolates that against the HOST environment at `up` time and the \
+         container's shell never sees it. Every `$` in these loops must be \
+         written `$$`."
+    );
+    script.replace('\u{0}', "$")
+}
+
+/// A committed announce loop running against stub `wget`/`connector`
+/// binaries, killed and reaped on drop so a panicking test leaves no shell
+/// (and no `sleep`) behind.
+struct AnnounceLoopRun {
+    child: Child,
+    /// One line per stub invocation, in order: `W` for a readiness probe,
+    /// `C` for a `connector announce` attempt. The whole assertion surface.
+    calls: std::path::PathBuf,
+    /// Holds the stubs and the script alive for as long as the shell is.
+    _dir: tempfile::TempDir,
+}
+
+impl Drop for AnnounceLoopRun {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Write a `/bin/sh` stub and make it executable -- PATH lookup skips a file
+/// it cannot execute, so a missing chmod would silently fall through to the
+/// real `wget` and put a live network call in a unit test.
+fn write_stub(path: &std::path::Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, body).expect("write stub");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod stub");
+}
+
+/// Run a committed announce loop with its two external commands stubbed:
+///
+///   * `wget` -- the readiness probe. FAILS its first two calls and succeeds
+///     from the third, standing in for an edge that is still coming up (the
+///     `502` the live box served). Deterministic by construction: it counts
+///     the log rather than the clock.
+///   * `connector` -- the publish. ALWAYS fails, so what the loop does after
+///     a failed publish is observable for as long as the test cares to watch.
+///
+/// `ANNOUNCE_READY_POLL_SECS` is turned down to 1 s so the two failing probes
+/// cost 2 s rather than 10; the retry backoff is deliberately left at the
+/// COMMITTED default, because that is the number under test.
+fn run_announce_loop(name: &str, raw: &str) -> AnnounceLoopRun {
+    let script = as_the_container_shell_sees_it(name, &announce_loop_block_scalar(name, raw));
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).expect("stub bin dir");
+    let calls = dir.path().join("calls.log");
+    std::fs::write(&calls, "").expect("call log");
+
+    let connector_stub = bin.join("connector-stub");
+    write_stub(
+        &connector_stub,
+        "#!/bin/sh\nprintf 'C\\n' >> \"$ANNOUNCE_TEST_CALLS\"\nexit 7\n",
+    );
+    write_stub(
+        &bin.join("wget"),
+        "#!/bin/sh\nprintf 'W\\n' >> \"$ANNOUNCE_TEST_CALLS\"\n\
+         [ \"$(grep -c W \"$ANNOUNCE_TEST_CALLS\")\" -ge 3 ]\n",
+    );
+
+    let script = replace_expecting_a_match(
+        &script,
+        "/usr/local/bin/connector",
+        connector_stub.to_str().expect("utf-8 temp path"),
+    );
+    let script_path = dir.path().join("announce-loop.sh");
+    std::fs::write(&script_path, &script).expect("write loop script");
+
+    let parsed = Command::new("sh")
+        .arg("-n")
+        .arg(&script_path)
+        .output()
+        .expect("run `sh -n`");
+    assert!(
+        parsed.status.success(),
+        "{name}: the committed `command:` block is not valid POSIX shell:\n{}",
+        String::from_utf8_lossy(&parsed.stderr)
+    );
+
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let child = Command::new("sh")
+        .arg(&script_path)
+        .env("PATH", path)
+        .env("ANNOUNCE_TEST_CALLS", &calls)
+        .env("ANNOUNCE_READY_POLL_SECS", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap_or_else(|error| panic!("{name}: could not spawn the announce loop: {error}"));
+
+    AnnounceLoopRun {
+        child,
+        calls,
+        _dir: dir,
+    }
+}
+
+/// Poll the call log until the loop has attempted `publishes` publishes, or
+/// give up. The ceiling is the real assertion: the shape this test exists to
+/// refuse reaches ONE publish and then sleeps 240 s, so it cannot get here in
+/// any amount of time a test would wait. The fixed loop's third attempt lands
+/// at about 2 s (two failed probes) + 0 + 5 + 10 = ~17 s.
+fn wait_for_publish_attempts(
+    name: &str,
+    run: &AnnounceLoopRun,
+    publishes: usize,
+    ceiling: std::time::Duration,
+) -> Vec<String> {
+    let started = std::time::Instant::now();
+    loop {
+        let calls: Vec<String> = std::fs::read_to_string(&run.calls)
+            .expect("read the call log")
+            .lines()
+            .map(str::to_string)
+            .collect();
+        if calls.iter().filter(|call| *call == "C").count() >= publishes {
+            return calls;
+        }
+        assert!(
+            started.elapsed() < ceiling,
+            "{name}: the announce loop made only {} publish attempt(s) in {:?} \
+             -- expected at least {publishes}. A loop that sleeps the full \
+             refresh interval after a failed publish leaves this fleet's \
+             kind:10032 unpublished for minutes, and client discovery is \
+             fail-closed and snapshotted at client startup (issue #996). \
+             Calls so far: {calls:?}",
+            calls.iter().filter(|call| *call == "C").count(),
+            started.elapsed()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
+/// Issue #996's two properties, asserted against the loop as it actually
+/// runs:
+///
+///   1. it does not publish into an edge that is not answering -- the first
+///      thing in the log is a run of readiness probes, not a publish;
+///   2. a failed publish is retried in seconds, not after the full refresh
+///      interval;
+///
+/// plus the third that keeps (1) honest over time: EVERY publish attempt is
+/// preceded by a probe, so the gate is part of the loop rather than a
+/// once-at-startup courtesy that a later recreate of the edge sails past.
+fn assert_announce_loop_waits_for_its_edge_then_retries_fast(name: &str, raw: &str) {
+    let run = run_announce_loop(name, raw);
+    let calls = wait_for_publish_attempts(name, &run, 3, std::time::Duration::from_secs(60));
+
+    let opening: Vec<&str> = calls.iter().take(4).map(String::as_str).collect();
+    assert_eq!(
+        opening,
+        ["W", "W", "W", "C"],
+        "{name}: expected the loop to probe its edge until it answered (two \
+         failing probes, then one that succeeds) and only THEN publish. It \
+         did: {calls:?}. Publishing into a still-booting edge is the race \
+         that took devnet discovery down on 2026-08-16 (issue #996)."
+    );
+
+    for pair in calls.windows(2) {
+        if pair[1] == "C" {
+            assert_eq!(
+                pair[0], "W",
+                "{name}: a publish attempt was not preceded by a readiness \
+                 probe -- the gate must run every cycle, not only at startup, \
+                 because Watchtower can recreate the edge underneath a \
+                 long-lived loop at any time. Calls: {calls:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_store_announce_loop_waits_for_its_edge_then_retries_fast() {
+    let (name, raw) = ANNOUNCE_LOOPS[0];
+    assert_announce_loop_waits_for_its_edge_then_retries_fast(name, raw);
+}
+
+#[test]
+fn the_relay_announce_loop_waits_for_its_edge_then_retries_fast() {
+    let (name, raw) = ANNOUNCE_LOOPS[1];
+    assert_announce_loop_waits_for_its_edge_then_retries_fast(name, raw);
+}
+
+#[test]
+fn the_relay_swap_announce_loop_waits_for_its_edge_then_retries_fast() {
+    let (name, raw) = ANNOUNCE_LOOPS[2];
+    assert_announce_loop_waits_for_its_edge_then_retries_fast(name, raw);
+}
