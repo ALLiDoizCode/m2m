@@ -187,19 +187,37 @@ const STORE_WATCHTOWER_OVERLAY: &str =
 /// [`the_relays_swap_announce_config_speaks_for_the_maker_not_the_relay`].
 const RELAY_NGINX_CONF: &str = include_str!("../../../infra/linode-relay/nginx/conf.d/node.conf");
 
-/// Every nginx file the two Watchtower-managed boxes commit: the RENDERED
-/// config each box's `nginx` service bind-mounts, and the `.template` that
-/// `init-letsencrypt.sh` renders it from. Both, because the pair drift
-/// independently -- issue #987's broken `/swap` form was fixed in one and
-/// left in the other once already -- and the template is what a rebuilt box
-/// starts from.
+/// Every nginx file any box in this repo commits: the RENDERED config a box's
+/// `nginx` service bind-mounts, and the `.template` that `bootstrap.sh`
+/// renders it from. Both, because the pair drift independently -- issue
+/// #987's broken `/swap` form was fixed in one and left in the other once
+/// already -- and the template is what a rebuilt box starts from.
 ///
-/// The faucet box (`infra/linode-faucet/`) and the chain box
-/// (`infra/linode/`) are deliberately NOT here: neither runs a Watchtower,
-/// their images are built on-box, and nothing recreates their upstreams
-/// behind nginx's back. Add a box to this list when it gets a Watchtower,
-/// not before -- see [`no_watchtower_box_nginx_names_a_literal_upstream`].
-const WATCHTOWER_BOX_NGINX_FILES: &[(&str, &str)] = &[
+/// # Why the faucet and chain boxes are in here now (issue #1013)
+///
+/// This list used to be the two WATCHTOWER-managed boxes only, on the reading
+/// that a literal upstream is a problem only where something recreates
+/// containers unattended. `infra/linode-faucet/` and `infra/linode/` were
+/// excluded on those grounds, and the exclusion was left as a comment with
+/// nothing enforcing it.
+///
+/// Two things were wrong with that. The narrow one: the chain box had already
+/// adopted the variable+resolver form everywhere except `mina.conf.template`
+/// (`devnet.conf.template`'s own header states the rule), so the exclusion was
+/// protecting drift, not a decision. The load-bearing one: only the *502 until
+/// someone reloads* half of the defect needs a Watchtower. The other half --
+/// an upstream container that is not running at parse time is `[emerg] host
+/// not found in upstream`, which exits the nginx MASTER and takes every server
+/// block with it, ACME included -- needs no recreate at all, and both excluded
+/// boxes build their images on-box, where `up -d --build` recreates a
+/// container exactly the way a Watchtower pull does.
+///
+/// So the rule is no longer "boxes with a Watchtower": it is every box, and
+/// [`every_committed_box_nginx_file_is_covered_by_the_upstream_guards`] walks
+/// `infra/` and fails if a committed nginx file is missing from this list --
+/// which is what the old prose-only "add a box to this list when it gets a
+/// Watchtower" could not do.
+const BOX_NGINX_FILES: &[(&str, &str)] = &[
     (
         "infra/linode-relay/nginx/conf.d/node.conf",
         RELAY_NGINX_CONF,
@@ -216,7 +234,40 @@ const WATCHTOWER_BOX_NGINX_FILES: &[(&str, &str)] = &[
         "infra/linode-store/nginx/node.conf.template",
         include_str!("../../../infra/linode-store/nginx/node.conf.template"),
     ),
+    (
+        "infra/linode-faucet/nginx/conf.d/node.conf",
+        include_str!("../../../infra/linode-faucet/nginx/conf.d/node.conf"),
+    ),
+    (
+        "infra/linode-faucet/nginx/node.conf.template",
+        include_str!("../../../infra/linode-faucet/nginx/node.conf.template"),
+    ),
+    (
+        "infra/linode/nginx/devnet.conf.template",
+        include_str!("../../../infra/linode/nginx/devnet.conf.template"),
+    ),
+    (
+        "infra/linode/nginx/evm.conf.template",
+        include_str!("../../../infra/linode/nginx/evm.conf.template"),
+    ),
+    (
+        "infra/linode/nginx/mina.conf.template",
+        include_str!("../../../infra/linode/nginx/mina.conf.template"),
+    ),
+    (
+        "infra/linode/nginx/sol.conf.template",
+        include_str!("../../../infra/linode/nginx/sol.conf.template"),
+    ),
 ];
+
+/// The chain box renders its nginx config into a directory its own
+/// `.gitignore` excludes (`infra/linode/.gitignore`: `nginx/conf.d/*.conf`),
+/// because which template it renders is a per-host choice
+/// (`NGINX_TEMPLATE=...`). The committed artifact for that box is therefore
+/// the template, and a rendered file found on disk is a local by-product of
+/// running `bootstrap.sh`/`devnet.sh` in a checkout -- not something
+/// [`BOX_NGINX_FILES`] should be asked to cover.
+const UNCOMMITTED_NGINX_RENDER_DIR: &str = "infra/linode/nginx/conf.d/";
 
 /// This test binary's own base port for [`Anvil::spawn`] -- distinct from
 /// other test binaries' bases (`connector-settlement-evm`'s own tests use
@@ -2810,19 +2861,106 @@ fn proxy_pass_targets(raw: &str) -> Vec<&str> {
 /// found in upstream`, which exits the whole nginx master -- every server
 /// block in the file, not just the one location. `nginx -t` on the relay
 /// file as committed before this test failed exactly that way.
+///
+/// That second mode is why this covers EVERY box (issue #1013) and not just
+/// the two a Watchtower recreates: it needs no unattended recreate, only a
+/// container that happens to be down when nginx parses. See
+/// [`BOX_NGINX_FILES`].
 #[test]
-fn no_watchtower_box_nginx_names_a_literal_upstream() {
-    for (name, raw) in WATCHTOWER_BOX_NGINX_FILES {
+fn no_box_nginx_names_a_literal_upstream() {
+    for (name, raw) in BOX_NGINX_FILES {
         for target in proxy_pass_targets(raw) {
             assert!(
                 target.starts_with("http://$") || target.starts_with('$'),
                 "{name} proxies to `{target}` -- a literal upstream hostname \
-                 is resolved ONCE at config-parse time, so a Watchtower \
-                 recreate of that container 502s this edge until someone \
-                 reloads nginx (issue #993). Name the upstream through a \
-                 variable (`set $upstream <container>;`) so the file's own \
-                 `resolver` re-resolves it per request."
+                 is resolved ONCE at config-parse time, so a recreate of that \
+                 container 502s this edge until someone reloads nginx, and a \
+                 container that is simply DOWN at parse time is `[emerg] host \
+                 not found in upstream`, which exits the nginx master (issue \
+                 #993). Name the upstream through a variable (`set $upstream \
+                 <container>;`) so the file's own `resolver` re-resolves it \
+                 per request."
             );
+        }
+    }
+}
+
+/// [`BOX_NGINX_FILES`] is written out by hand, for the same reason
+/// [`SURVIVING_BOX_COMPOSE_FILES`] is: a guard that globbed its own inputs
+/// would silently change what it covers whenever the filesystem changed. The
+/// cost of that choice is that a NEW box's nginx config is unguarded until
+/// someone remembers the list -- which is exactly what happened to the faucet
+/// and chain boxes, whose exclusion lived in a doc comment that nothing could
+/// enforce.
+///
+/// This test pays that cost off without giving up the explicit list: it walks
+/// `infra/` and fails if it finds a committed nginx file the list does not
+/// name. Coverage still only ever changes in a reviewed diff -- the failure
+/// mode is a red test naming the missing file, not silent drift in either
+/// direction.
+#[test]
+fn every_committed_box_nginx_file_is_covered_by_the_upstream_guards() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("crates/connector-bin/../.. is the repo root");
+
+    let mut found = Vec::new();
+    collect_nginx_files(&repo_root.join("infra"), &repo_root, &mut found);
+    found.sort();
+
+    assert!(
+        !found.is_empty(),
+        "walked {}/infra and found no nginx config at all -- this guard is \
+         reading the wrong tree and would pass no matter what was committed",
+        repo_root.display()
+    );
+
+    let missing: Vec<&String> = found
+        .iter()
+        .filter(|path| !BOX_NGINX_FILES.iter().any(|(name, _)| name == path))
+        .collect();
+
+    assert!(
+        missing.is_empty(),
+        "{missing:?} are committed nginx configs that `BOX_NGINX_FILES` does \
+         not name, so `no_box_nginx_names_a_literal_upstream` and \
+         `no_variable_upstream_appends_a_uri_that_nginx_will_ignore` cannot \
+         see them. Add each file to that list (`include_str!` + its \
+         repo-relative path) -- a guard that cannot see a committed file \
+         cannot refuse anything about it."
+    );
+}
+
+/// Every `*.conf` / `*.template` under an `nginx/` directory in `dir`,
+/// recursively, as repo-relative paths. Used only by
+/// [`every_committed_box_nginx_file_is_covered_by_the_upstream_guards`].
+fn collect_nginx_files(dir: &std::path::Path, repo_root: &std::path::Path, out: &mut Vec<String>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) => panic!("read_dir({}) failed: {err}", dir.display()),
+    };
+
+    for entry in entries {
+        let path = entry.expect("a readable directory entry").path();
+        if path.is_dir() {
+            collect_nginx_files(&path, repo_root, out);
+            continue;
+        }
+
+        let relative = path
+            .strip_prefix(repo_root)
+            .expect("walked path is under the repo root")
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        if relative.starts_with(UNCOMMITTED_NGINX_RENDER_DIR) {
+            continue;
+        }
+        if relative.contains("/nginx/")
+            && (relative.ends_with(".conf") || relative.ends_with(".template"))
+        {
+            out.push(relative);
         }
     }
 }
@@ -2841,7 +2979,7 @@ fn no_watchtower_box_nginx_names_a_literal_upstream() {
 /// is the double-apply that produced `/swap/ilp/btp/swap/ilp/btp`.
 #[test]
 fn no_variable_upstream_appends_a_uri_that_nginx_will_ignore() {
-    for (name, raw) in WATCHTOWER_BOX_NGINX_FILES {
+    for (name, raw) in BOX_NGINX_FILES {
         for target in proxy_pass_targets(raw) {
             let Some(rest) = target.strip_prefix("http://$") else {
                 // A bare `$backend`-style variable carries its whole URL,
