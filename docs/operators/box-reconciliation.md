@@ -300,12 +300,20 @@ the relay, plus the single ` M` from step 6.
 
 Separate from the reconcile, and the point where services actually restart.
 
-> **Run every `docker compose` from inside the box directory, with bare filenames.** The live
-> projects are named `linode-relay` and `linode-store`, derived from the working directory. Several
-> compose headers in this repo document their invocation as `-f infra/linode-relay/…` from the repo
-> root — run that way and compose creates a **second, parallel project** called `connector` and
-> duplicates every container. Also never pass `--remove-orphans`: each `-f` set covers only part of
-> the project.
+> **Always spell the `-f` set; never run a bare `docker compose`.** The live projects are
+> `linode-relay` and `linode-store`, and the project name comes from the directory of the **first
+> `-f` file**, not from your shell's CWD — verified on the relay box with Compose v5.4.0, where
+> `docker compose -f infra/linode-relay/docker-compose.relay.yml config` from `/root/connector` and
+> `docker compose -f docker-compose.relay.yml config` from `infra/linode-relay` both report
+> `name: linode-relay`. So the repo-root form the compose headers and `fleet-ops.yml` use, and the
+> `cd`-into-the-box-directory form below, are equivalent; use either.
+>
+> A **bare** `docker compose` in `/root/connector` is the one that goes wrong: it resolves the
+> repo-root dev-stack file and reports `name: connector`, a different project with no
+> `connector-rust` service in it (issue #948, and `fleet-ops.yml`'s own comment on the same point).
+>
+> Also never pass `--remove-orphans`: each `-f` set covers only part of the project, so it would
+> delete the services the current set does not name.
 
 ### relay
 
