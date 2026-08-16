@@ -1916,22 +1916,36 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
 /// documented way to hold a box on a known build, and doing so re-arms the
 /// immutable branch of every assertion above automatically.
 ///
-/// # Open, and deliberately not decided here
+/// # Who moves the tag: settled by #1000, hours after the above was written
 ///
-/// toon-meta#403's closing comment describes `:rust-release` as a supervised
-/// PROMOTION tag -- a manual dispatch retagging a validated `rust-sha-*` --
-/// which would preserve the validation gate #972 argues for while still
-/// automating the deploy. No such workflow exists:
-/// `publish-connector-rust-image.yml` moves the tag on `is_default_branch`,
-/// and the digests above show it moving that way in practice. Whether it
-/// stays auto-on-green or becomes a promotion tag is being decided
-/// separately (#972, ADR 0034).
+/// This section previously said the question was open. It was, for about
+/// three hours. When the fleet reference moved onto `:rust-release` the
+/// digests above showed the tag behaving as auto-on-green, because
+/// `publish-connector-rust-image.yml` (#990) moved it on `is_default_branch`
+/// -- while toon-meta#403's closing comment described it as a supervised
+/// PROMOTION tag. That gap, not either answer, was the actual defect, and
+/// #1000 (ADR 0041) closed it in favour of promotion:
 ///
-/// Nothing here presumes an answer. Under EITHER outcome the fleet overlays
-/// name `:rust-release` and the assertions above hold unchanged; only this
-/// doc comment's account of who moves the tag would need editing, and a
-/// promotion workflow would then be the natural place to reintroduce a
-/// `rust-sha-*` literal -- as the promotion TARGET, not as a box pin.
+/// * `publish-connector-rust-image.yml` no longer publishes `rust-release`
+///   at all. Its header now says so in as many words, and the tag list
+///   pushes only `rust-sha-<short-sha>` and `rust-main`.
+/// * `promote-to-fleet.yml` is the one thing that moves it -- a
+///   `workflow_dispatch` naming an immutable `rust-sha-` tag (refused if it
+///   is not one), which it retags to `:rust-release`. Rollback is the same
+///   dispatch naming the previous tag.
+///
+/// This costs the assertions here nothing, which was the design goal: under
+/// either outcome the fleet overlays name `:rust-release` and everything
+/// above holds unchanged. What changed is only who is allowed to move what
+/// it points at -- and #972's validated-deploy argument now has a mechanism
+/// instead of four literals.
+///
+/// The `rust-sha-*` literal is therefore back in this repo, exactly where
+/// that section predicted: as `promote-to-fleet`'s dispatch input, the
+/// promotion TARGET, not as a box pin. The two facts a box pin used to
+/// conflate -- which build was validated, and which build a box runs -- are
+/// now separately recorded, and conflating them again is what put the repo
+/// out of sync with the fleet in the first place.
 const EXPECTED_CONNECTOR_TAG: &str = "rust-release";
 
 /// Every `image:` pin this suite can see across the surviving two-box fleet
