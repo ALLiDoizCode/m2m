@@ -970,16 +970,20 @@ fn wire_outbound_client_hops(
     config: &Config,
     client: &reqwest::Client,
 ) -> Result<Connector, RuntimeError> {
-    let dialed_with_channel: Vec<(&PeerConfig, &PeerChannelConfig)> = config
+    // The endpoint is carried out of the filter rather than re-read inside
+    // the loop below: "dialed" IS "has an endpoint", so keeping the two
+    // together is what makes a second unwrap of the same `Option`
+    // unnecessary.
+    let dialed_with_channel: Vec<(&PeerConfig, &url::Url, &PeerChannelConfig)> = config
         .peers()
         .iter()
-        .filter(|peer| peer.endpoint().is_some())
-        .map(|peer| {
+        .filter_map(|peer| {
+            let endpoint = peer.endpoint()?;
             let channel = config
                 .peer_channels_for(peer.id())
                 .next()
                 .expect("Config::peers() guarantees at least one [[peer_channels]] row per peer");
-            (peer, channel)
+            Some((peer, endpoint, channel))
         })
         .collect();
     if dialed_with_channel.is_empty() {
@@ -1004,11 +1008,8 @@ fn wire_outbound_client_hops(
     });
     connector = connector.with_outbound_client_ledger(ledger);
 
-    for (peer, channel) in dialed_with_channel {
-        let edge_url = claim_state_edge_url(
-            peer.endpoint()
-                .expect("filtered to peers with an endpoint above"),
-        );
+    for (peer, endpoint, channel) in dialed_with_channel {
+        let edge_url = claim_state_edge_url(endpoint);
         connector = match channel {
             PeerChannelConfig::Evm(evm) => {
                 let Some((signer, _)) = &evm_identity else {
