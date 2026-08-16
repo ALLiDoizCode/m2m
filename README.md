@@ -209,8 +209,9 @@ handled the packet ([ADR 0014](docs/adr/0014-metrics-surface-and-packet-correlat
 
 To run it as a container instead, see
 [`deploy/connector-rust/README.md`](deploy/connector-rust/README.md) — the published image is
-`ghcr.io/toon-protocol/connector`, tagged `rust-sha-<short>` per commit and `rust-main` on the
-default branch (#645). Pin an exact `rust-sha-` tag; `rust-main` moves. The separate
+`ghcr.io/toon-protocol/connector`, tagged `rust-sha-<short>` per commit and `rust-main` plus
+`rust-release` on the default branch (#645, #989). Pin an exact `rust-sha-` tag; the other two
+move. The separate
 `ghcr.io/toon-protocol/connector-rust` package this used to name is retired and gets no new
 builds.
 
