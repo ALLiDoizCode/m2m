@@ -17,15 +17,29 @@
 # ── Label-scoped, not fleet-wide ────────────────────────────────────────────
 # `--label-enable` makes Watchtower ignore every container UNLESS it carries
 # `com.centurylinklabs.watchtower.enable=true`. On this shared box that is
-# load-bearing: Watchtower must never recreate `connector-rust`, `relay` or
-# `nginx` on a new image showing up in their repositories — those follow the
-# fleet's deliberate-pin doctrine (`EXPECTED_CONNECTOR_TAG`,
-# crates/connector-bin/tests/devnet_configs_load.rs), bumped by a reviewed PR,
-# not an unattended background pull. Only `swap-node`
-# (./docker-compose.relay.swap.yml) carries the enable label today — the one
-# service toon-meta#403 opts into the `:release`-tracking model, per the
-# owner's own trade-off note (an accepted risk on a shared devnet relay,
-# gated by `:release` only ever moving on a green `main`).
+# load-bearing in BOTH directions.
+#
+# When this file was first committed (issue #988) `swap-node` was the only
+# labelled service and the other three were named here as things Watchtower
+# must never touch. That was already untrue of the live box, and issue #992's
+# reconciliation is what makes the repo say so: `relay`
+# (./docker-compose.relay.yml), `connector-rust`
+# (./docker-compose.relay.rust.yml) and `announce`
+# (./docker-compose.relay.announce.yml) have followed moving tags with this
+# label since 2026-08-16. Each opts in beside the moving tag it follows, in
+# its own file, so the label and the tag cannot be separated by an edit to
+# one of them. The deliberate-pin doctrine those three used to follow is not
+# gone — it moved to the tag pointer, and `EXPECTED_CONNECTOR_TAG` in
+# crates/connector-bin/tests/devnet_configs_load.rs is where the whole
+# argument now lives.
+#
+# What must NEVER carry the label, and is asserted not to:
+#   * `nginx` — the TLS edge, and the holder of the `resolver` that lets
+#     every other service's recreate self-heal (issue #993). Recreating it on
+#     an upstream `nginx:alpine` push would be an unreviewed change to the one
+#     component whose job is surviving the others being replaced.
+#   * `certbot` — holds the renewal timer.
+#   * `watchtower` itself.
 #
 # ── `--interval 60 --cleanup` ───────────────────────────────────────────────
 # `--interval 60` polls the ONE watched repository once a minute — the public

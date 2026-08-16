@@ -1,0 +1,96 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# TOON devnet — label-scoped Watchtower, STORE box (issue #992, the store-box
+# sibling of infra/linode-relay/docker-compose.relay.watchtower.yml — both
+# halves of toon-meta#403's fleet-wide `:release` + Watchtower epic)
+# ═══════════════════════════════════════════════════════════════════════════
+# This is committed infra only. Bringing it up on the live box is a HUMAN
+# step (`docker compose ... up -d watchtower`, or dispatch fleet-ops.yml with
+# `box=store operation=deploy service=watchtower apply=true`) — nothing here
+# makes a live-box change by itself.
+#
+# ── This commits what the box already runs ─────────────────────────────────
+# Live on the store box since 2026-08-16 as drift, and reconciled here so a
+# rebuild or a `fleet-ops` reconcile reproduces it instead of silently
+# reverting it. Verified on the box: `--label-enable --interval 60 --cleanup`,
+# `DOCKER_API_VERSION=1.44`, the docker socket mounted, and the enable label
+# on exactly `store`, `connector-rust` and `announce` — never `nginx`, never
+# `certbot`, never Watchtower itself.
+#
+# ONE difference from the live container, deliberately: the box runs
+# `containrrr/watchtower` with no tag, which resolves to `:latest`. That is
+# the same defect this box's `store` image had (`:latest`, watched by
+# nothing, moving with no diff to review) applied to the thing doing the
+# watching — a future Watchtower release would change this box's deploy
+# behaviour with nothing in git to point at. Pinned here to `1.7.1`, the
+# version toon-meta#402 actually proved the pattern with, matching
+# infra/linode-relay/docker-compose.relay.watchtower.yml. Applying this file
+# to the box therefore also pins it, which is the point.
+#
+# ── Label-scoped, not fleet-wide ────────────────────────────────────────────
+# `--label-enable` makes Watchtower ignore every container UNLESS it carries
+# `com.centurylinklabs.watchtower.enable=true`. On this box that is
+# load-bearing in both directions:
+#
+#   * `nginx` and `certbot` are NOT labelled and must never be. nginx is the
+#     TLS edge and holds the resolver that lets every other recreate
+#     self-heal (issue #993); recreating it on an upstream `nginx:alpine`
+#     push would be an unreviewed change to the one component whose job is to
+#     survive the others being replaced. certbot holds the renewal timer.
+#   * `store`, `connector-rust` and `announce` ARE labelled, in their own
+#     compose files next to the tag they follow — a service opts in beside
+#     the moving tag that makes the opt-in meaningful, so the two can never
+#     be separated by an edit to one file. `connector-rust` and `announce`
+#     mount the SAME `connector-rust.toml`, so they must move together or the
+#     older binary refuses to load a config the newer one wrote
+#     (`deny_unknown_fields`); both carrying the label and both following
+#     `:rust-release` is what keeps that true unattended.
+#
+# ── `--interval 60 --cleanup` ───────────────────────────────────────────────
+# `--interval 60` polls the watched repositories once a minute — all public
+# (`ghcr.io/toon-protocol/store`, `ghcr.io/toon-protocol/connector`), so no
+# registry credentials have to be mounted in here. That is a manifest check
+# per scan, cheap enough that a promotion or a green `main` reaches the box in
+# about a minute rather than on a human's next dispatch. `--cleanup` removes
+# the image a recreate just superseded, so a box tracking moving tags does not
+# accumulate one dangling image per merge; every superseded build stays
+# pullable from GHCR by its own immutable `sha-`/`rust-sha-` tag for a manual
+# rollback.
+#
+# ── The recreate that this box is only safe under since #993 ───────────────
+# A Watchtower recreate gives the new container a NEW address on the compose
+# network. This box's nginx used to `proxy_pass` to `connector-rust` by
+# literal hostname, which nginx resolves once at config-parse time — so the
+# first recreate 502'd the public edge until a human reloaded nginx. Issue
+# #993 converted those upstreams to the variable+resolver form; running this
+# overlay against an nginx config that has not taken that change is an
+# unsupervised outage waiting for the next merge.
+#
+# The second half of the same lesson is issue #996/#997: `connector-rust` and
+# `announce` are recreated in the SAME sweep, and the announce loop used to
+# fire one publish into a still-booting edge and then sit out a full 240 s.
+# It now probes the public URL first and retries on a doubling backoff
+# (./docker-compose.store.announce.yml's `command:` block).
+#
+# ── `/var/run/docker.sock` ───────────────────────────────────────────────────
+# Root socket, unavoidable for a container-recreating tool — Watchtower's own
+# documented requirement, not something this file can sandbox further. No
+# `ports:` are published; there is nothing here for nginx to front and
+# nothing that should ever be reachable off-box.
+#
+# ── Run alongside the store's base stack (never on its own) ────────────────
+#   docker compose -f infra/linode-store/docker-compose.store.yml \
+#                  -f infra/linode-store/docker-compose.store.rust.yml \
+#                  -f infra/linode-store/docker-compose.store.announce.yml \
+#                  -f infra/linode-store/docker-compose.store.watchtower.yml \
+#                  up -d watchtower
+# ═══════════════════════════════════════════════════════════════════════════
+
+services:
+  watchtower:
+    image: containrrr/watchtower:1.7.1
+    environment:
+      DOCKER_API_VERSION: '1.44'
+    command: ['--label-enable', '--interval', '60', '--cleanup']
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
