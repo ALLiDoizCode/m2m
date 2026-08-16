@@ -1119,6 +1119,7 @@ dependencies = [
  "tokio-tungstenite",
  "tower",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -1271,6 +1272,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "base64 0.22.1",
  "bs58",
  "chrono",
  "connector-config",

@@ -22,6 +22,20 @@
 //! | 4 | role-by-auth on a real socket (§1.9) | [`a_credential_that_fails_p1_or_p2_reaches_no_peer_handling_over_http`] and [`_over_btp`](a_credential_that_fails_p1_or_p2_reaches_no_peer_handling_over_btp) -- **runs, green** |
 //! | 5 | both carriages | every test above exists in a `wss://` and an `https://` form |
 //!
+//! # The outbound client hop (issue #1011, part of #1010)
+//!
+//! Not one of #734's original five, added alongside them because it needs
+//! the same real-binary, real-socket, real-chain harness: assertion 1 above
+//! proves a packet crosses a peering whose payee terminates for FREE, so it
+//! never asks any packet -- covered or not -- for a claim, and needs a
+//! SECOND crossing to prove anything landed on the peer ledger at all.
+//! [`the_first_forward_over_a_dialed_peering_is_covered_proactively_over_btp`]
+//! / [`_over_http`](the_first_forward_over_a_dialed_peering_is_covered_proactively_over_http)
+//! instead price the payee's route so its price gate demands a covering
+//! claim from the FIRST packet, over a payer configured only via
+//! `[[peers]]` (with `endpoint`) + `[[peer_channels]]` + `[settlement.*]` --
+//! **runs, green**.
+//!
 //! # The client leg (issue #620, ADR 0028)
 //!
 //! Assertion 1 above proves the *peer hop* is paid, and until ADR 0028 it
@@ -327,6 +341,30 @@ impl Carriage {
     }
 }
 
+/// Mine `count` empty blocks on the Anvil chain at `rpc_url`, via the
+/// `anvil_mine` cheat-code RPC method -- used to push a just-landed
+/// transaction past the local channel index's confirmation depth (issue
+/// #661), since Anvil otherwise never mines a block without a transaction
+/// to put in it.
+async fn mine_blocks(rpc_url: &str, count: u64) {
+    let response = reqwest::Client::new()
+        .post(rpc_url)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "anvil_mine",
+            "params": [format!("0x{count:x}")],
+            "id": 1,
+        }))
+        .send()
+        .await
+        .expect("POST anvil_mine");
+    assert!(
+        response.status().is_success(),
+        "anvil_mine failed: {}",
+        response.status()
+    );
+}
+
 /// A real chain, a real `TokenNetwork`, and a real peer channel funded by
 /// the payer -- everything below the carriage, shared by every test here.
 ///
@@ -371,9 +409,56 @@ impl PeerFixture {
         )
         .await
         .expect("mint a fresh mock ERC-20 for this test");
-        // The payer *is* the deployer: it holds the supply, so it is the
-        // side that can genuinely deposit, and debt flows in the direction
-        // packets flow (§6.4).
+
+        // The payee's on-chain address, derived from its own key directly
+        // rather than through a connected backend -- deliberately BEFORE
+        // `payer_backend` (below) exists. It is the PAYER who owes on the
+        // peering leg (ADR 0004: the payer signs increasing claims to the
+        // payee), so the deposit backing those claims must land in the
+        // PAYER's own on-chain slot -- and `SettlementBackend::fund` always
+        // credits the CALLER's counterparty (`read_state`'s own doc), never
+        // the caller's own. Funding therefore has to be called FROM the
+        // payee, crediting the payee's counterparty (the payer). The payee
+        // (an invented key, unlike the deployer's own well-known Anvil dev
+        // account) starts with neither native currency to pay gas nor any
+        // of the mock ERC-20 to deposit, so both are sent to it here, from
+        // the deployer. Done before `payer_backend` is constructed and
+        // sends its own first transaction: `NonceManagerMiddleware` caches
+        // the deployer's next nonce from its first send onward, and a
+        // transaction from a SEPARATE deployer-keyed client interleaved
+        // after that point desyncs it (`nonce too low`) -- so every
+        // deployer-signed setup transaction happens first, in one place,
+        // through the one-off clients `deploy_mock_token`/`fund_native`/
+        // `mint_mock_token` each open and close.
+        let payee_secret = SecretKey::parse_slice(
+            &hex::decode(PEER_SETTLEMENT_KEY_PLACEHOLDER.trim_start_matches("0x"))
+                .expect("payee settlement key is hex"),
+        )
+        .expect("payee settlement key is a valid secp256k1 secret");
+        let payee_evm_address = ethers::types::Address::from(derive_evm_address(
+            &PublicKey::from_secret_key(&payee_secret).serialize(),
+        ));
+        EvmSettlementBackend::fund_native(
+            &anvil.rpc_url,
+            DEPLOYER_PRIVATE_KEY,
+            payee_evm_address,
+            1_000_000_000_000_000_000, // 1 ETH: gas for the payee's own approve + set_total_deposit
+        )
+        .await
+        .expect("give the payee native currency to pay gas with");
+        EvmSettlementBackend::mint_mock_token(
+            &anvil.rpc_url,
+            DEPLOYER_PRIVATE_KEY,
+            token,
+            payee_evm_address,
+            u128::from(100 * PEER_FEE),
+        )
+        .await
+        .expect("mint the payee some mock USDC to fund the peering channel with");
+
+        // The payer *is* the deployer: it holds the token supply, so it is
+        // the side that can genuinely fund the client leg (below), and debt
+        // flows in the direction packets flow (§6.4).
         let payer_backend =
             EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
                 .await
@@ -398,23 +483,40 @@ impl PeerFixture {
         .await
         .expect("connect the payee's settlement identity to the same TokenNetwork");
         let payee_address = payee_backend.own_address().to_fixed_bytes();
+        assert_eq!(
+            payee_address,
+            payee_evm_address.to_fixed_bytes(),
+            "the address derived from PEER_SETTLEMENT_KEY_PLACEHOLDER must be the one the \
+             connected backend itself signs as"
+        );
 
-        // The payer opens the peering's channel naming the payee, and funds
-        // it with real on-chain value -- read back from the chain's own
-        // receipt, never invented here.
+        // The payer opens the peering's channel naming the payee, and the
+        // payee funds it -- crediting the payer's own on-chain slot, per
+        // this function's own comment above.
         let channel = payer_backend
             .open(payee_address.to_vec(), ChronoDuration::hours(1))
             .await
             .expect("the payer opens the peering's channel");
-        let state = payer_backend
+        let state = payee_backend
             .fund(&channel, u128::from(100 * PEER_FEE))
             .await
-            .expect("fund the peering channel with real ERC-20 value");
+            .expect("fund the peering channel with real ERC-20 value, crediting the payer's slot");
         assert_eq!(
             state.deposited,
             u128::from(100 * PEER_FEE),
             "a real transaction genuinely moved this value on chain"
         );
+        // The local channel index (issue #661) only applies a channel's log
+        // once it sits `channel_index_confirmations` blocks behind head (5
+        // by default, and every connector spawned below leaves this
+        // unset) -- Anvil mines exactly one block per transaction and none
+        // otherwise, so without more blocks after the funding transaction
+        // above, the payee's own index would never consider this channel's
+        // deposit confirmed within the life of this test, and its `/ilp/
+        // claim-state` (the outbound client hop's watermark source, issue
+        // #1011) would report it as never-funded indefinitely. Mined well
+        // past the default depth so this is not a hand-tuned coincidence.
+        mine_blocks(&anvil.rpc_url, 20).await;
 
         // The client leg: a second channel on the same `TokenNetwork`,
         // opened by the payer naming an ordinary client, and funded from
@@ -566,6 +668,78 @@ token_network = "{token_network}"
 # cannot be written: `ConfigError::PeerUnbound` refuses it at load. See
 # `a_peer_with_no_channel_binding_refuses_to_start`, which is the only form
 # that case can take against a live binary.
+"#,
+        state_dir = state_dir.display(),
+        key_file = key_file.path().display(),
+        settlement = fixture.settlement_block(settlement_key_file.path()),
+        channel_id = fixture.channel_id,
+        payer = to_hex(&fixture.payer_address),
+        token_network = to_hex(&fixture.token_network_address),
+    ));
+    let connector = spawn_connector(config.path());
+    (connector, config, settlement_key_file)
+}
+
+/// The payee's own termination price for [`APP_PREFIX`] in
+/// [`the_first_forward_over_a_dialed_peering_is_covered_proactively`]:
+/// exactly what the payer's forwarded route (`[[routes]] fee = PEER_FEE,
+/// price = CLIENT_PRICE`, in [`spawn_payer`]) delivers --
+/// `CLIENT_PRICE - PEER_FEE` -- so the payee's own price gate demands
+/// exactly what arrives, the same shape #1010's live evidence used
+/// (`edge.price - fee == store.price`).
+const APP_PRICE: u64 = CLIENT_PRICE - PEER_FEE;
+
+/// [`spawn_payee`], but terminating [`APP_PREFIX`] at [`APP_PRICE`] rather
+/// than free (issue #1011): the one difference that makes the peer wire's
+/// own price gate (`connector_peer_btp::price_gate`, ADR 0011) actually
+/// demand a covering claim on the first packet forwarded to this peering --
+/// `spawn_payee`'s free route never asks for one at all, which is why
+/// `two_connectors_move_a_paid_packet` cannot stand in for this test.
+/// `claim_enforcement` is left unset -- the default (`enforce`, issue #868)
+/// is the point.
+fn spawn_payee_priced(
+    fixture: &PeerFixture,
+    state_dir: &std::path::Path,
+    stub_app_addr: &str,
+) -> (
+    ConnectorProcess,
+    tempfile::NamedTempFile,
+    tempfile::NamedTempFile,
+) {
+    let key_file = write_raw_key_file(PAYEE_SIGNER_SEED);
+    let mut settlement_key_file = tempfile::NamedTempFile::new().expect("temp settlement key file");
+    settlement_key_file
+        .write_all(PAYEE_PRIVATE_KEY.as_bytes())
+        .expect("write settlement key file");
+
+    let config = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+peer_expose = "both"
+
+[signer]
+key_file = "{key_file}"
+{settlement}
+[[routes]]
+prefix = "{APP_PREFIX}"
+handler_url = "http://{stub_app_addr}"
+price = {APP_PRICE}
+
+# Accept-only, exactly as `spawn_payee`'s own peering is: the payer dials
+# us, which on HTTP makes us structurally the payee (§6.4).
+[[peers]]
+id = "{PAYER_ID}"
+
+[peers.credential]
+secret = "{PEER_SECRET}"
+
+[[peer_channels]]
+peer_id = "{PAYER_ID}"
+channel_id = "{channel_id}"
+counterparty_key = "{payer}"
+chain_id = {ANVIL_CHAIN_ID}
+token_network = "{token_network}"
 "#,
         state_dir = state_dir.display(),
         key_file = key_file.path().display(),
@@ -1194,6 +1368,94 @@ async fn two_connectors_move_a_paid_packet(carriage: Carriage) {
         charged.contains(&fixture.client_channel_id),
         "the client leg must be charged: the payer's client-edge claim \
          journal must record a claim on the client's channel. Journal was:\n{charged}"
+    );
+}
+
+/// **Issue #1011's own acceptance criterion**: a paying connector configured
+/// only via `[[peers]]` (with `endpoint`) + `[[peer_channels]]` +
+/// `[settlement.*]` -- no other wiring -- covers the FIRST packet it ever
+/// forwards to a dialed peering, against a receiver at the default
+/// `claim_enforcement = "enforce"` (issue #868). Before #1011,
+/// `Connector::with_outbound_client_hop` had no config surface at all
+/// (`connector-cli::runtime::build` never called it), so `cover_forward`
+/// always answered `NotConfigured` and every first packet rode the peer
+/// ledger's own postpay convention (ADR 0004) uncovered -- refused `F06` by
+/// exactly the price gate this test's payee has, since postpay can only ever
+/// cover a packet AFTER an earlier one has fulfilled (`record_fulfillment`'s
+/// own doc). `two_connectors_move_a_paid_packet` cannot stand in for this:
+/// its payee terminates for free, so its price gate never demands a claim
+/// from anyone, covered or not, and it needs a SECOND crossing to prove
+/// anything landed on the peer ledger at all. This one asks for a claim on
+/// the very first packet and settles for nothing less.
+#[tokio::test]
+async fn the_first_forward_over_a_dialed_peering_is_covered_proactively_over_btp() {
+    the_first_forward_over_a_dialed_peering_is_covered_proactively(Carriage::Btp).await;
+}
+
+/// **Assertion 5 (§9, both carriages)** for the test above.
+#[tokio::test]
+async fn the_first_forward_over_a_dialed_peering_is_covered_proactively_over_http() {
+    the_first_forward_over_a_dialed_peering_is_covered_proactively(Carriage::Http).await;
+}
+
+async fn the_first_forward_over_a_dialed_peering_is_covered_proactively(carriage: Carriage) {
+    let Some(fixture) = PeerFixture::spawn().await else {
+        return;
+    };
+    let payee_state = tempfile::tempdir().expect("temp payee state dir");
+    let payer_state = tempfile::tempdir().expect("temp payer state dir");
+    let stub_app = spawn_stub_app();
+    let (payee, _payee_config, _payee_key) =
+        spawn_payee_priced(&fixture, payee_state.path(), &stub_app.addr);
+
+    let endpoint = format!(
+        "{}://{}{}",
+        carriage.scheme(),
+        payee.client_edge_addr,
+        match carriage {
+            Carriage::Btp => "/ilp/btp",
+            Carriage::Http => "/ilp",
+        }
+    );
+    let (payer, _payer_config, _payer_key) =
+        spawn_payer(&fixture, payer_state.path(), carriage, &endpoint);
+
+    let payee_identity = identity_from_key_seed(PAYEE_SIGNER_SEED);
+    let client = reqwest::Client::new();
+    let prepare = peer_bound_prepare(APP_PREFIX, b"the very first packet", &payee_identity);
+    let claim = fixture.client_claim(1);
+
+    let (status, body, _ack) = post_peer_request(
+        &client,
+        &payer.client_edge_addr,
+        None,
+        Some(&claim),
+        &prepare,
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    connector_domain::Fulfill::decode(&body).unwrap_or_else(|_| {
+        let reject = Reject::decode(&body).expect("an answer that is neither FULFILL nor REJECT");
+        panic!(
+            "the FIRST forward over this peering was not covered: {} {}",
+            reject.code.as_str(),
+            reject.message
+        )
+    });
+
+    // The receiver's peer watermark advanced by `price - fee` -- exactly
+    // what this hop forwards, per ADR 0028 -- on the FIRST attempt, with no
+    // second crossing needed to prove it landed.
+    let ledger = peer_journal(payee_state.path());
+    assert!(
+        ledger.contains(&fixture.channel_id),
+        "the first covering claim must be recorded on the peering's own channel. Ledger \
+         was:\n{ledger}"
+    );
+    assert!(
+        ledger.contains(&APP_PRICE.to_string()),
+        "the covering claim must advance the watermark by exactly price - fee ({APP_PRICE}). \
+         Ledger was:\n{ledger}"
     );
 }
 

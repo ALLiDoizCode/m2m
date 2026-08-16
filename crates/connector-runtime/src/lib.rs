@@ -46,8 +46,9 @@ pub use operator_view::{
 // journal above. See `outbound_client`'s header for the table of
 // differences and for why the two must never merge.
 pub use outbound_client::{
-    ClaimStateSource, ClaimWatermark, EvmDomain, HttpClaimState, OutboundClaim,
-    OutboundClientError, OutboundClientLedger,
+    ClaimStateSource, ClaimWatermark, EvmDomain, HttpClaimState, HttpSolanaClaimState,
+    OutboundClaim, OutboundClientError, OutboundClientLedger, OutboundSolanaClaim,
+    OwnedHttpClaimState, SolanaClaimStateSource,
 };
 pub use peer_route_store::{PeerRouteStore, PeerRouteStoreError};
 pub use peer_transport::{InProcessPeerTransport, PeerForward, PeerTransport};

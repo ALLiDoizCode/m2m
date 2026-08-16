@@ -62,13 +62,14 @@ use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 use connector_domain::x402::X402PaymentRequired;
 use connector_signer::{
-    derive_evm_address, evm_balance_proof_digest, evm_claim_state_challenge_digest, to_hex,
+    derive_evm_address, evm_balance_proof_digest, evm_claim_state_challenge_digest,
+    solana_balance_proof_message, solana_claim_state_challenge_message, to_hex, Ed25519Signer,
     EvmBalanceProof, EvmClaimStateChallenge, Signature, Signer,
 };
 use thiserror::Error;
@@ -179,6 +180,18 @@ pub enum OutboundClientError {
          a claim whose nonce could be reissued after a restart"
     )]
     LedgerUnwritable { path: PathBuf, reason: String },
+    /// A Solana claim's cumulative amount does not fit the `u64`
+    /// `solana_balance_proof_message` signs over (issue #1011). Refused
+    /// before signing -- unlike the EVM claim, whose wire form is checked
+    /// for this only once assembled (`Connector::cover_forward`), a Solana
+    /// claim's SIGNED MESSAGE is already the truncated value if this is not
+    /// caught first, which would sign something other than what watermark
+    /// tracking believes it signed.
+    #[error(
+        "the covering claim's cumulative amount {cumulative} on channel {channel} does not fit \
+         the wire's uint64"
+    )]
+    CumulativeAmountOverflow { channel: String, cumulative: u128 },
 }
 
 /// The receiver, asked where this node's claims on a channel stand.
@@ -299,6 +312,162 @@ impl ClaimStateSource for HttpClaimState<'_> {
     }
 }
 
+/// [`HttpClaimState`], owning what it borrows, so it can outlive the one
+/// async call `connector announce` (its other caller) makes it for and be
+/// stored for the life of a serving node (issue #1011,
+/// `Connector::with_outbound_client_hop`) -- a config-driven client-role
+/// hop is armed once at startup and asked repeatedly, so its
+/// [`ClaimStateSource`] cannot borrow anything scoped to one call. Delegates
+/// to [`HttpClaimState`] itself rather than re-implementing the request --
+/// one HTTP/signing implementation serves both the one-shot and the
+/// long-lived caller.
+pub struct OwnedHttpClaimState {
+    client: reqwest::Client,
+    edge_url: String,
+    signer: Arc<dyn Signer>,
+}
+
+impl OwnedHttpClaimState {
+    pub fn new(
+        client: reqwest::Client,
+        edge_url: impl Into<String>,
+        signer: Arc<dyn Signer>,
+    ) -> OwnedHttpClaimState {
+        OwnedHttpClaimState {
+            client,
+            edge_url: edge_url.into(),
+            signer,
+        }
+    }
+}
+
+#[async_trait]
+impl ClaimStateSource for OwnedHttpClaimState {
+    async fn watermark(
+        &self,
+        channel: &[u8; 32],
+        domain: &EvmDomain,
+    ) -> Result<ClaimWatermark, OutboundClientError> {
+        HttpClaimState::new(&self.client, &self.edge_url, self.signer.as_ref())
+            .watermark(channel, domain)
+            .await
+    }
+}
+
+/// The Solana counterpart of [`ClaimStateSource`] (issue #1011): asks a
+/// receiver where this node's claims on a Solana channel ACCOUNT stand.
+///
+/// Kept as its own trait rather than a second method on [`ClaimStateSource`]
+/// for the same reason this workspace keeps `ClaimSignature::Evm`/`::Solana`
+/// and `Signer`/`Ed25519Signer` apart throughout: a Solana channel carries
+/// no EIP-712 domain to ask under, so one shared method would take a
+/// parameter the Solana implementation always ignores.
+#[async_trait]
+pub trait SolanaClaimStateSource: Send + Sync {
+    async fn watermark(
+        &self,
+        channel_account: &[u8; 32],
+    ) -> Result<ClaimWatermark, OutboundClientError>;
+}
+
+/// Ask a client edge's `POST /ilp/claim-state` where this node's own claims
+/// on a Solana channel account stand -- the Solana counterpart of
+/// [`HttpClaimState`]/[`OwnedHttpClaimState`], owned for the same reason
+/// [`OwnedHttpClaimState`] is (issue #1011).
+///
+/// Authenticated per channel by a claim-state challenge
+/// (`connector_signer::solana_claim_state_challenge_message`) signed with
+/// the same settlement key a real claim is -- domain-separated from a
+/// balance proof on purpose, so a captured challenge is not replayable as a
+/// payment (mirrors [`HttpClaimState`]'s own EIP-712 challenge).
+pub struct HttpSolanaClaimState {
+    client: reqwest::Client,
+    edge_url: String,
+    signer: Arc<dyn Ed25519Signer>,
+}
+
+impl HttpSolanaClaimState {
+    pub fn new(
+        client: reqwest::Client,
+        edge_url: impl Into<String>,
+        signer: Arc<dyn Ed25519Signer>,
+    ) -> HttpSolanaClaimState {
+        HttpSolanaClaimState {
+            client,
+            edge_url: edge_url.into(),
+            signer,
+        }
+    }
+}
+
+#[async_trait]
+impl SolanaClaimStateSource for HttpSolanaClaimState {
+    async fn watermark(
+        &self,
+        channel_account: &[u8; 32],
+    ) -> Result<ClaimWatermark, OutboundClientError> {
+        let channel_text = bs58::encode(channel_account).into_string();
+        let url = format!("{}/claim-state", self.edge_url.trim_end_matches('/'));
+        let expires = now_secs() + CLAIM_STATE_CHALLENGE_TTL_SECS;
+        let message = solana_claim_state_challenge_message(channel_account, expires);
+        let failed = |reason: String| OutboundClientError::ClaimStateUnavailable {
+            channel: channel_text.clone(),
+            reason,
+        };
+        let signature = self.signer.sign(&message);
+
+        let request = serde_json::json!({
+            "channels": [{
+                "blockchain": "solana",
+                "channelAccount": channel_text,
+                "expires": expires,
+                "signature": base64_encode(&signature),
+            }]
+        });
+        let body: serde_json::Value = self
+            .client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|error| failed(error.to_string()))?
+            .json()
+            .await
+            .map_err(|error| failed(error.to_string()))?;
+
+        let entry = body["channels"]
+            .get(0)
+            .ok_or_else(|| failed(format!("no answer for the channel asked about: {body}")))?;
+        if entry["ok"] != serde_json::Value::Bool(true) {
+            // Same "one generic reason" posture as `HttpClaimState`'s own
+            // EVM branch -- see its comment for why.
+            return Err(failed(format!(
+                "answered ok=false ({})",
+                entry["error"].as_str().unwrap_or("no reason given")
+            )));
+        }
+        Ok(ClaimWatermark {
+            nonce: entry["nonce"]
+                .as_u64()
+                .ok_or_else(|| failed(format!("no nonce in the answer: {entry}")))?,
+            cumulative: entry["cumulativeClaimed"]
+                .as_str()
+                .and_then(|value| value.parse().ok())
+                .ok_or_else(|| failed(format!("no cumulativeClaimed in the answer: {entry}")))?,
+            available: entry["available"]
+                .as_str()
+                .and_then(|value| value.parse().ok()),
+        })
+    }
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    STANDARD.encode(bytes)
+}
+
 /// A claim this node signed for exactly one packet to one next hop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundClaim {
@@ -319,6 +488,28 @@ pub struct OutboundClaim {
     /// `PeerTransport` port -- does not have to parse back the JSON this
     /// module just wrote.
     pub signature: Signature,
+}
+
+/// The Solana counterpart of [`OutboundClaim`] (issue #1011). No `json`
+/// field: unlike the EVM path (read by `connector announce`'s one-shot
+/// client-edge payer), this one is only ever consumed by
+/// `Connector::cover_forward`, which needs the signature to build a
+/// `WireClaim` and nothing else -- rendering a Solana claim onto the peer
+/// wire is `connector_peer_btp::claim_json::encode`'s job, already wired
+/// since issue #998.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutboundSolanaClaim {
+    /// The nonce it was issued at.
+    pub nonce: u64,
+    /// The receiver's cumulative record advanced by exactly the amount --
+    /// already checked to fit the `u64` the signed message and the wire
+    /// both require (see [`OutboundClientError::CumulativeAmountOverflow`]).
+    pub cumulative: u64,
+    /// What the receiver reported.
+    pub watermark: ClaimWatermark,
+    /// The raw ed25519 signature over
+    /// `connector_signer::solana_balance_proof_message`.
+    pub signature: [u8; 64],
 }
 
 /// This node's outbound claims, one nonce line per next hop.
@@ -458,6 +649,55 @@ impl OutboundClientLedger {
             cumulative,
             watermark,
             json,
+            signature,
+        })
+    }
+
+    /// The Solana counterpart of [`OutboundClientLedger::next_claim`] (issue
+    /// #1011): same nonce-floor contract, same "ask the receiver, refuse
+    /// short headroom, record durably, then sign" order -- see that
+    /// method's own doc for why the order is the contract. The one added
+    /// step is the `u64` fit check, which the EVM path performs on the
+    /// *wire* claim after signing (`Connector::cover_forward`); a Solana
+    /// claim's signed MESSAGE is already that u64
+    /// (`connector_signer::solana_balance_proof_message`), so this checks
+    /// before signing rather than after.
+    pub async fn next_claim_solana(
+        &self,
+        next_hop: &str,
+        receiver: &dyn SolanaClaimStateSource,
+        channel_account: &[u8; 32],
+        signer: &dyn Ed25519Signer,
+        amount: u64,
+    ) -> Result<OutboundSolanaClaim, OutboundClientError> {
+        let watermark = receiver.watermark(channel_account).await?;
+        let channel_text = || bs58::encode(channel_account).into_string();
+        if let Some(available) = watermark.available {
+            if available < u128::from(amount) {
+                return Err(OutboundClientError::InsufficientHeadroom {
+                    channel: channel_text(),
+                    available,
+                    amount,
+                });
+            }
+        }
+        // Checked -- and refused -- before `reserve_nonce`, same as the
+        // headroom check above: a claim this method cannot actually
+        // produce must not consume a nonce either.
+        let cumulative = watermark.cumulative + u128::from(amount);
+        let cumulative_amount = u64::try_from(cumulative).map_err(|_| {
+            OutboundClientError::CumulativeAmountOverflow {
+                channel: channel_text(),
+                cumulative,
+            }
+        })?;
+        let nonce = self.reserve_nonce(next_hop, watermark.nonce)?;
+        let message = solana_balance_proof_message(channel_account, nonce, cumulative_amount);
+        let signature = signer.sign(&message);
+        Ok(OutboundSolanaClaim {
+            nonce,
+            cumulative: cumulative_amount,
+            watermark,
             signature,
         })
     }
@@ -834,6 +1074,204 @@ mod tests {
             0,
             "a refused packet must not consume a nonce"
         );
+    }
+
+    const SOLANA_CHANNEL: [u8; 32] = [0x7au8; 32];
+    /// A real one from this fleet, so nothing here reads as a placeholder --
+    /// same convention as [`NEXT_HOP`].
+    const SOLANA_NEXT_HOP: &str = "drew-store";
+
+    fn solana_claim_signer() -> connector_signer::LocalEd25519Signer {
+        connector_signer::LocalEd25519Signer::from_secret_bytes([31u8; 32]).expect("solana signer")
+    }
+
+    /// The Solana counterpart of
+    /// `the_watermark_comes_from_the_receiver_and_not_from_anything_local`
+    /// (issue #1011): same property, over [`HttpSolanaClaimState`] and
+    /// [`OutboundClientLedger::next_claim_solana`] instead of their EVM
+    /// twins.
+    #[tokio::test]
+    async fn the_solana_watermark_comes_from_the_receiver_and_not_from_anything_local() {
+        let receiver = Receiver::start(41, 41_082).await;
+        let client = reqwest::Client::new();
+        let signer: Arc<dyn Ed25519Signer> = Arc::new(solana_claim_signer());
+        let state = HttpSolanaClaimState::new(client.clone(), &receiver.url, Arc::clone(&signer));
+        let ledger = OutboundClientLedger::in_memory();
+
+        let first = ledger
+            .next_claim_solana(
+                SOLANA_NEXT_HOP,
+                &state,
+                &SOLANA_CHANNEL,
+                signer.as_ref(),
+                1_002,
+            )
+            .await
+            .expect("first claim");
+        assert_eq!((first.nonce, first.cumulative), (42, 42_084));
+
+        let second = ledger
+            .next_claim_solana(
+                SOLANA_NEXT_HOP,
+                &state,
+                &SOLANA_CHANNEL,
+                signer.as_ref(),
+                1_002,
+            )
+            .await
+            .expect("second claim");
+        assert_eq!(
+            second.cumulative, 42_084,
+            "the cumulative amount must be the receiver's record advanced by the amount"
+        );
+        assert_eq!(second.watermark.nonce, 41);
+
+        receiver.nonce.store(100, Ordering::SeqCst);
+        receiver.cumulative.store(100_200, Ordering::SeqCst);
+        let third = ledger
+            .next_claim_solana(
+                SOLANA_NEXT_HOP,
+                &state,
+                &SOLANA_CHANNEL,
+                signer.as_ref(),
+                1_002,
+            )
+            .await
+            .expect("third claim");
+        assert_eq!((third.nonce, third.cumulative), (101, 101_202));
+    }
+
+    /// The Solana counterpart of `a_restart_never_reissues_a_nonce_the_receiver_has_not_seen`.
+    #[tokio::test]
+    async fn a_solana_restart_never_reissues_a_nonce_the_receiver_has_not_seen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("outbound-client.log");
+        let receiver = Receiver::start(41, 41_082).await;
+        let client = reqwest::Client::new();
+        let signer: Arc<dyn Ed25519Signer> = Arc::new(solana_claim_signer());
+        let state = HttpSolanaClaimState::new(client.clone(), &receiver.url, Arc::clone(&signer));
+
+        let before = OutboundClientLedger::open(&path).expect("open");
+        let mut issued = Vec::new();
+        for _ in 0..3 {
+            issued.push(
+                before
+                    .next_claim_solana(SOLANA_NEXT_HOP, &state, &SOLANA_CHANNEL, signer.as_ref(), 7)
+                    .await
+                    .expect("claim")
+                    .nonce,
+            );
+        }
+        assert_eq!(issued, vec![42, 43, 44]);
+        drop(before);
+
+        let after = OutboundClientLedger::open(&path).expect("reopen");
+        assert_eq!(after.issued_nonce(SOLANA_NEXT_HOP), 44);
+        let resumed = after
+            .next_claim_solana(SOLANA_NEXT_HOP, &state, &SOLANA_CHANNEL, signer.as_ref(), 7)
+            .await
+            .expect("claim after restart");
+        assert_eq!(
+            resumed.nonce, 45,
+            "a restart must resume above every nonce ever issued, not above the receiver's record"
+        );
+    }
+
+    /// The Solana counterpart of `a_packet_bigger_than_the_reported_headroom_is_refused_not_signed`.
+    #[tokio::test]
+    async fn a_solana_packet_bigger_than_the_reported_headroom_is_refused_not_signed() {
+        let receiver = Receiver::start(0, 0).await;
+        let client = reqwest::Client::new();
+        let signer: Arc<dyn Ed25519Signer> = Arc::new(solana_claim_signer());
+        let state = HttpSolanaClaimState::new(client.clone(), &receiver.url, Arc::clone(&signer));
+        let ledger = OutboundClientLedger::in_memory();
+
+        let error = ledger
+            .next_claim_solana(
+                SOLANA_NEXT_HOP,
+                &state,
+                &SOLANA_CHANNEL,
+                signer.as_ref(),
+                2_000_000,
+            )
+            .await
+            .expect_err("a packet above the headroom must be refused");
+        assert!(
+            matches!(
+                error,
+                OutboundClientError::InsufficientHeadroom {
+                    available: 1_000_000,
+                    amount: 2_000_000,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        assert_eq!(
+            ledger.issued_nonce(SOLANA_NEXT_HOP),
+            0,
+            "a refused packet must not consume a nonce"
+        );
+    }
+
+    /// Issue #1011's own new failure mode, unique to Solana: the signed
+    /// message is a `u64`, so an amount that does not fit it must be
+    /// refused before signing -- signing it would sign a silently
+    /// truncated amount, not the one watermark tracking believes it owes.
+    #[tokio::test]
+    async fn a_solana_claim_whose_cumulative_amount_does_not_fit_u64_is_refused_before_signing() {
+        let receiver = Receiver::start(0, u64::MAX).await;
+        let client = reqwest::Client::new();
+        let signer: Arc<dyn Ed25519Signer> = Arc::new(solana_claim_signer());
+        let state = HttpSolanaClaimState::new(client.clone(), &receiver.url, Arc::clone(&signer));
+        let ledger = OutboundClientLedger::in_memory();
+
+        let error = ledger
+            .next_claim_solana(SOLANA_NEXT_HOP, &state, &SOLANA_CHANNEL, signer.as_ref(), 1)
+            .await
+            .expect_err("an amount overflowing u64 must be refused rather than signed truncated");
+        assert!(
+            matches!(error, OutboundClientError::CumulativeAmountOverflow { .. }),
+            "{error}"
+        );
+        assert_eq!(
+            ledger.issued_nonce(SOLANA_NEXT_HOP),
+            0,
+            "a claim this method could not produce must not consume a nonce"
+        );
+    }
+
+    /// The Solana counterpart of
+    /// `the_claim_verifies_as_the_settlement_address_the_channel_is_opened_with`:
+    /// the signature `next_claim_solana` produces verifies the way the
+    /// RECEIVER verifies it, against the exact message
+    /// `connector_signer::solana_balance_proof_message` defines.
+    #[tokio::test]
+    async fn the_solana_claim_verifies_as_the_settlement_address_the_channel_is_opened_with() {
+        let receiver = Receiver::start(6, 6_000).await;
+        let client = reqwest::Client::new();
+        let signer: Arc<dyn Ed25519Signer> = Arc::new(solana_claim_signer());
+        let state = HttpSolanaClaimState::new(client.clone(), &receiver.url, Arc::clone(&signer));
+        let ledger = OutboundClientLedger::in_memory();
+
+        let claim = ledger
+            .next_claim_solana(
+                SOLANA_NEXT_HOP,
+                &state,
+                &SOLANA_CHANNEL,
+                signer.as_ref(),
+                14,
+            )
+            .await
+            .expect("claim");
+
+        assert!(connector_signer::verify_solana_balance_proof(
+            &SOLANA_CHANNEL,
+            claim.nonce,
+            claim.cumulative,
+            &claim.signature,
+            &signer.public_key(),
+        ));
     }
 
     /// The claim this node emits is verified here the way the RECEIVER

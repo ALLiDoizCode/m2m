@@ -32,7 +32,9 @@ use crate::metrics::Metrics;
 use crate::operator_view::{
     ChannelView, ClaimView, LeasedRouteView, PeerRouteView, PeerView, RouteSource, RouteView,
 };
-use crate::outbound_client::{ClaimStateSource, EvmDomain, OutboundClientLedger};
+use crate::outbound_client::{
+    ClaimStateSource, EvmDomain, OutboundClientLedger, SolanaClaimStateSource,
+};
 use crate::peer_route_store::{PeerRouteStore, PeerRouteStoreError, RuntimePeers};
 use crate::peer_transport::PeerTransport;
 use crate::route::{LeasedRoute, PeerRoute, PeerSaleBounds, PeerSaleRoute};
@@ -611,27 +613,49 @@ pub struct Connector {
     runtime_store: Option<PeerRouteStore>,
 }
 
-/// One next hop this connector can pay as a client (issue #875).
-struct OutboundClientHop {
-    /// The channel this node's settlement address holds with the hop, as
-    /// its on-chain `bytes32`...
-    channel: [u8; 32],
-    /// ...and as the `0x`-prefixed lower-case hex a claim names it by on
-    /// the wire, kept beside it so the packet path never re-renders it.
-    channel_id: String,
-    /// The hop, asked where this node's claims on that channel stand. The
-    /// RECEIVER is the authority on its own watermark (see
-    /// `crate::outbound_client`'s header); nothing local substitutes.
-    claim_state: Arc<dyn ClaimStateSource>,
-    /// This channel's EIP-712 signing domain (issue #881): operator
-    /// config, the same way [`ClaimBook::set_channel_domain`] is for the
-    /// peer role on the very same channel -- a node that opened this
-    /// channel already knows which `TokenNetwork` it was deployed under,
-    /// so this is a configured input, not a guess. Used only to COVER a
-    /// forward proactively, before any greeting exists to read a domain
-    /// off of; [`Connector::cover_greeted_packet`]'s reactive retry still
-    /// reads the domain from the peer's own greeting, deliberately.
-    domain: EvmDomain,
+/// One next hop this connector can pay as a client (issue #875), on
+/// whichever chain that hop's outbound-covering channel is on (issue #1011)
+/// -- the CLIENT-role counterpart to `wire_peer_channels`' own Evm/Solana
+/// split for the PEER role, kept apart for the same reason: an EVM channel
+/// carries an EIP-712 signing domain a Solana one has no equivalent of.
+enum OutboundClientHop {
+    Evm {
+        /// The channel this node's settlement address holds with the hop,
+        /// as its on-chain `bytes32`...
+        channel: [u8; 32],
+        /// ...and as the `0x`-prefixed lower-case hex a claim names it by
+        /// on the wire, kept beside it so the packet path never re-renders
+        /// it.
+        channel_id: String,
+        /// The hop, asked where this node's claims on that channel stand.
+        /// The RECEIVER is the authority on its own watermark (see
+        /// `crate::outbound_client`'s header); nothing local substitutes.
+        claim_state: Arc<dyn ClaimStateSource>,
+        /// This channel's EIP-712 signing domain (issue #881): operator
+        /// config, the same way [`ClaimBook::set_channel_domain`] is for
+        /// the peer role on the very same channel -- a node that opened
+        /// this channel already knows which `TokenNetwork` it was deployed
+        /// under, so this is a configured input, not a guess. Used only to
+        /// COVER a forward proactively, before any greeting exists to read
+        /// a domain off of; [`Connector::cover_greeted_packet`]'s reactive
+        /// retry still reads the domain from the peer's own greeting,
+        /// deliberately.
+        domain: EvmDomain,
+    },
+    Solana {
+        /// The channel account this node's settlement identity holds with
+        /// the hop, as its raw 32 bytes...
+        channel_account: [u8; 32],
+        /// ...and as the base58 text a claim names it by on the wire (the
+        /// same convention `ClaimBook::record_fulfillment`'s Solana arm
+        /// uses for `WireClaim::channel_id`).
+        channel_id: String,
+        /// The hop, asked where this node's claims on this channel account
+        /// stand. No EIP-712 domain to carry: a Solana claim's signed
+        /// message has no domain separator to be told (see
+        /// `crate::claim::SolanaChannel`'s own doc).
+        claim_state: Arc<dyn SolanaClaimStateSource>,
+    },
 }
 
 /// What [`Connector::cover_forward`] found when asked to cover a forward to
@@ -830,6 +854,15 @@ impl Connector {
         self.outbound_client.as_ref()
     }
 
+    /// Whether `peer_id` has an outbound CLIENT hop configured (issue
+    /// #1011) -- true after either [`Connector::with_outbound_client_hop`]
+    /// or [`Connector::with_outbound_client_hop_solana`] has been called
+    /// for it, on whichever chain. The observable end of that wiring, the
+    /// same way [`Connector::recognizes_channel`] is for the PEER role.
+    pub fn has_outbound_client_hop(&self, peer_id: &str) -> bool {
+        self.outbound_client_hops.contains_key(peer_id)
+    }
+
     /// Configure how this node pays `peer_id` **as an ordinary client of
     /// it** (issue #875): the channel it holds with that hop, and the hop
     /// itself as the source of that channel's watermark.
@@ -866,7 +899,7 @@ impl Connector {
         let channel = crate::claim::parse_channel_id(&channel_id)?;
         self.outbound_client_hops.insert(
             peer_id.into(),
-            OutboundClientHop {
+            OutboundClientHop::Evm {
                 channel,
                 // The canonical spelling (`peer-carriage-spec.md` §4.1): a
                 // claim naming the same channel in two casings is two
@@ -874,6 +907,31 @@ impl Connector {
                 channel_id: format!("0x{}", hex_lower(&channel)),
                 claim_state,
                 domain,
+            },
+        );
+        Ok(self)
+    }
+
+    /// The Solana counterpart of [`Connector::with_outbound_client_hop`]
+    /// (issue #1011): same contract, over a Solana channel account instead
+    /// of an EVM channel id and EIP-712 domain -- see that method's own doc
+    /// for why this is kept separate from [`Connector::with_peer_claim_channel`]
+    /// and for what configuring a hop here switches on in
+    /// [`Connector::forward_via_peer_route`].
+    pub fn with_outbound_client_hop_solana(
+        mut self,
+        peer_id: impl Into<String>,
+        channel_account: impl Into<String>,
+        claim_state: Arc<dyn SolanaClaimStateSource>,
+    ) -> Result<Self, InvalidSolanaChannel> {
+        let channel_account = channel_account.into();
+        let channel = crate::claim::parse_base58_32("channel_account", &channel_account)?;
+        self.outbound_client_hops.insert(
+            peer_id.into(),
+            OutboundClientHop::Solana {
+                channel_account: channel,
+                channel_id: channel_account,
+                claim_state,
             },
         );
         Ok(self)
@@ -2055,9 +2113,14 @@ impl Connector {
     /// packet forwards -- from the outbound CLIENT ledger (issue #873),
     /// before the packet is ever sent (issue #881). Mirrors
     /// [`Connector::cover_greeted_packet`]'s mechanism but never reads a
-    /// greeting: `amount` and [`OutboundClientHop::domain`] are both known
-    /// locally, which is exactly what lets this run proactively rather
-    /// than only once a refusal has already taught this node a price.
+    /// greeting: `amount` and the hop's own binding (EIP-712 domain on EVM,
+    /// nothing further on Solana) are both known locally, which is exactly
+    /// what lets this run proactively rather than only once a refusal has
+    /// already taught this node a price. Branches on
+    /// [`OutboundClientHop`]'s chain the same way `wire_peer_channels` does
+    /// for the PEER role (issue #1011): the two roles read the same
+    /// `[[peer_channels]]` row, so they agree on which chain a hop is on by
+    /// construction.
     async fn cover_forward(&self, peer_id: &str, amount: u64) -> CoverOutcome {
         let Some(hop) = self.outbound_client_hops.get(peer_id) else {
             // Never configured for client-role covering: the peer ledger's
@@ -2071,41 +2134,81 @@ impl Connector {
                     .to_string(),
             );
         };
-        let Some(signer) = self.claims.signer() else {
-            return CoverOutcome::Failed(
-                "this node has no settlement signer to sign a claim with".to_string(),
-            );
-        };
 
-        let claim = match ledger
-            .next_claim(
-                peer_id,
-                hop.claim_state.as_ref(),
-                &hop.channel,
-                &hop.domain,
-                signer.as_ref(),
-                amount,
-            )
-            .await
-        {
-            Ok(claim) => claim,
-            Err(error) => return CoverOutcome::Failed(error.to_string()),
-        };
-        // The wire carries `cumulative_amount` as a `uint64` (§4.2); see
-        // the matching check in `cover_greeted_packet` for why this is
-        // refused rather than truncated.
-        let Ok(cumulative_amount) = u64::try_from(claim.cumulative) else {
-            return CoverOutcome::Failed(format!(
-                "the covering claim's cumulative amount {} does not fit the wire's uint64",
-                claim.cumulative
-            ));
-        };
-        CoverOutcome::Covered(WireClaim {
-            channel_id: hop.channel_id.clone(),
-            nonce: claim.nonce,
-            cumulative_amount,
-            signature: ClaimSignature::Evm(claim.signature),
-        })
+        match hop {
+            OutboundClientHop::Evm {
+                channel,
+                channel_id,
+                claim_state,
+                domain,
+            } => {
+                let Some(signer) = self.claims.signer() else {
+                    return CoverOutcome::Failed(
+                        "this node has no settlement signer to sign a claim with".to_string(),
+                    );
+                };
+                let claim = match ledger
+                    .next_claim(
+                        peer_id,
+                        claim_state.as_ref(),
+                        channel,
+                        domain,
+                        signer.as_ref(),
+                        amount,
+                    )
+                    .await
+                {
+                    Ok(claim) => claim,
+                    Err(error) => return CoverOutcome::Failed(error.to_string()),
+                };
+                // The wire carries `cumulative_amount` as a `uint64`
+                // (§4.2); see the matching check in `cover_greeted_packet`
+                // for why this is refused rather than truncated.
+                let Ok(cumulative_amount) = u64::try_from(claim.cumulative) else {
+                    return CoverOutcome::Failed(format!(
+                        "the covering claim's cumulative amount {} does not fit the wire's uint64",
+                        claim.cumulative
+                    ));
+                };
+                CoverOutcome::Covered(WireClaim {
+                    channel_id: channel_id.clone(),
+                    nonce: claim.nonce,
+                    cumulative_amount,
+                    signature: ClaimSignature::Evm(claim.signature),
+                })
+            }
+            OutboundClientHop::Solana {
+                channel_account,
+                channel_id,
+                claim_state,
+            } => {
+                let Some(signer) = self.claims.solana_signer() else {
+                    return CoverOutcome::Failed(
+                        "this node has no Solana settlement signer to sign a claim with"
+                            .to_string(),
+                    );
+                };
+                let claim = match ledger
+                    .next_claim_solana(
+                        peer_id,
+                        claim_state.as_ref(),
+                        channel_account,
+                        signer.as_ref(),
+                        amount,
+                    )
+                    .await
+                {
+                    Ok(claim) => claim,
+                    Err(error) => return CoverOutcome::Failed(error.to_string()),
+                };
+                CoverOutcome::Covered(WireClaim {
+                    channel_id: channel_id.clone(),
+                    nonce: claim.nonce,
+                    cumulative_amount: claim.cumulative,
+                    signature: ClaimSignature::Solana(claim.signature),
+                })
+            }
+        }
     }
 
     /// Sign a claim covering the terms `peer_id` just quoted, ready to ride
@@ -2144,6 +2247,29 @@ impl Connector {
             );
             return None;
         };
+        // Issue #1011 gave the Solana chain a PROACTIVE covering path
+        // (`Connector::cover_forward`), not this REACTIVE one -- there is
+        // no Solana counterpart of `EvmDomain::from_greeting` to read a
+        // signing domain from here, because a Solana claim's signed
+        // message carries no domain to be told (see
+        // `crate::claim::SolanaChannel`'s own doc). A Solana hop that
+        // reaches this function at all has already been covered
+        // proactively by `cover_forward`, so falling through to the peer
+        // ledger's own postpay convention here costs it nothing new.
+        let OutboundClientHop::Evm {
+            channel,
+            channel_id,
+            claim_state,
+            ..
+        } = hop
+        else {
+            tracing::warn!(
+                peer_id,
+                "peer quoted x402 terms but its client-role channel is on Solana, which this \
+                 reactive retry does not cover -- relaying the peer's own refusal"
+            );
+            return None;
+        };
         let Some(signer) = self.claims.signer() else {
             tracing::warn!(
                 peer_id,
@@ -2170,8 +2296,8 @@ impl Connector {
         let claim = match ledger
             .next_claim(
                 peer_id,
-                hop.claim_state.as_ref(),
-                &hop.channel,
+                claim_state.as_ref(),
+                channel,
                 &domain,
                 signer.as_ref(),
                 price,
@@ -2201,7 +2327,7 @@ impl Connector {
             return None;
         };
         Some(WireClaim {
-            channel_id: hop.channel_id.clone(),
+            channel_id: channel_id.clone(),
             nonce: claim.nonce,
             cumulative_amount,
             signature: ClaimSignature::Evm(claim.signature),
@@ -5817,6 +5943,136 @@ mod tests {
             let mut settlement_less = quoted_terms();
             settlement_less.accepts[0].extra.settlement = None;
             assert_eq!(EvmDomain::from_greeting(&settlement_less), None);
+        }
+
+        /// The Solana counterpart of `StandingWatermark`, answering
+        /// [`SolanaClaimStateSource::watermark`] instead of
+        /// [`ClaimStateSource::watermark`] -- same authority, no `domain`
+        /// parameter to ignore.
+        struct StandingWatermarkSolana {
+            nonce: AtomicU64,
+            cumulative: AtomicU64,
+        }
+
+        impl StandingWatermarkSolana {
+            fn at(nonce: u64, cumulative: u64) -> Arc<StandingWatermarkSolana> {
+                Arc::new(StandingWatermarkSolana {
+                    nonce: AtomicU64::new(nonce),
+                    cumulative: AtomicU64::new(cumulative),
+                })
+            }
+        }
+
+        #[async_trait]
+        impl crate::outbound_client::SolanaClaimStateSource for StandingWatermarkSolana {
+            async fn watermark(
+                &self,
+                _channel_account: &[u8; 32],
+            ) -> Result<ClaimWatermark, OutboundClientError> {
+                Ok(ClaimWatermark {
+                    nonce: self.nonce.load(Ordering::SeqCst),
+                    cumulative: u128::from(self.cumulative.load(Ordering::SeqCst)),
+                    available: Some(1_000_000),
+                })
+            }
+        }
+
+        /// The Solana counterpart of `first_hop` (issue #1011): the same
+        /// two-role shape -- peer role via `with_peer_claim_channel` +
+        /// `with_solana_channel`, client role via
+        /// `with_outbound_client_hop_solana` -- over a Solana channel
+        /// account instead of an EVM channel id, with an ed25519 signer
+        /// instead of the secp256k1 settlement key.
+        fn first_hop_solana(
+            peer: Arc<GreetingPeer>,
+            receiver: Arc<StandingWatermarkSolana>,
+            ledger: Arc<OutboundClientLedger>,
+            channel_account: &str,
+            counterparty_public_key: &str,
+            signer: Arc<dyn Ed25519Signer>,
+        ) -> Connector {
+            Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
+                Arc::new(FakeAppClient::new()),
+                peer,
+                test_clock(),
+            )
+            .with_solana_signer(signer)
+            .with_peer_claim_channel("second-hop", channel_account)
+            .with_solana_channel(channel_account, counterparty_public_key)
+            .expect("a real base58 32-byte account and public key")
+            .with_outbound_client_ledger(ledger)
+            .with_outbound_client_hop_solana("second-hop", channel_account, receiver)
+            .expect("a real base58 32-byte account")
+        }
+
+        /// **The Solana counterpart of the test that proves the hole is
+        /// closed** (issue #1011's own acceptance criterion): the FIRST
+        /// packet forwarded over a Solana-settled hop -- no prior fulfilment
+        /// to have armed `pending_claim` on -- carries a covering claim and
+        /// fulfils, on its first attempt, with no round trip spent
+        /// discovering a refusal first.
+        #[tokio::test]
+        async fn the_first_forward_over_a_solana_hop_is_covered_proactively() {
+            use connector_signer::LocalEd25519Signer;
+
+            let (sealed, shared_secret) = sealed_prepare(b"hello");
+            let peer = GreetingPeer::new(expected_fulfillment(&shared_secret));
+            let receiver = StandingWatermarkSolana::at(7, 7_000);
+            let (_dir, ledger) = ledger();
+            let signer: Arc<dyn Ed25519Signer> = Arc::new(LocalEd25519Signer::generate());
+            let counterparty_public_key = bs58::encode(signer.public_key()).into_string();
+            let channel_account = bs58::encode([0x22u8; 32]).into_string();
+            let connector = first_hop_solana(
+                peer.clone(),
+                receiver,
+                ledger.clone(),
+                &channel_account,
+                &counterparty_public_key,
+                signer,
+            );
+
+            let response = connector
+                .handle_prepare(
+                    Prepare {
+                        amount: PACKET_AMOUNT,
+                        ..sealed
+                    },
+                    0,
+                )
+                .await;
+
+            assert!(
+                matches!(response, PacketResponse::Fulfill(_)),
+                "a proactively covered Solana forward must fulfil on the first attempt, got \
+                 {response:?}"
+            );
+            let seen = peer.seen();
+            assert_eq!(
+                seen.len(),
+                1,
+                "covered from the first attempt -- no retry needed"
+            );
+            let claim = seen[0]
+                .as_ref()
+                .expect("the first packet over a Solana hop must not be emitted uncovered");
+            assert_eq!(claim.channel_id, channel_account);
+            assert_eq!(
+                claim.nonce, 8,
+                "nonce advances one above the receiver's watermark"
+            );
+            assert_eq!(
+                claim.cumulative_amount,
+                7_000 + PACKET_AMOUNT,
+                "the claim covers this node's own forwarded value over the receiver's watermark"
+            );
+            assert!(
+                matches!(claim.signature, ClaimSignature::Solana(_)),
+                "a Solana hop's covering claim must carry a Solana signature, got {:?}",
+                claim.signature
+            );
+            assert_eq!(ledger.issued_nonce("second-hop"), 8);
         }
     }
 

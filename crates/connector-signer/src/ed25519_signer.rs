@@ -19,16 +19,21 @@ use rand::rngs::OsRng;
 use crate::error::SignerError;
 
 /// Sign a Solana peer claim's balance-proof message with this connector's
-/// own identity key. The counterpart of [`crate::Signer::sign`], over a
-/// fixed-size message rather than a digest -- `solana_balance_proof_message`
-/// is already the full 48 bytes ed25519 signs, with no separate hashing
-/// step the way an EIP-712 digest has one.
+/// own identity key. The counterpart of [`crate::Signer::sign`], over the
+/// message directly rather than a digest -- ed25519 signs the message
+/// itself, with no separate hashing step the way an EIP-712 digest has one.
+///
+/// `message` is a plain slice rather than `solana_balance_proof_message`'s
+/// fixed 48 bytes (issue #1011) so the same key can also sign a
+/// claim-state challenge (`crate::solana_claim_state_challenge_message`),
+/// which is a different length -- both are still ordinary ed25519 signing
+/// over whatever bytes the caller already built.
 pub trait Ed25519Signer: Send + Sync {
     /// The raw 32-byte public key of the currently active key.
     fn public_key(&self) -> [u8; 32];
 
     /// Sign `message` with the currently active key.
-    fn sign(&self, message: &[u8; 48]) -> [u8; 64];
+    fn sign(&self, message: &[u8]) -> [u8; 64];
 }
 
 /// A [`Ed25519Signer`] that holds an ed25519 key pair directly in process
@@ -62,7 +67,7 @@ impl Ed25519Signer for LocalEd25519Signer {
         self.keypair.public.to_bytes()
     }
 
-    fn sign(&self, message: &[u8; 48]) -> [u8; 64] {
+    fn sign(&self, message: &[u8]) -> [u8; 64] {
         self.keypair.sign(message).to_bytes()
     }
 }
@@ -122,6 +127,31 @@ mod tests {
             500,
             &signature,
             &other.public_key()
+        ));
+    }
+
+    /// Issue #1011: the same signer signs a claim-state challenge, whose
+    /// message is a different length from a balance proof's fixed 48
+    /// bytes -- proving `sign` genuinely takes a plain slice now, not just
+    /// a 48-byte array coerced into one.
+    #[test]
+    fn the_same_signer_also_signs_a_differently_sized_claim_state_challenge() {
+        let signer = LocalEd25519Signer::from_secret_bytes([5u8; 32]).unwrap();
+        let channel_account = [9u8; 32];
+        let message = crate::solana_claim_state_challenge_message(&channel_account, 1_800_000_000);
+        assert_ne!(
+            message.len(),
+            48,
+            "the challenge message must not be 48 bytes"
+        );
+
+        let signature = signer.sign(&message);
+
+        assert!(crate::verify_solana_claim_state_challenge(
+            &channel_account,
+            1_800_000_000,
+            &signature,
+            &signer.public_key(),
         ));
     }
 }

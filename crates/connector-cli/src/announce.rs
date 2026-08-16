@@ -442,6 +442,13 @@ impl From<OutboundClientError> for AnnounceError {
             source @ OutboundClientError::LedgerUnwritable { .. } => {
                 AnnounceError::Signing(source.to_string())
             }
+            // Unreachable from this command as written -- it only ever
+            // calls `OutboundClientLedger::next_claim` (EVM), never
+            // `next_claim_solana` (issue #1011) -- carried through for the
+            // same reason `LedgerUnwritable` is, immediately above.
+            source @ OutboundClientError::CumulativeAmountOverflow { .. } => {
+                AnnounceError::Signing(source.to_string())
+            }
         }
     }
 }

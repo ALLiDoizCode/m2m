@@ -233,6 +233,61 @@ impl EvmSettlementBackend {
         Ok(contract.address())
     }
 
+    /// Mint more of an already-deployed mock ERC-20 to `to` (issue #1011).
+    ///
+    /// `SettlementBackend::fund` always credits the CALLER's counterparty
+    /// (`read_state`'s own doc: `ChannelState::deposited` is the
+    /// counterparty's deposit, never the caller's own), so the deposit
+    /// backing a claim SIGNED BY address X can only ever be funded by a
+    /// call made from X's counterparty. A fixture that wants X itself to
+    /// hold real token balance -- to fund its own outgoing claims, as a
+    /// dialing peer's outbound client hop does (issue #1011) -- needs X to
+    /// hold tokens to spend in the first place, which `deploy_mock_token`
+    /// alone cannot give it: that mints only to the deployer, once, at
+    /// deploy time. `MockERC20::mint` is deliberately ungated
+    /// (`contracts/MockERC20.sol`'s own doc), so any already-funded key can
+    /// mint more, to anyone, on the same deployed token.
+    pub async fn mint_mock_token(
+        rpc_url: &str,
+        private_key: &str,
+        token: Address,
+        to: Address,
+        amount: u128,
+    ) -> Result<(), SettlementError> {
+        let (client, _caller, _chain_id) = build_client(rpc_url, private_key).await?;
+        let contract = MockErc20Contract::new(token, Arc::new(client));
+        let call = contract.mint(to, U256::from(amount));
+        let pending = call.send().await.map_err(backend_error)?;
+        confirm(pending).await?;
+        Ok(())
+    }
+
+    /// Send `to` `amount_wei` of the chain's native currency (issue #1011).
+    ///
+    /// Anvil's own well-known dev accounts (like [`DEPLOYER_PRIVATE_KEY`]'s)
+    /// start pre-funded; a key a fixture invents for a second role -- a
+    /// payee needing to send its own transactions, e.g. to
+    /// [`EvmSettlementBackend::mint_mock_token`] or `fund` a channel from
+    /// its own side -- does not, and cannot pay gas for its first
+    /// transaction without this.
+    pub async fn fund_native(
+        rpc_url: &str,
+        private_key: &str,
+        to: Address,
+        amount_wei: u128,
+    ) -> Result<(), SettlementError> {
+        let (client, _caller, _chain_id) = build_client(rpc_url, private_key).await?;
+        let request = ethers::types::TransactionRequest::new()
+            .to(to)
+            .value(U256::from(amount_wei));
+        let pending = client
+            .send_transaction(request, None)
+            .await
+            .map_err(backend_error)?;
+        confirm(pending).await?;
+        Ok(())
+    }
+
     /// The address this backend's `TokenNetwork` is deployed at -- the
     /// contract every channel operation is actually sent to.
     pub fn address(&self) -> Address {

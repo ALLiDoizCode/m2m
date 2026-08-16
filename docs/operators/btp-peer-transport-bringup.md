@@ -93,6 +93,18 @@ proven, because they are the default client edge and both ends of the only inter
   watermark advances. A **claimless** peer PREPARE to a priced route is rejected. This is the #620
   gate. If (c) cannot be demonstrated, stop — an unmetered peer-forwarded route is worse than no
   peer link at all.
+
+  The claim on the FIRST packet forwarded over a fresh peering comes from the dialing side's
+  outbound CLIENT hop (issue #1011, part of #1010) — `[[peers]]` (with `endpoint`) +
+  `[[peer_channels]]` + `[settlement.<chain>]` and nothing else; see "A correct peering" below.
+  Without it, the peer ledger's own postpay convention (ADR 0004) is the only thing left to cover a
+  forward, and postpay can only ever arm a covering claim AFTER an earlier packet has already
+  fulfilled — so under the receiver's default `claim_enforcement = "enforce"` (issue #868) the very
+  first packet on any fresh peering is refused `F06`, forever, since there is never an "earlier
+  packet" for postpay to have covered. A dialed peering whose `[[peer_channels]]` row names a chain
+  this node has no matching `[settlement.<chain>]` table for is refused at load rather than left to
+  fail this way silently at runtime.
+
 - **(d) Claim exchange complete.** A FLUSH (TRANSFER) sent when traffic stops is acknowledged with a
   `claim-ack` entry on its RESPONSE; a deliberately stale-nonce claim comes back
   `{"result":"rejected","reason":"nonce_not_advancing"}` **without** rejecting the PREPARE it rode
@@ -247,6 +259,26 @@ the `[settlement.solana]` key as its outbound identity (the Solana counterpart o
 signer, ADR 0024). A node with a Solana row but no `[settlement.solana]` table therefore still
 verifies an inbound claim on that channel and signs none outbound -- it has no channel-participant
 identity to sign as -- which is exactly what an EVM row without `[settlement.evm]` does.
+
+### The dialing side pays from `[[peer_channels]]` via `[settlement.<chain>]`, and needs nothing else
+
+The paragraphs above describe the PEER role -- what lets this node verify and be paid by a claim
+someone else sends. A `[[peers]]` entry that also has an `endpoint` (this node dials that peer, so
+this node is the paying side, ADR 0027/§2.1) additionally becomes an outbound CLIENT hop (issue
+#1011, part of #1010): the first `[[peer_channels]]` row it names is wired as the channel this node
+covers its own forwards to that peer from, proactively, starting with the very first packet --
+signed with the same `[settlement.<chain>].key` the PEER role already signs from, since a claim this
+node signs as an ordinary client of a next hop is redeemed against the same on-chain participant a
+peer claim on that channel is. No separate config exists for this and none is needed: the same
+`[[peers]] endpoint` + `[[peer_channels]]` + `[settlement.<chain>]` that make a peering work at all
+are what this reads.
+
+An accept-only peering (no `endpoint`) is never the paying side of itself, so this never applies to
+one -- it dials in, and whatever it owes on a channel it holds is paid the same postpay way it
+always was (ADR 0004). A DIALED peering whose channel names a chain this node has no
+`[settlement.<chain>]` table for is refused at load (`RuntimeError::DialedPeerOutboundChannelUnsettled`)
+rather than left to silently ride the peer ledger's postpay convention -- which, for a fresh
+peering's first packet, means refused `F06` forever rather than merely late. See gate (c) above.
 
 ### `credential` — `secret_file` on a deployed node, `secret` only when the config is private
 

@@ -18,12 +18,14 @@ use connector_client_edge::{
     UnresolvableLookupBudgetPolicy,
 };
 use connector_config::{
-    ClientChannelConfig, Config, EvmSettlementConfig, PeerChannelConfig, SecretLocation,
-    SettlementChain, SettlementConfig, SolanaSettlementConfig,
+    ClientChannelConfig, Config, EvmSettlementConfig, PeerChannelConfig, PeerConfig,
+    SecretLocation, SettlementChain, SettlementConfig, SolanaSettlementConfig,
 };
 use connector_runtime::{
-    ChannelDomain, Connector, FileJournal, HttpAppClient, InMemoryJournal, Journal, JournalError,
-    PeerRoute, PeerRouteStore, PeerRouteStoreError, PeerSaleBounds, SystemClock,
+    ChannelDomain, Connector, EvmDomain, FileJournal, HttpAppClient, HttpSolanaClaimState,
+    InMemoryJournal, Journal, JournalError, OutboundClientError, OutboundClientLedger,
+    OwnedHttpClaimState, PeerRoute, PeerRouteStore, PeerRouteStoreError, PeerSaleBounds,
+    SystemClock,
 };
 use connector_settlement::{SettlementBackend, SettlementError};
 use connector_settlement_evm::{
@@ -132,6 +134,30 @@ pub enum RuntimeError {
     /// bytes -- kept as a named startup failure for the same reason
     /// [`RuntimeError::PeerChannelUnusable`] is.
     PeerChannelSolanaUnusable { channel_account: String },
+    /// A dialed `[[peers]]` entry's outbound-covering `[[peer_channels]]`
+    /// row (issue #1011, part of #1010) names a chain this node has no
+    /// `[settlement.<chain>]` table for. Refused at load rather than left
+    /// silently `NotConfigured`: a dialing peer with a channel and no key
+    /// to sign it with can never cover its own first forwarded packet, and
+    /// degrading silently would put a misconfigured hop on the very same
+    /// code path a genuinely accept-only one takes -- indistinguishable
+    /// until the far side's x402 refusal turns up in a log nobody is
+    /// watching.
+    DialedPeerOutboundChannelUnsettled {
+        peer_id: String,
+        chain: &'static str,
+    },
+    /// The outbound client ledger's durable nonce-floor log under
+    /// `state_dir` (issue #1011/#873) exists but could not be read or
+    /// written -- refused rather than silently reset to an empty book, for
+    /// the same reason [`RuntimeError::JournalUnreplayable`] is: a floor
+    /// this process cannot see is indistinguishable on the wire from a
+    /// floor that was never issued, and only one of those is safe to sign
+    /// from.
+    OutboundClientLedgerUnusable {
+        path: PathBuf,
+        source: OutboundClientError,
+    },
     /// `[announce] identity_key_file`'s path exists (config load already
     /// checked that) but could not be read.
     AnnounceIdentityKeyFileUnreadable {
@@ -205,6 +231,20 @@ impl fmt::Display for RuntimeError {
                 "the [[peer_channels]] row for Solana account '{channel_account}' names an \
                  account or counterparty key the claim ledger cannot file a watermark under -- \
                  both must be base58 of exactly 32 bytes"
+            ),
+            RuntimeError::DialedPeerOutboundChannelUnsettled { peer_id, chain } => write!(
+                f,
+                "peer '{peer_id}' is dialed (has an endpoint) and its first [[peer_channels]] \
+                 row is on {chain}, but no [settlement.{chain}] table is configured -- this node \
+                 cannot cover its own first forwarded packet to that peer without a settlement \
+                 key on that chain. Add a [settlement.{chain}] table, or drop the \
+                 [[peer_channels]] row if this peering should stay accept-only"
+            ),
+            RuntimeError::OutboundClientLedgerUnusable { path, source } => write!(
+                f,
+                "failed to read the outbound client ledger at {}: {source} -- the connector \
+                 refuses to start rather than sign a claim from a nonce floor it cannot vouch for",
+                path.display()
             ),
             RuntimeError::JournalUnreplayable { path, source } => write!(
                 f,
@@ -671,6 +711,10 @@ const CLIENT_EDGE_JOURNAL: &str = "client-edge-claims.log";
 /// not an append-only journal line format like the two above (see
 /// `connector_runtime::PeerRouteStore`'s own docs for why).
 const RUNTIME_PEER_ROUTE_TABLE: &str = "runtime-peers.json";
+/// Issue #1011/#873's outbound client ledger -- its own file, never either
+/// journal above (`connector_runtime::outbound_client`'s own module doc
+/// explains why the two books must never merge).
+const OUTBOUND_CLIENT_LEDGER: &str = "outbound-client.log";
 /// Issue #661's local EVM channel index -- a whole-table JSON snapshot for
 /// the same reason [`RUNTIME_PEER_ROUTE_TABLE`] is one rather than an
 /// append-only log: a settled channel is marked terminal in place, not
@@ -876,6 +920,149 @@ fn wire_peer_channels(
     Ok(connector)
 }
 
+/// The `POST /ilp` base a dialed peer's claim-state lives under, derived
+/// from its `[[peers]] endpoint` (issue #1011).
+///
+/// Same host and port regardless of carriage: `router` merges the client
+/// edge, the peer wire and the operator surface into one listener
+/// (`build`'s own doc), so whichever carriage a peer is dialed on, the same
+/// origin answers `/ilp/claim-state` too -- `wss`/`ws` map onto the
+/// `https`/`http` the client edge actually speaks, and the endpoint's own
+/// path (`/ilp/btp` for BTP, `/ilp` for HTTP -- see
+/// `crates/connector-bin/tests/two_connectors_peer.rs`'s own construction of
+/// one) is discarded and replaced with `/ilp`, since a peer's dialed path is
+/// never the client edge's own.
+fn claim_state_edge_url(endpoint: &url::Url) -> String {
+    let scheme = match endpoint.scheme() {
+        "wss" => "https",
+        "ws" => "http",
+        other => other,
+    };
+    let host = endpoint.host_str().unwrap_or_default();
+    match endpoint.port() {
+        Some(port) => format!("{scheme}://{host}:{port}/ilp"),
+        None => format!("{scheme}://{host}/ilp"),
+    }
+}
+
+/// Wire the outbound CLIENT hop for every DIALED `[[peers]]` entry (issue
+/// #1011, part of #1010): the first `[[peer_channels]]` row a dialing peer
+/// names -- the same row [`wire_peer_channels`] picks for the PEER role --
+/// becomes what this node pays that hop from proactively
+/// (`Connector::with_outbound_client_hop`/`_solana`), signed with the same
+/// `[settlement.<chain>].key` the PEER role already signs from
+/// ([`peer_claim_identity`]/[`peer_claim_identity_solana`]): a claim this
+/// node signs as an ordinary client of a next hop is redeemed against the
+/// very same on-chain participant a peer claim on that channel is, so the
+/// two roles must never sign as two different addresses.
+///
+/// An accept-only peer (no `endpoint`) is untouched -- it dials in, so it is
+/// never the paying side of its own peering (`peer-carriage-spec.md`
+/// §2.1) -- and `Connector::cover_forward` degrades it to the peer ledger's
+/// own postpay convention exactly as before this function existed.
+///
+/// A dialed peer whose first row names a chain this node has no
+/// `[settlement.<chain>]` table for is refused at load
+/// ([`RuntimeError::DialedPeerOutboundChannelUnsettled`], ADR 0009) rather
+/// than left silently `NotConfigured`: see that variant's own doc.
+fn wire_outbound_client_hops(
+    mut connector: Connector,
+    config: &Config,
+    client: &reqwest::Client,
+) -> Result<Connector, RuntimeError> {
+    let dialed_with_channel: Vec<(&PeerConfig, &PeerChannelConfig)> = config
+        .peers()
+        .iter()
+        .filter(|peer| peer.endpoint().is_some())
+        .map(|peer| {
+            let channel = config
+                .peer_channels_for(peer.id())
+                .next()
+                .expect("Config::peers() guarantees at least one [[peer_channels]] row per peer");
+            (peer, channel)
+        })
+        .collect();
+    if dialed_with_channel.is_empty() {
+        return Ok(connector);
+    }
+
+    let evm_identity = peer_claim_identity(config)?;
+    let solana_identity = peer_claim_identity_solana(config)?;
+
+    let ledger = Arc::new(match config.state_dir() {
+        Some(state_dir) => {
+            let path = state_dir.join(OUTBOUND_CLIENT_LEDGER);
+            OutboundClientLedger::open(&path)
+                .map_err(|source| RuntimeError::OutboundClientLedgerUnusable { path, source })?
+        }
+        // Mirrors `open_evm_channel_index`'s own degrade (issue #661) and
+        // `build`'s own peer-claim journal, both optional on `state_dir`
+        // for the same reason: a node with nowhere durable still serves,
+        // it just loses this book's memory across a restart rather than
+        // refusing to start.
+        None => OutboundClientLedger::in_memory(),
+    });
+    connector = connector.with_outbound_client_ledger(ledger);
+
+    for (peer, channel) in dialed_with_channel {
+        let edge_url = claim_state_edge_url(
+            peer.endpoint()
+                .expect("filtered to peers with an endpoint above"),
+        );
+        connector = match channel {
+            PeerChannelConfig::Evm(evm) => {
+                let Some((signer, _)) = &evm_identity else {
+                    return Err(RuntimeError::DialedPeerOutboundChannelUnsettled {
+                        peer_id: peer.id().to_string(),
+                        chain: "evm",
+                    });
+                };
+                let claim_state = Arc::new(OwnedHttpClaimState::new(
+                    client.clone(),
+                    edge_url,
+                    Arc::clone(signer),
+                ));
+                connector
+                    .with_outbound_client_hop(
+                        peer.id(),
+                        evm.channel_id(),
+                        EvmDomain {
+                            chain_id: evm.chain_id(),
+                            token_network: evm.token_network(),
+                        },
+                        claim_state,
+                    )
+                    .map_err(|_| RuntimeError::PeerChannelUnusable {
+                        channel_id: evm.channel_id().to_string(),
+                    })?
+            }
+            PeerChannelConfig::Solana(solana) => {
+                let Some(signer) = &solana_identity else {
+                    return Err(RuntimeError::DialedPeerOutboundChannelUnsettled {
+                        peer_id: peer.id().to_string(),
+                        chain: "solana",
+                    });
+                };
+                let claim_state = Arc::new(HttpSolanaClaimState::new(
+                    client.clone(),
+                    edge_url,
+                    Arc::clone(signer),
+                ));
+                connector
+                    .with_outbound_client_hop_solana(
+                        peer.id(),
+                        solana.channel_account(),
+                        claim_state,
+                    )
+                    .map_err(|_| RuntimeError::PeerChannelSolanaUnusable {
+                        channel_account: solana.channel_account().to_string(),
+                    })?
+            }
+        };
+    }
+    Ok(connector)
+}
+
 /// Everything [`build`] produced from a validated [`Config`], and
 /// everything [`router`] needs from it. A struct rather than a tuple
 /// because the third member is the kind of thing that only ever grows: as
@@ -1036,6 +1223,14 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
         connector = connector.with_solana_signer(claim_signer_solana);
     }
     connector = wire_peer_channels(connector, config)?;
+    // Issue #1011, part of #1010: a dialing peer's outbound CLIENT hop --
+    // what covers its own first forwarded packet proactively, before the
+    // peer ledger's postpay convention (ADR 0004) could ever have armed
+    // anything. Reads `peer_claim_identity`/`peer_claim_identity_solana`
+    // again rather than the values just consumed above -- a startup-only
+    // cost, and it keeps this function's signature the same shape as
+    // `wire_peer_channels`'s own.
+    connector = wire_outbound_client_hops(connector, config, &reqwest::Client::new())?;
     let mut client_channel_source_evm: Option<Arc<dyn ClientChannelSource>> = None;
     let mut client_channel_source_solana: Option<Arc<dyn ClientChannelSource>> = None;
     let mut settlement_terms: Option<connector_client_edge::X402SettlementTerms> = None;
@@ -1606,6 +1801,13 @@ key_file = "{}"
     /// it is true exactly when a counterparty address has been recorded
     /// for the channel, which is the record a peer claim's signature is
     /// recovered against.
+    ///
+    /// Accept-only (no `endpoint`) on purpose: this proves the PEER role's
+    /// own wiring in isolation, with no `[settlement.evm]` table and no
+    /// live chain. A DIALED peer with a channel row and no settlement key
+    /// is refused at load instead (issue #1011,
+    /// `RuntimeError::DialedPeerOutboundChannelUnsettled`) -- see
+    /// `wire_outbound_client_hops`'s own tests for that.
     #[tokio::test]
     async fn peer_channels_reach_the_claim_ledger() {
         let state_dir = tempfile::tempdir().expect("temp state dir");
@@ -1622,7 +1824,6 @@ key_file = "{key_file}"
 
 [[peers]]
 id = "store"
-endpoint = "wss://store.example:443/ilp/btp"
 
 [peers.credential]
 secret = "a-real-peering-secret"
@@ -1660,6 +1861,9 @@ token_network = "0x00000000000000000000000000000000000000bb"
     /// peering loaded and validated but could never verify an inbound
     /// claim -- `recognizes_solana_channel` is the observable end of that
     /// wiring, the Solana counterpart of `recognizes_channel`.
+    ///
+    /// Accept-only (no `endpoint`), for the same reason
+    /// [`peer_channels_reach_the_claim_ledger`] is (issue #1011).
     #[tokio::test]
     async fn solana_peer_channels_reach_the_claim_ledger() {
         let state_dir = tempfile::tempdir().expect("temp state dir");
@@ -1678,7 +1882,6 @@ key_file = "{key_file}"
 
 [[peers]]
 id = "store"
-endpoint = "wss://store.example:443/ilp/btp"
 
 [peers.credential]
 secret = "a-real-peering-secret"
@@ -4209,6 +4412,260 @@ key_file = "{key_path}"
         fn spl_token_program_id() -> Pubkey {
             Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
                 .expect("the canonical SPL Token program id")
+        }
+    }
+
+    /// Issue #1011, part of #1010: `wire_outbound_client_hops` -- the
+    /// config surface for a dialing peer's outbound CLIENT hop, so it can
+    /// cover its own first forwarded packet proactively instead of riding
+    /// the peer ledger's postpay convention (ADR 0004), which can never
+    /// cover a first packet at all.
+    mod outbound_client_hop_wiring {
+        use super::*;
+        use connector_settlement_evm::test_support::{
+            anvil_available, Anvil, DEPLOYER_PRIVATE_KEY,
+        };
+
+        /// Distinct from `settlement_construction`'s own base (18_700) and
+        /// every other test binary's, for the same reason that module's own
+        /// constant documents.
+        const ANVIL_BASE_PORT: u16 = 18_750;
+
+        fn evm_peer_channel_block(peer_id: &str, endpoint: Option<&str>) -> String {
+            let channel = format!("0x{}", "cd".repeat(32));
+            format!(
+                r#"
+[[peers]]
+id = "{peer_id}"
+{endpoint_line}
+
+[peers.credential]
+secret = "a-real-peering-secret"
+
+[[peer_channels]]
+peer_id = "{peer_id}"
+channel_id = "{channel}"
+counterparty_key = "0x00000000000000000000000000000000000000aa"
+chain_id = 31337
+token_network = "0x00000000000000000000000000000000000000bb"
+"#,
+                endpoint_line = endpoint
+                    .map(|url| format!(r#"endpoint = "{url}""#))
+                    .unwrap_or_default(),
+            )
+        }
+
+        /// The refusal the issue's own acceptance criterion names: a dialed
+        /// peer's channel row on a chain this node has no
+        /// `[settlement.<chain>]` table for is a load-time error, not a
+        /// silent `NotConfigured` -- see
+        /// `RuntimeError::DialedPeerOutboundChannelUnsettled`'s own doc for
+        /// why. No real chain needed: this is refused before `build` ever
+        /// tries to connect one.
+        #[tokio::test]
+        async fn a_dialed_evm_peer_with_no_settlement_refuses_to_build() {
+            let state_dir = tempfile::tempdir().expect("temp state dir");
+            let (config, _key_path) = config_with_raw_key_file(|key_path| {
+                format!(
+                    r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+peer_expose = "btp"
+
+[signer]
+key_file = "{key_file}"
+{peer}"#,
+                    state_dir = state_dir.path().display(),
+                    key_file = key_path.display(),
+                    peer = evm_peer_channel_block("store", Some("wss://store.example:443/ilp/btp")),
+                )
+            });
+
+            let error = match build(&config).await {
+                Ok(_) => panic!("a dialed peer with a channel and no settlement key must refuse"),
+                Err(error) => error,
+            };
+            assert!(
+                matches!(
+                    error,
+                    RuntimeError::DialedPeerOutboundChannelUnsettled { ref peer_id, chain: "evm" }
+                        if peer_id == "store"
+                ),
+                "{error}"
+            );
+        }
+
+        /// An accept-only peer (no `endpoint`) is never the paying side of
+        /// its own peering (`peer-carriage-spec.md` §2.1), so the same
+        /// channel row with no settlement key must NOT be refused --
+        /// exactly the shape `peer_channels_reach_the_claim_ledger` already
+        /// builds successfully.
+        #[tokio::test]
+        async fn an_accept_only_evm_peer_with_no_settlement_still_builds() {
+            let state_dir = tempfile::tempdir().expect("temp state dir");
+            let (config, _key_path) = config_with_raw_key_file(|key_path| {
+                format!(
+                    r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+peer_expose = "btp"
+
+[signer]
+key_file = "{key_file}"
+{peer}"#,
+                    state_dir = state_dir.path().display(),
+                    key_file = key_path.display(),
+                    peer = evm_peer_channel_block("store", None),
+                )
+            });
+
+            let runtime = build(&config)
+                .await
+                .expect("an accept-only peer needs no settlement key to build");
+            assert!(!runtime.connector.has_outbound_client_hop("store"));
+        }
+
+        /// A dialed peer whose first row is on Solana and this node has no
+        /// `[settlement.solana]` table is refused the same way the EVM
+        /// case is (`chain: "solana"`).
+        #[tokio::test]
+        async fn a_dialed_solana_peer_with_no_settlement_refuses_to_build() {
+            let state_dir = tempfile::tempdir().expect("temp state dir");
+            let (config, _key_path) = config_with_raw_key_file(|key_path| {
+                format!(
+                    r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+peer_expose = "btp"
+
+[signer]
+key_file = "{key_file}"
+
+[[peers]]
+id = "store"
+endpoint = "wss://store.example:443/ilp/btp"
+
+[peers.credential]
+secret = "a-real-peering-secret"
+
+[[peer_channels]]
+peer_id = "store"
+channel_account = "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+counterparty_key = "8pM1DN3RiT8vbom5u1sNryaNT1nyL8CTTW3b5PwWXRBH"
+program_id = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+"#,
+                    state_dir = state_dir.path().display(),
+                    key_file = key_path.display(),
+                )
+            });
+
+            let error = match build(&config).await {
+                Ok(_) => {
+                    panic!("a dialed Solana peer with a channel and no settlement must refuse")
+                }
+                Err(error) => error,
+            };
+            assert!(
+                matches!(
+                    error,
+                    RuntimeError::DialedPeerOutboundChannelUnsettled { ref peer_id, chain: "solana" }
+                        if peer_id == "store"
+                ),
+                "{error}"
+            );
+        }
+
+        /// **The acceptance criterion itself, at the config seam**: a
+        /// dialed peer with an EVM channel row and a real `[settlement.evm]`
+        /// table reaches `Connector::with_outbound_client_hop` --
+        /// `Connector::has_outbound_client_hop` is the observable end of
+        /// that wiring, the client-role counterpart of
+        /// `recognizes_channel`. What that hop actually does with a packet
+        /// (proactive covering, on the first forward) is proven at the
+        /// `connector-runtime` level
+        /// (`Connector::tests::covering_a_forward`); this proves the config
+        /// surface reaches it at all.
+        ///
+        /// Driven against a real, disposable `anvil` chain (ADR 0007): the
+        /// `[settlement.evm]` table this node's own dial-side identity
+        /// signs from is the same one `wire_outbound_client_hops` reads.
+        #[tokio::test]
+        async fn a_dialed_evm_peer_with_settlement_wires_the_outbound_client_hop() {
+            if !anvil_available() {
+                eprintln!(
+                    "skipping: `anvil` not found on PATH (install via https://getfoundry.sh)"
+                );
+                return;
+            }
+
+            let anvil = Anvil::spawn(ANVIL_BASE_PORT).await;
+            let token = EvmSettlementBackend::deploy_mock_token(
+                &anvil.rpc_url,
+                DEPLOYER_PRIVATE_KEY,
+                1_000_000,
+            )
+            .await
+            .expect("deploy mock USDC");
+            let settlement_backend =
+                EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
+                    .await
+                    .expect("deploy a TokenNetwork through a fresh registry");
+            let registry_address = settlement_backend.registry_address();
+            drop(settlement_backend);
+
+            let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
+            key_file
+                .write_all(DEPLOYER_PRIVATE_KEY.as_bytes())
+                .expect("write settlement key file");
+            let key_path = key_file.into_temp_path();
+            let state_dir = tempfile::tempdir().expect("temp state dir");
+            let channel = format!("0x{}", "cd".repeat(32));
+            let config = load_config(&format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+peer_expose = "btp"
+
+[signer]
+key_file = "{key_path}"
+
+[settlement]
+chain = "evm"
+rpc_url = "{rpc_url}"
+contract_address = "{registry_address:?}"
+token_address = "{token:?}"
+decimals = 6
+
+[settlement.key]
+key_file = "{key_path}"
+
+[[peers]]
+id = "store"
+endpoint = "wss://store.example:443/ilp/btp"
+
+[peers.credential]
+secret = "a-real-peering-secret"
+
+[[peer_channels]]
+peer_id = "store"
+channel_id = "{channel}"
+counterparty_key = "0x00000000000000000000000000000000000000aa"
+chain_id = 31337
+token_network = "0x00000000000000000000000000000000000000bb"
+"#,
+                state_dir = state_dir.path().display(),
+                key_path = key_path.display(),
+                rpc_url = anvil.rpc_url,
+                registry_address = registry_address,
+                token = token,
+            ));
+
+            let runtime = build(&config).await.expect("build");
+            assert!(
+                runtime.connector.has_outbound_client_hop("store"),
+                "a dialed peer with a channel row and a matching [settlement.evm] table must \
+                 reach Connector::with_outbound_client_hop"
+            );
         }
     }
 }

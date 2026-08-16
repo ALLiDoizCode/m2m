@@ -43,6 +43,10 @@ tokio = { version = "1", features = ["net", "time"] }
 tokio-tungstenite = { version = "0.20", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 tracing = "0.1"
+# `[[peers]] endpoint`'s scheme/host/port, read to derive a dialed peer's
+# claim-state URL (issue #1011) -- the same version `connector-config`'s own
+# `PeerConfig::endpoint` is typed with.
+url = "2"
 
 [dev-dependencies]
 base64 = "0.22"
