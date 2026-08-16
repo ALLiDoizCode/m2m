@@ -16,9 +16,18 @@ name: Publish connector-rust image
 # That contradicted the design of record. toon-meta#403 and #989's own closing
 # comment, both recorded as owner-approved, say `:rust-release` is a
 # "deliberate PROMOTION tag (a manual `promote-to-fleet` dispatch retags a
-# validated `rust-sha-*`), NOT auto-on-green" -- the gate connector#972 and
-# ADR 0034 exist to preserve. The workflow was never retargeted and no
-# promote workflow was ever written.
+# validated `rust-sha-*`), NOT auto-on-green" -- the gate ADR 0041 exists to
+# preserve. The workflow was never retargeted and no promote workflow was ever
+# written.
+#
+# (Those source comments cite "ADR 0034" for that gate and this file repeated
+# it. That is a mis-citation: ADR 0034 is "A runtime peer/route table never
+# shadows the config file". The release-gating record is ADR 0041, written
+# with promote-to-fleet.yml. The comments also named connector#972, an open
+# pin PR, as the gate; it was closed as superseded, because the supervised
+# regime it argued for is what promote-to-fleet.yml now implements and its
+# `rust-sha-*` overlay literals are refused by
+# `every_fleet_overlay_pins_the_connector_repos_pin_of_record`.)
 #
 # It is written now: .github/workflows/promote-to-fleet.yml. This workflow
 # publishes CANDIDATES; that one chooses which candidate fronts the fleet,

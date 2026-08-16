@@ -14,6 +14,16 @@
 #        `:rust-release`), preserving ADR-0034 / connector#972's 'validated
 #        before it hits production' gate while automating the *deploy* step."
 #
+#     [sic — "ADR-0034" is a mis-citation in the source and is quoted here
+#     verbatim rather than corrected in place. ADR 0034 is "A runtime
+#     peer/route table never shadows the config file" and has nothing to do
+#     with release gating. The record for THIS rule is ADR 0041, written
+#     alongside this file. connector#972, the other half of that citation, was
+#     closed as superseded: the supervised regime it asked for is what this
+#     workflow implements, and its own mechanism — a `rust-sha-*` literal in
+#     the four fleet overlays — is now refused by
+#     `every_fleet_overlay_pins_the_connector_repos_pin_of_record`.]
+#
 #   * connector#990, merged eleven hours EARLIER, shipped
 #     `type=raw,value=rust-release,enable={{is_default_branch}}` in
 #     publish-connector-rust-image.yml — a tag that moves on every green merge

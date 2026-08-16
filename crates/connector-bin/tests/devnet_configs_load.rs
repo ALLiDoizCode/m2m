@@ -187,19 +187,37 @@ const STORE_WATCHTOWER_OVERLAY: &str =
 /// [`the_relays_swap_announce_config_speaks_for_the_maker_not_the_relay`].
 const RELAY_NGINX_CONF: &str = include_str!("../../../infra/linode-relay/nginx/conf.d/node.conf");
 
-/// Every nginx file the two Watchtower-managed boxes commit: the RENDERED
-/// config each box's `nginx` service bind-mounts, and the `.template` that
-/// `init-letsencrypt.sh` renders it from. Both, because the pair drift
-/// independently -- issue #987's broken `/swap` form was fixed in one and
-/// left in the other once already -- and the template is what a rebuilt box
-/// starts from.
+/// Every nginx file any box in this repo commits: the RENDERED config a box's
+/// `nginx` service bind-mounts, and the `.template` that `bootstrap.sh`
+/// renders it from. Both, because the pair drift independently -- issue
+/// #987's broken `/swap` form was fixed in one and left in the other once
+/// already -- and the template is what a rebuilt box starts from.
 ///
-/// The faucet box (`infra/linode-faucet/`) and the chain box
-/// (`infra/linode/`) are deliberately NOT here: neither runs a Watchtower,
-/// their images are built on-box, and nothing recreates their upstreams
-/// behind nginx's back. Add a box to this list when it gets a Watchtower,
-/// not before -- see [`no_watchtower_box_nginx_names_a_literal_upstream`].
-const WATCHTOWER_BOX_NGINX_FILES: &[(&str, &str)] = &[
+/// # Why the faucet and chain boxes are in here now (issue #1013)
+///
+/// This list used to be the two WATCHTOWER-managed boxes only, on the reading
+/// that a literal upstream is a problem only where something recreates
+/// containers unattended. `infra/linode-faucet/` and `infra/linode/` were
+/// excluded on those grounds, and the exclusion was left as a comment with
+/// nothing enforcing it.
+///
+/// Two things were wrong with that. The narrow one: the chain box had already
+/// adopted the variable+resolver form everywhere except `mina.conf.template`
+/// (`devnet.conf.template`'s own header states the rule), so the exclusion was
+/// protecting drift, not a decision. The load-bearing one: only the *502 until
+/// someone reloads* half of the defect needs a Watchtower. The other half --
+/// an upstream container that is not running at parse time is `[emerg] host
+/// not found in upstream`, which exits the nginx MASTER and takes every server
+/// block with it, ACME included -- needs no recreate at all, and both excluded
+/// boxes build their images on-box, where `up -d --build` recreates a
+/// container exactly the way a Watchtower pull does.
+///
+/// So the rule is no longer "boxes with a Watchtower": it is every box, and
+/// [`every_committed_box_nginx_file_is_covered_by_the_upstream_guards`] walks
+/// `infra/` and fails if a committed nginx file is missing from this list --
+/// which is what the old prose-only "add a box to this list when it gets a
+/// Watchtower" could not do.
+const BOX_NGINX_FILES: &[(&str, &str)] = &[
     (
         "infra/linode-relay/nginx/conf.d/node.conf",
         RELAY_NGINX_CONF,
@@ -216,7 +234,40 @@ const WATCHTOWER_BOX_NGINX_FILES: &[(&str, &str)] = &[
         "infra/linode-store/nginx/node.conf.template",
         include_str!("../../../infra/linode-store/nginx/node.conf.template"),
     ),
+    (
+        "infra/linode-faucet/nginx/conf.d/node.conf",
+        include_str!("../../../infra/linode-faucet/nginx/conf.d/node.conf"),
+    ),
+    (
+        "infra/linode-faucet/nginx/node.conf.template",
+        include_str!("../../../infra/linode-faucet/nginx/node.conf.template"),
+    ),
+    (
+        "infra/linode/nginx/devnet.conf.template",
+        include_str!("../../../infra/linode/nginx/devnet.conf.template"),
+    ),
+    (
+        "infra/linode/nginx/evm.conf.template",
+        include_str!("../../../infra/linode/nginx/evm.conf.template"),
+    ),
+    (
+        "infra/linode/nginx/mina.conf.template",
+        include_str!("../../../infra/linode/nginx/mina.conf.template"),
+    ),
+    (
+        "infra/linode/nginx/sol.conf.template",
+        include_str!("../../../infra/linode/nginx/sol.conf.template"),
+    ),
 ];
+
+/// The chain box renders its nginx config into a directory its own
+/// `.gitignore` excludes (`infra/linode/.gitignore`: `nginx/conf.d/*.conf`),
+/// because which template it renders is a per-host choice
+/// (`NGINX_TEMPLATE=...`). The committed artifact for that box is therefore
+/// the template, and a rendered file found on disk is a local by-product of
+/// running `bootstrap.sh`/`devnet.sh` in a checkout -- not something
+/// [`BOX_NGINX_FILES`] should be asked to cover.
+const UNCOMMITTED_NGINX_RENDER_DIR: &str = "infra/linode/nginx/conf.d/";
 
 /// This test binary's own base port for [`Anvil::spawn`] -- distinct from
 /// other test binaries' bases (`connector-settlement-evm`'s own tests use
@@ -280,6 +331,63 @@ const EXPECTED_RELAY_PRICE: u64 = 1;
 /// rather than a silent no-op -- otherwise renaming a line in a committed
 /// file would quietly turn one of the substitutions below into nothing at
 /// all, and the test would go on passing while testing something else.
+/// Does this TOML line assign `field`, as opposed to merely mentioning it?
+/// Comment lines never count: every committed fleet file explains its own
+/// settings by name in prose, so a substring match reads the header rather
+/// than the config.
+fn assigns(line: &str, field: &str) -> bool {
+    let line = line.trim_start();
+    !line.starts_with('#')
+        && line
+            .split_once('=')
+            .is_some_and(|(key, _)| key.trim() == field)
+}
+
+/// The two files the store box's committed `[operator]` section points at
+/// (issue #1003), substituted for the container paths the same way the key
+/// files are -- and for the same reason: neither is committed, and config
+/// load refuses a `bearer_token_file`/`write_keys_file` that is not there.
+///
+/// A process-wide `OnceLock` rather than a per-test temp file, so that every
+/// existing caller of [`with_sandbox_paths`] picks the substitution up
+/// without threading two more arguments through fourteen call sites -- and,
+/// more usefully, so that a NEW test cannot forget to. The `TempDir` is held
+/// inside the `OnceLock` for the lifetime of the test binary; dropping it
+/// would delete the files out from under a still-running test.
+///
+/// The contents are what an operator would actually write: a hex token, and
+/// an allowlist with a comment line above one 64-hex public key.
+struct SandboxOperatorFiles {
+    _dir: tempfile::TempDir,
+    bearer_token: std::path::PathBuf,
+    write_keys: std::path::PathBuf,
+}
+
+fn sandbox_operator_files() -> &'static SandboxOperatorFiles {
+    static FILES: std::sync::OnceLock<SandboxOperatorFiles> = std::sync::OnceLock::new();
+    FILES.get_or_init(|| {
+        let dir = tempfile::tempdir().expect("temp operator dir");
+        let bearer_token = dir.path().join("operator-bearer-token");
+        std::fs::write(
+            &bearer_token,
+            "1f0e6a4c9b2d8e7f3a5c1b9d0e2f4a6c8b0d2e4f6a8c0b2d4e6f8a0c2b4d6e8f\n",
+        )
+        .expect("write sandbox operator bearer token");
+        let write_keys = dir.path().join("operator-write-keys");
+        std::fs::write(
+            &write_keys,
+            "# the sandbox's one allowlisted operator\n\
+             0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+        )
+        .expect("write sandbox operator allowlist");
+        SandboxOperatorFiles {
+            _dir: dir,
+            bearer_token,
+            write_keys,
+        }
+    })
+}
+
 fn replace_expecting_a_match(raw: &str, from: &str, to: &str) -> String {
     assert!(
         raw.contains(from),
@@ -293,11 +401,12 @@ fn replace_expecting_a_match(raw: &str, from: &str, to: &str) -> String {
 /// Substitute only what this sandbox physically cannot supply: the signer
 /// key file (real key material is never committed), the relay's carried-over
 /// `identity_key_file` when the file carries one (issue #870, same reason),
-/// the bind addresses (fixed ports collide across parallel test runs) and
-/// `state_dir` (the committed value is a container path, `/app/state`, which
-/// no test host can create). Every other line -- prefixes, handler URLs,
-/// `price`, and every `[settlement]` value -- stays the literal committed
-/// content.
+/// the store's `[operator]` credential files (issue #1003, same reason
+/// again), the bind addresses (fixed ports collide across parallel test
+/// runs) and `state_dir` (the committed value is a container path,
+/// `/app/state`, which no test host can create). Every other line --
+/// prefixes, handler URLs, `price`, and every `[settlement]` value -- stays
+/// the literal committed content.
 ///
 /// The `state_dir` substitution is a path swap, not a removal: the
 /// committed files must keep naming one, since a devnet box without it
@@ -347,6 +456,42 @@ fn with_sandbox_paths(
         "identity_key_file = \"/app/data/announce.key\"",
         &format!("identity_key_file = \"{}\"", key_path.display()),
     );
+    // The `[operator]` section's two files (issue #1003) -- same reasoning
+    // as the key files above, and optional in the same way: only the store
+    // file carries the section today, so plain `.replace` leaves the relay
+    // file untouched. [`sandbox_operator_files`] owns the substitutes; a
+    // path that ever moves in the committed file fails at `Config::load`
+    // with `OperatorFileNotFound` rather than being silently skipped.
+    let operator = sandbox_operator_files();
+    let replaced = replaced.replace(
+        "bearer_token_file = \"/app/data/operator-bearer-token\"",
+        &format!(
+            "bearer_token_file = \"{}\"",
+            operator.bearer_token.display()
+        ),
+    );
+    let replaced = replaced.replace(
+        "write_keys_file = \"/app/data/operator-write-keys\"",
+        &format!("write_keys_file = \"{}\"", operator.write_keys.display()),
+    );
+    // The regression guard for issue #1003 itself. A committed fleet config
+    // must name its operator credentials BY PATH and never carry one: a
+    // literal `bearer_token`/`write_keys` line here is a credential in a
+    // public repository, and it is also the drift that made the store box's
+    // operator surface uncommittable in the first place. Line-anchored on
+    // the key left of the `=`, because the file's own header prose names
+    // both settings at length while explaining them, and because
+    // `bearer_token_file` starts with `bearer_token`.
+    for field in ["bearer_token", "write_keys"] {
+        assert!(
+            !replaced.lines().any(|line| assigns(line, field)),
+            "a committed fleet config carries an inline `{field} = …`. That is \
+             a credential (or an authorization decision) in a PUBLIC \
+             repository, and it is the exact drift issue #1003 closed -- use \
+             `{field}_file` and put the file on the box (see \
+             infra/linode-store/connector-rust.toml's [operator] header)"
+        );
+    }
     assert!(
         !replaced.contains("secret_file ="),
         "no surviving box's committed config should carry a peering \
@@ -757,6 +902,62 @@ fn the_store_devnet_config_announces_g_toon_ario_under_its_own_identity() {
         announce.relay_url(),
         None,
         "the store fronts no relay and must not advertise reads it does not serve"
+    );
+}
+
+/// Issue #1003: the store box's operator surface (ADR 0008, live since
+/// toon-meta#312) is now IN the committed config, and reachable from it.
+///
+/// The bug this closes was not a wrong value — it was an absent section.
+/// `main` carried no `[operator]` at all, because the only spelling
+/// available was an inline bearer token that a public repository must never
+/// hold; so the surface lived on the box alone, and a `fleet-ops` reconcile
+/// of the committed tree would have deleted a live capability with nothing
+/// anywhere recording that it had. Two halves, both asserted here:
+///
+/// * the section is present and file-backed (the inline-literal half of the
+///   property is enforced for every fleet file in [`with_sandbox_paths`],
+///   since a future relay `[operator]` deserves the same guard); and
+/// * it actually RESOLVES — `Config::load` returns an authenticated surface,
+///   not merely a section that parses. `Config` refuses to return a
+///   half-configured one, so a `Some` here is the whole guarantee.
+#[test]
+fn the_store_devnet_config_commits_its_operator_surface_by_file_reference() {
+    assert!(
+        STORE_CONFIG.lines().any(|line| line.trim() == "[operator]"),
+        "the store config must carry its own [operator] section -- issue \
+         #1003. This box has served an authenticated operator surface since \
+         toon-meta#312; a committed config without the section is a config \
+         that deletes it on the next reconcile"
+    );
+    for field in ["bearer_token_file", "write_keys_file"] {
+        assert!(
+            STORE_CONFIG.lines().any(|line| assigns(line, field)),
+            "the store config's [operator] section must name `{field}` -- \
+             the file forms are the only ones a public repository can carry"
+        );
+    }
+
+    let key_file = write_raw_key_file(9);
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let text = with_sandbox_paths(STORE_CONFIG, key_file.path(), state_dir.path());
+    let text = with_sandbox_settlement_keys(&text, key_file.path());
+    let config_file = write_config(&text);
+    let config = Config::load(config_file.path()).expect("the committed store config must parse");
+
+    let operator = config
+        .operator()
+        .expect("the committed store config must resolve an operator surface");
+    assert!(
+        !operator.bearer_token().is_empty(),
+        "an operator surface with an empty bearer token would have no read \
+         authentication -- Config::load should have refused it"
+    );
+    assert_eq!(
+        operator.write_keys().len(),
+        1,
+        "the sandbox allowlist holds exactly one key, and its comment line \
+         must not have become a second one"
     );
 }
 
@@ -2810,19 +3011,106 @@ fn proxy_pass_targets(raw: &str) -> Vec<&str> {
 /// found in upstream`, which exits the whole nginx master -- every server
 /// block in the file, not just the one location. `nginx -t` on the relay
 /// file as committed before this test failed exactly that way.
+///
+/// That second mode is why this covers EVERY box (issue #1013) and not just
+/// the two a Watchtower recreates: it needs no unattended recreate, only a
+/// container that happens to be down when nginx parses. See
+/// [`BOX_NGINX_FILES`].
 #[test]
-fn no_watchtower_box_nginx_names_a_literal_upstream() {
-    for (name, raw) in WATCHTOWER_BOX_NGINX_FILES {
+fn no_box_nginx_names_a_literal_upstream() {
+    for (name, raw) in BOX_NGINX_FILES {
         for target in proxy_pass_targets(raw) {
             assert!(
                 target.starts_with("http://$") || target.starts_with('$'),
                 "{name} proxies to `{target}` -- a literal upstream hostname \
-                 is resolved ONCE at config-parse time, so a Watchtower \
-                 recreate of that container 502s this edge until someone \
-                 reloads nginx (issue #993). Name the upstream through a \
-                 variable (`set $upstream <container>;`) so the file's own \
-                 `resolver` re-resolves it per request."
+                 is resolved ONCE at config-parse time, so a recreate of that \
+                 container 502s this edge until someone reloads nginx, and a \
+                 container that is simply DOWN at parse time is `[emerg] host \
+                 not found in upstream`, which exits the nginx master (issue \
+                 #993). Name the upstream through a variable (`set $upstream \
+                 <container>;`) so the file's own `resolver` re-resolves it \
+                 per request."
             );
+        }
+    }
+}
+
+/// [`BOX_NGINX_FILES`] is written out by hand, for the same reason
+/// [`SURVIVING_BOX_COMPOSE_FILES`] is: a guard that globbed its own inputs
+/// would silently change what it covers whenever the filesystem changed. The
+/// cost of that choice is that a NEW box's nginx config is unguarded until
+/// someone remembers the list -- which is exactly what happened to the faucet
+/// and chain boxes, whose exclusion lived in a doc comment that nothing could
+/// enforce.
+///
+/// This test pays that cost off without giving up the explicit list: it walks
+/// `infra/` and fails if it finds a committed nginx file the list does not
+/// name. Coverage still only ever changes in a reviewed diff -- the failure
+/// mode is a red test naming the missing file, not silent drift in either
+/// direction.
+#[test]
+fn every_committed_box_nginx_file_is_covered_by_the_upstream_guards() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("crates/connector-bin/../.. is the repo root");
+
+    let mut found = Vec::new();
+    collect_nginx_files(&repo_root.join("infra"), &repo_root, &mut found);
+    found.sort();
+
+    assert!(
+        !found.is_empty(),
+        "walked {}/infra and found no nginx config at all -- this guard is \
+         reading the wrong tree and would pass no matter what was committed",
+        repo_root.display()
+    );
+
+    let missing: Vec<&String> = found
+        .iter()
+        .filter(|path| !BOX_NGINX_FILES.iter().any(|(name, _)| name == path))
+        .collect();
+
+    assert!(
+        missing.is_empty(),
+        "{missing:?} are committed nginx configs that `BOX_NGINX_FILES` does \
+         not name, so `no_box_nginx_names_a_literal_upstream` and \
+         `no_variable_upstream_appends_a_uri_that_nginx_will_ignore` cannot \
+         see them. Add each file to that list (`include_str!` + its \
+         repo-relative path) -- a guard that cannot see a committed file \
+         cannot refuse anything about it."
+    );
+}
+
+/// Every `*.conf` / `*.template` under an `nginx/` directory in `dir`,
+/// recursively, as repo-relative paths. Used only by
+/// [`every_committed_box_nginx_file_is_covered_by_the_upstream_guards`].
+fn collect_nginx_files(dir: &std::path::Path, repo_root: &std::path::Path, out: &mut Vec<String>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) => panic!("read_dir({}) failed: {err}", dir.display()),
+    };
+
+    for entry in entries {
+        let path = entry.expect("a readable directory entry").path();
+        if path.is_dir() {
+            collect_nginx_files(&path, repo_root, out);
+            continue;
+        }
+
+        let relative = path
+            .strip_prefix(repo_root)
+            .expect("walked path is under the repo root")
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        if relative.starts_with(UNCOMMITTED_NGINX_RENDER_DIR) {
+            continue;
+        }
+        if relative.contains("/nginx/")
+            && (relative.ends_with(".conf") || relative.ends_with(".template"))
+        {
+            out.push(relative);
         }
     }
 }
@@ -2841,7 +3129,7 @@ fn no_watchtower_box_nginx_names_a_literal_upstream() {
 /// is the double-apply that produced `/swap/ilp/btp/swap/ilp/btp`.
 #[test]
 fn no_variable_upstream_appends_a_uri_that_nginx_will_ignore() {
-    for (name, raw) in WATCHTOWER_BOX_NGINX_FILES {
+    for (name, raw) in BOX_NGINX_FILES {
         for target in proxy_pass_targets(raw) {
             let Some(rest) = target.strip_prefix("http://$") else {
                 // A bare `$backend`-style variable carries its whole URL,
