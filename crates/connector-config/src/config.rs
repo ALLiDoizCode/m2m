@@ -2030,6 +2030,108 @@ write_keys = ["{key}"]
         assert_eq!(operator.write_keys().len(), 1);
     }
 
+    /// Issue #1003, end to end through `Config::load`: the shape the store
+    /// box's committed `connector-rust.toml` uses, so what CI proves is the
+    /// spelling a fleet config is allowed to carry -- both settings as
+    /// paths, no credential anywhere in the file.
+    #[test]
+    fn an_operator_section_written_as_file_references_loads() {
+        let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+        let mut token_file = tempfile::NamedTempFile::new().expect("temp token file");
+        std::io::Write::write_all(&mut token_file, b"token-from-a-file\n").expect("write token");
+        let mut keys_file = tempfile::NamedTempFile::new().expect("temp keys file");
+        std::io::Write::write_all(&mut keys_file, format!("# alice\n{key}\n").as_bytes())
+            .expect("write keys");
+
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{signer}"
+
+[operator]
+bearer_token_file = "{token}"
+write_keys_file = "{keys}"
+"#,
+                signer = key_path.display(),
+                token = token_file.path().display(),
+                keys = keys_file.path().display(),
+            )
+        })
+        .expect("load");
+
+        let operator = config.operator().expect("operator config");
+        assert_eq!(operator.bearer_token(), "token-from-a-file");
+        assert_eq!(operator.write_keys().len(), 1);
+
+        // The whole point: a `Config` gets logged whole at startup, and the
+        // token that gates every operator read must not ride along.
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains("token-from-a-file"), "{rendered}");
+    }
+
+    /// A file the config names and the box does not have is a
+    /// refuse-to-start, not a surface that comes up and rejects every
+    /// request -- the same contract `[signer] key_file` has (ADR 0009).
+    #[test]
+    fn refuses_to_start_when_an_operator_file_is_missing() {
+        let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[operator]
+bearer_token_file = "/nonexistent/operator-bearer-token"
+write_keys = ["{key}"]
+"#,
+                key_path.display()
+            )
+        });
+
+        let message = result.expect_err("missing operator file").to_string();
+        assert!(message.contains("bearer_token_file"), "{message}");
+        assert!(
+            message.contains("/nonexistent/operator-bearer-token"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn refuses_to_start_when_the_operator_section_names_a_token_twice() {
+        let key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[operator]
+bearer_token = "secret-token"
+bearer_token_file = "/app/data/operator-bearer-token"
+write_keys = ["{key}"]
+"#,
+                key_path.display()
+            )
+        });
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::OperatorSettingAmbiguous {
+                literal: "bearer_token",
+                file: "bearer_token_file",
+            })
+        ));
+    }
+
     #[test]
     fn refuses_to_start_when_the_operator_surface_is_enabled_without_write_keys() {
         let result = with_key_file(|key_path| {
