@@ -79,7 +79,7 @@ on:
         default: box-status
         options: [box-status, config-read, pin-verify, config-apply, restart, deploy, announce]
       service:
-        description: "restart/deploy: compose service name (connector-rust, relay, store, nginx, faucet, swap-node or watchtower on relay). announce: which resident publisher to force -- announce (default) or swap-announce (relay only, issue #983)."
+        description: "restart/deploy: compose service name (connector-rust, relay, store, nginx, faucet; swap-node and watchtower are relay-only). announce: which resident publisher to force -- announce (default) or swap-announce (relay only, issue #983)."
         type: string
         required: false
         default: "connector-rust"

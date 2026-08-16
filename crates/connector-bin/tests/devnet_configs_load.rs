@@ -2021,11 +2021,26 @@ fn every_surviving_box_port_binding_is_host_ip_prefixed_or_allowlisted() {
     }
 }
 
-/// The label a container must carry before `--label-enable` Watchtower will
-/// ever touch it (issue #988, toon-meta#403). Named once so a spelling
+/// The label key a container must carry before `--label-enable` Watchtower
+/// will ever touch it (issue #988, toon-meta#403), and the exact opted-in
+/// `key: 'value'` line `swap-node` declares. Named once so a spelling
 /// mismatch between the swap-node service and the watchtower overlay's own
 /// documentation cannot go unnoticed by only one of the two assertions below.
+const WATCHTOWER_ENABLE_LABEL_KEY: &str = "com.centurylinklabs.watchtower.enable";
 const WATCHTOWER_ENABLE_LABEL: &str = "com.centurylinklabs.watchtower.enable: 'true'";
+
+/// Whether a compose file DECLARES [`WATCHTOWER_ENABLE_LABEL_KEY`], as
+/// opposed to merely mentioning it in a `#` comment (both relay files
+/// touching Watchtower explain the label in their headers). Keyed on the
+/// label key alone rather than the full `key: 'true'` line so that a leak
+/// spelled any other legal compose way -- `"true"`, `key=true` under a
+/// `labels:` sequence, `enable: true` -- still trips the assertion below,
+/// which is the whole point of scoping Watchtower by label.
+fn declares_watchtower_label(raw: &str) -> bool {
+    raw.lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .any(|line| line.contains(WATCHTOWER_ENABLE_LABEL_KEY))
+}
 
 /// Watchtower is label-scoped SPECIFICALLY so it can share the relay box
 /// with services that must never auto-update on an unattended image pull --
@@ -2056,8 +2071,8 @@ fn swap_node_carries_the_watchtower_label_and_no_other_relay_service_does() {
         ),
     ] {
         assert!(
-            !raw.contains(WATCHTOWER_ENABLE_LABEL),
-            "{name} carries `{WATCHTOWER_ENABLE_LABEL}` -- only \
+            !declares_watchtower_label(raw),
+            "{name} declares `{WATCHTOWER_ENABLE_LABEL_KEY}` -- only \
              docker-compose.relay.swap.yml's `swap-node` service should opt \
              into Watchtower's auto-redeploy-on-`:release` model \
              (issue #988); every other relay service still follows the \
@@ -2070,7 +2085,7 @@ fn swap_node_carries_the_watchtower_label_and_no_other_relay_service_does() {
         RELAY_WATCHTOWER_OVERLAY.contains("--label-enable"),
         "docker-compose.relay.watchtower.yml no longer passes `--label-enable` \
          -- without it Watchtower auto-updates EVERY container on the box, \
-         not just the ones carrying `{WATCHTOWER_ENABLE_LABEL}`."
+         not just the ones carrying `{WATCHTOWER_ENABLE_LABEL_KEY}`."
     );
 }
 

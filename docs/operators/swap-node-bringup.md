@@ -52,10 +52,11 @@ material or funds this environment does not have.
   `containrrr/watchtower` (`docker-compose.relay.watchtower.yml`) that recreates `swap-node` when
   the tag's digest moves. Step 1 below is therefore bringing the SIDECAR up once, not repointing an
   image tag per release; `sha-<short-sha>` tags remain available for a manual rollback if a
-  `:release` build regresses. The compose service's command invokes `node /app/dist/cli.js --config
-...` directly (not the `toon-swap` bin) — matching the runtime image's own `ENTRYPOINT`, which
-  does the same and never puts `node_modules/.bin` on `PATH` — so nothing else in this unit depends
-  on the image's contents beyond that file existing at that path under `WORKDIR /app`.
+  `:release` build regresses. The compose service's command invokes
+  `node /app/dist/cli.js --config ...` directly (not the `toon-swap` bin) — matching the runtime
+  image's own `ENTRYPOINT`, which does the same and never puts `node_modules/.bin` on `PATH` — so
+  nothing else in this unit depends on the image's contents beyond that file existing at that path
+  under `WORKDIR /app`.
 - **`swap.config.json`'s `settlementPrivateKey` is an obviously-fake placeholder.**
   `packages/swap/src/cli.ts`'s env overlay (`SWAP_MNEMONIC`) does **not** derive or set this field —
   it only sets `mnemonic`/`secretKey`. A human must compute the on-box mnemonic's BIP-44
@@ -107,9 +108,9 @@ material or funds this environment does not have.
 1. **Maker runtime image.** `docker-compose.relay.swap.yml` already pins the moving
    `ghcr.io/toon-protocol/swap:release` tag (connector#988) — no per-build repo edit needed any
    more. The one remaining human step is bringing the label-scoped Watchtower up alongside the
-   sidecar (`docker compose ... up -d watchtower`, or dispatch `fleet-ops.yml` with `box=relay
-operation=deploy service=watchtower apply=true`) so future `:release` moves are picked up
-   automatically; until then a new digest sits published but not deployed.
+   sidecar (`docker compose ... up -d watchtower`, or dispatch `fleet-ops.yml` with
+   `box=relay operation=deploy service=watchtower apply=true`) so future `:release` moves are
+   picked up automatically; until then a new digest sits published but not deployed.
 
 2. **Identity generation.** On the relay box, generate a **fresh** BIP-39 mnemonic — the same
    `TOON_MNEMONIC` convention `infra/linode-relay/.env.example` already documents for this box's own

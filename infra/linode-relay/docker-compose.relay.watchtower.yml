@@ -27,6 +27,17 @@
 # owner's own trade-off note (an accepted risk on a shared devnet relay,
 # gated by `:release` only ever moving on a green `main`).
 #
+# ── `--interval 60 --cleanup` ───────────────────────────────────────────────
+# `--interval 60` polls the ONE watched repository once a minute — the public
+# `ghcr.io/toon-protocol/swap`, so no registry credentials have to be mounted
+# in here. That is a manifest check per scan, cheap enough to let a green
+# `main` reach the box in about a minute rather than on a human's next
+# dispatch. `--cleanup` removes the image a recreate just superseded, so a
+# box tracking a moving tag does not accumulate one dangling maker image per
+# merge; the superseded build stays pullable from GHCR by its own immutable
+# `sha-<short-sha>` tag for the manual rollback
+# docs/operators/swap-node-bringup.md describes.
+#
 # ── DOCKER_API_VERSION ───────────────────────────────────────────────────────
 # The relay box's Docker daemon serves API 1.44+; Watchtower's bundled client
 # defaults to 1.25 and refuses to talk to a newer daemon without this pinned
