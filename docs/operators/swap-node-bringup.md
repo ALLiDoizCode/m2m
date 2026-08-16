@@ -67,6 +67,16 @@ material or funds this environment does not have.
   this... if it has gaps, either extend the CLI or bake a thin entrypoint", and the env overlay it
   shipped still sets only `mnemonic`/`secretKey`. Closing it belongs to a follow-up on the
   toon-swap CLI, not to this ticket.
+- **`tokenNetworkAddress` and `channelAddress` are different contracts.** Read them wrong and the
+  maker is down. `tokenNetworkAddress` is **leg A** — money coming _in_: the ordinary `TokenNetwork`
+  a taker's existing funded channel lives on, the contract the maker verifies the incoming claim
+  against. `channelAddress` is **leg B** — money going _out_: the `RollingSwapChannel` (#973/#974),
+  a different contract with a different ABI, the one the maker signs its own v2 EIP-712 balance
+  proofs against. swap#134 made `tokenNetworkAddress` **required** and there is no fallback to
+  `channelAddress`; a maker missing it crash-loops, which is how this was found on the live box.
+  Both are committed, and `the_makers_leg_a_token_network_is_the_fleets_and_is_not_its_leg_b_channel`
+  in `crates/connector-bin/tests/devnet_configs_load.rs` refuses a config where they are equal or
+  where leg A is not the fleet's one deployment.
 - **`swap.config.json`'s `swapPairs` is a placeholder pair** (same-chain USDC at parity on
   `evm:84532`), present only so the maker boots. The actual trading pair(s) this maker should quote
   — which chain(s) it accepts leg-A payment on, at what rate, with what inventory — is a business

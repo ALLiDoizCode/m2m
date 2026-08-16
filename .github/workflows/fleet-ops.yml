@@ -231,14 +231,22 @@ jobs:
           # forceable independently. Empty wherever the maker sidecar does
           # not exist, same convention as COMPOSE_ANNOUNCE on the faucet box.
           #
-          # The relay's COMPOSE also carries docker-compose.relay.watchtower.yml
-          # (issue #988, toon-meta#403): the label-scoped Watchtower that
-          # auto-redeploys `swap-node` on a new `:release` digest lives ONLY
-          # on the relay box, alongside the maker it watches -- so
-          # `service=watchtower` resolves for `restart`/`deploy` there (and
-          # `deploy` is what brings it up on a box where it has never run,
-          # same as any other service this workflow targets) and nowhere
-          # else.
+          # BOTH boxes' COMPOSE carries their own docker-compose.*.watchtower.yml
+          # (issues #988 and #992, toon-meta#403): the label-scoped Watchtower
+          # that recreates the box's opted-in services on a new digest. The
+          # relay's was committed first, when the maker was the only watched
+          # service; the store box has run one since 2026-08-16 and issue #992
+          # committed it. `service=watchtower` therefore resolves for
+          # `restart`/`deploy` on `relay` and `ario` (and `deploy` is what
+          # brings it up on a box where it has never run, same as any other
+          # service this workflow targets), and on the faucet box it does not
+          # -- that box builds its images on-box and has nothing to watch.
+          #
+          # Listing it in COMPOSE is also what makes a `deploy` of any OTHER
+          # service safe: `docker compose up -d <service>` with an incomplete
+          # `-f` set would otherwise leave the running watchtower orphaned
+          # from the project, and a later `--remove-orphans` would take the
+          # box's auto-redeploy away without anyone asking for it.
           case "$BOX" in
             relay)
               INFRA_DIR=infra/linode-relay
@@ -248,7 +256,7 @@ jobs:
               ;;
             ario)
               INFRA_DIR=infra/linode-store
-              COMPOSE="docker compose -f infra/linode-store/docker-compose.store.yml -f infra/linode-store/docker-compose.store.rust.yml"
+              COMPOSE="docker compose -f infra/linode-store/docker-compose.store.yml -f infra/linode-store/docker-compose.store.rust.yml -f infra/linode-store/docker-compose.store.watchtower.yml"
               COMPOSE_ANNOUNCE="$COMPOSE -f infra/linode-store/docker-compose.store.announce.yml"
               COMPOSE_SWAP_ANNOUNCE=""
               ;;
