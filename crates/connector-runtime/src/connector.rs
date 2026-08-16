@@ -3463,6 +3463,30 @@ impl Connector {
         self.claims.views()
     }
 
+    /// The highest nonce and cumulative amount this connector's own
+    /// `ClaimBook` has ever accepted from `channel_id`'s counterparty as a
+    /// PEER claim (issue #1011's fix), or `None` if no peer claim has ever
+    /// landed on it.
+    ///
+    /// Exists because a dialing peer's outbound-client watermark query
+    /// (`POST /ilp/claim-state`, `connector_client_edge::claim_state`) reads
+    /// `ClientClaimGate`'s own record by default, and a peer claim never
+    /// touches that book -- `outbound_client.rs`'s module doc, "Two ledgers,
+    /// and why they must never merge", is exactly this split. Without this
+    /// accessor a peering channel always reports cumulative `0` no matter
+    /// how many claims it has actually accepted, so a paying peer's second
+    /// and every later claim recomputes the same cumulative amount as its
+    /// first and is refused as a replay.
+    pub fn inbound_peer_watermark(&self, channel_id: &str) -> Option<(u64, u64)> {
+        let claim = self.claims.latest_inbound_claim(channel_id)?;
+        Some((
+            claim.nonce,
+            u64::try_from(claim.cumulative_amount).expect(
+                "a peer claim's cumulative amount is signed from a u64 and never exceeds one",
+            ),
+        ))
+    }
+
     /// Accept `candidate` as a genuine [`Fulfill`] only if its fulfillment
     /// verifies against `condition` (RFC-0022) -- the one check that
     /// prevents an intermediate hop (relaying a peer's answer) or a

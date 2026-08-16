@@ -1459,6 +1459,132 @@ async fn the_first_forward_over_a_dialed_peering_is_covered_proactively(carriage
     );
 }
 
+/// **Steady state, not just the first packet** (PR #1019 review finding on
+/// issue #1011): a SECOND crossing of the same dialed peering must advance
+/// the payee's watermark by another `price - fee`, not repeat the first
+/// claim's cumulative amount.
+///
+/// The bug this guards against: `wire_outbound_client_hops`'s outbound
+/// client hop asked the payee's `POST /ilp/claim-state` where its claims on
+/// the peering channel stood, and that endpoint answered from
+/// `ClientClaimGate` -- the book a *client's* claims land in, never a
+/// *peer's* (`connector_runtime::outbound_client`'s own "Two ledgers, and
+/// why they must never merge" doc). A peering channel's claims land in the
+/// payee's `ClaimBook` instead, so the reported cumulative was permanently
+/// `0` and every claim signed `0 + price` rather than `previous + price`.
+/// The first crossing landed fine -- its correct cumulative and `0 + price`
+/// are the same number by coincidence -- and the SECOND was refused as a
+/// replay (`ClaimRejectReason::AmountNotAdvancing`), silently un-paying the
+/// peering from packet 2 onward.
+/// `the_first_forward_over_a_dialed_peering_is_covered_proactively` cannot
+/// catch this -- it asserts exactly one crossing -- and
+/// `two_connectors_move_a_paid_packet`'s two crossings do not either, since
+/// its payee terminates for free and never demands a claim from either one.
+#[tokio::test]
+async fn a_second_forward_over_a_dialed_peering_also_advances_the_watermark_over_btp() {
+    a_second_forward_over_a_dialed_peering_also_advances_the_watermark(Carriage::Btp).await;
+}
+
+/// **Assertion 5 (§9, both carriages)** for the test above.
+#[tokio::test]
+async fn a_second_forward_over_a_dialed_peering_also_advances_the_watermark_over_http() {
+    a_second_forward_over_a_dialed_peering_also_advances_the_watermark(Carriage::Http).await;
+}
+
+async fn a_second_forward_over_a_dialed_peering_also_advances_the_watermark(carriage: Carriage) {
+    let Some(fixture) = PeerFixture::spawn().await else {
+        return;
+    };
+    let payee_state = tempfile::tempdir().expect("temp payee state dir");
+    let payer_state = tempfile::tempdir().expect("temp payer state dir");
+    let stub_app = spawn_stub_app();
+    let (payee, _payee_config, _payee_key) =
+        spawn_payee_priced(&fixture, payee_state.path(), &stub_app.addr);
+
+    let endpoint = format!(
+        "{}://{}{}",
+        carriage.scheme(),
+        payee.client_edge_addr,
+        match carriage {
+            Carriage::Btp => "/ilp/btp",
+            Carriage::Http => "/ilp",
+        }
+    );
+    let (payer, _payer_config, _payer_key) =
+        spawn_payer(&fixture, payer_state.path(), carriage, &endpoint);
+
+    let payee_identity = identity_from_key_seed(PAYEE_SIGNER_SEED);
+    let client = reqwest::Client::new();
+
+    let first_prepare = peer_bound_prepare(APP_PREFIX, b"the first packet", &payee_identity);
+    let first_claim = fixture.client_claim(1);
+    let (status, body, _ack) = post_peer_request(
+        &client,
+        &payer.client_edge_addr,
+        None,
+        Some(&first_claim),
+        &first_prepare,
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    connector_domain::Fulfill::decode(&body).unwrap_or_else(|_| {
+        let reject = Reject::decode(&body).expect("an answer that is neither FULFILL nor REJECT");
+        panic!(
+            "the FIRST forward over this peering was not covered: {} {}",
+            reject.code.as_str(),
+            reject.message
+        )
+    });
+
+    let second_prepare = peer_bound_prepare(APP_PREFIX, b"the second packet", &payee_identity);
+    let second_claim = fixture.client_claim(2);
+    let (status, body, _ack) = post_peer_request(
+        &client,
+        &payer.client_edge_addr,
+        None,
+        Some(&second_claim),
+        &second_prepare,
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    connector_domain::Fulfill::decode(&body).unwrap_or_else(|_| {
+        let reject = Reject::decode(&body).expect("an answer that is neither FULFILL nor REJECT");
+        panic!(
+            "the SECOND forward over this peering was not covered -- the outbound client hop's \
+             watermark query must report this peering's TRUE cumulative claimed, not 0, or the \
+             second claim recomputes the first claim's cumulative amount and is refused as a \
+             replay: {} {}",
+            reject.code.as_str(),
+            reject.message
+        )
+    });
+
+    // The payee's peer watermark advanced TWICE, by `price - fee` each time
+    // -- `APP_PRICE` after the first crossing, `2 * APP_PRICE` after the
+    // second -- never the same cumulative amount recorded twice.
+    let ledger = peer_journal(payee_state.path());
+    let first_line = format!(
+        "inbound_claim_accepted\t{}\t1\t{APP_PRICE}\t",
+        fixture.channel_id
+    );
+    let second_cumulative = 2 * APP_PRICE;
+    let second_line = format!(
+        "inbound_claim_accepted\t{}\t2\t{second_cumulative}\t",
+        fixture.channel_id
+    );
+    assert!(
+        ledger.contains(&first_line),
+        "the first crossing's claim must record cumulative {APP_PRICE} at nonce 1. Ledger \
+         was:\n{ledger}"
+    );
+    assert!(
+        ledger.contains(&second_line),
+        "the second crossing's claim must record cumulative {second_cumulative} at nonce 2 -- \
+         seeing {APP_PRICE} recorded again at nonce 2 instead means the watermark query is still \
+         reading 0 rather than this peering's true cumulative claimed. Ledger was:\n{ledger}"
+    );
+}
+
 /// **The amount a priced forwarded route will carry is bounded by its
 /// price** (ADR 0028). A client that pays `CLIENT_PRICE` and declares a
 /// larger `amount` is asking this connector to forward `amount - PEER_FEE`

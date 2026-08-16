@@ -298,9 +298,10 @@ async fn resolve_evm(
     let channel_key = format!("evm:{channel_id_hex}");
     ChannelStateResult::Verified(verified_state(
         "evm",
-        channel_id_hex,
+        channel_id_hex.clone(),
         state,
         &channel_key,
+        &channel_id_hex,
         channel.deposit_floor,
         state.claim_gate.credited_evm(&channel_id),
     ))
@@ -358,9 +359,10 @@ async fn resolve_solana(
     let channel_key = format!("solana:{channel_account_text}");
     ChannelStateResult::Verified(verified_state(
         "solana",
-        channel_account_text,
+        channel_account_text.clone(),
         state,
         &channel_key,
+        &channel_account_text,
         channel.deposit_floor,
         // `ClientPayoutLedger` only ever signs an EVM balance proof (issue
         // #699) -- a Solana channel has no credited amount to net yet, see
@@ -377,17 +379,39 @@ async fn resolve_solana(
 /// `cumulative_claimed` below -- so a fleet dashboard reads one number
 /// that already reflects an agent's own earnings, not a raw on-chain
 /// balance a human would have to net by hand.
+///
+/// `peer_channel_id` is a second, independent source for `cumulative
+/// claimed`/`nonce` (issue #1011's fix): [`crate::claim_gate::ClientClaimGate`]'s
+/// own watermark is `None` for a channel that has only ever carried PEER
+/// claims, since those never touch it (`connector_runtime::outbound_client`'s
+/// module doc, "Two ledgers, and why they must never merge") -- they land in
+/// `Connector`'s own `ClaimBook` instead, keyed by this same channel id. A
+/// dialing peer's `POST /ilp/claim-state` query is how it discovers where
+/// its own outbound claims on a peering channel stand
+/// (`connector_runtime::outbound_client::HttpClaimState`/`HttpSolanaClaimState`),
+/// so without this fallback that query always reads cumulative `0`, and
+/// every claim after the first recomputes the same cumulative amount as the
+/// first and is refused as a replay. Checked only when the client gate has
+/// no record -- a channel is never in both books at once
+/// (`ConfigError::ChannelInBothNamespaces`).
 fn verified_state(
     blockchain: &'static str,
     channel_id: String,
     state: &ClientEdgeState,
     channel_key: &str,
+    peer_channel_id: &str,
     deposit_floor: DepositFloor,
     credited: u64,
 ) -> VerifiedChannelState {
     let watermark = state.claim_gate.watermark(channel_key);
-    let cumulative_claimed = watermark.map(|w| w.cumulative_amount).unwrap_or(0);
-    let nonce = watermark.map(|w| w.nonce).unwrap_or(0);
+    let (cumulative_claimed, nonce) = match watermark {
+        Some(watermark) => (watermark.cumulative_amount, watermark.nonce),
+        None => state
+            .connector
+            .inbound_peer_watermark(peer_channel_id)
+            .map(|(nonce, cumulative_amount)| (cumulative_amount, nonce))
+            .unwrap_or((0, 0)),
+    };
     let deposit_total = deposit_floor.deposit();
     let available = deposit_total.map(|deposit| {
         deposit
@@ -415,7 +439,8 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use connector_domain::Prepare;
     use connector_runtime::{
-        Connector, FakeAppClient, InMemoryJournal, InProcessPeerTransport, TestClock,
+        ChannelDomain, ClaimAckOutcome, ClaimSignature, Connector, FakeAppClient, InMemoryJournal,
+        InProcessPeerTransport, TestClock, WireClaim,
     };
     use connector_signer::{
         evm_claim_state_challenge_digest, solana_claim_state_challenge_message, LocalSigner, Signer,
@@ -1187,5 +1212,100 @@ mod tests {
             .as_u64()
             .expect("a recorded claim time");
         assert!(last_claim_time >= before);
+    }
+
+    /// Issue #1011's fix. A channel that has only ever carried PEER claims
+    /// (accepted through [`Connector::handle_peer_claim`], never through
+    /// this edge's own [`crate::ClientClaimGate`]) must still answer `POST
+    /// /ilp/claim-state` with its TRUE cumulative -- exactly the query a
+    /// dialed peering's outbound client hop makes to learn where its own
+    /// claims stand (`connector_runtime::outbound_client`'s "Two ledgers,
+    /// and why they must never merge" doc). Before the fix this fell
+    /// through to `ClientClaimGate` alone, which has no record of a peer
+    /// claim, and always reported cumulative `0` -- so a second peer claim
+    /// recomputed the first claim's cumulative amount and was refused as a
+    /// replay (proven end to end by `two_connectors_peer.rs`'s
+    /// `a_second_forward_over_a_dialed_peering_also_advances_the_watermark`).
+    #[tokio::test]
+    async fn a_peering_channels_watermark_comes_from_the_peer_claimbook_not_the_client_gate() {
+        let (secret, address) = evm_signer();
+        let connector = Connector::new(
+            vec![],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            Arc::new(TestClock::new(
+                Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+            )),
+        )
+        .with_channel_verification_key(evm_channel_id_hex(), address)
+        .with_channel_domain(
+            evm_channel_id_hex(),
+            ChannelDomain {
+                chain_id: EVM_CHAIN_ID,
+                token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+            },
+        )
+        .expect("a well-formed on-chain channel id");
+        let connector = Arc::new(connector);
+
+        let balance_proof = connector_signer::EvmBalanceProof {
+            channel_id: EVM_CHANNEL_ID,
+            nonce: 1,
+            transferred_amount: 500,
+            locked_amount: 0,
+            locks_root: [0u8; 32],
+            chain_id: EVM_CHAIN_ID,
+            token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+        };
+        let digest = connector_signer::evm_balance_proof_digest(&balance_proof);
+        let signature = connector_signer::Signature::from_bytes(&sign_evm(&secret, &digest))
+            .expect("a 65-byte signature");
+        let outcome = connector.handle_peer_claim(WireClaim {
+            channel_id: evm_channel_id_hex(),
+            nonce: 1,
+            cumulative_amount: 500,
+            signature: ClaimSignature::Evm(signature),
+        });
+        assert_eq!(
+            outcome,
+            ClaimAckOutcome::Accepted,
+            "the peer claim itself must land before this test can prove anything about reading \
+             it back"
+        );
+
+        // A `ClientClaimGate` that knows this same channel (so the wire
+        // request's channel lookup itself succeeds) but has never ingested
+        // a CLIENT claim on it -- exactly the state a dialed peering's
+        // channel is in: known on chain, never a client's.
+        let app = router_with_gate(Arc::clone(&connector), test_signer(), None, test_gate());
+
+        let expires = far_future_expiry();
+        let body = serde_json::json!({
+            "channels": [{
+                "blockchain": "evm",
+                "channelId": evm_channel_id_hex(),
+                "expires": expires,
+                "signature": evm_challenge_signature(&secret, EVM_CHANNEL_ID, expires),
+            }]
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp/claim-state")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        let entry = &response["channels"][0];
+        assert_eq!(entry["ok"], true);
+        assert_eq!(
+            entry["cumulativeClaimed"], "500",
+            "a peer claim already accepted on this channel must be reflected here, not \
+             ClientClaimGate's own (nonexistent) record of it: {entry}"
+        );
+        assert_eq!(entry["nonce"], 1);
     }
 }
