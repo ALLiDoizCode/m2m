@@ -140,6 +140,11 @@ fn encode_line(entry: &JournalEntry) -> String {
         JournalEntry::InboundClaimWatermarkReset { channel_id } => {
             format!("inbound_claim_watermark_reset\t{channel_id}")
         }
+        JournalEntry::InboundClaimRolledBack {
+            channel_id,
+            nonce,
+            cumulative_amount,
+        } => format!("inbound_claim_rolled_back\t{channel_id}\t{nonce}\t{cumulative_amount}"),
     }
 }
 
@@ -173,6 +178,13 @@ fn decode_line(line: &str) -> Result<JournalEntry, JournalError> {
         ["inbound_claim_watermark_reset", channel_id] => {
             Ok(JournalEntry::InboundClaimWatermarkReset {
                 channel_id: channel_id.to_string(),
+            })
+        }
+        ["inbound_claim_rolled_back", channel_id, nonce, cumulative_amount] => {
+            Ok(JournalEntry::InboundClaimRolledBack {
+                channel_id: channel_id.to_string(),
+                nonce: parse_u64(nonce)?,
+                cumulative_amount: parse_u64(cumulative_amount)?,
             })
         }
         _ => Err(corrupt()),
@@ -266,6 +278,11 @@ mod tests {
             },
             JournalEntry::InboundClaimWatermarkReset {
                 channel_id: "solana:channel-c".to_string(),
+            },
+            JournalEntry::InboundClaimRolledBack {
+                channel_id: "channel-c".to_string(),
+                nonce: 2,
+                cumulative_amount: 150,
             },
         ]
     }
