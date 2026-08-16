@@ -3102,7 +3102,7 @@ fn every_committed_box_nginx_file_is_covered_by_the_upstream_guards() {
         missing.is_empty(),
         "{missing:?} are committed nginx configs that `BOX_NGINX_FILES` does \
          not name, so `no_box_nginx_names_a_literal_upstream` and \
-         `no_variable_upstream_appends_a_uri_that_nginx_will_ignore` cannot \
+         `no_variable_upstream_carries_a_static_uri_part` cannot \
          see them. Add each file to that list (`include_str!` + its \
          repo-relative path) -- a guard that cannot see a committed file \
          cannot refuse anything about it."
@@ -3142,39 +3142,202 @@ fn collect_nginx_files(dir: &std::path::Path, repo_root: &std::path::Path, out: 
     }
 }
 
-/// The other half of the same fix, and the defect issue #987 filed: with a
-/// VARIABLE upstream, nginx does not do the literal form's prefix
-/// substitution. `proxy_pass http://$upstream:3400/ilp/btp;` forwards the
-/// original `$request_uri` and silently ignores the appended `/ilp/btp`, so
-/// the maker saw `/swap/ilp/btp` and 404'd -- a config that looks like it
-/// strips a prefix and does not. The working form, live on the relay box, is
-/// `rewrite ^.*$ /<target> break;` followed by a `proxy_pass` carrying NO
-/// URI part at all, which forwards the rewritten `$uri`.
+/// The other half of the same fix. Issue #987 filed this as "with a variable
+/// upstream nginx IGNORES the URI part and forwards the original
+/// `$request_uri`", and #999 wrote that sentence into this guard and into six
+/// box nginx headers. **That rule is wrong**, and issue #1023 measured it:
 ///
-/// So a variable `proxy_pass` here must name host and port only. Appending
-/// `$uri`/`$request_uri` is refused by the same rule, and deliberately: that
-/// is the double-apply that produced `/swap/ilp/btp/swap/ilp/btp`.
+/// * nginx's own `proxy_pass` docs, under "the part of a request URI to be
+///   replaced cannot be determined": *"When variables are used in
+///   `proxy_pass` [...] if URI is specified in the directive, it is passed to
+///   the server as is, replacing the original request URI."* Passed, not
+///   ignored. (The neighbouring bullet -- a `rewrite ... break` in the
+///   location makes a LITERAL `proxy_pass`'s URI part ignored -- is the one
+///   that actually says "ignored", and is the likely source of the mix-up.)
+/// * Reproduced on nginx 1.18.0 / 1.24.0 / 1.26.3 / 1.28.3 / 1.30.4 /
+///   1.31.3: `location /graphql` + `proxy_pass $up/node/devnet/v1/graphql;`
+///   makes the upstream see `/node/devnet/v1/graphql`, every version.
+/// * End-to-end against the real upstream: the chain box's committed mina
+///   block, run verbatim in a throwaway nginx, returns **200** from
+///   `api.minascan.io`. The counterfactual #987 predicts
+///   (`proxy_pass $up$request_uri;`) returns **404** -- `api.minascan.io`
+///   serves `/node/devnet/v1/graphql` and 404s `/graphql`, so the two
+///   readings are distinguishable and the honoured one is what happens.
+///
+/// What is true is narrower, and is what this guard now refuses. A URI part
+/// on a variable upstream is **static**: it replaces the WHOLE request URI,
+/// so nothing of the request survives it -- not the part of the path past
+/// the location, and not the query string. Measured, same harness:
+///
+/// | request | literal `proxy_pass http://h/t` | variable `proxy_pass $u/t` |
+/// |---|---|---|
+/// | `/loc` | `/t` | `/t` |
+/// | `/loc/extra` | `/t/extra` | `/t` |
+/// | `/loc?a=b` | `/t?a=b` | `/t` |
+///
+/// So a variable `proxy_pass` that carries a URI part is only ever correct
+/// where the location maps to exactly ONE upstream path and no query string
+/// has to survive -- and it silently is not correct otherwise, which reads
+/// identically in the file. The fleet's default form stays
+/// `rewrite ^.*$ /<target> break;` plus a `proxy_pass` naming host and port
+/// only: a bare variable `proxy_pass` forwards the (possibly rewritten)
+/// `$uri` AND the query string, which is what a proxy generally wants.
+/// Appending `$uri`/`$request_uri` to the `proxy_pass` itself is refused by
+/// the same rule -- it double-applies against a `rewrite`, and `$uri` drops
+/// the args on its own.
+///
+/// #987's live 404 therefore had some other cause than the one it names.
+/// #999's own body records these files drifting apart ("that is how #987
+/// survived"), and a rendered `conf.d/node.conf` on the box carrying a bare
+/// `proxy_pass http://$swap_upstream:3400;` would produce exactly the 404
+/// that was seen. Its fix is right either way and is untouched.
+///
+/// # Coverage
+///
+/// Two shapes were unchecked before #1023 and are checked now:
+///
+/// * `proxy_pass $var/uri;` -- a variable carrying its own scheme. The old
+///   guard only matched a `http://$` prefix, so it `continue`d past the one
+///   line in the tree that actually has a URI part on a variable upstream.
+/// * the URL literals a `map`/`set` feeds those variables from. The value is
+///   where a URI part would hide from a scan of `proxy_pass` lines alone;
+///   [`upstream_url_literals`] reads them.
 #[test]
-fn no_variable_upstream_appends_a_uri_that_nginx_will_ignore() {
+fn no_variable_upstream_carries_a_static_uri_part() {
     for (name, raw) in BOX_NGINX_FILES {
         for target in proxy_pass_targets(raw) {
-            let Some(rest) = target.strip_prefix("http://$") else {
-                // A bare `$backend`-style variable carries its whole URL,
-                // including the scheme, from a `map`; there is no URI to
-                // append and nothing here to check.
+            // A variable upstream, whether the scheme is written in the
+            // directive (`http://$upstream:4000`) or carried inside the
+            // variable (`$backend`, `$mina_upstream`). A literal upstream is
+            // `no_box_nginx_names_a_literal_upstream`'s business, and nginx
+            // does do clean prefix substitution for those.
+            let after_scheme = strip_url_scheme(target);
+            if !after_scheme.starts_with('$') {
                 continue;
-            };
+            }
+            if STATIC_URI_PART_EXEMPTIONS
+                .iter()
+                .any(|(file, exempt, _)| file == name && exempt == &target)
+            {
+                continue;
+            }
             assert!(
-                !rest.contains('/'),
-                "{name} proxies to `{target}` -- with a variable upstream \
-                 nginx IGNORES the URI part and forwards the original \
-                 request URI, so this does not strip what it looks like it \
-                 strips (issue #987: the maker 404'd). Use `rewrite ^.*$ \
-                 /<target> break;` and a `proxy_pass` with host and port \
-                 only."
+                !after_scheme.contains('/'),
+                "{name} proxies to `{target}` -- a URI part on a VARIABLE \
+                 upstream is honoured, but statically: it replaces the whole \
+                 request URI, dropping both the path past the location and \
+                 the query string (issue #1023 measured this; #987's \
+                 \"nginx ignores it\" is not what nginx does). Write \
+                 `rewrite ^.*$ /<target> break;` and a `proxy_pass` with \
+                 host and port only, which forwards the rewritten `$uri` \
+                 and the args -- or, if the static URI is genuinely what \
+                 this location wants, add it to \
+                 `STATIC_URI_PART_EXEMPTIONS` with the reason."
+            );
+        }
+        for literal in upstream_url_literals(raw) {
+            assert!(
+                !strip_url_scheme(literal).contains('/'),
+                "{name} feeds an upstream variable the literal `{literal}`, \
+                 which carries a URI part. That path reaches `proxy_pass` \
+                 through the variable, where the same static-URI rule \
+                 applies and no scan of `proxy_pass` lines can see it. Keep \
+                 these values host-and-port only and put any path in a \
+                 `rewrite`."
             );
         }
     }
+}
+
+/// Every `proxy_pass` in the tree that deliberately carries a URI part on a
+/// variable upstream, with the reason. An exemption here is a reviewed diff
+/// and a named justification rather than a shape the scan quietly walks
+/// past, which is what the old `http://$`-only prefix match amounted to.
+///
+/// [`every_static_uri_part_exemption_still_exists`] fails if an entry stops
+/// matching a real line, so a stale exemption is a red test rather than a
+/// widening nobody notices.
+const STATIC_URI_PART_EXEMPTIONS: &[(&str, &str, &str)] = &[(
+    "infra/linode/nginx/devnet.conf.template",
+    "$mina_upstream/node/devnet/v1/graphql",
+    "The Mina passthrough is not a prefix proxy: `api.minascan.io` serves \
+     the public devnet's GraphQL at one fixed path and 404s `/graphql`, so \
+     this location has exactly ONE upstream path and the static URI is the \
+     whole point. The query string it drops is not wanted either -- the \
+     GraphQL request travels in the POST body, and forwarding args to that \
+     upstream measurably raised its error rate (issue #1023). Verified 200 \
+     end-to-end against api.minascan.io with this block run verbatim.",
+)];
+
+/// An exemption that no longer matches anything is worse than none: it reads
+/// as a live decision about a line that is gone, and it is one search-and-
+/// replace away from silently exempting something else.
+#[test]
+fn every_static_uri_part_exemption_still_exists() {
+    for (file, target, reason) in STATIC_URI_PART_EXEMPTIONS {
+        let (_, raw) = BOX_NGINX_FILES
+            .iter()
+            .find(|(name, _)| name == file)
+            .unwrap_or_else(|| panic!("{file} is exempted but is not in BOX_NGINX_FILES"));
+
+        assert!(
+            proxy_pass_targets(raw).contains(target),
+            "{file} no longer proxies to `{target}`, but \
+             STATIC_URI_PART_EXEMPTIONS still exempts it. Drop the entry -- \
+             the reason it carried (\"{reason}\") is about a line that is \
+             not there."
+        );
+    }
+}
+
+/// `target` with a leading `http://` or `https://` removed, if it had one.
+/// Used to ask "is this upstream a variable, and does it carry a path?"
+/// without caring whether the scheme was written in the directive or is
+/// carried inside the variable.
+fn strip_url_scheme(target: &str) -> &str {
+    target
+        .strip_prefix("http://")
+        .or_else(|| target.strip_prefix("https://"))
+        .unwrap_or(target)
+}
+
+/// Every `"http://..."` / `"https://..."` value an upstream variable is fed
+/// from: the values of a `map` block and of a `set` directive. Those are the
+/// two ways a URL reaches a `proxy_pass` in these files without appearing on
+/// the `proxy_pass` line itself.
+///
+/// Deliberately NOT every quoted URL in the file -- `add_header
+/// Access-Control-Allow-Origin "https://proxy.${DOMAIN}"` is a quoted URL
+/// that is not an upstream, and a path in one would be a CORS bug, not this
+/// one.
+fn upstream_url_literals(raw: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut in_map = false;
+
+    for line in raw.lines().map(str::trim) {
+        if line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with("map ") && line.ends_with('{') {
+            in_map = true;
+            continue;
+        }
+        if in_map && line.starts_with('}') {
+            in_map = false;
+            continue;
+        }
+        if !in_map && !line.starts_with("set ") {
+            continue;
+        }
+
+        for piece in line.split('"').skip(1).step_by(2) {
+            if piece.starts_with("http://") || piece.starts_with("https://") {
+                out.push(piece);
+            }
+        }
+    }
+
+    out
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

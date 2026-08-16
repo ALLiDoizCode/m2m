@@ -8,6 +8,15 @@
 # Backends are referenced through the `$backend` variable + the Docker embedded
 # resolver (127.0.0.11) so nginx boots even if a chain container is briefly down
 # or still starting (lazy, per-request resolution instead of boot-time).
+#
+# NOTHING RUNS THIS FILE TODAY. The self-hosted chain box was deleted 2026-07-19
+# (see ../README.md's banner and ../endpoints.json) and the devnet settles on
+# public chains; `*.devnet.toonprotocol.dev` is a wildcard A record to the
+# registrar's parking host, so `mina.` and `evm-rpc.` answer a 301 to
+# toonprotocol.dev and fail TLS. The file is committed because
+# `.github/workflows/devnet-deploy.yml` still renders it via bootstrap.sh (last
+# run 2026-06-23) — treat it as the artifact a rebuilt chain box would start
+# from, not as a description of anything currently serving traffic.
 
 # Per-IP rate limits for the public RPC/faucet endpoints (devnet abuse guard).
 limit_req_zone $binary_remote_addr zone=rpc:10m rate=30r/s;
@@ -89,6 +98,29 @@ server {
 
     resolver 1.1.1.1 8.8.8.8 valid=300s;
 
+    # THE URI PART BELOW IS DELIBERATE AND IT WORKS. It is the one `proxy_pass`
+    # in this repo that carries a URI on a variable upstream, so it looks like
+    # the defect issue #987 describes. It is not, and #987's rule is wrong:
+    # nginx does NOT ignore a URI part on a variable `proxy_pass`. Its own docs
+    # say the opposite — "if URI is specified in the directive, it is passed to
+    # the server as is, replacing the original request URI" — and issue #1023
+    # measured it on nginx 1.18 through 1.31 and end-to-end against the real
+    # upstream: this block, run verbatim, returns 200 from api.minascan.io,
+    # while the shape #987 predicts (`proxy_pass $mina_upstream$request_uri;`)
+    # returns 404, because minascan serves /node/devnet/v1/graphql and 404s
+    # /graphql. So the two readings are distinguishable and this is the working
+    # one. See `no_variable_upstream_carries_a_static_uri_part` in
+    # crates/connector-bin/tests/devnet_configs_load.rs, which exempts exactly
+    # this line and carries the whole argument.
+    #
+    # What IS true of a URI part on a variable upstream: it is STATIC. It
+    # replaces the entire request URI, so neither the path past `location
+    # /graphql` nor the query string reaches the upstream. Both are wanted here
+    # — minascan serves this API at one fixed path, the GraphQL request travels
+    # in the POST body, and forwarding args to that upstream measurably raised
+    # its error rate (#1023). Anywhere the remainder or the args must survive,
+    # use this box's other form instead: `rewrite ^.*$ /<target> break;` and a
+    # `proxy_pass` naming host and port only.
     location /graphql {
         limit_req zone=rpc burst=60 nodelay;
         set $mina_upstream "https://api.minascan.io";

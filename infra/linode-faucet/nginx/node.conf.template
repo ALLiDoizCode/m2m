@@ -23,12 +23,20 @@
 #
 # `set $upstream <container>;` defers resolution to request time, where this
 # file's own `resolver 127.0.0.11 valid=10s` applies. Both `proxy_pass` lines
-# below carry NO URI part, deliberately: with a variable upstream nginx does
-# not do the literal form's prefix substitution (issue #987 — the relay box's
-# maker 404'd on exactly that), so the request `$uri` is forwarded unchanged.
-# Both locations here already wanted `$uri` verbatim (`= /health` proxied to
-# `/health`), so no `rewrite` is needed. Add one — `rewrite ^.*$ /<target>
-# break;` — if a location ever needs to rewrite the path.
+# below carry NO URI part, deliberately: a variable upstream does not do the
+# literal form's prefix substitution, so a URI part here would be a STATIC
+# path — nginx honours it and it replaces the WHOLE request URI, dropping the
+# path past the location and the query string with it. (Issue #987 filed this
+# as "nginx ignores the URI part and forwards `$request_uri`". It does not;
+# issue #1023 measured it on nginx 1.18 through 1.31 and the URI part is
+# honoured. The rule that survives is the static one above — see
+# `no_variable_upstream_carries_a_static_uri_part` in
+# crates/connector-bin/tests/devnet_configs_load.rs.) With no URI part the
+# request `$uri` and its args are forwarded unchanged, which is what both
+# locations here already wanted (`= /health` proxied to `/health`), so no
+# `rewrite` is needed. Add one — `rewrite ^.*$ /<target> break;` — if a
+# location ever needs to rewrite the path; it keeps the args, a static URI
+# part does not.
 #
 # NOTE for `envsubst`: bootstrap.sh renders this with a `'${DOMAIN}'`-scoped
 # filter, so nginx's own `$upstream`/`$host`/`$uri` survive untouched.
