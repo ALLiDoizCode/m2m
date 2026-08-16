@@ -46,5 +46,6 @@
   "btpEndpoint": "wss://proxy.relay.devnet.toonprotocol.dev/swap/ilp/btp",
   "advertisedAsset": { "assetCode": "USDC", "assetScale": 6 },
   "statePath": "/app/state/swap-node-state.json",
-  "blsPort": 8080
+  "blsPort": 8090,
+  "_blsPort_comment": "8090, NOT 8080 — matching the live relay box (verified 2026-08-16). The maker already binds its own health/metrics server on 8080 (`Swap node listening on http://localhost:8080`, the port ./docker-compose.relay.swap.yml publishes on loopback and fleet-health.yml probes), so a `blsPort` of 8080 is a second bind on the same port and the process dies with `EADDRINUSE :::8080` AFTER passing validateConfig. Found by booting this committed file against `ghcr.io/toon-protocol/swap:release`, which is the whole argument for ADR 0041's gate: config validity is not bootability, and only actually starting the image proves the second. The box was hand-fixed and the fix was never committed; this brings it back."
 }

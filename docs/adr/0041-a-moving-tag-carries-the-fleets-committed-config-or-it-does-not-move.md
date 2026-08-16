@@ -147,6 +147,17 @@ repo's CI, so a box hand-edit that is never committed will make the gate validat
 That is a real new obligation and it is the point: the on-box config being unreviewable is what made
 this class of outage invisible.
 
+The first run of the gate proved the obligation was already being missed, three times over in one
+file. Booting the committed `infra/linode-relay/swap.config.json` against `swap:release` found (a)
+the missing `tokenNetworkAddress` from the outage above, still absent because the fix had only ever
+been applied to the box; (b) `blsPort: 8080`, which passes `validateConfig` and then dies
+`EADDRINUSE` because the maker already binds its own health server there — the live box runs `8090`
+and the correction was never committed; and (c) that the config file is not the whole service, since
+the boot only succeeds with the `SWAP_AUTOGEN_IDENTITY=1` the compose overlay supplies. Any redeploy
+from the committed tree would have reproduced two outages. This is the strongest available argument
+for the rule: **config validity is not bootability, and only actually starting the image proves the
+second.**
+
 **The connector deploys more slowly, on purpose.** A green merge no longer reaches the boxes. It
 reaches GHCR as `rust-sha-*`, and a human promotes it. The deploy itself is still automatic — the
 boxes' Watchtower recreates within ~60s of the retag — so what is added is the choice of build, not

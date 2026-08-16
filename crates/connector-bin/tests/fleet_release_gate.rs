@@ -20,6 +20,8 @@ const PUBLISH_CONNECTOR_WORKFLOW: &str =
 const PROMOTE_WORKFLOW: &str = include_str!("../../../.github/workflows/promote-to-fleet.yml");
 const FLEET_HEALTH_WORKFLOW: &str = include_str!("../../../.github/workflows/fleet-health.yml");
 const RELAY_SWAP_CONFIG: &str = include_str!("../../../infra/linode-relay/swap.config.json");
+const RELAY_SWAP_OVERLAY: &str =
+    include_str!("../../../infra/linode-relay/docker-compose.relay.swap.yml");
 
 /// A `docker/metadata-action` `type=raw,value=<tag>` line, ignoring `#`
 /// comments -- both workflows above discuss `rust-release` at length in their
@@ -199,6 +201,60 @@ fn the_committed_maker_config_satisfies_every_field_the_maker_requires() {
             );
         }
     }
+}
+
+/// Environment variables `docker-compose.relay.swap.yml` supplies to the
+/// maker. The config FILE is only half the box's configuration: without
+/// `SWAP_AUTOGEN_IDENTITY`, `swap.config.json` alone fails
+/// `[INVALID_CONFIG] SwapNodeConfig: one of mnemonic or secretKey is required`,
+/// because swap#127 made the maker self-generate and persist its own BIP-39
+/// mnemonic to `statePath` on first boot rather than read a committed one.
+const RELAY_SWAP_SERVICE_ENV: &[&str] = &["SWAP_AUTOGEN_IDENTITY"];
+
+/// The config-compatibility gates boot the `:release` image against the
+/// committed `swap.config.json`, and they can only be trusted if what they
+/// boot is what the BOX boots. The first run of this gate proved that is not
+/// automatic: booting the file by itself failed on a missing identity that
+/// the box never misses, because the overlay supplies it as an environment
+/// variable rather than a config key.
+///
+/// So both gates -- `fleet-health.yml`'s `config-compat` job here, and
+/// `publish-swap-image.yml`'s in the swap repo -- reproduce the SERVICE:
+/// the file, plus this environment, plus a writable state mount. This case is
+/// what stops the two descriptions drifting: a variable added to the overlay
+/// and not to the gate would leave the gate quietly validating a
+/// configuration the box does not run, which is a worse failure than having
+/// no gate, because it reads as a pass.
+#[test]
+fn the_config_compat_gate_reproduces_the_makers_committed_service_environment() {
+    for var in RELAY_SWAP_SERVICE_ENV {
+        assert!(
+            RELAY_SWAP_OVERLAY.contains(var),
+            "docker-compose.relay.swap.yml no longer sets `{var}`. If the \
+             maker genuinely no longer needs it, drop it from \
+             RELAY_SWAP_SERVICE_ENV and from both config-compat gates -- do \
+             not leave the gates passing a variable the service does not have."
+        );
+        assert!(
+            FLEET_HEALTH_WORKFLOW.contains(&format!("-e {var}=")),
+            "fleet-health.yml's config-compat job does not pass `{var}` to the \
+             image, but docker-compose.relay.swap.yml supplies it to the live \
+             service. The gate would be booting a configuration the box never \
+             runs -- and it would FAIL on a config the box is perfectly happy \
+             with, which is how a gate gets disabled."
+        );
+    }
+
+    // The writable state mount is the other half of the same point:
+    // `SWAP_AUTOGEN_IDENTITY` persists the generated mnemonic to `statePath`,
+    // so without somewhere to write it the boot is not the box's boot.
+    assert!(
+        FLEET_HEALTH_WORKFLOW.contains(":/app/state"),
+        "fleet-health.yml's config-compat job no longer mounts a writable \
+         /app/state. The maker persists its self-generated identity to \
+         `statePath` there (swap.config.json), so a boot without it is not \
+         the boot the box performs."
+    );
 }
 
 /// Every service a box's Watchtower can recreate unattended, as observed live
