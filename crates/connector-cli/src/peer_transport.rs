@@ -56,9 +56,17 @@ pub(crate) struct ConfiguredPeerTransport {
 /// The transport a validated [`Config`] describes.
 ///
 /// `signer_address` is this node's own EVM address -- the `senderId` /
-/// `signerAddress` of every claim it emits (§4). `clock` is the one the
-/// rest of the node reads, so a claim's `timestamp` and a fulfilment's
-/// agree.
+/// `signerAddress` of every EVM claim it emits (§4). `signer_solana_public_key`
+/// is the Solana counterpart (issue #732/#998) -- the raw ed25519 public key
+/// rendered as `senderId`/`signerPublicKey` on a Solana claim -- `None` for a
+/// node with no `[settlement.solana]` table, exactly mirroring how
+/// `signer_address` is all-zero and unused on a node with no
+/// `[settlement.evm]` table, which never produces an EVM claim to render
+/// either. Without it, a dial side that DID sign a Solana claim
+/// (`ClaimBook::record_fulfillment`, once a `[[peer_channels]]` Solana row is
+/// wired) would panic trying to render one -- see `claim_json::encode`'s own
+/// doc. `clock` is the one the rest of the node reads, so a claim's
+/// `timestamp` and a fulfilment's agree.
 ///
 /// A node with no dialable peering gets a bare [`InProcessPeerTransport`],
 /// which is what it held before this function existed: a peer-routed packet
@@ -66,6 +74,7 @@ pub(crate) struct ConfiguredPeerTransport {
 pub(crate) fn build_peer_transport(
     config: &Config,
     signer_address: [u8; 20],
+    signer_solana_public_key: Option<[u8; 32]>,
     clock: Arc<dyn Clock>,
 ) -> Arc<dyn PeerTransport> {
     let mut carriage = HashMap::new();
@@ -93,6 +102,9 @@ pub(crate) fn build_peer_transport(
             signer_address,
             Arc::clone(&clock),
         );
+        if let Some(public_key) = signer_solana_public_key {
+            transport.set_solana_signer_public_key(public_key);
+        }
         transport.add_peers_from_config(config.peers(), config.peer_channels());
         transport
     });
@@ -102,6 +114,9 @@ pub(crate) fn build_peer_transport(
             signer_address,
             clock,
         );
+        if let Some(public_key) = signer_solana_public_key {
+            transport.set_solana_signer_public_key(public_key);
+        }
         transport.add_peers_from_config(config.peers(), config.peer_channels());
         transport
     });
@@ -246,7 +261,7 @@ token_network = "0x00000000000000000000000000000000000000bb"
             ),
         );
 
-        let transport = build_peer_transport(&config, [0u8; 20], Arc::new(SystemClock));
+        let transport = build_peer_transport(&config, [0u8; 20], None, Arc::new(SystemClock));
 
         // Nothing is listening on port 1, so both answer §2.2's `T01` --
         // the point being that each was *dialed*, on its own carriage,
@@ -274,7 +289,7 @@ token_network = "0x00000000000000000000000000000000000000bb"
     async fn a_peer_this_connector_never_dials_is_still_answered_t01() {
         let (config, _state, _key) =
             config("", &peer_block("dialed", "ws://127.0.0.1:1/ilp/btp", "a"));
-        let transport = build_peer_transport(&config, [0u8; 20], Arc::new(SystemClock));
+        let transport = build_peer_transport(&config, [0u8; 20], None, Arc::new(SystemClock));
 
         let PeerForward {
             response,
@@ -320,7 +335,7 @@ token_network = "0x00000000000000000000000000000000000000bb"
 "#,
         );
 
-        let transport = build_peer_transport(&config, [0u8; 20], Arc::new(SystemClock));
+        let transport = build_peer_transport(&config, [0u8; 20], None, Arc::new(SystemClock));
 
         let PeerForward {
             response,

@@ -31,7 +31,9 @@ use connector_settlement_evm::{
     DEFAULT_POLL_INTERVAL,
 };
 use connector_settlement_solana::SolanaSettlementBackend;
-use connector_signer::{derive_evm_address, LocalSigner, Signer, SignerError};
+use connector_signer::{
+    derive_evm_address, Ed25519Signer, LocalEd25519Signer, LocalSigner, Signer, SignerError,
+};
 
 use crate::peer_transport;
 use ethers::types::U256;
@@ -122,6 +124,14 @@ pub enum RuntimeError {
     /// widening of the config shape refuses to start instead of panicking
     /// on the first peer claim.
     PeerChannelUnusable { channel_id: String },
+    /// A `[[peer_channels]]` Solana row's `channel_account` or
+    /// `counterparty_key` is not a shape
+    /// [`connector_runtime::ClaimBook::set_solana_channel`] can file a
+    /// watermark under (issue #759/#998). Unreachable through
+    /// `Config::load`, which already checks both are base58 of exactly 32
+    /// bytes -- kept as a named startup failure for the same reason
+    /// [`RuntimeError::PeerChannelUnusable`] is.
+    PeerChannelSolanaUnusable { channel_account: String },
     /// `[announce] identity_key_file`'s path exists (config load already
     /// checked that) but could not be read.
     AnnounceIdentityKeyFileUnreadable {
@@ -189,6 +199,12 @@ impl fmt::Display for RuntimeError {
                 "the [[peer_channels]] row for channel '{channel_id}' names an id the claim \
                  ledger cannot file a watermark under -- a peer channel id must be the \
                  channel's on-chain bytes32"
+            ),
+            RuntimeError::PeerChannelSolanaUnusable { channel_account } => write!(
+                f,
+                "the [[peer_channels]] row for Solana account '{channel_account}' names an \
+                 account or counterparty key the claim ledger cannot file a watermark under -- \
+                 both must be base58 of exactly 32 bytes"
             ),
             RuntimeError::JournalUnreplayable { path, source } => write!(
                 f,
@@ -758,52 +774,104 @@ fn peer_claim_identity(config: &Config) -> Result<Option<PeerClaimIdentity>, Run
     Ok(Some((Arc::new(signer), address)))
 }
 
+/// The key this node signs outbound **peer** claims with on Solana (issue
+/// #732/#998) -- the Solana counterpart of [`peer_claim_identity`], for
+/// exactly the same reason: a Solana peer claim's
+/// `senderId`/`signerPublicKey` is redeemed against this node's own
+/// channel-participant identity, which is the `[settlement.solana]` key,
+/// never `[signer]`'s. `None` for a node with no `[settlement.solana]`
+/// table, which therefore signs no Solana claim at all.
+///
+/// Returns the signer alone, where the EVM twin also returns an address:
+/// the public key the wire renders is read straight off the signer
+/// ([`Ed25519Signer::public_key`]), so there is no derived second copy that
+/// could drift from the key that actually signed.
+fn peer_claim_identity_solana(
+    config: &Config,
+) -> Result<Option<Arc<dyn Ed25519Signer>>, RuntimeError> {
+    let Some(solana) = config
+        .settlements()
+        .iter()
+        .find_map(|settlement| match settlement {
+            SettlementConfig::Solana(solana) => Some(solana),
+            SettlementConfig::Evm(_) => None,
+        })
+    else {
+        return Ok(None);
+    };
+    let secret = read_settlement_key_bytes(solana.key())?;
+    let signer = LocalEd25519Signer::from_secret_bytes(secret)?;
+    Ok(Some(Arc::new(signer)))
+}
+
 /// Wire every `[[peer_channels]]` row into the claim ledger (issue #678,
 /// `peer-carriage-spec.md` §11): which channel this node claims against
 /// when it owes a peer, whose signature it accepts on a claim naming that
-/// channel, and the EIP-712 domain both are judged under (ADR 0024).
+/// channel, and -- on EVM -- the EIP-712 domain both are judged under (ADR
+/// 0024). A Solana row (issue #759) has no separate domain call: the
+/// channel account *is* the whole of a Solana claim's signed message, so
+/// [`Connector::with_solana_channel`] does both jobs
+/// [`Connector::with_channel_verification_key`] and
+/// [`Connector::with_channel_domain`] do together on EVM, in one call (see
+/// [`connector_runtime::ClaimBook::set_solana_channel`]'s own doc).
 ///
-/// A peering with several rows claims against the **first**: an outbound
-/// ledger is per peer, so there is exactly one channel this node can owe on,
-/// and picking the last would make the answer depend on file order. Every
-/// row is still accepted *inbound* -- a counterparty may legitimately claim
-/// on any channel the two of them have bound.
+/// A peering with several rows -- on either chain, or one of each -- claims
+/// against the **first row in the file**: an outbound ledger is per peer,
+/// so there is exactly one channel this node can owe on, and picking the
+/// last would make the answer depend on file order. Every row is still
+/// accepted *inbound* -- a counterparty may legitimately claim on any
+/// channel the two of them have bound, on whichever chain it is on.
 ///
-/// EVM rows only: a Solana `[[peer_channels]]` row (issue #759) is
-/// validated by `Config::load` and reaches claim *rendering* (its
-/// `program_id` reaches `PeerRelation::from_config` in
-/// `connector-peer-btp`/`connector-peer-http`), but `ClaimBook` has no
-/// `Connector` builder to accept a Solana verification key or signer from
-/// config yet -- that is the config/CLI identity wiring issue #742/#757
-/// left as a named follow-up, not this issue's job. A Solana row is
-/// therefore skipped here rather than wired into a method that does not
-/// exist.
+/// Issue #998: before this, a Solana row loaded, validated, and reached
+/// claim *rendering* (its `program_id` reaches `PeerRelation::from_config`
+/// in `connector-peer-btp`/`connector-peer-http`) but never `ClaimBook`
+/// itself -- so a Solana-settled peering could never verify an inbound
+/// claim or sign an outbound one. `ClaimBook::set_solana_channel` (issue
+/// #742/#757) closed the other half of that gap; this closes the
+/// config-to-runtime wiring.
 fn wire_peer_channels(
     mut connector: Connector,
     config: &Config,
 ) -> Result<Connector, RuntimeError> {
     let mut claiming_against: Vec<&str> = Vec::new();
     for channel in config.peer_channels() {
-        let PeerChannelConfig::Evm(channel) = channel else {
-            continue;
+        // What a claim on this row names, and what `ClaimBook` files its
+        // ledger and watermark under: an EVM `channel_id` or a Solana
+        // `channel_account`. Read before the per-chain wiring below so the
+        // "first row in the file wins, on whichever chain it is" rule lives
+        // in one place rather than once per chain.
+        let claim_channel = match channel {
+            PeerChannelConfig::Evm(evm) => evm.channel_id(),
+            PeerChannelConfig::Solana(solana) => solana.channel_account(),
         };
         if !claiming_against.contains(&channel.peer_id()) {
             claiming_against.push(channel.peer_id());
-            connector = connector.with_peer_claim_channel(channel.peer_id(), channel.channel_id());
+            connector = connector.with_peer_claim_channel(channel.peer_id(), claim_channel);
         }
-        connector = connector
-            .with_channel_verification_key(channel.channel_id(), channel.counterparty_key());
-        connector = connector
-            .with_channel_domain(
-                channel.channel_id(),
-                ChannelDomain {
-                    chain_id: channel.chain_id(),
-                    token_network_address: channel.token_network(),
-                },
-            )
-            .map_err(|_| RuntimeError::PeerChannelUnusable {
-                channel_id: channel.channel_id().to_string(),
-            })?;
+        match channel {
+            PeerChannelConfig::Evm(evm) => {
+                connector =
+                    connector.with_channel_verification_key(claim_channel, evm.counterparty_key());
+                connector = connector
+                    .with_channel_domain(
+                        claim_channel,
+                        ChannelDomain {
+                            chain_id: evm.chain_id(),
+                            token_network_address: evm.token_network(),
+                        },
+                    )
+                    .map_err(|_| RuntimeError::PeerChannelUnusable {
+                        channel_id: claim_channel.to_string(),
+                    })?;
+            }
+            PeerChannelConfig::Solana(solana) => {
+                connector = connector
+                    .with_solana_channel(claim_channel, solana.counterparty_key())
+                    .map_err(|_| RuntimeError::PeerChannelSolanaUnusable {
+                        channel_account: claim_channel.to_string(),
+                    })?;
+            }
+        }
     }
     Ok(connector)
 }
@@ -888,12 +956,24 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
         .as_ref()
         .map(|(_, address)| *address)
         .unwrap_or([0u8; 20]);
+    // The Solana twin of the above (issue #732/#998): the
+    // `[settlement.solana]` key, because a Solana peer claim is likewise
+    // redeemed against the channel participant this node *is* on chain,
+    // never `[signer]`'s identity key.
+    let peer_claim_identity_solana = peer_claim_identity_solana(config)?;
+    let peer_signer_solana_public_key = peer_claim_identity_solana
+        .as_ref()
+        .map(|signer| signer.public_key());
     // Issue #678 gap 2: the dial side, built from `[[peers]]` and
     // `[[peer_channels]]`. A node with no dialable peering still holds an
     // empty `InProcessPeerTransport`, so a packet routed to a peer is
     // answered `T01 peer unreachable` rather than silently dropped.
-    let peer_transport =
-        peer_transport::build_peer_transport(config, peer_signer_address, Arc::new(SystemClock));
+    let peer_transport = peer_transport::build_peer_transport(
+        config,
+        peer_signer_address,
+        peer_signer_solana_public_key,
+        Arc::new(SystemClock),
+    );
     let peer_routes = config
         .peer_routes()
         .iter()
@@ -951,6 +1031,9 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     // which is #620's gap 3 surviving into the bring-up.
     if let Some((claim_signer, _)) = peer_claim_identity {
         connector = connector.with_signer(claim_signer);
+    }
+    if let Some(claim_signer_solana) = peer_claim_identity_solana {
+        connector = connector.with_solana_signer(claim_signer_solana);
     }
     connector = wire_peer_channels(connector, config)?;
     let mut client_channel_source_evm: Option<Arc<dyn ClientChannelSource>> = None;
@@ -1568,6 +1651,65 @@ token_network = "0x00000000000000000000000000000000000000bb"
                 .connector
                 .recognizes_channel(&format!("0x{}", "ee".repeat(32))),
             "and only that row -- a channel nobody configured is still unknown"
+        );
+    }
+
+    /// The Solana twin of [`peer_channels_reach_the_claim_ledger`] (issue
+    /// #998): before this, `wire_peer_channels` skipped every
+    /// `PeerChannelConfig::Solana` row outright, so a Solana-settled
+    /// peering loaded and validated but could never verify an inbound
+    /// claim -- `recognizes_solana_channel` is the observable end of that
+    /// wiring, the Solana counterpart of `recognizes_channel`.
+    #[tokio::test]
+    async fn solana_peer_channels_reach_the_claim_ledger() {
+        let state_dir = tempfile::tempdir().expect("temp state dir");
+        let channel_account = "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi";
+        let counterparty_key = "8pM1DN3RiT8vbom5u1sNryaNT1nyL8CTTW3b5PwWXRBH";
+        let program_id = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+peer_expose = "btp"
+
+[signer]
+key_file = "{key_file}"
+
+[[peers]]
+id = "store"
+endpoint = "wss://store.example:443/ilp/btp"
+
+[peers.credential]
+secret = "a-real-peering-secret"
+
+[[peer_channels]]
+peer_id = "store"
+channel_account = "{channel_account}"
+counterparty_key = "{counterparty_key}"
+program_id = "{program_id}"
+"#,
+                state_dir = state_dir.path().display(),
+                key_file = key_path.display(),
+            )
+        });
+
+        let runtime = build(&config).await.expect("build");
+
+        assert!(
+            runtime.connector.recognizes_solana_channel(channel_account),
+            "the [[peer_channels]] Solana row must reach ClaimBook's Solana verification key, \
+             or every peer claim on it is refused `unknown_channel` however correctly it was \
+             signed"
+        );
+        assert!(
+            !runtime
+                .connector
+                // A real 32-byte account (the system program's), so what
+                // this asserts is "nobody configured it", not "it was never
+                // a well-formed account in the first place".
+                .recognizes_solana_channel("11111111111111111111111111111111"),
+            "and only that row -- an account nobody configured is still unknown"
         );
     }
 
