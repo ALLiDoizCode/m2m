@@ -22,7 +22,11 @@ material or funds this environment does not have.
 - `infra/linode-relay/swap.config.json` — a committed config skeleton expressing the standalone
   direct-dial wiring toon-meta#402 proved (swap#105): no `connector`/`connectorUrl`, so
   `toon-swap --config` auto-creates an embedded, parentless `ConnectorNode` gated on
-  `btpServerPort`. `evm:84532` `chainProviders` point at the deployed `RollingSwapChannel`
+  `btpServerPort`. That embedded node comes from the **retired** `@toon-protocol/connector` 3.x
+  line — see
+  [`../embedded-connector-peer-relation-contract.md`](../embedded-connector-peer-relation-contract.md)
+  for what the maker may rely on there (including the `child` peer relation its leg-B return path
+  sets), and for what the Rust connector does instead. `evm:84532` `chainProviders` point at the deployed `RollingSwapChannel`
   (connector#974) and the fleet's standard `TokenNetworkRegistry`/USDC. See that file's own
   `_..._comment` fields for every placeholder it carries and why.
 - `infra/linode-relay/nginx/node.conf.template` + the rendered `nginx/conf.d/node.conf` — two new

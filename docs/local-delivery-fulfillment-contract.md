@@ -20,6 +20,10 @@
 >
 > Kept because the peer-wire spec's §3.1 "legacy class" and several ADRs cite it as the record of
 > what the prototype promised.
+>
+> For the _other_ frozen seam the same embedder depends on — the peer relation, and the `child`
+> exemption from per-packet settlement claims — see
+> [`embedded-connector-peer-relation-contract.md`](embedded-connector-peer-relation-contract.md).
 
 **Status:** Superseded (was: Normative, issue #309) · **Consumers (historical):**
 `@toon-protocol/sdk` swap handler
