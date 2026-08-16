@@ -209,9 +209,12 @@ handled the packet ([ADR 0014](docs/adr/0014-metrics-surface-and-packet-correlat
 
 To run it as a container instead, see
 [`deploy/connector-rust/README.md`](deploy/connector-rust/README.md) — the published image is
-`ghcr.io/toon-protocol/connector`, tagged `rust-sha-<short>` per commit and `rust-main` plus
-`rust-release` on the default branch (#645, #989). Pin an exact `rust-sha-` tag; the other two
-move. The separate
+`ghcr.io/toon-protocol/connector`, tagged `rust-sha-<short>` per commit and `rust-main` on the
+default branch (#645, #989). Pin an exact `rust-sha-` tag; `rust-main` moves. A third tag,
+`rust-release`, is the devnet fleet's PROMOTION tag — it is not a build output and moves only by
+a `promote-to-fleet.yml` dispatch
+([ADR 0041](docs/adr/0041-a-moving-tag-carries-the-fleets-committed-config-or-it-does-not-move.md)).
+The separate
 `ghcr.io/toon-protocol/connector-rust` package this used to name is retired and gets no new
 builds.
 

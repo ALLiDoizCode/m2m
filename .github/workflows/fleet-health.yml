@@ -1,0 +1,640 @@
+# Fleet health — the post-redeploy check Watchtower does not do (toon-meta#403).
+#
+# ── WHY THIS EXISTS ─────────────────────────────────────────────────────────
+# Every TOON-owned container on both devnet boxes now follows a moving image
+# tag and is recreated by a label-scoped Watchtower within ~60s of that tag
+# moving (infra/linode-relay/docker-compose.relay.watchtower.yml). Watchtower
+# does no health gating whatsoever: it pulls, recreates, and reports success
+# the moment the container is created. Whether the process inside then stayed
+# up, or served anything, is not a question it asks.
+#
+# toon-meta#403 recorded that gap in its own follow-up list and never filed it:
+#
+#   "(recommended) an optional post-redeploy smoke test per box (Watchtower
+#    does no health-gating; a bad image auto-deploys and the container just
+#    crash-loops — a lifecycle hook or external check should alert)."
+#
+# It has since been paid for twice:
+#
+#   * 2026-08-16, swap#134 added a REQUIRED `chainProviders[].tokenNetworkAddress`
+#     to the maker's config schema. It merged green, `swap:release` moved,
+#     Watchtower recreated `swap-node`, and the maker crash-looped on
+#     `[INVALID_CONFIG] chainProviders[0].tokenNetworkAddress MUST be a
+#     non-empty string` — because the box's bind-mounted `swap.config.json`
+#     is not part of the image and nothing had added the key. The maker was
+#     down until a human noticed and hand-edited the file. Nothing alerted.
+#   * connector#993 / connector#972: a recreate changes a container's Docker
+#     network IP, and a long-lived nginx that resolved the OLD one at config-load
+#     answers `502 connect() failed (111: Connection refused)` while the
+#     container itself is perfectly `Up`. "The container being `Up` is not
+#     sufficient evidence" is connector#972's own wording, learned the same way.
+#
+# Those are two DIFFERENT failure shapes and this workflow checks for both:
+# a container that is restarting, and a container that is running but whose
+# door is shut. Neither is visible from `docker ps` alone.
+#
+# ── WHAT REACHES A HUMAN ────────────────────────────────────────────────────
+# Detection nobody sees is worth nothing, so the alert is an ISSUE, not a red
+# tick on a cron nobody watches:
+#
+#   * On failure this opens (or updates) a single rolling GitHub issue in this
+#     repo titled `[fleet-health] devnet fleet is unhealthy`, labelled
+#     `needs:human` + `bug`, carrying the full probe table and the exact
+#     rollback command. `needs:human` is the org's existing human-queue label
+#     (toon-meta#347), so the alert lands in a queue that is already swept
+#     rather than inventing a channel of its own. Opening an issue also emails
+#     everyone watching the repo, which a failed scheduled run does not do
+#     reliably (GitHub mails only the cron's last editor).
+#   * A subsequent green run COMMENTS the recovery on that issue and CLOSES
+#     it, so the issue's open/closed state is the fleet's current verdict and
+#     a human never has to work out whether an old alert is still live.
+#   * The job itself also fails, so the promotion path below
+#     (`promote-to-fleet.yml` calls this workflow after it moves a tag) goes
+#     red instead of green when the thing it just deployed did not come up.
+#
+# ── HOW IT REACHES THE BOXES ────────────────────────────────────────────────
+# Same model as fleet-ops.yml and funded-ops.yml, and for the same reason: an
+# SSH key with root on the devnet boxes reaches a GitHub-hosted runner
+# executing THIS reviewed, committed file, and never an agent sandbox. The box
+# IP is resolved from its Linode label per run, never hardcoded. This workflow
+# is strictly READ-ONLY on the box — it runs `docker inspect`, `docker logs`
+# and `curl` against loopback, and nothing else. There is no `apply` input
+# because there is nothing here to apply.
+#
+# ── WHAT IT PROBES, AND WHY THAT SET ────────────────────────────────────────
+# The watched set is not a hardcoded service list. It is discovered on the box
+# as "every container carrying the Watchtower enable label" — precisely the
+# set of containers that can change underneath us without a human, which is
+# precisely the set at risk. A labelled service with no probe defined in
+# `PROBES` below is a FAILURE, not a skip: opting a new service into
+# auto-redeploy without saying how to tell whether it is serving is the
+# omission this file exists to refuse.
+#
+# Today that discovers seven containers: `connector-rust`, `announce`, `relay`
+# and `swap-node` on the relay box, `connector-rust`, `announce` and `store`
+# on the store box.
+#
+# Two probe layers, because each catches what the other cannot:
+#
+#   1. ON-BOX. Container state (running, not restarting) sampled TWICE with a
+#      gap, so a crash-loop — which presents as `Up 3 seconds` on any single
+#      look — is caught by a rising `RestartCount`. Then a real serving probe
+#      per service: an HTTP request the process can only answer once it has
+#      booted, read its keys and bound its socket.
+#   2. FROM THE RUNNER, over the public internet. This is the layer that
+#      catches connector#993's stale-nginx-upstream 502: on-box loopback
+#      reaches the container directly and looks perfect while the public edge
+#      in front of it is broken. Only an off-box request crosses nginx.
+#
+# ── PROBE CHOICES (measured live 2026-08-16, both boxes) ────────────────────
+#   * `connector-rust` — `GET /ilp/identity` → 200. The Rust connector has NO
+#     `/health`: `/health`, `/healthz`, `/status` and `/` all 404, and
+#     `/metrics` is 404 on the relay but 401 on the store, so neither is a
+#     uniform probe. `/ilp/identity` 200s only once the process is serving AND
+#     has read its signer key file, which is why fleet-ops.yml's own post-write
+#     gate already uses exactly it.
+#   * `swap-node` — `GET :8080/health` → 200 (`blsPort`). Loopback-published,
+#     so this is on-box only; there is no public swap health surface.
+#   * `relay` / `store` — these two DEFINE a container HEALTHCHECK, so Docker's
+#     own verdict is read instead of duplicating their probe here. The other
+#     three (`connector-rust`, `announce`, `swap-node`) define none, which is
+#     why they need explicit probes.
+#   * `announce` — a loop publisher with no port and no healthcheck: it
+#     publishes, prints a verdict line, sleeps 240s, repeats. The only honest
+#     "is it working" signal is that verdict line, so the probe greps the last
+#     15 minutes of its log for `[announce] OK` — three loop iterations' worth
+#     of chances, so one slow publish is not an alert. This is the same
+#     greppable verdict fleet-ops.yml's `announce` operation reads back.
+#   * Public edges — `proxy.relay…/ilp/identity` and `proxy.ario…/ilp/identity`
+#     expect 200; `relay-ws…/` expects **426 Upgrade Required**, which is the
+#     honest liveness signal for a WebSocket-only endpoint (a 200 there would
+#     mean something other than the relay is answering).
+#
+# `dvm.devnet.toonprotocol.dev` (the store app's public name) is deliberately
+# NOT probed: it is currently unreachable for an unrelated reason — the box
+# serves a certificate whose only SAN is `proxy.ario.devnet.toonprotocol.dev`,
+# so every request fails the TLS handshake. Adding it would make this workflow
+# alert forever on a pre-existing cert gap rather than on a deploy. Tracked
+# separately; see docs/operators/fleet-release-and-health.md.
+
+name: fleet-health
+
+on:
+  schedule:
+    # Every 15 minutes. Watchtower's own poll is 60s, so this is not a race to
+    # beat a bad deploy — nothing here can prevent one. It bounds how long a
+    # dead service stays unnoticed, which is the thing that actually hurt: the
+    # swap#134 crash-loop was found by a human happening to look.
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      box:
+        description: 'Which box to probe.'
+        type: choice
+        required: false
+        default: all
+        options: [all, relay, ario]
+      settle_seconds:
+        description: 'Seconds to wait before probing (let a just-moved tag land).'
+        type: string
+        required: false
+        default: '0'
+  # Called by promote-to-fleet.yml right after it moves `:rust-release`, which
+  # is what makes promotion a gated deploy rather than a hopeful one.
+  workflow_call:
+    inputs:
+      box:
+        type: string
+        required: false
+        default: all
+      settle_seconds:
+        type: string
+        required: false
+        default: '0'
+  pull_request:
+    # The config-compat job below reads committed box config, so a PR editing
+    # one must re-run it. The box-probing jobs skip on `pull_request` — they
+    # need a secret a fork PR must never see.
+    paths:
+      - 'infra/linode-relay/swap.config.json'
+      - 'infra/linode-relay/connector-rust.toml'
+      - 'infra/linode-store/connector-rust.toml'
+      - '.github/workflows/fleet-health.yml'
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  # Never two health runs at once — the second would race the first's
+  # open/close of the rolling alert issue and could close an alert the other
+  # run had just opened.
+  group: fleet-health
+  cancel-in-progress: false
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Does the image the fleet is ABOUT to run (or already runs) still accept
+  # the config the fleet actually has?
+  #
+  # This is the swap#134 check, and it needs no box and no credential: the
+  # maker's config is committed here (infra/linode-relay/swap.config.json is
+  # the file bind-mounted at /app/config/swap.config.json), and the image is
+  # public. Booting one against the other reproduces exactly what Watchtower
+  # will do, minutes before or after it does it.
+  #
+  # It runs on this cron rather than only in CI on purpose. A connector PR is
+  # not what breaks this: swap merging a new REQUIRED config key is, and that
+  # happens in another repo on its own schedule. CI here would never see it.
+  # The preventive half lives where the tag actually moves — swap's
+  # publish-swap-image.yml boots the image it just built against THIS file
+  # before it lets `:release` move (see docs/operators/fleet-release-and-health.md).
+  # This job is the backstop for when that gate is bypassed or a config edit
+  # lands here instead.
+  # ─────────────────────────────────────────────────────────────────────────
+  config-compat:
+    name: Committed box config still boots the release image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      verdict: ${{ steps.compat.outputs.verdict }}
+      detail: ${{ steps.compat.outputs.detail }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Boot ghcr.io/toon-protocol/swap:release against the committed maker config
+        id: compat
+        run: |
+          set -uo pipefail
+          IMAGE=ghcr.io/toon-protocol/swap:release
+          CONFIG=infra/linode-relay/swap.config.json
+
+          docker pull -q "$IMAGE" || {
+            echo "verdict=inconclusive" >> "$GITHUB_OUTPUT"
+            echo "detail=could not pull $IMAGE" >> "$GITHUB_OUTPUT"
+            echo "::warning::could not pull $IMAGE — compat unproven this run"
+            exit 0
+          }
+
+          # The maker validates its whole config BEFORE allocating any
+          # resource (packages/swap/src/swap-node.ts `validateConfig`), so an
+          # incompatible config exits within a second or two. A COMPATIBLE one
+          # goes on to open sockets and dial a relay, and would run forever --
+          # hence the timeout. Surviving the timeout IS the pass condition;
+          # we are asking "was this config refused", not "does this node work".
+          set +e
+          OUTPUT=$(timeout 45 docker run --rm \
+            -v "$PWD/$CONFIG":/app/config/swap.config.json:ro \
+            "$IMAGE" 2>&1)
+          STATUS=$?
+          set -e
+
+          echo "----- container output -----"
+          echo "$OUTPUT"
+          echo "----- exit code: $STATUS -----"
+
+          # 124 = `timeout` killed a still-running process = the config was
+          # accepted and the node got as far as running. That is the pass.
+          if [ "$STATUS" -eq 124 ]; then
+            echo "verdict=ok" >> "$GITHUB_OUTPUT"
+            echo "detail=config accepted; node ran until killed at 45s" >> "$GITHUB_OUTPUT"
+            echo "✓ the committed maker config still boots the current :release image"
+            exit 0
+          fi
+
+          # INVALID_CONFIG is the maker's own name for "this config does not
+          # satisfy my schema" -- swap#134's failure mode exactly. Grep for it
+          # rather than trusting a bare nonzero exit, so an unrelated crash
+          # (an unreachable RPC, say) is not misreported as a config break.
+          if echo "$OUTPUT" | grep -q 'INVALID_CONFIG'; then
+            REASON=$(echo "$OUTPUT" | grep -o 'INVALID_CONFIG[^"]*' | head -1)
+            echo "verdict=incompatible" >> "$GITHUB_OUTPUT"
+            echo "detail=$REASON" >> "$GITHUB_OUTPUT"
+            echo "::error::$IMAGE REFUSES the committed $CONFIG — $REASON"
+            echo "::error::The relay box's swap-node will crash-loop on its next Watchtower recreate."
+            exit 1
+          fi
+
+          echo "verdict=inconclusive" >> "$GITHUB_OUTPUT"
+          echo "detail=exited $STATUS without INVALID_CONFIG" >> "$GITHUB_OUTPUT"
+          echo "::warning::$IMAGE exited $STATUS against the committed config, but not with INVALID_CONFIG — not a config-schema break, see output above"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # The box probes.
+  # ─────────────────────────────────────────────────────────────────────────
+  probe:
+    name: Probe ${{ matrix.box }}
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      # Never fail-fast: if the relay is down we still want the store's
+      # verdict in the same alert, not a cancelled job and half a picture.
+      fail-fast: false
+      matrix:
+        box: [relay, ario]
+    env:
+      BOX: ${{ matrix.box }}
+      LINODE_API: https://api.linode.com/v4
+    steps:
+      - name: Skip boxes this run did not ask for
+        id: scope
+        run: |
+          set -euo pipefail
+          WANT="${{ inputs.box || 'all' }}"
+          if [ "$WANT" != "all" ] && [ "$WANT" != "$BOX" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Not this run's box (asked for '$WANT')."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Settle
+        if: steps.scope.outputs.skip == 'false' && inputs.settle_seconds != '' && inputs.settle_seconds != '0'
+        run: |
+          set -euo pipefail
+          # Give Watchtower its 60s poll plus a pull and a boot before asking
+          # whether the new image came up. Only promote-to-fleet.yml sets this.
+          echo "Waiting ${{ inputs.settle_seconds }}s for the fleet to settle…"
+          sleep "${{ inputs.settle_seconds }}"
+
+      - name: Preconditions
+        if: steps.scope.outputs.skip == 'false'
+        env:
+          DEVNET_SSH_KEY: ${{ secrets.DEVNET_SSH_KEY }}
+          LINODE_CLI_TOKEN: ${{ secrets.LINODE_CLI_TOKEN }}
+        run: |
+          set -euo pipefail
+          fail=0
+          [ -n "${DEVNET_SSH_KEY:-}" ] || { echo "::error::DEVNET_SSH_KEY is not set — cannot reach a box (see fleet-ops.yml)."; fail=1; }
+          [ -n "${LINODE_CLI_TOKEN:-}" ] || { echo "::error::LINODE_CLI_TOKEN is not set — cannot resolve a box label to an IP."; fail=1; }
+          [ "$fail" -eq 0 ] || exit 1
+
+      - name: Resolve box IP from its Linode label
+        if: steps.scope.outputs.skip == 'false'
+        id: box
+        env:
+          LINODE_CLI_TOKEN: ${{ secrets.LINODE_CLI_TOKEN }}
+        run: |
+          set -euo pipefail
+          ip=$(curl -sf -H "Authorization: Bearer $LINODE_CLI_TOKEN" \
+                 "$LINODE_API/linode/instances" \
+               | jq -r --arg l "$BOX" '.data[] | select(.label==$l) | .ipv4[0]' | head -1)
+          if [ -z "$ip" ] || [ "$ip" = "null" ]; then
+            echo "::error::No Linode labelled '$BOX'."
+            exit 1
+          fi
+          echo "ip=$ip" >> "$GITHUB_OUTPUT"
+
+      - name: Install SSH key
+        if: steps.scope.outputs.skip == 'false'
+        env:
+          DEVNET_SSH_KEY: ${{ secrets.DEVNET_SSH_KEY }}
+          BOX_IP: ${{ steps.box.outputs.ip }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$DEVNET_SSH_KEY" > ~/.ssh/devnet
+          chmod 600 ~/.ssh/devnet
+          {
+            echo "Host devnet-box"
+            echo "  HostName $BOX_IP"
+            echo "  User root"
+            echo "  IdentityFile ~/.ssh/devnet"
+            echo "  IdentitiesOnly yes"
+            echo "  StrictHostKeyChecking accept-new"
+            echo "  ConnectTimeout 30"
+            echo "  ServerAliveInterval 30"
+          } > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+
+      - name: Probe
+        if: steps.scope.outputs.skip == 'false'
+        id: probe
+        env:
+          BOX_IP: ${{ steps.box.outputs.ip }}
+        run: |
+          set -uo pipefail
+          sshbox() { ssh -F ~/.ssh/config -o LogLevel=ERROR devnet-box "$@"; }
+
+          # ── On-box probe ────────────────────────────────────────────────
+          # One script, one connection, two samples. Emits TSV:
+          #   <OK|FAIL>\t<service>\t<check>\t<detail>
+          # so the reporting below needs no parsing cleverness and a new probe
+          # is one `case` arm.
+          REMOTE=$(cat <<'REMOTE_SCRIPT'
+          set -u
+          LABEL=com.centurylinklabs.watchtower.enable
+
+          names=$(docker ps -a --filter "label=${LABEL}=true" --format '{{.Names}}')
+          if [ -z "$names" ]; then
+            printf 'FAIL\t(fleet)\twatchtower-labelled containers\tnone found — either Watchtower manages nothing here or docker is unreachable\n'
+            exit 0
+          fi
+
+          # First sample of the restart counters, then the serving probes,
+          # then a second sample. The probes themselves take long enough that
+          # no extra sleep is needed to give a crash-loop time to show.
+          for n in $names; do
+            printf '%s %s\n' "$n" "$(docker inspect -f '{{.RestartCount}}' "$n" 2>/dev/null || echo -1)"
+          done > /tmp/fleet-health-sample1
+
+          for n in $names; do
+            svc=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$n" 2>/dev/null)
+            [ -n "$svc" ] || svc="$n"
+            status=$(docker inspect -f '{{.State.Status}}' "$n" 2>/dev/null || echo unknown)
+            restarting=$(docker inspect -f '{{.State.Restarting}}' "$n" 2>/dev/null || echo unknown)
+            health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$n" 2>/dev/null || echo none)
+
+            if [ "$status" != "running" ] || [ "$restarting" = "true" ]; then
+              printf 'FAIL\t%s\tcontainer state\tstatus=%s restarting=%s\n' "$svc" "$status" "$restarting"
+              continue
+            fi
+            printf 'OK\t%s\tcontainer state\tstatus=running\n' "$svc"
+
+            # Serving probe. An unknown service is a FAILURE by design: a
+            # service opted into auto-redeploy without a probe is the exact
+            # omission this file refuses.
+            case "$svc" in
+              connector-rust)
+                if curl -sf --max-time 10 http://127.0.0.1:4000/ilp/identity >/dev/null 2>&1; then
+                  printf 'OK\t%s\tGET :4000/ilp/identity\t200\n' "$svc"
+                else
+                  printf 'FAIL\t%s\tGET :4000/ilp/identity\tno 200 — up but not serving\n' "$svc"
+                fi
+                ;;
+              swap-node)
+                if curl -sf --max-time 10 http://127.0.0.1:8080/health >/dev/null 2>&1; then
+                  printf 'OK\t%s\tGET :8080/health\t200\n' "$svc"
+                else
+                  printf 'FAIL\t%s\tGET :8080/health\tno 200 — up but not serving\n' "$svc"
+                fi
+                ;;
+              relay|store)
+                # These two define a container HEALTHCHECK; read its verdict
+                # rather than restating their probe here.
+                if [ "$health" = "healthy" ]; then
+                  printf 'OK\t%s\tdocker healthcheck\thealthy\n' "$svc"
+                elif [ "$health" = "none" ]; then
+                  printf 'FAIL\t%s\tdocker healthcheck\tthis service used to define one and no longer does — probe is now blind\n' "$svc"
+                else
+                  printf 'FAIL\t%s\tdocker healthcheck\t%s\n' "$svc" "$health"
+                fi
+                ;;
+              announce)
+                # A loop publisher: no port, no healthcheck. Its printed
+                # verdict line is the only honest signal. 15m covers ~3 of its
+                # 240s iterations, so one slow publish is not an alert.
+                if docker logs --since 15m "$n" 2>&1 | grep -q '\[announce\] OK'; then
+                  printf 'OK\t%s\t[announce] OK within 15m\tpublishing\n' "$svc"
+                else
+                  last=$(docker logs --tail 3 "$n" 2>&1 | tr '\n\t' '  ' | cut -c1-200)
+                  printf 'FAIL\t%s\t[announce] OK within 15m\tno success verdict in 15m; last: %s\n' "$svc" "$last"
+                fi
+                ;;
+              *)
+                printf 'FAIL\t%s\tserving probe\tNO PROBE DEFINED for a Watchtower-managed service — add one to fleet-health.yml before opting a service into auto-redeploy\n' "$svc"
+                ;;
+            esac
+          done
+
+          # Second restart sample. A rising counter is a crash-loop even
+          # though every single-shot look above said `running`.
+          for n in $names; do
+            svc=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$n" 2>/dev/null)
+            [ -n "$svc" ] || svc="$n"
+            before=$(awk -v k="$n" '$1==k {print $2}' /tmp/fleet-health-sample1)
+            after=$(docker inspect -f '{{.RestartCount}}' "$n" 2>/dev/null || echo -1)
+            if [ -n "$before" ] && [ "$after" -gt "$before" ] 2>/dev/null; then
+              printf 'FAIL\t%s\tcrash-loop\tRestartCount rose %s -> %s during this probe\n' "$svc" "$before" "$after"
+            else
+              printf 'OK\t%s\tcrash-loop\tRestartCount steady at %s\n' "$svc" "$after"
+            fi
+          done
+          rm -f /tmp/fleet-health-sample1
+          REMOTE_SCRIPT
+          )
+
+          sshbox "bash -s" <<< "$REMOTE" > /tmp/onbox.tsv 2>/tmp/onbox.err || true
+          if [ ! -s /tmp/onbox.tsv ]; then
+            printf 'FAIL\t(box)\tssh probe\tproduced no output: %s\n' "$(head -c 300 /tmp/onbox.err)" > /tmp/onbox.tsv
+          fi
+
+          # ── Public-edge probe, FROM THE RUNNER ──────────────────────────
+          # The layer that catches connector#993: loopback reaches the
+          # container directly, so an nginx holding a stale upstream IP looks
+          # perfect from on-box and 502s to the world. Only an off-box request
+          # crosses nginx.
+          case "$BOX" in
+            relay)
+              EDGES="https://proxy.relay.devnet.toonprotocol.dev/ilp/identity=200 https://relay-ws.devnet.toonprotocol.dev/=426"
+              ;;
+            ario)
+              EDGES="https://proxy.ario.devnet.toonprotocol.dev/ilp/identity=200"
+              ;;
+          esac
+          for spec in $EDGES; do
+            url="${spec%=*}"
+            want="${spec##*=}"
+            got=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$url" || echo 000)
+            if [ "$got" = "$want" ]; then
+              printf 'OK\t(public edge)\t%s\t%s\n' "$url" "$got" >> /tmp/onbox.tsv
+            else
+              printf 'FAIL\t(public edge)\t%s\texpected %s, got %s\n' "$url" "$want" "$got" >> /tmp/onbox.tsv
+            fi
+          done
+
+          # ── Verdict + report ────────────────────────────────────────────
+          FAILS=$(grep -c '^FAIL' /tmp/onbox.tsv || true)
+          {
+            echo "### \`$BOX\` — $( [ "$FAILS" -eq 0 ] && echo 'healthy' || echo "**$FAILS failing check(s)**" )"
+            echo ""
+            echo "| | service | check | detail |"
+            echo "|---|---|---|---|"
+            while IFS=$'\t' read -r st svc chk det; do
+              icon=$( [ "$st" = "OK" ] && echo '✅' || echo '❌' )
+              echo "| $icon | \`$svc\` | $chk | $det |"
+            done < /tmp/onbox.tsv
+            echo ""
+          } > /tmp/report.md
+
+          cat /tmp/report.md >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/onbox.tsv
+
+          # Stash the report for the alert job. Multi-line, so via a file
+          # artifact rather than an output.
+          cp /tmp/report.md "/tmp/report-$BOX.md"
+          echo "fails=$FAILS" >> "$GITHUB_OUTPUT"
+
+          [ "$FAILS" -eq 0 ] || exit 1
+
+      - name: Upload report
+        if: always() && steps.scope.outputs.skip == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fleet-health-${{ matrix.box }}
+          path: /tmp/report-${{ matrix.box }}.md
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Remove SSH key
+        if: always()
+        run: rm -f ~/.ssh/devnet ~/.ssh/config
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # The alert. This is the half that makes detection worth anything.
+  # ─────────────────────────────────────────────────────────────────────────
+  alert:
+    name: Alert a human
+    needs: [probe, config-compat]
+    # `always()` so this runs on the failure it exists to report. A skipped
+    # `probe` (a PR run, or a dispatch scoped to one box) must not be treated
+    # as a fleet-wide verdict, which the `result` checks below take care of.
+    if: always() && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # One rolling issue, matched by exact title. Not one issue per failure:
+      # a fleet that stays down for an hour would otherwise open four.
+      ALERT_TITLE: '[fleet-health] devnet fleet is unhealthy'
+    steps:
+      - name: Download reports
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/reports
+          pattern: fleet-health-*
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Open, update or close the rolling alert issue
+        run: |
+          set -euo pipefail
+
+          PROBE='${{ needs.probe.result }}'
+          COMPAT='${{ needs.config-compat.result }}'
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          # A cancelled or skipped upstream job is not evidence of health, so
+          # only `success` on BOTH counts as green. Anything else alerts.
+          if [ "$PROBE" = "success" ] && [ "$COMPAT" = "success" ]; then
+            VERDICT=healthy
+          else
+            VERDICT=unhealthy
+          fi
+          echo "probe=$PROBE compat=$COMPAT -> $VERDICT"
+
+          EXISTING=$(gh issue list --repo "${{ github.repository }}" --state open \
+                       --search "\"$ALERT_TITLE\" in:title" \
+                       --json number,title \
+                       --jq ".[] | select(.title == \"$ALERT_TITLE\") | .number" | head -1)
+
+          if [ "$VERDICT" = "healthy" ]; then
+            if [ -n "$EXISTING" ]; then
+              gh issue comment "$EXISTING" --repo "${{ github.repository }}" --body \
+                "✅ Recovered — every probe passed in [this run]($RUN_URL). Closing; a later failure reopens a fresh alert."
+              gh issue close "$EXISTING" --repo "${{ github.repository }}" \
+                --reason completed
+              echo "Closed alert #$EXISTING."
+            else
+              echo "Fleet healthy, no open alert. Nothing to do."
+            fi
+            exit 0
+          fi
+
+          BODY=/tmp/alert-body.md
+          {
+            echo "One or more Watchtower-managed devnet services failed their health probe."
+            echo ""
+            echo "**Run:** $RUN_URL"
+            echo "**Box probes:** \`$PROBE\` · **Config compatibility:** \`$COMPAT\`"
+            echo ""
+            if [ "$COMPAT" != "success" ]; then
+              echo "> ⚠️ **The committed box config and the current \`:release\` image disagree.**"
+              echo "> \`${{ needs.config-compat.outputs.detail }}\`"
+              echo ">"
+              echo "> This is the swap#134 shape: an image requiring a config key the box's"
+              echo "> bind-mounted file does not have. The service will crash-loop on its next"
+              echo "> recreate even if it happens to be up right now. Fix the committed config"
+              echo "> in \`infra/\` and apply it with \`fleet-ops.yml\`."
+              echo ""
+            fi
+            for f in /tmp/reports/*.md; do
+              [ -e "$f" ] && cat "$f"
+            done
+            echo ""
+            echo "### Recovering"
+            echo ""
+            echo "Every watched service follows a moving tag, so a rollback is a retag, not a rebuild."
+            echo "Immutable \`sha-*\` / \`rust-sha-*\` tags for every previous build stay pullable from GHCR."
+            echo ""
+            echo '```sh'
+            echo '# Roll a service back to a known-good immutable tag (from a machine with docker + ghcr login):'
+            echo 'docker buildx imagetools create -t ghcr.io/toon-protocol/<pkg>:<moving-tag> ghcr.io/toon-protocol/<pkg>:<known-good-sha-tag>'
+            echo '# …then let Watchtower pick it up (~60s), or force it now:'
+            echo '#   gh workflow run fleet-ops.yml -f box=<relay|ario> -f operation=deploy -f service=<svc> -f apply=true'
+            echo '```'
+            echo ""
+            echo "Full runbook: \`docs/operators/fleet-release-and-health.md\`."
+            echo ""
+            echo "<sub>Opened automatically by \`.github/workflows/fleet-health.yml\`. It closes itself when a later run is green.</sub>"
+          } > "$BODY"
+
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "${{ github.repository }}" --body-file "$BODY"
+            echo "Updated alert #$EXISTING."
+          else
+            gh issue create --repo "${{ github.repository }}" \
+              --title "$ALERT_TITLE" \
+              --label "needs:human" --label "bug" \
+              --body-file "$BODY"
+            echo "Opened a new alert."
+          fi
+
+          # The run itself must also be red, so a promote-to-fleet call that
+          # deployed something broken does not report success.
+          echo "::error::devnet fleet is unhealthy — see the alert issue"
+          exit 1

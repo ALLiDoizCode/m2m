@@ -99,11 +99,12 @@ outside this repository.
 Neither connector-internal nor wire law: decisions about how the fleet is run, migrated, or
 how another repository is regarded.
 
-| #                                                                    | Decision                                                                | Status                                                 |
-| -------------------------------------------------------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------ |
-| [0013](0013-cut-over-through-a-parallel-address-space.md)            | The Rust fleet runs in parallel under its own address space             | current                                                |
-| [0017](0017-the-typescript-connector-is-a-prototype.md)              | The TypeScript connector is a prototype, not a reference implementation | current — a judgement about a **different** repository |
-| [0030](0030-an-operator-announces-a-node-the-node-still-does-not.md) | An operator announces a node; the node still does not                   | current — the operational counterpart to 0022          |
+| #                                                                                    | Decision                                                                | Status                                                   |
+| ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- | -------------------------------------------------------- |
+| [0013](0013-cut-over-through-a-parallel-address-space.md)                            | The Rust fleet runs in parallel under its own address space             | current                                                  |
+| [0017](0017-the-typescript-connector-is-a-prototype.md)                              | The TypeScript connector is a prototype, not a reference implementation | current — a judgement about a **different** repository   |
+| [0030](0030-an-operator-announces-a-node-the-node-still-does-not.md)                 | An operator announces a node; the node still does not                   | current — the operational counterpart to 0022            |
+| [0041](0041-a-moving-tag-carries-the-fleets-committed-config-or-it-does-not-move.md) | A moving tag carries the fleet's committed config, or it does not move  | current — bounds toon-meta#403's auto-on-green trade-off |
 
 ---
 
