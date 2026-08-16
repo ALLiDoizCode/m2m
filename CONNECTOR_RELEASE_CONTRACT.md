@@ -7,10 +7,10 @@
 > `@toon-protocol/connector` versions and `ghcr.io/toon-protocol/connector` tags are
 > unaffected and the guarantees below still hold for them. The Rust connector's image
 > is published by `.github/workflows/publish-connector-rust-image.yml` to that same
-> `ghcr.io/toon-protocol/connector` package, under `rust-sha-<short>` and `rust-main`
-> tags (#645; the separate `ghcr.io/toon-protocol/connector-rust` package it used to
-> write to is retired and receives no new builds). It does not yet have a written
-> contract.
+> `ghcr.io/toon-protocol/connector` package, under `rust-sha-<short>`, `rust-main` and
+> `rust-release` tags (#645, #989; the separate `ghcr.io/toon-protocol/connector-rust`
+> package it used to write to is retired and receives no new builds). It does not yet
+> have a written contract.
 
 This document describes the supply-chain guarantees the connector project makes
 about its published artifacts (npm package and GHCR container image), and the
