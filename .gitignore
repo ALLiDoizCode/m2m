@@ -134,6 +134,19 @@ infra/linode-store/*.secret
 infra/linode-relay/*.secret
 deploy/connector-rust/*.secret
 
+# Operator write-key allowlists (issue #1003). An `[operator] write_keys_file`
+# points at one of these: one 64-hex ed25519 PUBLIC key per line, so unlike
+# every other rule in this block it holds no secret and committing one would
+# leak nothing. It is ignored for the OTHER reason a file exists here — ADR
+# 0008 revokes write authority by removing a key and restarting, which behind
+# a file is an edit on the box. A committed allowlist would put that decision
+# back behind a pull request, and would re-create exactly the two-sources-of-
+# truth drift #1003 closed. Distinct extension from `*.secret` on purpose:
+# calling public key material a secret teaches the wrong handling for it.
+infra/linode-store/*.allow
+infra/linode-relay/*.allow
+deploy/connector-rust/*.allow
+
 # Store-box gas-station Solana fee-payer — real key material (128-char hex
 # Ed25519), never committed. Was tracked until the rotation that removed it;
 # the pre-rotation key remains in git history, so the ROTATION (not this

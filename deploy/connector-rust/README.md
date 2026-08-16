@@ -100,6 +100,17 @@ openssl rand -hex 32
 Paste the output into `deploy/connector-rust/connector.toml`'s
 `operator.bearer_token`, replacing the `CHANGE-ME-...` placeholder.
 
+> **If the config you are writing will be committed, use the file form
+> instead** (issue #1003): write the token to a file, name it as
+> `bearer_token_file = "/app/data/operator-bearer-token"`, and bind-mount the
+> file at that path (`chmod 600`, `chown 10001:10001`). This quickstart's
+> `connector.toml` keeps the literal because it is a local template that
+> never holds a real token; every deployed config in this repo is public, and
+> a literal there is a credential in a public repository. Setting both forms
+> is refused at load — exactly one of them says where the token comes from.
+> See `infra/linode-store/connector-rust.toml`'s `[operator]` header for the
+> deployed shape.
+
 ## 3. Generate an operator write key
 
 Every write (currently `POST /packets`) requires an RFC 9421 signature from
@@ -118,6 +129,13 @@ replacing the placeholder (which is deliberately not 64 hex characters, so
 the file refuses to load until you do this). Keep `operator.pem` -- it is
 the private key an operator client signs writes with; nothing in this
 directory reads it automatically.
+
+> The file form is `write_keys_file = "/app/data/operator-write-keys"`, one
+> 64-hex public key per line with `#` comments (issue #1003). Public key
+> material, so this one is not about secrecy: ADR 0008 revokes write
+> authority by removing a key and restarting, and behind a file that is an
+> edit on the box rather than a pull request and a promotion. Use it for
+> anything deployed.
 
 ## 4. Edit the route(s)
 

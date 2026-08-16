@@ -66,14 +66,19 @@ pub enum ConfigError {
     SignerKmsIdEmpty,
 
     #[error(
-        "the [operator] section is present but bearer_token is empty: \
-         the operator surface would have no read authentication"
+        "the [operator] section is present but names no bearer token, or an empty one: the \
+         operator surface would have no read authentication. Set exactly one of \
+         'bearer_token_file = \"/app/data/…\"' (what a deployed node should use -- this \
+         repository is public, so a committed config must not carry the literal) or \
+         'bearer_token = \"…\"'"
     )]
     OperatorMissingBearerToken,
 
     #[error(
-        "the [operator] section is present but write_keys is empty: \
-         the operator surface would accept writes from no one"
+        "the [operator] section is present but names no write keys: the operator surface \
+         would accept writes from no one. Set exactly one of 'write_keys_file = \
+         \"/app/data/…\"' (the deployed form -- a file an operator can edit to revoke, which \
+         a committed literal is not) or 'write_keys = [\"…\"]'"
     )]
     OperatorNoWriteKeys,
 
@@ -82,6 +87,67 @@ pub enum ConfigError {
          (a 32-byte ed25519 public key)"
     )]
     OperatorInvalidWriteKey { value: String },
+
+    #[error(
+        "the [operator] section sets both '{literal}' and '{file}': exactly one of them says \
+         where this setting's value comes from, and two answers is not a merge -- it is an \
+         unanswerable question about which one gates the operator surface, with the losing \
+         value left in the file looking authoritative. Keep '{file}' (the deployed form -- \
+         this repository is public, so a committed config must not carry the literal) and \
+         delete '{literal}'; see docs/operators/key-rotation-runbook.md"
+    )]
+    OperatorSettingAmbiguous {
+        literal: &'static str,
+        file: &'static str,
+    },
+
+    #[error(
+        "the [operator] section sets '{setting} = {path}', which does not exist or is not a \
+         file: an operator surface that cannot read its own authentication authenticates \
+         nobody, so this is refused at load rather than becoming a surface that is enabled \
+         and quietly rejects every request. The path is resolved the same way '[signer] \
+         key_file' is -- relative to the process's working directory, so write an absolute \
+         path; see docs/operators/key-rotation-runbook.md"
+    )]
+    OperatorFileNotFound {
+        setting: &'static str,
+        path: PathBuf,
+    },
+
+    #[error(
+        "the [operator] section sets '{setting} = {path}', which could not be read as text: \
+         {source} -- check the file's permissions inside the container (a secret file is \
+         usually mode 600 and must be owned by the uid the connector runs as); see \
+         docs/operators/key-rotation-runbook.md"
+    )]
+    OperatorFileUnreadable {
+        setting: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error(
+        "the [operator] section sets '{setting} = {path}', which carries nothing once \
+         whitespace and comments are stripped: an empty file is the same unauthenticated \
+         surface an empty literal would be, and a truncated or half-written file is the usual \
+         cause -- rewrite it; see docs/operators/key-rotation-runbook.md"
+    )]
+    OperatorFileEmpty {
+        setting: &'static str,
+        path: PathBuf,
+    },
+
+    #[error(
+        "invalid operator write_keys_file entry at {path}:{line}: '{value}' must be 64 hex \
+         characters (a 32-byte ed25519 public key). One key per line, '#' starts a comment; \
+         see docs/operators/key-rotation-runbook.md"
+    )]
+    OperatorWriteKeysFileInvalidKey {
+        path: PathBuf,
+        line: usize,
+        value: String,
+    },
 
     #[error(
         "route '{prefix}' must set exactly one of 'handler_url' or 'peer_id', but neither is set"
