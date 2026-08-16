@@ -79,7 +79,7 @@ on:
         default: box-status
         options: [box-status, config-read, pin-verify, config-apply, restart, deploy, announce]
       service:
-        description: "restart/deploy: compose service name (connector-rust, relay, store, nginx, faucet, swap-node on relay). announce: which resident publisher to force -- announce (default) or swap-announce (relay only, issue #983)."
+        description: "restart/deploy: compose service name (connector-rust, relay, store, nginx, faucet; swap-node and watchtower are relay-only). announce: which resident publisher to force -- announce (default) or swap-announce (relay only, issue #983)."
         type: string
         required: false
         default: "connector-rust"
@@ -230,10 +230,19 @@ jobs:
           # the two loops sign under two different identities and must be
           # forceable independently. Empty wherever the maker sidecar does
           # not exist, same convention as COMPOSE_ANNOUNCE on the faucet box.
+          #
+          # The relay's COMPOSE also carries docker-compose.relay.watchtower.yml
+          # (issue #988, toon-meta#403): the label-scoped Watchtower that
+          # auto-redeploys `swap-node` on a new `:release` digest lives ONLY
+          # on the relay box, alongside the maker it watches -- so
+          # `service=watchtower` resolves for `restart`/`deploy` there (and
+          # `deploy` is what brings it up on a box where it has never run,
+          # same as any other service this workflow targets) and nowhere
+          # else.
           case "$BOX" in
             relay)
               INFRA_DIR=infra/linode-relay
-              COMPOSE="docker compose -f infra/linode-relay/docker-compose.relay.yml -f infra/linode-relay/docker-compose.relay.rust.yml -f infra/linode-relay/docker-compose.relay.swap.yml"
+              COMPOSE="docker compose -f infra/linode-relay/docker-compose.relay.yml -f infra/linode-relay/docker-compose.relay.rust.yml -f infra/linode-relay/docker-compose.relay.swap.yml -f infra/linode-relay/docker-compose.relay.watchtower.yml"
               COMPOSE_ANNOUNCE="$COMPOSE -f infra/linode-relay/docker-compose.relay.announce.yml"
               COMPOSE_SWAP_ANNOUNCE="$COMPOSE -f infra/linode-relay/docker-compose.relay.swap-announce.yml"
               ;;

@@ -166,6 +166,14 @@ const RELAY_SWAP_ANNOUNCE_OVERLAY: &str =
 const RELAY_SWAP_ANNOUNCE_CONFIG: &str =
     include_str!("../../../infra/linode-relay/connector-rust.swap-announce.toml");
 
+/// The relay box's label-scoped Watchtower overlay (issue #988,
+/// toon-meta#403's fleet-wide `:release` + Watchtower epic). It pins no
+/// connector image and publishes no ports, but it is still a committed,
+/// live-box service -- see [`SURVIVING_BOX_COMPOSE_FILES`] and
+/// [`swap_node_carries_the_watchtower_label_and_no_other_relay_service_does`].
+const RELAY_WATCHTOWER_OVERLAY: &str =
+    include_str!("../../../infra/linode-relay/docker-compose.relay.watchtower.yml");
+
 /// The relay box's RENDERED nginx config (the file its `nginx` service
 /// actually bind-mounts), read here so the endpoints the maker announces
 /// can be checked against the locations that serve them. See
@@ -1874,8 +1882,9 @@ fn every_fleet_overlay_pins_the_connector_repos_pin_of_record() {
 /// silently start (or stop) covering a box the moment the filesystem changed
 /// under it, rather than only when a real image or port regression landed.
 /// Two boxes: the store's three files (its base file plus its two overlays)
-/// and the relay's five (the same three, plus issue #983's rolling-swap
-/// maker sidecar and that maker's own announce overlay) -- see
+/// and the relay's six (the same three, plus issue #983's rolling-swap
+/// maker sidecar, that maker's own announce overlay, and issue #988's
+/// label-scoped Watchtower overlay) -- see
 /// [`no_surviving_box_pins_a_non_rust_connector_image`] and
 /// [`every_surviving_box_port_binding_is_host_ip_prefixed_or_allowlisted`].
 const SURVIVING_BOX_COMPOSE_FILES: &[(&str, &str)] = &[
@@ -1910,6 +1919,10 @@ const SURVIVING_BOX_COMPOSE_FILES: &[(&str, &str)] = &[
     (
         "infra/linode-relay/docker-compose.relay.swap-announce.yml",
         RELAY_SWAP_ANNOUNCE_OVERLAY,
+    ),
+    (
+        "infra/linode-relay/docker-compose.relay.watchtower.yml",
+        RELAY_WATCHTOWER_OVERLAY,
     ),
 ];
 
@@ -2006,4 +2019,120 @@ fn every_surviving_box_port_binding_is_host_ip_prefixed_or_allowlisted() {
             );
         }
     }
+}
+
+/// The label key a container must carry before `--label-enable` Watchtower
+/// will ever touch it (issue #988, toon-meta#403), and the exact opted-in
+/// `key: 'value'` line `swap-node` declares. Named once so a spelling
+/// mismatch between the swap-node service and the watchtower overlay's own
+/// documentation cannot go unnoticed by only one of the two assertions below.
+const WATCHTOWER_ENABLE_LABEL_KEY: &str = "com.centurylinklabs.watchtower.enable";
+const WATCHTOWER_ENABLE_LABEL: &str = "com.centurylinklabs.watchtower.enable: 'true'";
+
+/// Whether a compose file DECLARES [`WATCHTOWER_ENABLE_LABEL_KEY`], as
+/// opposed to merely mentioning it in a `#` comment (both relay files
+/// touching Watchtower explain the label in their headers). Keyed on the
+/// label key alone rather than the full `key: 'true'` line so that a leak
+/// spelled any other legal compose way -- `"true"`, `key=true` under a
+/// `labels:` sequence, `enable: true` -- still trips the assertion below,
+/// which is the whole point of scoping Watchtower by label.
+fn declares_watchtower_label(raw: &str) -> bool {
+    raw.lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .any(|line| line.contains(WATCHTOWER_ENABLE_LABEL_KEY))
+}
+
+/// Watchtower is label-scoped SPECIFICALLY so it can share the relay box
+/// with services that must never auto-update on an unattended image pull --
+/// `connector-rust`, `relay` and `nginx` all follow the fleet's reviewed-PR
+/// pin doctrine (`EXPECTED_CONNECTOR_TAG` below). `--label-enable` makes that
+/// true only as long as the enable label is not just present, but present on
+/// EXACTLY the one opted-in service. A label that leaked onto a second
+/// service (or a watchtower invocation missing `--label-enable`, which would
+/// make it fleet-wide again) is the failure this test exists to catch.
+#[test]
+fn swap_node_carries_the_watchtower_label_and_no_other_relay_service_does() {
+    assert!(
+        RELAY_SWAP_OVERLAY.contains(WATCHTOWER_ENABLE_LABEL),
+        "docker-compose.relay.swap.yml no longer carries `{WATCHTOWER_ENABLE_LABEL}` -- \
+         the label-scoped Watchtower overlay would then recreate nothing at all."
+    );
+    for (name, raw) in [
+        ("docker-compose.relay.yml", RELAY_BASE_COMPOSE),
+        ("docker-compose.relay.rust.yml", RELAY_RUST_OVERLAY),
+        ("docker-compose.relay.announce.yml", RELAY_ANNOUNCE_OVERLAY),
+        (
+            "docker-compose.relay.swap-announce.yml",
+            RELAY_SWAP_ANNOUNCE_OVERLAY,
+        ),
+        (
+            "docker-compose.relay.watchtower.yml",
+            RELAY_WATCHTOWER_OVERLAY,
+        ),
+    ] {
+        assert!(
+            !declares_watchtower_label(raw),
+            "{name} declares `{WATCHTOWER_ENABLE_LABEL_KEY}` -- only \
+             docker-compose.relay.swap.yml's `swap-node` service should opt \
+             into Watchtower's auto-redeploy-on-`:release` model \
+             (issue #988); every other relay service still follows the \
+             fleet's reviewed-PR pin doctrine and must never be recreated by \
+             an unattended background pull."
+        );
+    }
+
+    assert!(
+        RELAY_WATCHTOWER_OVERLAY.contains("--label-enable"),
+        "docker-compose.relay.watchtower.yml no longer passes `--label-enable` \
+         -- without it Watchtower auto-updates EVERY container on the box, \
+         not just the ones carrying `{WATCHTOWER_ENABLE_LABEL_KEY}`."
+    );
+}
+
+/// The maker's own moving watch target (issue #988, toon-meta#403): swap#131
+/// makes `publish-swap-image.yml` push `ghcr.io/toon-protocol/swap:release`
+/// on every green merge to `main`, and the label-scoped Watchtower above
+/// exists to recreate `swap-node` when that tag's digest moves. An immutable
+/// `sha-*` pin here would make Watchtower's `--interval` poll forever find
+/// nothing to do -- the tag never moves -- so this is the one place in the
+/// relay's compose set where a FLOATING tag is correct, deliberately the
+/// opposite of `relay_overlays_sharing_one_config_pin_one_image`'s own
+/// `rust-sha-` requirement for the connector image.
+#[test]
+fn swap_node_pins_the_moving_release_tag() {
+    assert!(
+        RELAY_SWAP_OVERLAY.contains("image: ghcr.io/toon-protocol/swap:release"),
+        "docker-compose.relay.swap.yml no longer pins \
+         `ghcr.io/toon-protocol/swap:release` -- the label-scoped Watchtower \
+         overlay watches exactly that tag; pinning an immutable `sha-*` tag \
+         again would make it permanently a no-op."
+    );
+}
+
+/// The watchtower service itself: an explicit version (never `:latest`,
+/// which would make a future Watchtower release change behaviour on this
+/// box with no reviewable diff) and `DOCKER_API_VERSION` set (the relay
+/// box's daemon serves API 1.44+; Watchtower's bundled client defaults to
+/// 1.25 and refuses a newer daemon without this pinned -- see the overlay's
+/// own header).
+#[test]
+fn relay_watchtower_pins_an_explicit_version_and_sets_docker_api_version() {
+    assert!(
+        RELAY_WATCHTOWER_OVERLAY.contains("image: containrrr/watchtower:")
+            && !RELAY_WATCHTOWER_OVERLAY.contains("containrrr/watchtower:latest"),
+        "docker-compose.relay.watchtower.yml must pin an explicit \
+         `containrrr/watchtower:<version>` tag, never `:latest`."
+    );
+    assert!(
+        RELAY_WATCHTOWER_OVERLAY.contains("DOCKER_API_VERSION"),
+        "docker-compose.relay.watchtower.yml no longer sets \
+         `DOCKER_API_VERSION` -- Watchtower's bundled docker client defaults \
+         to API 1.25 and refuses to talk to this box's 1.44+ daemon without \
+         it."
+    );
+    assert!(
+        RELAY_WATCHTOWER_OVERLAY.contains("/var/run/docker.sock:/var/run/docker.sock"),
+        "docker-compose.relay.watchtower.yml no longer mounts the docker \
+         socket -- Watchtower cannot recreate containers without it."
+    );
 }

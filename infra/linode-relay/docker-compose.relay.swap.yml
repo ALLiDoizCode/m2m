@@ -28,15 +28,23 @@
 #                  -f infra/linode-relay/docker-compose.relay.swap.yml \
 #                  up -d swap-node
 #
-# ── The image tag is pinned by immutable sha ────────────────────────────────
-# `sha-785b117` is the maker runtime image `publish-swap-image.yml` pushed on
-# the merge of toon-protocol/swap#126 (as PR swap#127) — the release that
-# added SWAP_AUTOGEN_IDENTITY (below). The publish tags
-# `ghcr.io/toon-protocol/swap` as `sha-<short-sha>` (immutable) and `main`
-# (floating, default-branch only); we pin the immutable `sha-` tag, mirroring
-# how this box's own `connector-rust` image is pinned by sha
-# (docker-compose.relay.rust.yml's own comment on `EXPECTED_CONNECTOR_TAG`).
-# Bump this line to a newer `sha-` tag when adopting a newer maker build.
+# ── The image tag tracks `:release`, watched by a label-scoped Watchtower ──
+# Issue #988 (toon-meta#403): repointed from the immutable `sha-785b117` pin
+# to the moving `ghcr.io/toon-protocol/swap:release` tag — swap#131 makes
+# `publish-swap-image.yml` move that tag on every green merge to `main`. The
+# sibling ./docker-compose.relay.watchtower.yml overlay's label-scoped
+# `containrrr/watchtower` recreates THIS service (and only this service, via
+# the `com.centurylinklabs.watchtower.enable` label below) whenever the tag's
+# digest changes — image-only, no git pull, no config churn. This
+# DELIBERATELY supersedes the immutable-sha deliberate-pin doctrine
+# (`EXPECTED_CONNECTOR_TAG`, still in force for the `connector-rust` image in
+# ./docker-compose.relay.rust.yml) for this one opted-in service — an
+# owner-decided trade-off accepted for devnet:
+# `:release` moving only on green `main` is the gate, not a human PR bumping
+# a sha. Proven live: Watchtower 1.7.1 auto-recreated this container on a new
+# `:release` digest (`Scanned=1 Updated=1`), the maker came back with its
+# persisted identity, and no other box service was touched. `sha-785b117`
+# (swap#127) remains available by immutable tag for a manual rollback.
 #
 # ── Identity + key material — self-generated on-box, never committed ────────
 # No mounted key file any more. `SWAP_AUTOGEN_IDENTITY=1` (set in
@@ -87,7 +95,14 @@
 
 services:
   swap-node:
-    image: ghcr.io/toon-protocol/swap:sha-785b117
+    image: ghcr.io/toon-protocol/swap:release
+    # Label-scoped Watchtower watch target (issue #988, toon-meta#403): only
+    # a container carrying this exact label is ever touched by
+    # ./docker-compose.relay.watchtower.yml's `--label-enable` Watchtower —
+    # see that file's header for why this is the one service opted into the
+    # auto-redeploy-on-`:release` model.
+    labels:
+      com.centurylinklabs.watchtower.enable: 'true'
     # SWAP_AUTOGEN_IDENTITY (toon-protocol/swap#126, merged as swap#127): the
     # maker self-generates a fresh BIP-39 mnemonic on FIRST boot, persists it
     # to an identity file on the `swap_node_state` volume below (idempotent —

@@ -11,9 +11,14 @@ material or funds this environment does not have.
 ## What is already done, repo-side
 
 - `infra/linode-relay/docker-compose.relay.swap.yml` — the `swap-node` compose service: pins the
-  maker's runtime image (currently a placeholder — see "What this leaves open" below), mounts
-  `swap.config.json` and a mnemonic key file (path only), binds its BTP (`3400`) and health
-  (`8080`) ports to loopback.
+  maker's runtime image to the moving `:release` tag, carries the
+  `com.centurylinklabs.watchtower.enable` label (connector#988) so Watchtower auto-redeploys it on
+  a new digest, mounts `swap.config.json`, and binds its BTP (`3400`) and health (`8080`) ports to
+  loopback.
+- `infra/linode-relay/docker-compose.relay.watchtower.yml` (connector#988, toon-meta#403) — a
+  label-scoped `containrrr/watchtower` that watches ONLY containers carrying that label (currently
+  just `swap-node`) and recreates them on a new image digest, image-only, no config touched. See
+  that file's own header for why `connector-rust`/`relay`/`nginx` are deliberately excluded.
 - `infra/linode-relay/swap.config.json` — a committed config skeleton expressing the standalone
   direct-dial wiring toon-meta#402 proved (swap#105): no `connector`/`connectorUrl`, so
   `toon-swap --config` auto-creates an embedded, parentless `ConnectorNode` gated on
@@ -30,24 +35,28 @@ material or funds this environment does not have.
   `connector announce` loop mirroring `docker-compose.relay.announce.yml`'s shape exactly (same
   tool, same publish-sleep-repeat pattern), but signing and paying as the maker's identity, not the
   relay's.
-- `.github/workflows/fleet-ops.yml` — `restart`/`deploy` recognize `service=swap-node` on the relay
-  box (via the relay's own `COMPOSE` now including `docker-compose.relay.swap.yml`); `announce`
-  recognizes `service=swap-announce` as a second, independently-forceable publisher alongside the
-  relay's own `announce`.
+- `.github/workflows/fleet-ops.yml` — `restart`/`deploy` recognize `service=swap-node` and
+  `service=watchtower` on the relay box (via the relay's own `COMPOSE` now including
+  `docker-compose.relay.swap.yml` and `docker-compose.relay.watchtower.yml`); `announce` recognizes
+  `service=swap-announce` as a second, independently-forceable publisher alongside the relay's own
+  `announce`.
 - `.gitignore` already covers `infra/linode-relay/*.key` and `*.secret` — nothing generated on the
   box in the steps below is committable by accident.
 
 ## What this leaves open
 
-- **The maker runtime image.** `docker-compose.relay.swap.yml` pins
-  `ghcr.io/toon-protocol/swap:PENDING-swap-124` — a placeholder. toon-protocol/swap#124 (the GHCR
-  publish workflow for the maker image) landed as toon-protocol/swap#125, which merged only after
-  the compose file was written; `publish-swap-image.yml` has since pushed `sha-5af4a75`. Repoint the
-  `image:` line to that immutable `sha-<short-sha>` tag (step 1 below). The compose service's
-  command invokes `node /app/dist/cli.js --config ...` directly (not the `toon-swap` bin) —
-  matching that Dockerfile's own `ENTRYPOINT`, which does the same and never puts
-  `node_modules/.bin` on `PATH` — so nothing else in this unit depends on the image's contents
-  beyond that file existing at that path under `WORKDIR /app`.
+- **The maker runtime image now tracks `:release`, not a step a human repoints per build.**
+  connector#988 (toon-meta#403) repointed `docker-compose.relay.swap.yml` from an immutable
+  `sha-<short-sha>` pin to the moving `ghcr.io/toon-protocol/swap:release` tag — swap#131 makes
+  `publish-swap-image.yml` push that tag on every green merge to `main` — and added a label-scoped
+  `containrrr/watchtower` (`docker-compose.relay.watchtower.yml`) that recreates `swap-node` when
+  the tag's digest moves. Step 1 below is therefore bringing the SIDECAR up once, not repointing an
+  image tag per release; `sha-<short-sha>` tags remain available for a manual rollback if a
+  `:release` build regresses. The compose service's command invokes
+  `node /app/dist/cli.js --config ...` directly (not the `toon-swap` bin) — matching the runtime
+  image's own `ENTRYPOINT`, which does the same and never puts `node_modules/.bin` on `PATH` — so
+  nothing else in this unit depends on the image's contents beyond that file existing at that path
+  under `WORKDIR /app`.
 - **`swap.config.json`'s `settlementPrivateKey` is an obviously-fake placeholder.**
   `packages/swap/src/cli.ts`'s env overlay (`SWAP_MNEMONIC`) does **not** derive or set this field —
   it only sets `mnemonic`/`secretKey`. A human must compute the on-box mnemonic's BIP-44
@@ -85,7 +94,7 @@ material or funds this environment does not have.
 
 | Step                                     |                Repo-side (this PR)                 |      Human-only (SSH, key material, funds)       |
 | ---------------------------------------- | :------------------------------------------------: | :----------------------------------------------: |
-| 1. Maker runtime image                   |                                                    |      ✅ swap#124 published; repoint the tag      |
+| 1. Maker runtime image                   |   ✅ `:release` pin + watchtower overlay (#988)    |     ✅ bring `watchtower` up (one-time SSH)      |
 | 2. Identity generation (BIP-39 mnemonic) |                                                    |          ✅ generated ON the relay box           |
 | 3. Extract the two derived key files     |                                                    | ✅ index-0 Nostr key, index-2 EVM settlement key |
 | 4. Announce-loop pay channel             |                                                    |          ✅ opened + funded (see above)          |
@@ -96,10 +105,12 @@ material or funds this environment does not have.
 
 ## Order — image through verification
 
-1. **Maker runtime image.** `publish-swap-image.yml` (toon-protocol/swap#125) has pushed
-   `ghcr.io/toon-protocol/swap:sha-5af4a75`; confirm it is still the tag you want, then edit
-   `infra/linode-relay/docker-compose.relay.swap.yml`'s `image:` line to name it (a small,
-   reviewable repo PR — not a live-box step by itself).
+1. **Maker runtime image.** `docker-compose.relay.swap.yml` already pins the moving
+   `ghcr.io/toon-protocol/swap:release` tag (connector#988) — no per-build repo edit needed any
+   more. The one remaining human step is bringing the label-scoped Watchtower up alongside the
+   sidecar (`docker compose ... up -d watchtower`, or dispatch `fleet-ops.yml` with
+   `box=relay operation=deploy service=watchtower apply=true`) so future `:release` moves are
+   picked up automatically; until then a new digest sits published but not deployed.
 
 2. **Identity generation.** On the relay box, generate a **fresh** BIP-39 mnemonic — the same
    `TOON_MNEMONIC` convention `infra/linode-relay/.env.example` already documents for this box's own
@@ -156,11 +167,18 @@ material or funds this environment does not have.
                   -f infra/linode-relay/docker-compose.relay.swap.yml \
                   -f infra/linode-relay/docker-compose.relay.swap-announce.yml \
                   up -d swap-announce
+   docker compose -f infra/linode-relay/docker-compose.relay.yml \
+                  -f infra/linode-relay/docker-compose.relay.rust.yml \
+                  -f infra/linode-relay/docker-compose.relay.swap.yml \
+                  -f infra/linode-relay/docker-compose.relay.watchtower.yml \
+                  up -d watchtower
    ```
 
    Or dispatch `fleet-ops.yml` with `box=relay`, `operation=deploy`, `service=swap-node`,
    `apply=true` (pulls the pin the repo names and recreates the container — run `restart` instead if
-   the pin is already correct), then `operation=announce`, `service=swap-announce`, `apply=true`.
+   the pin is already correct), then `operation=announce`, `service=swap-announce`, `apply=true`,
+   then `operation=deploy`, `service=watchtower`, `apply=true` (one-time — after this, a new
+   `:release` digest is picked up without a further dispatch).
 
 8. **Verify.**
 
@@ -194,3 +212,11 @@ resolves `swap-node` at all): no config file, no key material and no state volum
 `/swap/ilp*` nginx locations answer `502`/connection-refused once the container is stopped, which is
 the correct failure mode (not a silent fallback to the relay's own edge — `location =` blocks are
 exact-match and never fall through to `location /`).
+
+If a `:release` build regresses (Watchtower auto-recreates `swap-node` on ANY new digest — it does
+no health-gating, so a bad image auto-deploys and the container just crash-loops), roll back by
+hand to a known-good immutable `sha-<short-sha>` tag: edit `docker-compose.relay.swap.yml`'s
+`image:` line, `up -d --no-deps swap-node`, and either `stop watchtower` until a fix lands or accept
+that Watchtower will move `swap-node` straight back to `:release` on its next scan — the sha pin is
+a stopgap, not a way to opt this one container out of the label-scoped model permanently (remove the
+`com.centurylinklabs.watchtower.enable` label for that).
