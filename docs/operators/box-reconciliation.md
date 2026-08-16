@@ -6,9 +6,11 @@ cannot move the checkout at all. This is the runbook that gets them to a clean `
 losing the handful of values that legitimately exist only on the box.
 
 It is written for someone who wants to know what each command destroys **before** running it. Every
-step says what it changes, and every step is followed by the check that proves it worked. Nothing
-here restarts a service until the last section, which is separate on purpose: getting the checkout
-clean and redeploying from it are two decisions, not one.
+step says what it changes, and every step is followed by the check that proves it worked. The only
+service touched before the last section is Watchtower, which is stopped in step 2 so it cannot
+recreate a container mid-reconcile; everything that serves traffic keeps running until the bring-up
+section, which is separate on purpose. Getting the checkout clean and redeploying from it are two
+decisions, not one.
 
 ## The three classes
 
@@ -74,7 +76,7 @@ guarded by `the_swap_node_runs_with_its_state_volume_as_cwd`.
 
 Three of the box-local values live at paths git tracks, so **a pull would clobber them and a
 `git checkout --`/`git reset --hard` would destroy them**. That is not a property of this
-reconcile; it is true of every future one, and it is why step 1 below is a backup rather than a
+reconcile; it is true of every future one, and it is why step 0 below is a backup rather than a
 convenience.
 
 | Value                                   | File (tracked)                           | Why it is exposed                                                                                                                                                                                                                                                                       | Fix                                                                                                                                                                                                                                   |
@@ -141,7 +143,40 @@ _Verify:_ `operator-section.toml` is 3 lines (`[operator]`, `bearer_token`, `wri
 with `[operator]`. The relay prints a real `0x…` channel id and a non-zero inventory. Do not paste
 either into a terminal you are recording, a ticket, or a chat.
 
-### Step 2 — clear the tracked modifications
+### Step 2 — stop Watchtower on this box
+
+```bash
+docker stop watchtower
+docker ps --filter name=watchtower
+```
+
+_Destroys:_ nothing. It suspends automatic redeploys for the duration. Do this **before** touching
+the checkout: steps 4 and 5 briefly take `swap.config.json` off disk, and a Watchtower recreate
+inside that window would find the bind-mount source missing — Docker then creates a **directory** at
+that path, which both breaks the maker and makes the pull fail. The container comes back (relay:
+replaced by the committed compose file; store: recreated by compose) in the bring-up section.
+
+_Verify:_ the `docker ps` prints no running `watchtower`.
+
+### Step 3 — unstage the relay's two staged adds
+
+**relay box only.** `docker-compose.relay.swap.yml` and `swap.config.json` are in the index but not
+in `HEAD` (`AM` in `git status`). That matters, because `git reset --hard` treats an index-only file
+as a tracked file to be removed and **deletes it from the worktree** — including the live
+`swap.config.json` the running maker is bind-mounted onto. Take them out of the index first so the
+reset leaves them alone.
+
+```bash
+git rm --cached -q infra/linode-relay/docker-compose.relay.swap.yml infra/linode-relay/swap.config.json
+git status --porcelain=v1
+```
+
+_Destroys:_ nothing on disk — `--cached` is index-only.
+
+_Verify:_ both files now show as `??` rather than `AM`, and both still exist:
+`ls -l infra/linode-relay/swap.config.json`.
+
+### Step 4 — clear the tracked modifications
 
 ```bash
 git reset --hard
@@ -149,58 +184,60 @@ git status --porcelain=v1
 ```
 
 _Destroys:_ **every uncommitted change to a tracked file**, including the store's `[operator]`
-section and `pay_channel`, and the relay's `swap.config.json` values and its two staged adds. This is
-the irreversible step, and step 0's `cp -a` is the only thing standing behind it. It does **not**
-touch untracked or ignored files, so `*.key`, `*.secret`, `.env`, the `*.bak*` snapshots and the
-`*-label.yml` overlays all survive.
+section and `pay_channel`. This is the irreversible step, and step 0's `cp -a` is the only thing
+standing behind it. It does **not** touch untracked or ignored files, so `*.key`, `*.secret`, `.env`,
+the `*.bak*` snapshots, the `*-label.yml` overlays and (after step 3) the relay's two swap files all
+survive.
 
 _Verify:_ `git status --porcelain=v1` now lists **only `??` lines** — no ` M`, no `AM`. On the relay
-that is the three `*-label.yml` files (plus the two staged adds, now plain untracked). On the store
-it is `docker-compose.store.watchtower.yml`, `docker-compose.store.connector-label.yml` and the
-`.bak2-` snapshot.
+that is the three `*-label.yml` files plus the two swap files from step 3. On the store it is
+`docker-compose.store.watchtower.yml`, `docker-compose.store.connector-label.yml` and the `.bak2-`
+snapshot.
 
-### Step 3 — move aside the untracked files that collide with `main`
+### Step 5 — move the colliders aside and pull, back to back
 
 `git pull` refuses — before changing anything — if an incoming file already exists untracked. On this
-fleet that is three files.
+fleet that is three files. Run the `mv` and the `git pull` together: the pull puts `main`'s version
+of each one straight back, so the gap where the path does not exist is one command long.
 
 **relay box:**
 
 ```bash
-mv infra/linode-relay/docker-compose.relay.swap.yml "$BK/"
-mv infra/linode-relay/swap.config.json             "$BK/"
+mv infra/linode-relay/docker-compose.relay.swap.yml "$BK/box-swap.yml"
+mv infra/linode-relay/swap.config.json              "$BK/box-swap.config.json"
+git pull --ff-only origin main
 ```
 
 **store box:**
 
 ```bash
-mv infra/linode-store/docker-compose.store.watchtower.yml "$BK/"
+mv infra/linode-store/docker-compose.store.watchtower.yml "$BK/box-store-watchtower.yml"
+git pull --ff-only origin main
 ```
 
-_Destroys:_ nothing — `mv` into `$BK`, and `$BK` already holds a copy from step 0. The swap-node and
-the store's watchtower keep running: a container's bind mounts resolve to the inode it was started
-with, so moving the file out from under a running container changes nothing until that container is
-recreated. That recreate happens in the bring-up section, after the correct file is back in place.
-
-_Verify:_ `git status --porcelain=v1` no longer lists them, and `ls "$BK"` does.
-
-### Step 4 — pull
+then, on either:
 
 ```bash
-git pull --ff-only origin main
 git log --oneline -1
 git status --porcelain=v1
+git diff HEAD --stat
 ```
 
-_Destroys:_ nothing that step 2 and step 3 have not already dealt with — `--ff-only` guarantees no
-merge commit and no conflict resolution. If it refuses, **stop and read the message**; do not reach
-for `--force`, `--rebase` or `-X theirs`. A refusal here means the box has a commit the remote does
-not, which this inventory did not find and which needs a human before it is thrown away.
+_Destroys:_ nothing — the `mv` targets are inside `$BK`, which already holds a copy from step 0, and
+`--ff-only` guarantees no merge commit and no conflict resolution. The running containers are
+unaffected by the `mv`: a bind mount resolves to the inode the container was started with, so moving
+the file changes nothing until that container is recreated — which is why step 2 stopped Watchtower,
+the one thing that could recreate one unasked.
 
-_Verify:_ `git log --oneline -1` is the current `main` tip, and `git status --porcelain=v1` shows a
-**clean tree** apart from the leftover `??` overlays. `git diff HEAD --stat` is empty.
+If the pull refuses, **stop and read the message**; do not reach for `--force`, `--rebase` or
+`-X theirs`. A refusal here means the box has a commit the remote does not, which this inventory did
+not find and which needs a human before it is thrown away.
 
-### Step 5 — put the class (b) values back
+_Verify:_ `git log --oneline -1` is the current `main` tip, `git status --porcelain=v1` shows a clean
+tree apart from the leftover `??` overlays, and `git diff HEAD --stat` is empty. All three moved
+paths exist again, now as `main`'s versions.
+
+### Step 6 — put the class (b) values back
 
 **store box** — edit `infra/linode-store/connector-rust.toml`:
 
@@ -240,7 +277,7 @@ grep -c '0xdeaddead' infra/linode-relay/swap.config.json      # expect 1 (settle
 The relay's `settlementPrivateKey` placeholder stays as-is: the maker replaces it in memory from the
 autogenerated identity (`SWAP_AUTOGEN_IDENTITY`), so a `0xdead…` there is correct on disk.
 
-### Step 6 — delete the now-redundant label overlays
+### Step 7 — delete the now-redundant label overlays
 
 `main` puts the Watchtower labels inline on the services themselves, so these only add a file to the
 `-f` list that contributes nothing.
@@ -257,7 +294,7 @@ containers keep their labels until they are recreated; the recreate in the next 
 same labels from the committed files.
 
 _Verify:_ `git status --porcelain=v1` shows only the `.bak2-` snapshot on the store and nothing on
-the relay, plus the single ` M` from step 5.
+the relay, plus the single ` M` from step 6.
 
 ## Bring-up from the reconciled checkout
 
@@ -311,8 +348,9 @@ docker compose -f docker-compose.store.yml -f docker-compose.store.rust.yml \
                up -d watchtower
 ```
 
-The store's existing `watchtower` **does** carry `com.docker.compose.project=linode-store`, so
-compose adopts and recreates it in place — no `docker rm -f` needed. It loses the explicit
+The store's existing `watchtower` (stopped in step 2) **does** carry
+`com.docker.compose.project=linode-store`, so compose adopts and recreates it in place — no
+`docker rm -f` needed, unlike the relay's. It loses the explicit
 `container_name: watchtower` and comes back as `linode-store-watchtower-1`.
 
 ### Verify the fleet, from off-box
@@ -330,7 +368,7 @@ docker logs --since 10m linode-relay-announce-1 2>&1 | grep -E '\[announce\] (OK
 docker logs --since 10m linode-store-announce-1 2>&1 | grep -E '\[announce\] (OK|FAILED)' | tail -3
 ```
 
-The store's operator surface is the one thing no public probe covers, and it is the thing step 5
+The store's operator surface is the one thing no public probe covers, and it is the thing step 6
 restored by hand — check it explicitly, on-box:
 
 ```bash
