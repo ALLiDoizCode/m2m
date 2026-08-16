@@ -1892,7 +1892,7 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
 ///   so on a moving tag BOTH must be labelled: only being recreated in the
 ///   same Watchtower sweep keeps them on one digest.
 ///
-/// # The build the fleet is actually on, and how to read it back
+/// # The build the fleet was on, and how to read it back
 ///
 /// A tag pointer is only a pin if you can say what it points at. Recorded
 /// from the live boxes on 2026-08-16, read-only:
@@ -1903,35 +1903,72 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
 /// ```
 ///
 /// Identical on BOTH boxes, and `902daf92` is the merge of #997 on `main`.
-/// So `:rust-release` is currently behaving as auto-on-green: Watchtower had
-/// both boxes on that build within a minute of the merge, with no human
-/// step. Relay and store edges both answered `200` on `/ilp/identity` while
-/// running it. That is the ground truth, and it is why this constant does
-/// NOT claim promotion semantics it cannot back.
+/// Watchtower had both boxes on that build within a minute of that merge,
+/// with no human step, and relay and store edges both answered `200` on
+/// `/ilp/identity` while running it.
+///
+/// Read that as EVIDENCE OF THE DEFECT, not as how the tag behaves. Those
+/// digests are a measurement of the window in which `:rust-release` was
+/// moved by `publish-connector-rust-image.yml` on `is_default_branch` --
+/// #990's tag, which made every green merge an unvalidated deploy to the
+/// live client edge on two machines. #1000 closed that window the same day
+/// (next section). What the digests still prove, and what promotion kept
+/// unchanged, is the DEPLOY half: once the tag moves, both boxes converge on
+/// the new digest within about a minute, unattended, and the edges come back
+/// serving.
+///
+/// The read-back procedure is unchanged and is still how you say what the
+/// pointer points at -- `docker inspect` the running container's digest and
+/// `org.opencontainers.image.revision`, on both boxes. Only the expected
+/// answer moved: not "the newest green `main`", but "the build
+/// `promote-to-fleet` was last dispatched for".
 ///
 /// Note the asymmetry that keeps the ROLLBACK story intact: the moving tag
 /// is what a box follows, but every build also keeps its own immutable
-/// `rust-sha-<short-sha>` tag (`publish-connector-rust-image.yml` pushes
-/// both). Pinning one of those back into these four overlays is still the
-/// documented way to hold a box on a known build, and doing so re-arms the
-/// immutable branch of every assertion above automatically.
+/// `rust-sha-<short-sha>` tag (`publish-connector-rust-image.yml` pushes it
+/// on every build, and still does). Pinning one of those back into these
+/// four overlays is still the documented way to hold a box on a known build,
+/// and doing so re-arms the immutable branch of every assertion above
+/// automatically. It is also why a rollback always has something to name.
 ///
-/// # Open, and deliberately not decided here
+/// # Who moves the tag: a supervised promotion (#1000, ADR 0041)
 ///
-/// toon-meta#403's closing comment describes `:rust-release` as a supervised
-/// PROMOTION tag -- a manual dispatch retagging a validated `rust-sha-*` --
-/// which would preserve the validation gate #972 argues for while still
-/// automating the deploy. No such workflow exists:
-/// `publish-connector-rust-image.yml` moves the tag on `is_default_branch`,
-/// and the digests above show it moving that way in practice. Whether it
-/// stays auto-on-green or becomes a promotion tag is being decided
-/// separately (#972, ADR 0034).
+/// toon-meta#403's closing comment, and #989's, described `:rust-release` as
+/// a supervised PROMOTION tag -- a dispatch retagging a validated
+/// `rust-sha-*` -- while the workflow that actually shipped moved it on
+/// `is_default_branch`. The record and the pipeline had come apart, and it
+/// was the pipeline that was wrong. #1000 resolved it in favour of the
+/// record, and this is now decided rather than open:
 ///
-/// Nothing here presumes an answer. Under EITHER outcome the fleet overlays
-/// name `:rust-release` and the assertions above hold unchanged; only this
-/// doc comment's account of who moves the tag would need editing, and a
-/// promotion workflow would then be the natural place to reintroduce a
-/// `rust-sha-*` literal -- as the promotion TARGET, not as a box pin.
+/// * `publish-connector-rust-image.yml` publishes CANDIDATES only --
+///   `rust-sha-<short-sha>` (immutable) and `rust-main` (floating). Its
+///   `rust-release` tag line is gone.
+/// * `.github/workflows/promote-to-fleet.yml` is the only thing that moves
+///   `:rust-release`. It refuses anything but an immutable `rust-sha-` tag
+///   (promoting `rust-main` would be auto-on-green one indirection away),
+///   requires the commit to be on `main` and a DESCENDANT of the currently
+///   promoted build unless `allow_rollback` is set, BOOTS the candidate
+///   against both boxes' committed `connector-rust.toml` before retagging
+///   (ADR 0041 -- the config and the binary are a `deny_unknown_fields`
+///   matched pair, so a schema change is a refuse-to-start), and then calls
+///   `fleet-health.yml` to prove both boxes came back.
+/// * `swap`, `store` and `relay` keep auto-on-green. The connector is the
+///   one image held back, because it is the client edge on BOTH boxes and
+///   `announce` runs the same image, so one bad digest takes the whole
+///   devnet's paid-write path dark on two machines at once.
+///
+/// The companion suite `crates/connector-bin/tests/fleet_release_gate.rs` is
+/// the regression guard for that split -- it fails if `rust-release`
+/// reappears in the build workflow's tag list, or if the promotion workflow
+/// stops checking. The operator procedure is
+/// `docs/operators/fleet-release-and-health.md`.
+///
+/// None of this changed what this constant asserts. The fleet overlays name
+/// `:rust-release` under promotion exactly as they did under auto-on-green,
+/// and every assertion above holds unchanged; what the decision fixed is WHO
+/// moves it. `promote-to-fleet.yml`'s `tag` input -- not a box pin -- is
+/// where a `rust-sha-*` literal now legitimately appears, as the promotion
+/// TARGET.
 const EXPECTED_CONNECTOR_TAG: &str = "rust-release";
 
 /// Every `image:` pin this suite can see across the surviving two-box fleet
