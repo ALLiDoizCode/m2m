@@ -51,7 +51,9 @@ fn raw_metadata_tags(raw: &str) -> BTreeSet<String> {
 /// machines inside a minute, unvalidated -- while toon-meta#403 and
 /// connector#989's own closing comments (both owner-approved) recorded
 /// `:rust-release` as "a deliberate PROMOTION tag ... NOT auto-on-green", and
-/// connector#972's open pin PR still described a supervised regime.
+/// connector#972's then-open pin PR still described a supervised regime.
+/// (#972 has since been closed as superseded: this gate, not a `rust-sha-*`
+/// literal in the overlays, is what supervises the tag now.)
 ///
 /// The build workflow publishes CANDIDATES. Only `promote-to-fleet.yml` moves
 /// the tag the fleet follows. Re-adding it here would silently restore
