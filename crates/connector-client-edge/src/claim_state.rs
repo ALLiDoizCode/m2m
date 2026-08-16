@@ -298,10 +298,9 @@ async fn resolve_evm(
     let channel_key = format!("evm:{channel_id_hex}");
     ChannelStateResult::Verified(verified_state(
         "evm",
-        channel_id_hex.clone(),
+        channel_id_hex,
         state,
         &channel_key,
-        &channel_id_hex,
         channel.deposit_floor,
         state.claim_gate.credited_evm(&channel_id),
     ))
@@ -359,10 +358,9 @@ async fn resolve_solana(
     let channel_key = format!("solana:{channel_account_text}");
     ChannelStateResult::Verified(verified_state(
         "solana",
-        channel_account_text.clone(),
+        channel_account_text,
         state,
         &channel_key,
-        &channel_account_text,
         channel.deposit_floor,
         // `ClientPayoutLedger` only ever signs an EVM balance proof (issue
         // #699) -- a Solana channel has no credited amount to net yet, see
@@ -380,8 +378,9 @@ async fn resolve_solana(
 /// that already reflects an agent's own earnings, not a raw on-chain
 /// balance a human would have to net by hand.
 ///
-/// `peer_channel_id` is a second, independent source for `cumulative
-/// claimed`/`nonce` (issue #1011's fix): [`crate::claim_gate::ClientClaimGate`]'s
+/// The peer claim book is a second, independent source for
+/// `cumulativeClaimed`/`nonce` (issue #1011's fix):
+/// [`crate::claim_gate::ClientClaimGate`]'s
 /// own watermark is `None` for a channel that has only ever carried PEER
 /// claims, since those never touch it (`connector_runtime::outbound_client`'s
 /// module doc, "Two ledgers, and why they must never merge") -- they land in
@@ -399,18 +398,20 @@ fn verified_state(
     channel_id: String,
     state: &ClientEdgeState,
     channel_key: &str,
-    peer_channel_id: &str,
     deposit_floor: DepositFloor,
     credited: u64,
 ) -> VerifiedChannelState {
-    let watermark = state.claim_gate.watermark(channel_key);
-    let (cumulative_claimed, nonce) = match watermark {
+    // `channel_id` is what a PEER claim is filed under in `ClaimBook`
+    // (`Connector::inbound_peer_watermark`), where `channel_key` is the
+    // chain-prefixed key the CLIENT gate files its own watermark under --
+    // the two books, and the two spellings, are the whole point of the
+    // split.
+    let (cumulative_claimed, nonce) = match state.claim_gate.watermark(channel_key) {
         Some(watermark) => (watermark.cumulative_amount, watermark.nonce),
-        None => state
-            .connector
-            .inbound_peer_watermark(peer_channel_id)
-            .map(|(nonce, cumulative_amount)| (cumulative_amount, nonce))
-            .unwrap_or((0, 0)),
+        None => match state.connector.inbound_peer_watermark(&channel_id) {
+            Some((nonce, cumulative_amount)) => (cumulative_amount, nonce),
+            None => (0, 0),
+        },
     };
     let deposit_total = deposit_floor.deposit();
     let available = deposit_total.map(|deposit| {

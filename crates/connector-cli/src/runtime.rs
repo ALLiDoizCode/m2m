@@ -968,7 +968,6 @@ fn claim_state_edge_url(endpoint: &url::Url) -> String {
 fn wire_outbound_client_hops(
     mut connector: Connector,
     config: &Config,
-    client: &reqwest::Client,
 ) -> Result<Connector, RuntimeError> {
     // The endpoint is carried out of the filter rather than re-read inside
     // the loop below: "dialed" IS "has an endpoint", so keeping the two
@@ -992,6 +991,10 @@ fn wire_outbound_client_hops(
 
     let evm_identity = peer_claim_identity(config)?;
     let solana_identity = peer_claim_identity_solana(config)?;
+    // One HTTP client for every hop's claim-state query: `reqwest::Client`
+    // is a handle over a shared connection pool, so cloning it per hop
+    // below shares that pool rather than opening a second one.
+    let client = reqwest::Client::new();
 
     let ledger = Arc::new(match config.state_dir() {
         Some(state_dir) => {
@@ -1231,7 +1234,7 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     // again rather than the values just consumed above -- a startup-only
     // cost, and it keeps this function's signature the same shape as
     // `wire_peer_channels`'s own.
-    connector = wire_outbound_client_hops(connector, config, &reqwest::Client::new())?;
+    connector = wire_outbound_client_hops(connector, config)?;
     let mut client_channel_source_evm: Option<Arc<dyn ClientChannelSource>> = None;
     let mut client_channel_source_solana: Option<Arc<dyn ClientChannelSource>> = None;
     let mut settlement_terms: Option<connector_client_edge::X402SettlementTerms> = None;

@@ -273,6 +273,13 @@ peer claim on that channel is. No separate config exists for this and none is ne
 `[[peers]] endpoint` + `[[peer_channels]]` + `[settlement.<chain>]` that make a peering work at all
 are what this reads.
 
+Where those covering claims stand is asked of the peer itself, at `POST /ilp/claim-state` on the
+**origin of its `endpoint`** -- scheme, host and port, with `wss`/`ws` read as the `https`/`http` the
+same listener answers on, and the endpoint's own path (`/ilp/btp` or `/ilp`) replaced by `/ilp`.
+That is the connector's own client edge, since one listener carries all three surfaces. An
+`endpoint` reached through a proxy that serves the peer under a path prefix is therefore not
+supported here: give the peer's own origin.
+
 An accept-only peering (no `endpoint`) is never the paying side of itself, so this never applies to
 one -- it dials in, and whatever it owes on a channel it holds is paid the same postpay way it
 always was (ADR 0004). A DIALED peering whose channel names a chain this node has no

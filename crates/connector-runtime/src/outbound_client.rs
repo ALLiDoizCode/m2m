@@ -272,44 +272,62 @@ impl ClaimStateSource for HttpClaimState<'_> {
                 "signature": format!("0x{}", hex_encode(&signature)),
             }]
         });
-        let body: serde_json::Value = self
-            .client
-            .post(&url)
-            .json(&request)
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status)
-            .map_err(|error| failed(error.to_string()))?
-            .json()
-            .await
-            .map_err(|error| failed(error.to_string()))?;
-
-        let entry = body["channels"]
-            .get(0)
-            .ok_or_else(|| failed(format!("no answer for the channel asked about: {body}")))?;
-        if entry["ok"] != serde_json::Value::Bool(true) {
-            // The endpoint collapses every refusal to one generic reason on
-            // purpose (a caller must learn nothing about a channel it does
-            // not control), so there is nothing more specific to report
-            // here -- hence the long "usual causes" on the error itself.
-            return Err(failed(format!(
-                "answered ok=false ({})",
-                entry["error"].as_str().unwrap_or("no reason given")
-            )));
-        }
-        Ok(ClaimWatermark {
-            nonce: entry["nonce"]
-                .as_u64()
-                .ok_or_else(|| failed(format!("no nonce in the answer: {entry}")))?,
-            cumulative: entry["cumulativeClaimed"]
-                .as_str()
-                .and_then(|value| value.parse().ok())
-                .ok_or_else(|| failed(format!("no cumulativeClaimed in the answer: {entry}")))?,
-            available: entry["available"]
-                .as_str()
-                .and_then(|value| value.parse().ok()),
-        })
+        ask_claim_state(self.client, &url, &request, &failed).await
     }
+}
+
+/// POST one already-built claim-state request and read the single channel
+/// answer back as a [`ClaimWatermark`].
+///
+/// Shared by every [`ClaimStateSource`]/[`SolanaClaimStateSource`] that
+/// speaks HTTP: only the request body differs by chain (an EIP-712
+/// challenge over a channel id, an ed25519 one over a channel account), and
+/// the answer's shape -- `channels[0]` carrying `ok`, `nonce`,
+/// `cumulativeClaimed` and `available` -- is `client-edge-spec.md` §1.10's
+/// one contract, not a per-chain one. `failed` renders every refusal
+/// against the channel its caller asked about.
+async fn ask_claim_state(
+    client: &reqwest::Client,
+    url: &str,
+    request: &serde_json::Value,
+    failed: &(dyn Fn(String) -> OutboundClientError + Sync),
+) -> Result<ClaimWatermark, OutboundClientError> {
+    let body: serde_json::Value = client
+        .post(url)
+        .json(request)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|error| failed(error.to_string()))?
+        .json()
+        .await
+        .map_err(|error| failed(error.to_string()))?;
+
+    let entry = body["channels"]
+        .get(0)
+        .ok_or_else(|| failed(format!("no answer for the channel asked about: {body}")))?;
+    if entry["ok"] != serde_json::Value::Bool(true) {
+        // The endpoint collapses every refusal to one generic reason on
+        // purpose (a caller must learn nothing about a channel it does
+        // not control), so there is nothing more specific to report
+        // here -- hence the long "usual causes" on the error itself.
+        return Err(failed(format!(
+            "answered ok=false ({})",
+            entry["error"].as_str().unwrap_or("no reason given")
+        )));
+    }
+    Ok(ClaimWatermark {
+        nonce: entry["nonce"]
+            .as_u64()
+            .ok_or_else(|| failed(format!("no nonce in the answer: {entry}")))?,
+        cumulative: entry["cumulativeClaimed"]
+            .as_str()
+            .and_then(|value| value.parse().ok())
+            .ok_or_else(|| failed(format!("no cumulativeClaimed in the answer: {entry}")))?,
+        available: entry["available"]
+            .as_str()
+            .and_then(|value| value.parse().ok()),
+    })
 }
 
 /// [`HttpClaimState`], owning what it borrows, so it can outlive the one
@@ -424,41 +442,7 @@ impl SolanaClaimStateSource for HttpSolanaClaimState {
                 "signature": base64_encode(&signature),
             }]
         });
-        let body: serde_json::Value = self
-            .client
-            .post(&url)
-            .json(&request)
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status)
-            .map_err(|error| failed(error.to_string()))?
-            .json()
-            .await
-            .map_err(|error| failed(error.to_string()))?;
-
-        let entry = body["channels"]
-            .get(0)
-            .ok_or_else(|| failed(format!("no answer for the channel asked about: {body}")))?;
-        if entry["ok"] != serde_json::Value::Bool(true) {
-            // Same "one generic reason" posture as `HttpClaimState`'s own
-            // EVM branch -- see its comment for why.
-            return Err(failed(format!(
-                "answered ok=false ({})",
-                entry["error"].as_str().unwrap_or("no reason given")
-            )));
-        }
-        Ok(ClaimWatermark {
-            nonce: entry["nonce"]
-                .as_u64()
-                .ok_or_else(|| failed(format!("no nonce in the answer: {entry}")))?,
-            cumulative: entry["cumulativeClaimed"]
-                .as_str()
-                .and_then(|value| value.parse().ok())
-                .ok_or_else(|| failed(format!("no cumulativeClaimed in the answer: {entry}")))?,
-            available: entry["available"]
-                .as_str()
-                .and_then(|value| value.parse().ok()),
-        })
+        ask_claim_state(&self.client, &url, &request, &failed).await
     }
 }
 
