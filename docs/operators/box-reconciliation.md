@@ -386,4 +386,10 @@ steady state until connector#1003 lands and the `[operator]`/`pay_channel` value
 `*_file` paths. Once that is true, `fleet-ops`'s reconcile path works again and the fleet is
 reproducible from committed config, which is the whole point of #1004.
 
+**When #1003 does land**, step 6's store half changes shape rather than going away: the
+`[operator]` section becomes committed config naming two paths, and the reconcile step becomes
+"write the two secret files onto the box" — gitignored, so `git status` stops mentioning them at
+all. Re-read this section then; the values themselves are still only ever recoverable from `$BK` or
+from a rotation.
+
 Remove the backup: `rm -rf "$BK"` on each box. It holds real key material.
