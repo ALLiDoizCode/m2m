@@ -2824,3 +2824,97 @@ fn no_variable_upstream_appends_a_uri_that_nginx_will_ignore() {
         }
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The rolling-swap maker's own config (issue #983, toon-meta#402)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The maker's committed config skeleton. Not a connector config -- it is
+/// read by `toon-swap --config` from the swap repo -- but it names the same
+/// on-chain deployment the rest of this fleet settles on, which is a
+/// property this suite already asserts for everything else and is the one
+/// that took the maker down live.
+const RELAY_SWAP_CONFIG: &str = include_str!("../../../infra/linode-relay/swap.config.json");
+
+/// The deployed `TokenNetwork` for USDC on Base Sepolia
+/// (`packages/contracts/deployments.json`, docs/evm-deployment.md), resolved
+/// from [`FLEET_LIVE_REGISTRY`]. A literal here for the same reason every
+/// other `FLEET_*` address is one.
+const FLEET_LIVE_TOKEN_NETWORK: &str = "0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478";
+
+/// The maker holds TWO EVM contract addresses that are easy to read as one
+/// thing and are not:
+///
+/// * `tokenNetworkAddress` -- the LEG-A `TokenNetwork`. Money coming IN: the
+///   ordinary payment-channel contract a taker already holds a funded channel
+///   on, and the one the maker VERIFIES an incoming claim against before it
+///   quotes. It must be the fleet's one deployment, for the same reason every
+///   `[settlement.evm]` section on this fleet must be: a claim resolves
+///   against one deployment or it does not resolve.
+/// * `channelAddress` -- the LEG-B `RollingSwapChannel` (issues #973/#974).
+///   Money going OUT: a different contract with a different ABI, the one the
+///   maker SIGNS its own v2 EIP-712 balance proofs against.
+///
+/// swap#134 made `tokenNetworkAddress` required, and a config carrying only
+/// `channelAddress` does NOT fall back to it -- the live maker crash-looped
+/// until the field was added on the box. So this asserts three things: the
+/// field is present, it names the fleet's `TokenNetwork`, and it is not the
+/// same address as `channelAddress`. The last is the whole point: the two
+/// being interchangeable is the belief that caused the outage, and a config
+/// where they are equal is that belief written down.
+#[test]
+fn the_makers_leg_a_token_network_is_the_fleets_and_is_not_its_leg_b_channel() {
+    let config: serde_json::Value =
+        serde_json::from_str(RELAY_SWAP_CONFIG).expect("swap.config.json must be valid JSON");
+    let providers = config["chainProviders"]
+        .as_array()
+        .expect("swap.config.json must carry a `chainProviders` array");
+    assert!(
+        !providers.is_empty(),
+        "swap.config.json's `chainProviders` is empty -- the maker has no \
+         chain to verify a claim on"
+    );
+
+    for provider in providers {
+        let chain_id = provider["chainId"].as_str().unwrap_or("<unset>");
+        let token_network = provider["tokenNetworkAddress"].as_str().unwrap_or_else(|| {
+            panic!(
+                "swap.config.json's `{chain_id}` provider has no \
+                 `tokenNetworkAddress`. swap#134 made it REQUIRED and there \
+                 is no fallback to `channelAddress`: the live maker \
+                 crash-looped on exactly this omission"
+            )
+        });
+        assert_eq!(
+            token_network.to_lowercase(),
+            FLEET_LIVE_TOKEN_NETWORK.to_lowercase(),
+            "swap.config.json's `{chain_id}` names TokenNetwork \
+             {token_network}, not the fleet's {FLEET_LIVE_TOKEN_NETWORK} -- \
+             the maker would verify a taker's leg-A claim against a \
+             deployment no channel on this fleet lives on"
+        );
+
+        let channel = provider["channelAddress"]
+            .as_str()
+            .unwrap_or_else(|| panic!("swap.config.json's `{chain_id}` has no `channelAddress`"));
+        assert_ne!(
+            channel.to_lowercase(),
+            token_network.to_lowercase(),
+            "swap.config.json's `{chain_id}` gives `channelAddress` and \
+             `tokenNetworkAddress` the SAME address. They are different \
+             contracts with different ABIs -- leg A is the TokenNetwork an \
+             incoming claim is verified against, leg B is the \
+             RollingSwapChannel the maker signs its payout against"
+        );
+    }
+
+    assert_eq!(
+        config["chainProviders"][0]["registryAddress"]
+            .as_str()
+            .unwrap_or_default()
+            .to_lowercase(),
+        FLEET_LIVE_REGISTRY.to_lowercase(),
+        "swap.config.json must name the same TokenNetworkRegistry as the \
+         rest of the fleet"
+    );
+}
