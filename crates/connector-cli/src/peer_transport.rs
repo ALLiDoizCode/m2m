@@ -60,8 +60,9 @@ pub(crate) struct ConfiguredPeerTransport {
 /// is the Solana counterpart (issue #732/#998) -- the raw ed25519 public key
 /// rendered as `senderId`/`signerPublicKey` on a Solana claim -- `None` for a
 /// node with no `[settlement.solana]` table, exactly mirroring how
-/// `signer_address` is all-zero and unused when no Solana claim is ever
-/// produced to render. Without it, a dial side that DID sign a Solana claim
+/// `signer_address` is all-zero and unused on a node with no
+/// `[settlement.evm]` table, which never produces an EVM claim to render
+/// either. Without it, a dial side that DID sign a Solana claim
 /// (`ClaimBook::record_fulfillment`, once a `[[peer_channels]]` Solana row is
 /// wired) would panic trying to render one -- see `claim_json::encode`'s own
 /// doc. `clock` is the one the rest of the node reads, so a claim's

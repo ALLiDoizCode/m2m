@@ -775,16 +775,20 @@ fn peer_claim_identity(config: &Config) -> Result<Option<PeerClaimIdentity>, Run
 }
 
 /// The key this node signs outbound **peer** claims with on Solana (issue
-/// #732/#998), and the base58 ed25519 public key that key derives -- the
-/// Solana counterpart of [`peer_claim_identity`], for exactly the same
-/// reason: a Solana peer claim's `senderId`/`signerPublicKey` is redeemed
-/// against this node's own channel-participant identity, which is the
-/// `[settlement.solana]` key, never `[signer]`'s.
-type PeerClaimIdentitySolana = (Arc<dyn Ed25519Signer>, String);
-
+/// #732/#998) -- the Solana counterpart of [`peer_claim_identity`], for
+/// exactly the same reason: a Solana peer claim's
+/// `senderId`/`signerPublicKey` is redeemed against this node's own
+/// channel-participant identity, which is the `[settlement.solana]` key,
+/// never `[signer]`'s. `None` for a node with no `[settlement.solana]`
+/// table, which therefore signs no Solana claim at all.
+///
+/// Returns the signer alone, where the EVM twin also returns an address:
+/// the public key the wire renders is read straight off the signer
+/// ([`Ed25519Signer::public_key`]), so there is no derived second copy that
+/// could drift from the key that actually signed.
 fn peer_claim_identity_solana(
     config: &Config,
-) -> Result<Option<PeerClaimIdentitySolana>, RuntimeError> {
+) -> Result<Option<Arc<dyn Ed25519Signer>>, RuntimeError> {
     let Some(solana) = config
         .settlements()
         .iter()
@@ -797,8 +801,7 @@ fn peer_claim_identity_solana(
     };
     let secret = read_settlement_key_bytes(solana.key())?;
     let signer = LocalEd25519Signer::from_secret_bytes(secret)?;
-    let public_key = Pubkey::new_from_array(signer.public_key()).to_string();
-    Ok(Some((Arc::new(signer), public_key)))
+    Ok(Some(Arc::new(signer)))
 }
 
 /// Wire every `[[peer_channels]]` row into the claim ledger (issue #678,
@@ -832,39 +835,40 @@ fn wire_peer_channels(
 ) -> Result<Connector, RuntimeError> {
     let mut claiming_against: Vec<&str> = Vec::new();
     for channel in config.peer_channels() {
+        // What a claim on this row names, and what `ClaimBook` files its
+        // ledger and watermark under: an EVM `channel_id` or a Solana
+        // `channel_account`. Read before the per-chain wiring below so the
+        // "first row in the file wins, on whichever chain it is" rule lives
+        // in one place rather than once per chain.
+        let claim_channel = match channel {
+            PeerChannelConfig::Evm(evm) => evm.channel_id(),
+            PeerChannelConfig::Solana(solana) => solana.channel_account(),
+        };
+        if !claiming_against.contains(&channel.peer_id()) {
+            claiming_against.push(channel.peer_id());
+            connector = connector.with_peer_claim_channel(channel.peer_id(), claim_channel);
+        }
         match channel {
-            PeerChannelConfig::Evm(channel) => {
-                if !claiming_against.contains(&channel.peer_id()) {
-                    claiming_against.push(channel.peer_id());
-                    connector =
-                        connector.with_peer_claim_channel(channel.peer_id(), channel.channel_id());
-                }
-                connector = connector.with_channel_verification_key(
-                    channel.channel_id(),
-                    channel.counterparty_key(),
-                );
+            PeerChannelConfig::Evm(evm) => {
+                connector =
+                    connector.with_channel_verification_key(claim_channel, evm.counterparty_key());
                 connector = connector
                     .with_channel_domain(
-                        channel.channel_id(),
+                        claim_channel,
                         ChannelDomain {
-                            chain_id: channel.chain_id(),
-                            token_network_address: channel.token_network(),
+                            chain_id: evm.chain_id(),
+                            token_network_address: evm.token_network(),
                         },
                     )
                     .map_err(|_| RuntimeError::PeerChannelUnusable {
-                        channel_id: channel.channel_id().to_string(),
+                        channel_id: claim_channel.to_string(),
                     })?;
             }
-            PeerChannelConfig::Solana(channel) => {
-                if !claiming_against.contains(&channel.peer_id()) {
-                    claiming_against.push(channel.peer_id());
-                    connector = connector
-                        .with_peer_claim_channel(channel.peer_id(), channel.channel_account());
-                }
+            PeerChannelConfig::Solana(solana) => {
                 connector = connector
-                    .with_solana_channel(channel.channel_account(), channel.counterparty_key())
+                    .with_solana_channel(claim_channel, solana.counterparty_key())
                     .map_err(|_| RuntimeError::PeerChannelSolanaUnusable {
-                        channel_account: channel.channel_account().to_string(),
+                        channel_account: claim_channel.to_string(),
                     })?;
             }
         }
@@ -959,7 +963,7 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     let peer_claim_identity_solana = peer_claim_identity_solana(config)?;
     let peer_signer_solana_public_key = peer_claim_identity_solana
         .as_ref()
-        .map(|(signer, _)| signer.public_key());
+        .map(|signer| signer.public_key());
     // Issue #678 gap 2: the dial side, built from `[[peers]]` and
     // `[[peer_channels]]`. A node with no dialable peering still holds an
     // empty `InProcessPeerTransport`, so a packet routed to a peer is
@@ -1028,7 +1032,7 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     if let Some((claim_signer, _)) = peer_claim_identity {
         connector = connector.with_signer(claim_signer);
     }
-    if let Some((claim_signer_solana, _)) = peer_claim_identity_solana {
+    if let Some(claim_signer_solana) = peer_claim_identity_solana {
         connector = connector.with_solana_signer(claim_signer_solana);
     }
     connector = wire_peer_channels(connector, config)?;
@@ -1701,7 +1705,10 @@ program_id = "{program_id}"
         assert!(
             !runtime
                 .connector
-                .recognizes_solana_channel("11111111111111111111111111111111111111111"),
+                // A real 32-byte account (the system program's), so what
+                // this asserts is "nobody configured it", not "it was never
+                // a well-formed account in the first place".
+                .recognizes_solana_channel("11111111111111111111111111111111"),
             "and only that row -- an account nobody configured is still unknown"
         );
     }
