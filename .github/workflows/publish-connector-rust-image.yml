@@ -2,17 +2,30 @@ name: Publish connector-rust image
 
 # Publishes the Rust connector (crates/connector-bin, built via
 # deploy/connector-rust/Dockerfile) to GHCR as ghcr.io/toon-protocol/connector,
-# tagged `rust-sha-<short-sha>` (immutable, content-pinned), `rust-main` and
-# `rust-release` (both floating, moved to the newest green main build).
+# tagged `rust-sha-<short-sha>` (immutable, content-pinned) and `rust-main`
+# (floating, moved to the newest green main build).
 # #429 added the Dockerfile, #465 left publishing to #487.
 #
-# `rust-release` (#989, part of toon-meta#403's fleet-wide :release +
-# Watchtower convention) is the moving target a box's label-scoped
-# Watchtower would follow. Adding the tag here does NOT wire any box to
-# follow it -- the relay+store boxes intentionally stay on an immutable
-# `rust-sha-` pin (#972, an open deliberate hold) while main is ahead, and
-# repointing them is a separate, gated step. `devnet_configs_load.rs`
-# asserts that committed overlays pin `rust-sha-`, never a floating tag.
+# ── `rust-release` IS NOT PUBLISHED HERE, AND THAT IS THE POINT ─────────────
+# #990 originally added `type=raw,value=rust-release,enable={{is_default_branch}}`
+# to the tag list below, which made `:rust-release` move on EVERY green merge
+# to `main`. Both devnet boxes were then repointed to follow that tag with a
+# label-scoped Watchtower, so every green merge reached the live client edge
+# on two machines within ~60s, unvalidated.
+#
+# That contradicted the design of record. toon-meta#403 and #989's own closing
+# comment, both recorded as owner-approved, say `:rust-release` is a
+# "deliberate PROMOTION tag (a manual `promote-to-fleet` dispatch retags a
+# validated `rust-sha-*`), NOT auto-on-green" -- the gate connector#972 and
+# ADR 0034 exist to preserve. The workflow was never retargeted and no
+# promote workflow was ever written.
+#
+# It is written now: .github/workflows/promote-to-fleet.yml. This workflow
+# publishes CANDIDATES; that one chooses which candidate fronts the fleet,
+# after checking that it still boots both boxes' committed
+# `connector-rust.toml` (ADR 0041). `swap`, `store` and `relay` keep
+# auto-on-green -- see docs/operators/fleet-release-and-health.md for why the
+# connector is the one image held back.
 #
 # NAME HISTORY (reversal, connector#633): #487 originally shipped this as a
 # SEPARATE package `connector-rust`, to avoid colliding with the TypeScript
@@ -87,10 +100,12 @@ jobs:
           images: ${{ env.IMAGE }}
           # `rust-` prefix keeps these disjoint from any TS-node tag that ever
           # lived in this package (semver X.Y.Z, latest, main). See header.
+          # `rust-release` is DELIBERATELY ABSENT — see the header. It is a
+          # promotion tag moved by .github/workflows/promote-to-fleet.yml, not
+          # a build output.
           tags: |
             type=raw,value=rust-sha-${{ steps.sha.outputs.short }}
             type=raw,value=rust-main,enable={{is_default_branch}}
-            type=raw,value=rust-release,enable={{is_default_branch}}
 
       - name: Build and push connector-rust image
         uses: docker/build-push-action@v5

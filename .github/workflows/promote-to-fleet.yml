@@ -1,0 +1,331 @@
+# promote-to-fleet — move `:rust-release` to a validated build, on purpose.
+#
+# ── THE CONTRADICTION THIS FILE RESOLVES ────────────────────────────────────
+# Two records disagreed about what `ghcr.io/toon-protocol/connector:rust-release`
+# is, and the disagreement was live on the devnet.
+#
+#   * toon-meta#403 (2026-08-16 13:41Z) and connector#989's own closing comment,
+#     both recorded as owner-approved, say:
+#
+#       "for the connector image (fronts the LIVE relay), `:rust-release` is a
+#        deliberate PROMOTION tag, NOT auto-on-green like swap/store/relay. It
+#        moves only when a validated build is promoted (a `workflow_dispatch`
+#        `promote-to-fleet` that retags a chosen `rust-sha-*` to
+#        `:rust-release`), preserving ADR-0034 / connector#972's 'validated
+#        before it hits production' gate while automating the *deploy* step."
+#
+#   * connector#990, merged eleven hours EARLIER, shipped
+#     `type=raw,value=rust-release,enable={{is_default_branch}}` in
+#     publish-connector-rust-image.yml — a tag that moves on every green merge
+#     to `main`.
+#
+# No `promote-to-fleet` workflow was ever written, #989 was closed anyway, and
+# both boxes were then repointed to `:rust-release` with the Watchtower enable
+# label. Net effect: every green merge to `main` reached both live devnet
+# boxes within ~60s, unvalidated, while connector#972 — an OPEN pull request
+# pinning the fleet to `rust-sha-1204220` "after a verified deploy, not before
+# one" — still described a supervised immutable-pin regime, and
+# `EXPECTED_CONNECTOR_TAG` still asserted it.
+#
+# ── THE RESOLUTION: the epic is right, the workflow was wrong ───────────────
+# This file implements the promotion dispatch the record describes, and
+# publish-connector-rust-image.yml no longer moves `rust-release` on green
+# main. Code and docs now agree, and they agree on the SUPERVISED reading, for
+# reasons that are specific to this image rather than a general taste for
+# gates:
+#
+#   1. **Blast radius.** `connector-rust` is the client edge on BOTH boxes —
+#      every paid write on the devnet enters through it — and `announce` is
+#      the same image. A bad `swap:release` takes down one maker sidecar; a
+#      bad `:rust-release` takes the whole devnet's money path dark on two
+#      machines at once. toon-meta#403's owner-accepted "a bad-but-green merge
+#      can reach production" trade-off was written about the opted-in
+#      services; the connector was explicitly HELD out of it in that same
+#      epic's comments 1 and 2, twice.
+#   2. **The config is bind-mounted and the binary is not.** `RawConfig` and
+#      `RawAnnounceConfig` are `deny_unknown_fields`, so the box's hand-tuned
+#      `connector-rust.toml` and the image are a MATCHED PAIR — a field added
+#      on one side is a refuse-to-start on the other. fleet-ops.yml already
+#      encodes the only safe ordering for that pair (deploy the pin first,
+#      apply the config second). An unattended pull has no ordering at all.
+#   3. **It costs almost nothing.** The deploy is still automatic: Watchtower
+#      recreates both boxes within ~60s of the retag. What promotion adds is a
+#      human choosing WHICH build, and a machine checking that the build can
+#      still read the fleet's committed configs before it moves.
+#
+# `swap`, `store` and `relay` keep auto-on-green. This is not a reversal of
+# toon-meta#403 — it is the split that epic's own comments describe
+# ("Connector = supervised promotion tag; swap/store/relay = auto-on-green").
+#
+# ── WHAT PROMOTION CHECKS BEFORE IT MOVES THE TAG ───────────────────────────
+#   1. The tag exists in GHCR and names an immutable `rust-sha-` build.
+#   2. Its commit is on `main` and is a DESCENDANT of the currently promoted
+#      build, so promotion cannot silently roll the fleet backwards. (A
+#      deliberate rollback is what `allow_rollback` is for, and it says so in
+#      the summary.)
+#   3. **Config compatibility**: the candidate image is booted against each
+#      box's own committed `connector-rust.toml`. This is the connector-side
+#      half of the rule in ADR 0041 — the same failure that took the relay's
+#      swap maker down on 2026-08-16, checked before it can happen here.
+#   4. After the retag, fleet-health.yml probes both boxes and this run goes
+#      red if they did not come back. A promotion that breaks the fleet
+#      reports as a failure, with the alert issue already open.
+#
+# ── ROLLBACK ────────────────────────────────────────────────────────────────
+# Dispatch this workflow again naming the previous `rust-sha-` tag, with
+# `allow_rollback: true`. Every build ever published keeps its immutable tag,
+# so there is always something to name.
+
+name: promote-to-fleet
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Immutable tag to promote, e.g. rust-sha-1204220.'
+        type: string
+        required: true
+      reason:
+        description: 'Why this build is being promoted (recorded in the summary).'
+        type: string
+        required: false
+        default: ''
+      allow_rollback:
+        description: 'Permit promoting a build that is NOT a descendant of the current one.'
+        type: boolean
+        required: false
+        default: false
+      skip_health_check:
+        description: 'Skip the post-promotion fleet probe. Use only when the boxes are already known-down.'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+  # The `verify` job calls fleet-health.yml, which opens/closes the rolling
+  # alert issue. A called workflow cannot hold more permission than its
+  # caller grants, so this must be declared here too or the health job
+  # startup-fails (the same subset-capped-caller trap connector#965 hit).
+  issues: write
+
+concurrency:
+  # Never two promotions at once, and never cancel one mid-retag.
+  group: promote-to-fleet
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/connector
+  MOVING_TAG: rust-release
+
+jobs:
+  promote:
+    name: Promote ${{ inputs.tag }} to :rust-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The ancestry check below needs history, not a shallow tip.
+          fetch-depth: 0
+
+      - name: Validate the requested tag's shape
+        run: |
+          set -euo pipefail
+          TAG='${{ inputs.tag }}'
+          # Only an immutable content-pinned build may be promoted. Promoting
+          # `rust-main` would reintroduce exactly the auto-on-green behaviour
+          # this workflow exists to replace, one indirection further away.
+          if ! echo "$TAG" | grep -Eq '^rust-sha-[0-9a-f]{7}$'; then
+            echo "::error::'$TAG' is not an immutable build tag. Promote a 'rust-sha-<7 hex>' tag."
+            echo "::error::Floating tags (rust-main, rust-release) must never be promoted — that is auto-on-green by another name."
+            exit 1
+          fi
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve the candidate and the incumbent
+        id: resolve
+        run: |
+          set -euo pipefail
+          TAG='${{ inputs.tag }}'
+
+          if ! docker buildx imagetools inspect "$IMAGE:$TAG" >/dev/null 2>&1; then
+            echo "::error::$IMAGE:$TAG does not exist in GHCR. Check the tag, or re-run publish-connector-rust-image.yml on that commit."
+            exit 1
+          fi
+          echo "candidate=$TAG" >> "$GITHUB_OUTPUT"
+
+          # The incumbent is whatever `:rust-release` points at today. On the
+          # very first promotion there may be none; that is not an error.
+          if docker buildx imagetools inspect "$IMAGE:$MOVING_TAG" >/dev/null 2>&1; then
+            docker pull -q "$IMAGE:$MOVING_TAG"
+            INCUMBENT=$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE:$MOVING_TAG" 2>/dev/null || echo '')
+            echo "incumbent_sha=$INCUMBENT" >> "$GITHUB_OUTPUT"
+            echo "Currently promoted revision: ${INCUMBENT:-<unlabelled>}"
+          else
+            echo "incumbent_sha=" >> "$GITHUB_OUTPUT"
+            echo "No :$MOVING_TAG yet — this is the first promotion."
+          fi
+
+      - name: The candidate must be on main, and must not roll the fleet back
+        env:
+          CANDIDATE: ${{ steps.resolve.outputs.candidate }}
+          INCUMBENT_SHA: ${{ steps.resolve.outputs.incumbent_sha }}
+        run: |
+          set -euo pipefail
+          # `rust-sha-<short>` is a commit prefix by construction (the publish
+          # workflow cuts it from github.sha), so the tag itself is the
+          # provenance -- the same property devnet_configs_load.rs's pin
+          # assertions rely on.
+          SHORT="${CANDIDATE#rust-sha-}"
+          if ! git cat-file -e "$SHORT^{commit}" 2>/dev/null; then
+            echo "::error::commit $SHORT is not in this repository — the tag does not name a build of this codebase."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$SHORT" origin/main; then
+            echo "::error::commit $SHORT is not an ancestor of origin/main. Only a build of main may front the live fleet."
+            exit 1
+          fi
+          echo "✓ $SHORT is on main."
+
+          if [ -z "$INCUMBENT_SHA" ]; then
+            echo "No incumbent to compare against."
+            exit 0
+          fi
+          if ! git cat-file -e "$INCUMBENT_SHA^{commit}" 2>/dev/null; then
+            echo "::warning::the currently promoted revision $INCUMBENT_SHA is not in this repo — skipping the ancestry comparison."
+            exit 0
+          fi
+          if git merge-base --is-ancestor "$INCUMBENT_SHA" "$SHORT"; then
+            echo "✓ forward move: $INCUMBENT_SHA -> $SHORT"
+          elif [ '${{ inputs.allow_rollback }}' = 'true' ]; then
+            echo "::warning::ROLLBACK — $SHORT is not a descendant of the promoted $INCUMBENT_SHA, allowed by allow_rollback."
+            echo "ROLLBACK=1" >> "$GITHUB_ENV"
+          else
+            echo "::error::$SHORT is not a descendant of the currently promoted $INCUMBENT_SHA."
+            echo "::error::That would roll the live fleet backwards. Re-dispatch with allow_rollback: true if that is what you mean."
+            exit 1
+          fi
+
+      # ── The config-compatibility gate (ADR 0041) ──────────────────────────
+      # The box's `connector-rust.toml` is BIND-MOUNTED: it is not in the
+      # image, no image build ever sees it, and a Watchtower recreate swaps
+      # the binary underneath it without anyone consulting it. `RawConfig` is
+      # `deny_unknown_fields` and refuses unknown and missing fields alike, so
+      # binary and config are a matched pair — and this is the one moment in
+      # the whole pipeline where both halves are in the same place at the same
+      # time. Check them here or nowhere.
+      #
+      # Both boxes' files are checked, not one: they are different files with
+      # different routes, prefixes and settlement blocks, and #948's own
+      # finding was two overlays pinning two different stale tags.
+      - name: Candidate image must boot both boxes' committed configs
+        run: |
+          set -uo pipefail
+          TAG='${{ inputs.tag }}'
+          docker pull -q "$IMAGE:$TAG"
+          rc=0
+
+          for CONF in infra/linode-relay/connector-rust.toml infra/linode-store/connector-rust.toml; do
+            echo "::group::$CONF"
+            WORK=$(mktemp -d)
+            # Key material is never committed (`.gitignore`), and config load
+            # refuses a `key_file` that is not there — so stand in placeholder
+            # scalars at exactly the paths the committed file names. This is
+            # the same substitution crates/connector-bin/tests/devnet_configs_load.rs
+            # makes for the same reason, and it touches nothing semantic: no
+            # prefix, no route, no peer, no price, no field name. The SHAPE of
+            # the config -- which is what a schema change breaks -- is verbatim.
+            mkdir -p "$WORK/data" "$WORK/state"
+            for k in signer settlement settlement-solana announce; do
+              openssl rand -hex 32 > "$WORK/data/$k.key"
+            done
+            chmod -R a+rX "$WORK"
+
+            set +e
+            OUTPUT=$(timeout 60 docker run --rm \
+              -v "$PWD/$CONF":/app/config/connector.toml:ro \
+              -v "$WORK/data":/app/data:ro \
+              -v "$WORK/state":/app/state \
+              --user 0 \
+              "$IMAGE:$TAG" 2>&1)
+            STATUS=$?
+            set -e
+            echo "$OUTPUT" | tail -40
+            echo "exit: $STATUS"
+            echo "::endgroup::"
+
+            # 124 = still running when `timeout` killed it = it loaded this
+            # config and got as far as serving. That is the pass.
+            if [ "$STATUS" -eq 124 ]; then
+              echo "✓ $CONF loads and serves on $TAG"
+              continue
+            fi
+
+            # Distinguish "this config does not fit this binary" from "a
+            # settlement RPC was unreachable from a GitHub runner". Only the
+            # first is a reason to refuse a promotion; the second is noise
+            # this gate must not turn into a false red.
+            if echo "$OUTPUT" | grep -Eq 'is not valid TOML|unknown field|missing field|failed to read config file'; then
+              echo "::error::$TAG REFUSES $CONF — a config-schema break. This build must not front the fleet."
+              echo "::error::Fix the committed config first (fleet-ops.yml config-apply), or make the new field optional. See ADR 0041."
+              rc=1
+            else
+              echo "::warning::$CONF did not reach a serving state on $TAG (exit $STATUS), but not with a config-schema error."
+              echo "::warning::Most likely an unreachable settlement RPC from this runner (ADR 0009 refuses to start on one). Output above."
+            fi
+          done
+          exit $rc
+
+      - name: Move :rust-release
+        run: |
+          set -euo pipefail
+          TAG='${{ inputs.tag }}'
+          # A retag, not a rebuild: `imagetools create` re-points the tag at
+          # the EXACT manifest already validated above. Rebuilding could
+          # produce a different image from the same commit and would make the
+          # checks above vouch for something else.
+          docker buildx imagetools create -t "$IMAGE:$MOVING_TAG" "$IMAGE:$TAG"
+          echo "Moved $IMAGE:$MOVING_TAG -> $TAG"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## promote-to-fleet"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Promoted | \`$IMAGE:${{ inputs.tag }}\` |"
+            echo "| Moving tag | \`:$MOVING_TAG\` |"
+            echo "| Previous | \`${{ steps.resolve.outputs.incumbent_sha }}\` |"
+            echo "| Rollback | \`${ROLLBACK:-0}\` |"
+            echo "| Reason | ${{ inputs.reason }} |"
+            echo ""
+            echo "Both boxes' label-scoped Watchtower recreates \`connector-rust\` and \`announce\` within ~60s."
+            echo "The health job below probes them once they have had time to land."
+            echo ""
+            echo "To undo: re-dispatch with \`tag: ${{ steps.resolve.outputs.incumbent_sha }}\` (as a \`rust-sha-\` tag) and \`allow_rollback: true\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The deploy is not done when the tag moves — it is done when the boxes are
+  # serving again. Watchtower will not tell us that, so this does.
+  verify:
+    name: Verify the fleet came back
+    needs: promote
+    if: needs.promote.result == 'success' && !inputs.skip_health_check
+    uses: ./.github/workflows/fleet-health.yml
+    with:
+      box: all
+      # 60s Watchtower poll + pull + boot, with margin. Probing sooner just
+      # measures the old container.
+      settle_seconds: '180'
+    secrets: inherit
