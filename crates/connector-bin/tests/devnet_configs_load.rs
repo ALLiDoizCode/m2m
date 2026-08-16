@@ -2636,6 +2636,33 @@ fn swap_node_pins_the_moving_release_tag() {
     );
 }
 
+/// The maker's CWD must be its state volume (issue #1004). The embedded
+/// `@toon-protocol/connector` ConnectorNode opens its three SQLite ledgers at
+/// literal `./data/...` paths -- the issued-claims DB, the received-claims DB
+/// (the redeemable ones) and the peer registry -- so CWD alone decides whether
+/// they land on the `swap_node_state` volume or in the container's writable
+/// layer. `swap-node` is this fleet's ONE Watchtower auto-redeploy target, so
+/// "writable layer" means "discarded on the next `swap:release` publish".
+/// `statePath` does not cover this: it is read by the swap CLI for its own boot
+/// snapshot, not by the connector library, and it has no `./data/` equivalent.
+#[test]
+fn the_swap_node_runs_with_its_state_volume_as_cwd() {
+    assert!(
+        RELAY_SWAP_OVERLAY.contains("working_dir: /app/state"),
+        "docker-compose.relay.swap.yml no longer sets `working_dir: \
+         /app/state`. The maker's claim ledgers are opened at CWD-relative \
+         `./data/*.db` paths, so dropping this puts them in the container's \
+         writable layer -- and this is the one service Watchtower recreates on \
+         its own, which would discard them on every `swap:release` publish."
+    );
+    assert!(
+        RELAY_SWAP_OVERLAY.contains("- swap_node_state:/app/state"),
+        "docker-compose.relay.swap.yml no longer mounts `swap_node_state` at \
+         /app/state, which is what makes `working_dir: /app/state` persist \
+         anything at all -- the two only work together."
+    );
+}
+
 /// The watchtower service itself: an explicit version (never `:latest`,
 /// which would make a future Watchtower release change behaviour on this
 /// box with no reviewable diff) and `DOCKER_API_VERSION` set (the relay

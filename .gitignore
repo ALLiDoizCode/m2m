@@ -32,6 +32,14 @@ coverage/
 *.bak
 *.bak-*
 *.bak.*
+# `.bak2-`, `.bak3-`, ... — a second snapshot of the same file in one session.
+# The three rules above all require `.bak` to end at a `-`, `.` or the name, so
+# `docker-compose.store.announce.yml.bak2-pre997-1786897318` (found untracked on
+# the live store box, issue #1004) matched NONE of them and showed up as real
+# untracked content in `git status`. Same rationale as the rules above: an
+# operator's `git add -A` on a box must not be able to commit a point-in-time
+# copy of live deployment values.
+*.bak[0-9]*
 *.orig
 *.rej
 *.stale-drift-bak-*
