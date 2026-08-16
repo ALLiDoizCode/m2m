@@ -2,6 +2,16 @@
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
+> **The conclusion below is superseded by
+> [ADR 0040](0040-a-verified-payment-is-stated-to-the-app.md).** A terminating connector now does
+> state `X-TOON-Payer` / `X-TOON-Amount` / `X-TOON-Chain` to the app — but only for a payment it
+> verified itself, sourced from the very `client_channel_id` this record introduced, and absent
+> (never guessed, never a sentinel) on every path where that is not what happened. What survives
+> unchanged is everything else here: the reasoning about why the TypeScript prototype's own
+> values were wrong, the connector-side records, and the span-to-journal join this decision built
+> — ADR 0040 adds a second reader of that same fact, it does not retire the first. Read this
+> record for the reasoning; read ADR 0040 for what is on the wire.
+
 A terminating connector tells the app nothing about the payment that brought a packet to it — not
 who paid, not how much, not on what chain. There is no successor to the relay's retired
 `X-TOON-Payer` / `X-TOON-Amount` / `X-TOON-Chain` headers, and there should not be one: `amount` is

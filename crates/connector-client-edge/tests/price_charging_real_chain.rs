@@ -32,7 +32,9 @@ use connector_config::StaticRoute;
 use connector_domain::{
     derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Prepare, Reject,
 };
-use connector_runtime::{AppOutcome, Connector, FakeAppClient, InProcessPeerTransport, TestClock};
+use connector_runtime::{
+    AppOutcome, Connector, FakeAppClient, InProcessPeerTransport, TestClock, PAYER_HEADER,
+};
 use connector_settlement::SettlementBackend;
 use connector_settlement_evm::EvmSettlementBackend;
 use connector_signer::giftwrap::{derive_fulfillment, seal_request};
@@ -336,6 +338,31 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
     assert_eq!(status, StatusCode::OK);
     Fulfill::decode(&bytes).expect("a claim covering the real on-chain deposit is fulfilled");
     assert_eq!(app_client.deliveries().len(), 1);
+
+    // ADR 0040 (issue #994), joined to a real chain: the payer the app is
+    // told about is the channel this claim was actually *verified*
+    // against, not anything the sender wrote. Asserted here rather than
+    // only in `connector-runtime`'s own unit tests because this is the
+    // whole path -- a real signature, checked against a real on-chain
+    // channel, whose key then rides the delivery.
+    let delivery = app_client.deliveries().remove(0);
+    let payer = delivery
+        .request
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(PAYER_HEADER))
+        .map(|(_, value)| value.clone());
+    assert_eq!(
+        payer.as_deref(),
+        Some(
+            format!(
+                "evm:0x{}",
+                paid_channel.0.trim_start_matches("0x").to_ascii_lowercase()
+            )
+            .as_str()
+        ),
+        "the app is told which channel paid for this delivery"
+    );
 
     // A second, freshly funded channel that genuinely received only 40 --
     // less than the route's price of 100 -- is refused as underpayment

@@ -53,10 +53,23 @@ pub(crate) fn sealed_envelope_request_data_with_target(
     target: &str,
     body: &[u8],
 ) -> (Vec<u8>, [u8; 32]) {
+    sealed_envelope_request_data_with_headers(target, vec![], body)
+}
+
+/// Like [`sealed_envelope_request_data_with_target`], but with
+/// caller-chosen request headers inside the sealed envelope -- for a test
+/// that asserts what a delivery carries beyond what the sender wrote,
+/// including a sender who wrote the attribution headers a terminating
+/// connector states for itself (ADR 0040, `crate::attribution`).
+pub(crate) fn sealed_envelope_request_data_with_headers(
+    target: &str,
+    headers: Vec<(String, String)>,
+    body: &[u8],
+) -> (Vec<u8>, [u8; 32]) {
     let plaintext = EnvelopeRequest {
         method: "POST".to_string(),
         target: target.to_string(),
-        headers: vec![],
+        headers,
         body: body.to_vec(),
     }
     .encode();
