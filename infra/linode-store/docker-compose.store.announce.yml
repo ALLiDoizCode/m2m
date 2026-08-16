@@ -166,19 +166,35 @@ services:
     # nothing in that suite had any notion of an image tag before, which is
     # why `rust-sha-b31a7c9` sailed through a green gate.
     #
-    # PIN OF RECORD (issue #848, bumped for #948): bumped past that floor to
-    # `rust-sha-415531a` -- the prior pin `rust-sha-440eab7` predates the
-    # `notice_*` announce fields (issue #912, PR #915) this box's committed
-    # `connector-rust.toml` now sets, and every cycle of the publish loop
-    # below would fail to load that config on it (`RawAnnounceConfig` is
-    # `deny_unknown_fields`) -- the loop would survive and announce nothing,
-    # logging `[announce] FAILED` forever. This repo's compose files are the
-    # fleet's pin of record and lead the boxes, not the reverse (#948 is a
-    # repo-only change; the cutover is separate and human-gated). See
-    # `EXPECTED_CONNECTOR_TAG` in
-    # crates/connector-bin/tests/devnet_configs_load.rs, which asserts every
-    # surviving overlay names this same tag.
-    image: ghcr.io/toon-protocol/connector:rust-sha-415531a
+    # ── PIN OF RECORD: a watched GHCR tag, no longer a literal here ─────────
+    # (toon-meta#403's fleet-wide Watchtower rollout, applied to this box by
+    # issue #992; reconciles what the box has actually run since 2026-08-16)
+    #
+    # This named an immutable `rust-sha-*` tag until toon-meta#403 gave each
+    # box a label-scoped Watchtower. The doctrine that pin enforced -- no
+    # connector image reaches a box unreviewed -- has NOT been dropped, it has
+    # MOVED: the reviewed decision is now which build
+    # `ghcr.io/toon-protocol/connector:rust-release` points at, and this
+    # service's `com.centurylinklabs.watchtower.enable` label below is what
+    # subscribes this container to it.
+    #
+    # A `rust-sha-*` literal here cannot coexist with that: it would make
+    # Watchtower's poll a permanent no-op, since an immutable tag's digest
+    # never moves. The state before this change was the worst of both -- this
+    # file said `rust-sha-415531a` while the box had been following
+    # `:rust-release` for a day, so the repo described a fleet that did not
+    # exist and a `fleet-ops` reconcile would have rolled the box backwards.
+    #
+    # The full reasoning, and what IS still asserted (all four fleet overlays
+    # name the SAME reference; a floating reference only ever on a
+    # Watchtower-labelled service), is on `EXPECTED_CONNECTOR_TAG` in
+    # crates/connector-bin/tests/devnet_configs_load.rs.
+    image: ghcr.io/toon-protocol/connector:rust-release
+    # Label-scoped Watchtower watch target: ./docker-compose.store.watchtower.yml's `--label-enable` Watchtower only ever
+    # touches a container carrying this exact label. See that file's header
+    # and the note above.
+    labels:
+      com.centurylinklabs.watchtower.enable: 'true'
     # `$$` throughout: compose interpolates a bare `$VAR`/`${VAR}` in this
     # file's own text against the HOST's environment at `up` time, same as
     # the nginx/certbot reload loops elsewhere in this fleet
