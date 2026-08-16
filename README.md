@@ -11,7 +11,11 @@ built as one static binary that reads one TOML file. The TypeScript connector th
 here was a prototype and has been removed —
 [ADR 0017](docs/adr/0017-the-typescript-connector-is-a-prototype.md), #465 and #543.
 `@toon-protocol/connector` remains on npm at its last release (4.0.0) for existing clients, but
-its source is only in git history, and nothing in this repository implements its wire.
+its source is only in git history, and nothing in this repository implements its wire. Note that
+4.0.0 **is** the removal: it is a thin HTTP client over the Rust client edge and contains no
+`ConnectorNode`. A consumer still embedding the node is on the closed 3.x line — see
+[the frozen peer-relation contract](docs/embedded-connector-peer-relation-contract.md) for what
+that line guarantees and what replaces it.
 
 ## What the connector does
 
