@@ -314,5 +314,8 @@ exists to avoid.
 `rig`'s `DEVNET_DVM_URL` (`packages/rig/src/cli/name.ts`) defaults `--via` to
 `https://dvm.devnet.toonprotocol.dev` for `rig name buy` / `rig name set` on devnet, and posts to
 `${via}/store`. That path cannot work through this hostname even with a valid certificate: `dvm.`
-maps to `store:3400`, the health server, while `POST /store` is served on `store:3300`. Fixing the
-certificate does not fix the brokered ArNS buy; that is a `rig`-side ticket.
+maps to `store:3400`, the health server, while `POST /store` is served on `store:3300` and is not
+exposed under any hostname (it was deleted as a free door on 2026-08-05). Fixing the certificate does
+not fix the brokered ArNS buy. Tracked as toon-protocol/rig#101, which reaches the same conclusion
+from the connector side — no node serves an unpaid `POST /store`, by design — and where this box's
+half of the evidence is recorded.
