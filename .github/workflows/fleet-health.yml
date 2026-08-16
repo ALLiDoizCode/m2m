@@ -598,8 +598,13 @@ jobs:
           fi
           echo "probe=$PROBE compat=$COMPAT -> $VERDICT"
 
+          # Deliberately NOT `--search "... in:title"`: the title contains `[`
+          # and `]`, which GitHub's search syntax does not treat as literals,
+          # and a search that silently matched nothing would open a fresh
+          # alert on every run instead of updating one. Listing the label and
+          # comparing titles exactly in jq has no such failure mode.
           EXISTING=$(gh issue list --repo "${{ github.repository }}" --state open \
-                       --search "\"$ALERT_TITLE\" in:title" \
+                       --label "needs:human" --limit 100 \
                        --json number,title \
                        --jq ".[] | select(.title == \"$ALERT_TITLE\") | .number" | head -1)
 
