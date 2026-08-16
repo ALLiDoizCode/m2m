@@ -50,17 +50,17 @@ them; only the watchtower one is brought up here.
 
 ### store — `45.79.173.113`
 
-| Path                                                                                     | Class                          | Disposition                                                                                                                                                                                                                                                                                  |
-| ---------------------------------------------------------------------------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `infra/linode-store/connector-rust.toml` → `[[peers]]`/`[[peer_channels]]`/`peer_expose` | (a)                            | Same retired `apex-store` peering as the relay's. Discard.                                                                                                                                                                                                                                   |
-| `infra/linode-store/connector-rust.toml` → `[announce] pay_channel`                      | **(b)**                        | The real funded channel. `main` commits `0xdead…c0de` deliberately (#822/#853/#871) and `the_store_announce_pay_channel_is_a_clearly_marked_placeholder` asserts it stays one. **Re-apply after the pull.**                                                                                  |
-| `infra/linode-store/connector-rust.toml` → `[operator]`                                  | **(b), and the dangerous one** | `bearer_token` and `write_keys` are live credentials that exist **nowhere but this file**. `main` has no `[operator]` section at all, so a pull without a backup destroys the operator surface irrecoverably and silently. See "Class (b) at a tracked path" below.                          |
-| `infra/linode-store/docker-compose.store.{announce,rust,yml}.yml`                        | (a)                            | `:release` repoints and Watchtower labels (#1006), plus `apex-store.secret` mounts `main` removes with the peering. Discard.                                                                                                                                                                 |
-| `infra/linode-store/nginx/conf.d/node.conf`                                              | (a)                            | Variable upstream (#999); `$u` vs `main`'s `$upstream`. Discard.                                                                                                                                                                                                                             |
-| `docker-compose.store.watchtower.yml`                                                    | (a), **blocks the pull**       | Untracked on the box, **tracked in `main`** — so `git pull` aborts with "untracked working tree file would be overwritten" before it changes anything. `main`'s version pins `containrrr/watchtower:1.7.1` (the box runs an unpinned tag) and moves the service label inline. Move it aside. |
-| `docker-compose.store.connector-label.yml`                                               | (a)                            | Untracked, not in `main`, redundant once labels are inline. Delete after the pull.                                                                                                                                                                                                           |
-| `docker-compose.store.announce.yml.bak2-pre997-1786897318`                               | (b)                            | An operator snapshot. It showed as untracked rather than ignored because `.gitignore`'s `*.bak-*` requires the `-` immediately after `.bak`; this PR adds `*.bak[0-9]*`. Harmless either way — leave it.                                                                                     |
-| `*.key`, `*.secret`, `.env`, `*.bak*`                                                    | (b)                            | Gitignored. Untouched.                                                                                                                                                                                                                                                                       |
+| Path                                                                                     | Class                                 | Disposition                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ---------------------------------------------------------------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `infra/linode-store/connector-rust.toml` → `[[peers]]`/`[[peer_channels]]`/`peer_expose` | (a)                                   | Same retired `apex-store` peering as the relay's. Discard.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `infra/linode-store/connector-rust.toml` → `[announce] pay_channel`                      | **(b)**                               | The real funded channel. `main` commits `0xdead…c0de` deliberately (#822/#853/#871) and `the_store_announce_pay_channel_is_a_clearly_marked_placeholder` asserts it stays one. **Re-apply after the pull.**                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `infra/linode-store/connector-rust.toml` → `[operator]`                                  | **(a), but it stops the box booting** | `bearer_token` and `write_keys` are live credentials that exist **nowhere but this file**. #1003 landed while this runbook was being written (PR #1017): `main` now commits the section as two paths, `bearer_token_file`/`write_keys_file`, and `docker-compose.store.rust.yml` mounts `./operator-bearer-token.secret` and `./operator-write-keys.allow`. **Neither file exists on the box** (checked 2026-08-16), and a missing `*_file` is `OperatorFileNotFound` — a refuse-to-start, not a warning. So the TOML edit is gone and a NEW step replaces it: write those two files from the values step 1 extracts, before the connector is recreated. See below. |
+| `infra/linode-store/docker-compose.store.{announce,rust,yml}.yml`                        | (a)                                   | `:release` repoints and Watchtower labels (#1006), plus `apex-store.secret` mounts `main` removes with the peering. Discard.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `infra/linode-store/nginx/conf.d/node.conf`                                              | (a)                                   | Variable upstream (#999); `$u` vs `main`'s `$upstream`. Discard.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `docker-compose.store.watchtower.yml`                                                    | (a), **blocks the pull**              | Untracked on the box, **tracked in `main`** — so `git pull` aborts with "untracked working tree file would be overwritten" before it changes anything. `main`'s version pins `containrrr/watchtower:1.7.1` (the box runs an unpinned tag) and moves the service label inline. Move it aside.                                                                                                                                                                                                                                                                                                                                                                        |
+| `docker-compose.store.connector-label.yml`                                               | (a)                                   | Untracked, not in `main`, redundant once labels are inline. Delete after the pull.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `docker-compose.store.announce.yml.bak2-pre997-1786897318`                               | (b)                                   | An operator snapshot. It showed as untracked rather than ignored because `.gitignore`'s `*.bak-*` requires the `-` immediately after `.bak`; this PR adds `*.bak[0-9]*`. Harmless either way — leave it.                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `*.key`, `*.secret`, `.env`, `*.bak*`                                                    | (b)                                   | Gitignored. Untouched.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
 ### The one class (c) find
 
@@ -74,16 +74,21 @@ guarded by `the_swap_node_runs_with_its_state_volume_as_cwd`.
 
 ## Class (b) at a tracked path — the standing hazard
 
-Three of the box-local values live at paths git tracks, so **a pull would clobber them and a
+Two of the box-local values live at paths git tracks, so **a pull would clobber them and a
 `git checkout --`/`git reset --hard` would destroy them**. That is not a property of this
 reconcile; it is true of every future one, and it is why step 0 below is a backup rather than a
 convenience.
 
-| Value                                   | File (tracked)                           | Why it is exposed                                                                                                                                                                                                                                                                       | Fix                                                                                                                                                                                                                                   |
-| --------------------------------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `[operator] bearer_token`, `write_keys` | `infra/linode-store/connector-rust.toml` | `RawOperatorConfig` takes both as **inline string literals**. Every other secret on this fleet is a path to a gitignored file (`[signer] key_file`, `[settlement.*.key] key_file`, `[[peers]] credential.secret_file`), which is exactly what lets those configs be committed verbatim. | **connector#1003** — add `bearer_token_file` / `write_keys_file`, validated the way `secret_file` is. Owned by another agent; not done here. Until it lands, this section has no committed representation and a reconcile deletes it. |
-| `[announce] pay_channel`                | `infra/linode-store/connector-rust.toml` | Deliberate placeholder convention, guarded by a test. Not a secret — an on-chain id — so the exposure is data loss, not disclosure.                                                                                                                                                     | Either a `pay_channel_file` indirection alongside #1003's, or accept the re-apply step and keep it documented here. A `.gitignore` change cannot help: the file must stay tracked.                                                    |
-| `channels[].channelId`, `inventory`     | `infra/linode-relay/swap.config.json`    | Same placeholder convention. The file is bind-mounted `:ro`, so the maker never writes back to it — the drift is entirely hand-applied, and re-applying by hand is the whole mechanism.                                                                                                 | Same shape of fix. Worth noting the maker's own mutable state is already elsewhere (`statePath` on the volume), so only these two literals need to move.                                                                              |
+There were three. The store's `[operator]` credentials left this table on 2026-08-16 when #1003
+landed (PR #1017) and moved them behind `bearer_token_file`/`write_keys_file` — the shape the two
+rows below still want. It is worth reading as the worked example: the values now live in
+gitignored files the box owns, `main` commits the section naming them, and `git status` stops
+mentioning either. That is the end state; the rows below are what has not reached it yet.
+
+| Value                               | File (tracked)                           | Why it is exposed                                                                                                                                                                       | Fix                                                                                                                                                                                |
+| ----------------------------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `[announce] pay_channel`            | `infra/linode-store/connector-rust.toml` | Deliberate placeholder convention, guarded by a test. Not a secret — an on-chain id — so the exposure is data loss, not disclosure.                                                     | Either a `pay_channel_file` indirection alongside #1003's, or accept the re-apply step and keep it documented here. A `.gitignore` change cannot help: the file must stay tracked. |
+| `channels[].channelId`, `inventory` | `infra/linode-relay/swap.config.json`    | Same placeholder convention. The file is bind-mounted `:ro`, so the maker never writes back to it — the drift is entirely hand-applied, and re-applying by hand is the whole mechanism. | Same shape of fix. Worth noting the maker's own mutable state is already elsewhere (`statePath` on the volume), so only these two literals need to move.                           |
 
 Do **not** try to solve this with `.gitignore` or `git update-index --skip-worktree`: both make the
 box's copy invisible to `git status`, which converts a loud conflict into silent divergence — the
@@ -141,7 +146,12 @@ _Destroys:_ nothing; all reads.
 
 _Verify:_ `operator-section.toml` is 3 lines (`[operator]`, `bearer_token`, `write_keys`) and starts
 with `[operator]`. The relay prints a real `0x…` channel id and a non-zero inventory. Do not paste
-either into a terminal you are recording, a ticket, or a chat.
+any of it into a terminal you are recording, a ticket, or a chat.
+
+This capture is the whole reconcile on the store box. The bearer token exists in exactly one place —
+that file, right now — and the config `main` will hand the box afterwards names it by path rather
+than carrying it. If step 1 is skipped, the only remaining route is a rotation
+(`docs/operators/key-rotation-runbook.md`), and every operator client has to be re-issued.
 
 ### Step 2 — stop Watchtower on this box
 
@@ -239,16 +249,43 @@ paths exist again, now as `main`'s versions.
 
 ### Step 6 — put the class (b) values back
 
-**store box** — edit `infra/linode-store/connector-rust.toml`:
-
-1. Replace the `[announce] pay_channel = "0xdead…c0de"` line with the real value from step 1.
-2. Append the three lines of `$BK/operator-section.toml` at the end of the file.
+**store box, part 1** — edit `infra/linode-store/connector-rust.toml`: replace the
+`[announce] pay_channel = "0xdead…c0de"` line with the real value from step 1. That is the only
+edit this file needs; **do not** append the old `[operator]` section back, because `main` already
+carries one (in the `*_file` form) and a second table is a duplicate-key TOML parse error.
 
 ```bash
-cat "$BK/operator-section.toml" >> infra/linode-store/connector-rust.toml
-$EDITOR infra/linode-store/connector-rust.toml   # pay_channel
+$EDITOR infra/linode-store/connector-rust.toml   # pay_channel only
 git diff --stat
 ```
+
+**store box, part 2 — the two operator files, which the box does not have yet.** `main`'s
+`[operator]` names `/app/data/operator-bearer-token` and `/app/data/operator-write-keys`, and
+`docker-compose.store.rust.yml` mounts them from `./operator-bearer-token.secret` and
+`./operator-write-keys.allow`. A missing `*_file` is `OperatorFileNotFound`, which the loader
+refuses to start on — so **without this the connector crash-loops after bring-up**, and the failure
+is at boot, not at the first operator request.
+
+Take both values out of `$BK/operator-section.toml` (step 1). The write-keys file is one 64-hex
+ed25519 **public** key per line, `#` comments allowed; the box's old `write_keys = [...]` array had
+one entry, so the file has one line. Contents are trimmed, so a trailing newline is fine.
+
+```bash
+cd /root/connector/infra/linode-store
+umask 077
+$EDITOR operator-bearer-token.secret     # the bearer_token value, no quotes, nothing else
+$EDITOR operator-write-keys.allow        # one write_keys entry per line, no quotes, no brackets
+chmod 600 operator-bearer-token.secret
+chmod 644 operator-write-keys.allow
+chown 10001:10001 operator-bearer-token.secret operator-write-keys.allow
+cd /root/connector
+```
+
+Use `$EDITOR`, not `echo`: an `echo` of a bearer token lands in the shell history in plaintext.
+`chown 10001:10001` matches how the other mounted credentials on this box are owned
+(`docs/operators/devnet-ssh-hardening.md` §2) — the container runs as that uid and the mounts are
+`:ro`. The allowlist is public key material and is deliberately world-readable and named `.allow`
+rather than `.secret`; both extensions are gitignored, so neither shows up in `git status`.
 
 **relay box** — put back the two `swap.config.json` literals. Take `main`'s file (it gained
 `tokenNetworkAddress`, `blsPort: 8090` and new comments the box copy lacks) and edit the two values
@@ -263,15 +300,20 @@ git diff --stat
 _Destroys:_ nothing.
 
 _Verify:_ `git diff --stat` names **exactly one file** — `infra/linode-store/connector-rust.toml` on
-the store, `infra/linode-relay/swap.config.json` on the relay — and nothing else. Any second file is
+the store, `infra/linode-relay/swap.config.json` on the relay — and nothing else. The two new
+operator files are gitignored (`*.secret`, `*.allow`), so they correctly do not appear at all; that
+is the whole point of the `*_file` form #1003 introduced. Any second file is
 a mistake; `git checkout -- <that file>` and look again. Then confirm the values landed:
 
 ```bash
 # store — `main` has exactly one `0xdeaddead…` (the pay_channel); after the edit there are none
-grep -c '0xdeaddead' infra/linode-store/connector-rust.toml   # expect 0
-grep -q '^\[operator\]' infra/linode-store/connector-rust.toml && echo 'operator present'
+grep -c '0xdeaddead' infra/linode-store/connector-rust.toml            # expect 0
+grep -c '^\[operator\]' infra/linode-store/connector-rust.toml        # expect 1, never 2
+# store — both mount sources exist and are non-empty (this is the boot gate)
+test -s infra/linode-store/operator-bearer-token.secret && echo 'bearer token file ok'
+test -s infra/linode-store/operator-write-keys.allow    && echo 'write-keys file ok'
 # relay — `main` has two (channelId and settlementPrivateKey); after the edit, one
-grep -c '0xdeaddead' infra/linode-relay/swap.config.json      # expect 1 (settlementPrivateKey)
+grep -c '0xdeaddead' infra/linode-relay/swap.config.json               # expect 1 (settlementPrivateKey)
 ```
 
 The relay's `settlementPrivateKey` placeholder stays as-is: the maker replaces it in memory from the
@@ -346,10 +388,23 @@ right (`docs/operators/swap-node-bringup.md`), not part of reconciling a checkou
 
 ### store
 
+**Gate first.** `connector-rust` here now loads two mounted operator files, and a missing one is a
+refuse-to-start. Confirm step 6 part 2 actually happened before recreating anything:
+
+```bash
+ls -l /root/connector/infra/linode-store/operator-bearer-token.secret \
+      /root/connector/infra/linode-store/operator-write-keys.allow
+```
+
+Both must exist and be non-empty. The container running right now still holds the OLD config in
+memory and will keep serving until it is recreated, so this is the last moment the mistake is free.
+
 ```bash
 cd /root/connector/infra/linode-store
 docker compose -f docker-compose.store.yml -f docker-compose.store.rust.yml config -q
 docker compose -f docker-compose.store.yml -f docker-compose.store.rust.yml up -d
+# then, immediately:
+docker logs --since 2m linode-store-connector-rust-1 2>&1 | grep -iE 'operator|panic|error' | head
 docker compose -f docker-compose.store.rust.yml -f docker-compose.store.announce.yml up -d announce
 docker compose -f docker-compose.store.yml -f docker-compose.store.rust.yml \
                -f docker-compose.store.announce.yml -f docker-compose.store.watchtower.yml \
@@ -389,15 +444,16 @@ fails.
 
 ## After both boxes are clean
 
-`git status` on each box should be one modified file and nothing else, permanently — that is the
-steady state until connector#1003 lands and the `[operator]`/`pay_channel` values can move behind
-`*_file` paths. Once that is true, `fleet-ops`'s reconcile path works again and the fleet is
-reproducible from committed config, which is the whole point of #1004.
+`git status` on each box should be one modified file and nothing else, permanently — the store's
+`pay_channel`, the relay's `swap.config.json`. That is the steady state until those two follow the
+`[operator]` credentials behind a `*_file` path (see "Class (b) at a tracked path"). With that,
+`fleet-ops`'s reconcile path works again and the fleet is reproducible from committed config, which
+is the whole point of #1004.
 
-**When #1003 does land**, step 6's store half changes shape rather than going away: the
-`[operator]` section becomes committed config naming two paths, and the reconcile step becomes
-"write the two secret files onto the box" — gitignored, so `git status` stops mentioning them at
-all. Re-read this section then; the values themselves are still only ever recoverable from `$BK` or
-from a rotation.
+The `[operator]` half is already there, and it is the shape to copy: #1003 landed on 2026-08-16 (PR
+#1017), so the section is committed config naming two paths and the box owns two gitignored files
+that `git status` never mentions. Note what that did and did not buy — the box is reproducible, but
+the credential VALUES are still only ever recoverable from `$BK` or from a rotation, because the
+whole point is that the repo never sees them.
 
 Remove the backup: `rm -rf "$BK"` on each box. It holds real key material.
