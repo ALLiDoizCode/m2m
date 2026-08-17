@@ -13,13 +13,13 @@
 > claim (ADR 0031) regardless of which side dials.
 
 Operator runbook for
-[ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md).
+[ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-role-is-deleted.md).
 
 > **This replaces the four-phase migration plan that used to live at
 > `btp-peer-transport-migration.md`.** That plan assumed traffic had to be drained off the raw-TCP
-> peer wire onto BTP. The 2026-08-03 audits (`toon-meta/prototypes/peer-wire-audit/`) established
-> that **no link has ever run on the peer wire**: the live apex `connector-rust.toml` has no
-> `[[peers]]` table, `peer-claims.log` on the Rust state volume is 0 bytes, and no peer-wire
+> peer semantics onto BTP. The 2026-08-03 audits (`toon-meta/prototypes/peer-role-audit/`) established
+> that **no link has ever run on the peer semantics**: the live apex `connector-rust.toml` has no
+> `[[peers]]` table, `peer-claims.log` on the Rust state volume is 0 bytes, and no peer-role
 > listener is open on either box. There is nothing to drain and no dual-stack window. The raw-TCP
 > transport is deleted up front; what follows is a **bring-up**, not a cutover.
 
@@ -120,12 +120,12 @@ image on every merge to main. Those image pipelines have to be repointed before 
 
 # The peer config surface
 
-The configuration surface for peering, and what changed when the raw-TCP peer wire was
+The configuration surface for peering, and what changed when the raw-TCP transport was
 deleted (issue #677). This is the section every peer-related config error names: if a
 connector refused to start and sent you here, find your error message below.
 
-- **Decision:** [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md)
-  — connectors peer over BTP or ILP-over-HTTP; the raw-TCP peer wire is deleted.
+- **Decision:** [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-role-is-deleted.md)
+  — connectors peer over BTP or ILP-over-HTTP; the raw-TCP transport is deleted.
 - **Normative detail:** [`docs/protocol/peer-carriage-spec.md`](../protocol/peer-carriage-spec.md)
   — the role rule, the two carriages, and §11's config requirements.
 - **Scope of this document:** the configuration surface only (issue #677). The carriages that

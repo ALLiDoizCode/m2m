@@ -4,7 +4,7 @@
 //! ADR 0011 chose fee accumulation over a quoting protocol: a sender sends a
 //! packet it expects to be rejected, and the reject reports what the path
 //! would have charged. The packet plane has accumulated that figure since
-//! issue #426 and the peer wire has carried it beside the packet since; this
+//! issue #426 and the peer role has carried it beside the packet since; this
 //! file holds the client edge -- where the only clients are -- to reporting
 //! it too, over the surface a client actually speaks.
 //!

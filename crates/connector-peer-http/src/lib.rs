@@ -7,7 +7,7 @@
 //!
 //! It is the **carriage**: where the bytes ride. It is not the semantics.
 //! Claim exchange, flush, fees, minimum delivery and the refusal taxonomy
-//! are `peer-wire-spec.md` §3--§6's and live above the
+//! are `peer-semantics-spec.md` §3--§6's and live above the
 //! [`connector_runtime::PeerTransport`] port, unchanged by which wire carried
 //! them. This crate maps §3's table onto requests and responses, and nothing
 //! else:
@@ -85,7 +85,7 @@
 //! *semantics* that happen to have landed in #727's crate first, and I3/I4/I6
 //! require exactly one of each. Copying them here would be the drift those
 //! invariants exist to prevent; lifting them into a shared
-//! `connector-peer-wire` crate would be a better home and is mechanical, but
+//! `connector-peer-role` crate would be a better home and is mechanical, but
 //! it is a refactor of a crate that merged days ago and it changes no
 //! behaviour, so it is not done under this issue.
 //!

@@ -147,7 +147,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 /// connector has claimed to the peer ([`ClaimDirection::Outbound`]) and
 /// what the peer has claimed to this connector
 /// ([`ClaimDirection::Inbound`], i.e. this connector's own watermark on
-/// that channel). `peer_id` is `None` on an inbound entry: the peer wire
+/// that channel). `peer_id` is `None` on an inbound entry: the peer semantics
 /// has no identity handshake yet, so an inbound claim is known only by the
 /// channel it names, not by which configured peer sent it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -15,7 +15,7 @@ const DEFAULT_PEER_TIMEOUT_MS: u64 = 30_000;
 /// exactly two, and neither is selected by a `transport` field: a
 /// connector's *expose* set says which listeners it opens, and each peer's
 /// endpoint **scheme** says which carriage this connector dials that peer
-/// on (§2.1). ADR 0027 deleted the raw-TCP peer wire, so there is no third
+/// on (§2.1). ADR 0027 deleted the raw-TCP transport, so there is no third
 /// value and nothing to add one for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerCarriage {
@@ -430,7 +430,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawPeer {
     id: String,
-    /// Removed with the raw-TCP peer wire (ADR 0027, issue #679); a peer
+    /// Removed with the raw-TCP transport (ADR 0027, issue #679); a peer
     /// is reached by `endpoint` now.
     #[serde(default)]
     addr: Option<toml::Value>,

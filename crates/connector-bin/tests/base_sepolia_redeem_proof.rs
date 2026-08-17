@@ -1,5 +1,5 @@
 //! The proof issue #566 says nothing else in the epic can give: a claim
-//! signed by this workspace's *production* peer-wire signing path redeems
+//! signed by this workspace's *production* peer signing path redeems
 //! against the `TokenNetwork` actually deployed and resolved on Base
 //! Sepolia -- through the same `TokenNetworkRegistry` every fleet config's
 //! `[settlement.evm]` names (`infra/linode-store/connector-rust.toml` and
@@ -26,7 +26,7 @@
 //!   an outbound claim (`connector-runtime/src/claim.rs:881`), not a
 //!   hand-rolled digest.
 //! - **Wire**: [`connector_runtime::WireClaim::encode`]/`decode` -- the
-//!   exact peer-wire byte shape (peer-wire-spec.md §3.5), round-tripped
+//!   exact peer-role byte shape (peer-semantics-spec.md §3.5), round-tripped
 //!   before anything is submitted, so a bug in the wire codec would show up
 //!   here as a decode failure rather than being silently bypassed.
 //! - **Verify**: [`connector_signer::verify_evm_balance_proof`] -- the
@@ -215,7 +215,7 @@ fn production_signature(
     signer.sign(&evm_balance_proof_digest(proof)).expect("sign")
 }
 
-/// Round-trip `proof`/`signature` through the real peer-wire codec and hand
+/// Round-trip `proof`/`signature` through the real peer-role codec and hand
 /// back the on-chain redemption `Claim` the decoded side would submit --
 /// the same construction `ClaimBook::latest_inbound_claim` performs
 /// (`connector-runtime/src/claim.rs:798-802`).

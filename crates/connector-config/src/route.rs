@@ -45,7 +45,7 @@ pub(crate) fn is_valid_ilp_address(address: &str) -> bool {
 /// `fee` is only meaningful alongside `peer_id` (ADR 0010) and defaults to
 /// zero there: it is what this hop *retains* of the price, realized on the
 /// wire as the difference between the amount received and the amount
-/// forwarded (`peer-wire-spec.md` §4). `transport` is only meaningful
+/// forwarded (`peer-semantics-spec.md` §4). `transport` is only meaningful
 /// alongside `handler_url` (toon-meta#262 decision 11, issue #701) -- not
 /// because a forwarded route is unreachable over a client transport (ADR
 /// 0028 makes it reachable over both), but because the policy is not
@@ -251,7 +251,7 @@ impl StaticRoute {
     /// #520). Never emitted to a client -- ADR 0006 keeps this connector
     /// mechanism, not a discovery source. Charged against a client-edge
     /// claim (issue #522) and, since issue #752, checked against a
-    /// peer-wire arrival's own `amount` before it is delivered
+    /// peer-role arrival's own `amount` before it is delivered
     /// (`Connector::handle_peer_prepare`).
     pub fn price(&self) -> u64 {
         self.price

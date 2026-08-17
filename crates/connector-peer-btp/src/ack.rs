@@ -28,7 +28,7 @@
 use connector_btp::{ProtocolData, CLAIM_ACK_PROTOCOL, CONTENT_TYPE_TEXT};
 use connector_runtime::{ClaimAckOutcome, ClaimRejectReason};
 
-/// The wire spelling of each of `peer-wire-spec.md` §3.4's four reasons
+/// The wire spelling of each of `peer-semantics-spec.md` §3.4's four reasons
 /// (§6.1). Not extensible without a spec change and a vector.
 pub fn reason_name(reason: ClaimRejectReason) -> &'static str {
     match reason {

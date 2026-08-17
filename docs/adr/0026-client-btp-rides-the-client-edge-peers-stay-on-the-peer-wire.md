@@ -18,7 +18,7 @@
 same `ClientClaimGate` instance, the same watermarks and journal — as `POST /ilp`. It is a second
 carriage for the client edge's existing pipeline, not a second pipeline. Peers never use it:
 connector↔connector traffic stays on the raw-TCP peer wire (`peer_wire.rs`,
-`docs/protocol/peer-wire-spec.md`), unchanged.
+`docs/protocol/peer-semantics-spec.md`), unchanged.
 
 ## Why this is a client-edge route, not a peer transport
 

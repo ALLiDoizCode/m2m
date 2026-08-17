@@ -154,7 +154,7 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
-/// The 32-byte on-chain channel id `n`, hex, as the peer wire spells one.
+/// The 32-byte on-chain channel id `n`, hex, as the peer semantics spells one.
 fn channel_id(n: u8) -> String {
     format!("0x{n:064x}")
 }

@@ -46,7 +46,7 @@ struct RawConfig {
     /// serving path never reads it.
     #[serde(default)]
     announce: Option<RawAnnounceConfig>,
-    /// Removed with the raw-TCP peer wire (ADR 0027, issue #679). Still
+    /// Removed with the raw-TCP transport (ADR 0027, issue #679). Still
     /// parsed, and only so that a stale config naming it fails at boot
     /// with [`ConfigError::PeerWireAddrRemoved`] rather than tripping the
     /// generic `deny_unknown_fields` message: the devnet boxes run
@@ -1654,7 +1654,7 @@ token_network_address = "{PEER_TOKEN_NETWORK}"
             |error| matches!(error, ConfigError::PeerAddrRemoved { id } if id == "store"),
         );
         assert!(
-            message.contains("removed with the raw-TCP peer wire")
+            message.contains("removed with the raw-TCP transport")
                 && message.contains("endpoint")
                 && message.contains(BRINGUP_DOC),
             "got: {message}"
@@ -1671,7 +1671,7 @@ token_network_address = "{PEER_TOKEN_NETWORK}"
 
         assert!(
             message.contains("peer_wire_addr")
-                && message.contains("removed with the raw-TCP peer wire")
+                && message.contains("removed with the raw-TCP transport")
                 && message.contains(BRINGUP_DOC),
             "got: {message}"
         );
@@ -1873,7 +1873,7 @@ lease_seconds = 3600
         ));
     }
 
-    /// ADR 0027 / issue #679: the raw-TCP peer wire is deleted, so a
+    /// ADR 0027 / issue #679: the raw-TCP transport is deleted, so a
     /// config still naming its bind address must stop the node by name.
     /// Silently ignoring it is the failure mode that matters -- the devnet
     /// boxes run bind-mounted configs that lead the repo copies, so a

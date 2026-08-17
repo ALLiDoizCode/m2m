@@ -263,7 +263,7 @@ pub enum ConfigError {
     #[error(
         "endpoint '{value}' for peer '{id}' has scheme '{scheme}', which selects no peer \
          carriage: 'wss://' selects BTP and 'https://' selects ILP-over-HTTP, and there is no \
-         third one (ADR 0027 deleted the raw-TCP peer wire). Both are TLS-only because a \
+         third one (ADR 0027 deleted the raw-TCP transport). Both are TLS-only because a \
          peering carries signed balance proofs (ADR 0004), so 'ws://' and 'http://' are not \
          accepted either; see docs/operators/btp-peer-transport-bringup.md"
     )]
@@ -409,7 +409,7 @@ pub enum ConfigError {
     PeerChannelsWithoutStateDir,
 
     #[error(
-        "peer '{id}' sets 'addr', which was removed with the raw-TCP peer wire (ADR 0027, \
+        "peer '{id}' sets 'addr', which was removed with the raw-TCP transport (ADR 0027, \
          issue #679) -- a peer is reached by 'endpoint' (a wss:// or https:// URL) instead; \
          see docs/operators/btp-peer-transport-bringup.md"
     )]
@@ -438,17 +438,17 @@ pub enum ConfigError {
     PeerFlushIntervalRemoved { id: String },
 
     /// The other half of §11's removed-field row, spelled and worded
-    /// exactly as PR #718 (`feat/delete-peer-wire`) spells it.
+    /// exactly as PR #718 (`feat/delete-peer-role`) spells it.
     ///
     /// **Defined here, constructed there.** #718 owns the deletion of the
-    /// raw-TCP peer wire itself (issue #679), including the top-level
+    /// raw-TCP transport itself (issue #679), including the top-level
     /// `peer_wire_addr` field, the listener `connector-cli` binds from it
     /// and the infra configs that still name it. This branch does not
     /// touch that listener, so on this branch alone the field still binds
     /// one; when the two land, #718's `if raw.peer_wire_addr.is_some()`
     /// meets this variant and the pair is complete.
     #[error(
-        "'peer_wire_addr' was removed with the raw-TCP peer wire (ADR 0027, issue #679) -- \
+        "'peer_wire_addr' was removed with the raw-TCP transport (ADR 0027, issue #679) -- \
          peer carriages are exposed on the connector's own listeners, not a separate socket; \
          see docs/operators/btp-peer-transport-bringup.md"
     )]

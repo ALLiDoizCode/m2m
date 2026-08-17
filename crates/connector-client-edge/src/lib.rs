@@ -988,7 +988,7 @@ fn claim_rejected_response(rejection: ClaimIngestRejection, price: u64) -> Respo
 /// 0028). `None` when the packet is within its price, or when the route is
 /// not one this rule governs.
 ///
-/// The arithmetic this protects is `peer-wire-spec.md` §4's, at the one hop
+/// The arithmetic this protects is `peer-semantics-spec.md` §4's, at the one hop
 /// where "upstream" is a client rather than a peer: this connector collects
 /// `price`, forwards `amount - fee`, and so earns `fee` exactly when
 /// `amount == price`. Let the client pick a larger `amount` and it picks
@@ -1289,7 +1289,7 @@ async fn handle_ilp(
     tracing::debug!(identity = %identity.id(), "client-edge request identity resolved");
 
     // client-edge-spec.md v1 carries no minimum-delivery field (§4 of
-    // peer-wire-spec.md scopes it to the peer wire) -- a client-originated
+    // peer-semantics-spec.md scopes it to the peer semantics) -- a client-originated
     // packet declares no guarantee yet, so this hop enforces none, exactly
     // matching today's actual (unguaranteed) behavior.
     //
@@ -1504,7 +1504,7 @@ mod tests {
         }
     }
 
-    /// A fixed EIP-712 domain for this module's one peer-wire claim test
+    /// A fixed EIP-712 domain for this module's one peer claim test
     /// (issue #575/#566) -- an arbitrary but consistent chain id and
     /// `TokenNetwork` address.
     fn test_channel_domain() -> connector_runtime::ChannelDomain {
@@ -1514,7 +1514,7 @@ mod tests {
         }
     }
 
-    /// A valid on-chain `bytes32` peer-wire channel id for tests (issue
+    /// A valid on-chain `bytes32` peer channel id for tests (issue
     /// #575's AC4).
     fn channel_a() -> String {
         format!("0x{:064x}", 1)
@@ -1904,7 +1904,7 @@ mod tests {
     /// connector, which delivers it to its app -- and the fulfillment
     /// travels back the same way.
     ///
-    /// This used to run over the raw-TCP peer wire's `PeerWireServer`.
+    /// This used to run over the raw-TCP transport's `PeerWireServer`.
     /// ADR 0027 / issue #679 deleted that wire, so the hop is made over
     /// the in-process transport instead; what is under test here is the
     /// client edge handing a peer-routed packet to whatever transport is

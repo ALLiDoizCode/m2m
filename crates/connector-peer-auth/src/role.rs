@@ -137,7 +137,7 @@ pub enum Capability {
     /// Append to the peer claim ledger.
     AppendToPeerClaimLedger,
     /// Honour a declared `minimumDelivery` as a sender declaration (§5,
-    /// `peer-wire-spec.md` §4). A client's is **ignored** — not rejected
+    /// `peer-semantics-spec.md` §4). A client's is **ignored** — not rejected
     /// and not applied. Use [`honoured_minimum_delivery`] rather than
     /// reading this directly, so the ignoring is done by a function
     /// instead of remembered.

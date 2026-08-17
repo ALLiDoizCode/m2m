@@ -62,14 +62,14 @@
 # nothing here to amortize a handshake against.
 #
 # ── No `peer_wire_addr`, and no `[[peers]]`, deliberately ──────────────────
-# The very first draft of this file bound ADR 0003's raw-TCP peer wire on
+# The very first draft of this file bound ADR 0003's raw-TCP transport on
 # :4001, and the compose overlay demanded a `STORE_PEER_WIRE_BIND` VPC
 # address to publish it on. Both were removed before ever shipping live:
 #
 #   * the VPC was never provisioned, and #600 settled that none is wanted —
 #     node↔node links on this fleet are public and TLS-terminated by each
 #     box's own nginx, like the TypeScript fleet's BTP-over-wss;
-#   * the peer wire cannot carry a public link (#623): raw-TCP custom framing
+#   * the peer semantics cannot carry a public link (#623): raw-TCP custom framing
 #     nginx cannot TLS-terminate, no transport security of its own by ADR
 #     0003's design, and SocketAddr-only addressing — see
 #     crates/connector-config/src/peer.rs, where a peer is `{ id, addr }` and

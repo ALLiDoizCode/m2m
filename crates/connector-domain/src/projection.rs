@@ -33,7 +33,7 @@ pub enum JournalEntry {
     },
     /// A signed claim on `channel_id` was verified and accepted, advancing
     /// that channel's watermark to `nonce`/`cumulative_amount`
-    /// (`ClaimBook::accept_inbound`, peer-wire-spec.md §3.4). `signature` is
+    /// (`ClaimBook::accept_inbound`, peer-semantics-spec.md §3.4). `signature` is
     /// carried through opaque (chain- and scheme-specific verification
     /// already happened before this entry is ever appended) and durably
     /// retained rather than discarded once accepted: on-chain redemption
@@ -64,9 +64,9 @@ pub enum JournalEntry {
     /// reopened channel would inherit that predecessor's watermark forever,
     /// charging its payer again for units already settled on chain (or, at
     /// the limit, refusing every claim it could ever present). Folds into
-    /// nothing here: [`Projection`] tracks the peer wire's own book, which
+    /// nothing here: [`Projection`] tracks the peer semantics's own book, which
     /// this entry kind is never written to (see the client edge's own
-    /// journal file, kept separate from the peer wire's for exactly this
+    /// journal file, kept separate from the peer semantics's for exactly this
     /// reason) -- it is in this shared alphabet only so both journals'
     /// entries decode through one enum, matching every other entry kind
     /// here.

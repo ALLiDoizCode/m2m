@@ -454,7 +454,7 @@ fn reject_response(request_id: u32, reject: Reject, extra: Vec<ProtocolData>) ->
 /// `WireClaim`'s own fields, `signature` hex-encoded the same way
 /// `ClientClaimGate`'s inbound claim JSON already expects one
 /// (`0x`-prefixed 65-byte `r‖s‖recoveryId`). JSON rather than
-/// [`connector_runtime::WireClaim::encode`]'s peer-wire binary shape,
+/// [`connector_runtime::WireClaim::encode`]'s peer-role binary shape,
 /// matching every other protocolData entry this dialect ever carries -- the
 /// auth secret, the inbound claim, the x402 terms, the accumulated-cost
 /// total -- all of which are raw UTF-8 text, never a second binary
@@ -464,7 +464,7 @@ fn reject_response(request_id: u32, reject: Reject, extra: Vec<ProtocolData>) ->
 /// (never trusted -- see `ClientClaimGate`'s own doc), this claim's signer
 /// is the channel's own recorded counterparty from the client's point of
 /// view, implicit in which channel the TRANSFER arrived on, exactly as a
-/// peer-wire `WireClaim` carries no signer field either.
+/// peer-role `WireClaim` carries no signer field either.
 ///
 /// This is the mapping of a *claim* onto the grammar, so it stays with the
 /// client edge rather than moving into [`connector_btp`] with the codec
@@ -961,7 +961,7 @@ mod tests {
     /// Issue #699: a payout claim rides a TRANSFER's protocolData as JSON,
     /// matching every other entry this dialect carries (all UTF-8 text,
     /// never a second binary sub-format) rather than
-    /// [`connector_runtime::WireClaim::encode`]'s peer-wire bytes.
+    /// [`connector_runtime::WireClaim::encode`]'s peer-role bytes.
     #[test]
     fn payout_claim_protocol_data_encodes_the_wire_claims_fields_as_json() {
         let claim = connector_runtime::WireClaim {

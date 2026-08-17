@@ -14,13 +14,13 @@
 //! domain the digest is computed under (ADR 0024) -- out of this registry
 //! and never out of the claim.
 //!
-//! Deliberately the same shape the peer wire already settled on:
+//! Deliberately the same shape the peer semantics already settled on:
 //! `connector_runtime::ClaimBook` keeps a `channel_id -> Address` map plus
 //! a per-channel `ChannelDomain` for exactly this reason (issue #575), and
 //! refuses a claim naming a channel it has no record of as
 //! `ClaimRejectReason::UnknownChannel`. This is that rule at the other
 //! edge, over the client edge's own claim shapes, since a client-edge
-//! claim's channel is never a peer-wire channel.
+//! claim's channel is never a peer channel.
 //!
 //! # Where a record comes from
 //!
@@ -396,7 +396,7 @@ impl DepositFloor {
 /// are signed over -- a `channelId` that is not a 32-byte `bytes32`, or a
 /// `channelAccount` that is not a 32-byte Solana account. Refused at
 /// registration rather than hashed or truncated into shape, matching
-/// `connector_runtime::InvalidChannelId`'s rule on the peer wire (issue
+/// `connector_runtime::InvalidChannelId`'s rule on the peer semantics (issue
 /// #575).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvalidChannelIdentifier(pub String);
@@ -611,7 +611,7 @@ pub trait ClientChannelSource: Send + Sync + std::fmt::Debug {
 /// without believing anything the claim says about itself: whose signature
 /// it accepts, and the EIP-712 domain (ADR 0024) that signature must have
 /// been produced under. `chain_id` and `token_network_address` are
-/// per-channel rather than node-wide for the same reason the peer wire's
+/// per-channel rather than node-wide for the same reason the peer semantics's
 /// `ChannelDomain` is (issue #566): each token gets its own `TokenNetwork`,
 /// and therefore its own `verifyingContract`, so there is no single domain
 /// a node could default to.

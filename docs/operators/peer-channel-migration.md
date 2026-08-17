@@ -17,7 +17,7 @@ domain (ADR 0024), and rewriting the literal under a live channel would invalida
 already exchanged on it. Leaving it there afterwards is not deliberate — it is a standing
 two-settlement-contract split-brain, and this is the follow-up that ends it.
 
-Relies on [ADR 0024](../adr/0024-peer-wire-claims-sign-the-eip-712-balance-proof.md) (the
+Relies on [ADR 0024](../adr/0024-peer-role-claims-sign-the-eip-712-balance-proof.md) (the
 domain a channel's claims are signed under) and [ADR 0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md)
 (the apex↔store peering carries priced, claim-settled traffic, not a free relay). Modelled on
 [`btp-peer-transport-bringup.md`](btp-peer-transport-bringup.md)'s "Order"/"Gates" shape. See also
@@ -147,7 +147,7 @@ rollback means reverting the edit, not the on-chain state.
 ## Gates — in order
 
 - **(a) The new channel is funded and `Opened`** before either config is touched (Order steps 1-4).
-  Nothing on the peer wire catches this for you: its four reject reasons (`signature_invalid`,
+  Nothing on the peer semantics catches this for you: its four reject reasons (`signature_invalid`,
   `nonce_not_advancing`, `amount_not_advancing`, `unknown_channel`) all judge the claim, not the
   chain, so both boxes will happily sign and accept claims against a channel that does not exist or
   cannot cover them, and the failure only surfaces when `claimFromChannel` reverts — after the

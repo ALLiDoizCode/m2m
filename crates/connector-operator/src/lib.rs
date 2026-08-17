@@ -1971,7 +1971,7 @@ mod tests {
         /// real, disposable `anvil` chain, exactly like the lifecycle test
         /// above. The claim itself is fed in via
         /// `Connector::handle_peer_claim` directly rather than a real peer
-        /// wire connection -- the peer wire (#416) is a separate concern
+        /// wire connection -- the peer semantics (#416) is a separate concern
         /// from this ticket's settlement-side one, and `handle_peer_claim`
         /// is the same entry point a real inbound PREPARE's piggybacked
         /// claim reaches.
@@ -2077,7 +2077,7 @@ mod tests {
                 // `peer_signer.sign` produces a recovery id in
                 // `libsecp256k1`'s own `{0, 1}` convention
                 // (`connector_signer::crypto::sign_digest`), exactly what
-                // the wire carries (peer-wire-spec.md §3.5). No `+ 27`
+                // the wire carries (peer-semantics-spec.md §3.5). No `+ 27`
                 // here: `EvmSettlementBackend::redeem` is the one place
                 // that gets normalized to the Ethereum-wallet `{27, 28}`
                 // range `TokenNetwork`'s on-chain `ECDSA.recover` requires

@@ -34,12 +34,12 @@ collects everything, the store earns nothing) if the store box cannot itself ver
 
 Two questions were explicitly left open by the issue for whoever closed it:
 
-1. **Mechanism.** The peer wire's claim exchange is not per-packet (`peer-wire-spec.md` §3.2 — a
+1. **Mechanism.** The peer wire's claim exchange is not per-packet (`peer-semantics-spec.md` §3.2 — a
    claim rides the _next_ packet, trailing the fulfilment that created the obligation) while a
    price is inherently per-delivery. Checking a price against a running, trailing balance is not the
    same operation as checking it against a single claim the way the client edge's `ClientClaimGate`
    does.
-2. **Per-packet refusal, or relation-level throttle?** `peer-wire-spec.md` §5.3's `T04` ceiling
+2. **Per-packet refusal, or relation-level throttle?** `peer-semantics-spec.md` §5.3's `T04` ceiling
    already throttles a whole peering relation once its unclaimed exposure grows too large. The issue
    asked whether an underpriced arrival should be answered the same way, as a property of the
    relation, rather than of the one packet.
@@ -51,9 +51,9 @@ exchange at all.**
 
 Value on the peer wire moves by [ADR 0004](0004-value-moves-on-fulfilment.md): a PREPARE's `amount`
 is exactly what becomes owed to this connector, as exposure, the moment it fulfils
-(`peer-wire-spec.md` §3.2, `Connector::handle_peer_prepare`'s `record_inbound_delivery`). That
+(`peer-semantics-spec.md` §3.2, `Connector::handle_peer_prepare`'s `record_inbound_delivery`). That
 `amount` already carries the answer this ticket needs — a hop cannot increase it forwarding
-(`peer-wire-spec.md` §4: outgoing amount is always incoming amount minus fee), so if the amount
+(`peer-semantics-spec.md` §4: outgoing amount is always incoming amount minus fee), so if the amount
 arriving at a termination is at least that route's price, whatever exposure this delivery creates is
 guaranteed to be at least that route's price too, and the ordinary claim exchange that later covers
 that exposure (§3.2–§3.4) is guaranteed to cover the route's price as a consequence — with no new
@@ -71,7 +71,7 @@ after the exposure-ceiling check and before calling `Connector::handle_prepare`:
 - `price = 0` never gates. An operator's deliberate free termination (ADR 0020) stays free reached
   from a peer, exactly as it stays free reached from a client.
 - A rejected arrival never opens the wrap, never reaches the app, and records no exposure — the app
-  did no work, so nothing accumulates (`peer-wire-spec.md` §5.2's existing "no value added" rule,
+  did no work, so nothing accumulates (`peer-semantics-spec.md` §5.2's existing "no value added" rule,
   which this decision adds a new member to) and the sending peer is not charged for a delivery that
   never happened.
 

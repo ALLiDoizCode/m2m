@@ -8,10 +8,10 @@
 //! `validateClaimMessage`/`validateEVMClaim`/`validateSolanaClaim`, not
 //! guessed at.
 //!
-//! Distinct from [`crate::claim::Watermark`]'s peer-wire `WireClaim`: same
+//! Distinct from [`crate::claim::Watermark`]'s peer-role `WireClaim`: same
 //! nonce/watermark rule ([`crate::validate_claim`], [`crate::advance_watermark`]),
 //! a different wire shape and a different channel namespace (a client-edge
-//! claim never touches a peer-wire channel).
+//! claim never touches a peer channel).
 //!
 //! Mina is deliberately excluded from [`ClientClaim`] entirely. ADR 0002
 //! drops Mina from the Rust connector, and this ticket's own acceptance
@@ -230,7 +230,7 @@ pub const SOLANA_NAMESPACE: &str = "solana";
 ///   same account.
 /// * anything else -- identity, byte for byte. A key in no namespace this
 ///   function knows is left exactly as it was found rather than guessed
-///   at: a journal's entry alphabet is shared with the peer wire, whose
+///   at: a journal's entry alphabet is shared with the peer semantics, whose
 ///   channel ids carry no namespace prefix at all, and quietly rewriting
 ///   one of those would be inventing a channel.
 ///
@@ -791,7 +791,7 @@ mod tests {
         );
     }
 
-    /// A key in no namespace this function knows -- a peer-wire channel id
+    /// A key in no namespace this function knows -- a peer channel id
     /// sharing the journal's entry alphabet, say -- is returned byte for
     /// byte. Rewriting one would be inventing a channel.
     #[test]

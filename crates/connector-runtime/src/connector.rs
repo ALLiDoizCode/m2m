@@ -523,7 +523,7 @@ pub struct Connector {
     /// client edge (issue #548), and therefore recognizes as belonging to a
     /// sender that holds a channel with it -- the other half of
     /// [`Connector::handle_probe`]'s first gate, beside `claims`'s
-    /// configured peer-wire verification keys. Without this the gate is
+    /// configured peer-role verification keys. Without this the gate is
     /// unsatisfiable on a deployed node: nothing in a node's configuration
     /// supplies a client's channel id, and a gate no node can pass is not a
     /// gate (ADR 0011's "accepted only from a sender that already holds an
@@ -909,7 +909,7 @@ impl Connector {
 
     /// Configure the channel this node claims against when it owes
     /// `peer_id` for value it forwarded and `peer_id` fulfilled (issue
-    /// #423, peer-wire-spec.md §3.5).
+    /// #423, peer-semantics-spec.md §3.5).
     pub fn with_peer_claim_channel(
         mut self,
         peer_id: impl Into<String>,
@@ -920,7 +920,7 @@ impl Connector {
     }
 
     /// Configure the EVM address whose signature this node accepts on an
-    /// inbound claim for `channel_id` (issue #423, peer-wire-spec.md §1.1's
+    /// inbound claim for `channel_id` (issue #423, peer-semantics-spec.md §1.1's
     /// "a configured peer id and verification key"; issue #575: this is now
     /// the channel's counterparty *address*, recovered from an EIP-712
     /// `BalanceProof` signature, not a raw public key checked against a
@@ -1457,7 +1457,7 @@ impl Connector {
                 // condition is the exact shape a naive "unconditional
                 // announce" packet takes, and this connector has no such
                 // packet type to fall back to (ADR 0004, ADR 0022,
-                // peer-wire-spec.md §3.1): attach a real condition instead.
+                // peer-semantics-spec.md §3.1): attach a real condition instead.
                 message: "prepare carries no execution condition -- every prepare must carry \
                     a real, non-zero 32-byte execution condition chosen by the sender; retry \
                     with one attached rather than an unconditional/announce-style packet"
@@ -1514,7 +1514,7 @@ impl Connector {
     /// either chain names its channel unambiguously.
     ///
     /// `None` when no client claim admitted this packet (an unclaimed
-    /// request, a peer-wire arrival, or a caller using
+    /// request, a peer-role arrival, or a caller using
     /// [`Self::handle_prepare`] directly) -- the field is then simply
     /// absent from the span, not recorded empty.
     pub async fn handle_prepare_with_client_channel(
@@ -1537,9 +1537,9 @@ impl Connector {
             .await
     }
 
-    /// The peer wire's entry point (issue #423): accepts an inbound PREPARE
+    /// The peer semantics's entry point (issue #423): accepts an inbound PREPARE
     /// exactly like [`Connector::handle_prepare`], but also verifies and
-    /// watermarks whatever claim it carries (peer-wire-spec.md §3.2).
+    /// watermarks whatever claim it carries (peer-semantics-spec.md §3.2).
     ///
     /// The claim outcome and the PREPARE outcome are independent -- a
     /// rejected claim does not reject the PREPARE it rode in on (§3.4), and
@@ -1552,7 +1552,7 @@ impl Connector {
     /// route paid for by nothing (or by less than the route is worth) got
     /// the same free service ADR 0028 already closed off at the client
     /// edge. This is a per-packet gate, not a relation-wide throttle
-    /// (`peer-wire-spec.md` §5.4): it is answered from the amount already
+    /// (`peer-semantics-spec.md` §5.4): it is answered from the amount already
     /// on this PREPARE via the same `client_route` lookup the client edge
     /// prices with (ADR 0028) and leaves the claim exchange itself (§3.2)
     /// untouched, and carries no x402 greeting of its own: since issue #880
@@ -1620,7 +1620,7 @@ impl Connector {
     }
 
     /// Whether `channel_id` is a channel this connector recognizes: either
-    /// a peer-wire channel whose verification key its operator configured
+    /// a peer channel whose verification key its operator configured
     /// ([`Connector::with_channel_verification_key`]), or a client channel
     /// [`Connector::recognize_channel`] recorded when a claim on it
     /// verified at this connector's client edge.
@@ -1633,7 +1633,7 @@ impl Connector {
                 .contains(channel_id)
     }
 
-    /// Whether `channel_account` is a Solana peer-wire channel this
+    /// Whether `channel_account` is a Solana peer channel this
     /// connector recognizes -- the Solana counterpart of
     /// [`Connector::recognizes_channel`] (issue #732/#998). A separate
     /// query rather than folded into `recognizes_channel`: an EVM
@@ -1661,7 +1661,7 @@ impl Connector {
     /// recognizes (`ProbeDenied::NoOpenChannel` otherwise -- see
     /// [`Connector::recognizes_channel`] for what makes that satisfiable on
     /// a deployed node), and even then only within a rate limit per that
-    /// identity (`ProbeDenied::RateLimited` otherwise) -- peer-wire-spec.md
+    /// identity (`ProbeDenied::RateLimited` otherwise) -- peer-semantics-spec.md
     /// §5.2's consequences, `docs/protocol/client-edge-spec.md` §1.6.
     /// Neither denial reaches [`Connector::handle_prepare`]: the packet is
     /// never forwarded.
@@ -1726,14 +1726,14 @@ impl Connector {
         Ok(self.handle_prepare(prepare, minimum_delivery).await)
     }
 
-    /// Verify and, if valid, accept a claim received over the peer wire --
+    /// Verify and, if valid, accept a claim received over the peer semantics --
     /// whether it rode a PREPARE or a FLUSH -- advancing its channel's
-    /// watermark (issue #423, peer-wire-spec.md §3.4).
+    /// watermark (issue #423, peer-semantics-spec.md §3.4).
     pub fn handle_peer_claim(&self, claim: WireClaim) -> ClaimAckOutcome {
         self.claims.accept_inbound(&claim)
     }
 
-    /// Send a FLUSH frame (peer-wire-spec.md §3.3) for every peer whose
+    /// Send a FLUSH frame (peer-semantics-spec.md §3.3) for every peer whose
     /// claim has waited at least `flush_interval` since it armed, as of
     /// this connector's injected clock -- the mechanism that bounds
     /// trailing exposure once traffic to a peer stops rather than leaving a
@@ -1872,7 +1872,7 @@ impl Connector {
     /// Forward `prepare` to `peer_route`'s peer, covering it from the
     /// outbound CLIENT ledger when this hop is configured for that (issue
     /// #881), or piggybacking whatever claim this connector currently owes
-    /// it on the peer ledger otherwise (issue #423, peer-wire-spec.md
+    /// it on the peer ledger otherwise (issue #423, peer-semantics-spec.md
     /// §3.2). Only once the answer is a genuine fulfilment, verified
     /// against `prepare`'s own execution condition, and only when the
     /// packet was NOT already covered by a client-role claim, does a fresh
@@ -2037,7 +2037,7 @@ impl Connector {
                 }
                 outcome
             }
-            // ADR 0011, peer-wire-spec.md §5.2: this hop's own fee is added
+            // ADR 0011, peer-semantics-spec.md §5.2: this hop's own fee is added
             // only once it has genuinely reached `peer_id` and relays a
             // reject that peer itself decided on -- never on a reject this
             // transport synthesized locally (`reached_peer` false) because
@@ -2233,7 +2233,7 @@ impl Connector {
     ///
     /// `client_channel_id` is the client channel whose covering claim
     /// admitted this packet at this connector's own edge, or `None` when
-    /// nothing did (a peer-wire arrival, an unpriced or unclaimed
+    /// nothing did (a peer-role arrival, an unpriced or unclaimed
     /// request). It is the sole source of the attribution headers the
     /// delivery carries (ADR 0040, `crate::attribution`) -- which is why a
     /// packet that reached here across another hop states no payer at all
@@ -3622,7 +3622,7 @@ mod tests {
         }
 
         /// Nothing admitted this packet at this connector's own edge -- a
-        /// peer-wire arrival, or an unclaimed request -- so there is no
+        /// peer-role arrival, or an unclaimed request -- so there is no
         /// payer to name and none is invented. This is the case that makes
         /// ADR 0017's "on a longer path the header names the wrong party"
         /// unreachable rather than merely avoided.
@@ -3875,7 +3875,7 @@ mod tests {
 
         let fields = packet_span_fields(async {
             // The ordinary `handle_prepare` entry point -- no admitting
-            // client channel available at all, exactly the peer-wire and
+            // client channel available at all, exactly the peer-role and
             // unclaimed-request shapes.
             let _ = connector
                 .handle_prepare(prepare("g.nowhere", b"hello"), 0)
@@ -4225,7 +4225,7 @@ mod tests {
     /// sent.
     ///
     /// A claim rides the packet *after* the one it pays for
-    /// (peer-wire-spec.md §3.3/§3.5, `record_fulfillment`'s own doc), so
+    /// (peer-semantics-spec.md §3.3/§3.5, `record_fulfillment`'s own doc), so
     /// this sends two PREPAREs: the first only arms the outbound claim, and
     /// the second is what actually carries it to the receiver for
     /// `accept_inbound` to judge.
@@ -5073,7 +5073,7 @@ mod tests {
             assert!(first_hop.claims().is_empty());
         }
 
-        /// Peer-wire-spec.md §3.3: a flush sends a claim that would
+        /// Peer-role-spec.md §3.3: a flush sends a claim that would
         /// otherwise have waited to ride the next packet -- the mechanism
         /// that covers traffic stopping.
         #[tokio::test]
@@ -7567,7 +7567,7 @@ mod tests {
         /// The hop that cannot reach its own next hop never actually
         /// forwarded the packet, so its own fee is never added -- only the
         /// hops before it, which genuinely reached their peer, add theirs
-        /// (peer-wire-spec.md §5.2: fee is added only when relaying a
+        /// (peer-semantics-spec.md §5.2: fee is added only when relaying a
         /// REJECT "received from its own next hop").
         #[tokio::test]
         async fn a_hop_that_cannot_reach_its_peer_does_not_add_its_own_fee() {
@@ -8065,11 +8065,11 @@ mod tests {
     /// that route's price, checked in `Connector::handle_peer_prepare`
     /// before the app is ever consulted -- closing the gap ADR 0028 named
     /// and left open (a connector whose priced terminated route was
-    /// reached over the peer wire served it for free).
-    mod peer_wire_termination_price {
+    /// reached over the peer semantics served it for free).
+    mod peer_role_termination_price {
         use super::*;
 
-        /// A route priced at 25, reached over the peer wire with a PREPARE
+        /// A route priced at 25, reached over the peer semantics with a PREPARE
         /// carrying only 10, is refused before the app is ever called --
         /// unlike every other reject this connector originates for a
         /// packet that never reached its termination, this one is possible
@@ -8118,7 +8118,7 @@ mod tests {
 
         /// Unlike a priced *forwarded* route at the client edge (ADR 0028's
         /// `F03` over-carry cap), a priced terminated route reached over the
-        /// peer wire has no upper bound -- this connector never forwards the
+        /// peer role has no upper bound -- this connector never forwards the
         /// excess anywhere, so nothing is lost by a peer that overpays it.
         #[tokio::test]
         async fn a_peer_arrival_that_overpays_the_routes_price_is_still_delivered() {
@@ -8154,14 +8154,14 @@ mod tests {
             assert!(matches!(response, PacketResponse::Fulfill(_)));
         }
 
-        /// This check is specific to the peer wire. A destination reached
+        /// This check is specific to the peer semantics. A destination reached
         /// through [`Connector::handle_prepare`] directly -- what the
         /// client edge itself calls, only after its own claim gate already
         /// charged `price` (issue #522) -- is never subject to it, since
         /// `handle_prepare` cannot tell whether `prepare.amount` reflects
         /// anything a client actually paid.
         #[tokio::test]
-        async fn handle_prepare_itself_is_not_gated_by_the_peer_wire_price_check() {
+        async fn handle_prepare_itself_is_not_gated_by_the_peer_role_price_check() {
             let route =
                 StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
             let app_client = Arc::new(FakeAppClient::new());
@@ -8186,7 +8186,7 @@ mod tests {
         /// The gate that made `handle_probe` unreachable in practice:
         /// nothing in a node's configuration names an unaffiliated client's
         /// channel, so before #548 the only way to satisfy it was a
-        /// peer-wire verification key -- and a gate no deployed node can
+        /// peer-role verification key -- and a gate no deployed node can
         /// pass is not a gate. A channel a claim has been seen on at this
         /// connector's own client edge now satisfies it.
         #[tokio::test]

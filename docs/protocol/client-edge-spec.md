@@ -13,7 +13,7 @@ text and the code is a bug in this text. Where this document and an ADR disagree
 this document is reconciled to match, not the other way around. Version 1 below is organized by
 section number so `crates/connector-client-edge`'s own doc comments can cite it; §3 sketches how a
 future version would be introduced, per
-[ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md).
+[ADR 0003](../adr/0003-clean-room-peer-role-versioned-client-edge.md).
 **Consumers:** `toon-client` and any other app that pays this connector directly — installed on
 machines this repository's operators do not control.
 **Vocabulary:** [`CONTEXT.md`](../../CONTEXT.md).
@@ -21,9 +21,9 @@ machines this repository's operators do not control.
 [`money-model.md`](money-model.md).
 
 The **client edge** is the protocol a client speaks to the connector it attaches to
-(`CONTEXT.md`). Unlike the peer wire, it is versioned rather than redesigned: its far end is
+(`CONTEXT.md`). Unlike the peer semantics, it is versioned rather than redesigned: its far end is
 software this repository does not ship and cannot flag-day, so an old version keeps working
-after a new one exists ([ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md),
+after a new one exists ([ADR 0003](../adr/0003-clean-room-peer-role-versioned-client-edge.md),
 [ADR 0001](../adr/0001-rust-workspace-library-first.md) — `connector-client-edge` is exposed as
 an HTTP router).
 
@@ -36,14 +36,14 @@ traffic, and the one-shot ILP-over-HTTP binding (RFC-0035) at `POST /ilp` — it
 described this as the edge transport for one-shot, stateless purchases: a buyer, a NAT'd client, a
 browser, or an agent that only consumes. That source no longer exists in this repository but is
 recoverable from git history prior to #465. That BTP did double duty is exactly the conflation
-[ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md) retires: the peer wire
-(`docs/protocol/peer-wire-spec.md`) is redesigned freely because both its ends are
+[ADR 0003](../adr/0003-clean-room-peer-role-versioned-client-edge.md) retires: the peer semantics
+(`docs/protocol/peer-semantics-spec.md`) is redesigned freely because both its ends are
 operator-controlled, which is never true of a client. This document therefore specifies the
 client edge as **ILP-over-HTTP** — `POST /ilp` — since that is the transport whose far end is
 genuinely uncontrolled and whose shape carries forward as "version 1" of the versioned scheme. A
 client that reached the old embedded node over BTP was, for the purposes of this spec, using the
-peer wire's pre-rewrite transport as a transitional convenience, not the client edge; it is out of
-scope here and is not preserved by the redesigned peer wire.
+peer semantics's pre-rewrite transport as a transitional convenience, not the client edge; it is out of
+scope here and is not preserved by the redesigned peer semantics.
 
 `POST /admin/ilp/send` was a distinct, operator-surface-adjacent interface the same removed
 embedded node exposed so an app behind this connector could ask its _own_ connector to originate a
@@ -104,7 +104,7 @@ A request identifies its sender in one of two ways:
 
 A request pays with a claim header. The claim is a JSON object, `version: '1.0'`, discriminated
 by `blockchain: 'evm' | 'solana'` — the shape below is this document's own definition, not a
-pointer to source; the peer wire's predecessor (BTP protocol) carried the same shape, but that
+pointer to source; the peer semantics's predecessor (BTP protocol) carried the same shape, but that
 code no longer exists in this repository. `blockchain: 'mina'` is a distinct, invalid value here:
 see the note at the end of this section.
 
@@ -135,7 +135,7 @@ Required fields on every claim, regardless of chain: `version` (`'1.0'`), `block
 - **solana**: `programId`, `channelAccount` (both base58), `nonce`, `transferredAmount` (lamports,
   decimal string), `signature` (base64 Ed25519), `signerPublicKey` (base58); optional `cluster`.
 
-A present claim is validated by the same gate the peer wire uses (the inbound claim validator)
+A present claim is validated by the same gate the peer role uses (the inbound claim validator)
 before the PREPARE is routed, in this order — deliberately freshness-and-value before
 cryptography, so a replay or an underpayment never pays the cost of a signature verification and
 never reaches the terminating app:
@@ -446,7 +446,7 @@ drops Mina from the Rust connector: a Mina claim's on-chain lifecycle (open, dep
 settle) has no Rust implementation and none is planned, so a connector that accepted a Mina claim
 would be accepting value it can never settle. `blockchain: 'mina'` is therefore refused as a
 structural validation failure (step 1 above) rather than parsed or cryptographically checked — the
-zkApp-specific fields the peer wire's predecessor once carried for it (`zkAppAddress`, `tokenId`,
+zkApp-specific fields the peer semantics's predecessor once carried for it (`zkAppAddress`, `tokenId`,
 `balanceCommitment`, `proof`, `salt`, and the dual-party `balanceB`/`signatureB` extension) are not
 part of this connector's claim shape and are not documented here. A Mina client's claim is rejected
 clearly and immediately; it is not owed a code path, only an unambiguous refusal.
@@ -487,7 +487,7 @@ required no claim and was carried for free; that was a free gateway, not a desig
 
 Two rules attach to the forwarded case and to nothing else. A client-edge PREPARE to a priced
 forwarded destination is refused `F03_INVALID_AMOUNT` when its declared `amount` exceeds that
-`price` — this connector never puts more value on the peer wire than it collected, and the
+`price` — this connector never puts more value on the peer semantics than it collected, and the
 refusal is decided before the claim is ingested so a packet that will not be carried never spends
 a watermark. And a _peer-role_ PREPARE is never answered with this greeting at all
 (`peer-carriage-spec.md` §3.1): everything in this section is the client-facing direction.
@@ -607,7 +607,7 @@ connector no longer "charges a percentage spread with no per-hop fee accumulatio
 percentage anywhere ([ADR 0010](../adr/0010-flat-per-packet-fee-and-minimum-delivery.md)), and a
 REJECT genuinely does accumulate cost: `connector_domain::Reject` carries an `accumulated_cost`
 field that sums every hop's flat fee and adds a terminated route's price
-(`docs/protocol/peer-wire-spec.md` §5.2, issues #523/#545/#584). That field is **not** part of the
+(`docs/protocol/peer-semantics-spec.md` §5.2, issues #523/#545/#584). That field is **not** part of the
 RFC-0027 OER encoding — it rides beside the packet — so this edge reports it in a header. Version 1
 does not change to gain it: the request/response shape below is unchanged.
 
@@ -616,7 +616,7 @@ does not change to gain it: the request/response shape below is unchanged.
 application-level reject's own diagnostic payload (an `F99`/`T99`/`R99` from the terminating app),
 so `accumulatedCost` MUST NOT be packed into it; instead the connector returns it as a response
 header, `TOON-Accumulated-Cost` (decimal string, `uint64`), alongside the unchanged OER REJECT body
-— the client-edge equivalent of the peer wire carrying the field at the frame level, beside the
+— the client-edge equivalent of the peer semantics carrying the field at the frame level, beside the
 packet, rather than inside it. The header is present on every REJECT response this edge answers
 with, from `POST /ilp` and `POST /ilp/probe` alike, and is absent from a FULFILL. It is `0` when
 nothing was traversed and nothing terminated — no route matched, or a claim was refused as
@@ -665,7 +665,7 @@ remote connector raises there — a terminating connector adds its route's price
 ([ADR 0020](../adr/0020-a-price-is-flat-and-attaches-to-a-handler.md) — a price accumulates into a
 reject's running total; issues #545/#584) — with each hop on the way back adding its own fee, so
 what arrives is one figure covering both. Note that this is the ordinary packet path: a probe is
-gated at the client edge it enters, and the peer wire carries no probe frame, so a remote
+gated at the client edge it enters, and the peer semantics carries no probe frame, so a remote
 connector cannot tell a probe from any other packet and the "never delivered to a termination"
 rule above applies only to the connector the probe was submitted to.
 
@@ -739,7 +739,7 @@ opened envelope's own `method`, `target`, `headers` and `body`, the request made
 | `X-TOON-Chain`  | that channel key's own namespace — `evm` or `solana`                                                          |
 
 They are stated **only** for a delivery this connector was paid for at its own client edge: a
-packet no client claim admitted (a peer-wire arrival, a forwarded packet, an unclaimed request) or
+packet no client claim admitted (a peer-role arrival, a forwarded packet, an unclaimed request) or
 a route priced at zero carries none of the three, absent rather than empty. `X-TOON-Payer` is
 therefore never the previous hop — on a longer path there is no client channel to name, and
 nothing is named (ADR 0017's defect, made unreachable rather than merely avoided). `X-TOON-Chain`
@@ -756,7 +756,7 @@ The connector's own records are unchanged and remain the after-the-fact answer: 
 the `"packet"` log (ADR 0014, `client_channel_id`) to `state_dir/client-edge-claims.log`'s
 `InboundClaimAccepted` entries under that same chain-namespaced channel key, with the payer's
 identity from the channel's `[[client_channels]]`/chain-resolved record (ADR 0036).
-(`GET /channels`/`GET /claims` do not carry this: both project the node's own peer-wire channels,
+(`GET /channels`/`GET /claims` do not carry this: both project the node's own peer channels,
 which a payer-opened client channel is not.)
 
 ### 1.9 Client BTP websocket transport (issue #674 family)
@@ -770,7 +770,7 @@ over BTP is indistinguishable downstream from one that arrived over HTTP.
 
 **Peer sessions (ADR 0027).** This section previously stated that peers do not use this transport,
 so every BTP session was a client session by construction (ADR 0026). ADR 0027 reverses that: the
-raw-TCP peer wire is deleted and connectors peer over BTP on the same codec. A session is a **peer**
+raw-TCP transport is deleted and connectors peer over BTP on the same codec. A session is a **peer**
 session only if it presented a credential configured in `[[peers]]` _and_ has a `[[peer_channels]]`
 binding; anything else is a client session, with no fallthrough, and everything below in this section
 describes client sessions exactly as before. That credential admits nothing on its own: opening this
@@ -780,8 +780,8 @@ below for what a client's `auth` entry is and is not). The peer sub-protocol ent
 `toon-minimum-delivery` beside the `payment-channel-claim` and `toon-accumulated-cost` entries this
 section already defines — are specified for the peer direction, not here.
 
-> **Superseded** by [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md):
-> the raw-TCP peer wire is deleted (issue #679) and peers ride this same carriage, or
+> **Superseded** by [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-role-is-deleted.md):
+> the raw-TCP transport is deleted (issue #679) and peers ride this same carriage, or
 > ILP-over-HTTP. A session is a _peer_ session if and only if it presented a configured peer
 > credential **and** has a `[[peer_channels]]` entry — role by authentication, not by transport
 > or port. "Every BTP session is a client session by construction" no longer holds, and the
@@ -1143,7 +1143,7 @@ A client and this connector agree on which version is in use by the path the cli
 address: `POST /ilp` (or `/ilp/v1`) is a version-1 exchange end to end; `POST /ilp/v2` is a
 version-2 exchange end to end. There is no per-request negotiation or content-type haggling — the
 path is the entire agreement, which keeps the client edge as small as the two-repository
-implementation cost in [ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md)
+implementation cost in [ADR 0003](../adr/0003-clean-room-peer-role-versioned-client-edge.md)
 demands (implemented once in Rust, once in TypeScript for `toon-client`, and complexity here is
 paid twice on those grounds alone). A connector that does not implement a version a client
 requests returns `404` on that version's path, distinguishable from every in-spec response
@@ -1154,7 +1154,7 @@ defined above.
 This spec defines only how a version is _introduced_ alongside an existing one. Retiring a
 version — ceasing to serve a version-qualified path — is a separate operational decision outside
 this document's scope, gated on nothing addressing that version's prefix, mirroring
-[ADR 0013](../adr/0013-cut-over-through-a-parallel-address-space.md)'s treatment of the peer-wire
+[ADR 0013](../adr/0013-cut-over-through-a-parallel-address-space.md)'s treatment of the peer-role
 cutover.
 
 ## 4. Consistency
@@ -1162,6 +1162,6 @@ cutover.
 This specification uses exactly the vocabulary of `CONTEXT.md` (connector, app, handler, packet,
 route, route termination, client edge, payment channel, claim, nonce, watermark, fee, price,
 probe) and implements [ADR 0001](../adr/0001-rust-workspace-library-first.md) and
-[ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md). It does not use
+[ADR 0003](../adr/0003-clean-room-peer-role-versioned-client-edge.md). It does not use
 "terminator", "BLS"/"Business Logic Server", or "agent runtime" (all deprecated); it uses "app"
 and "handler" for the payment-oblivious service behind a terminated route.

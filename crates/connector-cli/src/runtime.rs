@@ -660,7 +660,7 @@ impl ClientChannelSource for SolanaChannelSource {
 
 /// The two journal files a node keeps under its `state_dir` (issue #605).
 /// Two files rather than one because they are two different books --
-/// `ClaimBook`'s channel ids are peer-wire channels, the client edge's are
+/// `ClaimBook`'s channel ids are peer channels, the client edge's are
 /// chain-namespaced client channels -- and because each is replayed by a
 /// different owner at startup; sharing one file would mean each replaying
 /// the other's entries and each holding a second writer's file handle on
@@ -914,7 +914,7 @@ pub struct Runtime {
 /// describes. Every `peer_id`-targeted `[[routes]]` entry becomes a
 /// [`PeerRoute`] alongside the terminated
 /// [`connector_config::StaticRoute`]s -- though nothing can currently
-/// traverse one: ADR 0027 / issue #679 deleted the raw-TCP peer wire that
+/// traverse one: ADR 0027 / issue #679 deleted the raw-TCP transport that
 /// was the only [`connector_runtime::PeerTransport`] a built node held,
 /// and the carriages replacing it (BTP over `wss://`, ILP-over-HTTP over
 /// `https://`) are issue #676. Until one lands this node holds an empty
@@ -1130,7 +1130,7 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
             }
         }
     }
-    // The peer wire's own claim watermarks, made durable by the same
+    // The peer semantics's own claim watermarks, made durable by the same
     // `state_dir` the client edge's are (issue #605, and #556's
     // reconciliation row "Journal: `ClaimBook::new(None, ..)` installs the
     // in-memory journal ... watermarks reset on restart; spent nonces
@@ -1385,7 +1385,7 @@ fn client_claim_gate(
 
 /// This connector's own outbound claim ledger for the client edge (issue
 /// #770): every EVM `[[client_channels]]` entry, registered under the same
-/// signer that already signs this connector's identity and its peer-wire
+/// signer that already signs this connector's identity and its peer-role
 /// outbound claims (`Connector::with_identity_signer`) -- one signing key
 /// for everything this connector owes, not a second one minted for this
 /// edge alone. A session earning against an undeclared (chain-resolved)
@@ -2600,7 +2600,7 @@ key_file = "{key_path}"
         assert!(matches!(error, RuntimeError::JournalUnreplayable { .. }));
     }
 
-    /// The peer wire's own journal is armed off the same `state_dir`
+    /// The peer semantics's own journal is armed off the same `state_dir`
     /// (issue #605, #556's "Journal" row): one answer for both surfaces,
     /// not a fix for the client edge and the same bug left standing on the
     /// wire between connectors.
