@@ -4429,11 +4429,29 @@ key_file = "{key_path}"
         use connector_settlement_evm::test_support::{
             anvil_available, Anvil, DEPLOYER_PRIVATE_KEY,
         };
+        use connector_settlement_solana::test_support::{
+            fund, require_solana_test_validator, SolanaValidator, LOCAL_TEST_PROGRAM_ID,
+        };
+        use connector_settlement_solana::SolanaSettlementBackend;
+        use solana_rpc_client::nonblocking::rpc_client::RpcClient;
+        use solana_sdk::commitment_config::CommitmentConfig;
+        use solana_sdk::signature::{Keypair, Signer as SolanaSigner};
 
         /// Distinct from `settlement_construction`'s own base (18_700) and
         /// every other test binary's, for the same reason that module's own
         /// constant documents.
         const ANVIL_BASE_PORT: u16 = 18_750;
+
+        /// A `[settlement.solana]` key file carrying `seed` as 32 raw bytes.
+        /// `settlement_construction` has its own copy of this for the same
+        /// reason this module re-imports the EVM test support it shares with
+        /// that module: the two are siblings, so neither one's private
+        /// helpers are in the other's scope.
+        fn solana_raw_key_file(seed: [u8; 32]) -> tempfile::TempPath {
+            let mut file = tempfile::NamedTempFile::new().expect("temp key file");
+            file.write_all(&seed).expect("write raw key file");
+            file.into_temp_path()
+        }
 
         fn evm_peer_channel_block(peer_id: &str, endpoint: Option<&str>) -> String {
             let channel = format!("0x{}", "cd".repeat(32));
@@ -4669,6 +4687,107 @@ token_network = "0x00000000000000000000000000000000000000bb"
                 runtime.connector.has_outbound_client_hop("store"),
                 "a dialed peer with a channel row and a matching [settlement.evm] table must \
                  reach Connector::with_outbound_client_hop"
+            );
+        }
+
+        /// The Solana twin of
+        /// [`a_dialed_evm_peer_with_settlement_wires_the_outbound_client_hop`]
+        /// -- issue #1011's acceptance criterion asks for both an EVM row
+        /// and a Solana row, and #1019's review found the Solana arm of
+        /// `wire_outbound_client_hops` compile-checked only: the negative
+        /// case ([`a_dialed_solana_peer_with_no_settlement_refuses_to_build`])
+        /// proved the refusal, and nothing proved the wiring.
+        ///
+        /// Why that gap mattered enough to close rather than narrow the
+        /// criterion: the defect this PR's first review caught (the hop
+        /// reading its watermark from `ClientClaimGate`, a book peer claims
+        /// never touch, so only packet 1 ever advanced value) shipped green
+        /// past an EVM-only gate. The Solana arm reaches
+        /// `with_outbound_client_hop_solana` through a *different* claim-state
+        /// implementation (`HttpSolanaClaimState`, not
+        /// `OwnedHttpClaimState`), so "EVM is covered" does not carry to it.
+        ///
+        /// Driven against a real, disposable `solana-test-validator` running
+        /// the real `packages/solana-program` artifact (ADR 0007, and this
+        /// repo's own no-mocks rule), because
+        /// `peer_claim_identity_solana` is `Some` only when a
+        /// `[settlement.solana]` table actually connected. The
+        /// `[[peer_channels]]` row's `channel_account` is an arbitrary real
+        /// pubkey rather than an opened channel for the same reason the EVM
+        /// twin's `channel_id` is `0xcdcd..`: `wire_outbound_client_hops`
+        /// reads the row to name the hop, and verifies nothing on chain.
+        #[tokio::test]
+        async fn a_dialed_solana_peer_with_settlement_wires_the_outbound_client_hop() {
+            if !require_solana_test_validator() {
+                return;
+            }
+
+            let validator = SolanaValidator::spawn().await;
+            let program_id =
+                Pubkey::from_str(LOCAL_TEST_PROGRAM_ID).expect("valid local test program id");
+            let deployed = SolanaSettlementBackend::deploy(&validator.rpc_url, program_id)
+                .await
+                .expect("bind to the genesis-loaded payment-channel program");
+            let token_mint = deployed.token_mint();
+            drop(deployed);
+
+            let seed = [23u8; 32];
+            let payer =
+                solana_sdk::signer::keypair::keypair_from_seed(&seed).expect("derive keypair");
+            let rpc = RpcClient::new_with_commitment(
+                validator.rpc_url.clone(),
+                CommitmentConfig::confirmed(),
+            );
+            fund(&rpc, &payer.pubkey()).await;
+
+            let key_path = solana_raw_key_file(seed);
+            let state_dir = tempfile::tempdir().expect("temp state dir");
+            // Real, well-formed pubkeys this test holds no authority over:
+            // the row has to parse as Solana, and nothing downstream of
+            // parsing consults the chain for it.
+            let channel_account = Keypair::new().pubkey();
+            let counterparty_key = Keypair::new().pubkey();
+            let config = load_config(&format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+peer_expose = "btp"
+
+[signer]
+key_file = "{key_path}"
+
+[settlement.solana]
+rpc_url = "{rpc_url}"
+program_id = "{program_id}"
+token_address = "{token_mint}"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "{key_path}"
+
+[[peers]]
+id = "store"
+endpoint = "wss://store.example:443/ilp/btp"
+
+[peers.credential]
+secret = "a-real-peering-secret"
+
+[[peer_channels]]
+peer_id = "store"
+channel_account = "{channel_account}"
+counterparty_key = "{counterparty_key}"
+program_id = "{program_id}"
+"#,
+                state_dir = state_dir.path().display(),
+                key_path = key_path.display(),
+                rpc_url = validator.rpc_url,
+            ));
+
+            let runtime = build(&config).await.expect("build");
+            assert!(
+                runtime.connector.has_outbound_client_hop("store"),
+                "a dialed peer with a Solana channel row and a matching [settlement.solana] \
+                 table must reach Connector::with_outbound_client_hop_solana"
             );
         }
     }
