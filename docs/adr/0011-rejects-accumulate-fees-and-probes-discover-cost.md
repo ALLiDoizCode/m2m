@@ -54,9 +54,9 @@ This closes the price-discovery gap opened by removing `announcePrice` with disc
 property was inherited from ADR 0004: under postpay, a hop advertising a low fee to attract traffic
 and then rejecting the real packet earned nothing.
 [ADR 0042](0042-a-packet-carries-its-claim.md) retires that headline — a packet now carries its
-claim — so such a hop banks the covering claim and refuses to carry, and the bait is purchasable,
-since [ADR 0037](0037-a-purchased-peering-is-a-terminated-route-whose-work-is-a-table-write.md) lets
-a buyer declare its own `next_hop_price`.
+claim — so such a hop banks the covering claim and refuses to carry. The hop is at least always one
+the operator chose: [ADR 0043](0043-purchasable-peering-is-removed.md) removed the purchasable
+peering that would otherwise have let a stranger advertise the bait itself.
 
 **Fee honesty is now bounded rather than self-enforcing.** Two mechanisms ADR 0042 already requires
 do the work: the sender's own packet sizing, and the per-peer cap on what this connector will

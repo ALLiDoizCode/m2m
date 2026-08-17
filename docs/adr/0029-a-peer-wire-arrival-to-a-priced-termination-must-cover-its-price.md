@@ -49,8 +49,15 @@ Two questions were explicitly left open by the issue for whoever closed it:
 **The check is per-packet, and it is answered from the PREPARE already in hand — not from the claim
 exchange at all.**
 
-Value on the peer wire moves by [ADR 0004](0004-value-moves-on-fulfilment.md): a PREPARE's `amount`
-is exactly what becomes owed to this connector, as exposure, the moment it fulfils
+Value on the peer path moved, when this was written, by
+[ADR 0004](0004-value-moves-on-fulfilment.md) — superseded twice since, and the reasoning below
+survives both: [ADR 0033](0033-the-exposure-machinery-is-retired-not-restated.md) deleted the
+exposure accounting this paragraph names, and
+[ADR 0042](0042-a-packet-carries-its-claim.md) retired the "moves on fulfilment" headline for a
+packet that carries its own claim. What the argument actually needs is only that a hop cannot
+increase an amount while forwarding, which is untouched by either. As originally written: a
+PREPARE's `amount` is exactly what becomes owed to this connector, as exposure, the moment it
+fulfils
 (`peer-semantics-spec.md` §3.2, `Connector::handle_peer_prepare`'s `record_inbound_delivery`). That
 `amount` already carries the answer this ticket needs — a hop cannot increase it forwarding
 (`peer-semantics-spec.md` §4: outgoing amount is always incoming amount minus fee), so if the amount

@@ -2,6 +2,10 @@
 
 **Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
 
+> **Removed with the feature it bounds, by
+> [ADR 0043](0043-purchasable-peering-is-removed.md).** Its bounds guarded a network-writable primitive; nothing network-writable remains for them to
+> guard. **"Refuse, not refund" survives as a principle** — this repo still has no refund path.
+
 Issue #887 (toon-meta#316, child C4 of #867 "sell peering") bounds issue #885's priced write
 primitive: row caps, a prefix-length cap and a purchase-attempt rate limit, each with a tight
 default, each configurable, each refused loudly. This ADR states where each bound is enforced,

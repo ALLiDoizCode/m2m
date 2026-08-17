@@ -2,6 +2,10 @@
 
 **Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
 
+> **Removed with the feature it bounds, by
+> [ADR 0043](0043-purchasable-peering-is-removed.md).** It solved expiry for a row shape that no longer exists. ADR 0034's runtime peer/route table is
+> unaffected and keeps its own durability rules.
+
 Issue #886 (toon-meta#316, child C3 of #867 "sell peering") gives a purchased peering (issue
 #885, ADR 0037) a lease: a duration bought alongside the price, renewable by paying again,
 that lapses into a clean demotion back to client role rather than staying a permanent grant.

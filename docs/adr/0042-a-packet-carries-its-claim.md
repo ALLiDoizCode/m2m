@@ -53,19 +53,25 @@ worked this way:
 
 RFC 0027 does not say when ledger value moves relative to the packet — "payment channels are only
 used for funding and rebalancing… not directly part of the ILPv4 packet flow" — so both this record
-and ADR 0004 were always protocol-legal. This is a local choice, made because a peering may have
-been **bought** ([ADR 0037](0037-a-purchased-peering-is-a-terminated-route-whose-work-is-a-table-write.md))
-and a counterparty that selected itself is owed no credit.
+and ADR 0004 were always protocol-legal. This is a local choice, made because a hop that is paid
+before it carries can always decline to carry, and no amount of protocol prevents that — only a
+bound on what one packet is worth does.
+
+An earlier draft of this record justified the cap by saying a peering "may have been bought", so a
+counterparty that selected itself is owed no credit.
+[ADR 0043](0043-purchasable-peering-is-removed.md) removed that premise outright: a peering cannot
+be bought, so every peer is operator-chosen. **The cap is unaffected** — it is the dial law 03's "trust grows" turns for
+_every_ peer, not a guard against self-admitted ones.
 
 ## The cap
 
 **Every peering carries a maximum amount this connector will forward to it in one packet.** A packet
 needing more is refused with `T04` — never carried, never split. The cap is how far a connector
-trusts a peer, expressed as the most it is willing to lose at once: a peering that has just been
-bought starts at the floor; a path that keeps fulfilling earns a larger one.
+trusts a peer, expressed as the most it is willing to lose at once: a new peering starts at the
+floor; a path that keeps fulfilling earns a larger one.
 
-It has a default, so an operator who never configures one is still bounded — the same convention
-[ADR 0039](0039-abuse-bounds-on-a-purchased-peering-refuse-not-refund.md) uses for purchase bounds.
+It has a default, so an operator who never configures one is still bounded. A bound only an
+attentive operator gets is not a bound.
 
 This is not [ADR 0033](0033-the-exposure-machinery-is-retired-not-restated.md)'s ceiling returning.
 That bounded an _accumulation_, and under this record no accumulation exists — a packet carries its
@@ -75,20 +81,24 @@ time once the work below lands.
 
 ## What must be true for this record to be true
 
-None of this ships today. Listed in the order it must be built:
+None of this ships today. Listed in the order it must be built, and the order matters for one
+reason only — the third item is the one that can break a running fleet:
 
-1. **Require a covering claim on forwarded arrivals.** The price gate filters on
+1. **The cap, refused with `T04`, with a default.** Independent of the rest, and safe to land on its
+   own: it only ever refuses a packet this connector would otherwise have carried.
+2. **Wire issue #881 — the send half.** Proactive covering exists in the runtime and is exercised by
+   tests, but no production path populates `outbound_client_hops`. Additive: a peering with nothing
+   configured behaves exactly as it does now.
+3. **Require a covering claim on forwarded arrivals.** The price gate filters on
    `ClientRouteKind::Terminated`, so a packet this connector forwards onward is carried for free.
-2. **The cap, refused with `T04`, with a default.** Before the next item, not after: turning on
-   covering while a stranger can buy into the routing table means prepaying a counterparty that
-   chose _you_.
-3. **Wire issue #881 — the send half.** Proactive covering exists in the runtime and is exercised by
-   tests, but no production path populates `outbound_client_hops`. Until it does, this record is
-   aspirational and should be read as such.
+   **This one is breaking.** Enforce it before every box's send half is live and forwarding stops
+   across the fleet, because the other end is not covering yet. It ships behind a per-peer knob that
+   observes and logs first, the same migration shape `ClaimEnforcement` already uses, and flips to
+   enforcing once (2) is deployed everywhere.
 4. **Resolve `ClaimEnforcement::Observe`** — honour its 2026-11-01 sunset, or record that the escape
    hatch is permanent.
 
-Until (3) lands the connector runs ADR 0004's model end to end for forwarding, which is coherent and
+Until (2) lands the connector runs ADR 0004's model end to end for forwarding, which is coherent and
 RFC-shaped; it is simply not this record. **Three documents already assert otherwise** — ADR 0031's
 Decision, ADR 0033's premise, and `docs/protocol/money-model.md`'s "current behaviour" banner. This
 record does not become a fourth: it says plainly that it describes the target.
@@ -103,5 +113,5 @@ earns the right to owe — batching and credit windows stay retired, because tha
 accumulation back.
 
 **A signature sits on the hot path of every packet at every hop**, as ADR 0004 already noted. That
-cost is now permanent rather than provisional, and is the price of extending no credit to a
-counterparty that may have bought its way in.
+cost is now permanent rather than provisional, and is what this record buys: no peering is ever owed
+anything between packets, so no peering can be left holding value a counterparty declines to cover.
