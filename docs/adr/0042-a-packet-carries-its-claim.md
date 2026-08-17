@@ -25,6 +25,13 @@ covered a PREPARE it sends, because issue #881's proactive covering was never wi
 declared "gone as an operating mode" is the only mode that runs. Four false clauses is past the
 point where amendment banners help a reader.
 
+**[ADR 0011](0011-rejects-accumulate-fees-and-probes-discover-cost.md) loses one inherited
+property.** Its "understating a fee is unprofitable — honesty needs no enforcement" was reasoned
+from ADR 0004's postpay: a hop advertising a low fee and then rejecting earned nothing. Under this
+record it banks the claim instead, so fee honesty becomes bounded rather than self-enforcing — by
+packet size and by the cap below. ADR 0011 carries the amendment; nothing else in it changes, probe
+economics included.
+
 ## The trade this makes, and does not hide
 
 ADR 0004 rejected prepay on a specific argument: prepayment makes the execution condition
