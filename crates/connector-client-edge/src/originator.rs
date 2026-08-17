@@ -26,13 +26,19 @@ use connector_runtime::PacketOriginator;
 use crate::session_route::route_prepare;
 use crate::ClientEdgeState;
 
-/// See the module doc. `price` is always `0` at this call site -- unlike
-/// `POST /ilp`/the BTP carriage, an operator-originated packet was never
-/// matched against `Connector::app_route` before this point, so there is no
-/// figure to price a mismatched fulfilment against (the same reasoning
-/// `originate_packet`'s own history has: it never computed one either).
-/// `client_channel_id` is always `None`: an operator write is authenticated
-/// by its RFC 9421 signature, never by a covering claim.
+/// A [`PacketOriginator`] over the client edge's own `ClientEdgeState`, so
+/// an operator-originated PREPARE takes the same routing arm `POST
+/// /ilp`/the BTP carriage take -- see the module doc for why this is a
+/// separate type rather than `connector-operator` reaching the arm itself.
+///
+/// Two of `route_prepare`'s arguments are fixed here rather than passed
+/// in. `price` is always `0`: unlike `POST /ilp`/the BTP carriage, an
+/// operator-originated packet was never matched against
+/// `Connector::app_route` before this point, so there is no figure to price
+/// a mismatched fulfilment against (the same reasoning `originate_packet`'s
+/// own history has: it never computed one either). `client_channel_id` is
+/// always `None`: an operator write is authenticated by its RFC 9421
+/// signature, never by a covering claim.
 pub struct SessionAwareOriginator(pub(crate) Arc<ClientEdgeState>);
 
 #[async_trait]

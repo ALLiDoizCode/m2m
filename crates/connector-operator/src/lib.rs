@@ -262,15 +262,16 @@ async fn metrics(State(state): State<OperatorState>) -> Response {
 
 /// `POST /packets`: an operator originates a packet outward, exactly as
 /// the client edge does for an external caller -- decode a [`Prepare`],
-/// call [`PacketOriginator::originate`] once, encode the outcome. Before
-/// issue #1020 this called [`Connector::handle_prepare`] directly, which
-/// meant a destination bound only in a client edge's live session registry
-/// answered `F02` here even though `POST /ilp`/the BTP carriage would have
-/// delivered to it -- `state.originator` is what closes that gap, since
-/// [`router_with_originator`]'s caller can hand it something that also
-/// consults that registry. Unlike that comparison, the difference here is
-/// not only what happens first: [`authenticate_write`] must accept the
-/// request's RFC 9421 signature before any of that runs.
+/// call [`PacketOriginator::originate`] once, encode the outcome. The one
+/// difference is what happens first: [`authenticate_write`] must accept
+/// the request's RFC 9421 signature before any of that runs.
+///
+/// Issue #1020 is why that call goes through [`PacketOriginator`] rather
+/// than [`Connector::handle_prepare`] directly: a destination bound only in
+/// a client edge's live session registry used to answer `F02` here even
+/// though `POST /ilp`/the BTP carriage would have delivered to it.
+/// `state.originator` closes that gap, since [`router_with_originator`]'s
+/// caller can hand it something that also consults that registry.
 async fn originate_packet(
     State(state): State<OperatorState>,
     method: Method,

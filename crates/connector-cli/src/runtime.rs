@@ -1423,7 +1423,7 @@ fn client_payout_ledger(config: &Config, signer: Arc<dyn Signer>) -> Arc<ClientP
 /// surface into the one router the binary serves. The operator router is
 /// mounted only when [`Config::operator`] is `Some` -- absence means the
 /// surface is not started at all, exactly as it means for
-/// [`connector_operator::router`] itself.
+/// [`connector_operator::router_with_originator`] itself.
 ///
 /// Fallible since issue #605: the client edge's claim gate is restored from
 /// a durable journal here, and a journal that will not replay must stop the

@@ -35,7 +35,7 @@
 //! interval between this check and the send itself -- with `T01`
 //! (`RejectCode::t01_peer_unreachable`), never `F02`.
 //!
-//! **Charging.** Unchanged: both ingresses (`lib.rs`'s `POST /ilp`,
+//! **Charging.** Unchanged: both client ingresses (`lib.rs`'s `POST /ilp`,
 //! `btp.rs`'s BTP carriage) already compute `price` from
 //! `Connector::app_route` and admit any claim against it before routing is
 //! attempted at all. A destination this arm ever delivers through has, by
@@ -43,6 +43,10 @@
 //! answered non-`F02` above and never reached here -- so `price` is `0` on
 //! every real deployment today, and a `T01` this arm answers keeps nothing,
 //! exactly like `Connector::deliver_to_app`'s own `AppOutcome::Unreachable`.
+//! [`crate::originator::SessionAwareOriginator`] -- the third caller, added
+//! by issue #1020 for the operator surface's `POST /packets` -- passes `0`
+//! outright: an operator write admits no claim at all, so there is nothing
+//! for a mismatched fulfilment to be priced against.
 
 use connector_btp::{BtpFrame, BTP_RESPONSE};
 use connector_domain::{
