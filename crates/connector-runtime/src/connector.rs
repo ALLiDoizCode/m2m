@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Duration, Utc};
-use connector_config::{SettlementChain, StaticRoute, TransportPolicy};
+use connector_config::{SettlementChain, StaticRoute, TransportPolicy, DEFAULT_MAX_PACKET_AMOUNT};
 use connector_domain::x402::X402PaymentRequired;
 use connector_domain::{
     amount_after_fee, condition_is_present, fulfillment_matches_condition, is_expired,
@@ -603,6 +603,26 @@ pub struct Connector {
     /// closure would perform a disk write -- rcu is only safe for a pure
     /// in-memory transform, which persisting to disk is not.
     runtime_table_lock: Mutex<()>,
+    /// ADR 0042's **cap**, keyed by peer id: the largest amount this
+    /// connector will forward to that peer in a single packet, from its
+    /// `[[peers]]` row's `max_packet_amount`.
+    ///
+    /// A peer with no entry here is capped at
+    /// [`connector_config::DEFAULT_MAX_PACKET_AMOUNT`] rather than
+    /// uncapped -- the same "a bound exists even if nobody configured one"
+    /// shape `peer_sale_bounds` and `probe_rate_limiter` already take, and
+    /// the reason this is a plain map with a defaulted lookup
+    /// ([`Self::packet_cap_for`]) rather than an `Option`. That covers a
+    /// peer added at runtime over the operator surface (issue #884), which
+    /// has no config row to read a cap off at all and is exactly the
+    /// counterparty ADR 0042 says starts at the floor.
+    ///
+    /// **Per packet, never an accumulation.** Nothing here counts what a
+    /// peer has already been sent -- ADR 0033 deleted the exposure ceiling
+    /// and this is not it (`CONTEXT.md` keeps "ceiling" and "cap" apart for
+    /// this reason). The cap is checked against one packet's own forwarded
+    /// amount and forgotten.
+    peer_packet_caps: HashMap<String, u64>,
     /// Where the runtime peer/route table is written durably (issue #884).
     /// `None` on a node with no `state_dir` configured -- the table is
     /// still mutable, exactly like `leased_routes` always is, it simply
@@ -751,7 +771,30 @@ impl Connector {
             runtime_peer_routes: ArcSwap::from_pointee(HashMap::new()),
             runtime_table_lock: Mutex::new(()),
             runtime_store: None,
+            peer_packet_caps: HashMap::new(),
         }
+    }
+
+    /// Give each named peering the cap its `[[peers]]` row configures (ADR
+    /// 0042): the largest amount this connector will forward to it in one
+    /// packet. Every peer left out of `caps` -- including one added at
+    /// runtime over the operator surface (issue #884) -- keeps
+    /// [`connector_config::DEFAULT_MAX_PACKET_AMOUNT`], so this only ever
+    /// overrides a bound that already exists; there is no call that removes
+    /// one.
+    pub fn with_peer_packet_caps(mut self, caps: impl IntoIterator<Item = (String, u64)>) -> Self {
+        self.peer_packet_caps = caps.into_iter().collect();
+        self
+    }
+
+    /// The most this connector will forward to `peer_id` in one packet --
+    /// its configured cap, or [`DEFAULT_MAX_PACKET_AMOUNT`] for a peer that
+    /// configured none.
+    fn packet_cap_for(&self, peer_id: &str) -> u64 {
+        self.peer_packet_caps
+            .get(peer_id)
+            .copied()
+            .unwrap_or(DEFAULT_MAX_PACKET_AMOUNT)
     }
 
     /// Reserve every peer id this node's config file names (issue #884):
@@ -1883,6 +1926,15 @@ impl Connector {
     /// travel together on the SAME PREPARE there, not on the fulfilment
     /// that follows it.
     ///
+    /// # The cap (ADR 0042)
+    ///
+    /// Before any of that, the amount this forward would put on the wire is
+    /// checked against the peering's own cap
+    /// ([`Self::packet_cap_for`]) and refused with `T04` if it exceeds it.
+    /// The cap bounds a single packet -- how much this connector is willing
+    /// to lose at once to a hop that takes the claim and does not carry --
+    /// and never an accumulation.
+    ///
     /// # Proactive covering (issue #881), and the retry arm it replaced
     ///
     /// Before #881, the claim riding the first attempt was always
@@ -1944,11 +1996,41 @@ impl Connector {
             });
         };
 
+        let peer_id = peer_route.peer_id();
+
+        // ADR 0042, "The cap": the most this connector will hand this peer
+        // in ONE packet, and therefore the most a single theft by it can
+        // take -- a packet carries its own claim now, so the value on this
+        // forward is at risk from the moment it leaves. Checked here,
+        // before the packet is covered or sent, against the amount actually
+        // going out (post-fee, the figure `cover_forward` would mint a
+        // claim for); refused with `T04` naming both numbers, never
+        // truncated and never split into two packets, which would defeat
+        // the bound rather than respect it.
+        //
+        // Tempting and wrong: adding "and how much has this peer had
+        // lately" here. That is an accumulation, ADR 0033 deleted the
+        // machinery for it deliberately, and it stays deleted -- nothing is
+        // ever owed between packets, so there is no running total for this
+        // to bound. One packet, checked and forgotten.
+        let cap = self.packet_cap_for(peer_id);
+        if forwarded_amount > cap {
+            return PacketResponse::Reject(Reject {
+                code: RejectCode::t04_insufficient_liquidity(),
+                triggered_by: String::new(),
+                message: format!(
+                    "peer '{peer_id}' has a maximum packet amount of {cap}, and this packet \
+                     would forward {forwarded_amount}"
+                ),
+                data: Vec::new(),
+                accumulated_cost: 0,
+            });
+        }
+
         let outgoing = Prepare {
             amount: forwarded_amount,
             ..prepare
         };
-        let peer_id = peer_route.peer_id();
 
         // Issue #881: a hop configured for client-role covering is covered
         // proactively, from this packet's own forwarded value -- never
@@ -4338,6 +4420,204 @@ mod tests {
         }
         // Never forwarded a smaller amount hoping the far end would cope.
         assert!(second_hop_app_client.deliveries().is_empty());
+    }
+
+    // -- ADR 0042's cap: the largest amount this connector will forward to
+    // one peer in a SINGLE packet. Every case here builds the same two-hop
+    // rig the fee tests above use, so the only thing under test is which
+    // amounts get past the cap.
+
+    /// A first hop forwarding `g.example.app` to `second-hop`, whose own
+    /// app answers -- the rig every cap test shares. Returns the first hop
+    /// alongside the second hop's app client, which is the evidence of
+    /// whether a packet was actually carried: a refused packet leaves it
+    /// empty.
+    fn capped_hop_pair(fee: u64, caps: Vec<(String, u64)>) -> (Connector, Arc<FakeAppClient>) {
+        let second_hop_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+        let second_hop_app_client = Arc::new(FakeAppClient::new());
+        second_hop_app_client.respond(
+            second_hop_route.handler_url(),
+            answered(b"delivered by the second hop"),
+        );
+        let second_hop = Arc::new(
+            Connector::new(
+                vec![second_hop_route],
+                vec![],
+                second_hop_app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_identity_signer(identity_signer()),
+        );
+        let mut peer_transport = InProcessPeerTransport::new();
+        peer_transport.add_peer("second-hop", second_hop);
+        let first_hop = Connector::new(
+            vec![],
+            vec![PeerRoute::new("g.example.app", "second-hop", fee)],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(peer_transport),
+            test_clock(),
+        )
+        .with_peer_packet_caps(caps);
+        (first_hop, second_hop_app_client)
+    }
+
+    #[tokio::test]
+    async fn a_packet_at_exactly_the_cap_is_forwarded() {
+        let (first_hop, second_hop_app_client) =
+            capped_hop_pair(0, vec![("second-hop".to_string(), 100)]);
+
+        let response = first_hop
+            .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+            .await;
+
+        assert!(
+            matches!(response, PacketResponse::Fulfill(_)),
+            "{response:?}"
+        );
+        assert_eq!(second_hop_app_client.deliveries().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_packet_one_unit_over_the_cap_is_refused_with_t04() {
+        let (first_hop, second_hop_app_client) =
+            capped_hop_pair(0, vec![("second-hop".to_string(), 100)]);
+
+        let response = first_hop
+            .handle_prepare(prepare_with_amount("g.example.app", 101), 0)
+            .await;
+
+        match response {
+            PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "T04"),
+            other => panic!("expected a reject, got {other:?}"),
+        }
+        // Never carried, and never split into two packets that each fit:
+        // the far end saw nothing at all.
+        assert!(second_hop_app_client.deliveries().is_empty());
+    }
+
+    /// A refusal an operator cannot act on is a refusal they will
+    /// mis-diagnose, so the message names the peering, the cap in force and
+    /// the amount that exceeded it.
+    #[tokio::test]
+    async fn the_cap_refusal_names_the_peer_the_cap_and_the_offending_amount() {
+        let (first_hop, _) = capped_hop_pair(0, vec![("second-hop".to_string(), 250)]);
+
+        let response = first_hop
+            .handle_prepare(prepare_with_amount("g.example.app", 900), 0)
+            .await;
+
+        match response {
+            PacketResponse::Reject(reject) => {
+                assert!(reject.message.contains("second-hop"), "{}", reject.message);
+                assert!(reject.message.contains("250"), "{}", reject.message);
+                assert!(reject.message.contains("900"), "{}", reject.message);
+            }
+            other => panic!("expected a reject, got {other:?}"),
+        }
+    }
+
+    /// ADR 0042: the cap has a default "so an operator who never configures
+    /// one is still bounded". A connector nobody gave a cap to still holds
+    /// this peering to `DEFAULT_MAX_PACKET_AMOUNT` -- forwarding a packet
+    /// at it, refusing the one above it.
+    #[tokio::test]
+    async fn a_peer_with_no_configured_cap_is_still_bounded_by_the_default() {
+        let (first_hop, second_hop_app_client) = capped_hop_pair(0, vec![]);
+
+        let at_the_default = first_hop
+            .handle_prepare(
+                prepare_with_amount("g.example.app", DEFAULT_MAX_PACKET_AMOUNT),
+                0,
+            )
+            .await;
+        assert!(
+            matches!(at_the_default, PacketResponse::Fulfill(_)),
+            "{at_the_default:?}"
+        );
+
+        let over_the_default = first_hop
+            .handle_prepare(
+                prepare_with_amount("g.example.app", DEFAULT_MAX_PACKET_AMOUNT + 1),
+                0,
+            )
+            .await;
+        match over_the_default {
+            PacketResponse::Reject(reject) => {
+                assert_eq!(reject.code.as_str(), "T04");
+                assert!(
+                    reject
+                        .message
+                        .contains(&DEFAULT_MAX_PACKET_AMOUNT.to_string()),
+                    "{}",
+                    reject.message
+                );
+            }
+            other => panic!("expected a reject, got {other:?}"),
+        }
+
+        // Only the first packet was ever carried.
+        assert_eq!(second_hop_app_client.deliveries().len(), 1);
+    }
+
+    /// The cap bounds what this connector hands the peer, which is the
+    /// amount left after its own fee -- an arriving 105 with a fee of 10
+    /// puts 95 on the wire and clears a cap of 100.
+    #[tokio::test]
+    async fn the_cap_is_measured_against_the_amount_forwarded_not_the_amount_that_arrived() {
+        let (first_hop, second_hop_app_client) =
+            capped_hop_pair(10, vec![("second-hop".to_string(), 100)]);
+
+        let response = first_hop
+            .handle_prepare(prepare_with_amount("g.example.app", 105), 0)
+            .await;
+
+        assert!(
+            matches!(response, PacketResponse::Fulfill(_)),
+            "{response:?}"
+        );
+        assert_eq!(second_hop_app_client.deliveries().len(), 1);
+    }
+
+    /// The cap bounds ONE packet, never a running total (ADR 0042; ADR 0033
+    /// retired the exposure ceiling and it is not coming back). Three
+    /// packets at the cap are three carried packets, not two and a refusal:
+    /// each carries its own claim, so nothing accumulates between them for
+    /// a cap to bound.
+    #[tokio::test]
+    async fn the_cap_bounds_each_packet_rather_than_a_running_total() {
+        let (first_hop, second_hop_app_client) =
+            capped_hop_pair(0, vec![("second-hop".to_string(), 100)]);
+
+        for _ in 0..3 {
+            let response = first_hop
+                .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+                .await;
+            assert!(
+                matches!(response, PacketResponse::Fulfill(_)),
+                "{response:?}"
+            );
+        }
+
+        assert_eq!(second_hop_app_client.deliveries().len(), 3);
+    }
+
+    /// The cap is per peering: a tight one on one peer says nothing about
+    /// another, which keeps its own (here, the default).
+    #[tokio::test]
+    async fn a_cap_on_one_peer_does_not_bind_another() {
+        let (first_hop, second_hop_app_client) =
+            capped_hop_pair(0, vec![("some-other-peer".to_string(), 1)]);
+
+        let response = first_hop
+            .handle_prepare(prepare_with_amount("g.example.app", 5_000), 0)
+            .await;
+
+        assert!(
+            matches!(response, PacketResponse::Fulfill(_)),
+            "{response:?}"
+        );
+        assert_eq!(second_hop_app_client.deliveries().len(), 1);
     }
 
     #[tokio::test]

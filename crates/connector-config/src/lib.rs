@@ -35,7 +35,10 @@ pub use config::Config;
 pub use error::ConfigError;
 pub use identity::ClientIdentityConfig;
 pub use operator::OperatorConfig;
-pub use peer::{ClaimEnforcement, PeerCarriage, PeerConfig, PeerCredential, PeerExposure};
+pub use peer::{
+    ClaimEnforcement, PeerCarriage, PeerConfig, PeerCredential, PeerExposure,
+    DEFAULT_MAX_PACKET_AMOUNT,
+};
 pub use peer_channel::{EvmPeerChannelConfig, PeerChannelConfig, SolanaPeerChannelConfig};
 pub use peer_sale::{
     PeerSaleConfig, DEFAULT_MAX_PREFIX_LENGTH, DEFAULT_MAX_PURCHASED_ROWS,

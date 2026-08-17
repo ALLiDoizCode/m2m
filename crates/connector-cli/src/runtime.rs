@@ -1000,7 +1000,20 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     // config file already owns. `Connector` needs every config peer id
     // to enforce that, even though it stores nothing else about a
     // config peer (see `PeerView`'s own docs).
-    .with_config_peer_ids(config.peers().iter().map(|peer| peer.id().to_string()));
+    .with_config_peer_ids(config.peers().iter().map(|peer| peer.id().to_string()))
+    // ADR 0042's cap: the largest amount this node will forward to each
+    // peer in ONE packet, straight off its `[[peers]]` row. Defaulted at
+    // the config layer (`connector_config::DEFAULT_MAX_PACKET_AMOUNT`), so
+    // a row that writes nothing still arrives here bounded -- and a peer
+    // this call never names (one added at runtime over the operator
+    // surface, issue #884) is bounded by the same figure inside
+    // `Connector` itself.
+    .with_peer_packet_caps(
+        config
+            .peers()
+            .iter()
+            .map(|peer| (peer.id().to_string(), peer.max_packet_amount())),
+    );
     // Issue #885: the single priced route that buys peering with this
     // node, if this operator sells one -- an absent `[peer_sale]` leaves
     // the connector exactly as it was before this section existed. Issue

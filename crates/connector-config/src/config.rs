@@ -789,7 +789,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::peer::{PeerCarriage, PeerCredential};
+    use crate::peer::{PeerCarriage, PeerCredential, DEFAULT_MAX_PACKET_AMOUNT};
     use crate::route::TransportPolicy;
     use crate::settlement::SettlementChain;
     use std::io::Write;
@@ -1025,6 +1025,65 @@ price = 1000
         assert_eq!(config.peer_routes().len(), 1);
         assert_eq!(config.peer_routes()[0].peer_id(), "store");
         assert_eq!(config.peer_routes()[0].fee(), 3);
+    }
+
+    /// ADR 0042's cap round-trips from a real TOML file, and a file that
+    /// says nothing about it still comes back bounded.
+    #[test]
+    fn a_written_max_packet_amount_round_trips_and_an_omitted_one_defaults() {
+        let defaulted = load_peering(|text| text).expect("load");
+        assert_eq!(
+            defaulted.peers()[0].max_packet_amount(),
+            DEFAULT_MAX_PACKET_AMOUNT
+        );
+
+        let written = load_peering(|text| {
+            text.replace(
+                "credential = { secret = \"shared-secret\" }",
+                "credential = { secret = \"shared-secret\" }\nmax_packet_amount = 250000",
+            )
+        })
+        .expect("load");
+        assert_eq!(written.peers()[0].max_packet_amount(), 250_000);
+    }
+
+    /// A cap of zero is a peering that refuses every packet, so it is
+    /// refused at load with a message naming the peer and the rule.
+    #[test]
+    fn rejects_a_max_packet_amount_of_zero() {
+        let result = load_peering(|text| {
+            text.replace(
+                "credential = { secret = \"shared-secret\" }",
+                "credential = { secret = \"shared-secret\" }\nmax_packet_amount = 0",
+            )
+        });
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::PeerMaxPacketAmountZero { id } if id == "store"),
+        );
+        assert!(
+            message.contains("max_packet_amount = 0") && message.contains("ONE packet"),
+            "got: {message}"
+        );
+    }
+
+    /// A negative cap is not a smaller cap: `max_packet_amount` is an
+    /// unsigned amount, and a file that writes one is refused rather than
+    /// wrapped around into an enormous one.
+    #[test]
+    fn rejects_a_negative_max_packet_amount() {
+        let result = load_peering(|text| {
+            text.replace(
+                "credential = { secret = \"shared-secret\" }",
+                "credential = { secret = \"shared-secret\" }\nmax_packet_amount = -1",
+            )
+        });
+
+        assert!(
+            matches!(result, Err(ConfigError::Parse { .. })),
+            "{result:?}"
+        );
     }
 
     /// An `https://` peer rides the HTTP carriage instead -- the scheme is

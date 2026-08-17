@@ -248,6 +248,19 @@ pub enum ConfigError {
     )]
     InvalidClaimEnforcement { id: String, value: String },
 
+    /// ADR 0042's cap, written as `0`. A cap of zero refuses every packet
+    /// this peering could carry, so it is a peering that silently does
+    /// nothing -- and there is deliberately no spelling that turns the cap
+    /// off, since the whole point of the rule is that a bound always
+    /// exists.
+    #[error(
+        "max_packet_amount = 0 for peer '{id}': the cap is the largest amount this connector \
+         will forward to a peer in ONE packet (ADR 0042), so zero refuses every packet that \
+         peering could ever carry. Write a positive amount in the settlement asset's base \
+         units, or omit the field for the default"
+    )]
+    PeerMaxPacketAmountZero { id: String },
+
     #[error(
         "invalid endpoint '{value}' for peer '{id}': {source} -- a peer endpoint is a URL \
          ('wss://host:port/path' for BTP, 'https://host:port/path' for ILP-over-HTTP), not a \

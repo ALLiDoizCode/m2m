@@ -1105,6 +1105,13 @@ Required surface:
   required here before [ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md)
   (issue #882); both are retired and now parsed only as removed-field traps
   (`PeerCeilingRemoved`/`PeerFlushIntervalRemoved`, below).
+- Per peer: `max_packet_amount` — [ADR 0042](../adr/0042-a-packet-carries-its-claim.md)'s **cap**,
+  the largest amount this connector will forward to that peering in **one packet**, in the
+  settlement asset's base units. A packet needing more is refused with `T04`, never carried and
+  never split. Optional and defaulted (`connector_config::DEFAULT_MAX_PACKET_AMOUNT`, 1 000 000 =
+  1 USDC), so a peering that writes nothing is still bounded; there is deliberately no spelling
+  that disables it, and `0` is a named load error rather than "off". This bounds one packet, not
+  an accumulation — it is not `ceiling` returning (ADR 0033, retired above).
 - Per peer, **temporary** (issue #883, child B6 — see
   [`docs/operators/claim-policy-rollout.md`](../operators/claim-policy-rollout.md)):
   `claim_enforcement`, one of `"enforce"` (default) or `"observe"`. `"observe"` admits and logs an
@@ -1141,6 +1148,7 @@ Named load-time errors this specification requires (spelling #677's, identity ou
 | `PeerRouteUndeliverable`            | a route naming as next hop a peer this connector can never originate to                                                                                                                                                                                             | §2.2, §6.4         |
 | `DuplicatePeerId`                   | two `[[peers]]` entries with the same `id`                                                                                                                                                                                                                          | —                  |
 | `InvalidClaimEnforcement`           | `claim_enforcement` set to anything other than `"enforce"` or `"observe"` — a typo must not silently read as either                                                                                                                                                 | issue #883         |
+| `PeerMaxPacketAmountZero`           | `max_packet_amount = 0` — a cap of zero refuses every packet the peering could carry, and there is no "disable the cap" spelling                                                                                                                                    | ADR 0042           |
 | removed-field errors                | `peer_wire_addr`, `addr` in its old `SocketAddr` shape, or `ceiling`/`flush_interval_ms` (ADR 0033, issue #882) — a **hard, named** error pointing at the bring-up doc, never a silent ignore, because the devnet boxes run bind-mounted configs that lead the repo | ADR 0027, ADR 0033 |
 
 `AcceptOnlyPeerWithoutCeiling` and the `claim_ack_timeout_ms > flush_interval_ms` load-time warning
