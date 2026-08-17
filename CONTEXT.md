@@ -90,6 +90,9 @@ derives from; that connector seals its answer back with the same secret. Because
 them can open either, opacity in carriage is a property of the packet rather than a rule every hop
 is trusted to keep. A reject raised short of the termination cannot be sealed — no secret is shared
 with the sender — which is what makes a sealed reject proof that the destination itself said no.
+The converse does not hold: an **unsealed** reject proves nothing about who refused, because a
+termination that never recovered the secret — no identity key, or a wrap it could not open — also
+answers in plaintext. Sealed identifies the destination; unsealed identifies nobody.
 _Avoid_: encryption (when the layer is already clear), wrapper, seal
 
 **Packet plane**:
