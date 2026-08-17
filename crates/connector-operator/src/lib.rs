@@ -66,7 +66,7 @@ use serde::{Deserialize, Serialize};
 use connector_domain::{PacketResponse, Prepare};
 use connector_runtime::{
     ChannelOperationError, ChannelView, ClaimView, Connector, LeaseRouteError, LeasedRouteView,
-    PeerRouteTableError, PeerRouteView, PeerView, RouteView, SettlementChain,
+    PacketOriginator, PeerRouteTableError, PeerRouteView, PeerView, RouteView, SettlementChain,
 };
 use connector_settlement::Claim;
 use connector_signer::{derive_evm_address, to_hex, Signer, SignerError};
@@ -85,6 +85,7 @@ pub struct NodeIdentity {
 #[derive(Clone)]
 struct OperatorState {
     connector: Arc<Connector>,
+    originator: Arc<dyn PacketOriginator>,
     signer: Arc<dyn Signer>,
     bearer_token: Arc<str>,
     write_auth: Arc<WriteAuth>,
@@ -97,14 +98,44 @@ struct OperatorState {
 /// allowlist of ed25519 public keys permitted to sign a write once a
 /// write endpoint lands (issue #421); removing a key from this list and
 /// restarting revokes it, with no other change.
+///
+/// `POST /packets` originates through `connector` alone -- plain
+/// [`Connector::handle_prepare`], answering only from this node's own
+/// configured routing table. A node whose client edge also holds a live
+/// session registry should mount [`router_with_originator`] instead (issue
+/// #1020): this function exists for a deployment with no client edge to
+/// consult, and is exactly [`router_with_originator`] with `connector`
+/// itself as the originator.
 pub fn router(
     connector: Arc<Connector>,
     signer: Arc<dyn Signer>,
     bearer_token: impl Into<String>,
     write_keys: Vec<[u8; 32]>,
 ) -> Router {
+    let originator = connector.clone();
+    router_with_originator(connector, originator, signer, bearer_token, write_keys)
+}
+
+/// As [`router`], but originates `POST /packets` through `originator`
+/// rather than `connector` directly (issue #1020). `originator` is a
+/// [`PacketOriginator`] -- `connector` itself implements it (what [`router`]
+/// passes), and `connector_client_edge`'s session-aware implementation is
+/// what a node also serving a client edge should pass instead, so a
+/// destination bound only in that edge's live session registry is
+/// delivered to rather than answered `F02` for -- the asymmetry issue #1020
+/// exists to close. `connector` is still held separately for every read
+/// endpoint below (peers, routes, channels, claims), which have no notion
+/// of a session at all.
+pub fn router_with_originator(
+    connector: Arc<Connector>,
+    originator: Arc<dyn PacketOriginator>,
+    signer: Arc<dyn Signer>,
+    bearer_token: impl Into<String>,
+    write_keys: Vec<[u8; 32]>,
+) -> Router {
     let state = OperatorState {
         connector,
+        originator,
         signer,
         bearer_token: Arc::from(bearer_token.into()),
         write_auth: Arc::new(WriteAuth::new(write_keys)),
@@ -231,9 +262,15 @@ async fn metrics(State(state): State<OperatorState>) -> Response {
 
 /// `POST /packets`: an operator originates a packet outward, exactly as
 /// the client edge does for an external caller -- decode a [`Prepare`],
-/// call [`Connector::handle_prepare`] once, encode the outcome. The one
-/// difference is what happens first: [`authenticate_write`] must accept
-/// the request's RFC 9421 signature before any of that runs.
+/// call [`PacketOriginator::originate`] once, encode the outcome. Before
+/// issue #1020 this called [`Connector::handle_prepare`] directly, which
+/// meant a destination bound only in a client edge's live session registry
+/// answered `F02` here even though `POST /ilp`/the BTP carriage would have
+/// delivered to it -- `state.originator` is what closes that gap, since
+/// [`router_with_originator`]'s caller can hand it something that also
+/// consults that registry. Unlike that comparison, the difference here is
+/// not only what happens first: [`authenticate_write`] must accept the
+/// request's RFC 9421 signature before any of that runs.
 async fn originate_packet(
     State(state): State<OperatorState>,
     method: Method,
@@ -260,11 +297,7 @@ async fn originate_packet(
     // no further hop's fee may discount it below that.
     let minimum_delivery = prepare.amount;
 
-    let encoded = match state
-        .connector
-        .handle_prepare(prepare, minimum_delivery)
-        .await
-    {
+    let encoded = match state.originator.originate(prepare, minimum_delivery).await {
         PacketResponse::Fulfill(fulfill) => fulfill.encode(),
         PacketResponse::Reject(reject) => reject.encode(),
     };
@@ -991,6 +1024,79 @@ mod tests {
             let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
             let reject = connector_domain::Reject::decode(&bytes).expect("decode reject");
             assert_eq!(reject.code, RejectCode::f02_unreachable());
+        }
+
+        /// A [`PacketOriginator`] that answers with a fixed [`PacketResponse`]
+        /// regardless of what it is asked to originate -- standing in for
+        /// `connector_client_edge`'s session-aware implementation without
+        /// this crate depending on that one. `Connector::handle_prepare`
+        /// alone would answer `F02` for `sample_prepare()`'s destination (no
+        /// route matches it, same as the test above); this fake answers a
+        /// [`Fulfill`] instead, so a response of that shape is only
+        /// possible if `originate_packet` actually called through
+        /// `state.originator` rather than reaching `Connector` directly.
+        struct FakeOriginator {
+            response: PacketResponse,
+        }
+
+        #[async_trait::async_trait]
+        impl PacketOriginator for FakeOriginator {
+            async fn originate(&self, _prepare: Prepare, _minimum_delivery: u64) -> PacketResponse {
+                self.response.clone()
+            }
+        }
+
+        /// Issue #1020: `POST /packets` must originate through whatever
+        /// [`PacketOriginator`] `router_with_originator` was given, not
+        /// through `Connector::handle_prepare` unconditionally -- otherwise
+        /// a node mounting a session-aware originator (the fix this issue
+        /// asks for) would never actually have it consulted.
+        #[tokio::test]
+        async fn originate_packet_calls_through_the_injected_originator() {
+            let keypair = keypair();
+            let app_client = Arc::new(FakeAppClient::new());
+            let clock = Arc::new(TestClock::new(chrono::Utc::now()));
+            let connector = Arc::new(Connector::new(
+                vec![],
+                vec![],
+                app_client,
+                Arc::new(InProcessPeerTransport::new()),
+                clock,
+            ));
+            let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
+            let fulfillment = [9u8; 32];
+            let originator: Arc<dyn PacketOriginator> = Arc::new(FakeOriginator {
+                response: PacketResponse::Fulfill(connector_domain::Fulfill {
+                    fulfillment,
+                    data: Vec::new(),
+                }),
+            });
+            let app = router_with_originator(
+                connector,
+                originator,
+                signer,
+                "correct-token".to_string(),
+                vec![keypair.public.to_bytes()],
+            );
+            let body = sample_prepare().encode();
+            let (sig_input, sig, digest) = sign(&keypair, &body, 9_999_999_999);
+
+            let response = app
+                .oneshot(packets_request(
+                    body,
+                    Some(&sig_input),
+                    Some(&sig),
+                    Some(&digest),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let fulfill = connector_domain::Fulfill::decode(&bytes)
+                .expect("the fake originator's fulfil, not connector.handle_prepare's own F02");
+            assert_eq!(fulfill.fulfillment, fulfillment);
         }
 
         #[tokio::test]

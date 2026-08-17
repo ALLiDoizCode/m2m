@@ -28,3 +28,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tower = { version = "0.4", features = ["util"] }
 hyper = { version = "0.14", features = ["full"] }
 rand = "0.7"
+# `FakeOriginator` (issue #1020's `router_with_originator` test): only a
+# test double needs to *implement* `PacketOriginator`, since calling one
+# through the trait needs no macro at all -- production code here never
+# implements it.
+async-trait = "0.1"

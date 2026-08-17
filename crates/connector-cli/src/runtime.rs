@@ -1455,7 +1455,7 @@ pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError
     tokio::spawn(reap_unresolvable_client_channels_periodically(Arc::clone(
         &claim_gate,
     )));
-    let app = connector_client_edge::router_with_bootstrap_identity(
+    let (app, originator) = connector_client_edge::router_and_originator_with_bootstrap_identity(
         connector.clone(),
         signer.clone(),
         wrap_receiver_secret,
@@ -1503,8 +1503,13 @@ pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError
             .collect(),
     );
     Ok(match config.operator() {
-        Some(operator) => app.merge(connector_operator::router(
+        // Issue #1020: `originator` reaches the same session registry
+        // `POST /ilp`/the BTP carriage just mounted above, so `POST
+        // /packets` can deliver to a destination this node's own client
+        // dialled in and bound, rather than answer `F02` for one.
+        Some(operator) => app.merge(connector_operator::router_with_originator(
             connector,
+            Arc::new(originator),
             signer,
             operator.bearer_token().to_string(),
             operator.write_keys().to_vec(),

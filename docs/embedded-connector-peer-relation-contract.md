@@ -234,15 +234,27 @@ So a maker fronted by the Rust connector needs no route to install, no relation 
 private field to reach. It needs only that its client dialled in and declared the address the
 leg-B PREPARE is sent to.
 
-**But it must originate that PREPARE through the right door.** `route_prepare` is wrapped around
-`handle_prepare` inside `connector-client-edge`, not folded into it —
-`connector_runtime::Connector` cannot see the session registry at all, because
-`connector-client-edge` depends on `connector-runtime` and never the reverse. The consequence is an
-asymmetry worth knowing before you hit it: the operator surface's `POST /packets`
-(`crates/connector-operator/src/lib.rs`, `originate_packet`) calls `Connector::handle_prepare`
-directly and so **bypasses the session arm entirely**, answering `F02` for a destination that is
-only bound in the session registry. The client edge's own ingress — `POST /ilp`, or the BTP
-carriage — is the surface that reaches it. See the issue linked from this document's pull request.
+**It must originate that PREPARE through the right door — and, as of issue #1020, `POST /packets`
+is one.** `route_prepare` is wrapped around `handle_prepare` inside `connector-client-edge`, not
+folded into it — `connector_runtime::Connector` cannot see the session registry at all, because
+`connector-client-edge` depends on `connector-runtime` and never the reverse. Before #1020 this was
+an asymmetry: the operator surface's `POST /packets` (`crates/connector-operator/src/lib.rs`,
+`originate_packet`) called `Connector::handle_prepare` directly and so bypassed the session arm
+entirely, answering `F02` for a destination that was only bound in the session registry, even
+though `POST /ilp`/the BTP carriage would have delivered to it.
+
+#1020 closed it with a port rather than a dependency in either direction:
+`connector_runtime::PacketOriginator` (`crates/connector-runtime/src/origination.rs`) is the
+trait `originate_packet` calls through instead of `Connector::handle_prepare` directly — `Connector`
+itself implements it as that same plain call, so a node with no client edge keeps the old
+behaviour unchanged. `connector-client-edge`'s `SessionAwareOriginator`
+(`crates/connector-client-edge/src/originator.rs`) is the other implementation: it wraps the same
+`ClientEdgeState` the client edge's own router is mounted over and calls `route_prepare` on it, so
+it sees the identical session registry a client's BTP session bound into. `connector_cli::runtime`
+wires the two together — `connector_client_edge::router_and_originator_with_bootstrap_identity`
+hands back both the client-edge `Router` and this originator, and the latter is passed to
+`connector_operator::router_with_originator` when `[operator]` is configured — so `POST /packets`
+now reaches a maker's own dialled-in client exactly as `POST /ilp`/the BTP carriage already did.
 
 **A TypeScript app pairs with it as a sidecar, not as a library.**
 [ADR 0001](adr/0001-rust-workspace-library-first.md) is explicit that TypeScript consumers move to

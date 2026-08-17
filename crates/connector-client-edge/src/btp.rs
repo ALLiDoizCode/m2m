@@ -934,10 +934,17 @@ async fn finish_frame(
 
     // Issue #736: the same fourth routing arm `handle_ilp`'s HTTP carriage
     // uses -- a configured route first, then whatever client session
-    // `state.session_registry` has bound to this destination.
-    let packet_response =
-        crate::session_route::route_prepare(&state, prepare, price, client_channel_id.as_deref())
-            .await;
+    // `state.session_registry` has bound to this destination. `0`: this
+    // carriage has no wire field to carry a sender-declared minimum
+    // (session_route.rs's own doc).
+    let packet_response = crate::session_route::route_prepare(
+        &state,
+        prepare,
+        price,
+        0,
+        client_channel_id.as_deref(),
+    )
+    .await;
     crate::roll_back_uncarried_forward(
         &state,
         is_forwarded_route,

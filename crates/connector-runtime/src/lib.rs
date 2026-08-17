@@ -8,6 +8,7 @@ mod connector;
 mod journal;
 mod metrics;
 mod operator_view;
+mod origination;
 mod outbound_client;
 mod peer_route_store;
 mod peer_transport;
@@ -41,6 +42,7 @@ pub use operator_view::{
     ChannelView, ChannelViewStatus, ClaimDirection, ClaimView, LeasedRouteView, PeerRouteView,
     PeerView, RouteSource, RouteView,
 };
+pub use origination::PacketOriginator;
 // The OUTBOUND client ledger (issue #873) -- what this node signs to pay a
 // next hop, deliberately a different book from `ClaimBook`'s inbound
 // journal above. See `outbound_client`'s header for the table of

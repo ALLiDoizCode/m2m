@@ -82,6 +82,7 @@ mod channels;
 mod claim_gate;
 mod claim_state;
 mod lookup_budget;
+mod originator;
 mod outbound_ledger;
 mod peer;
 mod session_registry;
@@ -98,6 +99,7 @@ pub use lookup_budget::{
     DEFAULT_UNRESOLVABLE_LOOKUPS_TOTAL, DEFAULT_UNRESOLVABLE_LOOKUP_MAX_WAIT,
     DEFAULT_UNRESOLVABLE_LOOKUP_WINDOW, MAX_UNRESOLVABLE_LOOKUP_WINDOW,
 };
+pub use originator::SessionAwareOriginator;
 pub use outbound_ledger::ClientPayoutLedger;
 pub use peer::PeerCarriages;
 pub use session_registry::SESSION_LEASE_BACKSTOP_TTL;
@@ -408,6 +410,44 @@ pub fn router_with_bootstrap_identity(
     bootstrap_identity: Option<BootstrapIdentity>,
     identities: Arc<[ConfiguredIdentity]>,
 ) -> Router {
+    router_and_originator_with_bootstrap_identity(
+        connector,
+        signer,
+        wrap_receiver_secret,
+        claim_gate,
+        settlement_terms,
+        settlements,
+        btp_session_window,
+        peers,
+        bootstrap_identity,
+        identities,
+    )
+    .0
+}
+
+/// As [`router_with_bootstrap_identity`], but also hands back a
+/// [`SessionAwareOriginator`] over the exact same state the returned
+/// [`Router`] is mounted on (issue #1020) -- so a caller that also mounts
+/// `connector-operator`'s surface can give `POST /packets` the same routing
+/// arm `POST /ilp`/the BTP carriage use, reaching a destination this node's
+/// own client dialled in and bound, rather than have it answer `F02` for
+/// one. Split from [`router_with_bootstrap_identity`] rather than changing
+/// that function's return type, since every other constructor in this file
+/// (`router`, `router_with_gate`, ...) builds on it and wants a bare
+/// [`Router`] back.
+#[allow(clippy::too_many_arguments)]
+pub fn router_and_originator_with_bootstrap_identity(
+    connector: Arc<Connector>,
+    signer: Arc<dyn Signer>,
+    wrap_receiver_secret: Option<[u8; 32]>,
+    claim_gate: Arc<ClientClaimGate>,
+    settlement_terms: Option<X402SettlementTerms>,
+    settlements: Vec<X402ChainSettlementTerms>,
+    btp_session_window: NonZeroU32,
+    peers: Option<Arc<PeerCarriages>>,
+    bootstrap_identity: Option<BootstrapIdentity>,
+    identities: Arc<[ConfiguredIdentity]>,
+) -> (Router, SessionAwareOriginator) {
     let state = Arc::new(ClientEdgeState {
         connector,
         signer,
@@ -421,14 +461,16 @@ pub fn router_with_bootstrap_identity(
         bootstrap_identity,
         identities,
     });
-    Router::new()
+    let originator = SessionAwareOriginator(Arc::clone(&state));
+    let router = Router::new()
         .route("/ilp", post(handle_ilp))
         .route("/ilp/btp", get(btp::handle_btp_upgrade))
         .route("/ilp/probe", post(handle_probe))
         .route("/ilp/identity", get(identity))
         .route("/ilp/routes/price", get(route_price))
         .route("/ilp/claim-state", post(claim_state::claim_state))
-        .with_state(state)
+        .with_state(state);
+    (router, originator)
 }
 
 /// The `ILP-Payment-Channel-Claim-Wrapped` header's JSON shape
@@ -1297,7 +1339,7 @@ async fn handle_ilp(
     // sources first, then whatever client session `state.session_registry`
     // has bound to this destination -- see `session_route::route_prepare`.
     let response =
-        session_route::route_prepare(&state, prepare, price, client_channel_id.as_deref()).await;
+        session_route::route_prepare(&state, prepare, price, 0, client_channel_id.as_deref()).await;
     roll_back_uncarried_forward(
         &state,
         is_forwarded_route(client_route),
