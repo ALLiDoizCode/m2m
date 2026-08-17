@@ -192,9 +192,12 @@ was wrong twice over: #879's 3.00 was the pre-ADR-0033 figure (the current recei
 as the peer ledger's own per-forward write it replaces on the send side, not an addition on top of
 it. The only genuinely new cost is the watermark round trip, and at 278us p50 / 384us p99 against a
 ~20.4ms inter-packet budget at 49fps it consumes under 2% of it; every run held the requested 49.0/s
-achieved rate. A persistent connection roughly halves the round trip's own p50/p99 versus opening a
-fresh one per call, answering the "what does a persistent session change" question directly: it
-still matters, by about the same margin ADR 0033's own numbers showed for a single `fdatasync`.
+achieved rate. A persistent connection cuts the round trip's own p50 and p99 by roughly a third
+versus opening a fresh one per call (278 us against 407 us at p50, 384 us against 554 us at p99),
+answering the "what does a persistent session change" question directly: reuse is worth having, and
+a hop should hold one client — but the ~170 us it saves at p99 is an order of magnitude below the
+~1.8 ms a single extra `fdatasync` cost at p99 in ADR 0033's own numbers, so it is a tuning choice,
+not a rollout gate.
 
 **What this verdict does not cover.** This is a local, single-hop, loopback measurement of latency
 and durable-write cost; it says nothing about WAN round-trip variance to a real receiver, and

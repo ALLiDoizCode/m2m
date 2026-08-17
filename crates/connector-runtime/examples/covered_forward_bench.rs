@@ -13,11 +13,12 @@
 //!
 //! `cover_forward`'s own doc names the cost precisely: "one watermark round
 //! trip to the receiver and the one durable nonce reservation
-//! `OutboundClientLedger::next_claim` makes, on every packet" -- a fourth
-//! cost on top of issue #879's measured 3.00 `fdatasync`/packet for the
-//! covering-claim-plus-exposure receive path (ADR 0033's table). This file
-//! measures that fourth cost directly, on the send side, real network round
-//! trip and real disk write included -- nothing here is stubbed.
+//! `OutboundClientLedger::next_claim` makes, on every packet" -- and read
+//! that as a cost stacked on top of issue #879's 3.00 `fdatasync`/packet,
+//! which is the covering-claim-plus-exposure RECEIVE path (ADR 0033's
+//! table), not this one. This file measures the send side's own cost
+//! directly instead of inferring it from that figure: real network round
+//! trip, real disk write, nothing here stubbed.
 //!
 //! # Three modes
 //!
@@ -343,22 +344,22 @@ fn micros(d: Duration) -> f64 {
     d.as_secs_f64() * 1_000_000.0
 }
 
+/// One `name  value` report line, on the column every other line here
+/// reports its own value at.
+fn print_metric(name: &str, value: f64) {
+    println!("{name:<21} {value:.1}");
+}
+
 fn print_latency_table(label: &str, latencies: &[Duration]) {
-    println!(
-        "{label}_p50_us        {:.1}",
-        micros(quantile(latencies, 0.50))
-    );
-    println!(
-        "{label}_p90_us        {:.1}",
-        micros(quantile(latencies, 0.90))
-    );
-    println!(
-        "{label}_p99_us        {:.1}",
-        micros(quantile(latencies, 0.99))
-    );
-    println!(
-        "{label}_mean_us       {:.1}",
-        latencies.iter().copied().map(micros).sum::<f64>() / latencies.len().max(1) as f64
+    for (quantile_name, q) in [("p50", 0.50), ("p90", 0.90), ("p99", 0.99)] {
+        print_metric(
+            &format!("{label}_{quantile_name}_us"),
+            micros(quantile(latencies, q)),
+        );
+    }
+    print_metric(
+        &format!("{label}_mean_us"),
+        latencies.iter().copied().map(micros).sum::<f64>() / latencies.len().max(1) as f64,
     );
 }
 
@@ -514,9 +515,9 @@ async fn main() {
         println!("journal_entries       n/a (in-memory ledger)");
     }
     print_latency_table("latency", &latencies);
-    println!(
-        "latency_max_us        {:.1}",
-        micros(*latencies.last().expect("at least one packet"))
+    print_metric(
+        "latency_max_us",
+        micros(*latencies.last().expect("at least one packet")),
     );
 
     let mut watermark_timings = timed_state
