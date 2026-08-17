@@ -721,9 +721,11 @@ state, and is never pushed into a network unprompted.
 
 - **`GET /ilp/identity`** — unauthenticated, no request body. Returns this connector's own
   uncompressed secp256k1 public key, plus the key id identifying it:
+
   ```json
   { "keyId": "...", "publicKey": "0x04..." }
   ```
+
   Mounted under `/ilp` rather than at the bare `/identity` because the operator surface already
   serves its own bearer-gated `GET /identity` (issue #420) for a different audience — a different
   operator-authenticated caller asking a different question — and the two routers are merged onto
@@ -731,17 +733,23 @@ state, and is never pushed into a network unprompted.
 
   **`?destination=<ILP address>`** ([issue
   #1026](https://github.com/toon-protocol/connector/issues/1026)): asks, in addition, which
-  identity a payload to `destination` must be sealed to — which is *this* connector's key only if
+  identity a payload to `destination` must be sealed to — which is _this_ connector's key only if
   this connector terminates `destination`. `keyId`/`publicKey` are unchanged and still describe
   the answering connector; the answer gains `routeIdentity` (§1.4's `extra.routeIdentity`, the
   identical object from the identical lookup) when this connector can vouch for one:
+
   ```json
   {
     "keyId": "...",
     "publicKey": "0x04...",
-    "routeIdentity": { "prefix": "g.example.beta.app", "publicKey": "0x04...", "signature": "0x..." }
+    "routeIdentity": {
+      "prefix": "g.example.beta.app",
+      "publicKey": "0x04...",
+      "signature": "0x..."
+    }
   }
   ```
+
   On a destination this connector terminates, `routeIdentity.publicKey` equals `publicKey` and the
   statement is self-signed. On one it forwards ([ADR
   0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md)), this connector asks its
@@ -754,6 +762,7 @@ state, and is never pushed into a network unprompted.
   cannot open the payload, and saying nothing is what lets a sender refuse to send it. Without
   `?destination=`, or on a sender that ignores `routeIdentity`, the answer is exactly what it was
   before #1026 — which on a forwarded destination is the wrong key to seal to, and always was.
+
 - **`GET /ilp/routes/price?destination=<ILP address>`** — unauthenticated. Returns `200` with the
   price of the configured route `destination` would match — terminated or forwarded ([ADR
   0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md)) — reading the same
