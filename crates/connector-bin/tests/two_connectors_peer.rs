@@ -68,6 +68,18 @@
 //!    does set it logs a `WARN` naming every plaintext peering at startup.
 //!    [`spawn_payer`] is the only config in this repo that sets it.
 //!
+//! # The identity a client can actually seal to (issue #1026)
+//!
+//! Every packet in the tests above is sealed to
+//! `identity_from_key_seed(PAYEE_SIGNER_SEED)`: the payee's key, read off a
+//! constant in this file, which no real client of the payer can do.
+//! [`a_client_sealing_to_the_only_identity_it_can_discover_is_refused_across_the_peering_over_btp`]
+//! / [`_over_http`](a_client_sealing_to_the_only_identity_it_can_discover_is_refused_across_the_peering_over_http)
+//! drop that privilege and show what a client that knows only the wire gets
+//! across a forwarded route today: `F01`, from the payee, because the only
+//! identity the payer advertises is its own. That is #1026, reproduced
+//! against two real binaries with distinct `[signer]` files.
+//!
 //! # EVM only, on purpose (#732)
 //!
 //! Peer claims are EIP-712 balance proofs; `ClaimBook` verifies nothing else
@@ -1195,6 +1207,191 @@ async fn two_connectors_move_a_paid_packet(carriage: Carriage) {
         "the client leg must be charged: the payer's client-edge claim \
          journal must record a claim on the client's channel. Journal was:\n{charged}"
     );
+}
+
+/// **Issue #1026, over `wss://`: a forwarded route is unreachable for a
+/// client that knows only what the wire tells it.**
+///
+/// [`two_connectors_move_a_paid_packet`] seals its packets to
+/// `identity_from_key_seed(PAYEE_SIGNER_SEED)` -- the payee's key, read off
+/// this file's own constant, *"without asking it over the wire"* as the
+/// helper's doc says. That is a fixture privilege, not a protocol path. A
+/// real client of the payer has exactly one identity source: `GET
+/// /ilp/identity` on the connector it talks to, and the x402 greeting that
+/// connector answers with. Both describe the **payer**. So the only key a
+/// real client can seal to is the forwarding hop's, and the packet arrives
+/// at the payee addressed to a key the payee does not hold.
+///
+/// This is the first-packet failure observed on the third-party Solana
+/// mainnet node when its edge and store connectors were given distinct
+/// `[signer]` files (issue #1026):
+///
+/// ```text
+/// F01  gift wrap could not be opened: gift wrap failed to decrypt
+/// ```
+///
+/// Two things are pinned here, and they must both survive the fix:
+///
+/// 1. **The forwarding hop cannot open the payload** (ADR 0018 §8.1). A
+///    packet sealed to the payer's identity is refused *by the payee* with
+///    `F01`, relayed back through the payer unchanged. A payer that ever
+///    answered this with a FULFILL would have opened and re-sealed the
+///    payload -- the "unwrap and re-wrap at the edge" non-fix, which makes
+///    every intermediary a plaintext reader. This test is what makes that
+///    a red build.
+/// 2. **The failure is the key, and only the key.** The identical packet,
+///    same fixture, same route, sealed to the payee's real identity,
+///    fulfils. Whatever #1026's fix looks like -- and the shape is
+///    deliberately not decided in this file -- it must give a real client
+///    a discoverable way to arrive at that second key.
+///
+/// The fix's own acceptance test ("a client learns the terminating identity
+/// from the wire and crosses") is written alongside the plumbing that makes
+/// it possible, not here: it depends on where the identity ends up being
+/// carried, and this test does not.
+#[tokio::test]
+async fn a_client_sealing_to_the_only_identity_it_can_discover_is_refused_across_the_peering_over_btp(
+) {
+    a_client_sealing_to_the_only_identity_it_can_discover_is_refused_across_the_peering(
+        Carriage::Btp,
+    )
+    .await;
+}
+
+/// **Issue #1026, over `https://`.** Same defect on the other carriage: the
+/// gift wrap is opened at the payee's termination boundary
+/// (`Connector::open_termination_request`), which neither carriage touches,
+/// so §9 says the failure must be identical on both.
+#[tokio::test]
+async fn a_client_sealing_to_the_only_identity_it_can_discover_is_refused_across_the_peering_over_http(
+) {
+    a_client_sealing_to_the_only_identity_it_can_discover_is_refused_across_the_peering(
+        Carriage::Http,
+    )
+    .await;
+}
+
+/// The identity a connector advertises to anyone who asks: `GET
+/// /ilp/identity` on its client edge (ADR 0022), decoded from its
+/// `0x`-prefixed hex `publicKey`. This is the *only* way a client that has
+/// not read this test file's constants can learn a key to seal to.
+async fn advertised_identity(client: &reqwest::Client, client_edge_addr: &str) -> PublicKeyBytes {
+    let identity: serde_json::Value = client
+        .get(format!("http://{client_edge_addr}/ilp/identity"))
+        .send()
+        .await
+        .expect("GET /ilp/identity")
+        .json()
+        .await
+        .expect("identity JSON");
+    let public_key = identity["publicKey"]
+        .as_str()
+        .expect("`publicKey` is a string")
+        .strip_prefix("0x")
+        .expect("`publicKey` is 0x-prefixed hex");
+    hex::decode(public_key)
+        .expect("`publicKey` is hex")
+        .try_into()
+        .expect("an uncompressed secp256k1 public key is 65 bytes")
+}
+
+async fn a_client_sealing_to_the_only_identity_it_can_discover_is_refused_across_the_peering(
+    carriage: Carriage,
+) {
+    let Some(fixture) = PeerFixture::spawn().await else {
+        return;
+    };
+    let payee_state = tempfile::tempdir().expect("temp payee state dir");
+    let payer_state = tempfile::tempdir().expect("temp payer state dir");
+    let stub_app = spawn_stub_app();
+    let (payee, _payee_config, _payee_key) =
+        spawn_payee(&fixture, payee_state.path(), &stub_app.addr);
+    let endpoint = format!(
+        "{}://{}{}",
+        carriage.scheme(),
+        payee.client_edge_addr,
+        match carriage {
+            Carriage::Btp => "/ilp/btp",
+            Carriage::Http => "/ilp",
+        }
+    );
+    let (payer, _payer_config, _payer_key) =
+        spawn_payer(&fixture, payer_state.path(), carriage, &endpoint);
+    let client = reqwest::Client::new();
+
+    // What the wire tells a client of the payer. It is the payer's own key
+    // -- the identity endpoint answers for the process that serves it -- and
+    // the payer's config holds nothing that would let it say otherwise.
+    let discoverable = advertised_identity(&client, &payer.client_edge_addr).await;
+    assert_eq!(
+        discoverable,
+        identity_from_key_seed(PAYER_SIGNER_SEED),
+        "`GET /ilp/identity` on the payer answers with the payer's identity"
+    );
+    assert_ne!(
+        discoverable,
+        identity_from_key_seed(PAYEE_SIGNER_SEED),
+        "the fixture's two connectors hold distinct signers -- with one shared \
+         key file this test would prove nothing, which is exactly the deployment \
+         convention #1026 says is not a protocol fix"
+    );
+
+    // A paying client, doing everything right with what it can see: a real
+    // claim, the route's price, and the payload sealed to the identity the
+    // wire gave it.
+    let sealed_to_the_hop =
+        peer_bound_prepare(APP_PREFIX, b"sealed to the forwarding hop", &discoverable);
+    let (status, body, _ack) = post_peer_request(
+        &client,
+        &payer.client_edge_addr,
+        None,
+        Some(&fixture.client_claim(1)),
+        &sealed_to_the_hop,
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let reject = Reject::decode(&body).expect(
+        "a payload sealed to the forwarding hop must be refused, not fulfilled: a \
+         FULFILL here means the payer opened and re-sealed the client's payload",
+    );
+    assert_eq!(
+        reject.code.as_str(),
+        "F01",
+        "the payee cannot open a wrap addressed to the payer: {}",
+        reject.message
+    );
+    assert!(
+        reject.message.contains("gift wrap could not be opened"),
+        "the refusal must be the termination boundary's own, relayed unchanged \
+         through the payer -- not a payer-side failure. Message was: {}",
+        reject.message
+    );
+
+    // The control: nothing but the sealing key changes, and the packet
+    // crosses. This is the "give both the same signer bytes and the identical
+    // packet fulfills" line from #1026 made precise -- the fixture, the
+    // route, the claim and the carriage were all fine; the client simply had
+    // no protocol path to this key.
+    let payee_identity = identity_from_key_seed(PAYEE_SIGNER_SEED);
+    let sealed_to_the_payee =
+        peer_bound_prepare(APP_PREFIX, b"sealed to the payee", &payee_identity);
+    let (status, body, _ack) = post_peer_request(
+        &client,
+        &payer.client_edge_addr,
+        None,
+        Some(&fixture.client_claim(2)),
+        &sealed_to_the_payee,
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    connector_domain::Fulfill::decode(&body).unwrap_or_else(|_| {
+        let reject = Reject::decode(&body).expect("an answer that is neither FULFILL nor REJECT");
+        panic!(
+            "the same packet sealed to the payee's identity must cross: {} {}",
+            reject.code.as_str(),
+            reject.message
+        )
+    });
 }
 
 /// **The amount a priced forwarded route will carry is bounded by its
