@@ -480,10 +480,15 @@ still falls through to `F01`, unchanged by this paragraph.
 0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md), [issue
 #620](https://github.com/toon-protocol/connector/issues/620)): one that terminates here, whose
 `price` buys the app's work, and one that forwards over a peering, whose `price` buys the whole
-path and out of which this hop retains its `fee`. The terms are byte-identical either way —
-nothing in the shape below names a route kind, and a client cannot tell, and has no reason to
-care, which one it is paying. Before ADR 0028 a forwarded destination was greeted with nothing,
-required no claim and was carried for free; that was a free gateway, not a design.
+path and out of which this hop retains its `fee`. The terms are byte-identical either way with
+one exception — nothing in the shape below names a route kind, and a client cannot tell, and has
+no reason to care, which one it is paying, **except for which key to seal the payload to**
+(`extra.routeIdentity`, [issue #1026](https://github.com/toon-protocol/connector/issues/1026),
+below): on a terminated route that is this node's own; on a forwarded one it is the far end's,
+relayed, and a client that seals to this node's own key instead sends a payload only this hop
+could open, which the terminating connector refuses `F01`. Before ADR 0028 a forwarded destination
+was greeted with nothing, required no claim and was carried for free; that was a free gateway, not
+a design.
 
 Two rules attach to the forwarded case and to nothing else. A client-edge PREPARE to a priced
 forwarded destination is refused `F03_INVALID_AMOUNT` when its declared `amount` exceeds that
@@ -535,7 +540,40 @@ because no settlement address is configured anywhere in this connector yet — a
 (issue #526) is a smaller, different thing from adding that configuration. `extra` is limited to
 what the code actually sets — `ilpAddress`, `endpoint`, `price` and `sessionLeaseTtlMs` on every
 greeting, plus whichever of `ilpAddresses`/`btpEndpoint`/`settlement`/`settlements`/
-`requiredTransport` this node has configured (below) — and carries nothing else.
+`requiredTransport` this node has configured (below), plus `routeIdentity` when this node can
+vouch for one (below) — and carries nothing else.
+
+**`extra.routeIdentity`** ([issue #1026](https://github.com/toon-protocol/connector/issues/1026)):
+the identity a payload to `destination` must be sealed to (§1.8, ADR 0018), as the connector that
+**terminates** it states it — the same object `GET /ilp/identity?destination=` (§1.7) answers
+with, from the same lookup, so the two cannot disagree:
+
+```json
+"routeIdentity": {
+  "prefix": "g.example.beta.app",
+  "publicKey": "0x04...",
+  "signature": "0x..."
+}
+```
+
+`prefix` is the ILP prefix the statement covers — `destination` is either `prefix` itself or lies
+beneath it — and may be longer than the route this node forwards on; a reader checks its
+destination against `prefix`, never against the route it asked about. `publicKey` is the
+terminating connector's uncompressed secp256k1 identity, `signature` that connector's own
+signature over `(prefix, publicKey)` made with the private half of `publicKey`
+(`connector_signer::route_identity`, `sha256("toon-route-identity-v1" || u16_be(len(prefix)) ||
+prefix || publicKey)`, 65-byte `r||s||v`). On a route this node terminates the statement is
+self-signed by this node; on a route it forwards it is whatever this node's next hop stated
+(fetched from that hop's own `GET /ilp/identity?destination=`, §1.7), **relayed verbatim after
+verifying**. A hop cannot forge a statement for a key it does not hold, so a client that verifies
+`signature` against `publicKey` over `prefix` before sealing knows the key came from whoever holds
+it, however many hops relayed it. Absent — not `null` — when this node has nothing it can vouch
+for: no identity key of its own on a terminated route, or a next hop that could not be asked, did
+not answer, or answered something that does not verify or does not cover `destination`. This
+node **never** substitutes its own key on a forwarded route; a client that finds the field absent
+there has no key to seal to and should say so rather than seal to `ilpAddress`'s node. This is the
+one field of `extra` that may describe a node other than the emitter, and it is the one fact a
+client cannot get from the emitter and cannot do without.
 
 **`extra.ilpAddresses`/`extra.btpEndpoint`** ([issue
 #807](https://github.com/toon-protocol/connector/issues/807)): this node's own ILP address(es) and
@@ -673,14 +711,16 @@ rule above applies only to the connector the probe was submitted to.
 
 A sender must hold the terminating connector's public key before it can seal a packet to it (§1
 above; [ADR 0018](../adr/0018-a-payload-is-sealed-to-the-terminating-connector.md)), and must know a
-route's price before it can construct a claim that pays for it. Both are answered directly by the
-connector that terminates the route, over the same client edge a payer already speaks to it on
+route's price before it can construct a claim that pays for it. Both are answered by the connector
+the sender speaks to — which vouches for the terminating connector's key when it is not itself
+the terminating connector (`?destination=`, below) — over the same client edge a payer already
+speaks to it on
 ([ADR 0022](../adr/0022-a-connector-answers-it-does-not-announce.md)) — **answering, not announcing**: each
 of the following is a reply to a request that reached this connector's own client edge, changes no
 state, and is never pushed into a network unprompted.
 
-- **`GET /ilp/identity`** — unauthenticated, no request body. Returns the uncompressed secp256k1
-  public key a sender must seal a packet's payload to, plus the key id identifying it:
+- **`GET /ilp/identity`** — unauthenticated, no request body. Returns this connector's own
+  uncompressed secp256k1 public key, plus the key id identifying it:
   ```json
   { "keyId": "...", "publicKey": "0x04..." }
   ```
@@ -688,6 +728,32 @@ state, and is never pushed into a network unprompted.
   serves its own bearer-gated `GET /identity` (issue #420) for a different audience — a different
   operator-authenticated caller asking a different question — and the two routers are merged onto
   one port whenever the operator surface is enabled.
+
+  **`?destination=<ILP address>`** ([issue
+  #1026](https://github.com/toon-protocol/connector/issues/1026)): asks, in addition, which
+  identity a payload to `destination` must be sealed to — which is *this* connector's key only if
+  this connector terminates `destination`. `keyId`/`publicKey` are unchanged and still describe
+  the answering connector; the answer gains `routeIdentity` (§1.4's `extra.routeIdentity`, the
+  identical object from the identical lookup) when this connector can vouch for one:
+  ```json
+  {
+    "keyId": "...",
+    "publicKey": "0x04...",
+    "routeIdentity": { "prefix": "g.example.beta.app", "publicKey": "0x04...", "signature": "0x..." }
+  }
+  ```
+  On a destination this connector terminates, `routeIdentity.publicKey` equals `publicKey` and the
+  statement is self-signed. On one it forwards ([ADR
+  0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md)), this connector asks its
+  next hop the same question at that hop's own `GET /ilp/identity?destination=` — peer carriages
+  ride a node's client-edge listener, so the origin is the peering's own — verifies what comes
+  back, relays it verbatim, and remembers it briefly so a burst of askers is not a burst of
+  questions. Absent — not `null` — when there is nothing to vouch for (an unrouted destination, no
+  identity key, a next hop that did not or could not say). The answering connector **never
+  answers its own key as `routeIdentity` for a destination it forwards**: that is the key that
+  cannot open the payload, and saying nothing is what lets a sender refuse to send it. Without
+  `?destination=`, or on a sender that ignores `routeIdentity`, the answer is exactly what it was
+  before #1026 — which on a forwarded destination is the wrong key to seal to, and always was.
 - **`GET /ilp/routes/price?destination=<ILP address>`** — unauthenticated. Returns `200` with the
   price of the configured route `destination` would match — terminated or forwarded ([ADR
   0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md)) — reading the same

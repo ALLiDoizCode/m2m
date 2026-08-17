@@ -23,6 +23,7 @@ mod oer;
 mod packet;
 mod projection;
 mod route;
+pub mod route_identity;
 pub mod x402;
 
 pub use address::is_valid_ilp_address;
@@ -39,3 +40,4 @@ pub use identity::{
 pub use packet::{Fulfill, PacketResponse, Prepare, Reject, RejectCode};
 pub use projection::{JournalEntry, Projection};
 pub use route::select_route;
+pub use route_identity::RouteIdentity;

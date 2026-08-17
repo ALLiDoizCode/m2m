@@ -198,6 +198,24 @@ pub struct X402ChannelExtra {
     /// reads this instead of hardcoding a guessed millisecond count.
     #[serde(rename = "sessionLeaseTtlMs", default)]
     pub session_lease_ttl_ms: u64,
+    /// The identity a payload to `destination` must be sealed to, as the
+    /// connector that terminates it states it (issue #1026,
+    /// [`crate::RouteIdentity`]). On a terminated route this is the
+    /// emitting node's own key, self-signed; on a forwarded route (ADR
+    /// 0028) it is the far end's, relayed verbatim -- and it is the *only*
+    /// field of this greeting that ever describes a node other than the
+    /// emitter, because it is the only fact a client cannot get from the
+    /// emitter and cannot do without. Absent -- not `null` -- when the
+    /// emitter does not know it (no identity key configured, or the next
+    /// hop could not say), so the pre-#1026 shape is unchanged; a client
+    /// that finds it absent on a forwarded route has no key to seal to and
+    /// should say so rather than seal to the emitter.
+    #[serde(
+        rename = "routeIdentity",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub route_identity: Option<crate::RouteIdentity>,
 }
 
 /// What an unaffiliated buyer needs to OPEN a channel with the emitting
@@ -349,6 +367,7 @@ pub fn terms_body(terms: &GreetingTerms<'_>) -> Vec<u8> {
         btp_endpoint,
         required_transport,
         session_lease_ttl_ms,
+        route_identity,
     } = *terms;
     let terms = X402PaymentRequired {
         x402_version: X402_VERSION,
@@ -372,6 +391,7 @@ pub fn terms_body(terms: &GreetingTerms<'_>) -> Vec<u8> {
                 settlements: settlements.to_vec(),
                 required_transport: required_transport.map(str::to_string),
                 session_lease_ttl_ms,
+                route_identity: route_identity.cloned(),
             },
         }],
     };
@@ -408,6 +428,11 @@ pub struct GreetingTerms<'a> {
     /// carriages) leaves it `0`, which is otherwise never a real
     /// deployment's value.
     pub session_lease_ttl_ms: u64,
+    /// The identity the destination's payload must be sealed to (issue
+    /// #1026): the emitting node's own, self-signed, on a route it
+    /// terminates; the far end's, relayed, on one it forwards. `None` when
+    /// the emitter has nothing it can vouch for -- it never guesses.
+    pub route_identity: Option<&'a crate::RouteIdentity>,
 }
 
 /// Read a `payment-required` greeting's terms.

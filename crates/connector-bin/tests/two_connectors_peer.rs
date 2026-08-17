@@ -75,10 +75,16 @@
 //! constant in this file, which no real client of the payer can do.
 //! [`a_client_sealing_to_the_only_identity_it_can_discover_is_refused_across_the_peering_over_btp`]
 //! / [`_over_http`](a_client_sealing_to_the_only_identity_it_can_discover_is_refused_across_the_peering_over_http)
-//! drop that privilege and show what a client that knows only the wire gets
-//! across a forwarded route today: `F01`, from the payee, because the only
-//! identity the payer advertises is its own. That is #1026, reproduced
-//! against two real binaries with distinct `[signer]` files.
+//! drop that privilege and show what a client that knows only the wire got
+//! across a forwarded route before #1026: `F01`, from the payee, because the
+//! only identity the payer advertised was its own. That is #1026, reproduced
+//! against two real binaries with distinct `[signer]` files -- and it stays
+//! green after the fix, because sealing to the hop is still wrong.
+//! [`a_client_that_knows_only_the_wire_crosses_a_forwarded_route_over_btp`]
+//! / [`_over_http`](a_client_that_knows_only_the_wire_crosses_a_forwarded_route_over_http)
+//! are the fix: the same client asks the payer `GET
+//! /ilp/identity?destination=`, gets the payee's self-signed statement
+//! relayed, verifies it, seals to it, and crosses.
 //!
 //! # EVM only, on purpose (#732)
 //!
@@ -113,7 +119,8 @@ use connector_btp::{
     decode_frame, encode_message, ProtocolData, AUTH_PROTOCOL, BTP_RESPONSE, CLAIM_ACK_PROTOCOL,
     CLAIM_PROTOCOL, CONTENT_TYPE_TEXT,
 };
-use connector_domain::{Prepare, Reject};
+use connector_domain::{Prepare, Reject, RouteIdentity};
+use connector_runtime::route_identity_covers;
 use connector_settlement::SettlementBackend;
 use connector_settlement_evm::test_support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
 use connector_settlement_evm::EvmSettlementBackend;
@@ -1392,6 +1399,184 @@ async fn a_client_sealing_to_the_only_identity_it_can_discover_is_refused_across
             reject.message
         )
     });
+}
+
+/// **Issue #1026, the fix, over `wss://`: a client that knows only the wire
+/// crosses a forwarded route.**
+///
+/// The counterpart to
+/// [`a_client_sealing_to_the_only_identity_it_can_discover_is_refused_across_the_peering_over_btp`]:
+/// same fixture, same two binaries with distinct `[signer]` files, and a
+/// client that reads **nothing** off this file's constants. It asks the
+/// payer -- the only connector it knows -- `GET
+/// /ilp/identity?destination=<app>`, and the payer answers with the
+/// **payee's** self-signed statement (issue #1026, `routeIdentity`),
+/// which it fetched from the payee's own `GET /ilp/identity` over the
+/// peering's origin and relayed after verifying. The client verifies it
+/// too, seals to the key inside it, pays, and the packet fulfils at the
+/// payee.
+///
+/// Three things are pinned:
+///
+/// 1. **The answering node's `publicKey` is still its own**, exactly as
+///    before #1026, and it is *not* the key to seal to here -- the first
+///    test in this pair proves what happens to a client that does. The
+///    fix adds a field; it does not change what an old field means.
+/// 2. **The relayed statement verifies against the key it names**, and
+///    that key is the payee's. The payer cannot forge this (it does not
+///    hold the payee's key), which is what makes relaying it safe.
+/// 3. **The x402 greeting says the same thing** (`extra.routeIdentity`), so
+///    a client that arrives via a claimless probe rather than the identity
+///    endpoint learns the same key from the same statement.
+#[tokio::test]
+async fn a_client_that_knows_only_the_wire_crosses_a_forwarded_route_over_btp() {
+    a_client_that_knows_only_the_wire_crosses_a_forwarded_route(Carriage::Btp).await;
+}
+
+/// **Issue #1026, the fix, over `https://`.** The payer's question to the
+/// payee is `GET /ilp/identity` at the peering's origin regardless of
+/// carriage -- peer carriages ride the client-edge listener -- so the
+/// answer, and the crossing, must be identical on both (§9).
+#[tokio::test]
+async fn a_client_that_knows_only_the_wire_crosses_a_forwarded_route_over_http() {
+    a_client_that_knows_only_the_wire_crosses_a_forwarded_route(Carriage::Http).await;
+}
+
+/// `GET /ilp/identity?destination=…` on `client_edge_addr`, as a client
+/// forming a packet for `destination` asks it: the answering node's own
+/// `publicKey`, and -- when it can vouch for one -- the `routeIdentity` the
+/// payload is actually to be sealed to.
+async fn advertised_route_identity(
+    client: &reqwest::Client,
+    client_edge_addr: &str,
+    destination: &str,
+) -> (PublicKeyBytes, Option<RouteIdentity>) {
+    let identity: serde_json::Value = client
+        .get(format!("http://{client_edge_addr}/ilp/identity"))
+        .query(&[("destination", destination)])
+        .send()
+        .await
+        .expect("GET /ilp/identity?destination=")
+        .json()
+        .await
+        .expect("identity JSON");
+    let own = decode_public_key(identity["publicKey"].as_str().expect("`publicKey`"));
+    let stated = identity
+        .get("routeIdentity")
+        .cloned()
+        .map(|value| serde_json::from_value(value).expect("`routeIdentity` is a RouteIdentity"));
+    (own, stated)
+}
+
+fn decode_public_key(hex_0x: &str) -> PublicKeyBytes {
+    hex::decode(hex_0x.strip_prefix("0x").expect("0x-prefixed hex"))
+        .expect("hex")
+        .try_into()
+        .expect("an uncompressed secp256k1 public key is 65 bytes")
+}
+
+async fn a_client_that_knows_only_the_wire_crosses_a_forwarded_route(carriage: Carriage) {
+    let Some(fixture) = PeerFixture::spawn().await else {
+        return;
+    };
+    let payee_state = tempfile::tempdir().expect("temp payee state dir");
+    let payer_state = tempfile::tempdir().expect("temp payer state dir");
+    let stub_app = spawn_stub_app();
+    let (payee, _payee_config, _payee_key) =
+        spawn_payee(&fixture, payee_state.path(), &stub_app.addr);
+    let endpoint = format!(
+        "{}://{}{}",
+        carriage.scheme(),
+        payee.client_edge_addr,
+        match carriage {
+            Carriage::Btp => "/ilp/btp",
+            Carriage::Http => "/ilp",
+        }
+    );
+    let (payer, _payer_config, _payer_key) =
+        spawn_payer(&fixture, payer_state.path(), carriage, &endpoint);
+    let client = reqwest::Client::new();
+
+    // What the wire now tells a client of the payer about the app's
+    // destination. The client verifies the statement before trusting a
+    // byte of it -- the payer is a relay, and a relay is exactly the party
+    // that must not be able to name the key.
+    let (payers_own_key, stated) =
+        advertised_route_identity(&client, &payer.client_edge_addr, APP_PREFIX).await;
+    let stated = stated.expect(
+        "issue #1026: the payer must be able to say which identity a payload to a \
+         destination it forwards is sealed to",
+    );
+    assert!(
+        route_identity_covers(&stated, APP_PREFIX),
+        "the relayed statement must verify against the key it names, over a prefix \
+         covering the destination. Statement was: {stated:?}"
+    );
+    let sealing_key = decode_public_key(&stated.public_key);
+    assert_ne!(
+        sealing_key, payers_own_key,
+        "the key to seal to is not the answering node's: that is the whole defect"
+    );
+    assert_eq!(
+        payers_own_key,
+        identity_from_key_seed(PAYER_SIGNER_SEED),
+        "`publicKey` still describes the answering node, exactly as before #1026"
+    );
+
+    // The greeting agrees with the identity endpoint, byte for byte on the
+    // statement: one source, two carriages of it.
+    let terms = claimless_client_terms(
+        &client,
+        &payer.client_edge_addr,
+        &peer_bound_prepare(APP_PREFIX, b"probe", &sealing_key),
+    )
+    .await;
+    let greeted: RouteIdentity =
+        serde_json::from_value(terms["accepts"][0]["extra"]["routeIdentity"].clone())
+            .expect("the greeting on a forwarded route carries `extra.routeIdentity`");
+    assert_eq!(greeted, stated);
+
+    // And the crossing. Nothing below this line differs from
+    // `two_connectors_move_a_paid_packet` except where `sealing_key` came
+    // from -- which is the point.
+    let cross = |body: &'static [u8], nonce: u64| {
+        let prepare = peer_bound_prepare(APP_PREFIX, body, &sealing_key);
+        let claim = fixture.client_claim(nonce);
+        let client = client.clone();
+        let addr = payer.client_edge_addr.clone();
+        async move {
+            let (status, body, _ack) =
+                post_peer_request(&client, &addr, None, Some(&claim), &prepare).await;
+            assert_eq!(status, reqwest::StatusCode::OK);
+            connector_domain::Fulfill::decode(&body).unwrap_or_else(|_| {
+                let reject =
+                    Reject::decode(&body).expect("an answer that is neither FULFILL nor REJECT");
+                panic!(
+                    "a packet sealed to the wire-discovered identity did not cross: {} {}",
+                    reject.code.as_str(),
+                    reject.message
+                )
+            });
+        }
+    };
+    cross(b"sealed to what the wire said", 1).await;
+    cross(b"and again", 2).await;
+    assert!(
+        peer_journal(payee_state.path()).contains(&fixture.channel_id),
+        "the crossing must be paid at the peer leg, exactly as any other. Ledger was:\n{}",
+        peer_journal(payee_state.path())
+    );
+
+    // The client's control on the *other* end: the payee itself, asked
+    // directly, states the same identity self-signed -- the payer relayed,
+    // it did not compose. And asked about a destination it does not
+    // terminate, it says nothing.
+    let (_, from_the_payee) =
+        advertised_route_identity(&client, &payee.client_edge_addr, APP_PREFIX).await;
+    assert_eq!(from_the_payee.as_ref(), Some(&stated));
+    let (_, unknown) =
+        advertised_route_identity(&client, &payee.client_edge_addr, "g.example.elsewhere").await;
+    assert_eq!(unknown, None);
 }
 
 /// **The amount a priced forwarded route will carry is bounded by its

@@ -30,10 +30,11 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use connector_config::{Config, PeerCarriage};
-use connector_domain::Prepare;
+use connector_domain::{Prepare, RouteIdentity};
 use connector_peer_btp::{BtpPeerTransport, TungsteniteDialer};
 use connector_peer_http::{HttpPeerTransport, ReqwestPeerClient};
 use connector_runtime::{
@@ -51,6 +52,40 @@ pub(crate) struct ConfiguredPeerTransport {
     /// Registered with no peers, so every unmapped peer id gets §2.2's
     /// `T01` from the one place that already produces it.
     unreachable: InProcessPeerTransport,
+    /// Peer id → where to ask that peer which identity terminates a
+    /// destination (issue #1026): its `GET /ilp/identity`, derived from its
+    /// `[[peers]].endpoint` by [`identity_url`]. Same key set as `carriage`.
+    identity_urls: HashMap<String, reqwest::Url>,
+    /// One HTTP client for those questions, with a timeout a greeting can
+    /// afford to wait out; a peer that will not answer costs a bounded
+    /// delay and an absent field, never a hung greeting.
+    identity_client: reqwest::Client,
+}
+
+/// How long a `GET /ilp/identity?destination=` to a peer may take before it
+/// is treated as unanswered.
+const IDENTITY_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The `GET /ilp/identity` a peer answers on, from the endpoint this node
+/// dials it at. Peer carriages ride a node's own client-edge listener
+/// (issue #678: *"peer carriages ride this node's own listeners"*), so the
+/// origin is the endpoint's own and only the scheme and path change:
+/// `wss://host/ilp/btp` → `https://host/ilp/identity`, `ws://` → `http://`,
+/// and an `https://`/`http://` ILP endpoint keeps its scheme. `None` for an
+/// endpoint whose scheme is none of those, which config load already
+/// refused.
+fn identity_url(endpoint: &reqwest::Url) -> Option<reqwest::Url> {
+    let scheme = match endpoint.scheme() {
+        "wss" | "https" => "https",
+        "ws" | "http" => "http",
+        _ => return None,
+    };
+    let mut url = endpoint.clone();
+    url.set_scheme(scheme).ok()?;
+    url.set_path("/ilp/identity");
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url)
 }
 
 /// The transport a validated [`Config`] describes.
@@ -121,12 +156,34 @@ pub(crate) fn build_peer_transport(
         transport
     });
 
+    let identity_urls = config
+        .peers()
+        .iter()
+        .filter(|peer| peer.dial().is_some())
+        .filter_map(|peer| Some((peer.id().to_string(), identity_url(peer.endpoint()?)?)))
+        .collect();
+
     Arc::new(ConfiguredPeerTransport {
         btp,
         http,
         carriage,
         unreachable: InProcessPeerTransport::new(),
+        identity_urls,
+        identity_client: reqwest::Client::builder()
+            .timeout(IDENTITY_QUERY_TIMEOUT)
+            .build()
+            .expect("a reqwest client with only a timeout set always builds"),
     })
+}
+
+/// The part of a peer's `GET /ilp/identity` answer this transport reads.
+/// Everything else the endpoint says (`keyId`, `publicKey`) describes the
+/// peer itself, which is exactly the key a forwarded payload must *not* be
+/// sealed to, so it is not read here at all.
+#[derive(serde::Deserialize)]
+struct PeerIdentityAnswer {
+    #[serde(rename = "routeIdentity", default)]
+    route_identity: Option<RouteIdentity>,
 }
 
 impl ConfiguredPeerTransport {
@@ -168,6 +225,43 @@ impl PeerTransport for ConfiguredPeerTransport {
             Some(transport) => transport.flush(peer_id, claim).await,
             None => self.unreachable.flush(peer_id, claim).await,
         }
+    }
+
+    /// Put the question to the peer's own client edge:
+    /// `GET /ilp/identity?destination=…` at the origin this node dials it
+    /// on. Carriage-independent on purpose -- BTP has no request/response
+    /// slot for a question that is not a packet, and inventing one would be
+    /// a second identity mechanism beside the one every connector already
+    /// answers (ADR 0022). Whatever comes back is returned unjudged; the
+    /// caller verifies it.
+    async fn route_identity(&self, peer_id: &str, destination: &str) -> Option<RouteIdentity> {
+        let url = self.identity_urls.get(peer_id)?;
+        let response = self
+            .identity_client
+            .get(url.clone())
+            .query(&[("destination", destination)])
+            .send()
+            .await
+            .map_err(
+                |error| tracing::debug!(peer_id, %error, "peer did not answer GET /ilp/identity"),
+            )
+            .ok()?;
+        if !response.status().is_success() {
+            tracing::debug!(
+                peer_id,
+                status = %response.status(),
+                "peer refused GET /ilp/identity"
+            );
+            return None;
+        }
+        response
+            .json::<PeerIdentityAnswer>()
+            .await
+            .map_err(|error| {
+                tracing::debug!(peer_id, %error, "peer's GET /ilp/identity answer was unreadable")
+            })
+            .ok()?
+            .route_identity
     }
 }
 
@@ -347,5 +441,42 @@ token_network = "0x00000000000000000000000000000000000000bb"
 
         assert!(t01(&response), "{response:?}");
         assert!(!reached);
+    }
+
+    /// Issue #1026: the peer's `GET /ilp/identity` is derived from the
+    /// endpoint this node dials it at -- same origin, HTTP scheme, fixed
+    /// path -- because peer carriages ride the client-edge listener.
+    #[test]
+    fn a_peers_identity_endpoint_is_its_dial_endpoints_origin_over_http() {
+        let cases = [
+            (
+                "wss://peer.example:8443/ilp/btp",
+                "https://peer.example:8443/ilp/identity",
+            ),
+            (
+                "ws://127.0.0.1:9000/ilp/btp",
+                "http://127.0.0.1:9000/ilp/identity",
+            ),
+            (
+                "https://peer.example/ilp",
+                "https://peer.example/ilp/identity",
+            ),
+            (
+                "http://127.0.0.1:9000/ilp?x=1#frag",
+                "http://127.0.0.1:9000/ilp/identity",
+            ),
+        ];
+        for (endpoint, expected) in cases {
+            let endpoint = reqwest::Url::parse(endpoint).unwrap();
+            assert_eq!(
+                identity_url(&endpoint).map(|url| url.to_string()),
+                Some(expected.to_string()),
+                "{endpoint}"
+            );
+        }
+        assert_eq!(
+            identity_url(&reqwest::Url::parse("ftp://peer.example/ilp").unwrap()),
+            None
+        );
     }
 }

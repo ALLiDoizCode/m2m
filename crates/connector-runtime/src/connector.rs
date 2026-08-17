@@ -8,6 +8,7 @@ use arc_swap::ArcSwap;
 use chrono::{DateTime, Duration, Utc};
 use connector_config::{SettlementChain, StaticRoute, TransportPolicy};
 use connector_domain::x402::X402PaymentRequired;
+use connector_domain::RouteIdentity;
 use connector_domain::{
     amount_after_fee, condition_is_present, fulfillment_matches_condition, is_expired,
     is_valid_ilp_address, select_route, EnvelopeRequest, EnvelopeResponse, Fulfill, PacketResponse,
@@ -15,7 +16,9 @@ use connector_domain::{
 };
 use connector_settlement::{ChannelId, ChannelStatus, Claim, SettlementBackend, SettlementError};
 use connector_signer::giftwrap::{derive_fulfillment, open_request, seal_response};
-use connector_signer::{Address, Ed25519Signer, Signer};
+use connector_signer::{
+    sign_route_identity, verify_route_identity, Address, Ed25519Signer, Signer,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::Instrument;
@@ -337,6 +340,73 @@ enum ConfiguredTarget {
     },
 }
 
+/// How long a next hop's answer to "which identity terminates this
+/// destination" is reused before it is asked again (issue #1026). A
+/// statement grants nothing -- it names a key to seal to -- so the cost of
+/// staleness is one payload sealed to a key its owner has rotated away
+/// from, which the far end refuses `F01` exactly as today; and the cost of
+/// no reuse is one round trip to the peer per claimless greeting, which is
+/// an amplifier an unauthenticated client controls.
+const ROUTE_IDENTITY_TTL: Duration = Duration::minutes(5);
+
+/// One verified statement a next hop made about a destination it forwards
+/// or terminates, and when this node was told it.
+#[derive(Debug, Clone)]
+struct RelayedRouteIdentity {
+    peer_id: String,
+    identity: RouteIdentity,
+    told_at: DateTime<Utc>,
+}
+
+/// `0x`-prefixed lowercase hex, the encoding `GET /ilp/identity` already
+/// reports a public key in and that a [`RouteIdentity`] therefore uses for
+/// both of its byte fields.
+fn hex_0x(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(2 + bytes.len() * 2);
+    out.push_str("0x");
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// The inverse of [`hex_0x`] for a fixed-width field: `None` unless the
+/// text is `0x` plus exactly `2 * N` hex digits.
+fn from_hex_0x<const N: usize>(text: &str) -> Option<[u8; N]> {
+    let digits = text.strip_prefix("0x")?;
+    if digits.len() != 2 * N {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (index, chunk) in digits.as_bytes().chunks(2).enumerate() {
+        let pair = std::str::from_utf8(chunk).ok()?;
+        out[index] = u8::from_str_radix(pair, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// Whether `identity` is a well-formed, self-signed statement that covers
+/// `destination` (issue #1026): the key decodes, the signature decodes and
+/// verifies against that key over that prefix, and `destination` is the
+/// prefix or lies beneath it. This is the check every reader of a
+/// [`RouteIdentity`] makes before sealing to it or relaying it -- exposed
+/// so the client edge, a test, and any other consumer judge a statement by
+/// exactly one rule.
+#[must_use]
+pub fn route_identity_covers(identity: &RouteIdentity, destination: &str) -> bool {
+    if !identity.covers(destination) {
+        return false;
+    }
+    let (Some(public_key), Some(signature)) = (
+        from_hex_0x::<65>(&identity.public_key),
+        from_hex_0x::<65>(&identity.signature),
+    ) else {
+        return false;
+    };
+    verify_route_identity(&identity.prefix, &public_key, &signature)
+}
+
 impl ConfiguredTarget {
     fn into_route_target(self) -> RouteTarget {
         match self {
@@ -511,6 +581,15 @@ pub struct Connector {
     /// degrades to "every channel operation refuses" rather than "channel
     /// operations silently no-op".
     identity_signer: Option<Arc<dyn Signer>>,
+    /// Route identities this node has been told by its next hops (issue
+    /// #1026), each remembered for [`ROUTE_IDENTITY_TTL`] so that greeting
+    /// every claimless client of a forwarded route does not put a question
+    /// to the peer per greeting. Only statements that verified are ever
+    /// stored; a peer that could not say is asked again next time. Small
+    /// and linear on purpose: a node holds a handful of forwarded prefixes,
+    /// and this is read once per greeting or identity lookup, never per
+    /// packet.
+    route_identities: Mutex<Vec<RelayedRouteIdentity>>,
     /// Gates [`Connector::handle_probe`] (issue #426, ADR 0011): a fixed
     /// window of probe attempts admitted per sender identity. Defaults to
     /// [`DEFAULT_PROBE_LIMIT`] per [`default_probe_window`], overridable via
@@ -739,6 +818,7 @@ impl Connector {
             known_channels: RwLock::new(Vec::new()),
             claims: ClaimBook::new(None, HashMap::new(), HashMap::new()),
             identity_signer: None,
+            route_identities: Mutex::new(Vec::new()),
             probe_rate_limiter: FixedWindowRateLimiter::new(
                 DEFAULT_PROBE_LIMIT,
                 default_probe_window(),
@@ -2770,6 +2850,116 @@ impl Connector {
     /// the rest.
     pub fn client_route_price(&self, destination: &str) -> Option<u64> {
         self.client_route(destination).map(|route| route.price)
+    }
+
+    /// This node's own statement that payloads to `destination` are sealed
+    /// to its identity key (issue #1026) -- made only for a destination a
+    /// route **terminated here** resolves to, and signed over that route's
+    /// prefix so one statement serves every address beneath it. `None` for
+    /// a forwarded destination (this node is not the one to say), for an
+    /// unrouted one, and on a node with no identity key (which cannot
+    /// terminate anything either, per [`Self::with_identity_signer`]).
+    ///
+    /// Synchronous and network-free, so the peer carriages' `F06` greeting
+    /// -- which has no async context and no business making one -- can
+    /// carry it.
+    pub fn own_route_identity(&self, destination: &str) -> Option<RouteIdentity> {
+        let prefix = match self.select_configured_route(destination)?.1 {
+            ConfiguredTarget::App(index) => self.routes[index].prefix().to_string(),
+            ConfiguredTarget::PeerSale { .. } => self.peer_sale.as_ref()?.prefix().to_string(),
+            ConfiguredTarget::Peer(_) | ConfiguredTarget::RuntimePeer(_) => return None,
+        };
+        let signer = self.identity_signer.as_ref()?;
+        let (public_key, signature) = sign_route_identity(signer.as_ref(), &prefix)
+            .map_err(|error| {
+                tracing::warn!(%error, %prefix, "could not sign this node's own route identity")
+            })
+            .ok()?;
+        Some(RouteIdentity {
+            prefix,
+            public_key: hex_0x(&public_key),
+            signature: hex_0x(&signature),
+        })
+    }
+
+    /// Which identity a payload to `destination` must be sealed to (issue
+    /// #1026), whoever holds it: this node's own, self-signed, when the
+    /// destination terminates here ([`Self::own_route_identity`]); the next
+    /// hop's answer, **verified and then relayed verbatim**, when this node
+    /// forwards it. `None` when there is nothing this node can vouch for --
+    /// no route, no identity key, a peer that could not be asked or did
+    /// not answer, or an answer that does not verify or does not cover
+    /// `destination`. It never falls back to this node's own key on a
+    /// forwarded route: that is the packet the far end cannot open, and
+    /// saying nothing is what lets the client refuse to send it.
+    ///
+    /// A verified answer is remembered for [`ROUTE_IDENTITY_TTL`], so a
+    /// burst of claimless greetings on one forwarded prefix costs one
+    /// question to the peer, not one per greeting.
+    pub async fn route_identity(&self, destination: &str) -> Option<RouteIdentity> {
+        let peer_id = match self.select_configured_route(destination)?.1 {
+            ConfiguredTarget::App(_) | ConfiguredTarget::PeerSale { .. } => {
+                return self.own_route_identity(destination);
+            }
+            ConfiguredTarget::Peer(index) => self.peer_routes[index].peer_id().to_string(),
+            ConfiguredTarget::RuntimePeer(route) => route.peer_id().to_string(),
+        };
+        let now = self.clock.now();
+        if let Some(remembered) = self.remembered_route_identity(&peer_id, destination, now) {
+            return Some(remembered);
+        }
+        let identity = self
+            .peer_transport
+            .route_identity(&peer_id, destination)
+            .await?;
+        if !route_identity_covers(&identity, destination) {
+            tracing::warn!(
+                peer_id,
+                destination,
+                prefix = %identity.prefix,
+                "peer answered a route identity that does not verify for this destination; \
+                 not relaying it"
+            );
+            return None;
+        }
+        self.remember_route_identity(&peer_id, identity.clone(), now);
+        Some(identity)
+    }
+
+    fn remembered_route_identity(
+        &self,
+        peer_id: &str,
+        destination: &str,
+        now: DateTime<Utc>,
+    ) -> Option<RouteIdentity> {
+        let remembered = self
+            .route_identities
+            .lock()
+            .expect("route identity cache poisoned");
+        remembered
+            .iter()
+            .find(|entry| {
+                entry.peer_id == peer_id
+                    && entry.identity.covers(destination)
+                    && now - entry.told_at < ROUTE_IDENTITY_TTL
+            })
+            .map(|entry| entry.identity.clone())
+    }
+
+    fn remember_route_identity(&self, peer_id: &str, identity: RouteIdentity, now: DateTime<Utc>) {
+        let mut remembered = self
+            .route_identities
+            .lock()
+            .expect("route identity cache poisoned");
+        remembered.retain(|entry| {
+            now - entry.told_at < ROUTE_IDENTITY_TTL
+                && !(entry.peer_id == peer_id && entry.identity.prefix == identity.prefix)
+        });
+        remembered.push(RelayedRouteIdentity {
+            peer_id: peer_id.to_string(),
+            identity,
+            told_at: now,
+        });
     }
 
     /// Whether `prepare` names a terminated app route whose envelope
@@ -8839,6 +9029,250 @@ mod tests {
                 connector.remove_runtime_peer_route("g.nowhere"),
                 Err(PeerRouteTableError::RouteNotFound(prefix)) if prefix == "g.nowhere"
             ));
+        }
+    }
+
+    /// Issue #1026: which identity a payload must be sealed to, asked of a
+    /// node that terminates the destination and of one that forwards it.
+    mod route_identity {
+        use super::*;
+        use connector_signer::LocalSigner;
+
+        fn terminating(signer: Arc<dyn Signer>) -> Arc<Connector> {
+            let route = StaticRoute::new("g.example.beta.app", "http://localhost:4000").unwrap();
+            Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer),
+            )
+        }
+
+        fn forwarding_to(peer: Arc<Connector>, signer: Arc<dyn Signer>) -> Connector {
+            let mut peer_transport = InProcessPeerTransport::new();
+            peer_transport.add_peer("beta", peer);
+            Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.beta", "beta", 7)],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(peer_transport),
+                test_clock(),
+            )
+            .with_identity_signer(signer)
+        }
+
+        fn key_of(signer: &dyn Signer) -> String {
+            hex_0x(&signer.public_key().expect("public key"))
+        }
+
+        #[tokio::test]
+        async fn a_terminating_node_states_its_own_identity_over_the_routes_prefix() {
+            let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("beta"));
+            let node = terminating(signer.clone());
+
+            let stated = node
+                .route_identity("g.example.beta.app.deeper")
+                .await
+                .expect("a terminated destination has an identity");
+            assert_eq!(stated.prefix, "g.example.beta.app");
+            assert_eq!(stated.public_key, key_of(signer.as_ref()));
+            assert!(route_identity_covers(&stated, "g.example.beta.app.deeper"));
+            assert!(route_identity_covers(&stated, "g.example.beta.app"));
+            assert!(!route_identity_covers(&stated, "g.example.beta.other"));
+            assert_eq!(node.own_route_identity("g.example.beta.app"), Some(stated));
+        }
+
+        #[tokio::test]
+        async fn a_node_with_no_identity_key_or_no_route_states_nothing() {
+            let route = StaticRoute::new("g.example.beta.app", "http://localhost:4000").unwrap();
+            let keyless = Connector::new(
+                vec![route],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            );
+            assert_eq!(keyless.route_identity("g.example.beta.app").await, None);
+
+            let node = terminating(Arc::new(LocalSigner::generate("beta")));
+            assert_eq!(node.route_identity("g.unrouted").await, None);
+        }
+
+        #[tokio::test]
+        async fn a_forwarding_node_relays_the_far_ends_statement_and_never_its_own() {
+            let far_end_signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("beta"));
+            let hop_signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("alpha"));
+            let far_end = terminating(far_end_signer.clone());
+            let hop = forwarding_to(far_end, hop_signer.clone());
+
+            // The hop has an identity key of its own, and it is the wrong
+            // one to seal to. It never says so on a forwarded route.
+            assert_eq!(hop.own_route_identity("g.example.beta.app"), None);
+
+            let relayed = hop
+                .route_identity("g.example.beta.app")
+                .await
+                .expect("the hop relays what the far end stated");
+            assert_eq!(relayed.public_key, key_of(far_end_signer.as_ref()));
+            assert_ne!(relayed.public_key, key_of(hop_signer.as_ref()));
+            // The far end signed over *its* route's prefix, which is longer
+            // than the hop's forwarding prefix -- a reader checks the
+            // destination against the statement, not the hop's route.
+            assert_eq!(relayed.prefix, "g.example.beta.app");
+            assert!(route_identity_covers(&relayed, "g.example.beta.app"));
+        }
+
+        #[tokio::test]
+        async fn a_forwarding_node_answers_nothing_for_what_the_far_end_does_not_terminate() {
+            let far_end = terminating(Arc::new(LocalSigner::generate("beta")));
+            let hop = forwarding_to(far_end, Arc::new(LocalSigner::generate("alpha")));
+            // Under the hop's forwarding prefix, but the far end has no
+            // route for it: the far end says nothing, so neither does the
+            // hop. It does not substitute its own key.
+            assert_eq!(hop.route_identity("g.example.beta.elsewhere").await, None);
+        }
+
+        /// A peer that answers with a statement it did not sign -- a hop
+        /// trying to name its own key as the far end's, or a corrupted
+        /// relay -- is not relayed. This is the property the whole design
+        /// rests on, so it is checked at the one place a relay decides.
+        #[tokio::test]
+        async fn a_statement_that_does_not_verify_is_not_relayed() {
+            struct LyingPeer {
+                statement: RouteIdentity,
+            }
+            #[async_trait]
+            impl PeerTransport for LyingPeer {
+                async fn forward(
+                    &self,
+                    _peer_id: &str,
+                    _prepare: Prepare,
+                    _minimum_delivery: u64,
+                    _claim: Option<WireClaim>,
+                ) -> PeerForward {
+                    PeerForward::unreachable("beta")
+                }
+                async fn flush(&self, _peer_id: &str, _claim: WireClaim) -> ClaimAckOutcome {
+                    ClaimAckOutcome::NotSent
+                }
+                async fn route_identity(
+                    &self,
+                    _peer_id: &str,
+                    _destination: &str,
+                ) -> Option<RouteIdentity> {
+                    Some(self.statement.clone())
+                }
+            }
+
+            let honest = LocalSigner::generate("beta");
+            let liar = LocalSigner::generate("alpha");
+            let (_, honest_signature) =
+                sign_route_identity(&honest, "g.example.beta.app").expect("signs");
+            let liars_key_under_an_honest_signature = RouteIdentity {
+                prefix: "g.example.beta.app".to_string(),
+                public_key: hex_0x(&liar.public_key().expect("public key")),
+                signature: hex_0x(&honest_signature),
+            };
+            let hop = Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.beta", "beta", 7)],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(LyingPeer {
+                    statement: liars_key_under_an_honest_signature,
+                }),
+                test_clock(),
+            );
+            assert_eq!(hop.route_identity("g.example.beta.app").await, None);
+
+            // And a genuine statement for a prefix that does not cover the
+            // destination is refused the same way.
+            let (honest_key, honest_signature) =
+                sign_route_identity(&honest, "g.example.beta.app").expect("signs");
+            let hop = Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.beta", "beta", 7)],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(LyingPeer {
+                    statement: RouteIdentity {
+                        prefix: "g.example.beta.app".to_string(),
+                        public_key: hex_0x(&honest_key),
+                        signature: hex_0x(&honest_signature),
+                    },
+                }),
+                test_clock(),
+            );
+            assert_eq!(hop.route_identity("g.example.beta.other").await, None);
+        }
+
+        #[tokio::test]
+        async fn a_relayed_statement_is_remembered_and_then_asked_again_after_the_ttl() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            struct CountingPeer {
+                asked: Arc<AtomicUsize>,
+                statement: RouteIdentity,
+            }
+            #[async_trait]
+            impl PeerTransport for CountingPeer {
+                async fn forward(
+                    &self,
+                    _peer_id: &str,
+                    _prepare: Prepare,
+                    _minimum_delivery: u64,
+                    _claim: Option<WireClaim>,
+                ) -> PeerForward {
+                    PeerForward::unreachable("beta")
+                }
+                async fn flush(&self, _peer_id: &str, _claim: WireClaim) -> ClaimAckOutcome {
+                    ClaimAckOutcome::NotSent
+                }
+                async fn route_identity(
+                    &self,
+                    _peer_id: &str,
+                    _destination: &str,
+                ) -> Option<RouteIdentity> {
+                    self.asked.fetch_add(1, Ordering::SeqCst);
+                    Some(self.statement.clone())
+                }
+            }
+            let far_end = LocalSigner::generate("beta");
+            let (key, signature) =
+                sign_route_identity(&far_end, "g.example.beta.app").expect("signs");
+            let asked = Arc::new(AtomicUsize::new(0));
+            let clock = test_clock();
+            let hop = Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.beta", "beta", 7)],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(CountingPeer {
+                    asked: asked.clone(),
+                    statement: RouteIdentity {
+                        prefix: "g.example.beta.app".to_string(),
+                        public_key: hex_0x(&key),
+                        signature: hex_0x(&signature),
+                    },
+                }),
+                clock.clone(),
+            );
+
+            assert!(hop.route_identity("g.example.beta.app").await.is_some());
+            assert!(hop.route_identity("g.example.beta.app.x").await.is_some());
+            assert_eq!(
+                asked.load(Ordering::SeqCst),
+                1,
+                "one question covers the prefix"
+            );
+
+            clock.advance(ROUTE_IDENTITY_TTL + Duration::seconds(1));
+            assert!(hop.route_identity("g.example.beta.app").await.is_some());
+            assert_eq!(
+                asked.load(Ordering::SeqCst),
+                2,
+                "asked again once the answer aged out"
+            );
         }
     }
 }

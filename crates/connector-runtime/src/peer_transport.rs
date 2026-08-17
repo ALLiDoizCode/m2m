@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
 
 use connector_domain::x402::X402PaymentRequired;
-use connector_domain::{PacketResponse, Prepare, Reject, RejectCode};
+use connector_domain::{PacketResponse, Prepare, Reject, RejectCode, RouteIdentity};
 
 use crate::claim::{ClaimAckOutcome, WireClaim};
 use crate::connector::Connector;
@@ -138,6 +138,25 @@ pub trait PeerTransport: Send + Sync {
     /// has stopped. Returns [`ClaimAckOutcome::NotSent`] if `peer_id`
     /// could not be reached.
     async fn flush(&self, peer_id: &str, claim: WireClaim) -> ClaimAckOutcome;
+
+    /// Ask `peer_id` which identity a payload to `destination` must be
+    /// sealed to (issue #1026): the peer's own, self-signed, if it
+    /// terminates `destination`; whatever *its* next hop told it, relayed,
+    /// if it forwards. `None` when the peer cannot be reached, does not
+    /// answer the question, or answers with something that does not name
+    /// `destination` -- never a guess, and never this transport's own key,
+    /// because the whole point is that the caller must not seal to a hop.
+    ///
+    /// Carriage-agnostic in the same way `forward` is: what comes back is
+    /// checked above this port (`Connector::route_identity` verifies the
+    /// signature before relaying), so a carriage returns what it was told
+    /// and nothing more. Default `None`, so a transport that has no way to
+    /// ask -- or a test double that does not care -- degrades to "the far
+    /// end could not say", which the caller already handles.
+    async fn route_identity(&self, peer_id: &str, destination: &str) -> Option<RouteIdentity> {
+        let _ = (peer_id, destination);
+        None
+    }
 }
 
 /// §2.2, §5.1 of `peer-wire-spec.md`: a peer this connector could not reach
@@ -169,6 +188,10 @@ enum PeerMessage {
     Flush {
         claim: WireClaim,
         respond_to: oneshot::Sender<ClaimAckOutcome>,
+    },
+    RouteIdentity {
+        destination: String,
+        respond_to: oneshot::Sender<Option<RouteIdentity>>,
     },
 }
 
@@ -208,6 +231,13 @@ impl PeerLink {
                     PeerMessage::Flush { claim, respond_to } => {
                         let ack = connector.handle_peer_claim(claim);
                         let _ = respond_to.send(ack);
+                    }
+                    PeerMessage::RouteIdentity {
+                        destination,
+                        respond_to,
+                    } => {
+                        let identity = connector.route_identity(&destination).await;
+                        let _ = respond_to.send(identity);
                     }
                 }
             }
@@ -258,6 +288,22 @@ impl PeerLink {
         }
         receiver.await.unwrap_or(ClaimAckOutcome::NotSent)
     }
+
+    async fn route_identity(&self, destination: &str) -> Option<RouteIdentity> {
+        let (respond_to, receiver) = oneshot::channel();
+        if self
+            .sender
+            .send(PeerMessage::RouteIdentity {
+                destination: destination.to_string(),
+                respond_to,
+            })
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        receiver.await.ok().flatten()
+    }
 }
 
 /// The in-process [`PeerTransport`]: every peer is another [`Connector`] in
@@ -305,6 +351,16 @@ impl PeerTransport for InProcessPeerTransport {
         match self.peers.get(peer_id) {
             Some(link) => link.flush(claim).await,
             None => ClaimAckOutcome::NotSent,
+        }
+    }
+
+    /// An in-process peer is a [`Connector`], so the question is put to it
+    /// directly -- the same `Connector::route_identity` a real carriage
+    /// reaches over `GET /ilp/identity?destination=` on the far side.
+    async fn route_identity(&self, peer_id: &str, destination: &str) -> Option<RouteIdentity> {
+        match self.peers.get(peer_id) {
+            Some(link) => link.route_identity(destination).await,
+            None => None,
         }
     }
 }

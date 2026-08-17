@@ -695,6 +695,7 @@ async fn handle_frame(
                 &state.settlements,
                 state.bootstrap_identity.as_ref(),
                 Some(policy.name()),
+                None,
             );
             let reject = Reject {
                 code: RejectCode::f02_unreachable(),
@@ -729,6 +730,10 @@ async fn handle_frame(
     // exactly as on HTTP -- unless the PREPARE itself carries no execution
     // condition (issue #807), the same broadening `handle_ilp` applies.
     if claim_json.is_none() && (price > 0 || !condition_present) {
+        // Issue #1026: the same route identity the HTTP greeting carries,
+        // from the same one place, so the two carriages cannot disagree
+        // about which key a payload is sealed to.
+        let route_identity = state.connector.route_identity(&prepare.destination).await;
         let terms = x402_terms_body(
             &prepare.destination,
             price,
@@ -736,6 +741,7 @@ async fn handle_frame(
             &state.settlements,
             state.bootstrap_identity.as_ref(),
             None,
+            route_identity.as_ref(),
         );
         let reject = Reject {
             code: RejectCode::f06_unexpected_payment(),

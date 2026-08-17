@@ -72,7 +72,9 @@ use serde::{Deserialize, Serialize};
 use connector_config::TransportPolicy;
 use connector_domain::client_claim::ClientClaim;
 use connector_domain::identity::{anonymous_identity, resolve_identity, ConfiguredIdentity};
-use connector_domain::{condition_is_present, PacketResponse, Prepare, Reject, RejectCode};
+use connector_domain::{
+    condition_is_present, PacketResponse, Prepare, Reject, RejectCode, RouteIdentity,
+};
 use connector_runtime::{ClientRouteFacts, ClientRouteKind, Connector, ProbeDenied};
 use connector_signer::nip59::{unwrap_claim, WrappedClaim};
 use connector_signer::{PublicKeyBytes, Signer};
@@ -486,13 +488,45 @@ struct ClientEdgeIdentity {
     key_id: String,
     #[serde(rename = "publicKey")]
     public_key: String,
+    /// The identity a payload to the `destination` the caller asked about
+    /// must be sealed to (issue #1026, [`RouteIdentity`]) -- **which is not
+    /// necessarily the two fields above.** `keyId`/`publicKey` describe
+    /// this connector, always, exactly as before #1026; `routeIdentity` is
+    /// the connector that terminates `destination`, self-signed, relayed
+    /// through this one if it forwards there. Present only when a
+    /// `destination` was asked about *and* this connector can vouch for an
+    /// answer; a caller that asked and finds it absent has no key to seal
+    /// to and should not fall back to `publicKey` on a destination this
+    /// connector forwards.
+    #[serde(
+        rename = "routeIdentity",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    route_identity: Option<RouteIdentity>,
 }
 
-async fn identity(State(state): State<Arc<ClientEdgeState>>) -> Response {
+/// `GET /ilp/identity`'s optional query: which destination the caller
+/// intends to seal a payload for. Absent, the answer is this connector's own
+/// identity and nothing else, as it always was.
+#[derive(Deserialize)]
+struct IdentityQuery {
+    destination: Option<String>,
+}
+
+async fn identity(
+    State(state): State<Arc<ClientEdgeState>>,
+    Query(query): Query<IdentityQuery>,
+) -> Response {
+    let route_identity = match query.destination.as_deref() {
+        Some(destination) => state.connector.route_identity(destination).await,
+        None => None,
+    };
     match state.signer.public_key() {
         Ok(public_key) => Json(ClientEdgeIdentity {
             key_id: state.signer.key_id(),
             public_key: format!("0x{}", hex_encode(&public_key)),
+            route_identity,
         })
         .into_response(),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
@@ -601,6 +635,7 @@ fn payment_required(
     settlement: Option<&X402SettlementTerms>,
     settlements: &[X402ChainSettlementTerms],
     bootstrap_identity: Option<&BootstrapIdentity>,
+    route_identity: Option<&RouteIdentity>,
 ) -> Response {
     x402_response(
         destination,
@@ -609,6 +644,7 @@ fn payment_required(
         settlements,
         bootstrap_identity,
         None,
+        route_identity,
     )
 }
 
@@ -630,6 +666,9 @@ fn wrong_transport_required(
     settlements: &[X402ChainSettlementTerms],
     bootstrap_identity: Option<&BootstrapIdentity>,
 ) -> Response {
+    // A wrong-transport refusal names no route identity: the client is
+    // being told to come back on another carriage, where the §1.4 greeting
+    // will tell it what to seal to.
     x402_response(
         destination,
         price,
@@ -637,9 +676,11 @@ fn wrong_transport_required(
         settlements,
         bootstrap_identity,
         Some(required.name()),
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn x402_response(
     destination: &str,
     price: u64,
@@ -647,6 +688,7 @@ fn x402_response(
     settlements: &[X402ChainSettlementTerms],
     bootstrap_identity: Option<&BootstrapIdentity>,
     required_transport: Option<&str>,
+    route_identity: Option<&RouteIdentity>,
 ) -> Response {
     let body = x402_terms_body(
         destination,
@@ -655,6 +697,7 @@ fn x402_response(
         settlements,
         bootstrap_identity,
         required_transport,
+        route_identity,
     );
     let header_value = BASE64.encode(&body);
     Response::builder()
@@ -678,6 +721,13 @@ fn x402_response(
 /// #880): it moved there so the peer carriages -- which sit *below* this
 /// crate in the graph and cannot import it -- can call the same emitter for
 /// their own `F06` greeting rather than re-declaring the shape.
+///
+/// `route_identity` (issue #1026) is the identity a payload to
+/// `destination` must be sealed to -- this node's own on a route it
+/// terminates, the far end's, relayed, on one it forwards -- and is the one
+/// thing in the greeting that may describe a node other than this one.
+/// `None` when this node cannot vouch for one; the field is then absent.
+#[allow(clippy::too_many_arguments)]
 fn x402_terms_body(
     destination: &str,
     price: u64,
@@ -685,6 +735,7 @@ fn x402_terms_body(
     settlements: &[X402ChainSettlementTerms],
     bootstrap_identity: Option<&BootstrapIdentity>,
     required_transport: Option<&str>,
+    route_identity: Option<&RouteIdentity>,
 ) -> Vec<u8> {
     connector_domain::x402::terms_body(&connector_domain::x402::GreetingTerms {
         destination,
@@ -698,6 +749,7 @@ fn x402_terms_body(
         required_transport,
         session_lease_ttl_ms: crate::session_registry::SESSION_LEASE_BACKSTOP_TTL.as_millis()
             as u64,
+        route_identity,
     })
 }
 
@@ -1177,12 +1229,20 @@ async fn handle_ilp(
     }
 
     if !has_claim_header && (price > 0 || !condition_present) {
+        // Issue #1026: the greeting names the identity the payload must be
+        // sealed to. Asked only now, on the greeting path -- a paid request
+        // is already sealed and this hop has no use for the answer -- and
+        // answered from this node's own key or its next hop's remembered
+        // statement, so a burst of claimless requests is not a burst of
+        // questions to the peer.
+        let route_identity = state.connector.route_identity(&prepare.destination).await;
         return payment_required(
             &prepare.destination,
             price,
             state.settlement_terms.as_ref(),
             &state.settlements,
             state.bootstrap_identity.as_ref(),
+            route_identity.as_ref(),
         );
     }
 
@@ -2730,6 +2790,179 @@ mod tests {
             extra.get("btpEndpoint").is_none(),
             "a node with no [announce] must not carry a btpEndpoint key: {extra}"
         );
+    }
+
+    /// Issue #1026: `GET /ilp/identity?destination=` and the greeting both
+    /// name the identity a payload to a destination is sealed to -- this
+    /// node's own on a terminated route, the far end's on a forwarded one.
+    mod route_identity {
+        use super::*;
+        use connector_runtime::route_identity_covers;
+
+        /// A node terminating `g.example.beta.app` under `signer`.
+        fn terminating(signer: Arc<dyn Signer>) -> Arc<Connector> {
+            let route = StaticRoute::new_priced("g.example.beta.app", "http://localhost:4000", 100)
+                .unwrap();
+            Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer),
+            )
+        }
+
+        /// A node forwarding `g.example.beta` to `far_end`, priced for its
+        /// own clients (ADR 0028), under `signer`.
+        fn forwarding_to(far_end: Arc<Connector>, signer: Arc<dyn Signer>) -> Arc<Connector> {
+            let mut peers = InProcessPeerTransport::new();
+            peers.add_peer("beta", far_end);
+            Arc::new(
+                Connector::new(
+                    vec![],
+                    vec![PeerRoute::new_priced("g.example.beta", "beta", 10, 100)],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(peers),
+                    test_clock(),
+                )
+                .with_identity_signer(signer),
+            )
+        }
+
+        fn key_of(signer: &dyn Signer) -> String {
+            format!("0x{}", hex_encode(&signer.public_key().unwrap()))
+        }
+
+        async fn identity_json(app: Router, uri: &str) -> serde_json::Value {
+            let request = Request::builder()
+                .method("GET")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        }
+
+        #[tokio::test]
+        async fn the_identity_endpoint_answers_as_before_when_no_destination_is_asked_about() {
+            let signer = test_signer();
+            let app = router(terminating(signer.clone()), signer.clone());
+            let identity = identity_json(app, "/ilp/identity").await;
+            assert_eq!(identity["publicKey"], key_of(signer.as_ref()));
+            assert!(
+                identity.get("routeIdentity").is_none(),
+                "no destination asked about, no routeIdentity key at all: {identity}"
+            );
+        }
+
+        #[tokio::test]
+        async fn the_identity_endpoint_names_the_key_a_terminated_destination_is_sealed_to() {
+            let signer = test_signer();
+            let app = router(terminating(signer.clone()), signer.clone());
+            let identity =
+                identity_json(app, "/ilp/identity?destination=g.example.beta.app.deeper").await;
+            let stated: RouteIdentity =
+                serde_json::from_value(identity["routeIdentity"].clone()).unwrap();
+            assert_eq!(stated.prefix, "g.example.beta.app");
+            assert_eq!(stated.public_key, key_of(signer.as_ref()));
+            assert!(route_identity_covers(&stated, "g.example.beta.app.deeper"));
+        }
+
+        #[tokio::test]
+        async fn the_identity_endpoint_says_nothing_for_a_destination_it_cannot_vouch_for() {
+            let signer = test_signer();
+            let app = router(terminating(signer.clone()), signer.clone());
+            let identity = identity_json(app, "/ilp/identity?destination=g.nowhere").await;
+            // Still this node's own identity, still 200: the caller asked
+            // a question this node cannot answer, and gets everything else.
+            assert_eq!(identity["publicKey"], key_of(signer.as_ref()));
+            assert!(identity.get("routeIdentity").is_none(), "{identity}");
+        }
+
+        /// The #1026 case itself. `publicKey` is the answering node's, as
+        /// it always was; `routeIdentity` is the far end's, and the two
+        /// differ -- a client that seals to `publicKey` on this destination
+        /// is sealing to the hop.
+        #[tokio::test]
+        async fn the_identity_endpoint_relays_the_far_ends_key_on_a_forwarded_destination() {
+            let far_end_signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("beta"));
+            let hop_signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("alpha"));
+            let hop = forwarding_to(terminating(far_end_signer.clone()), hop_signer.clone());
+            let app = router(hop, hop_signer.clone());
+
+            let identity = identity_json(app, "/ilp/identity?destination=g.example.beta.app").await;
+            assert_eq!(identity["publicKey"], key_of(hop_signer.as_ref()));
+            let stated: RouteIdentity =
+                serde_json::from_value(identity["routeIdentity"].clone()).unwrap();
+            assert_eq!(stated.public_key, key_of(far_end_signer.as_ref()));
+            assert_ne!(stated.public_key, key_of(hop_signer.as_ref()));
+            assert!(route_identity_covers(&stated, "g.example.beta.app"));
+        }
+
+        #[tokio::test]
+        async fn the_greeting_names_the_key_a_forwarded_destination_is_sealed_to() {
+            let far_end_signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("beta"));
+            let hop_signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("alpha"));
+            let hop = forwarding_to(terminating(far_end_signer.clone()), hop_signer.clone());
+            let app = router(hop, hop_signer.clone());
+
+            let request = Request::builder()
+                .method("POST")
+                .uri("/ilp")
+                .body(Body::from(sample_prepare("g.example.beta.app").encode()))
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let terms: X402PaymentRequired = serde_json::from_slice(&bytes).unwrap();
+            let stated = terms.accepts[0]
+                .extra
+                .route_identity
+                .as_ref()
+                .expect("the greeting on a forwarded route names the far end's identity");
+            assert_eq!(stated.public_key, key_of(far_end_signer.as_ref()));
+            assert!(route_identity_covers(stated, "g.example.beta.app"));
+        }
+
+        #[tokio::test]
+        async fn the_greeting_omits_the_key_when_this_node_cannot_vouch_for_one() {
+            // A forwarding hop whose far end has no identity key: the far
+            // end states nothing, and the hop relays nothing rather than
+            // its own key. The pre-#1026 shape, byte for byte.
+            let keyless_far_end = Arc::new(Connector::new(
+                vec![
+                    StaticRoute::new_priced("g.example.beta.app", "http://localhost:4000", 100)
+                        .unwrap(),
+                ],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ));
+            let hop_signer = test_signer();
+            let hop = forwarding_to(keyless_far_end, hop_signer.clone());
+            let app = router(hop, hop_signer);
+
+            let request = Request::builder()
+                .method("POST")
+                .uri("/ilp")
+                .body(Body::from(sample_prepare("g.example.beta.app").encode()))
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let terms: X402PaymentRequired = serde_json::from_slice(&bytes).unwrap();
+            let extra = serde_json::to_value(&terms.accepts[0].extra).unwrap();
+            assert!(
+                extra.get("routeIdentity").is_none(),
+                "nothing to vouch for, no routeIdentity key at all: {extra}"
+            );
+        }
     }
 
     /// End-to-end claim ingest (issue #504, #506/#544): a claim presented in

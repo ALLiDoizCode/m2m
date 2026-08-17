@@ -192,10 +192,14 @@ pub fn payment_required(
         },
         // A peering has no bootstrap identity to advertise and no client
         // session to lease: the peer already knows this node, and what it
-        // needs quoted is the price alone.
+        // needs quoted is the price -- plus, since issue #1026, which key
+        // a payload to this destination is sealed to. The peer forwards
+        // for clients that must seal to *this* node, and this greeting is
+        // one place it can be told so without a second round trip.
         terms: connector_domain::x402::terms_body(&GreetingTerms {
             destination,
             price,
+            route_identity: connector.own_route_identity(destination).as_ref(),
             ..Default::default()
         }),
     })
