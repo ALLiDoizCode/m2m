@@ -37,9 +37,9 @@ delivery. Every packet carries a real one; a hop pays out only against something
 _Avoid_: execution condition (when the layer is already clear), hashlock
 
 **Fulfilment**:
-What satisfies a packet's condition, and so the proof that the packet was delivered. Value moves
-on fulfilment and only on fulfilment. At a route termination the terminating connector produces
-it; every hop upstream checks it and is paid against it.
+What satisfies a packet's condition, and so the proof that the packet was delivered to its
+intended receiver. It proves delivery; it does not move value — a packet carries its own claim.
+At a route termination the terminating connector produces it; every hop upstream checks it.
 _Avoid_: receipt, proof of payment, preimage (when the layer is already clear)
 
 **Route**:
@@ -103,7 +103,7 @@ _Avoid_: control plane, admin
 
 ### Protocol surfaces
 
-**Peer wire**:
+**Peer semantics**:
 The protocol two connectors speak to each other. Both ends are operator-controlled.
 
 **Client edge**:
@@ -136,12 +136,22 @@ Value a payee had delivered but did not yet hold a claim for, under the pre-#868
 One packet under normal flow; more only when a payer had fulfilled packets and stopped claiming.
 With a covering claim mandatory on every peer PREPARE (ADR 0031), this state no longer arises in
 normal operation and nothing tracks it. Kept here because the term still appears in historical
-prose (`docs/protocol/peer-wire-spec.md` §3.2–§3.4, §5.3; [`docs/protocol/money-model.md`](docs/protocol/money-model.md)).
+prose (`docs/protocol/peer-semantics-spec.md` §3.2–§3.4, §5.3; [`docs/protocol/money-model.md`](docs/protocol/money-model.md)).
 
 **Ceiling** _(retired term, ADR 0033, issue #882)_:
 The exposure a peering relation tolerated before the connector stopped forwarding for that
-peer. Retired along with exposure, above.
+peer. Retired along with exposure, above. Not to be confused with the **cap** below, which
+bounds one packet rather than an accumulation.
 _Avoid_: credit limit, debt limit
+
+**Cap**:
+The largest amount a connector will forward to one peer in a single packet. A packet needing
+more is refused with `T04`, never carried and never split. The cap is how far a connector
+trusts a peer, expressed as the most it is willing to lose in one theft: a peering that has
+just been bought starts at the floor, and a path that keeps fulfilling earns a larger one.
+Bounds a single packet, not an accumulation — there is no accumulation, because a packet
+carries its own claim.
+_Avoid_: ceiling, limit, liquidity bound
 
 **Flush** _(retired term, ADR 0033, issue #882)_:
 Sending a claim that would otherwise have waited to travel with the next packet to that peer.
@@ -151,7 +161,9 @@ with exposure, above. Not to be confused with `peer-carriage-spec.md` §6.4's st
 
 **In flight**:
 The state of a packet that has been forwarded but has neither fulfilled nor been rejected nor
-expired. In-flight packets carry no value; value moves only on fulfilment.
+expired. An in-flight packet carries value — its claim rides with it — so value is at risk
+between the forward and its outcome. Bounding that risk is the sender's business, not the
+protocol's: small packets, and larger ones only on a path that has earned it.
 
 **Projection**:
 Money state derived by replaying claims and fulfilments — balances and exposure. Never a

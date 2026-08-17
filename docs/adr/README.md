@@ -1,6 +1,6 @@
 # Architecture decision records
 
-40 records, and they do **three different jobs**. Most readers only need one group.
+42 records, and they do **three different jobs**. Most readers only need one group.
 
 The numbers are permanent and are never reused or renumbered — they are cited over a thousand
 times across this repo and from `toon-meta`, `relay` and `store`. This index groups them by
@@ -9,8 +9,8 @@ scope; it does not move them.
 | If you are…                                                                 | Read                                                               |
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------ |
 | changing the connector's code or structure                                  | **[Connector architecture](#connector-architecture)** — 14 records |
-| writing or fixing another implementation (a client SDK, a second connector) | **[Protocol law](#protocol-law)** — 23 records                     |
-| deploying, migrating or operating the fleet                                 | **[Fleet and operations](#fleet-and-operations)** — 3 records      |
+| writing or fixing another implementation (a client SDK, a second connector) | **[Protocol law](#protocol-law)** — 24 records                     |
+| deploying, migrating or operating the fleet                                 | **[Fleet and operations](#fleet-and-operations)** — 4 records      |
 
 > **Scope note.** A record's group says _who is bound by it_, not where it is implemented.
 > Protocol records are implemented in this repo but bind every implementation, which is why
@@ -53,15 +53,16 @@ outside this repository.
 
 | #                                                                                | Decision                                                                             | Status                                                                                                              |
 | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
-| [0004](0004-value-moves-on-fulfilment.md)                                        | Value moves on fulfilment, one claim per packet                                      | current                                                                                                             |
+| [0004](0004-value-moves-on-fulfilment.md)                                        | Value moves on fulfilment, one claim per packet                                      | **partly superseded** — headline retired by 0042; one claim per packet, no batching, still binding                  |
 | [0010](0010-flat-per-packet-fee-and-minimum-delivery.md)                         | A hop charges a flat per-packet fee; packets declare a minimum delivery              | current                                                                                                             |
 | [0011](0011-rejects-accumulate-fees-and-probes-discover-cost.md)                 | Rejects accumulate fees; a probe is how cost is discovered                           | current                                                                                                             |
 | [0020](0020-a-price-is-flat-and-attaches-to-a-handler.md)                        | A price is flat, attaches to a handler, and buys an answer                           | current — its "the app is told nothing" clause is narrowed by 0040                                                  |
 | [0024](0024-peer-wire-claims-sign-the-eip-712-balance-proof.md)                  | Peer-wire claims sign the EIP-712 balance-proof digest                               | current                                                                                                             |
 | [0028](0028-a-forwarded-route-is-priced-at-the-client-edge.md)                   | A forwarded route is priced at the client edge, and carries no more than it was paid | current                                                                                                             |
 | [0029](0029-a-peer-wire-arrival-to-a-priced-termination-must-cover-its-price.md) | A peer-wire arrival to a priced termination must cover its price                     | **partly retired** — its `F03` price check stands; the exposure ceiling and `T04` it references are retired by 0033 |
-| [0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md)  | A peer PREPARE arrives with its covering claim, or it is greeted                     | current — **retires the credit window**                                                                             |
+| [0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md)  | A peer PREPARE arrives with its covering claim, or it is greeted                     | **superseded by 0042** — every clause of its Decision was false of the binary                                       |
 | [0033](0033-the-exposure-machinery-is-retired-not-restated.md)                   | The exposure machinery is retired, not restated                                      | current — **retires `ceiling` and `flush_interval_ms`**                                                             |
+| [0042](0042-a-packet-carries-its-claim.md)                                       | A packet carries its claim                                                           | current — **supersedes 0031, retires 0004's headline**; describes the target, not today's binary                    |
 | [0035](0035-request-request-binding-ships-no-new-mechanism.md)                   | Request-request binding ships no new mechanism                                       | current — the claim gate already closes the threat                                                                  |
 
 ### The wire and its carriage
@@ -110,23 +111,25 @@ how another repository is regarded.
 
 ## Records carrying superseded reasoning
 
-Five records are still authoritative in part but argue from premises that later records
+Seven records are still authoritative in part but argue from premises that later records
 retired. Read the superseding record first, or the reasoning will mislead you.
 
 | Record | Read this first                                                                                                           |
 | ------ | ------------------------------------------------------------------------------------------------------------------------- |
 | 0003   | [0027](0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md)                                     |
+| 0004   | [0042](0042-a-packet-carries-its-claim.md)                                                                                |
 | 0016   | [0017](0017-the-typescript-connector-is-a-prototype.md), [0018](0018-a-payload-is-sealed-to-the-terminating-connector.md) |
 | 0026   | [0027](0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md)                                     |
 | 0027   | [0033](0033-the-exposure-machinery-is-retired-not-restated.md)                                                            |
 | 0029   | [0033](0033-the-exposure-machinery-is-retired-not-restated.md)                                                            |
+| 0031   | [0042](0042-a-packet-carries-its-claim.md)                                                                                |
 
 ---
 
 ## Related, and not an ADR
 
 `docs/protocol/` holds the specifications the protocol records above are the decision trail
-for — `client-edge-spec.md`, `peer-carriage-spec.md`, `peer-wire-spec.md`, `money-model.md`,
+for — `client-edge-spec.md`, `peer-carriage-spec.md`, `peer-semantics-spec.md`, `money-model.md`,
 and `wire-vectors.md`. Per ADR 0021 those prose specs are **non-normative**; the committed
 vectors are the contract.
 
