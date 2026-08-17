@@ -1916,12 +1916,25 @@ impl Connector {
     ///
     /// Cost, since #881 moves it from the exception to the norm: a forward
     /// to a COVERED hop now spends one watermark round trip to the receiver
-    /// and the one durable nonce reservation
-    /// [`OutboundClientLedger::next_claim`] makes, on every packet rather
-    /// than only on a greeted one (issue #879 measured the forwarded-packet
-    /// path at 3.00 `fdatasync`/packet with exposure accounting on; this is
-    /// a fourth). A forward to a hop with no client-role config spends
-    /// neither -- no extra call, no extra `fdatasync` -- exactly as before.
+    /// and the one durable sync [`OutboundClientLedger::next_claim`] makes,
+    /// on every packet rather than only on a greeted one. Issue #1033
+    /// measured this send-side cost in isolation
+    /// (`examples/covered_forward_bench.rs`, ADR 0031): it is **one**
+    /// `fsync`/packet on `OutboundClientLedger`'s own file, the same order
+    /// as the peer ledger's own per-forward claim write, not a fourth durable
+    /// write stacked on issue #879's number -- that figure (3.00
+    /// `fdatasync`/packet) was the pre-ADR-0033 receive-side count with
+    /// exposure accounting still live; ADR 0033 retired that accounting and
+    /// the current receive-side cost is 2.00. A box that both receives a
+    /// covered peer PREPARE and covers its own outbound hop for the same
+    /// forwarded packet pays 2.00 (receive) + 1.00 (this send-side write) =
+    /// 3.00 durable syncs, not 4. The genuinely new cost the watermark round
+    /// trip adds is small next to the huddle-rate packet budget (measured
+    /// p50 ~280us / p99 ~385us over a reused connection at 49fps, against a
+    /// ~20.4ms inter-packet interval) but is real and does not disappear with
+    /// an in-memory ledger. A forward to a hop with no client-role config
+    /// spends neither -- no extra call, no extra durable write -- exactly as
+    /// before.
     async fn forward_via_peer_route(
         &self,
         peer_route: &PeerRoute,

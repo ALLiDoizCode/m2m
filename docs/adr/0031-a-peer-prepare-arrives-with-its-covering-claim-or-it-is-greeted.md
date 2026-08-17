@@ -157,3 +157,48 @@ and the mesh-compute prototype found a single fsync accounting for 99% of p99. R
 comments, `record_inbound_delivery` journals durably too, so both paths appear to hit disk and the
 window may have been saving nothing — but that is unverified, and "appears to" is not a measurement.
 This does not gate the decision; it gates how fast it rolls.
+
+**Resolved by issue #1033**, for the covered _forward_ (send) side — issue #879/ADR 0033's table
+above is the covered _receive_ side; neither issue had measured the other. `cover_forward` (#881)
+was untested outside a unit test before #1033: an exhaustive grep at the time found exactly two
+callers of `with_outbound_client_hop`, `connector.rs`'s own tests and the new bench. Measured with
+`crates/connector-runtime/examples/covered_forward_bench.rs` — a real `Connector`, a real HTTP
+watermark round trip over loopback TCP, a real `OutboundClientLedger` file and `fsync`, nothing
+stubbed — same method as the table above: kernel-counted syncs via an `LD_PRELOAD` shim
+interposing `fsync`/`fdatasync` (`strace` is unavailable in this sandbox; the shim counts the same
+two libc calls `strace -e trace=fsync,fdatasync` would, without ptrace overhead), 500 packets for
+the sync count and 2940 packets at 49/s (60 seconds of a huddle) for latency, each reproduced
+across two runs:
+
+| path                                         | syncs/pkt      | watermark RTT      | p50 @ 49fps | p99 @ 49fps |
+| -------------------------------------------- | -------------- | ------------------ | ----------- | ----------- |
+| uncovered (pre-#881 postpay, ADR 0004)       | 1.00 fdatasync | none               | 0.74 ms     | 1.32 ms     |
+| covered, persistent connection               | 1.00 fsync     | yes                | 1.03 ms     | 1.71 ms     |
+| covered, in-memory ledger (isolates the RTT) | 0.00           | yes                | 0.61 ms     | 0.75 ms     |
+| covered, fresh connection per call           | 1.00 fsync     | yes, no keep-alive | 1.17 ms     | 1.92 ms     |
+
+The watermark round trip's own contribution, timed directly around the call rather than inferred
+by subtraction (a thin wrapper around the real `HttpClaimState`, timing nothing else):
+
+| connection reuse            | p50    | p99    |
+| --------------------------- | ------ | ------ |
+| persistent (one client/hop) | 278 us | 384 us |
+| fresh client, every call    | 407 us | 554 us |
+
+**Verdict: the covered forward's send-side cost is viable at 49fps as it stands.** It does not add
+a fourth durable write on top of #879's number — `connector.rs`'s own doc comment claimed that and
+was wrong twice over: #879's 3.00 was the pre-ADR-0033 figure (the current receive-side cost is
+2.00), and the covered send side's own write is one `fsync` on a different ledger, the same order
+as the peer ledger's own per-forward write it replaces on the send side, not an addition on top of
+it. The only genuinely new cost is the watermark round trip, and at 278us p50 / 384us p99 against a
+~20.4ms inter-packet budget at 49fps it consumes under 2% of it; every run held the requested 49.0/s
+achieved rate. A persistent connection roughly halves the round trip's own p50/p99 versus opening a
+fresh one per call, answering the "what does a persistent session change" question directly: it
+still matters, by about the same margin ADR 0033's own numbers showed for a single `fdatasync`.
+
+**What this verdict does not cover.** This is a local, single-hop, loopback measurement of latency
+and durable-write cost; it says nothing about WAN round-trip variance to a real receiver, and
+nothing about #1031's actual concern — locked capital per in-flight packet under the hold #1031
+proposes. A small, cheap watermark round trip does not make a capital lock cheap; that is a
+separate question #1032 and #1034 own. This issue answers only the one ADR 0031 deferred: whether
+the covered path's own throughput cost, as it ships today, is a rollout blocker. It is not.
