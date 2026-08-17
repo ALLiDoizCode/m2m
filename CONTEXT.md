@@ -103,13 +103,23 @@ _Avoid_: control plane, admin
 
 ### Protocol surfaces
 
-**Peer wire**:
-The protocol two connectors speak to each other. Both ends are operator-controlled.
+**Peer semantics**:
+The protocol two connectors speak to each other, carried over BTP or ILP-over-HTTP. Both
+ends are operator-controlled.
+_Avoid_: peer wire (ADR 0027 deleted the raw-TCP wire that name described; the surviving
+semantics are `peer-wire-spec.md` §3–§6, whose section numbers are kept only so existing
+citations resolve)
 
 **Client edge**:
 The protocol a client speaks to the connector it attaches to. The far end is installed on
 machines the operator does not control.
 _Avoid_: client API, ingress
+
+**Role**:
+Which side of a connector an arrival is served as — client-role or peer-role — decided by
+whether a configured channel binding vouches for the sender, never by which carriage it
+arrived on. One connection can carry either.
+_Avoid_: peer type, connection kind
 
 ### Value
 
