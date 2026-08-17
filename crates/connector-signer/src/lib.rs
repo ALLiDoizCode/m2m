@@ -39,6 +39,7 @@ mod kms;
 mod local;
 pub mod nip59;
 pub mod nostr;
+pub mod route_identity;
 mod signer;
 
 pub use address::{derive_evm_address, to_hex, Address};
@@ -57,6 +58,10 @@ pub use kms::{InMemoryKmsBackend, KmsBackend, KmsSigner};
 pub use local::LocalSigner;
 pub use nip59::{unwrap_claim, wrap_claim, Nip59Error, WrappedClaim};
 pub use nostr::{sign_ilp_peer_info, NostrEvent, ILP_PEER_INFO_KIND};
+pub use route_identity::{
+    route_identity_digest, sign_route_identity, verify_route_identity, RouteIdentitySignature,
+    ROUTE_IDENTITY_DOMAIN_TAG,
+};
 pub use signer::{verify, PublicKeyBytes, Signature, Signer};
 
 #[cfg(test)]
