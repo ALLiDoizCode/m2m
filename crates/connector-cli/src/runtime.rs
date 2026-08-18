@@ -18,12 +18,13 @@ use connector_client_edge::{
     UnresolvableLookupBudgetPolicy,
 };
 use connector_config::{
-    ClientChannelConfig, Config, EvmSettlementConfig, PeerChannelConfig, SecretLocation,
-    SettlementChain, SettlementConfig, SolanaSettlementConfig,
+    ClientChannelConfig, Config, EvmSettlementConfig, PayChannelConfig, PeerChannelConfig,
+    SecretLocation, SettlementChain, SettlementConfig, SolanaSettlementConfig,
 };
 use connector_runtime::{
-    ChannelDomain, Connector, FileJournal, HttpAppClient, InMemoryJournal, Journal, JournalError,
-    PeerRoute, PeerRouteStore, PeerRouteStoreError, SystemClock,
+    ChannelDomain, Connector, EvmDomain, FileJournal, HttpAppClient, InMemoryJournal, Journal,
+    JournalError, OutboundClientError, OutboundClientLedger, OwnedHttpClaimState, PeerRoute,
+    PeerRouteStore, PeerRouteStoreError, SystemClock,
 };
 use connector_settlement::{SettlementBackend, SettlementError};
 use connector_settlement_evm::{
@@ -132,6 +133,42 @@ pub enum RuntimeError {
     /// bytes -- kept as a named startup failure for the same reason
     /// [`RuntimeError::PeerChannelUnusable`] is.
     PeerChannelSolanaUnusable { channel_account: String },
+    /// A `[[pay_channels]]` row's `channel_id` is not a shape
+    /// [`connector_runtime::Connector::with_outbound_client_hop`] can sign
+    /// against (issue #881) -- unreachable through `Config::load`, and kept
+    /// as a named startup failure for exactly the reason
+    /// [`RuntimeError::PeerChannelUnusable`] is.
+    PayChannelUnusable { channel_id: String },
+    /// A `[[pay_channels]]` row loaded, but the runtime piece it needs to
+    /// sign a covering claim is missing: the `[settlement.evm]` key, or the
+    /// `state_dir` its nonce floor lives under. Both are refused by
+    /// `Config::load` (`PayChannelWithoutEvmSettlement`,
+    /// `PayChannelsWithoutStateDir`), so this is the second lock on the
+    /// same door -- and it fails the whole startup rather than silently
+    /// leaving `outbound_client_hops` empty, because an empty map is
+    /// indistinguishable from "nobody configured covering" and would
+    /// forward uncovered while the file reads as configured.
+    PayChannelUnwirable {
+        peer_id: String,
+        missing: &'static str,
+    },
+    /// The outbound client ledger under `state_dir` exists but could not be
+    /// replayed or extended (issue #873/#881). Refused rather than started
+    /// without: the nonce floor it holds is the only thing that stops a
+    /// restart reissuing a nonce this node has already signed against a
+    /// different cumulative amount.
+    OutboundClientLedgerUnusable {
+        path: PathBuf,
+        source: OutboundClientError,
+    },
+    /// The HTTP client this node asks a next hop's `POST /ilp/claim-state`
+    /// with could not be constructed (a TLS backend failure, in practice).
+    /// A startup failure because the alternative is a configured hop whose
+    /// every forward fails at packet time.
+    ClaimStateClientUnusable {
+        peer_id: String,
+        source: reqwest::Error,
+    },
     /// `[announce] identity_key_file`'s path exists (config load already
     /// checked that) but could not be read.
     AnnounceIdentityKeyFileUnreadable {
@@ -205,6 +242,32 @@ impl fmt::Display for RuntimeError {
                 "the [[peer_channels]] row for Solana account '{channel_account}' names an \
                  account or counterparty key the claim ledger cannot file a watermark under -- \
                  both must be base58 of exactly 32 bytes"
+            ),
+            RuntimeError::PayChannelUnusable { channel_id } => write!(
+                f,
+                "the [[pay_channels]] row for channel '{channel_id}' names an id no covering \
+                 claim can be signed against -- a pay-from channel id must be the channel's \
+                 on-chain bytes32"
+            ),
+            RuntimeError::PayChannelUnwirable { peer_id, missing } => write!(
+                f,
+                "the [[pay_channels]] row for peer '{peer_id}' cannot be wired: this node has \
+                 no {missing}. Every PREPARE forwarded to that peer is meant to carry a \
+                 covering claim (ADR 0042), and a node that cannot sign one refuses to start \
+                 rather than forward uncovered while the config file reads as configured"
+            ),
+            RuntimeError::OutboundClientLedgerUnusable { path, source } => write!(
+                f,
+                "failed to open the outbound client ledger at {}: {source} -- the connector \
+                 refuses to start rather than sign covering claims from a nonce floor it \
+                 cannot make durable, which is the floor that stops a restart reissuing a \
+                 nonce it has already spent",
+                path.display()
+            ),
+            RuntimeError::ClaimStateClientUnusable { peer_id, source } => write!(
+                f,
+                "failed to build the HTTP client this node asks peer '{peer_id}' for its \
+                 claim state with: {source}"
             ),
             RuntimeError::JournalUnreplayable { path, source } => write!(
                 f,
@@ -876,6 +939,135 @@ fn wire_peer_channels(
     Ok(connector)
 }
 
+/// This node's outbound client ledger (issue #873), under the same
+/// `state_dir` its two claim journals live in.
+///
+/// A third file rather than a line in either journal, and the module header
+/// of `connector_runtime::outbound_client` is explicit about why: this book
+/// is not a `JournalEntry` stream, nothing replaying a journal would
+/// understand it, and the inbound and outbound books must never merge.
+const OUTBOUND_CLIENT_LEDGER: &str = "outbound-client.log";
+
+/// Wire every `[[pay_channels]]` row into the connector's client role (ADR
+/// 0042 item 2, issue #881): the ledger this node signs outbound client
+/// claims from, and, per next hop, the channel it pays from plus the hop
+/// itself as the authority on where those claims stand.
+///
+/// **This is the wiring ADR 0042 names as the missing half.**
+/// `Connector::with_outbound_client_hop` has existed and been correct since
+/// #875/#881, and no production path called it -- so `cover_forward`
+/// answered `NotConfigured` on every packet the shipped binary ever
+/// forwarded, and "a connector covers every PREPARE it sends" could not
+/// happen. It happens for a peering with a row here, and for no other.
+///
+/// **Additive, and default-off.** A file with no `[[pay_channels]]` table
+/// returns here having done nothing at all: no ledger file is opened, no
+/// HTTP client is built, `outbound_client_hops` stays empty, and every
+/// forward keeps riding the peer ledger's `pending_claim` exactly as it did
+/// before this function existed (ADR 0004's postpay convention). That is the
+/// property `a_peering_with_no_pay_channels_row_forwards_exactly_as_before`
+/// pins.
+///
+/// Where each part of the claim comes from is ADR 0030's table, and every
+/// row of it is honoured here:
+///
+/// * the **signing key** is `[settlement.evm]`'s, passed in as
+///   `claim_signer` -- the same key `with_signer` gives the peer role,
+///   because the channel's on-chain participant is this node's settlement
+///   address either way. No second key is introduced;
+/// * the **nonce and cumulative amount** are the receiver's, asked over
+///   `POST /ilp/claim-state` ([`OwnedHttpClaimState`]) on every covered
+///   packet. Nothing local substitutes, and nothing is remembered but the
+///   nonce floor;
+/// * the **channel id** and the **EIP-712 domain** are the row's own.
+///
+/// The per-hop [`reqwest::Client`] carries that peering's own
+/// `peer_answer_timeout_ms` rather than a new knob: the claim-state ask is a
+/// request to that peer, on the packet's hot path, and a hop that stops
+/// answering must fail the packet inside the peering's own answer budget
+/// instead of holding it until the PREPARE expires.
+fn wire_outbound_client_hops(
+    mut connector: Connector,
+    config: &Config,
+    claim_signer: Option<Arc<dyn Signer>>,
+) -> Result<Connector, RuntimeError> {
+    if config.pay_channels().is_empty() {
+        return Ok(connector);
+    }
+    let unwirable = |pay_channel: &PayChannelConfig, missing| RuntimeError::PayChannelUnwirable {
+        peer_id: pay_channel.peer_id().to_string(),
+        missing,
+    };
+    let first = &config.pay_channels()[0];
+    let Some(signer) = claim_signer else {
+        return Err(unwirable(first, "[settlement.evm] signing key"));
+    };
+    let Some(state_dir) = config.state_dir() else {
+        return Err(unwirable(first, "state_dir to keep its nonce floor in"));
+    };
+
+    // The FILE-BACKED form, as `with_outbound_client_ledger` requires of a
+    // serving node: a restart that reissued a nonce would fork this node's
+    // own outbound nonce line. `open_journal` has not run yet on this path,
+    // so the directory is created here the same way it creates it.
+    std::fs::create_dir_all(state_dir).map_err(|source| RuntimeError::StateDirUnusable {
+        path: state_dir.to_path_buf(),
+        source,
+    })?;
+    let ledger_path = state_dir.join(OUTBOUND_CLIENT_LEDGER);
+    let ledger = OutboundClientLedger::open(&ledger_path).map_err(|source| {
+        RuntimeError::OutboundClientLedgerUnusable {
+            path: ledger_path,
+            source,
+        }
+    })?;
+    connector = connector.with_outbound_client_ledger(Arc::new(ledger));
+
+    for pay_channel in config.pay_channels() {
+        // Every row names a configured peering -- `Config::load` refuses a
+        // `PayChannelOrphaned` one -- so this lookup cannot miss.
+        let answer_timeout = config
+            .peers()
+            .iter()
+            .find(|peer| peer.id() == pay_channel.peer_id())
+            .map(|peer| std::time::Duration::from_millis(peer.peer_answer_timeout_ms()))
+            .ok_or_else(|| unwirable(pay_channel, "peering for that peer_id"))?;
+        let client = reqwest::Client::builder()
+            .timeout(answer_timeout)
+            .build()
+            .map_err(|source| RuntimeError::ClaimStateClientUnusable {
+                peer_id: pay_channel.peer_id().to_string(),
+                source,
+            })?;
+        let claim_state = Arc::new(OwnedHttpClaimState::new(
+            client,
+            pay_channel.client_edge_url().as_str(),
+            Arc::clone(&signer),
+        ));
+        connector = connector
+            .with_outbound_client_hop(
+                pay_channel.peer_id(),
+                pay_channel.channel_id(),
+                EvmDomain {
+                    chain_id: pay_channel.chain_id(),
+                    token_network: pay_channel.token_network(),
+                },
+                claim_state,
+            )
+            .map_err(|_| RuntimeError::PayChannelUnusable {
+                channel_id: pay_channel.channel_id().to_string(),
+            })?;
+        tracing::info!(
+            peer_id = pay_channel.peer_id(),
+            channel_id = pay_channel.channel_id(),
+            chain_id = pay_channel.chain_id(),
+            client_edge = %pay_channel.client_edge_url(),
+            "covering every PREPARE forwarded to this peer with a client-role claim (ADR 0042)"
+        );
+    }
+    Ok(connector)
+}
+
 /// Everything [`build`] produced from a validated [`Config`], and
 /// everything [`router`] needs from it. A struct rather than a tuple
 /// because the third member is the kind of thing that only ever grows: as
@@ -1020,6 +1212,13 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     // this, the table loaded, validated, and reached nothing -- so every
     // peer claim was refused `unknown_channel` and none was ever signed,
     // which is #620's gap 3 surviving into the bring-up.
+    // Cloned rather than moved: the very same settlement key signs this
+    // node's CLIENT-role covering claims below (ADR 0030 -- "no second key
+    // is introduced"), because both roles sign against the same on-chain
+    // channel participant.
+    let claim_signer = peer_claim_identity
+        .as_ref()
+        .map(|(signer, _)| Arc::clone(signer));
     if let Some((claim_signer, _)) = peer_claim_identity {
         connector = connector.with_signer(claim_signer);
     }
@@ -1027,6 +1226,10 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
         connector = connector.with_solana_signer(claim_signer_solana);
     }
     connector = wire_peer_channels(connector, config)?;
+    // ADR 0042 item 2, issue #881: `[[pay_channels]]` reaching
+    // `Connector::with_outbound_client_hop` at last. A node with no such
+    // table is untouched by this call -- see the function's own doc.
+    connector = wire_outbound_client_hops(connector, config, claim_signer)?;
     let mut client_channel_source_evm: Option<Arc<dyn ClientChannelSource>> = None;
     let mut client_channel_source_solana: Option<Arc<dyn ClientChannelSource>> = None;
     let mut settlement_terms: Option<connector_client_edge::X402SettlementTerms> = None;
@@ -2635,6 +2838,538 @@ write_keys = ["{key}"]
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// `[[pay_channels]]` reaching `Connector::with_outbound_client_hop`
+    /// (ADR 0042 item 2, issue #881) -- the wiring whose absence meant no
+    /// production path ever covered a forward.
+    ///
+    /// Nothing here is mocked (ADR 0007). The receiver is a real HTTP
+    /// server answering a real `POST /ilp/claim-state`, the claims are
+    /// signed by a real `LocalSigner` from the config's own
+    /// `[settlement.evm]` key file, and every signature these tests assert
+    /// on is verified with `connector_signer`'s own recovery -- so a claim
+    /// signed under the wrong domain, or against the wrong channel, fails
+    /// them. The peer transport is a fake in the ADR 0007 sense: a real
+    /// implementation of the port that records what it was handed.
+    mod outbound_client_hops {
+        use super::*;
+
+        use std::sync::Mutex;
+
+        use axum::extract::State;
+        use axum::routing::post;
+        use connector_domain::{derive_condition, Fulfill, PacketResponse, Prepare};
+        use connector_runtime::{
+            ClaimAckOutcome, ClaimSignature, FakeAppClient, PeerForward, PeerTransport, WireClaim,
+        };
+        use connector_signer::{
+            derive_evm_address, verify_evm_balance_proof, verify_evm_claim_state_challenge,
+            EvmBalanceProof, EvmClaimStateChallenge,
+        };
+
+        /// The peering, its peer-role channel, and the channel this node
+        /// PAYS it from -- three distinct strings, so no assertion below
+        /// can pass by conflating two of them.
+        const PEER_ID: &str = "store";
+        const PEER_CHANNEL: &str =
+            "0xaaaabbbbccccddddeeeeffff00001111aaaabbbbccccddddeeeeffff00001111";
+        const PAY_CHANNEL: &str =
+            "0xccccddddeeeeffff00001111222233334444555566667777888899990000aaaa";
+        const COUNTERPARTY: &str = "0x2222222222222222222222222222222222222222";
+        const TOKEN_NETWORK: &str = "0x3333333333333333333333333333333333333333";
+        const CHAIN_ID: u64 = 31_337;
+
+        /// The route this node forwards over, and the fee it keeps.
+        const ROUTE_PREFIX: &str = "g.example.store";
+        const DESTINATION: &str = "g.example.store.app";
+        const PEER_FEE: u64 = 3;
+        const CLIENT_AMOUNT: u64 = 1_000;
+        /// What actually goes over the peering, and therefore exactly what
+        /// a covering claim must be worth: ADR 0042 covers the packet's own
+        /// forwarded value, not the amount the client declared.
+        const FORWARDED: u64 = CLIENT_AMOUNT - PEER_FEE;
+
+        /// Where the receiver says this node's claims on [`PAY_CHANNEL`]
+        /// stand. Non-zero on both axes so an assertion could not pass
+        /// against a defaulted or forgotten watermark.
+        const RECEIVER_NONCE: u64 = 7;
+        const RECEIVER_CUMULATIVE: u64 = 7_000;
+
+        /// `0x`-prefixed (or bare) hex as bytes. A local four-liner rather
+        /// than a dependency: this is the only place in the crate that
+        /// reads hex back off a wire.
+        fn decode_hex(value: &str) -> Vec<u8> {
+            let hex = value.trim_start_matches("0x");
+            (0..hex.len() / 2)
+                .map(|index| {
+                    u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).expect("hex digits")
+                })
+                .collect()
+        }
+
+        fn channel_bytes(id: &str) -> [u8; 32] {
+            decode_hex(id).try_into().expect("a 32-byte channel id")
+        }
+
+        fn token_network_bytes() -> [u8; 20] {
+            decode_hex(TOKEN_NETWORK)
+                .try_into()
+                .expect("a 20-byte address")
+        }
+
+        /// A real next hop's claim-state endpoint: it answers
+        /// `POST /ilp/claim-state` with a watermark, and keeps every ask so
+        /// a test can check both that it was asked and what it was asked
+        /// with.
+        struct ClaimStateEdge {
+            /// The `POST /ilp` URL an operator writes as
+            /// `client_edge_url` -- `claim-state` hangs off it.
+            url: String,
+            asks: Arc<Mutex<Vec<serde_json::Value>>>,
+        }
+
+        async fn spawn_claim_state_edge() -> ClaimStateEdge {
+            #[derive(Clone)]
+            struct EdgeState {
+                asks: Arc<Mutex<Vec<serde_json::Value>>>,
+            }
+
+            async fn claim_state(
+                State(state): State<EdgeState>,
+                axum::Json(body): axum::Json<serde_json::Value>,
+            ) -> axum::Json<serde_json::Value> {
+                state
+                    .asks
+                    .lock()
+                    .expect("claim-state asks lock poisoned")
+                    .push(body);
+                axum::Json(serde_json::json!({
+                    "channels": [{
+                        "ok": true,
+                        "nonce": RECEIVER_NONCE,
+                        "cumulativeClaimed": RECEIVER_CUMULATIVE.to_string(),
+                        "available": "1000000",
+                    }]
+                }))
+            }
+
+            let asks = Arc::new(Mutex::new(Vec::new()));
+            let router = axum::Router::new()
+                .route("/ilp/claim-state", post(claim_state))
+                .with_state(EdgeState { asks: asks.clone() });
+            let listener =
+                std::net::TcpListener::bind("127.0.0.1:0").expect("bind the claim-state edge");
+            let addr = listener.local_addr().expect("claim-state edge addr");
+            tokio::spawn(async move {
+                axum::Server::from_tcp(listener)
+                    .expect("axum server from tcp listener")
+                    .serve(router.into_make_service())
+                    .await
+                    .expect("claim-state edge server");
+            });
+
+            ClaimStateEdge {
+                url: format!("http://{addr}/ilp"),
+                asks,
+            }
+        }
+
+        /// A real [`PeerTransport`] that fulfils every forward and keeps
+        /// what rode with it. The fulfilment matches the condition
+        /// [`peer_bound_prepare`] sets, so the forward genuinely fulfils
+        /// and the postpay path's `record_fulfillment` genuinely runs.
+        struct RecordingPeerTransport {
+            fulfillment: [u8; 32],
+            forwards: Mutex<Vec<(String, Prepare, Option<WireClaim>)>>,
+        }
+
+        impl RecordingPeerTransport {
+            fn new() -> Arc<RecordingPeerTransport> {
+                Arc::new(RecordingPeerTransport {
+                    fulfillment: [42u8; 32],
+                    forwards: Mutex::new(Vec::new()),
+                })
+            }
+
+            fn claims(&self) -> Vec<Option<WireClaim>> {
+                self.forwards
+                    .lock()
+                    .expect("forwards lock poisoned")
+                    .iter()
+                    .map(|(_, _, claim)| claim.clone())
+                    .collect()
+            }
+
+            fn forwarded_amounts(&self) -> Vec<u64> {
+                self.forwards
+                    .lock()
+                    .expect("forwards lock poisoned")
+                    .iter()
+                    .map(|(_, prepare, _)| prepare.amount)
+                    .collect()
+            }
+        }
+
+        #[async_trait]
+        impl PeerTransport for RecordingPeerTransport {
+            async fn forward(
+                &self,
+                peer_id: &str,
+                prepare: Prepare,
+                _minimum_delivery: u64,
+                claim: Option<WireClaim>,
+            ) -> PeerForward {
+                self.forwards.lock().expect("forwards lock poisoned").push((
+                    peer_id.to_string(),
+                    prepare,
+                    claim,
+                ));
+                PeerForward::answered(
+                    PacketResponse::Fulfill(Fulfill {
+                        fulfillment: self.fulfillment,
+                        data: Vec::new(),
+                    }),
+                    ClaimAckOutcome::NotSent,
+                )
+            }
+
+            async fn flush(&self, _peer_id: &str, _claim: WireClaim) -> ClaimAckOutcome {
+                ClaimAckOutcome::NotSent
+            }
+        }
+
+        fn peer_bound_prepare(fulfillment: &[u8; 32]) -> Prepare {
+            Prepare {
+                amount: CLIENT_AMOUNT,
+                expires_at: chrono::Utc::now() + chrono::Duration::seconds(30),
+                execution_condition: derive_condition(fulfillment),
+                destination: DESTINATION.to_string(),
+                data: b"a forwarded packet's payload".to_vec(),
+            }
+        }
+
+        /// Everything a test needs to keep alive: the temp files the config
+        /// still points at, and the state directory the ledger is written
+        /// into.
+        struct Fixture {
+            config: Config,
+            state_dir: tempfile::TempDir,
+            _key_path: tempfile::TempPath,
+        }
+
+        /// A node peered with [`PEER_ID`] and routing [`ROUTE_PREFIX`] to
+        /// it, with the `[settlement.evm]` key a claim is signed with --
+        /// plus the `[[pay_channels]]` row, unless `pay_channel` is empty.
+        fn fixture(pay_channel: &str) -> Fixture {
+            let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
+            key_file
+                .write_all(&[7u8; 32])
+                .expect("write raw 32-byte key");
+            let key_path = key_file.into_temp_path();
+            let state_dir = tempfile::tempdir().expect("temp state dir");
+            let config = load_config(&format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+peer_expose = "btp"
+peer_allow_plaintext_endpoints = true
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_file}"
+
+[settlement.evm]
+rpc_url = "http://127.0.0.1:8545"
+contract_address = "0x1234567890123456789012345678901234567890"
+token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "{key_file}"
+
+[[peers]]
+id = "{PEER_ID}"
+endpoint = "wss://store.example:443/btp"
+credential = {{ secret = "shared-secret" }}
+
+[[peer_channels]]
+peer_id = "{PEER_ID}"
+channel_id = "{PEER_CHANNEL}"
+counterparty_key = "{COUNTERPARTY}"
+chain_id = {CHAIN_ID}
+token_network = "{TOKEN_NETWORK}"
+
+[[routes]]
+prefix = "{ROUTE_PREFIX}"
+peer_id = "{PEER_ID}"
+fee = {PEER_FEE}
+price = {CLIENT_AMOUNT}
+{pay_channel}
+"#,
+                state_dir = state_dir.path().display(),
+                key_file = key_path.display(),
+            ));
+            Fixture {
+                config,
+                state_dir,
+                _key_path: key_path,
+            }
+        }
+
+        /// The row under test, pointed at a real claim-state edge.
+        fn pay_channel_row(edge: &ClaimStateEdge) -> String {
+            format!(
+                r#"
+[[pay_channels]]
+peer_id = "{PEER_ID}"
+channel_id = "{PAY_CHANNEL}"
+chain_id = {CHAIN_ID}
+token_network = "{TOKEN_NETWORK}"
+client_edge_url = "{url}"
+"#,
+                url = edge.url,
+            )
+        }
+
+        /// The connector `build` would produce for this config, with the
+        /// recording transport in place of the dial side -- every other
+        /// piece is the production wiring, called in the production order.
+        fn connector(fixture: &Fixture, peer: Arc<RecordingPeerTransport>) -> Connector {
+            let config = &fixture.config;
+            let peer_routes = config
+                .peer_routes()
+                .iter()
+                .map(|route| {
+                    PeerRoute::new_priced(
+                        route.prefix(),
+                        route.peer_id(),
+                        route.fee(),
+                        route.price(),
+                    )
+                })
+                .collect();
+            let (claim_signer, _) = peer_claim_identity(config)
+                .expect("read the settlement key")
+                .expect("the fixture configures [settlement.evm]");
+            let mut connector = Connector::new(
+                config.routes().to_vec(),
+                peer_routes,
+                Arc::new(FakeAppClient::new()),
+                peer,
+                Arc::new(SystemClock),
+            )
+            .with_signer(Arc::clone(&claim_signer));
+            connector = wire_peer_channels(connector, config).expect("wire [[peer_channels]]");
+            wire_outbound_client_hops(connector, config, Some(claim_signer))
+                .expect("wire [[pay_channels]]")
+        }
+
+        /// The address every claim in these tests must recover to: the
+        /// `[settlement.evm]` key's own, because the channel's on-chain
+        /// participant IS this node's settlement address (ADR 0030 -- "no
+        /// second key is introduced").
+        fn settlement_address(fixture: &Fixture) -> [u8; 20] {
+            let (signer, address) = peer_claim_identity(&fixture.config)
+                .expect("read the settlement key")
+                .expect("the fixture configures [settlement.evm]");
+            assert_eq!(
+                address,
+                derive_evm_address(&signer.public_key().expect("public key")),
+                "the identity used to sign and the address asserted against are one key"
+            );
+            address
+        }
+
+        /// **The wiring, end to end.** A peering with a `[[pay_channels]]`
+        /// row covers its forward from the first attempt: the claim rides
+        /// the outgoing PREPARE, it is worth exactly what this packet
+        /// forwards, its nonce advances the RECEIVER's watermark (asked
+        /// over a real `POST /ilp/claim-state`, never guessed), and its
+        /// signature verifies against this node's settlement address under
+        /// the configured channel and domain.
+        #[tokio::test]
+        async fn a_configured_pay_channel_covers_the_forward_and_the_claim_rides_the_prepare() {
+            let edge = spawn_claim_state_edge().await;
+            let fixture = fixture(&pay_channel_row(&edge));
+            let peer = RecordingPeerTransport::new();
+            let connector = connector(&fixture, Arc::clone(&peer));
+
+            let response = connector
+                .handle_prepare(peer_bound_prepare(&peer.fulfillment), 0)
+                .await;
+
+            assert!(
+                matches!(response, PacketResponse::Fulfill(_)),
+                "the covered forward fulfils: {response:?}"
+            );
+            assert_eq!(peer.forwarded_amounts(), vec![FORWARDED]);
+            let claim = peer.claims()[0]
+                .clone()
+                .expect("a configured hop covers its forward -- no claim means #881 is unwired");
+            assert_eq!(
+                claim.channel_id, PAY_CHANNEL,
+                "the covering claim names the channel this node PAYS from, not the one it \
+                 judges peer claims against"
+            );
+            assert_eq!(
+                claim.nonce,
+                RECEIVER_NONCE + 1,
+                "the nonce advances the receiver's own watermark"
+            );
+            assert_eq!(
+                claim.cumulative_amount,
+                RECEIVER_CUMULATIVE + FORWARDED,
+                "the claim covers exactly this packet's forwarded value"
+            );
+
+            let ClaimSignature::Evm(signature) = claim.signature else {
+                panic!("an EVM channel's covering claim is an EIP-712 balance proof");
+            };
+            assert!(
+                verify_evm_balance_proof(
+                    &EvmBalanceProof {
+                        channel_id: channel_bytes(PAY_CHANNEL),
+                        nonce: RECEIVER_NONCE + 1,
+                        transferred_amount: u128::from(RECEIVER_CUMULATIVE + FORWARDED),
+                        locked_amount: 0,
+                        locks_root: [0u8; 32],
+                        chain_id: CHAIN_ID,
+                        token_network_address: token_network_bytes(),
+                    },
+                    &signature.to_bytes(),
+                    &settlement_address(&fixture),
+                ),
+                "the claim must recover to this node's settlement address under the CONFIGURED \
+                 chain id and TokenNetwork -- a claim signed under any other domain is refused \
+                 at the far gate with the packet already paid for"
+            );
+
+            // The receiver was asked, and asked about this channel, with a
+            // challenge signed by the same key: the watermark authority is
+            // the receiver (issue #693), never anything remembered here.
+            let asks = edge.asks.lock().expect("asks lock poisoned").clone();
+            assert_eq!(asks.len(), 1, "one covered packet, one watermark ask");
+            let asked = &asks[0]["channels"][0];
+            assert_eq!(asked["channelId"], PAY_CHANNEL);
+            let expires = asked["expires"].as_u64().expect("an expiry");
+            let signature = asked["signature"].as_str().expect("a challenge signature");
+            let signature = decode_hex(signature);
+            assert!(
+                verify_evm_claim_state_challenge(
+                    &EvmClaimStateChallenge {
+                        channel_id: channel_bytes(PAY_CHANNEL),
+                        expires,
+                        chain_id: CHAIN_ID,
+                        token_network_address: token_network_bytes(),
+                    },
+                    &signature,
+                    &settlement_address(&fixture),
+                ),
+                "the claim-state ask proves control of the channel's on-chain participant"
+            );
+
+            // And the nonce floor is durable, under the same `state_dir`
+            // the journals are, in its own file: a restart that reissued a
+            // nonce would fork this node's own outbound line.
+            let ledger = fixture.state_dir.path().join(OUTBOUND_CLIENT_LEDGER);
+            assert!(
+                ledger.is_file(),
+                "the outbound client ledger is file-backed"
+            );
+            let written = std::fs::read_to_string(&ledger).expect("read the ledger");
+            assert!(
+                written.contains(&format!("\"nonce\":{}", RECEIVER_NONCE + 1)),
+                "the issued nonce reaches the disk before the claim exists: {written}"
+            );
+        }
+
+        /// **The regression guard** (ADR 0042: "additive -- a peering with
+        /// nothing configured behaves exactly as it does now").
+        ///
+        /// The same node, the same peering, the same packet, with the
+        /// `[[pay_channels]]` row simply absent: the first forward carries
+        /// no claim, the second carries the one the FIRST one's fulfilment
+        /// armed on the PEER ledger -- ADR 0004's postpay convention,
+        /// unchanged -- and the receiver is never asked for a watermark at
+        /// all, because no client-role hop exists to ask on behalf of.
+        #[tokio::test]
+        async fn a_peering_with_no_pay_channels_row_forwards_exactly_as_before() {
+            let edge = spawn_claim_state_edge().await;
+            let fixture = fixture("");
+            assert!(fixture.config.pay_channels().is_empty());
+            let peer = RecordingPeerTransport::new();
+            let connector = connector(&fixture, Arc::clone(&peer));
+
+            for _ in 0..2 {
+                let response = connector
+                    .handle_prepare(peer_bound_prepare(&peer.fulfillment), 0)
+                    .await;
+                assert!(matches!(response, PacketResponse::Fulfill(_)));
+            }
+
+            let claims = peer.claims();
+            assert!(
+                claims[0].is_none(),
+                "an unconfigured peering's first forward is uncovered, exactly as before #881: \
+                 {:?}",
+                claims[0]
+            );
+            let postpay = claims[1]
+                .clone()
+                .expect("the second forward carries the claim the first fulfilment armed");
+            assert_eq!(
+                postpay.channel_id, PEER_CHANNEL,
+                "the postpay claim is the PEER ledger's, on the [[peer_channels]] channel"
+            );
+            assert_eq!(postpay.cumulative_amount, FORWARDED);
+
+            assert!(
+                edge.asks.lock().expect("asks lock poisoned").is_empty(),
+                "a node with no client-role hop never asks anybody for a watermark"
+            );
+            assert!(
+                !fixture
+                    .state_dir
+                    .path()
+                    .join(OUTBOUND_CLIENT_LEDGER)
+                    .exists(),
+                "and it opens no outbound client ledger: the file is created only for a node \
+                 that actually signs client-role claims"
+            );
+        }
+
+        /// The whole production build chain, not just the wiring function:
+        /// a config with no `[[pay_channels]]` table builds a node that
+        /// writes no outbound client ledger at all -- which is what makes
+        /// this change safe to land on a running fleet, where every
+        /// committed config today has no such table.
+        #[tokio::test]
+        async fn build_writes_no_outbound_client_ledger_for_a_node_with_no_pay_channels() {
+            let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
+            key_file
+                .write_all(&[7u8; 32])
+                .expect("write raw 32-byte key");
+            let key_path = key_file.into_temp_path();
+            let state_dir = tempfile::tempdir().expect("temp state dir");
+            let config = load_config(&format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_file}"
+"#,
+                state_dir = state_dir.path().display(),
+                key_file = key_path.display(),
+            ));
+
+            build(&config).await.expect("build");
+
+            assert!(
+                !state_dir.path().join(OUTBOUND_CLIENT_LEDGER).exists(),
+                "the ledger file is created only for a node that actually signs client-role                  claims"
+            );
+        }
     }
 
     mod settlement_construction {

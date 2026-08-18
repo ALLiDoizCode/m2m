@@ -86,9 +86,14 @@ reason only — the third item is the one that can break a running fleet:
 
 1. **The cap, refused with `T04`, with a default.** Independent of the rest, and safe to land on its
    own: it only ever refuses a packet this connector would otherwise have carried.
-2. **Wire issue #881 — the send half.** Proactive covering exists in the runtime and is exercised by
-   tests, but no production path populates `outbound_client_hops`. Additive: a peering with nothing
-   configured behaves exactly as it does now.
+2. **Wire issue #881 — the send half.** ~~Proactive covering exists in the runtime and is exercised by
+   tests, but no production path populates `outbound_client_hops`.~~ **Built.** `[[pay_channels]]`
+   populates `outbound_client_hops` from `connector-cli`'s own build chain, one row per peering this
+   node pays: the channel, its EIP-712 domain, and that hop's client edge as the watermark authority
+   (asked over `POST /ilp/claim-state` on every covered packet, never remembered). Additive as
+   promised: a peering with no row behaves exactly as it did — `cover_forward` answers
+   `NotConfigured`, the postpay `pending_claim` path runs, and no outbound client ledger file is
+   opened at all.
 3. **Require a covering claim on forwarded arrivals.** The price gate filters on
    `ClientRouteKind::Terminated`, so a packet this connector forwards onward is carried for free.
    **This one is breaking.** Enforce it before every box's send half is live and forwarding stops
@@ -102,6 +107,11 @@ Until (2) lands the connector runs ADR 0004's model end to end for forwarding, w
 RFC-shaped; it is simply not this record. **Three documents already assert otherwise** — ADR 0031's
 Decision, ADR 0033's premise, and `docs/protocol/money-model.md`'s "current behaviour" banner. This
 record does not become a fourth: it says plainly that it describes the target.
+
+(2) has since landed, and what it changed is narrower than "the fleet now covers": a peering covers
+its forwards **once an operator writes `[[pay_channels]]` for it**, and no committed config on this
+fleet writes one yet. So the sentence above still describes every deployed box, and stops describing
+one the moment its config names a channel to pay from.
 
 ## Consequences
 

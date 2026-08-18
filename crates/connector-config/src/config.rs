@@ -11,6 +11,7 @@ use crate::client_channel::{resolve_client_channels, ClientChannelConfig, RawCli
 use crate::error::ConfigError;
 use crate::identity::{resolve_client_identities, ClientIdentityConfig, RawClientIdentity};
 use crate::operator::{resolve_operator, OperatorConfig, RawOperatorConfig};
+use crate::pay_channel::{resolve_pay_channels, PayChannelConfig, RawPayChannel};
 use crate::peer::{parse_peer_exposure, resolve_peers, PeerConfig, PeerExposure, RawPeer};
 use crate::peer_channel::{resolve_peer_channels, PeerChannelConfig, RawPeerChannel};
 use crate::route::{resolve_routes, PeerRouteConfig, RawChild, RawRoute, StaticRoute};
@@ -98,6 +99,16 @@ struct RawConfig {
     /// can never take the peer role at all.
     #[serde(default)]
     peer_channels: Vec<RawPeerChannel>,
+    /// The channels this node **pays** each next hop from, as an ordinary
+    /// client of that hop (ADR 0042 item 2, issue #881). Absent -- the
+    /// default, and every config that predates this table -- means this
+    /// node covers no forward proactively and every peering keeps riding
+    /// ADR 0004's postpay `pending_claim` exactly as before, which is why
+    /// the table is additive rather than a migration. See
+    /// [`crate::PayChannelConfig`] for where each part of the claim it
+    /// configures comes from.
+    #[serde(default)]
+    pay_channels: Vec<RawPayChannel>,
     /// Removed with purchasable peering (ADR 0043): a peering cannot be
     /// bought, so there is no priced route that sells one and no
     /// `prefix`/`price`/`lease_seconds`/`max_purchased_rows`/
@@ -252,6 +263,7 @@ pub struct Config {
     peer_expose: PeerExposure,
     peer_allow_plaintext_endpoints: bool,
     peer_channels: Vec<PeerChannelConfig>,
+    pay_channels: Vec<PayChannelConfig>,
     operator: Option<OperatorConfig>,
     announce: Option<AnnounceConfig>,
     settlements: Vec<SettlementConfig>,
@@ -392,6 +404,58 @@ impl Config {
             };
             if collides {
                 return Err(ConfigError::ChannelInBothNamespaces { value });
+            }
+        }
+        // `[[pay_channels]]` (ADR 0042 item 2, issue #881): the channels
+        // this node PAYS a next hop from. Three cross-table rules, each
+        // refusing at load what would otherwise be a packet-time surprise
+        // on the money path (ADR 0009).
+        let pay_channels = resolve_pay_channels(raw.pay_channels, peer_allow_plaintext_endpoints)?;
+        let evm_settlement = settlements
+            .iter()
+            .any(|settlement| matches!(settlement, SettlementConfig::Evm(_)));
+        for pay_channel in &pay_channels {
+            // A row for a peering that does not exist pays nobody -- the
+            // same reasoning `PeerChannelOrphaned` applies, and the same
+            // typo it catches.
+            if !peers.iter().any(|peer| peer.id() == pay_channel.peer_id()) {
+                return Err(ConfigError::PayChannelOrphaned {
+                    peer_id: pay_channel.peer_id().to_string(),
+                });
+            }
+            // ADR 0030, said of `[announce] pay_channel` and just as true
+            // here: "that table is channels this node receives on, and this
+            // is one it pays from. One channel in two roles is the same
+            // collision `Config::load` already refuses between the peer and
+            // client books." Compared EVM-to-EVM only, both sides already
+            // canonicalized to lowercase `0x` hex by their own resolver.
+            //
+            // Deliberately NOT compared against `[[peer_channels]]`: one
+            // channel carrying both roles with one hop is the deployed
+            // shape (the peer role for what arrives, the client role for
+            // what this node sends), and `forward_via_peer_route` is built
+            // for it -- a covered packet is not owed a second time on the
+            // peer ledger, so exactly one book ever signs per packet.
+            if client_channels.iter().any(|client_channel| {
+                matches!(
+                    client_channel,
+                    ClientChannelConfig::Evm(evm_client)
+                        if evm_client.channel_id() == pay_channel.channel_id()
+                )
+            }) {
+                return Err(ConfigError::PayChannelIsAlsoAClientChannel {
+                    value: pay_channel.channel_id().to_string(),
+                });
+            }
+            // The signing key is `[settlement.evm]`'s and there is no
+            // second one (ADR 0030's table). A row with no table to sign
+            // under would reach the packet path and fail every forward it
+            // was configured for, which is the failure ADR 0009 puts at
+            // load instead.
+            if !evm_settlement {
+                return Err(ConfigError::PayChannelWithoutEvmSettlement {
+                    peer_id: pay_channel.peer_id().to_string(),
+                });
             }
         }
         let state_dir = raw.state_dir.map(PathBuf::from);
@@ -536,6 +600,16 @@ impl Config {
             // no less a replay defence than a client claim's, and ADR
             // 0024's ledger is the record that has to outlive the process.
             return Err(ConfigError::PeerChannelsWithoutStateDir);
+        } else if !pay_channels.is_empty() {
+            // The outbound half of the same rule (issue #881). Unreachable
+            // through a loadable file today -- a `[[pay_channels]]` row
+            // needs a peering, a peering needs a `[[peer_channels]]` row,
+            // and that already demands a `state_dir` two arms above -- and
+            // written out anyway, because what it protects is different in
+            // kind: the outbound client ledger's nonce floor is the one
+            // number that stops a RESTART reissuing a nonce this node has
+            // already signed against a different cumulative amount.
+            return Err(ConfigError::PayChannelsWithoutStateDir);
         }
 
         Ok(Config {
@@ -547,6 +621,7 @@ impl Config {
             peer_expose,
             peer_allow_plaintext_endpoints,
             peer_channels,
+            pay_channels,
             operator,
             announce,
             settlements,
@@ -703,6 +778,22 @@ impl Config {
         self.peer_channels
             .iter()
             .filter(move |channel| channel.peer_id() == peer_id)
+    }
+
+    /// The channels this node **pays** a next hop from, as an ordinary
+    /// client of that hop (ADR 0042 item 2, issue #881) -- what
+    /// `Connector::with_outbound_client_hop` is configured from. Every row
+    /// names a configured peer at most once, no channel appears twice, none
+    /// of them appears in [`Config::client_channels`] (that table is
+    /// channels this node *receives* on, ADR 0030), and this node has a
+    /// `[settlement.evm]` key to sign a claim with -- [`Config::load`]
+    /// refuses to return a value where any of those does not hold.
+    ///
+    /// **Empty is the default and means default-off**: a peering with no
+    /// row here forwards exactly as it did before this table existed,
+    /// riding ADR 0004's postpay `pending_claim`.
+    pub fn pay_channels(&self) -> &[PayChannelConfig] {
+        &self.pay_channels
     }
 
     /// The operator surface's authentication, if the surface is enabled.
@@ -1578,6 +1669,167 @@ token_network_address = "{PEER_TOKEN_NETWORK}"
             message.contains("counted as credit twice") && message.contains(BRINGUP_DOC),
             "got: {message}"
         );
+    }
+
+    // -- `[[pay_channels]]` (ADR 0042 item 2, issue #881) ---------------
+    //
+    // The cross-table rules. The single-row shape is `pay_channel`'s own
+    // unit tests; these are the three things only `Config::load` can see.
+
+    /// The peering of [`peering_config`], plus the `[settlement.evm]` key a
+    /// covering claim is signed with and the `[[pay_channels]]` row that
+    /// says which channel to sign on -- with `edit` applied to the whole
+    /// text, the same spoil-one-thing shape [`load_peering`] uses.
+    ///
+    /// No `[[client_channels]]` row: that is the collision one test below
+    /// adds on purpose.
+    fn load_pay_channel_config(edit: impl Fn(String) -> String) -> Result<Config, ConfigError> {
+        let state_dir = tempfile::tempdir().expect("temp state dir");
+        let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
+        key_file
+            .write_all(b"not a real key")
+            .expect("write key file");
+        let base = peering_config(key_file.path(), state_dir.path(), "");
+        let text = format!(
+            r#"{base}
+[settlement.evm]
+rpc_url = "http://127.0.0.1:8545"
+contract_address = "0x1234567890123456789012345678901234567890"
+token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "{key_file}"
+
+[[pay_channels]]
+peer_id = "store"
+channel_id = "{PAY_CHANNEL}"
+chain_id = 31337
+token_network = "{PEER_TOKEN_NETWORK}"
+client_edge_url = "https://store.example/ilp"
+"#,
+            key_file = key_file.path().display(),
+        );
+        Config::from_toml_str(&edit(text), Path::new("test.toml"))
+    }
+
+    /// A channel that is NOT [`PEER_CHANNEL`]: the pay-from channel and the
+    /// peer-role channel may be the same one (that is the deployed shape),
+    /// but a test that used one string could not tell the two roles apart.
+    const PAY_CHANNEL: &str = "0xccccddddeeeeffff00001111222233334444555566667777888899990000aaaa";
+
+    /// The round trip, from a real TOML file: a `[[pay_channels]]` row
+    /// reaches [`Config::pay_channels`] with its channel id canonicalized
+    /// and its domain and client edge intact.
+    #[test]
+    fn loads_the_full_pay_channels_shape() {
+        let config = load_pay_channel_config(|text| text).expect("load");
+
+        assert_eq!(config.pay_channels().len(), 1);
+        let pay = &config.pay_channels()[0];
+        assert_eq!(pay.peer_id(), "store");
+        assert_eq!(pay.channel_id(), PAY_CHANNEL);
+        assert_eq!(pay.chain_id(), 31_337);
+        assert_eq!(pay.token_network(), [0x33u8; 20]);
+        assert_eq!(pay.client_edge_url().as_str(), "https://store.example/ilp");
+    }
+
+    /// **The default-off property, at the config layer** (ADR 0042: "a
+    /// peering with nothing configured behaves exactly as it does now").
+    /// The same peering, with the table simply absent, loads to an empty
+    /// list -- there is no default row, and nothing else about the file
+    /// changes.
+    #[test]
+    fn a_peering_with_no_pay_channels_row_loads_with_none() {
+        let config = load_peering(|text| text).expect("load");
+
+        assert!(
+            config.pay_channels().is_empty(),
+            "a file that writes no [[pay_channels]] must configure no client-role hop"
+        );
+        assert_eq!(config.peers().len(), 1);
+        assert_eq!(config.peer_channels().len(), 1);
+    }
+
+    /// **The collision, by name** (ADR 0030): `[[client_channels]]` is
+    /// channels this node RECEIVES on and `[[pay_channels]]` is one it PAYS
+    /// from, so one channel in both is the same double-count
+    /// `ChannelInBothNamespaces` refuses between the peer and client books.
+    /// Written in mixed case on one side to prove the comparison is over
+    /// the canonical form rather than the operator's spelling.
+    #[test]
+    fn rejects_a_pay_channel_that_is_also_a_client_channel() {
+        let result = load_pay_channel_config(|text| {
+            format!(
+                r#"{text}
+[[client_channels]]
+channel_id = "{}"
+counterparty = "{PEER_KEY}"
+chain_id = 31337
+token_network_address = "{PEER_TOKEN_NETWORK}"
+"#,
+                PAY_CHANNEL.to_uppercase().replace("0X", "0x"),
+            )
+        });
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::PayChannelIsAlsoAClientChannel { value } if value == PAY_CHANNEL),
+        );
+        assert!(
+            message.contains("RECEIVES") && message.contains("PAYS"),
+            "got: {message}"
+        );
+    }
+
+    /// The pay-from channel and the peer-role channel with the SAME hop may
+    /// be one channel, and this is the test that says so on purpose: the
+    /// peer role judges what arrives, the client role covers what this node
+    /// sends, and `forward_via_peer_route` never lets both books sign for
+    /// one packet.
+    #[test]
+    fn a_pay_channel_may_be_the_same_channel_as_that_peering_s_peer_channel() {
+        let config =
+            load_pay_channel_config(|text| text.replace(PAY_CHANNEL, PEER_CHANNEL)).expect("load");
+
+        assert_eq!(config.pay_channels()[0].channel_id(), PEER_CHANNEL);
+    }
+
+    /// A row for a peering that does not exist pays nobody -- the same
+    /// typo `PeerChannelOrphaned` catches, on the other table.
+    #[test]
+    fn rejects_a_pay_channel_naming_an_unconfigured_peer() {
+        let result = load_pay_channel_config(|text| {
+            text.replace(
+                "peer_id = \"store\"\nchannel_id = \"0xcccc",
+                "peer_id = \"stroe\"\nchannel_id = \"0xcccc",
+            )
+        });
+
+        expect_error(
+            result,
+            |error| matches!(error, ConfigError::PayChannelOrphaned { peer_id } if peer_id == "stroe"),
+        );
+    }
+
+    /// The signing key is `[settlement.evm]`'s and there is no second one
+    /// (ADR 0030's table), so a row with no table to sign under is refused
+    /// at load rather than failing every forward it was configured for.
+    #[test]
+    fn rejects_a_pay_channel_with_no_evm_settlement_table() {
+        let result = load_pay_channel_config(|text| {
+            let start = text.find("[settlement.evm]").expect("the fixture has one");
+            let end = text.find("[[pay_channels]]").expect("the fixture has one");
+            let mut without = text.clone();
+            without.replace_range(start..end, "");
+            without
+        });
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::PayChannelWithoutEvmSettlement { peer_id } if peer_id == "store"),
+        );
+        assert!(message.contains("no second key"), "got: {message}");
     }
 
     /// ADR 0031/ADR 0033, issue #882: an accept-only peering used to be

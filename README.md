@@ -85,21 +85,22 @@ handler_url = "http://app:3100"
 price       = 100
 ```
 
-| Key                     | Type        | Required  | Meaning                                                                                                       |
-| ----------------------- | ----------- | --------- | ------------------------------------------------------------------------------------------------------------- |
-| `client_edge_addr`      | `host:port` | yes       | Where `POST /ilp`, `GET /ilp/btp` (and, if configured, the operator surface) listen.                          |
-| `[signer]`              | table       | yes       | Exactly one of `key_file` or `kms_key_id` — a location, never a key value.                                    |
-| `[[routes]]`            | array       | no        | See below.                                                                                                    |
-| `apex`                  | ILP address | no        | Required only if `[[children]]` is used.                                                                      |
-| `[[children]]`          | array       | no        | `{ name, handler_url, price }` — sugar for a route at `<apex>.<name>`.                                        |
-| `[operator]`            | table       | no        | Absent ⇒ the operator surface is not mounted at all.                                                          |
-| `peer_expose`           | string      | no        | `btp` / `http` / `both` / `neither` — which peer carriages this node listens for. Absent ⇒ `neither`.         |
-| `[[peers]]`             | array       | no        | `{ id, endpoint, credential, … }` — the peerings `routes.peer_id` may name.                                   |
-| `[[peer_channels]]`     | array       | no        | `{ peer_id, channel_id, counterparty_key, chain_id, token_network }` — required for every peering.            |
-| `[settlement]`          | table       | no        | Absent ⇒ every channel operation answers `503`.                                                               |
-| `[[client_channels]]`   | array       | no        | Absent ⇒ the client edge has a record of no channel, so it refuses every claim.                               |
-| `[[client_identities]]` | array       | no        | `{ id, secret }` — the client-edge identities `POST /ilp` authenticates. Absent ⇒ every request is anonymous. |
-| `state_dir`             | path        | see below | Where this node writes its claim journals. Required whenever `[[client_channels]]` is set.                    |
+| Key                     | Type        | Required  | Meaning                                                                                                                                                                |
+| ----------------------- | ----------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `client_edge_addr`      | `host:port` | yes       | Where `POST /ilp`, `GET /ilp/btp` (and, if configured, the operator surface) listen.                                                                                   |
+| `[signer]`              | table       | yes       | Exactly one of `key_file` or `kms_key_id` — a location, never a key value.                                                                                             |
+| `[[routes]]`            | array       | no        | See below.                                                                                                                                                             |
+| `apex`                  | ILP address | no        | Required only if `[[children]]` is used.                                                                                                                               |
+| `[[children]]`          | array       | no        | `{ name, handler_url, price }` — sugar for a route at `<apex>.<name>`.                                                                                                 |
+| `[operator]`            | table       | no        | Absent ⇒ the operator surface is not mounted at all.                                                                                                                   |
+| `peer_expose`           | string      | no        | `btp` / `http` / `both` / `neither` — which peer carriages this node listens for. Absent ⇒ `neither`.                                                                  |
+| `[[peers]]`             | array       | no        | `{ id, endpoint, credential, … }` — the peerings `routes.peer_id` may name.                                                                                            |
+| `[[peer_channels]]`     | array       | no        | `{ peer_id, channel_id, counterparty_key, chain_id, token_network }` — required for every peering.                                                                     |
+| `[[pay_channels]]`      | array       | no        | `{ peer_id, channel_id, chain_id, token_network, client_edge_url }` — the channel this node **pays** that peer from. Absent ⇒ that peering forwards exactly as before. |
+| `[settlement]`          | table       | no        | Absent ⇒ every channel operation answers `503`.                                                                                                                        |
+| `[[client_channels]]`   | array       | no        | Absent ⇒ the client edge has a record of no channel, so it refuses every claim.                                                                                        |
+| `[[client_identities]]` | array       | no        | `{ id, secret }` — the client-edge identities `POST /ilp` authenticates. Absent ⇒ every request is anonymous.                                                          |
+| `state_dir`             | path        | see below | Where this node writes its claim journals. Required whenever `[[client_channels]]` is set.                                                                             |
 
 A `[[routes]]` entry sets **exactly one** of `handler_url` (terminate here) or `peer_id` (forward
 there). A terminated route **must** carry a `price` — write `price = 0` if free is deliberate,
@@ -114,6 +115,18 @@ authentication _and_ a channel binding. A `credential` sets **exactly one** of `
 path to the secret — what a deployed node uses, so the peering can live in a committed config) or
 `secret` (the literal). See
 [`docs/operators/btp-peer-transport-bringup.md`](docs/operators/btp-peer-transport-bringup.md).
+
+A `[[pay_channels]]` entry is the other direction, and the two are not interchangeable:
+`[[peer_channels]]` is the channel a peering's claims are **judged** against, `[[client_channels]]`
+is a channel this node **receives** claims on, and `[[pay_channels]]` is one it **pays** from — the
+channel every PREPARE forwarded to that peer carries a covering claim on
+([ADR 0042](docs/adr/0042-a-packet-carries-its-claim.md)). It is additive and default-off: a peering
+with no row here keeps forwarding exactly as it did, so this changes nothing for a config that does
+not write one. `client_edge_url` is that peer's own `POST /ilp` endpoint — where this node arrives
+as an ordinary buyer, and where `POST /ilp/claim-state` answers where its claims on the channel
+stand, because the **receiver** is the authority on its own watermark and it is never guessed. A
+channel in both `[[pay_channels]]` and `[[client_channels]]` is refused at load; the signing key is
+`[settlement.evm]`'s, and there is no second key to configure.
 
 `peer_expose` and `credential` are **peer-role** settings and nothing else. `peer_expose` opens no
 port: it turns on peer handling, behind the credential check, on the listeners this node already

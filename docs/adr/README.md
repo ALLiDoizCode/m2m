@@ -145,3 +145,13 @@ vectors are the contract.
 - **A record states its decision in its first paragraph**, before any context or options.
 - **Amendments are appended in place** under an `## Update (issue #NNN)` heading rather than
   rewriting the original decision, so the trail stays readable.
+- **Superseding a record means grepping for every record that cites it.** A decision is rarely
+  load-bearing only where it was written: other records inherit properties from it and say so by
+  name. Retire one without that sweep and its consequences stay asserted somewhere else, which is
+  how a repo ends up with several documents agreeing with each other and disagreeing with the
+  binary. Note which citations survive as well as which do not — most do, and saying so is what
+  stops the next reader re-deriving it. ADR 0042 is the worked example: superseding ADR 0004
+  disturbed 0010 and 0011, and left 0005, 0022, 0024 and 0029's actual argument untouched.
+- **A record that describes a target says so.** If the decision is made but unbuilt, state that
+  plainly and list what must be true for the record to be true. A record written in the present
+  tense about behaviour the binary does not have is the failure mode above, committed on purpose.

@@ -363,6 +363,105 @@ pub enum ConfigError {
     )]
     ChannelInBothNamespaces { value: String },
 
+    // -- `[[pay_channels]]` (ADR 0042 item 2, issue #881): the channel this
+    // node PAYS a next hop from, as an ordinary client of it. See
+    // `crate::pay_channel`'s module header for why this is a third table
+    // rather than a row in either of the two above.
+    #[error(
+        "'[[pay_channels]]' names peer_id '{peer_id}', which no '[[peers]]' entry configures -- \
+         a channel that pays a peering that does not exist pays nobody. This table is how this \
+         node covers every PREPARE it forwards to a hop (ADR 0042); the hop is named by the \
+         same '[[peers]]' id a route's peer_id names"
+    )]
+    PayChannelOrphaned { peer_id: String },
+
+    #[error(
+        "'[[pay_channels]]' for peer '{peer_id}' names channel '{value}', which is not a \
+         32-byte on-chain channel id: it must be 64 hex characters, optionally '0x'-prefixed. \
+         This is the channel this node PAYS that hop from as an ordinary client of it"
+    )]
+    PayChannelInvalidId { peer_id: String, value: String },
+
+    #[error(
+        "'[[pay_channels]]' for peer '{peer_id}' has an invalid {field} '{value}': it must be a \
+         20-byte EVM address, optionally '0x'-prefixed. It is half of the EIP-712 domain the \
+         covering claim is signed under, and a claim signed under the wrong domain recovers to \
+         a different address and is refused at the far gate"
+    )]
+    PayChannelInvalidAddress {
+        peer_id: String,
+        field: &'static str,
+        value: String,
+    },
+
+    #[error(
+        "'[[pay_channels]]' for peer '{peer_id}' has an unusable client_edge_url '{value}': \
+         {source}. It is that hop's own 'POST /ilp' endpoint -- where this node arrives as an \
+         ordinary buyer, and where 'POST /ilp/claim-state' (issue #693) answers where this \
+         node's claims on the channel stand"
+    )]
+    PayChannelInvalidClientEdgeUrl {
+        peer_id: String,
+        value: String,
+        #[source]
+        source: url::ParseError,
+    },
+
+    #[error(
+        "'[[pay_channels]]' for peer '{peer_id}' has client_edge_url '{value}', whose scheme \
+         '{scheme}' is not one this node may ask a channel's claim state over: it must be \
+         'https://' (or 'http://' with peer_allow_plaintext_endpoints, which is a loopback and \
+         test setting). The ask carries a signed EIP-712 challenge -- a capability to read a \
+         channel's state -- so it is TLS-only by default. A peering's own 'wss://' endpoint is \
+         not this URL and is never turned into it by swapping scheme and appending a path \
+         (ADR 0030)"
+    )]
+    PayChannelClientEdgeUrlScheme {
+        peer_id: String,
+        value: String,
+        scheme: String,
+    },
+
+    #[error(
+        "'[[pay_channels]]' names peer '{peer_id}' twice: the outbound client ledger keeps one \
+         nonce line per next hop, so a second row would be a second channel for one line and \
+         which one signed would depend on file order"
+    )]
+    PayChannelDuplicatePeer { peer_id: String },
+
+    #[error(
+        "channel '{value}' is named by two '[[pay_channels]]' rows: one channel paid from by \
+         two next hops is one channel carrying two nonce lines, and the far gate resolves that \
+         by refusing one of them as a replay"
+    )]
+    PayChannelDuplicate { value: String },
+
+    #[error(
+        "channel '{value}' is configured in both '[[pay_channels]]' and '[[client_channels]]': \
+         '[[client_channels]]' is channels this node RECEIVES claims on and '[[pay_channels]]' \
+         is one it PAYS from, so one channel in both roles is the same double-count \
+         'ChannelInBothNamespaces' refuses between the peer and client books (ADR 0030, \
+         peer-carriage-spec.md §1.8)"
+    )]
+    PayChannelIsAlsoAClientChannel { value: String },
+
+    #[error(
+        "'[[pay_channels]]' names peer '{peer_id}' but this node has no '[settlement.evm]' \
+         table: a covering claim is an EIP-712 balance proof signed by the channel's on-chain \
+         participant, which IS this node's settlement address -- the same key ADR 0024's \
+         outbound peer claims use. There is no second key to configure and none is invented \
+         (ADR 0030)"
+    )]
+    PayChannelWithoutEvmSettlement { peer_id: String },
+
+    #[error(
+        "'[[pay_channels]]' is configured but 'state_dir' is not: the outbound client ledger \
+         keeps the highest nonce it has ever ISSUED to each next hop, and it has to outlive the \
+         process -- a restart that reissued a nonce would fork this node's own outbound nonce \
+         line and the far gate would refuse one of the two claims as a replay"
+    )]
+    PayChannelsWithoutStateDir,
+
     #[error(
         "route '{prefix}' forwards to peer '{peer_id}', which this connector can never \
          originate to: the peering configures no 'endpoint' (so this connector never dials it) \

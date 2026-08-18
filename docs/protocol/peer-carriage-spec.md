@@ -158,6 +158,16 @@ untouched: bilateral peer-to-peer forwarding is not what #868/#881 changed, per 
 **peer-role** PREPARE reaching this node's `Forwarded` routes is still priced by the claim exchange
 of §4 and `peer-semantics-spec.md` §3 alone".
 
+**What "configured via `with_outbound_client_hop`" means in a config file**, since for a while it
+meant nothing an operator could write and the covering therefore never ran on a deployed node: it is
+a **`[[pay_channels]]`** row (ADR 0042's item 2). One row per peering this node pays — `peer_id`,
+the `channel_id` it pays from, that channel's `chain_id`/`token_network` (its EIP-712 domain, the
+same two facts its `[[peer_channels]]` row carries, because both roles sign against the very same
+on-chain channel), and `client_edge_url`: that hop's own `POST /ilp` endpoint, asked over
+`POST /ilp/claim-state` (#693) for where this node's claims stand, on every covered packet. The
+signing key is `[settlement.evm]`'s and no second key exists (ADR 0030). The table is additive: a
+peering with no row is the "no such config" case above, byte for byte.
+
 #### Peer role is not a prerequisite for paid carriage
 
 Stated here because #863 was originally filed while standing up an `apex-relay` peering, and implied

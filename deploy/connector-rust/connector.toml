@@ -219,3 +219,41 @@ write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STE
 # peer_id = "store"
 # fee = 3
 # price = 1000
+#
+# # The channel this node PAYS that peer from, as an ordinary client of it
+# # (ADR 0042, "a connector covers every PREPARE it sends"; issue #881).
+# # Write this and every packet forwarded to `peer_id` carries a covering
+# # claim, signed before the packet is sent, worth exactly what the packet
+# # forwards. Omit it -- as every config on this fleet does today -- and
+# # nothing about that peering changes: it keeps riding the peer ledger's
+# # postpay claim (ADR 0004), which is why this table is safe to add one
+# # peering at a time.
+# #
+# # Three tables name channels and they are not interchangeable:
+# #   [[peer_channels]]   -- the channel a peering's claims are JUDGED against
+# #   [[client_channels]] -- a channel this node RECEIVES claims on
+# #   [[pay_channels]]    -- a channel this node PAYS from
+# # A channel here may NOT also appear in [[client_channels]] (it would be
+# # received on and paid from at once); it MAY be the same channel as this
+# # peering's own [[peer_channels]] row, which is the ordinary shape -- one
+# # on-chain channel, one role in each direction.
+# #
+# # client_edge_url is that peer's own `POST /ilp` endpoint: where this node
+# # arrives as a buyer, and where `POST /ilp/claim-state` says where its
+# # claims on the channel stand. The RECEIVER is the authority on its own
+# # watermark, so it is asked on every packet and never guessed or
+# # remembered. It is NOT derived from the peering's `endpoint` -- a `wss://`
+# # peer endpoint is not an HTTP client edge, and guessing one from the other
+# # is the class of mistake ADR 0030 refuses. `https://` only, unless
+# # peer_allow_plaintext_endpoints is set for a loopback test.
+# #
+# # chain_id/token_network are the channel's EIP-712 domain -- the same two
+# # facts its [[peer_channels]] row carries, because both roles sign against
+# # the very same on-chain channel. The signing key is [settlement.evm]'s;
+# # there is no second key and none is invented (ADR 0030).
+# [[pay_channels]]
+# peer_id = "store"
+# channel_id = "0x0000000000000000000000000000000000000000000000000000000000000000"
+# chain_id = 31337
+# token_network = "0x0000000000000000000000000000000000000000"
+# client_edge_url = "https://store.example/ilp"

@@ -47,7 +47,7 @@ pub use operator_view::{
 // differences and for why the two must never merge.
 pub use outbound_client::{
     ClaimStateSource, ClaimWatermark, EvmDomain, HttpClaimState, OutboundClaim,
-    OutboundClientError, OutboundClientLedger,
+    OutboundClientError, OutboundClientLedger, OwnedHttpClaimState,
 };
 pub use peer_route_store::{PeerRouteStore, PeerRouteStoreError};
 pub use peer_transport::{InProcessPeerTransport, PeerForward, PeerTransport};

@@ -22,6 +22,7 @@ mod config;
 mod error;
 mod identity;
 mod operator;
+mod pay_channel;
 mod peer;
 mod peer_channel;
 mod route;
@@ -34,6 +35,7 @@ pub use config::Config;
 pub use error::ConfigError;
 pub use identity::ClientIdentityConfig;
 pub use operator::OperatorConfig;
+pub use pay_channel::PayChannelConfig;
 pub use peer::{
     ClaimEnforcement, PeerCarriage, PeerConfig, PeerCredential, PeerExposure,
     DEFAULT_MAX_PACKET_AMOUNT,
