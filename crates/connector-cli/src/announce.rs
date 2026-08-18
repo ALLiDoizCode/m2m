@@ -525,16 +525,6 @@ pub struct IlpPeerInfo {
     ///     needed it.
     #[serde(rename = "requiredTransport", skip_serializing_if = "Option::is_none")]
     pub required_transport: Option<String>,
-    /// How long a peer-sale purchase leases peering for (issue #886),
-    /// present exactly when `[peer_sale]` is configured -- the lease is
-    /// part of what a purchase buys, so it is visible to a buyer before
-    /// paying, the same way `route_prices` already makes the price
-    /// visible.
-    #[serde(
-        rename = "peerSaleLeaseSeconds",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub peer_sale_lease_seconds: Option<u64>,
     #[serde(rename = "edgeIdentity", skip_serializing_if = "Option::is_none")]
     pub edge_identity: Option<EdgeIdentity>,
     pub routes: RouteHints,
@@ -648,31 +638,13 @@ pub fn build_announcement(config: &Config, runtime: &Runtime) -> IlpPeerInfo {
     // a client that reads one from the announce and discovers the other by
     // being refused has paid to learn it.
     //
-    // Only the addresses this announce COVERS are consulted. A peer-sale
-    // prefix is deliberately not, even though its price is folded in above:
-    // it reports `TransportPolicy::Both` by construction (see
-    // `Connector::client_route`), so including it would break the agreement
-    // below and silently drop the field from an announce that both
-    // terminates a BTP-only route and sells peering -- and it cannot need
-    // the field anyway, since a prefix absent from `addresses` never wins a
-    // terminator claim on the reading side.
+    // Only the addresses this announce COVERS are consulted.
     let required_transport = announced_required_transport(announce.addresses(), |address| {
         runtime
             .connector
             .client_route(address)
             .map(|route| route.transport_policy)
     });
-    // Issue #885: a node selling peering advertises its price here
-    // unconditionally, whether or not an operator also remembered to list
-    // the peer-sale prefix in `[announce].addresses` -- the whole point of
-    // pricing the mutation is that a buyer discovers it without asking a
-    // human, so it cannot depend on a second, easy-to-forget config line.
-    if let Some(peer_sale) = config.peer_sale() {
-        if let Some(price) = runtime.connector.client_route_price(peer_sale.prefix()) {
-            route_prices.insert(peer_sale.prefix().to_string(), price.to_string());
-        }
-    }
-
     let edge_identity = runtime
         .signer
         .public_key()
@@ -698,7 +670,6 @@ pub fn build_announcement(config: &Config, runtime: &Runtime) -> IlpPeerInfo {
         preferred_tokens,
         route_prices,
         required_transport,
-        peer_sale_lease_seconds: config.peer_sale().map(|sale| sale.lease_seconds()),
         edge_identity,
         routes: RouteHints {
             publish: announce.route_publish().to_string(),
@@ -1949,7 +1920,6 @@ btp_endpoint = "wss://proxy.ario.example/ilp/btp"
             preferred_tokens: BTreeMap::new(),
             route_prices: BTreeMap::new(),
             required_transport: None,
-            peer_sale_lease_seconds: None,
             edge_identity: None,
             routes: RouteHints {
                 publish: "g.toon.ario".to_string(),

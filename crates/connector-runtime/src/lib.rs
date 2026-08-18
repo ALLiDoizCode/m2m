@@ -51,4 +51,4 @@ pub use outbound_client::{
 };
 pub use peer_route_store::{PeerRouteStore, PeerRouteStoreError};
 pub use peer_transport::{InProcessPeerTransport, PeerForward, PeerTransport};
-pub use route::{LeasedRoute, PeerRoute, PeerSaleBounds};
+pub use route::{LeasedRoute, PeerRoute};

@@ -13,7 +13,6 @@ use crate::identity::{resolve_client_identities, ClientIdentityConfig, RawClient
 use crate::operator::{resolve_operator, OperatorConfig, RawOperatorConfig};
 use crate::peer::{parse_peer_exposure, resolve_peers, PeerConfig, PeerExposure, RawPeer};
 use crate::peer_channel::{resolve_peer_channels, PeerChannelConfig, RawPeerChannel};
-use crate::peer_sale::{resolve_peer_sale, PeerSaleConfig, RawPeerSale};
 use crate::route::{resolve_routes, PeerRouteConfig, RawChild, RawRoute, StaticRoute};
 use crate::secret::{RawSignerConfig, SecretLocation};
 use crate::settlement::{resolve_settlement, RawSettlementSection, SettlementConfig};
@@ -99,13 +98,18 @@ struct RawConfig {
     /// can never take the peer role at all.
     #[serde(default)]
     peer_channels: Vec<RawPeerChannel>,
-    /// The single priced route that, when paid, buys peering with this
-    /// node (issue #885, part of #867 "sell peering"): inserts the payer
-    /// into the runtime peer/route table (issue #884) instead of an
-    /// out-of-band `{peerId, secret}` exchange. Absent means this node
-    /// sells no peering, exactly as before this section existed.
+    /// Removed with purchasable peering (ADR 0043): a peering cannot be
+    /// bought, so there is no priced route that sells one and no
+    /// `prefix`/`price`/`lease_seconds`/`max_purchased_rows`/
+    /// `max_routes_per_payer`/`max_prefix_length`/`purchase_rate_limit`/
+    /// `purchase_rate_window_seconds` for it to carry. Still parsed, and
+    /// only so that a stale config naming the section fails at boot with
+    /// [`ConfigError::PeerSaleRemoved`] rather than tripping the generic
+    /// `deny_unknown_fields` message -- the same treatment
+    /// `peer_wire_addr` above already gets, for the same reason: the
+    /// devnet boxes run bind-mounted configs that lead the repo copies.
     #[serde(default)]
-    peer_sale: Option<RawPeerSale>,
+    peer_sale: Option<toml::Value>,
     /// One or more real settlement backends to construct at startup (issue
     /// #542; per-chain tables, issue #628). Absent means channel operations
     /// keep degrading to `ChannelOperationError::NoSettlementBackend`, same
@@ -248,7 +252,6 @@ pub struct Config {
     peer_expose: PeerExposure,
     peer_allow_plaintext_endpoints: bool,
     peer_channels: Vec<PeerChannelConfig>,
-    peer_sale: Option<PeerSaleConfig>,
     operator: Option<OperatorConfig>,
     announce: Option<AnnounceConfig>,
     settlements: Vec<SettlementConfig>,
@@ -344,24 +347,8 @@ impl Config {
                 });
             }
         }
-        let peer_sale = resolve_peer_sale(raw.peer_sale)?;
-        // Prefixes share one namespace (`resolve_routes`'s own
-        // `DuplicatePrefix` rule, extended to the peer-sale route -- issue
-        // #885): a purchase address that silently doubled as an app or
-        // peer-forwarding route would resolve to whichever one this
-        // connector happened to match first, and a config-file row always
-        // wins over a runtime purchase (ADR 0034), so the ambiguity is
-        // refused here rather than left to that precedence rule to hide.
-        if let Some(sale) = &peer_sale {
-            let collides = routes.iter().any(|route| route.prefix() == sale.prefix())
-                || peer_routes
-                    .iter()
-                    .any(|route| route.prefix() == sale.prefix());
-            if collides {
-                return Err(ConfigError::PeerSalePrefixCollision {
-                    prefix: sale.prefix().to_string(),
-                });
-            }
+        if raw.peer_sale.is_some() {
+            return Err(ConfigError::PeerSaleRemoved);
         }
         if raw.peer_wire_addr.is_some() {
             return Err(ConfigError::PeerWireAddrRemoved);
@@ -560,7 +547,6 @@ impl Config {
             peer_expose,
             peer_allow_plaintext_endpoints,
             peer_channels,
-            peer_sale,
             operator,
             announce,
             settlements,
@@ -706,12 +692,6 @@ impl Config {
     /// construction (`peer-carriage-spec.md` §1.8).
     pub fn peer_channels(&self) -> &[PeerChannelConfig] {
         &self.peer_channels
-    }
-
-    /// The single priced route that buys peering with this node (issue
-    /// #885), or `None` on a node that sells no peering.
-    pub fn peer_sale(&self) -> Option<&PeerSaleConfig> {
-        self.peer_sale.as_ref()
     }
 
     /// The channels bound to one peering relation. Never empty for a
@@ -1818,11 +1798,14 @@ price = 1000
         assert!(matches!(result, Err(ConfigError::UnknownPeerId { .. })));
     }
 
-    /// Issue #885: `[peer_sale]` is a singleton table, and a node that
-    /// writes one reaches the runtime with both halves of the offer.
+    /// ADR 0043: purchasable peering is removed, so a config still naming
+    /// `[peer_sale]` must stop the node by name rather than be silently
+    /// dropped -- the same treatment `peer_wire_addr` below already gets,
+    /// for the same reason (the devnet boxes run bind-mounted configs that
+    /// lead the repo copies).
     #[test]
-    fn loads_a_peer_sale_section() {
-        let config = with_key_file(|key_path| {
+    fn rejects_a_config_that_still_sets_peer_sale() {
+        let result = with_key_file(|key_path| {
             format!(
                 r#"
 client_edge_addr = "127.0.0.1:3000"
@@ -1837,20 +1820,25 @@ lease_seconds = 3600
 "#,
                 key_path.display()
             )
-        })
-        .expect("load");
+        });
 
-        let sale = config.peer_sale().expect("the section is present");
-        assert_eq!(sale.prefix(), "g.example.node.peer-sale");
-        assert_eq!(sale.price(), 5000);
-        assert_eq!(sale.lease_seconds(), 3600);
+        let Err(error) = result else {
+            panic!("expected a config error");
+        };
+        assert!(matches!(error, ConfigError::PeerSaleRemoved));
+        let message = error.to_string();
+        assert!(
+            message.contains("peer_sale"),
+            "the error must name the section an operator has to delete: {message}"
+        );
     }
 
-    /// Issue #887: `[peer_sale]`'s abuse-bound fields load from TOML end to
-    /// end, alongside the price and lease #885 already wrote.
+    /// The abuse-bound half of the same section (ADR 0039's own fields) is
+    /// refused by the very same trap: the whole table is gone, not just
+    /// its price.
     #[test]
-    fn loads_a_peer_sale_section_with_abuse_bounds() {
-        let config = with_key_file(|key_path| {
+    fn rejects_a_config_that_still_sets_peer_sale_abuse_bounds() {
+        let result = with_key_file(|key_path| {
             format!(
                 r#"
 client_edge_addr = "127.0.0.1:3000"
@@ -1870,66 +1858,9 @@ purchase_rate_window_seconds = 30
 "#,
                 key_path.display()
             )
-        })
-        .expect("load");
-
-        let sale = config.peer_sale().expect("the section is present");
-        assert_eq!(sale.max_purchased_rows(), 8);
-        assert_eq!(sale.max_routes_per_payer(), 2);
-        assert_eq!(sale.max_prefix_length(), 64);
-        assert_eq!(sale.purchase_rate_limit(), 3);
-        assert_eq!(sale.purchase_rate_window_seconds(), 30);
-    }
-
-    #[test]
-    fn a_config_with_no_peer_sale_section_sells_no_peering() {
-        let config = with_key_file(|key_path| {
-            format!(
-                r#"
-client_edge_addr = "127.0.0.1:3000"
-
-[signer]
-key_file = "{}"
-"#,
-                key_path.display()
-            )
-        })
-        .expect("load");
-
-        assert!(config.peer_sale().is_none());
-    }
-
-    /// Prefixes share one namespace (issue #885): a peer-sale prefix that
-    /// silently doubled as an app route would resolve to whichever entry
-    /// matched first, so the ambiguity is refused at load.
-    #[test]
-    fn rejects_a_peer_sale_prefix_that_collides_with_an_app_route() {
-        let result = with_key_file(|key_path| {
-            format!(
-                r#"
-client_edge_addr = "127.0.0.1:3000"
-
-[signer]
-key_file = "{}"
-
-[[routes]]
-prefix = "g.example.node.peer-sale"
-handler_url = "http://localhost:4000"
-price = 10
-
-[peer_sale]
-prefix = "g.example.node.peer-sale"
-price = 5000
-lease_seconds = 3600
-"#,
-                key_path.display()
-            )
         });
 
-        assert!(matches!(
-            result,
-            Err(ConfigError::PeerSalePrefixCollision { .. })
-        ));
+        assert!(matches!(result, Err(ConfigError::PeerSaleRemoved)));
     }
 
     /// ADR 0027 / issue #679: the raw-TCP transport is deleted, so a

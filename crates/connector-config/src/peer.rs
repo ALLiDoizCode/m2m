@@ -19,13 +19,11 @@ const DEFAULT_PEER_TIMEOUT_MS: u64 = 30_000;
 ///
 /// A default exists at all because ADR 0042 requires one: the cap is the
 /// most a single theft by a next hop can take, and an operator who never
-/// writes the field must still be bounded -- the same convention ADR 0039's
-/// purchase bounds take in this crate's `peer_sale` module. Public for the
-/// same reason that module's `DEFAULT_MAX_PURCHASED_ROWS` is: the runtime reads
-/// this number rather than restating it, so a peer with no row of its own
-/// (one added at runtime over the operator surface, issue #884) is bounded
-/// by exactly the same figure a config-file peer that left the field
-/// unwritten is.
+/// writes the field must still be bounded. Public so the runtime reads this
+/// number rather than restating it, so a peer with no row of its own (one
+/// added at runtime over the operator surface, issue #884) is bounded by
+/// exactly the same figure a config-file peer that left the field unwritten
+/// is.
 ///
 /// # Why 1 000 000, and what was inspected to pick it
 ///

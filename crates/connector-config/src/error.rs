@@ -742,21 +742,23 @@ pub enum ConfigError {
     )]
     AnnounceNoticeInvalidSeverity { value: String },
 
+    /// The removed-section trap for purchasable peering (ADR 0043), the
+    /// same shape [`ConfigError::PeerWireAddrRemoved`] and
+    /// [`ConfigError::PeerCeilingRemoved`] already take: the section is
+    /// still parsed so a stale config naming it stops the node by name
+    /// rather than being silently dropped by `deny_unknown_fields`.
+    ///
+    /// One variant covers the whole table -- `prefix`, `price`,
+    /// `lease_seconds` and every abuse bound -- because there is no
+    /// surviving `[peer_sale]` for any of them to be written into: the
+    /// fix is always to delete the section, never to correct a field.
     #[error(
-        "[peer_sale] prefix '{prefix}' sets no 'price': the peer-sale route is never silently \
-         free either (ADR 0028/issue #557) -- set 'price = 0' if that is deliberate (issue #885)"
+        "'[peer_sale]' was removed with purchasable peering (ADR 0043) -- a peering cannot be \
+         bought at all, so 'prefix', 'price', 'lease_seconds', 'max_purchased_rows', \
+         'max_routes_per_payer', 'max_prefix_length', 'purchase_rate_limit' and \
+         'purchase_rate_window_seconds' have nothing left to configure. Delete the whole \
+         section; an operator still adds a peer and its route directly, over the operator \
+         surface (POST /peers, POST /routes/peers) or in the config file"
     )]
-    PeerSaleMissingPrice { prefix: String },
-
-    #[error(
-        "[peer_sale] prefix '{prefix}' collides with a route, peer route or child already \
-         naming that prefix (issue #885) -- prefixes share one namespace"
-    )]
-    PeerSalePrefixCollision { prefix: String },
-
-    #[error(
-        "[peer_sale] prefix '{prefix}' sets no 'lease_seconds': a purchased peering is a lease, \
-         never a permanent grant (issue #886) -- name how long a purchase buys"
-    )]
-    PeerSaleMissingLease { prefix: String },
+    PeerSaleRemoved,
 }
