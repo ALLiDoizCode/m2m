@@ -18,7 +18,7 @@
 > [`docs/protocol/client-edge-spec.md`](protocol/client-edge-spec.md) §1.8 and
 > [`vectors/README.md`](../vectors/README.md).
 >
-> Kept because the peer-wire spec's §3.1 "legacy class" and several ADRs cite it as the record of
+> Kept because the peer semantics spec's §3.1 "legacy class" and several ADRs cite it as the record of
 > what the prototype promised.
 >
 > For the _other_ frozen seam the same embedder depends on — the peer relation, and the `child`

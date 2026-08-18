@@ -158,7 +158,7 @@ pub struct ClaimVectors {
 }
 
 /// A signed EIP-712 `BalanceProof` (ADR 0024, issue #575): the same struct
-/// and digest both a peer-wire claim (`ClaimBook::accept_inbound`) and a
+/// and digest both a peer claim (`ClaimBook::accept_inbound`) and a
 /// client-edge claim (`client-edge-spec.md` §1.3 step 4) are checked
 /// against -- `connector_signer::claim_signature` has exactly one such
 /// scheme, shared by both wires, so one vector section covers both.
@@ -881,7 +881,7 @@ fn generate_peer_claim_evm_case(fixture: &ClaimFixture) -> PeerClaimCase {
     }
 }
 
-/// §10.2 item 4: marked **aspirational**, exactly as `peer-wire-spec.md`
+/// §10.2 item 4: marked **aspirational**, exactly as `peer-semantics-spec.md`
 /// §3.5 marks the Solana claim row -- pinning the shape before an emitting
 /// implementation exists on this connector (outbound peer claims are
 /// EVM-only, `claim_json::encode`'s own doc). What *does* exist and is

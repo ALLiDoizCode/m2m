@@ -145,8 +145,8 @@ fulfilment relationship.
 
 ### `claim`
 
-A signed EIP-712 `BalanceProof` (ADR 0024) -- the digest and signature scheme both a peer-wire
-claim (`docs/protocol/peer-wire-spec.md` §3.5) and a client-edge claim (`client-edge-spec.md` §1.3
+A signed EIP-712 `BalanceProof` (ADR 0024) -- the digest and signature scheme both a peer-role
+claim (`docs/protocol/peer-semantics-spec.md` §3.5) and a client-edge claim (`client-edge-spec.md` §1.3
 step 4) are checked against. This is the scheme that replaced a SHA-256 tuple nothing on chain ever
 verified; a client that still signs the old tuple has nothing else in this repository that would
 tell it.
@@ -213,7 +213,7 @@ wire_nonce, wire_cumulative_amount, wire_signature_hex }`: an EVM peer claim, th
   repeated here rather than recomputed, demonstrating ADR 0024's EIP-712 digest is untouched by
   carriage.
 - **`claim_solana`** (item 4) -- shaped like `claim_evm`, over a Solana claim. **Aspirational**
-  (`peer-wire-spec.md` §3.5): this connector's outbound peer claims are EVM-only, so nothing today
+  (`peer-semantics-spec.md` §3.5): this connector's outbound peer claims are EVM-only, so nothing today
   emits this shape, but `claim_json::parse` already accepts it inbound (issue #732) and this vector
   pins that shape before an emitter exists.
 - **`prepare`** / **`prepare_no_claim`** (items 5, 6) -- `{ name, prepare, claim_json,

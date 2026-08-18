@@ -47,7 +47,7 @@ pub(crate) fn sign_digest(secret: &SecretKey, digest: &[u8; 32]) -> Signature {
 }
 
 /// Whether `signature` over `digest` recovers to exactly `public_key` --
-/// the check a claim's payee runs before accepting it (peer-wire-spec.md
+/// the check a claim's payee runs before accepting it (peer-semantics-spec.md
 /// §3.4's `signature_invalid` rejection reason). Malformed signature bytes
 /// (out of curve range, an invalid recovery id) are a verification
 /// failure, not an error a caller needs to distinguish from any other

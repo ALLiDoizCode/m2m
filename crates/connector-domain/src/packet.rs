@@ -189,7 +189,7 @@ impl RejectCode {
 
     /// R01: Insufficient Source Amount -- this hop cannot meet the
     /// packet's declared minimum delivery once its own flat fee is taken
-    /// (ADR 0010, peer-wire-spec.md §4-5.1).
+    /// (ADR 0010, peer-semantics-spec.md §4-5.1).
     pub fn r01_insufficient_source_amount() -> RejectCode {
         RejectCode("R01".to_string())
     }
@@ -216,7 +216,7 @@ impl RejectCode {
     }
 
     /// T04: Insufficient Liquidity (RFC-0027). Used until issue #424
-    /// (peer-wire-spec.md §5.1/§5.3) for this connector's own exposure
+    /// (peer-semantics-spec.md §5.1/§5.3) for this connector's own exposure
     /// ceiling; that machinery is retired (ADR 0031, ADR 0033, issue #882)
     /// and nothing in this codebase emits `T04` any more. Kept for wire
     /// interop -- a standard ILPv4 code a counterparty may still send.
@@ -255,7 +255,7 @@ impl RejectCode {
 /// `accumulated_cost` is the running total of what this packet's path has
 /// charged so far: the fees of every hop it actually passed through, plus
 /// the price of the route that terminates it, if it has reached one (ADR
-/// 0011, issue #523, `peer-wire-spec.md` §5.2) -- `0` when this connector
+/// 0011, issue #523, `peer-semantics-spec.md` §5.2) -- `0` when this connector
 /// originated the reject itself before forwarding or terminating the
 /// packet, since neither a fee nor a price applies to a hop the packet
 /// never used. It is a single sum -- never a per-hop breakdown, and never
@@ -456,7 +456,7 @@ mod tests {
         assert_eq!(Reject::decode(&encoded).expect("decode"), reject);
     }
 
-    /// ADR 0011 / peer-wire-spec.md §5.2: `accumulated_cost` rides beside the
+    /// ADR 0011 / peer-semantics-spec.md §5.2: `accumulated_cost` rides beside the
     /// packet (frame level / response header), never inside RFC-0027's own
     /// REJECT encoding -- so a nonzero value never survives an encode/decode
     /// round trip through this struct's wire format alone.

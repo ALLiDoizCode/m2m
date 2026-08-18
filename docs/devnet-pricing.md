@@ -71,7 +71,7 @@ description of anything currently live.
 The apex charged its own client `1002` for `g.toon.ario`, kept a `fee` of `2`, and forwarded the
 remaining `1000` to the store's own terminating route — ADR 0028's arithmetic (`amount == price` at
 each hop) made a short forward an F03 rather than a silent subsidy once #754 made a terminating
-connector charge its price on a peer-wire arrival, so `1002`/`2` was the only pair that both paid the
+connector charge its price on a peer-role arrival, so `1002`/`2` was the only pair that both paid the
 store its `1000` and matched that rule.
 
 For `g.toon.relay` the apex charged `1` and kept a `fee` of `0` (owner decision, 2026-08-06): the

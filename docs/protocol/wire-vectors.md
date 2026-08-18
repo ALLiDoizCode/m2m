@@ -13,10 +13,10 @@ This covers the **client edge** termination wire (issue #498): the structured en
 (`connector_domain::envelope`), the gift wrap sealing it (`connector_signer::giftwrap`), the
 fulfilment a terminating connector derives from it (ADR 0019), and the EIP-712 `BalanceProof`
 claim-signing scheme (`connector_signer::claim_signature`, ADR 0024). The claim scheme is included
-even though it is also what the **peer wire**'s claim exchange uses (`docs/protocol/
-peer-wire-spec.md` §3.5) — `connector_signer::claim_signature` is one implementation shared by
+even though it is also what the **peer semantics**'s claim exchange uses (`docs/protocol/
+peer-semantics-spec.md` §3.5) — `connector_signer::claim_signature` is one implementation shared by
 both wires, not two, and a client-edge claim (`client-edge-spec.md` §1.3 step 4) is checked against
-exactly the same digest. Nothing else about the peer wire is in scope here: it is
+exactly the same digest. Nothing else about the peer semantics is in scope here: it is
 operator-to-operator on both ends (ADR 0003), already normative prose for a different reason, and
 the rest of it is out of this issue's scope.
 
@@ -84,7 +84,7 @@ of band.
 fields, and `verify_evm_balance_proof` accepts a signature over that digest only from the address
 that actually produced it — changing any one field (`channel_id`, `nonce`, `transferred_amount`,
 `chain_id`, or `token_network_address`) invalidates a prior signature rather than being silently
-tolerated. This is the scheme both the peer wire (`ClaimBook::accept_inbound`) and the client edge
+tolerated. This is the scheme both the peer semantics (`ClaimBook::accept_inbound`) and the client edge
 (`client-edge-spec.md` §1.3 step 4) check a claim's signature against, replacing a SHA-256 tuple
 (`connector_domain::claim_digest`, removed by #575/#583) that no chain ever verified.
 

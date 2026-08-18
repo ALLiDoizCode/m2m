@@ -20,7 +20,7 @@
 //! A **`Terminated`** route's own `price`, exactly like the pre-existing
 //! `F03` amount check `Connector::handle_peer_prepare` still runs after it
 //! (ADR 0029). A `Forwarded` route is priced by the peering's own bilateral
-//! fee (`peer-wire-spec.md` §4), which is a configured agreement rather
+//! fee (`peer-semantics-spec.md` §4), which is a configured agreement rather
 //! than something a greeting quotes, and a route deliberately priced at `0`
 //! (ADR 0020) is free on the peer path exactly as it is on the client edge.
 

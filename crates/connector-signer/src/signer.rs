@@ -16,7 +16,7 @@ pub struct Signature {
 impl Signature {
     /// `r || s || recovery_id`, 65 bytes -- the one encoding this crate's
     /// callers use whenever a signature needs to travel as opaque bytes
-    /// (the peer wire's `WireClaim`, and a claim journaled for later
+    /// (the peer semantics's `WireClaim`, and a claim journaled for later
     /// on-chain redemption, issue #425). `recovery_id` here is always
     /// libsecp256k1's raw `{0, 1}`, never the Ethereum-wallet `{27, 28}`
     /// convention (issue #590) -- `EvmSettlementBackend::redeem` is the
@@ -87,7 +87,7 @@ pub trait Signer: Send + Sync {
 /// `public_key` -- the counterpart to [`Signer::sign`] that needs no
 /// `Signer` at all, since checking a signature takes only the public key a
 /// verifier already holds (a peer's claim-verification key, per
-/// `docs/protocol/peer-wire-spec.md` §1.1). Never returns an error: a
+/// `docs/protocol/peer-semantics-spec.md` §1.1). Never returns an error: a
 /// malformed public key or signature simply fails to verify, exactly like
 /// one that verifies against the wrong digest.
 pub fn verify(public_key: &PublicKeyBytes, digest: &[u8; 32], signature: &Signature) -> bool {

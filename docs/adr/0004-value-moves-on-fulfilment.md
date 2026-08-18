@@ -2,6 +2,14 @@
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
+> **The headline is superseded by [ADR 0042](0042-a-packet-carries-its-claim.md).** "Value moves on
+> fulfilment and only on fulfilment" conflated two questions — _when is value owed_ and _what proves
+> delivery_ — and answered both with the fulfilment. ADR 0042 keeps only the second: a packet
+> carries its own claim, and a fulfilment is a delivery receipt. **What survives here is unchanged
+> and still binding: one claim per packet, never batched, and `lockedAmount`/`locksRoot` stay
+> dead.** The argument below against prepay is not retracted — ADR 0042 accepts it and bounds it
+> with a per-peer packet cap rather than answering it.
+
 A packet's value is owed only when the packet fulfils. The claim covering it follows the
 fulfilment rather than riding the outgoing PREPARE, which reverses the existing prepay model
 in which the payer paid for the forward _attempt_. Claims remain one per packet: they are not

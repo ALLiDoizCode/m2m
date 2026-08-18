@@ -3,19 +3,21 @@
 > **Superseded 2026-08-07 through 2026-08-10 by issue #868's children (ADR 0031, ADR 0033, issues
 > #880/#881/#882).** This document describes the pre-#868 **credit window**: a peer PREPARE forwarded
 > claimless, its claim riding the next packet or a FLUSH, bounded by a per-channel exposure ceiling.
-> That model is retired, not built on. Current behaviour: every peer PREPARE carries its own covering
-> claim or is refused with the x402 greeting (ADR 0031); there is no exposure, no ceiling, and no
-> `flush_interval_ms` (ADR 0033). This document's own "Decided, not yet built (#868)" section below,
-> written when the decision was new, is now history rather than a preview — everything it lists has
-> landed. Kept for the reasoning behind the _old_ model (why pay-in-arrears existed, why a claim used
-> to trail its fulfilment); do not read anything below as current runtime behaviour without checking
-> it against `docs/adr/0031-*.md`, `docs/adr/0033-*.md` and `docs/protocol/peer-carriage-spec.md`
-> first.
+> That model is retired as a _decision_, and [ADR 0042](../adr/0042-a-packet-carries-its-claim.md)
+> now states the rule that replaces it: a packet carries its claim. **Corrected 2026-08-17:** an
+> earlier version of this banner said "current behaviour: every peer PREPARE carries its own
+> covering claim… everything it lists has landed." Neither was true. Issue #881's send-side covering
+> was never wired to config, and the price gate requires a covering claim only at a _priced
+> termination_ — so for **forwarding**, the trailing-claim model described below is still what the
+> binary does. Read ADR 0042's "What must be true for this record to be true" for the gap. There is
+> no exposure tracking and no `flush_interval_ms` (ADR 0033); those really are gone. Kept for the
+> reasoning behind the old model (why pay-in-arrears existed, why a claim used to trail its
+> fulfilment) — and, until #881 lands, for the shape of what forwarding still does.
 
 How value actually moved across a forwarded packet, end to end, **under the pre-#868 credit
 window**: which claim was signed, by whom, on which channel, and at which instant. Written for
 issue #865, because the pieces existed in seven
-places — `peer-carriage-spec.md`, `peer-wire-spec.md`, ADR 0004, ADR 0028, `devnet-pricing.md`,
+places — `peer-carriage-spec.md`, `peer-semantics-spec.md`, ADR 0004, ADR 0028, `devnet-pricing.md`,
 `CONTEXT.md`, `README.md` — and nothing joined them, and the repo had no diagram at all.
 
 Every claim below is cited to a line this document's author opened and read on 2026-08-07, against
@@ -174,7 +176,7 @@ balance-proof message for a Solana one, `claim.rs:924-938`), arms the result as 
 a second fulfilment before the first claim went out simply supersedes it with a fresher nonce and a
 higher cumulative amount (`claim.rs:859-862`).
 
-## Stage 3 — arrival on the peer wire
+## Stage 3 — arrival on the peer semantics
 
 `Connector::handle_peer_prepare` (`connector.rs:667-673`) takes:
 
@@ -199,7 +201,7 @@ Two gates then run, in this order:
   (`connector.rs:678-689`).
 - **`F03_INVALID_AMOUNT`** if the destination resolves to one of this connector's own priced
   _terminated_ routes and `prepare.amount < route.price` (`connector.rs:691-708`). The lookup is the
-  same `client_route` the client edge prices with, so a peer-wire arrival and a client arrival are
+  same `client_route` the client edge prices with, so a peer-role arrival and a client arrival are
   charged the same number. A route priced at `0` never trips it.
 
 On a fulfilment, the receiving side records what it just delivered on the sender's behalf:
@@ -395,7 +397,7 @@ What that changed, relative to this document:
   uncovered packet is admitted regardless.
 - **ADR 0004 inverts for the peer path.** "The claim covering it follows the fulfilment rather than
   riding the outgoing PREPARE" (`docs/adr/0004-value-moves-on-fulfilment.md:4`, restated at
-  `docs/protocol/peer-wire-spec.md:86`) stops being true peer-side; value and its covering claim
+  `docs/protocol/peer-semantics-spec.md:86`) stops being true peer-side; value and its covering claim
   would travel together.
 - **`peer-carriage-spec.md` §1.5 inverts.** "A connector MUST determine role before it decodes a
   claim" (`docs/protocol/peer-carriage-spec.md:145-148`) is an ordering that exists precisely
@@ -424,7 +426,7 @@ This document is the joining piece; these remain authoritative for their own sco
 
 | Topic                                          | Document                                                          |
 | ---------------------------------------------- | ----------------------------------------------------------------- |
-| Claim frames, ack, flush, exposure on the wire | `docs/protocol/peer-wire-spec.md` §3.2–3.4, §5.2–5.4              |
+| Claim frames, ack, flush, exposure on the wire | `docs/protocol/peer-semantics-spec.md` §3.2–3.4, §5.2–5.4         |
 | Carriage, roles, re-derivation of the claim    | `docs/protocol/peer-carriage-spec.md` §1.5, §2.5, §3.1, §11       |
 | Client edge: greeting, claim gate, cost        | `docs/protocol/client-edge-spec.md` §1.3, §1.4, §1.6              |
 | Value moves on fulfilment                      | `docs/adr/0004-value-moves-on-fulfilment.md`                      |

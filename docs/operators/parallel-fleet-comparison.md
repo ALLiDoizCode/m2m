@@ -210,10 +210,10 @@ only once §1.2–§1.5 are implemented and the fleet charges for a write.
 Not demonstrated end-to-end: doing so means publishing a permanent event, so the last link is
 read out of the relay's handler rather than executed.
 
-It also settled how the peer wire had to be protected. A ufw rule would not have contained it —
+It also settled how the raw-TCP peer listener had to be protected. A ufw rule would not have contained it —
 only refusing to publish it on the public interface does, which is why
 `docker-compose.store.rust.yml` used to bind 4001 to `${STORE_PEER_WIRE_BIND}` rather than
-adding a firewall rule. **Superseded (ADR 0027, issue #679):** the raw-TCP peer wire is deleted,
+adding a firewall rule. **Superseded (ADR 0027, issue #679):** the raw-TCP transport is deleted,
 that publish and that variable are gone, and peers ride TLS carriages behind the existing nginx
 front. The general finding — a Docker `ports:` publish is internet-reachable regardless of ufw —
 is unaffected and is why the client edge's own publish is still loopback-only.
@@ -237,7 +237,7 @@ Not reached, and still open:
 
 ## Decisions taken here
 
-- **The peer wire is never published on the public interface.** See above, and
+- **The raw-TCP peer listener is never published on the public interface.** See above, and
   `docker-compose.store.rust.yml`'s header. Overtaken by ADR 0027 / issue #679: there is no
   raw-TCP peer listener to publish at all any more.
 - **The overlays stay a manual `up`.** #490 left open whether they should join `bootstrap.sh`'s

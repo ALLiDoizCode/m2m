@@ -567,7 +567,7 @@ fn counterparty_address(counterparty: &[u8]) -> Result<Address, SettlementError>
 /// (`keccak256(participant1, participant2, channelCounter)`,
 /// `TokenNetwork.sol:199`), formatted as `0x`-prefixed, zero-padded lowercase
 /// hex -- the same shape `connector_runtime::claim::parse_channel_id`
-/// already accepts for a peer-wire channel id (issue #575's AC4), so an id
+/// already accepts for a peer channel id (issue #575's AC4), so an id
 /// this backend hands back is usable there unchanged.
 fn format_channel_id(id: [u8; 32]) -> ChannelId {
     let mut hex = String::with_capacity(2 + 64);
@@ -602,7 +602,7 @@ fn backend_error<E: std::fmt::Display>(error: E) -> SettlementError {
 
 /// Put a claim's `r || s || v` signature's trailing recovery-id byte into
 /// the `{27, 28}` range `TokenNetwork.claimFromChannel`'s `ECDSA.recover`
-/// requires (issue #590). The peer wire (and every other producer of a
+/// requires (issue #590). The peer semantics (and every other producer of a
 /// [`Claim`]) carries whatever libsecp256k1 itself emits -- `{0, 1}` -- so
 /// this is the one place that convention is bridged to the Ethereum-wallet
 /// one an on-chain verifier expects; a value already in `{27, 28}` is left

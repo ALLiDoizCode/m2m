@@ -23,7 +23,7 @@ use connector_config::{
 };
 use connector_runtime::{
     ChannelDomain, Connector, FileJournal, HttpAppClient, InMemoryJournal, Journal, JournalError,
-    PeerRoute, PeerRouteStore, PeerRouteStoreError, PeerSaleBounds, SystemClock,
+    PeerRoute, PeerRouteStore, PeerRouteStoreError, SystemClock,
 };
 use connector_settlement::{SettlementBackend, SettlementError};
 use connector_settlement_evm::{
@@ -660,7 +660,7 @@ impl ClientChannelSource for SolanaChannelSource {
 
 /// The two journal files a node keeps under its `state_dir` (issue #605).
 /// Two files rather than one because they are two different books --
-/// `ClaimBook`'s channel ids are peer-wire channels, the client edge's are
+/// `ClaimBook`'s channel ids are peer channels, the client edge's are
 /// chain-namespaced client channels -- and because each is replayed by a
 /// different owner at startup; sharing one file would mean each replaying
 /// the other's entries and each holding a second writer's file handle on
@@ -914,7 +914,7 @@ pub struct Runtime {
 /// describes. Every `peer_id`-targeted `[[routes]]` entry becomes a
 /// [`PeerRoute`] alongside the terminated
 /// [`connector_config::StaticRoute`]s -- though nothing can currently
-/// traverse one: ADR 0027 / issue #679 deleted the raw-TCP peer wire that
+/// traverse one: ADR 0027 / issue #679 deleted the raw-TCP transport that
 /// was the only [`connector_runtime::PeerTransport`] a built node held,
 /// and the carriages replacing it (BTP over `wss://`, ILP-over-HTTP over
 /// `https://`) are issue #676. Until one lands this node holds an empty
@@ -1000,29 +1000,20 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     // config file already owns. `Connector` needs every config peer id
     // to enforce that, even though it stores nothing else about a
     // config peer (see `PeerView`'s own docs).
-    .with_config_peer_ids(config.peers().iter().map(|peer| peer.id().to_string()));
-    // Issue #885: the single priced route that buys peering with this
-    // node, if this operator sells one -- an absent `[peer_sale]` leaves
-    // the connector exactly as it was before this section existed. Issue
-    // #886: the lease a purchase actually buys, alongside the price.
-    if let Some(peer_sale) = config.peer_sale() {
-        connector = connector
-            .with_peer_sale(
-                peer_sale.prefix(),
-                peer_sale.price(),
-                chrono::Duration::seconds(peer_sale.lease_seconds() as i64),
-            )
-            // Issue #887 (C4): abuse bounds, straight from `[peer_sale]`'s
-            // own fields -- defaulted at the config layer
-            // (`connector_config::peer_sale`), so this is never a guess.
-            .with_peer_sale_bounds(PeerSaleBounds::new(
-                peer_sale.max_purchased_rows(),
-                peer_sale.max_routes_per_payer(),
-                peer_sale.max_prefix_length() as usize,
-                peer_sale.purchase_rate_limit(),
-                chrono::Duration::seconds(peer_sale.purchase_rate_window_seconds() as i64),
-            ));
-    }
+    .with_config_peer_ids(config.peers().iter().map(|peer| peer.id().to_string()))
+    // ADR 0042's cap: the largest amount this node will forward to each
+    // peer in ONE packet, straight off its `[[peers]]` row. Defaulted at
+    // the config layer (`connector_config::DEFAULT_MAX_PACKET_AMOUNT`), so
+    // a row that writes nothing still arrives here bounded -- and a peer
+    // this call never names (one added at runtime over the operator
+    // surface, issue #884) is bounded by the same figure inside
+    // `Connector` itself.
+    .with_peer_packet_caps(
+        config
+            .peers()
+            .iter()
+            .map(|peer| (peer.id().to_string(), peer.max_packet_amount())),
+    );
     // `[[peer_channels]]` reaching `ClaimBook` at last (§11: "it MUST
     // actually wire `ClaimBook`'s signer, verification key and EIP-712
     // domain, with no code-only setters left on the config path"). Before
@@ -1130,7 +1121,7 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
             }
         }
     }
-    // The peer wire's own claim watermarks, made durable by the same
+    // The peer semantics's own claim watermarks, made durable by the same
     // `state_dir` the client edge's are (issue #605, and #556's
     // reconciliation row "Journal: `ClaimBook::new(None, ..)` installs the
     // in-memory journal ... watermarks reset on restart; spent nonces
@@ -1163,17 +1154,6 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
             connector.with_runtime_peer_route_store(store, runtime_peers, runtime_peer_routes);
     }
     let connector = Arc::new(connector);
-    // Issue #886: a purchased peering's lease is enforced immediately at
-    // routing time regardless of this loop (`Connector::select_configured_route`
-    // stops matching a lapsed lease's route the instant the clock passes
-    // it), but the durable row behind it is only ever removed here --
-    // otherwise it rots in `runtime-peers.json` forever, the "slow leak on
-    // a long-lived box" issue #886's own rationale names. Spawned once,
-    // never awaited on the startup path, mirroring
-    // `EvmChannelIndexSyncer::run`'s own periodic-sweep shape.
-    tokio::spawn(reap_expired_peer_leases_periodically(Arc::clone(
-        &connector,
-    )));
     Ok(Runtime {
         connector,
         signer,
@@ -1182,26 +1162,6 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
         settlement_terms,
         settlements,
     })
-}
-
-/// How often [`build`]'s spawned loop sweeps for lapsed peer-sale leases
-/// (issue #886) -- frequent enough that a durable dead row does not sit
-/// around for long, infrequent enough that it costs nothing worth naming
-/// on a box with no peer-sale purchases at all (`Connector::reap_expired_peer_leases`
-/// is a cheap no-op when nothing has lapsed).
-const PEER_LEASE_REAP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// Sweep `connector`'s durable runtime peer table for lapsed peer-sale
-/// leases every [`PEER_LEASE_REAP_INTERVAL`], forever. Never returns, so
-/// it is spawned rather than awaited; a sweep that cannot persist logs and
-/// leaves the table alone, so a failure costs a cycle rather than the
-/// loop.
-async fn reap_expired_peer_leases_periodically(connector: Arc<Connector>) {
-    let mut interval = tokio::time::interval(PEER_LEASE_REAP_INTERVAL);
-    loop {
-        interval.tick().await;
-        connector.reap_expired_peer_leases();
-    }
 }
 
 /// How often [`router`]'s spawned loop sweeps the client edge's channels
@@ -1228,8 +1188,8 @@ const CLIENT_CHANNEL_REAP_INTERVAL: std::time::Duration = std::time::Duration::f
 /// [`CLIENT_CHANNEL_REAP_INTERVAL`], forever -- the periodic wrapper around
 /// [`ClientClaimGate::reap_unresolvable_channels`], which does the actual
 /// resolution and reset and is otherwise chain- and I/O-agnostic. Never
-/// returns, so it is spawned rather than awaited, mirroring
-/// `reap_expired_peer_leases_periodically`'s own shape.
+/// returns, so it is spawned rather than awaited: a sweep that fails costs
+/// a cycle rather than the loop.
 async fn reap_unresolvable_client_channels_periodically(gate: Arc<ClientClaimGate>) {
     let mut interval = tokio::time::interval(CLIENT_CHANNEL_REAP_INTERVAL);
     loop {
@@ -1385,7 +1345,7 @@ fn client_claim_gate(
 
 /// This connector's own outbound claim ledger for the client edge (issue
 /// #770): every EVM `[[client_channels]]` entry, registered under the same
-/// signer that already signs this connector's identity and its peer-wire
+/// signer that already signs this connector's identity and its peer-role
 /// outbound claims (`Connector::with_identity_signer`) -- one signing key
 /// for everything this connector owes, not a second one minted for this
 /// edge alone. A session earning against an undeclared (chain-resolved)
@@ -1451,7 +1411,7 @@ pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError
     // nothing on the claim path itself can ever discover a reopen (see
     // `ClientClaimGate::reap_unresolvable_channels`'s own doc for why).
     // Spawned once per gate, never awaited on the startup path, mirroring
-    // `reap_expired_peer_leases_periodically`'s own shape.
+    // `EvmChannelIndexSyncer::run`'s own periodic-sweep shape.
     tokio::spawn(reap_unresolvable_client_channels_periodically(Arc::clone(
         &claim_gate,
     )));
@@ -2600,7 +2560,7 @@ key_file = "{key_path}"
         assert!(matches!(error, RuntimeError::JournalUnreplayable { .. }));
     }
 
-    /// The peer wire's own journal is armed off the same `state_dir`
+    /// The peer semantics's own journal is armed off the same `state_dir`
     /// (issue #605, #556's "Journal" row): one answer for both surfaces,
     /// not a fix for the client edge and the same bug left standing on the
     /// wire between connectors.

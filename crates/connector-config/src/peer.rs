@@ -11,11 +11,55 @@ use crate::error::ConfigError;
 /// (`peer-carriage-spec.md` §6.3): thirty seconds each.
 const DEFAULT_PEER_TIMEOUT_MS: u64 = 30_000;
 
+/// The default `max_packet_amount` (ADR 0042, "The cap"): the largest
+/// amount this connector will forward to one peer in a **single packet**,
+/// in the settlement asset's own base units -- 6-decimal USDC everywhere on
+/// this fleet (ADR 0010, `docs/usdc-cross-chain-settlement.md`), so this is
+/// **1 USDC**.
+///
+/// A default exists at all because ADR 0042 requires one: the cap is the
+/// most a single theft by a next hop can take, and an operator who never
+/// writes the field must still be bounded. Public so the runtime reads this
+/// number rather than restating it, so a peer with no row of its own (one
+/// added at runtime over the operator surface, issue #884) is bounded by
+/// exactly the same figure a config-file peer that left the field unwritten
+/// is.
+///
+/// # Why 1 000 000, and what was inspected to pick it
+///
+/// The number had to clear everything the live devnet actually carries by a
+/// wide margin, so turning the cap on refuses nothing that works today:
+///
+/// * `infra/linode-relay/connector-rust.toml` prices `g.toon.relay` at
+///   **1** µUSDC per write (buzz huddles, per audio frame at 49 fps), and
+///   `infra/linode-store/connector-rust.toml` prices `g.toon.ario` at
+///   **1000**. `crates/connector-bin/tests/devnet_configs_load.rs` pins both
+///   as `EXPECTED_RELAY_PRICE`/`EXPECTED_STORE_PRICE`, and
+///   `docs/devnet-pricing.md` is the committed table they come from.
+/// * The largest *forwarded* amount this fleet ever ran was the retired
+///   apex's `g.toon.ario` leg: a client paid `1002`, the apex kept a fee of
+///   `2`, and **1000** went over the peering (`docs/devnet-pricing.md`, "The
+///   apex forward"; `docs/protocol/money-model.md`'s worked example).
+/// * The largest single packet observed live on the fleet is **1998**
+///   (`docs/operators/parallel-fleet-comparison.md`'s
+///   `[write] … amount=1998`), and the retired TypeScript `announcePrice`
+///   buffer -- the biggest figure any devnet config ever named -- was
+///   **2000**.
+///
+/// So 1 000 000 sits ~500x above the largest amount this fleet has ever put
+/// in one packet and 1000x above its most expensive committed route, while
+/// still being a real bound: one packet to one peer can never carry more
+/// than a dollar. Neither devnet box configures a peering at all today, so
+/// nothing on the fleet is even reached by this check -- the margin is for
+/// the next peering, and an operator who wants more writes
+/// `max_packet_amount` on that peer's own `[[peers]]` row.
+pub const DEFAULT_MAX_PACKET_AMOUNT: u64 = 1_000_000;
+
 /// Which carriage a peering rides (`peer-carriage-spec.md` §0.1). There are
 /// exactly two, and neither is selected by a `transport` field: a
 /// connector's *expose* set says which listeners it opens, and each peer's
 /// endpoint **scheme** says which carriage this connector dials that peer
-/// on (§2.1). ADR 0027 deleted the raw-TCP peer wire, so there is no third
+/// on (§2.1). ADR 0027 deleted the raw-TCP transport, so there is no third
 /// value and nothing to add one for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerCarriage {
@@ -430,7 +474,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawPeer {
     id: String,
-    /// Removed with the raw-TCP peer wire (ADR 0027, issue #679); a peer
+    /// Removed with the raw-TCP transport (ADR 0027, issue #679); a peer
     /// is reached by `endpoint` now.
     #[serde(default)]
     addr: Option<toml::Value>,
@@ -458,6 +502,11 @@ pub(crate) struct RawPeer {
     /// why this field is temporary.
     #[serde(default)]
     claim_enforcement: Option<String>,
+    /// ADR 0042's cap: the largest amount this connector will forward to
+    /// this peer in one packet. Omitted is [`DEFAULT_MAX_PACKET_AMOUNT`] --
+    /// there is no "unbounded" spelling, deliberately.
+    #[serde(default)]
+    max_packet_amount: Option<u64>,
 }
 
 /// A fully validated peering relation. Constructed only by
@@ -479,6 +528,7 @@ pub struct PeerConfig {
     claim_ack_timeout_ms: u64,
     peer_answer_timeout_ms: u64,
     claim_enforcement: ClaimEnforcement,
+    max_packet_amount: u64,
 }
 
 impl PeerConfig {
@@ -536,6 +586,19 @@ impl PeerConfig {
     /// exists and is temporary (issue #883).
     pub fn claim_enforcement(&self) -> ClaimEnforcement {
         self.claim_enforcement
+    }
+
+    /// This peering's **cap** (ADR 0042): the largest amount this connector
+    /// will forward to it in a single packet. A packet needing more is
+    /// refused with `T04`, never carried and never split.
+    ///
+    /// Bounds one packet, not an accumulation -- ADR 0033 retired the
+    /// exposure ceiling and it is not coming back (see `CONTEXT.md`'s
+    /// glossary, which keeps "ceiling" and "cap" apart for exactly this
+    /// reason). Defaults to [`DEFAULT_MAX_PACKET_AMOUNT`], so a peering that
+    /// wrote nothing is still bounded.
+    pub fn max_packet_amount(&self) -> u64 {
+        self.max_packet_amount
     }
 }
 
@@ -633,6 +696,18 @@ pub(crate) fn resolve_peers(
                 })?,
         };
 
+        // ADR 0042's cap. `0` is refused by name rather than taken
+        // literally: a cap of zero refuses every packet this peering could
+        // ever carry, which is a peering that silently does nothing, and
+        // "I meant to disable the cap" is the likeliest thing a `0` was
+        // written for. There is no disabling spelling -- the cap's whole
+        // point is that a bound always exists.
+        let max_packet_amount = match peer.max_packet_amount {
+            None => DEFAULT_MAX_PACKET_AMOUNT,
+            Some(0) => return Err(ConfigError::PeerMaxPacketAmountZero { id: peer.id }),
+            Some(written) => written,
+        };
+
         // A peering with nothing to dial, on a connector with nothing to
         // dial into, can never establish -- and no amount of retrying
         // changes that (§2.2).
@@ -653,6 +728,7 @@ pub(crate) fn resolve_peers(
                 .peer_answer_timeout_ms
                 .unwrap_or(DEFAULT_PEER_TIMEOUT_MS),
             claim_enforcement,
+            max_packet_amount,
         });
     }
 
@@ -698,6 +774,7 @@ mod tests {
             claim_ack_timeout_ms: None,
             peer_answer_timeout_ms: None,
             claim_enforcement: None,
+            max_packet_amount: None,
         }
     }
 
@@ -766,6 +843,48 @@ mod tests {
             resolve_peers(vec![entry], PeerExposure::Neither, false),
             Err(ConfigError::InvalidClaimEnforcement { ref id, ref value })
                 if id == "peer-b" && value == "log-only"
+        ));
+    }
+
+    /// ADR 0042: an operator who never writes a cap still gets one. This is
+    /// the property the whole default exists for -- there is no spelling
+    /// that leaves a peering unbounded.
+    #[test]
+    fn a_peer_that_configures_no_cap_still_gets_the_default_one() {
+        let peers =
+            resolve_peers(vec![raw("peer-b")], PeerExposure::Neither, false).expect("resolve");
+
+        assert_eq!(peers[0].max_packet_amount(), DEFAULT_MAX_PACKET_AMOUNT);
+        assert_eq!(peers[0].max_packet_amount(), 1_000_000);
+    }
+
+    /// The cap is per peering, so two rows in one file hold two different
+    /// caps -- how far this connector trusts each peer, separately.
+    #[test]
+    fn each_peering_carries_its_own_cap() {
+        let mut tight = raw("peer-tight");
+        tight.max_packet_amount = Some(50);
+        let mut generous = raw("peer-generous");
+        generous.max_packet_amount = Some(5_000_000);
+
+        let peers =
+            resolve_peers(vec![tight, generous], PeerExposure::Neither, false).expect("resolve");
+
+        assert_eq!(peers[0].max_packet_amount(), 50);
+        assert_eq!(peers[1].max_packet_amount(), 5_000_000);
+    }
+
+    /// `0` is refused by name: it would refuse every packet the peering
+    /// could carry, and it is what someone reaching for a non-existent
+    /// "disable the cap" spelling would write.
+    #[test]
+    fn a_cap_of_zero_is_refused_by_name() {
+        let mut entry = raw("peer-b");
+        entry.max_packet_amount = Some(0);
+
+        assert!(matches!(
+            resolve_peers(vec![entry], PeerExposure::Neither, false),
+            Err(ConfigError::PeerMaxPacketAmountZero { ref id }) if id == "peer-b"
         ));
     }
 

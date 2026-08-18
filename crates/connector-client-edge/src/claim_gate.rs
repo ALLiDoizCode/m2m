@@ -19,11 +19,11 @@
 //!
 //! Reuses `connector_domain`'s pure nonce/watermark/value rules
 //! ([`connector_domain::validate_claim`], [`connector_domain::validate_price`],
-//! [`connector_domain::advance_watermark`]) exactly as the peer wire's own
+//! [`connector_domain::advance_watermark`]) exactly as the peer semantics's own
 //! `connector_runtime::ClaimBook` does for the first two -- this is a
 //! second *state* around the same rules, not a second set of rules. The
 //! state is deliberately separate from `ClaimBook`: a client-edge claim's
-//! channel is never a peer-wire channel, and (unlike `ClaimBook::accept_inbound`)
+//! channel is never a peer channel, and (unlike `ClaimBook::accept_inbound`)
 //! a watermark advance here is gated behind a signature verification, on the
 //! `ClientClaimGate`'s own claim-native scheme (EIP-712 for EVM, Ed25519 for
 //! Solana -- `connector_signer::claim_signature`), not `ClaimBook`'s
@@ -167,7 +167,7 @@ pub enum ClaimIngestRejection {
     },
     /// The claim names a channel this connector has no counterparty
     /// recorded for (issue #558), so there is no key its signature could
-    /// be checked against. Matches the peer wire's own
+    /// be checked against. Matches the peer semantics's own
     /// `connector_runtime::ClaimRejectReason::UnknownChannel`.
     UnknownChannel,
     /// The claim names a channel a [`crate::ClientChannelSource`] has a
@@ -833,7 +833,7 @@ impl ClientClaimGate {
         // only once it has, so nothing is visible-before-durable at any
         // boundary that renders service.
         // The signature is retained rather than discarded for the same
-        // reason the peer wire retains it (issue #425): a watermark says
+        // reason the peer semantics retains it (issue #425): a watermark says
         // what was spent, but only the claim itself is redeemable.
         let previous = watermarks.get(&key).copied();
         watermarks.insert(
@@ -1367,9 +1367,9 @@ fn check_freshness_and_value(
 /// Rebuild the per-channel watermarks a journal records, folding every
 /// [`JournalEntry::InboundClaimAccepted`] in it -- the client edge's own
 /// half of the replay `connector_runtime::ClaimBook::set_journal` does for
-/// the peer wire, over the same entry.
+/// the peer semantics, over the same entry.
 ///
-/// Componentwise `max` rather than last-wins, unlike the peer wire's fold:
+/// Componentwise `max` rather than last-wins, unlike the peer semantics's fold:
 /// entries are appended in accepted order and each accepted claim strictly
 /// advances, so the two agree on any journal this gate itself wrote. They
 /// differ only on a journal that has been reordered or spliced, and there
@@ -1378,7 +1378,7 @@ fn check_freshness_and_value(
 /// is the one failure this whole mechanism exists to prevent.
 ///
 /// Entries of other kinds are ignored rather than refused: the entry
-/// alphabet is shared with the peer wire, and this gate is only the
+/// alphabet is shared with the peer semantics, and this gate is only the
 /// authority on the ones it writes.
 ///
 /// **Every key is canonicalised as it is folded** (issue #643), which is
@@ -4542,7 +4542,7 @@ mod tests {
         }
 
         /// A journal entry whose channel is in no namespace this build
-        /// canonicalises -- the peer wire shares the entry alphabet -- is
+        /// canonicalises -- the peer role shares the entry alphabet -- is
         /// folded byte for byte. Canonicalisation must never invent a
         /// channel out of a key it does not recognise.
         #[test]
@@ -4809,7 +4809,7 @@ mod tests {
             );
         }
 
-        /// Entries the peer wire writes share this journal's alphabet but
+        /// Entries the peer role writes share this journal's alphabet but
         /// not this gate's authority: replaying them must not invent a
         /// client-edge watermark out of an outbound claim or a fulfilment.
         #[test]

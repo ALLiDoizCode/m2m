@@ -22,7 +22,7 @@
 //! client-edge claim journal writes its `InboundClaimAccepted` entries
 //! under. There is no other input:
 //!
-//! - **A longer path emits nothing.** A peer-wire arrival, a forwarded
+//! - **A longer path emits nothing.** A peer-role arrival, a forwarded
 //!   packet, an unclaimed request -- none of them admitted a client claim
 //!   here, so none of them carry a payer, and the header is absent rather
 //!   than guessed. ADR 0017's "on any path longer than one hop the header
@@ -82,7 +82,7 @@ fn chain_of(channel_key: &str) -> Option<&str> {
 /// then -- if `attribution` describes a payment this connector verified --
 /// state it.
 ///
-/// The strip is unconditional: it runs for a free route and a peer-wire
+/// The strip is unconditional: it runs for a free route and a peer-role
 /// arrival exactly as it runs for a paid client-edge delivery, so a sender
 /// cannot smuggle an attribution claim into an app by addressing a
 /// destination that has none to state.

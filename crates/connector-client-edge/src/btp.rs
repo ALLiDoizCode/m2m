@@ -454,7 +454,7 @@ fn reject_response(request_id: u32, reject: Reject, extra: Vec<ProtocolData>) ->
 /// `WireClaim`'s own fields, `signature` hex-encoded the same way
 /// `ClientClaimGate`'s inbound claim JSON already expects one
 /// (`0x`-prefixed 65-byte `r‖s‖recoveryId`). JSON rather than
-/// [`connector_runtime::WireClaim::encode`]'s peer-wire binary shape,
+/// [`connector_runtime::WireClaim::encode`]'s peer-role binary shape,
 /// matching every other protocolData entry this dialect ever carries -- the
 /// auth secret, the inbound claim, the x402 terms, the accumulated-cost
 /// total -- all of which are raw UTF-8 text, never a second binary
@@ -464,7 +464,7 @@ fn reject_response(request_id: u32, reject: Reject, extra: Vec<ProtocolData>) ->
 /// (never trusted -- see `ClientClaimGate`'s own doc), this claim's signer
 /// is the channel's own recorded counterparty from the client's point of
 /// view, implicit in which channel the TRANSFER arrived on, exactly as a
-/// peer-wire `WireClaim` carries no signer field either.
+/// peer-role `WireClaim` carries no signer field either.
 ///
 /// This is the mapping of a *claim* onto the grammar, so it stays with the
 /// client edge rather than moving into [`connector_btp`] with the codec
@@ -787,41 +787,9 @@ async fn handle_frame(
     // is, so that claim is left entirely unadmitted rather than spent on
     // a packet already known to be going nowhere. `finish_frame` below
     // still routes `prepare` unchanged and raises the identical F00
-    // itself. Issue #887 extends the same seam to a peer-sale purchase
-    // whose own shape already dooms it, for the same reason: the shape
-    // refusal is identical with or without the claim.
+    // itself.
     let admitted = match claim_json {
-        Some(json)
-            if !state.connector.envelope_target_would_be_refused(&prepare)
-                && !state
-                    .connector
-                    .peer_sale_purchase_would_be_refused(&prepare) =>
-        {
-            // Issue #887's identity-keyed peek, mirroring `handle_ilp`
-            // (§9: the two carriages must not drift): the claim's own
-            // declared channel key, read without admitting it, refuses a
-            // rate-limited or row-capped purchase unpaid with the settle
-            // path's identical message. Sound because admission verifies
-            // the signature against exactly the declared channel.
-            if let Some(message) =
-                state
-                    .connector
-                    .peer_sale_purchase_refusal_for_payer(&prepare, || {
-                        connector_domain::client_claim::parse_client_claim(&json)
-                            .ok()
-                            .map(|claim| claim.channel_key())
-                    })
-            {
-                return reply(
-                    replies,
-                    reject_response(
-                        frame.request_id,
-                        crate::peer_sale_bound_reject(message),
-                        Vec::new(),
-                    ),
-                )
-                .await;
-            }
+        Some(json) if !state.connector.envelope_target_would_be_refused(&prepare) => {
             match state.claim_gate.admit(&json, price).await {
                 Ok(accepted) => Some(accepted),
                 Err(rejection) => {
@@ -961,7 +929,7 @@ mod tests {
     /// Issue #699: a payout claim rides a TRANSFER's protocolData as JSON,
     /// matching every other entry this dialect carries (all UTF-8 text,
     /// never a second binary sub-format) rather than
-    /// [`connector_runtime::WireClaim::encode`]'s peer-wire bytes.
+    /// [`connector_runtime::WireClaim::encode`]'s peer-role bytes.
     #[test]
     fn payout_claim_protocol_data_encodes_the_wire_claims_fields_as_json() {
         let claim = connector_runtime::WireClaim {

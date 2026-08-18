@@ -34,9 +34,13 @@ it locally, with no knowledge of the rest of the path.
 
 ## Consequences
 
-Fees are earned only on fulfilment, following ADR 0004. A hop's earnings are the difference
-between the cumulative it receives from upstream and the cumulative it sends downstream, which
-falls out of the claim exchange without separate accounting.
+A hop's earnings are the difference between the cumulative it receives from upstream and the
+cumulative it sends downstream, which falls out of the claim exchange without separate accounting.
+That arithmetic is unchanged by _when_ the exchange happens: this record originally said fees are
+earned only on fulfilment, following ADR 0004, and
+[ADR 0042](0042-a-packet-carries-its-claim.md) retired that headline — a packet carries its claim,
+so a fee is earned when the packet is paid for rather than when it fulfils. The difference-of-two-
+cumulatives above is what a hop earns either way.
 
 Choosing a flat fee is what makes cost discoverable in one shot. Because the figure does not
 vary with the amount carried, a path's cost is a constant a client can learn once and cache;

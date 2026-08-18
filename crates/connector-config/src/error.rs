@@ -248,6 +248,19 @@ pub enum ConfigError {
     )]
     InvalidClaimEnforcement { id: String, value: String },
 
+    /// ADR 0042's cap, written as `0`. A cap of zero refuses every packet
+    /// this peering could carry, so it is a peering that silently does
+    /// nothing -- and there is deliberately no spelling that turns the cap
+    /// off, since the whole point of the rule is that a bound always
+    /// exists.
+    #[error(
+        "max_packet_amount = 0 for peer '{id}': the cap is the largest amount this connector \
+         will forward to a peer in ONE packet (ADR 0042), so zero refuses every packet that \
+         peering could ever carry. Write a positive amount in the settlement asset's base \
+         units, or omit the field for the default"
+    )]
+    PeerMaxPacketAmountZero { id: String },
+
     #[error(
         "invalid endpoint '{value}' for peer '{id}': {source} -- a peer endpoint is a URL \
          ('wss://host:port/path' for BTP, 'https://host:port/path' for ILP-over-HTTP), not a \
@@ -263,7 +276,7 @@ pub enum ConfigError {
     #[error(
         "endpoint '{value}' for peer '{id}' has scheme '{scheme}', which selects no peer \
          carriage: 'wss://' selects BTP and 'https://' selects ILP-over-HTTP, and there is no \
-         third one (ADR 0027 deleted the raw-TCP peer wire). Both are TLS-only because a \
+         third one (ADR 0027 deleted the raw-TCP transport). Both are TLS-only because a \
          peering carries signed balance proofs (ADR 0004), so 'ws://' and 'http://' are not \
          accepted either; see docs/operators/btp-peer-transport-bringup.md"
     )]
@@ -409,7 +422,7 @@ pub enum ConfigError {
     PeerChannelsWithoutStateDir,
 
     #[error(
-        "peer '{id}' sets 'addr', which was removed with the raw-TCP peer wire (ADR 0027, \
+        "peer '{id}' sets 'addr', which was removed with the raw-TCP transport (ADR 0027, \
          issue #679) -- a peer is reached by 'endpoint' (a wss:// or https:// URL) instead; \
          see docs/operators/btp-peer-transport-bringup.md"
     )]
@@ -438,17 +451,17 @@ pub enum ConfigError {
     PeerFlushIntervalRemoved { id: String },
 
     /// The other half of §11's removed-field row, spelled and worded
-    /// exactly as PR #718 (`feat/delete-peer-wire`) spells it.
+    /// exactly as PR #718 (`feat/delete-peer-role`) spells it.
     ///
     /// **Defined here, constructed there.** #718 owns the deletion of the
-    /// raw-TCP peer wire itself (issue #679), including the top-level
+    /// raw-TCP transport itself (issue #679), including the top-level
     /// `peer_wire_addr` field, the listener `connector-cli` binds from it
     /// and the infra configs that still name it. This branch does not
     /// touch that listener, so on this branch alone the field still binds
     /// one; when the two land, #718's `if raw.peer_wire_addr.is_some()`
     /// meets this variant and the pair is complete.
     #[error(
-        "'peer_wire_addr' was removed with the raw-TCP peer wire (ADR 0027, issue #679) -- \
+        "'peer_wire_addr' was removed with the raw-TCP transport (ADR 0027, issue #679) -- \
          peer carriages are exposed on the connector's own listeners, not a separate socket; \
          see docs/operators/btp-peer-transport-bringup.md"
     )]
@@ -729,21 +742,23 @@ pub enum ConfigError {
     )]
     AnnounceNoticeInvalidSeverity { value: String },
 
+    /// The removed-section trap for purchasable peering (ADR 0043), the
+    /// same shape [`ConfigError::PeerWireAddrRemoved`] and
+    /// [`ConfigError::PeerCeilingRemoved`] already take: the section is
+    /// still parsed so a stale config naming it stops the node by name
+    /// rather than being silently dropped by `deny_unknown_fields`.
+    ///
+    /// One variant covers the whole table -- `prefix`, `price`,
+    /// `lease_seconds` and every abuse bound -- because there is no
+    /// surviving `[peer_sale]` for any of them to be written into: the
+    /// fix is always to delete the section, never to correct a field.
     #[error(
-        "[peer_sale] prefix '{prefix}' sets no 'price': the peer-sale route is never silently \
-         free either (ADR 0028/issue #557) -- set 'price = 0' if that is deliberate (issue #885)"
+        "'[peer_sale]' was removed with purchasable peering (ADR 0043) -- a peering cannot be \
+         bought at all, so 'prefix', 'price', 'lease_seconds', 'max_purchased_rows', \
+         'max_routes_per_payer', 'max_prefix_length', 'purchase_rate_limit' and \
+         'purchase_rate_window_seconds' have nothing left to configure. Delete the whole \
+         section; an operator still adds a peer and its route directly, over the operator \
+         surface (POST /peers, POST /routes/peers) or in the config file"
     )]
-    PeerSaleMissingPrice { prefix: String },
-
-    #[error(
-        "[peer_sale] prefix '{prefix}' collides with a route, peer route or child already \
-         naming that prefix (issue #885) -- prefixes share one namespace"
-    )]
-    PeerSalePrefixCollision { prefix: String },
-
-    #[error(
-        "[peer_sale] prefix '{prefix}' sets no 'lease_seconds': a purchased peering is a lease, \
-         never a permanent grant (issue #886) -- name how long a purchase buys"
-    )]
-    PeerSaleMissingLease { prefix: String },
+    PeerSaleRemoved,
 }

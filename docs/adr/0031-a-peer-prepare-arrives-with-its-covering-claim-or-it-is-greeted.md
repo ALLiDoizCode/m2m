@@ -2,6 +2,15 @@
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
+> **Superseded entirely by [ADR 0042](0042-a-packet-carries-its-claim.md).** Every clause of the
+> Decision below was false of the shipped binary: an uncovered arrival was refused only at a
+> _priced_ termination, no connector has ever covered a PREPARE it sends (issue #881 was never
+> wired), `ClaimEnforcement::Observe` is an escape hatch this record says does not exist, and the
+> credit window it declares retired is the only mode that runs. Its claim that ADR 0004's
+> argument against prepay "remains sound and is not disturbed here" is also wrong — that argument
+> _is_ disturbed, deliberately, and ADR 0042 states the trade instead of leaving it silent. Read
+> below for the reasoning that produced the rule, not for the rule.
+
 **Owner decision, 2026-08-07 (issue #868):** a peer-role PREPARE may not arrive without a covering
 claim. Every packet is paid, or it gets the x402 greeting — the same rule the client edge already
 enforces. **The credit window is retired** as the peer path's operating mode.
@@ -56,7 +65,7 @@ all.
 
 [ADR 0004](0004-value-moves-on-fulfilment.md) established that value is owed on fulfilment, so a
 claim can only follow the fulfilment that created the obligation: "the claim covering it follows the
-fulfilment rather than riding the outgoing PREPARE." `peer-wire-spec.md` §3.2 is the mechanism that
+fulfilment rather than riding the outgoing PREPARE." `peer-semantics-spec.md` §3.2 is the mechanism that
 falls out of it — the claim rides the **next** frame to that peer, and the flush timer (§3.3) bounds
 how long the last packet of a burst stays uncovered. `T04`'s ceiling (§5.3) bounds how much
 uncovered value accumulates in the meantime. That window — trailing exposure, bounded by a timer and

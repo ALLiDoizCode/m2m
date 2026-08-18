@@ -104,7 +104,7 @@ impl SettlementBackend for InMemorySettlementBackend {
         settlement_timeout: Duration,
     ) -> Result<ChannelId, SettlementError> {
         // A plain decimal counter (issue #575) -- this fake's channel id
-        // doubles as the peer-wire `ClaimBook`'s channel id in this
+        // doubles as the peer-role `ClaimBook`'s channel id in this
         // workspace's own tests, which now requires a decimal or hex
         // on-chain-`bytes32`-shaped string. `EvmSettlementBackend`'s own
         // channel ids are the `0x`-prefixed hex `bytes32` `TokenNetwork`

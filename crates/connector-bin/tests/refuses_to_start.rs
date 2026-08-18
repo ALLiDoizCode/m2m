@@ -507,7 +507,7 @@ key_file = "{key_file}"
     );
 }
 
-// -- The deleted raw-TCP peer wire (ADR 0027, issue #679) and the peer
+// -- The deleted raw-TCP transport (ADR 0027, issue #679) and the peer
 // config surface that replaced it (issue #677, peer-carriage-spec.md
 // §11) --
 

@@ -22,12 +22,12 @@ describes it — for what it used, read this file's history.
   and merged by `connector-cli`, so neither owns a port or a process.
 - **Client:** `reqwest` 0.11 with `rustls-tls` and `default-features = false` — no OpenSSL in the
   build, which is what lets the container image be an Alpine build.
-- **Peer transport:** none shipped. The raw-TCP peer wire was deleted in issue #679; per
-  [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md)
+- **Peer transport:** none shipped. The raw-TCP transport was deleted in issue #679; per
+  [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-role-is-deleted.md)
   peers ride the carriages the client edge already serves — BTP (RFC-0023) over `wss://` or
   ILP-over-HTTP over `https://` — so peering adds no transport dependency of its own. The
   `PeerTransport` port remains; the semantics it carries are
-  [`docs/protocol/peer-wire-spec.md`](../protocol/peer-wire-spec.md) §3–§6.
+  [`docs/protocol/peer-semantics-spec.md`](../protocol/peer-semantics-spec.md) §3–§6.
 
 ## Cryptography
 

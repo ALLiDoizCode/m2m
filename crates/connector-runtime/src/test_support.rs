@@ -140,7 +140,7 @@ pub(crate) fn fulfill_envelope_with_status(status: u16, body: &[u8]) -> Envelope
     }
 }
 
-/// A fixed EIP-712 domain every peer-wire test channel in this crate's own
+/// A fixed EIP-712 domain every peer-role test channel in this crate's own
 /// test modules shares (issue #575/#566) -- an arbitrary but consistent
 /// chain id and `TokenNetwork` address; nothing in these tests depends on
 /// their real-world provenance, only that signing and verifying a claim use
@@ -152,9 +152,9 @@ pub(crate) fn test_channel_domain() -> ChannelDomain {
     }
 }
 
-/// A valid on-chain `bytes32` peer-wire channel id for tests -- `0x`
+/// A valid on-chain `bytes32` peer channel id for tests -- `0x`
 /// followed by `n` left-padded to 64 hex characters (issue #575's AC4: a
-/// peer-wire claim's channel id must already be a real bytes32, never an
+/// peer claim's channel id must already be a real bytes32, never an
 /// arbitrary label like the `"channel-a"` placeholders this crate's tests
 /// used before this issue).
 pub(crate) fn test_channel_id(n: u8) -> String {

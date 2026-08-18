@@ -20,7 +20,7 @@ window, against a live audit of `root@104.237.150.177` (apex, `linode-node-*`) a
 executed: no container has been stopped and no box config has been written yet. It supersedes no
 prior plan for this step — #714 is the first place this order was written down.
 
-Relies on [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md)
+Relies on [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-role-is-deleted.md)
 (peer carriage), [ADR 0013](../adr/0013-cut-over-through-a-parallel-address-space.md) (the parallel
 `/rust` prefix this runbook retires) and [ADR 0017](../adr/0017-the-typescript-connector-is-a-prototype.md).
 Related: [#678](https://github.com/toon-protocol/connector/issues/678),
@@ -247,9 +247,9 @@ shape wants a real apex↔store peer link, gated on:
   greeted, claim-gated and journaled exactly as a terminating route is ([ADR
   0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md)), so a forwarded
   `g.toon.store` is no longer a free-write lane and config load refuses one that omits the price.
-  The far side's own gap — a terminating connector not charging its `price` for a peer-wire
+  The far side's own gap — a terminating connector not charging its `price` for a peer-role
   arrival — is closed by #752 / [ADR
-  0029](../adr/0029-a-peer-wire-arrival-to-a-priced-termination-must-cover-its-price.md): the
+  0029](../adr/0029-a-peer-role-arrival-to-a-priced-termination-must-cover-its-price.md): the
   store box now refuses an apex-forwarded packet whose `amount` does not cover its own `price`,
   rather than depending on the apex's `price` alone to cover the whole path.
 - **#678** — the bring-up itself, still open.
@@ -354,7 +354,7 @@ though on-demand, not scheduled. Run it manually as part of §7.
 **(d) Docs:** `connector/packages/announcer/README.md:49-50`, `announce-builder.ts:9,28,30`,
 `docs/operators/btp-peer-transport-bringup.md:31`, `buzz/desktop/README.md:66`,
 `buzz/.env.example:221`, three CHANGELOGs, and
-`toon-meta/prototypes/peer-wire-audit/DEPLOYMENT-PLAN.md` (41 hits — the audit this runbook builds
+`toon-meta/prototypes/peer-role-audit/DEPLOYMENT-PLAN.md` (41 hits — the audit this runbook builds
 on).
 
 Zero hits in `relay`, `store`, `fractal`, `Forge`, `capability-market`, `swap`, `toon`, `hub`,

@@ -32,7 +32,7 @@ client_edge_addr = "0.0.0.0:3000"
 # replay watermark survive a restart:
 #
 #   client-edge-claims.log  claims accepted at POST /ilp
-#   peer-claims.log         the peer wire's own ClaimBook
+#   peer-claims.log         the peer semantics's own ClaimBook
 #
 # Both are append-only, fsync'd per accepted claim, and replayed before this
 # node serves anything. Without a state_dir every channel's watermark lives

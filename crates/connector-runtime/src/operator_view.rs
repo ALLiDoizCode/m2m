@@ -61,13 +61,6 @@ pub struct LeasedRouteView {
 pub struct PeerView {
     pub id: String,
     pub source: RouteSource,
-    /// When this peer's peer-sale lease lapses and it is demoted back to
-    /// client role (issue #886) -- `None` for a config-file row (never
-    /// leased) or a runtime row added over the plain `POST /peers`
-    /// surface (a permanent grant, exactly as every runtime peer was
-    /// before #886); `Some` only for one a peer-sale purchase inserted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<DateTime<Utc>>,
 }
 
 /// A peer-forwarding route (as opposed to [`RouteView`]'s app-terminating
@@ -147,7 +140,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 /// connector has claimed to the peer ([`ClaimDirection::Outbound`]) and
 /// what the peer has claimed to this connector
 /// ([`ClaimDirection::Inbound`], i.e. this connector's own watermark on
-/// that channel). `peer_id` is `None` on an inbound entry: the peer wire
+/// that channel). `peer_id` is `None` on an inbound entry: the peer semantics
 /// has no identity handshake yet, so an inbound claim is known only by the
 /// channel it names, not by which configured peer sent it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

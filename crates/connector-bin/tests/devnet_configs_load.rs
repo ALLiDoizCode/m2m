@@ -650,7 +650,7 @@ fn spawn(config_path: &std::path::Path) -> Child {
 /// rather than hanging or reporting only that a pipe closed.
 ///
 /// There is one listen line to wait for since ADR 0027 / issue #679 deleted
-/// the raw-TCP peer wire and its separate listener.
+/// the raw-TCP transport and its separate listener.
 fn wait_for_listen_line(child: &mut Child) -> String {
     let mut stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
     let mut line = String::new();
@@ -782,7 +782,7 @@ async fn the_store_side_devnet_config_loads_and_serves_verbatim() {
     // deliberate edit here too rather than drifting back in.
     assert!(!STORE_CONFIG.contains("prefix = \"g.toon.relay.ario\""));
 
-    // No peer wire: this node accepts no inbound peer connection and dials
+    // No peer semantics: this node accepts no inbound peer connection and dials
     // no peer, so only the client edge comes up. ADR 0003's raw-TCP wire
     // cannot carry the public inter-node link this fleet needs (#623), so
     // the file configures neither -- see its header. (A peer-forwarded
@@ -798,7 +798,7 @@ async fn the_store_side_devnet_config_loads_and_serves_verbatim() {
         !STORE_CONFIG
             .lines()
             .any(|line| line.starts_with("peer_wire_addr")),
-        "the store config must not bind ADR 0003's plaintext peer wire on a \
+        "the store config must not bind ADR 0003's plaintext peer semantics on a \
          box with no private segment -- if a peering is being added, it \
          should arrive with the transport that replaces it"
     );

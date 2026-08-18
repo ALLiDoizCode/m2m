@@ -1,9 +1,9 @@
-# Peer semantics specification (formerly the peer wire specification)
+# Peer semantics specification (formerly the peer semantics specification)
 
 **Status:** Normative for §3–§6. **§1–§2 are deleted** — superseded by
-[ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md),
+[ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-role-is-deleted.md),
 and the implementation they described was removed in issue #679.
-Originally: normative, version 1 — clean-room design per [ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md).
+Originally: normative, version 1 — clean-room design per [ADR 0003](../adr/0003-clean-room-peer-role-versioned-client-edge.md).
 **Consumers:** the Rust `connector-runtime` peer transport port and every implementation of
 it (contract-tested per [ADR 0007](../adr/0007-testing-doctrine-fakes-yes-mocks-no.md)); any
 non-Rust connector that wishes to peer with this fleet.
@@ -47,9 +47,9 @@ speaks.
 ### 3.1 Execution condition is mandatory and real
 
 Per [ADR 0004](../adr/0004-value-moves-on-fulfilment.md) ("Why the reversal"), every PREPARE on
-the peer wire MUST carry a non-zero, 32-byte `executionCondition` chosen by the original sender. A
+the peer semantics MUST carry a non-zero, 32-byte `executionCondition` chosen by the original sender. A
 connector receiving a PREPARE with an absent or all-zero condition MUST reject it with
-`F01_INVALID_PACKET`. There is no derived-preimage (HKDF) fallback on the peer wire — that path
+`F01_INVALID_PACKET`. There is no derived-preimage (HKDF) fallback on the peer semantics — that path
 is deleted, leaving one security model: a hop is paid only against a preimage it cannot forge.
 (The prototype's **legacy** class — an absent or all-zero condition auto-fulfilled without
 verification, recorded in
@@ -144,7 +144,7 @@ A claim is chain-specific (`CONTEXT.md` "Claim", "Nonce", "Watermark"):
 
 | Field              | evm                                         | solana                                     | mina (dropped, see [ADR 0002](../adr/0002-drop-mina-from-the-rust-connector.md)) |
 | ------------------ | ------------------------------------------- | ------------------------------------------ | -------------------------------------------------------------------------------- |
-| Channel identifier | `channelId` (bytes32)                       | `channelAccount` (program-derived address) | n/a — Mina is out of scope for the Rust peer wire                                |
+| Channel identifier | `channelId` (bytes32)                       | `channelAccount` (program-derived address) | n/a — Mina is out of scope for the Rust peer semantics                           |
 | Nonce              | `uint64`                                    | `uint64`                                   | n/a                                                                              |
 | Cumulative amount  | `uint64`                                    | `uint64`                                   | n/a                                                                              |
 | Signature          | ECDSA over the EIP-712 balance-proof digest | Ed25519 over the balance-proof digest      | n/a                                                                              |
@@ -157,11 +157,11 @@ contract this design calls for, not the one currently deployed: the live `TokenN
 what that contract's `ecrecover` checks. Until a redeployment drops them, they are still hashed as
 zeros (see below).
 
-**Implementation note (issue #575, [ADR 0024](../adr/0024-peer-wire-claims-sign-the-eip-712-balance-proof.md)):**
+**Implementation note (issue #575, [ADR 0024](../adr/0024-peer-role-claims-sign-the-eip-712-balance-proof.md)):**
 this table's `evm` row is normative and, as of this issue, matches what the code does — before it,
 `crates/connector-runtime/src/claim.rs` signed and verified a connector-internal SHA-256 hash of
 `channel_id ‖ nonce ‖ cumulative_amount` instead, a divergence from this section that was invisible
-because nothing had ever redeemed a peer-wire claim on chain. `ClaimBook` now signs and verifies
+because nothing had ever redeemed a peer claim on chain. `ClaimBook` now signs and verifies
 through `connector_signer::evm_balance_proof_digest` — the same function the client edge already
 used (issue #506) — over exactly the fields the deployed `TokenNetwork.sol` typehash requires,
 `lockedAmount`/`locksRoot` included, hashed as zeros. The Solana row remains aspirational: the peer
@@ -169,18 +169,18 @@ wire has no Ed25519 claim path yet.
 
 **Recovery id (issue #590):** an `evm` claim's signature is 65 bytes, `r (32) ‖ s (32) ‖ v (1)`. The
 wire carries `v` exactly as libsecp256k1 emits it — `{0, 1}` — never the Ethereum-wallet `{27, 28}`
-convention; `WireClaim::encode`/`decode` round-trip that byte unchanged, and nothing on the peer wire
+convention; `WireClaim::encode`/`decode` round-trip that byte unchanged, and nothing on the peer semantics
 adds 27 to it. `TokenNetwork.claimFromChannel`'s `ECDSA.recover` accepts only `{27, 28}`, so
 `EvmSettlementBackend::redeem` is the one place that conversion happens, immediately before
 submission — idempotent (a value already in `{27, 28}` passes through unchanged) and refusing
 anything outside both ranges with a named error rather than submitting it to revert on chain. A
-verifier checking a claim's signature off the wire (`recover_evm_signer`, used by both the peer wire
+verifier checking a claim's signature off the wire (`recover_evm_signer`, used by both the peer semantics
 and the client edge) accepts either convention, since it never submits on chain and so has no reason
 to prefer one.
 
 ### 3.6 Relationship to application-level claims (e.g. rolling-swap)
 
-The peer-wire claim in this section is the connector's own per-hop claim — the "leg A" claim in
+The peer claim in this section is the connector's own per-hop claim — the "leg A" claim in
 the rolling-swap terminology used when investigating this timing change (issue #410, closed; its
 findings were carried forward as input to this ticket, issue #412). That investigation found no
 dependency from `@toon-protocol/settlement-digest` on claim/fulfilment ordering (every one of its
@@ -208,7 +208,7 @@ PREPARE field; it is realized on the wire as the difference between the `amount`
 receives on the inbound PREPARE and the (possibly smaller) `amount` it forwards on the outbound
 one, and is what falls out of the claim exchange (§3) once packets fulfil — a hop's earnings are
 the difference between the cumulative it receives from upstream and the cumulative it sends
-downstream. No separate fee accounting is needed on the peer wire beyond the claims themselves.
+downstream. No separate fee accounting is needed on the peer semantics beyond the claims themselves.
 
 `minimumDelivery` (`uint64`) IS a PREPARE field, declared once by the original sender and
 unchanged by every intermediate hop:
@@ -228,9 +228,9 @@ one `minimumDelivery` the sender set.
 
 ## 5. Reject codes and the accumulated-cost field
 
-### 5.1 Codes in use on the peer wire
+### 5.1 Codes in use on the peer semantics
 
-Peer-wire REJECTs use the existing RFC-0027 §3.3 codes:
+Peer-role REJECTs use the existing RFC-0027 §3.3 codes:
 
 | Code              | Meaning here                                                                                                                                      |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -268,14 +268,14 @@ and issue #523 -- the fees of the hops the packet actually passed through, plus 
 route that terminated it, if it reached one. The field starts at `0`:
 
 - When a connector **originates** a REJECT for a reason that added no value to the packet at all
-  (no route, expired, cannot meet minimum delivery, an underpriced peer-wire
+  (no route, expired, cannot meet minimum delivery, an underpriced peer-role
   arrival at a priced terminated route (§5.4, issue #752), the terminating app itself unreachable,
   or an envelope target that attempted to escape the route's handler path), it sets
   `accumulatedCost = 0` on the REJECT it sends upstream — it never forwarded or terminated this
   packet, so nothing applies to a hop it never used. An app that could not be reached (`T01`) is
   the termination-side mirror of a forwarding hop that cannot reach its own peer: no priced work
   was done, so no price is added. A refused target (`F00`, issue #596) is the same reasoning one
-  step earlier — the app was never even called, so nothing accumulates. An underpriced peer-wire
+  step earlier — the app was never even called, so nothing accumulates. An underpriced peer-role
   arrival is the same reasoning again, one step earlier still: the app is never even consulted, so
   the route's price is not owed by a payer who was never even asked to cover it.
 - When a connector **originates** a REJECT because the packet reached one of its own terminated
@@ -320,10 +320,10 @@ relation's configured ceiling MUST be rejected with `T04_INSUFFICIENT_LIQUIDITY`
 since the condition clears once the payer's pending claim is acknowledged (`CONTEXT.md`
 "Ceiling").
 
-### 5.4 A priced termination reached over the peer wire requires enough value to cover it
+### 5.4 A priced termination reached over the peer semantics requires enough value to cover it
 
 Issue #752 closes the second gap [ADR 0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md)
-left open: a connector whose priced _terminated_ route was reached over the peer wire used to serve
+left open: a connector whose priced _terminated_ route was reached over the peer semantics used to serve
 it without charging anything, since only the client edge checked a route's price. When a peer-role
 PREPARE resolves to one of this connector's own terminated routes and that route's `price` is
 greater than zero, the connector MUST check `amount >= price` **before** opening the wrap or
@@ -348,9 +348,9 @@ own price-coverage gate (`peer-carriage-spec.md` §3.1) before this check is eve
 ## 6. Consistency
 
 This specification uses exactly the vocabulary of `CONTEXT.md` (connector, app, packet, route,
-peer wire, client edge, claim, nonce, watermark, exposure, ceiling, flush, in flight, projection,
+peer semantics, client edge, claim, nonce, watermark, exposure, ceiling, flush, in flight, projection,
 settlement, fee, minimum delivery, probe) and implements
-[ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md),
+[ADR 0003](../adr/0003-clean-room-peer-role-versioned-client-edge.md),
 [ADR 0004](../adr/0004-value-moves-on-fulfilment.md),
 [ADR 0005](../adr/0005-claims-are-truth-balances-are-a-projection.md),
 [ADR 0010](../adr/0010-flat-per-packet-fee-and-minimum-delivery.md) and
