@@ -181,6 +181,17 @@ write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STE
 # # named load-time error, not a silent default.
 # # claim_enforcement = "observe"
 #
+# # ADR 0042 item 3's sibling knob, for the OTHER half of the same rule: an
+# # arrival this node FORWARDS onward must carry a claim covering the
+# # packet's own amount. Omit for the default, "observe" -- admitted,
+# # forwarded, and logged exactly as a refusal would be logged -- which is
+# # deliberately the opposite default to claim_enforcement above: no box on
+# # this fleet covers its forwards yet, so enforcing by default would stop
+# # forwarding fleet-wide. Set "enforce" on a peering only once that
+# # peering's counterparty is covering its forwards ([[pay_channels]]).
+# # A mistyped value is a named load-time error, not a silent default.
+# # forwarded_claim_enforcement = "enforce"
+#
 # # Every peering needs at least one channel binding, or it can never take
 # # the peer role at all: the role rule needs BOTH a proven credential and
 # # a channel. This is the table whose absence left ADR 0024's peer-claim

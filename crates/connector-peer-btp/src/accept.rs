@@ -586,17 +586,18 @@ impl PeerSession {
             }
         };
 
-        // Issue #880 (owner decision #868): a peer PREPARE to a route this
-        // connector terminates and prices carries a covering claim, or it
-        // is refused with the client edge's own x402 greeting. The decision
-        // is `price_gate`'s, shared with the HTTP carriage so §0.1's one
-        // pipeline cannot admit over one carriage what it refuses over the
-        // other; what is this carriage's is only the frame the refusal is
-        // shaped into.
+        // Issue #880 (owner decision #868) and ADR 0042: a peer PREPARE
+        // carries a covering claim -- the route's `price` where this
+        // connector terminates, the packet's own `amount` where it forwards
+        // -- or it is refused with the client edge's own x402 greeting. The
+        // decision is `price_gate`'s, shared with the HTTP carriage so
+        // §0.1's one pipeline cannot admit over one carriage what it
+        // refuses over the other; what is this carriage's is only the frame
+        // the refusal is shaped into.
         if let Some(refusal) = price_gate::payment_required(
             &self.state.connector,
             &peer_id,
-            &prepare.destination,
+            &prepare,
             ack,
             judged.as_ref().and_then(|judged| judged.claim.as_ref()),
             prior_watermark,

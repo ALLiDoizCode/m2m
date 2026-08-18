@@ -140,7 +140,8 @@ stands today: `connector_peer_auth::decide_role` still implements the P1/P2 bran
 verified claim the way §1.2 describes -- that remains open work, not scoped to #880.
 `Connector::handle_peer_prepare` itself is unchanged and still accepts a `None` claim
 (`crates/connector-runtime/src/connector.rs:667-676`): issue #880 lands the _price-coverage_ half of
-this section (a `Terminated` route's own `price`, §3.1) one layer up, in the accept pipelines
+this section (a `Terminated` route's own `price`, §3.1 — since joined by ADR 0042's
+forwarded-arrival rule in the same gate) one layer up, in the accept pipelines
 (`connector-peer-http`'s `PeerHttpState::handle` and `connector-peer-btp`'s
 `PeerSession::handle_message`) -- before `handle_peer_prepare` is ever called, using the claim each
 carriage already judges inline. Both call one decision,
@@ -154,9 +155,10 @@ configured via `Connector::with_outbound_client_hop` is covered proactively, fro
 client ledger (#873), for this node's own forwarded value -- before the first attempt is ever sent,
 not merely recovered by #875's retry arm after a refusal teaches this node it must pay. A hop with
 no such config keeps riding the peer ledger's `pending_claim` (ADR 0004's postpay convention),
-untouched: bilateral peer-to-peer forwarding is not what #868/#881 changed, per §3.1 below — "a
-**peer-role** PREPARE reaching this node's `Forwarded` routes is still priced by the claim exchange
-of §4 and `peer-semantics-spec.md` §3 alone".
+untouched: bilateral peer-to-peer forwarding is not what #868/#881 changed. ADR 0042's item 3 has
+since extended the same shared gate to a `Forwarded` arrival, judged against the PREPARE's own
+`amount` and defaulting to observe rather than refuse — §3.1 below states both rules and the two
+per-peer knobs that select them.
 
 **What "configured via `with_outbound_client_hop`" means in a config file**, since for a while it
 meant nothing an operator could write and the covering therefore never ran on a deployed node: it is
@@ -561,20 +563,36 @@ additively extensible) and MUST NOT be emitted.
   peer PREPARE is priced independently of the bilateral fee. A route explicitly priced at `0` is
   untouched, exactly like the amount check.
 
-  **Every other peer PREPARE is still answered by nothing of the sort.** Peer fees are bilateral
-  configuration (`peer-semantics-spec.md` §4), not a negotiation, and `requiredTransport` (issue #701) is
-  a client-edge route policy with no peer analogue. This survives [ADR
-  0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md) unchanged, and the
-  distinction is worth stating because that ADR looks at first like it contradicts this rule. A
-  `[[routes]]` entry naming a `peer_id` now carries a `price`, and a **client-role** PREPARE to
-  it is greeted, claim-gated and journaled exactly as one to a terminated route is (issue #620).
-  That is the client-facing direction of the same node. A **peer-role** PREPARE reaching this
-  node's `Forwarded` routes is still priced by the claim exchange of §4 and `peer-semantics-spec.md` §3
-  alone -- greeting it would invent a negotiation where a bilateral agreement already exists. The
-  route's `price` is a fact about this node's client edge; its `fee` is the fact its peers agreed
-  to. The gate above binds only where the client edge's `price` and this node's own termination
-  coincide -- a `Terminated` route -- which is exactly where ADR 0028 says a fact about the client
-  edge, not a peering, is being charged.
+  **A `Forwarded` arrival must cover its own `amount`** ([ADR
+  0042](../adr/0042-a-packet-carries-its-claim.md) item 3, correcting what this bullet said while
+  only the `Terminated` rule existed). A peer-role PREPARE this node will forward onward MUST carry
+  a claim whose advance over that channel's watermark is at least the PREPARE's own `amount`, or it
+  is refused `F06` with the same x402 greeting, quoting that amount. The figure is the packet's
+  `amount` and nothing else:
+  - **Not the route's `price`.** A `[[routes]]` entry naming a `peer_id` carries a `price`, and a
+    **client-role** PREPARE to it is greeted, claim-gated and journaled exactly as one to a
+    terminated route is (issue #620, [ADR
+    0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md)). That is the
+    client-facing direction of the same node: the `price` is a fact about this node's client edge,
+    and it is not what a peer owes.
+  - **Not the `fee`, and not the post-fee amount this hop passes on.** The send half covers the next
+    hop for `amount_after_fee(amount, fee, minimum_delivery)`
+    (`Connector::forward_via_peer_route`), so a peer covering the amount that _arrives_ leaves this
+    node exactly its bilaterally agreed flat fee. Peer fees stay bilateral configuration
+    (`peer-semantics-spec.md` §4) and are not negotiated by this greeting; `requiredTransport`
+    (issue #701) remains a client-edge route policy with no peer analogue.
+
+  **This rule ships defaulting to observe.** Its per-peer knob is `forwarded_claim_enforcement`,
+  **separate** from `claim_enforcement` and defaulting the other way (`"observe"`): an uncovered
+  forwarded arrival is admitted, forwarded, and logged exactly as a refusal would be logged, until
+  an operator writes `"enforce"` on that peering. ADR 0042 records why -- no box on this fleet
+  covers its forwards yet, and each forwards to the other, so enforcing by default would stop
+  forwarding fleet-wide. The `Terminated` rule above is unchanged under every combination of the
+  two settings.
+
+  **A destination that resolves to no configured route is still gated by nothing**, and that
+  includes a **leased** route: `Connector::client_route` excludes leases by construction (ADR 0028),
+  so neither rule here reaches one. That is ADR 0028's own gap, unchanged by ADR 0042.
 
 ### 3.2 The `WireClaim` binary encoding is not used on either carriage
 
@@ -1128,6 +1146,13 @@ Required surface:
   uncovered peer PREPARE instead of refusing it with `F06_UNEXPECTED_PAYMENT` — the rollout's
   canary step, not a permanent policy surface. Slated for deletion once the fleet-wide rollout
   this document's §3.1 gate depends on is complete and confirmed.
+- Per peer, **temporary** (ADR 0042 item 3): `forwarded_claim_enforcement`, one of `"observe"`
+  (**default**) or `"enforce"`. Governs §3.1's forwarded-arrival rule only, and defaults the
+  opposite way to `claim_enforcement` above because no box on this fleet covers its forwards yet:
+  omitted, an uncovered forwarded arrival is admitted and logged rather than refused. An operator
+  writes `"enforce"` per peering once that peering's counterparty is covering. Two fields rather
+  than one, because the two migrations default in opposite directions and end on different days —
+  deleting `claim_enforcement`'s `"observe"` must not delete this field's default with it.
 - The accepting mirror: configured credentials map to peer ids and thence to their channels.
 - `[[peer_channels]]` — EVM shape: `peer_id`, `channel_id`, `counterparty_key`, `chain_id`,
   `token_network`. Solana shape (issue #759): `peer_id`, `channel_account`, `counterparty_key`,
@@ -1158,6 +1183,7 @@ Named load-time errors this specification requires (spelling #677's, identity ou
 | `PeerRouteUndeliverable`            | a route naming as next hop a peer this connector can never originate to                                                                                                                                                                                             | §2.2, §6.4         |
 | `DuplicatePeerId`                   | two `[[peers]]` entries with the same `id`                                                                                                                                                                                                                          | —                  |
 | `InvalidClaimEnforcement`           | `claim_enforcement` set to anything other than `"enforce"` or `"observe"` — a typo must not silently read as either                                                                                                                                                 | issue #883         |
+| `InvalidForwardedClaimEnforcement`  | `forwarded_claim_enforcement` set to anything other than `"observe"` or `"enforce"` — here a typo meant as `"enforce"` falls through to the permissive default and carries forwards for free                                                                        | ADR 0042           |
 | `PeerMaxPacketAmountZero`           | `max_packet_amount = 0` — a cap of zero refuses every packet the peering could carry, and there is no "disable the cap" spelling                                                                                                                                    | ADR 0042           |
 | removed-field errors                | `peer_wire_addr`, `addr` in its old `SocketAddr` shape, or `ceiling`/`flush_interval_ms` (ADR 0033, issue #882) — a **hard, named** error pointing at the bring-up doc, never a silent ignore, because the devnet boxes run bind-mounted configs that lead the repo | ADR 0027, ADR 0033 |
 

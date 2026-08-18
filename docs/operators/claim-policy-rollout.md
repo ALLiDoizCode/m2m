@@ -93,6 +93,44 @@ claim_enforcement = "observe"   # default, if omitted: "enforce"
   **2026-11-01**, whichever is first. File the removal as its own issue when the last `"observe"`
   is flipped to `"enforce"`, referencing this document.
 
+## The sibling setting: `forwarded_claim_enforcement` (ADR 0042 item 3)
+
+The rule above is only half of what [ADR 0042](../adr/0042-a-packet-carries-its-claim.md) requires.
+Its item 3 extends the same gate to an arrival this node **forwards onward**, which until then was
+carried for free: such a packet must now carry a claim advancing at least the packet's own
+`amount` — not the route's `price` and not the fee (the node keeps the difference between what
+arrives and what it covers to the next hop, which is exactly its flat fee).
+
+```toml
+[[peers]]
+id = "apex-store"
+# ...
+forwarded_claim_enforcement = "enforce"   # default, if omitted: "observe"
+```
+
+- **The default is `"observe"`, the opposite of `claim_enforcement`'s**, and deliberately so. No
+  box on this fleet covers its forwards yet — `[[pay_channels]]` (ADR 0042 item 2) is opt-in per
+  peering and no committed config writes one — and the boxes forward to each other, so a binary
+  that enforced this on upgrade would stop forwarding fleet-wide. Omitted, an uncovered forwarded
+  arrival is admitted, forwarded, and logged.
+- **The observed line has its own text**, so the two rollouts are watched separately. Grep for
+  `peer PREPARE admitted without a covering claim (forwarded_claim_enforcement = observe` — the
+  same fields as the terminated line except that the required figure is logged as `amount` rather
+  than `price`. The refusal it stands in for reads `peer PREPARE refused: no claim covers this
+packet's amount`.
+- **Same rollout order as above, per peering:** upgrade every box first (its send half only
+  covers a peering that has a `[[pay_channels]]` row, so writing that row is the actual "senders
+  first" step here), soak on the default `"observe"` until that peering's admissions stop, then
+  write `"enforce"` on that one peering. Never fleet-wide in one edit.
+- A mistyped value is refused at config load by name
+  (`ConfigError::InvalidForwardedClaimEnforcement`). The stakes are the mirror image of
+  `claim_enforcement`'s: here a typo meant as `"enforce"` would fall through to the permissive
+  default and go on carrying forwards for free.
+- **Two fields, not one restructured field.** `claim_enforcement`'s `"observe"` is dated for
+  deletion (**2026-11-01**, above); this one's default cannot be deleted with it, since it is the
+  behaviour every unconfigured peering relies on. They are separate settings with separate end
+  dates, and the terminated rule's behaviour is unchanged under every combination of the two.
+
 ## Current risk, honestly stated
 
 None of the fleet's three peerings carry **live, real-channel** peer traffic today:
