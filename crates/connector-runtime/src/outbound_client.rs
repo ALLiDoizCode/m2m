@@ -62,7 +62,7 @@ use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
@@ -296,6 +296,54 @@ impl ClaimStateSource for HttpClaimState<'_> {
                 .as_str()
                 .and_then(|value| value.parse().ok()),
         })
+    }
+}
+
+/// [`HttpClaimState`] for a caller that has to **hold** one rather than
+/// build it per call (issue #881).
+///
+/// A [`crate::Connector`] keeps its client-role hops for the life of the
+/// process, in an `Arc<dyn ClaimStateSource>` -- which cannot borrow a
+/// stack-local [`reqwest::Client`] and [`Signer`] the way the one-shot
+/// `connector announce` path does. Everything about the ask is
+/// [`HttpClaimState`]'s and this owns rather than reimplements it: one
+/// `POST /ilp/claim-state`, one challenge digest, one parse of the answer,
+/// so a serving node and a one-shot announce cannot drift into asking the
+/// same question two ways.
+pub struct OwnedHttpClaimState {
+    client: reqwest::Client,
+    edge_url: String,
+    signer: Arc<dyn Signer>,
+}
+
+impl OwnedHttpClaimState {
+    /// `edge_url` is the receiver's full `POST /ilp` endpoint --
+    /// `claim-state` hangs off it as a sub-path -- and `signer` is the
+    /// settlement key the claim itself will be signed with, since the
+    /// challenge proves control of the channel's on-chain participant.
+    pub fn new(
+        client: reqwest::Client,
+        edge_url: impl Into<String>,
+        signer: Arc<dyn Signer>,
+    ) -> OwnedHttpClaimState {
+        OwnedHttpClaimState {
+            client,
+            edge_url: edge_url.into(),
+            signer,
+        }
+    }
+}
+
+#[async_trait]
+impl ClaimStateSource for OwnedHttpClaimState {
+    async fn watermark(
+        &self,
+        channel: &[u8; 32],
+        domain: &EvmDomain,
+    ) -> Result<ClaimWatermark, OutboundClientError> {
+        HttpClaimState::new(&self.client, &self.edge_url, self.signer.as_ref())
+            .watermark(channel, domain)
+            .await
     }
 }
 

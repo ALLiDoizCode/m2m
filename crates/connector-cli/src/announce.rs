@@ -1325,6 +1325,20 @@ pub async fn announce(
     // touches `ClientPayoutLedger`, which is assembled in `router()` and
     // `router()` is never called here. So there is no local mutable money
     // state to fork, and nothing to guard.
+    //
+    // Re-checked when `[[pay_channels]]` gave a SERVING node a file-backed
+    // outbound client ledger of its own (ADR 0042 item 2, issue #881), and
+    // the guard needed no widening. `crate::build` below *opens* that
+    // ledger, which is a read -- the same read it already performs on the
+    // peer journal -- and only `Connector::cover_forward` ever appends to
+    // it, reached solely from `forward_via_peer_route`: the very call
+    // condition (2) above already detects. So the routing path is guarded
+    // for both books at once and the client path still appends to neither
+    // (it signs from `OutboundClientLedger::in_memory`, deliberately). A
+    // fork of the client book would also be the milder one -- the receiver
+    // is the authority there, so it costs one refused packet and the next
+    // watermark ask recovers, where a forked PEER journal silently stops
+    // the peering being paid until somebody restarts it.
     if !options.dry_run && options.via_own_routing {
         refuse_if_a_second_process_would_fork_the_ledger(config, &destination).await?;
     }
