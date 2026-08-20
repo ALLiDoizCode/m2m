@@ -254,11 +254,11 @@ _Avoid_: credit limit, debt limit
 
 **Cap**:
 The largest amount a connector will forward to one peer in a single packet. A packet needing
-more is refused with `T04`, never carried and never split. The cap is how far a connector
-trusts a peer, expressed as the most it is willing to lose in one theft: a peering that has
-just been bought starts at the floor, and a path that keeps fulfilling earns a larger one.
-Bounds a single packet, not an accumulation — there is no accumulation, because a packet
-carries its own claim.
+more is refused with `T04`, never carried and never split — and that reject's message states the
+cap, which is the only way a sender learns it. Bounds a single packet, not an accumulation — there
+is no accumulation, because a packet carries its own claim. The cap is how far a connector trusts a
+peer, expressed as the most it is willing to lose in one theft; the number comes from outside the
+connector, which never raises its own (ADR 0049).
 _Avoid_: ceiling, limit, liquidity bound
 
 **Flush** _(retired term, ADR 0033, issue #882)_:
