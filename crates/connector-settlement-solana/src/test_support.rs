@@ -9,7 +9,7 @@
 //! crate's tests cannot see anything behind `#[cfg(test)]`, since that cfg
 //! is only active while this crate compiles its own test binary.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
@@ -58,13 +58,70 @@ fn program_so_path() -> PathBuf {
     workspace_root().join("target/deploy/payment_channel.so")
 }
 
+/// Where [`program_source_fingerprint`] of the sources the present
+/// `payment_channel.so` was built from is recorded, next to the `.so`
+/// itself so the two travel together through any `target/` cache.
+fn program_fingerprint_path() -> PathBuf {
+    workspace_root().join("target/deploy/payment_channel.so.srcfingerprint")
+}
+
+/// A hash over every source `cargo build-sbf` compiles into
+/// `payment_channel.so` -- `packages/solana-program`'s manifest and its
+/// whole `src/` tree, each file's path hashed alongside its bytes so a
+/// rename counts as a change.
+///
+/// This exists because "the `.so` is present" is not "the `.so` is the
+/// program in this working tree". `target/` is a restored cache in the
+/// Rust Workspace Gate, so a `.so` built from an *older* commit arrives
+/// already present; reusing it silently tested the wrong program. That is
+/// exactly how #1082's balance-proof change (ADR 0053) failed CI: the
+/// client signed the new 96-byte message while the cached program still
+/// expected the old 48-byte one and rejected every claim with
+/// `InvalidSignature`. Comparing sources, not mere existence, is what
+/// makes the rebuild happen.
+///
+/// `None` if the sources cannot be read at all, which callers treat as
+/// "cannot vouch for the `.so`" and rebuild.
+fn program_source_fingerprint() -> Option<String> {
+    let program_dir = workspace_root().join("packages/solana-program");
+    let mut inputs = vec![program_dir.join("Cargo.toml")];
+    collect_program_sources(&program_dir.join("src"), &mut inputs)?;
+    inputs.sort();
+
+    let mut hashed = Vec::new();
+    for path in &inputs {
+        hashed.extend_from_slice(path.to_string_lossy().as_bytes());
+        hashed.extend_from_slice(&std::fs::read(path).ok()?);
+    }
+    Some(solana_sdk::hash::hash(&hashed).to_string())
+}
+
+/// Every file under `dir`, recursively, appended to `out`. `None` if the
+/// directory cannot be walked.
+fn collect_program_sources(dir: &Path, out: &mut Vec<PathBuf>) -> Option<()> {
+    for entry in std::fs::read_dir(dir).ok()? {
+        let path = entry.ok()?.path();
+        if path.is_dir() {
+            collect_program_sources(&path, out)?;
+        } else {
+            out.push(path);
+        }
+    }
+    Some(())
+}
+
 /// Build `packages/solana-program` for the SBF target with `cargo
-/// build-sbf` if its `.so` is not already present, so a fresh checkout (or
-/// CI cache miss) still produces something to load -- mirrors `make
-/// solana-build`. Returns `false` (rather than panicking) if the build
-/// tool is missing or the build itself fails, so callers can fold that
-/// into the same "skip locally, fail loudly in CI" policy every other gate
-/// in this harness already uses.
+/// build-sbf` unless the `.so` already on disk was built from exactly the
+/// sources in this working tree, so a fresh checkout, a CI cache miss, or
+/// an *edit to the program* all still produce something current to load --
+/// mirrors `make solana-build`. Returns `false` (rather than panicking) if
+/// the build tool is missing or the build itself fails, so callers can
+/// fold that into the same "skip locally, fail loudly in CI" policy every
+/// other gate in this harness already uses.
+///
+/// The freshness check is [`program_source_fingerprint`], recorded beside
+/// the `.so` on each successful build; see its docs for why presence alone
+/// was not enough.
 ///
 /// `--tools-version v1.52` pins the platform-tools release rather than
 /// taking whichever line the installed CLI defaults to: it is the same pin
@@ -76,7 +133,10 @@ fn program_so_path() -> PathBuf {
 /// binary entirely (`packages/solana-program/deployments/devnet-public.md`,
 /// "Reproducible-build comparison").
 fn ensure_program_built() -> bool {
-    if program_so_path().exists() {
+    let fingerprint = program_source_fingerprint();
+    let built_from_these_sources = fingerprint.is_some()
+        && std::fs::read_to_string(program_fingerprint_path()).ok() == fingerprint;
+    if program_so_path().exists() && built_from_these_sources {
         return true;
     }
     let status = Command::new("cargo")
@@ -85,7 +145,20 @@ fn ensure_program_built() -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .status();
-    matches!(status, Ok(status) if status.success()) && program_so_path().exists()
+    let built = matches!(status, Ok(status) if status.success()) && program_so_path().exists();
+    if built {
+        if let Some(fingerprint) = fingerprint {
+            // Written via a temporary and renamed: two tests in the same
+            // binary reach this concurrently (cargo's own build lock
+            // serializes their builds, not their bookkeeping), and a
+            // half-written fingerprint would cost a needless rebuild.
+            let temporary = program_fingerprint_path().with_extension("srcfingerprint.tmp");
+            if std::fs::write(&temporary, &fingerprint).is_ok() {
+                let _ = std::fs::rename(&temporary, program_fingerprint_path());
+            }
+        }
+    }
+    built
 }
 
 /// True if `solana-test-validator --version` runs successfully.
