@@ -1,6 +1,16 @@
 # Client edge specification
 
-**Status:** **Live — becomes the client edge specification** (wayfinder map #1049, issue #1065).
+**Status:** **Live — this is the client edge specification** (wayfinder map #1049, issues #1065, #1073).
+Its known corrections are applied: §2 and §3.4 no longer cite the spent ADR 0013, §3.2's
+`GET /ilp/versions` is retired in favour of the node self-description (#1054), and §1.4's claim that no
+settlement address is configured is corrected — they have been in the greeting since issue #617.
+
+**Its authentication, identity and privacy surface is now recorded**, in
+[ADR 0052](../adr/0052-permissionless-payment-is-guaranteed-and-a-claim-is-what-authorises.md): a
+conforming connector accepts payment from a buyer it has never heard of; a **claim** authorises and an
+identity does not; _unverifiable is never accepted, by configuration, flag or build profile_; and a
+claim may be presented plaintext or NIP-59-wrapped at the **client's** choice, with both accepted.
+Before that record this surface appeared in none of the first 51.
 Known corrections pending: §2 and §3.4 cite [ADR 0013](../adr/0013-cut-over-through-a-parallel-address-space.md)
 as live authority and it is spent (the fleet was switched off, issue #872); §3.2 describes
 `GET /ilp/versions` in the present tense and no such route exists — version discovery moves to the node
@@ -536,8 +546,9 @@ byte-for-byte, base64-encoded, in a `Payment-Required` response header:
 the one payment method this client edge's own claim gate (§1.3) actually understands: a TOON
 payment channel claim, presented back over this same `POST /ilp`. There is no per-chain `exact`
 scheme entry naming a settlement `asset`/`payTo` address, for EVM, Solana or any other chain,
-because no settlement address is configured anywhere in this connector yet — answering terms
-(issue #526) is a smaller, different thing from adding that configuration. `extra` is limited to
+because this claim gate understands one payment method and an `exact` scheme entry would describe a
+second. **Not** because settlement facts are unavailable — they have been in the greeting's `extra`
+since issue #617, and are per-chain since #632 (corrected, issue #1073). `extra` is limited to
 what the code actually sets — `ilpAddress`, `endpoint`, `price` and `sessionLeaseTtlMs` on every
 greeting, plus whichever of `ilpAddresses`/`btpEndpoint`/`settlement`/`settlements`/
 `requiredTransport` this node has configured (below) — and carries nothing else.
@@ -1111,8 +1122,10 @@ against `POST /ilp`. Nothing here calls into claim ingestion, and no per-packet 
 Version 1 has no field or header identifying its own version. That is the gap §3 closes: version
 1 is the version a client speaks when it addresses `POST /ilp` with none of the version-selection
 mechanism below, and is preserved exactly as specified above for as long as any client depends on
-it — per [ADR 0013](../adr/0013-cut-over-through-a-parallel-address-space.md), the old fleet stays
-up until nothing addresses its prefix.
+it. **That promise no longer rests on ADR 0013** (issue #1073): the parallel fleet it described was
+switched off by issue #872, so "the old fleet stays up until nothing addresses its prefix" refers to
+nothing. Version 1's preservation rests instead on §3.1's own guarantee — the unversioned path is a
+**permanent** alias for `v1`, and a client that never adopts versioning is never asked to change.
 
 ## 3. Introducing a new version
 
@@ -1130,8 +1143,15 @@ of any lower-numbered path.
 
 ### 3.2 Discovering what a connector supports
 
-`GET /ilp/versions` is unauthenticated (client-edge-facing, requiring no identity or claim) and
-returns:
+**Retired before it was ever built (issue #1054).** Version support is a fact about this node, and a
+node's facts live in **one** document: its self-description, which a `GET` on this connector's own URL
+returns ([ADR 0050](../adr/0050-a-connectors-url-resolves-to-its-self-description.md),
+[`self-description-spec.md`](self-description-spec.md)). A separate versions endpoint would have been a
+third surface describing the same node, after the greeting and the kind:10032 announce — which is the
+mess ADR 0046 and ADR 0050 exist to end.
+
+`supportedVersions` and `defaultVersion` are therefore fields on that document, carrying exactly what
+this section described:
 
 ```json
 { "supported": [1, 2], "default": 1 }
@@ -1158,9 +1178,9 @@ defined above.
 
 This spec defines only how a version is _introduced_ alongside an existing one. Retiring a
 version — ceasing to serve a version-qualified path — is a separate operational decision outside
-this document's scope, gated on nothing addressing that version's prefix, mirroring
-[ADR 0013](../adr/0013-cut-over-through-a-parallel-address-space.md)'s treatment of the peer-role
-cutover.
+this document's scope, gated on nothing addressing that version's prefix. **The mirror this
+previously pointed at is gone** (issue #1073): ADR 0013's parallel fleet was switched off by issue
+#872. The gate itself stands on its own; it needs no precedent.
 
 ## 4. Consistency
 
