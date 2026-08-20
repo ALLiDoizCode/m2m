@@ -831,9 +831,10 @@ impl Connector {
         mut self,
         channel_account: impl Into<String>,
         counterparty_public_key: &str,
+        program_id: &str,
     ) -> Result<Self, InvalidSolanaChannel> {
         self.claims
-            .set_solana_channel(channel_account, counterparty_public_key)?;
+            .set_solana_channel(channel_account, counterparty_public_key, program_id)?;
         Ok(self)
     }
 
@@ -3487,7 +3488,11 @@ mod tests {
                 test_clock(),
             )
             .with_identity_signer(identity_signer())
-            .with_solana_channel(channel_account.clone(), &payer_public_key)
+            .with_solana_channel(
+                channel_account.clone(),
+                &payer_public_key,
+                "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+            )
             .expect("a real base58 32-byte account and public key"),
         );
         let mut peer_transport = InProcessPeerTransport::new();
@@ -3501,7 +3506,11 @@ mod tests {
         )
         .with_solana_signer(payer_signer)
         .with_peer_claim_channel("second-hop", channel_account.clone())
-        .with_solana_channel(channel_account.clone(), &payer_public_key)
+        .with_solana_channel(
+            channel_account.clone(),
+            &payer_public_key,
+            "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+        )
         .expect("a real base58 32-byte account and public key");
 
         let first = first_hop

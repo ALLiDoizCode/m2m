@@ -80,7 +80,7 @@ pub fn verify_evm_claim_state_challenge(
 
 /// Domain tag prefixing every Solana claim-state challenge message --
 /// chosen to be neither the same length nor a prefix/suffix of
-/// [`crate::solana_balance_proof_message`]'s 48 raw bytes, so the two
+/// [`crate::solana_balance_proof_message`]'s 96 bytes, so the two
 /// message layouts can never collide for any channel/nonce/amount/expires.
 const SOLANA_CHALLENGE_DOMAIN_TAG: &[u8] = b"toon-claim-state-challenge-v1";
 
@@ -280,7 +280,8 @@ mod tests {
     fn a_genuine_solana_balance_proof_signature_does_not_verify_as_a_claim_state_challenge() {
         let keypair = generate_solana_keypair();
         let channel_account = [3u8; 32];
-        let balance_proof_message = crate::solana_balance_proof_message(&channel_account, 7, 500);
+        let balance_proof_message =
+            crate::solana_balance_proof_message(&[9u8; 32], &channel_account, 7, 500);
         let signature = keypair.sign(&balance_proof_message);
 
         assert!(!verify_solana_claim_state_challenge(

@@ -941,6 +941,7 @@ price = {SOLANA_ROUTE_PRICE}
     let channel_bytes = channel_pubkey.to_bytes();
     let genuine_nonce = 1u64;
     let genuine_message = connector_signer::solana_balance_proof_message(
+        &[7u8; 32],
         &channel_bytes,
         genuine_nonce,
         SOLANA_ROUTE_PRICE,
@@ -997,8 +998,12 @@ price = {SOLANA_ROUTE_PRICE}
     let forged_prepare = sample_prepare("g.example.app", forged_data, &forged_shared);
     let forged_nonce = 2u64;
     let forged_amount = 2 * SOLANA_ROUTE_PRICE;
-    let forged_message =
-        connector_signer::solana_balance_proof_message(&channel_bytes, forged_nonce, forged_amount);
+    let forged_message = connector_signer::solana_balance_proof_message(
+        &[7u8; 32],
+        &channel_bytes,
+        forged_nonce,
+        forged_amount,
+    );
     let forged_signature = forger.sign_message(&forged_message);
     let forged_claim = solana_claim_json(
         &channel.0,

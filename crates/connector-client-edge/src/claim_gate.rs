@@ -1743,6 +1743,7 @@ async fn verify_solana_claim_signature(
     };
 
     if verify_solana_balance_proof(
+        &channel.program_id,
         &channel_account,
         claim.nonce,
         claim.transferred_amount,
@@ -1802,6 +1803,7 @@ mod tests {
             .record_solana(
                 &base58_encode(&SOLANA_CHANNEL_ACCOUNT),
                 &base58_encode(&solana_signer().public.to_bytes()),
+                "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
             )
             .expect("a 32-byte base58 channel account");
         channels
@@ -2613,6 +2615,7 @@ mod tests {
 
         let keypair = solana_signer();
         let message = connector_signer::solana_balance_proof_message(
+            &[7u8; 32],
             channel_account_bytes,
             nonce,
             transferred_amount,
@@ -2654,8 +2657,12 @@ mod tests {
             solana_signer().public.to_bytes(),
             "the forger must not accidentally be the counterparty"
         );
-        let message =
-            connector_signer::solana_balance_proof_message(&SOLANA_CHANNEL_ACCOUNT, 1, 100);
+        let message = connector_signer::solana_balance_proof_message(
+            &[7u8; 32],
+            &SOLANA_CHANNEL_ACCOUNT,
+            1,
+            100,
+        );
         let signature = forger.sign(&message);
 
         let claim = solana_claim_json_with(
@@ -2696,8 +2703,12 @@ mod tests {
 
         let gate = gate();
         let signer = solana_signer();
-        let message =
-            connector_signer::solana_balance_proof_message(&SOLANA_CHANNEL_ACCOUNT, 1, 100);
+        let message = connector_signer::solana_balance_proof_message(
+            &[7u8; 32],
+            &SOLANA_CHANNEL_ACCOUNT,
+            1,
+            100,
+        );
         let signature = signer.sign(&message);
 
         let claim = solana_claim_json_with(
@@ -2719,8 +2730,12 @@ mod tests {
 
         let gate = gate();
         let keypair = solana_signer();
-        let message =
-            connector_signer::solana_balance_proof_message(&SOLANA_CHANNEL_ACCOUNT, 1, 100);
+        let message = connector_signer::solana_balance_proof_message(
+            &[7u8; 32],
+            &SOLANA_CHANNEL_ACCOUNT,
+            1,
+            100,
+        );
         let mut signature_bytes = keypair.sign(&message).to_bytes();
         signature_bytes[0] ^= 0xff;
 
@@ -3068,6 +3083,7 @@ mod tests {
             let source = Arc::new(FakeSolanaChannelSource::knowing(vec![(
                 account,
                 SolanaChannel {
+                    program_id: [7u8; 32],
                     counterparty: solana_signer().public.to_bytes(),
                     deposit_floor: DepositFloor::AtLeast(0),
                 },
@@ -3092,6 +3108,7 @@ mod tests {
             source.now_says(
                 account,
                 Some(SolanaChannel {
+                    program_id: [7u8; 32],
                     counterparty: solana_signer().public.to_bytes(),
                     deposit_floor: DepositFloor::AtLeast(6_000),
                 }),
@@ -3177,6 +3194,7 @@ mod tests {
             let source = Arc::new(FakeSolanaChannelSource::knowing(vec![(
                 account,
                 SolanaChannel {
+                    program_id: [7u8; 32],
                     counterparty,
                     deposit_floor: DepositFloor::AtLeast(deposit),
                 },
@@ -3224,6 +3242,7 @@ mod tests {
             source.now_says(
                 account,
                 Some(SolanaChannel {
+                    program_id: [7u8; 32],
                     counterparty,
                     deposit_floor: DepositFloor::AtLeast(5_000_000),
                 }),
@@ -3264,6 +3283,7 @@ mod tests {
             source.now_says(
                 account,
                 Some(SolanaChannel {
+                    program_id: [7u8; 32],
                     counterparty,
                     deposit_floor: DepositFloor::AtLeast(5_000_000),
                 }),
@@ -3401,6 +3421,7 @@ mod tests {
             let source = Arc::new(FakeSolanaChannelSource::knowing(vec![(
                 account,
                 SolanaChannel {
+                    program_id: [7u8; 32],
                     counterparty,
                     deposit_floor: DepositFloor::AtLeast(5_000_000),
                 },
@@ -3425,6 +3446,7 @@ mod tests {
                 source.now_says(
                     account,
                     Some(SolanaChannel {
+                        program_id: [7u8; 32],
                         counterparty,
                         deposit_floor: DepositFloor::AtLeast(5_000_000),
                     }),
