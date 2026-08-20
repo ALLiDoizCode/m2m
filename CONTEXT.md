@@ -242,8 +242,10 @@ The highest nonce a payee has accepted on a channel.
 **Exposure** _(retired term, [ADR 0033](docs/adr/0033-the-exposure-machinery-is-retired-not-restated.md), issue #882)_:
 Value a payee had delivered but did not yet hold a claim for, under the pre-#868 credit window.
 One packet under normal flow; more only when a payer had fulfilled packets and stopped claiming.
-With a covering claim mandatory on every peer PREPARE (ADR 0031), this state no longer arises in
-normal operation and nothing tracks it. Kept here because the term still appears in historical
+Retired by ADR 0033: nothing tracks it, and no projection produces it. The reasoning was that a packet
+would carry its own claim (ADR 0042) and so leave nothing trailing — **true today at a priced
+termination, and not yet built for a forwarded arrival**, which is why the retirement is stated on ADR
+0033's own terms rather than on that one's. Kept here because the term still appears in historical
 prose (`docs/protocol/peer-semantics-pre-868.md` §3.2–§3.4, §5.3; [`docs/protocol/money-model-pre-868.md`](docs/protocol/money-model-pre-868.md)).
 
 **Ceiling** _(retired term, ADR 0033, issue #882)_:

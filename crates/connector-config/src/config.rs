@@ -1846,9 +1846,16 @@ token_network_address = "{PEER_TOKEN_NETWORK}"
         assert_eq!(config.peers()[0].dial(), None);
     }
 
-    /// §11's removed-field row, `ceiling` half (ADR 0031, ADR 0033, issue
-    /// #882): a devnet box's bind-mounted TOML that still sets it gets a
-    /// named error, not a silent unknown-field drop.
+    /// §11's removed-field row, `ceiling` half (ADR 0033, issue #882): a
+    /// devnet box's bind-mounted TOML that still sets it gets a named error,
+    /// not a silent unknown-field drop.
+    ///
+    /// Asserts on **ADR 0033**, the record that removed the machinery -- not
+    /// on the reasoning behind it (issue #1068). This assertion previously
+    /// pinned "ADR 0031", which is superseded in full by ADR 0042 and whose
+    /// covering-claim rule is still unbuilt for forwarded arrivals; pinning
+    /// it is how the wrong citation survived in a message an operator reads
+    /// when their node refuses to boot.
     #[test]
     fn rejects_a_peering_that_still_sets_ceiling() {
         let result = load_peering(|text| {
@@ -1863,7 +1870,7 @@ token_network_address = "{PEER_TOKEN_NETWORK}"
             |error| matches!(error, ConfigError::PeerCeilingRemoved { id } if id == "store"),
         );
         assert!(
-            message.contains("ADR 0031") && message.contains(BRINGUP_DOC),
+            message.contains("ADR 0033") && message.contains(BRINGUP_DOC),
             "got: {message}"
         );
     }
@@ -1883,7 +1890,7 @@ token_network_address = "{PEER_TOKEN_NETWORK}"
             |error| matches!(error, ConfigError::PeerFlushIntervalRemoved { id } if id == "store"),
         );
         assert!(
-            message.contains("ADR 0031") && message.contains(BRINGUP_DOC),
+            message.contains("ADR 0033") && message.contains(BRINGUP_DOC),
             "got: {message}"
         );
     }

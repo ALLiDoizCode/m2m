@@ -1,6 +1,6 @@
 # Request-request binding ships no new mechanism
 
-**Status:** Accepted. It ships no mechanism, so there is nothing in the tree to check: what closes the threat is [0018](0018-a-payload-is-sealed-to-the-terminating-connector.md), [0019](0019-a-terminating-connector-derives-the-fulfilment.md) and the client claim gate that predates both.
+**Status:** Accepted. It ships no mechanism, so there is nothing in the tree to check: what closes the threat is [0018](0018-a-payload-is-sealed-to-the-terminating-connector.md), [0019](0019-a-terminating-connector-derives-the-fulfilment.md) and the client claim gate that predates both. **Amended by issue #1068:** its argument cites [0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md) in the present tense, and 0031 is superseded **in full** by [0042](0042-a-packet-carries-its-claim.md). **The argument survives the substitution** — 0042 keeps one claim per packet, signed fresh on the channel between that one pair of connectors, and a claim covering a forward is still never forwarded onward. Read the citation as 0042.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
