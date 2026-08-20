@@ -1,5 +1,7 @@
 # A terminating connector derives the fulfilment it is paid against
 
+**Status:** Accepted. Bounded by [0032](0032-a-client-destination-is-never-a-route-termination.md). Live: `Connector::deliver_opened_envelope`. The `TOON-Fulfillment` header it retires is gone from `crates/`.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 At a route termination the connector derives the packet's fulfilment from the secret in the gift

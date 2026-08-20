@@ -1,5 +1,7 @@
 # A packet carries its claim
 
+**Status:** Accepted — **a target record, partly built**. **Supersedes [0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md)**, retires [0004](0004-value-moves-on-fulfilment.md)'s headline, and amends [0010](0010-flat-per-packet-fee-and-minimum-delivery.md) and [0011](0011-rejects-accumulate-fees-and-probes-discover-cost.md). Built: the cap (`max_packet_amount`, with a default) and the send half (`[[pay_channels]]` populating `outbound_client_hops`, issue #881). Not built: requiring a covering claim on **forwarded** arrivals, and the resolution of `ClaimEnforcement::Observe`. Until those land, forwarding runs [0004](0004-value-moves-on-fulfilment.md)'s model end to end.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 Every packet carries the claim that pays for it. A PREPARE arrives at a connector with a covering
@@ -105,7 +107,7 @@ reason only — the third item is the one that can break a running fleet:
 
 Until (2) lands the connector runs ADR 0004's model end to end for forwarding, which is coherent and
 RFC-shaped; it is simply not this record. **Three documents already assert otherwise** — ADR 0031's
-Decision, ADR 0033's premise, and `docs/protocol/money-model.md`'s "current behaviour" banner. This
+Decision, ADR 0033's premise, and `docs/protocol/money-model-pre-868.md`'s "current behaviour" banner. This
 record does not become a fourth: it says plainly that it describes the target.
 
 (2) has since landed, and what it changed is narrower than "the fleet now covers": a peering covers

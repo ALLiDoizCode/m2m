@@ -1,5 +1,7 @@
 # Request-request binding ships no new mechanism
 
+**Status:** Accepted. It ships no mechanism, so there is nothing in the tree to check: what closes the threat is [0018](0018-a-payload-is-sealed-to-the-terminating-connector.md), [0019](0019-a-terminating-connector-derives-the-fulfilment.md) and the client claim gate that predates both.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 Issue #508 asked whether a claim must be cryptographically bound to the specific request it paid
@@ -88,7 +90,7 @@ work." That party does not exist on the path the client edge or the peer wire ac
 claim over, and this is a correction to issue #508's own premise, not new work performed here.
 
 A client-edge claim is a per-hop artifact: it travels from the client directly to the one
-connector that verifies it, and stops there. `docs/protocol/money-model.md` states this as the
+connector that verifies it, and stops there. `docs/protocol/money-model-pre-868.md` states this as the
 model's own foundation: "The client's claim never leaves box 1. Box 1's claim to box 2 is box 1's
 own money." The value a claim carries is consumed into that connector's own accounting the moment
 its watermark advances — it is never re-presented, re-signed, or forwarded to the next hop as

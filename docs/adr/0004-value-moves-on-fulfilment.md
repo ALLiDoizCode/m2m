@@ -1,5 +1,7 @@
 # Value moves on fulfilment, one claim per packet
 
+**Status:** Partly superseded by [0042](0042-a-packet-carries-its-claim.md). The headline — "value moves on fulfilment and only on fulfilment" — is retired. **One claim per packet, never batched, and dead `lockedAmount`/`locksRoot`, are Accepted and still binding.** Its trailing-claim mechanism was inverted by [0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md), itself superseded by 0042; the flush timer and exposure ceiling it reasons with are retired by [0033](0033-the-exposure-machinery-is-retired-not-restated.md).
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 > **The headline is superseded by [ADR 0042](0042-a-packet-carries-its-claim.md).** "Value moves on

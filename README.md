@@ -6,6 +6,12 @@ A payment router for agent networks: an [Interledger](https://interledger.org) c
 forwards value-bearing packets between peers, terminates routes in front of
 payment-oblivious apps, charges for them, and settles the balance on chain.
 
+**It terminates payments the way nginx terminates SSL.** Value arrives wrapped in a protocol the
+app never speaks; at the last hop the connector unwraps it, verifies it, and hands the app ordinary
+HTTP that was already paid for. That is the whole of what "route termination", the app/connector
+split and "paid reverse proxy" mean — see [`CONTEXT.md`](CONTEXT.md) for the terms and
+[`docs/adr/`](docs/adr/README.md) for the decisions.
+
 **This is a Rust repository.** The connector is a Cargo workspace under [`crates/`](crates/),
 built as one static binary that reads one TOML file. The TypeScript connector that used to live
 here was a prototype and has been removed —
@@ -45,7 +51,7 @@ that line guarantees and what replaces it.
   ([ADR 0004](docs/adr/0004-value-moves-on-fulfilment.md),
   [ADR 0005](docs/adr/0005-claims-are-truth-balances-are-a-projection.md)); the latest claim is
   redeemed on chain against a deployed `TokenNetwork`, reached through a registry.
-  [`docs/protocol/money-model.md`](docs/protocol/money-model.md) walks one write end to end —
+  [`docs/protocol/money-model-pre-868.md`](docs/protocol/money-model-pre-868.md) walks one write end to end —
   client edge to terminating app — with a diagram.
 
 ## Build
@@ -167,7 +173,7 @@ two disagree, naming both. Write the scale the deployed token actually has — t
 node accepts client-edge claims on, and the counterparty whose signature it accepts on that
 channel — `channel_id` (the on-chain 32-byte identifier), `counterparty` (a 20-byte EVM address),
 `chain_id` and `token_network_address` (the EIP-712 domain the balance proof is signed under, per
-[ADR 0024](docs/adr/0024-peer-role-claims-sign-the-eip-712-balance-proof.md)). A claim's signature
+[ADR 0024](docs/adr/0024-peer-wire-claims-sign-the-eip-712-balance-proof.md)). A claim's signature
 is checked against that recorded counterparty and never against the signer the claim declares for
 itself, and a claim naming a channel with no entry here is refused as unknown. A node configuring
 none therefore accepts no paid write at all — deliberately, since the only alternative to "no
@@ -239,7 +245,7 @@ builds.
 
 What a client speaks to the connector it pays. Versioned rather than redesigned, because its far
 end is software this repository does not ship
-([ADR 0003](docs/adr/0003-clean-room-peer-role-versioned-client-edge.md)). Six routes, all on
+([ADR 0003](docs/adr/0003-clean-room-peer-wire-versioned-client-edge.md)). Six routes, all on
 `client_edge_addr`: the three below (`POST /ilp`, `GET /ilp/identity`, `GET /ilp/routes/price`),
 plus `POST /ilp/probe` (raises a `TOON-Accumulated-Cost` reject deliberately, for cost discovery),
 `GET /ilp/btp` (the BTP carriage's websocket upgrade, ADR 0027 — also where a BTP peer rides this
@@ -340,13 +346,13 @@ never an open endpoint — see issue #669.
 
 A peer rides one of the same two carriages a client speaks to, on `client_edge_addr` — there is no
 second listener and no raw-TCP frame protocol; that was deleted with the old peer semantics
-([ADR 0027](docs/adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-role-is-deleted.md)).
+([ADR 0027](docs/adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md)).
 The peer endpoint's URL **scheme** picks the carriage — `wss://` for BTP (RFC-0023 frames),
 `https://` for ILP-over-HTTP — and **role is decided by authentication**: an interaction is a
 `peer` only if it presents a credential naming a peer id with a matching `[[peer_channels]]`
 binding, never by which port or listener it arrived on. A claim rides the _next_ frame or request
 to a peer after a fulfilment, not the PREPARE that caused it, and is signed as an EIP-712
-`BalanceProof` ([ADR 0024](docs/adr/0024-peer-role-claims-sign-the-eip-712-balance-proof.md)).
+`BalanceProof` ([ADR 0024](docs/adr/0024-peer-wire-claims-sign-the-eip-712-balance-proof.md)).
 
 "Role is decided by authentication" says **which role you get**, not **whether you are let in**. An
 interaction presenting no credential — every ordinary client — is admitted as a `client`, and so is

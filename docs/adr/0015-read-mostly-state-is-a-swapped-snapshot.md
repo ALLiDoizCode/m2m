@@ -1,5 +1,7 @@
 # Read-mostly state is a swapped snapshot; the packet path never locks
 
+**Status:** Accepted. Live: `ArcSwap`-held leased routes in `connector-runtime`.
+
 **Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
 
 Routes, peers and configuration are read on every packet and written rarely, if ever. That

@@ -1,5 +1,7 @@
 # A hop charges a flat per-packet fee, and packets declare a minimum delivery
 
+**Status:** Accepted, amended by [0042](0042-a-packet-carries-its-claim.md): a fee is earned when the packet is paid for, not on fulfilment. Flat-per-packet and minimum delivery are unchanged.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 Each peering relation has a flat fee charged once per forwarded packet, replacing the

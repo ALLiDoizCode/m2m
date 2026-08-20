@@ -1,5 +1,7 @@
 # Connectors peer over BTP or ILP-over-HTTP; the raw-TCP peer wire is deleted
 
+**Status:** Accepted. **Supersedes [0003](0003-clean-room-peer-wire-versioned-client-edge.md)'s peer-wire half, [0026](0026-client-btp-rides-the-client-edge-peers-stay-on-the-peer-wire.md)'s peer conclusion, and [0022](0022-a-connector-answers-it-does-not-announce.md)'s "private, plaintext and unauthenticated" consequence.** Amended by [0033](0033-the-exposure-machinery-is-retired-not-restated.md): every clause reasoning with `flush_interval_ms` or an explicit `ceiling` is historical — both are now config keys parsed only to be rejected, and `AcceptOnlyPeerWithoutCeiling` no longer exists.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 > **The flush timer and the exposure ceiling this ADR reasons with throughout are retired** by

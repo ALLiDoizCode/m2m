@@ -1,5 +1,7 @@
 # Configuration is one typed file with no environment-variable layer
 
+**Status:** Accepted. Extended by [0034](0034-a-runtime-peer-route-table-never-shadows-the-config-file.md), which adds a runtime table that can never shadow the file.
+
 **Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
 
 The connector reads a single configuration file, deserializes and validates it once at boot,

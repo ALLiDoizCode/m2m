@@ -1,16 +1,16 @@
-# Peer semantics specification (formerly the peer semantics specification)
+# Peer semantics specification (formerly the peer wire specification)
 
 **Status:** Normative for §3–§6. **§1–§2 are deleted** — superseded by
-[ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-role-is-deleted.md),
+[ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md),
 and the implementation they described was removed in issue #679.
-Originally: normative, version 1 — clean-room design per [ADR 0003](../adr/0003-clean-room-peer-role-versioned-client-edge.md).
+Originally: normative, version 1 — clean-room design per [ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md).
 **Consumers:** the Rust `connector-runtime` peer transport port and every implementation of
 it (contract-tested per [ADR 0007](../adr/0007-testing-doctrine-fakes-yes-mocks-no.md)); any
 non-Rust connector that wishes to peer with this fleet.
 **Vocabulary:** [`CONTEXT.md`](../../CONTEXT.md). The key words MUST, MUST NOT, SHOULD and MAY
 are per RFC 2119.
 **How the claim exchange below fits into value moving end to end across a forwarded packet,
-with a diagram:** [`money-model.md`](money-model.md).
+with a diagram:** [`money-model-pre-868.md`](money-model-pre-868.md).
 
 ## What this document is now
 
@@ -157,7 +157,7 @@ contract this design calls for, not the one currently deployed: the live `TokenN
 what that contract's `ecrecover` checks. Until a redeployment drops them, they are still hashed as
 zeros (see below).
 
-**Implementation note (issue #575, [ADR 0024](../adr/0024-peer-role-claims-sign-the-eip-712-balance-proof.md)):**
+**Implementation note (issue #575, [ADR 0024](../adr/0024-peer-wire-claims-sign-the-eip-712-balance-proof.md)):**
 this table's `evm` row is normative and, as of this issue, matches what the code does — before it,
 `crates/connector-runtime/src/claim.rs` signed and verified a connector-internal SHA-256 hash of
 `channel_id ‖ nonce ‖ cumulative_amount` instead, a divergence from this section that was invisible
@@ -350,7 +350,7 @@ own price-coverage gate (`peer-carriage-spec.md` §3.1) before this check is eve
 This specification uses exactly the vocabulary of `CONTEXT.md` (connector, app, packet, route,
 peer semantics, client edge, claim, nonce, watermark, exposure, ceiling, flush, in flight, projection,
 settlement, fee, minimum delivery, probe) and implements
-[ADR 0003](../adr/0003-clean-room-peer-role-versioned-client-edge.md),
+[ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md),
 [ADR 0004](../adr/0004-value-moves-on-fulfilment.md),
 [ADR 0005](../adr/0005-claims-are-truth-balances-are-a-projection.md),
 [ADR 0010](../adr/0010-flat-per-packet-fee-and-minimum-delivery.md) and

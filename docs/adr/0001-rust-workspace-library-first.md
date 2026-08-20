@@ -1,5 +1,7 @@
 # The connector is a Rust library first, a binary second
 
+**Status:** Accepted. No successor record. Two crate names in "Consequences" never shipped: `connector-api` and `connector-admin` are `connector-client-edge` and `connector-operator`. The embedded `ConnectorNode` this record promised to delete was deleted (issue #457).
+
 **Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
 
 The TypeScript connector's real problem is structural, not performance: `connector-node.ts`

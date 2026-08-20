@@ -1,5 +1,7 @@
 # A moving tag carries the fleet's committed config, or it does not move
 
+**Status:** Accepted. Deployment law for this fleet, not protocol. Live: `crates/connector-bin/tests/fleet_release_gate.rs`, over `publish-connector-rust-image.yml` and `promote-to-fleet.yml`.
+
 **Scope:** deployment law for this fleet — not protocol. See the [ADR index](README.md).
 
 An image tag that a box follows unattended may only move to a build that still accepts the

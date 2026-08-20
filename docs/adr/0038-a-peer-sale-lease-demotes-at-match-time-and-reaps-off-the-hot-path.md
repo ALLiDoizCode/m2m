@@ -1,5 +1,7 @@
 # A peer-sale lease demotes at match time and reaps off the hot path
 
+**Status:** Retired by [0043](0043-purchasable-peering-is-removed.md). It gave expiry to a row shape that no longer exists. [0034](0034-a-runtime-peer-route-table-never-shadows-the-config-file.md)'s runtime peer/route table is unaffected and keeps its own durability rules.
+
 **Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
 
 > **Removed with the feature it bounds, by

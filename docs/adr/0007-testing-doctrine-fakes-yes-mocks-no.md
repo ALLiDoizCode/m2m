@@ -1,5 +1,7 @@
 # Property tests over a pure core; fakes are allowed, mocks are not
 
+**Status:** Accepted. The crate it names, `connector-core`, shipped as `connector-domain`; the local-disposable-chain section is an in-place amendment, not a separate record.
+
 **Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
 
 Testing runs in three tiers: property tests over `connector-core`, which has no I/O at all;

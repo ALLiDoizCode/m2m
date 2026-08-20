@@ -13,17 +13,17 @@ text and the code is a bug in this text. Where this document and an ADR disagree
 this document is reconciled to match, not the other way around. Version 1 below is organized by
 section number so `crates/connector-client-edge`'s own doc comments can cite it; §3 sketches how a
 future version would be introduced, per
-[ADR 0003](../adr/0003-clean-room-peer-role-versioned-client-edge.md).
+[ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md).
 **Consumers:** `toon-client` and any other app that pays this connector directly — installed on
 machines this repository's operators do not control.
 **Vocabulary:** [`CONTEXT.md`](../../CONTEXT.md).
 **Where the claim a client pays here goes next**, and why it is never forwarded onward:
-[`money-model.md`](money-model.md).
+[`money-model-pre-868.md`](money-model-pre-868.md).
 
 The **client edge** is the protocol a client speaks to the connector it attaches to
 (`CONTEXT.md`). Unlike the peer semantics, it is versioned rather than redesigned: its far end is
 software this repository does not ship and cannot flag-day, so an old version keeps working
-after a new one exists ([ADR 0003](../adr/0003-clean-room-peer-role-versioned-client-edge.md),
+after a new one exists ([ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md),
 [ADR 0001](../adr/0001-rust-workspace-library-first.md) — `connector-client-edge` is exposed as
 an HTTP router).
 
@@ -36,7 +36,7 @@ traffic, and the one-shot ILP-over-HTTP binding (RFC-0035) at `POST /ilp` — it
 described this as the edge transport for one-shot, stateless purchases: a buyer, a NAT'd client, a
 browser, or an agent that only consumes. That source no longer exists in this repository but is
 recoverable from git history prior to #465. That BTP did double duty is exactly the conflation
-[ADR 0003](../adr/0003-clean-room-peer-role-versioned-client-edge.md) retires: the peer semantics
+[ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md) retires: the peer semantics
 (`docs/protocol/peer-semantics-spec.md`) is redesigned freely because both its ends are
 operator-controlled, which is never true of a client. This document therefore specifies the
 client edge as **ILP-over-HTTP** — `POST /ilp` — since that is the transport whose far end is
@@ -780,7 +780,7 @@ below for what a client's `auth` entry is and is not). The peer sub-protocol ent
 `toon-minimum-delivery` beside the `payment-channel-claim` and `toon-accumulated-cost` entries this
 section already defines — are specified for the peer direction, not here.
 
-> **Superseded** by [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-role-is-deleted.md):
+> **Superseded** by [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md):
 > the raw-TCP transport is deleted (issue #679) and peers ride this same carriage, or
 > ILP-over-HTTP. A session is a _peer_ session if and only if it presented a configured peer
 > credential **and** has a `[[peer_channels]]` entry — role by authentication, not by transport
@@ -1143,7 +1143,7 @@ A client and this connector agree on which version is in use by the path the cli
 address: `POST /ilp` (or `/ilp/v1`) is a version-1 exchange end to end; `POST /ilp/v2` is a
 version-2 exchange end to end. There is no per-request negotiation or content-type haggling — the
 path is the entire agreement, which keeps the client edge as small as the two-repository
-implementation cost in [ADR 0003](../adr/0003-clean-room-peer-role-versioned-client-edge.md)
+implementation cost in [ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md)
 demands (implemented once in Rust, once in TypeScript for `toon-client`, and complexity here is
 paid twice on those grounds alone). A connector that does not implement a version a client
 requests returns `404` on that version's path, distinguishable from every in-spec response
@@ -1162,6 +1162,6 @@ cutover.
 This specification uses exactly the vocabulary of `CONTEXT.md` (connector, app, handler, packet,
 route, route termination, client edge, payment channel, claim, nonce, watermark, fee, price,
 probe) and implements [ADR 0001](../adr/0001-rust-workspace-library-first.md) and
-[ADR 0003](../adr/0003-clean-room-peer-role-versioned-client-edge.md). It does not use
+[ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md). It does not use
 "terminator", "BLS"/"Business Logic Server", or "agent runtime" (all deprecated); it uses "app"
 and "handler" for the payment-oblivious service behind a terminated route.

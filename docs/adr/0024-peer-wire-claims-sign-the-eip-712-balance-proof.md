@@ -1,5 +1,7 @@
 # Peer-wire claims sign the EIP-712 balance-proof digest, not a connector-internal SHA-256 tuple
 
+**Status:** Accepted. Its own inline note already records that `SettlementChannel.sol` was deleted (#578, #589) and `connector-settlement-evm` retargeted at the deployed `TokenNetwork`. `connector_domain::claim_digest` is gone from `crates/`, as this record required.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 `ClaimBook` (`crates/connector-runtime/src/claim.rs`) now signs and verifies every EVM peer-wire

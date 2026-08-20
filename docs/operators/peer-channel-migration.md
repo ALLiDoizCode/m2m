@@ -17,7 +17,7 @@ domain (ADR 0024), and rewriting the literal under a live channel would invalida
 already exchanged on it. Leaving it there afterwards is not deliberate — it is a standing
 two-settlement-contract split-brain, and this is the follow-up that ends it.
 
-Relies on [ADR 0024](../adr/0024-peer-role-claims-sign-the-eip-712-balance-proof.md) (the
+Relies on [ADR 0024](../adr/0024-peer-wire-claims-sign-the-eip-712-balance-proof.md) (the
 domain a channel's claims are signed under) and [ADR 0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md)
 (the apex↔store peering carries priced, claim-settled traffic, not a free relay). Modelled on
 [`btp-peer-transport-bringup.md`](btp-peer-transport-bringup.md)'s "Order"/"Gates" shape. See also

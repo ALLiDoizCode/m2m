@@ -1,5 +1,7 @@
 # A peer-wire arrival to a priced termination must cover its price, per packet, before delivery
 
+**Status:** Accepted in part. The per-packet `F03` price-coverage check **stands and is live**. Every citation of the exposure ceiling and `T04` as separate, still-live machinery is retired by [0033](0033-the-exposure-machinery-is-retired-not-restated.md), and the claim-exchange premise it reasons from — a claim rides the _next_ packet — is superseded by [0042](0042-a-packet-carries-its-claim.md). The decision survives both, because it needs only that a hop cannot increase an amount while forwarding.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 > **The exposure ceiling and `T04` this ADR references throughout as already-existing, unaffected

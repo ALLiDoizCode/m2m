@@ -1,5 +1,7 @@
 # A packet's payload is sealed to the terminating connector
 
+**Status:** Accepted. Bounded by [0032](0032-a-client-destination-is-never-a-route-termination.md) — "the terminating connector" means a route termination, never a client destination. Live: `connector-signer`'s gift wrap, `connector-domain::envelope`.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 A packet's `data` is always a gift wrap addressed to the identity of the connector that terminates

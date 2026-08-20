@@ -1,5 +1,7 @@
 # A verified payment is stated to the app; an unverified one is stated by nobody
 
+**Status:** Accepted. **Supersedes [0036](0036-a-paid-deliverys-attribution-stays-on-the-connector.md)'s conclusion** and narrows [0020](0020-a-price-is-flat-and-attaches-to-a-handler.md). Live: `connector-runtime/src/attribution.rs`.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 A terminating connector tells the app who paid for a delivery, how much, and on what chain —

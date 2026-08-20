@@ -1,5 +1,7 @@
 # Abuse bounds on a purchased peering refuse, not refund
 
+**Status:** Retired by [0043](0043-purchasable-peering-is-removed.md). Its bounds guarded a network-writable primitive, and nothing network-writable remains. **"Refuse, not refund" survives as a principle** — this repo still has no refund path and still wants none.
+
 **Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
 
 > **Removed with the feature it bounds, by

@@ -3,6 +3,13 @@
 The bounded context of a node that forwards packets for payment. Terms only — decisions
 live in `docs/adr/`.
 
+**The connector terminates payments the way nginx terminates SSL.** Value arrives wrapped in a
+protocol the app never speaks; at the last hop the connector unwraps it, verifies it, and hands the
+app ordinary HTTP that was already paid for. Read the rest of this glossary through that sentence.
+A **route termination** is where the unwrapping happens, the **app** is the origin server behind
+it, and the connector in front is a paid reverse proxy — not a library the app imports, and not a
+role of its own beside the two.
+
 ## Language
 
 ### Forwarding
@@ -26,6 +33,12 @@ _Avoid_: BLS, Business Logic Server, agent runtime, backend
 **Handler**:
 The app's receiving endpoint, and the unit a price attaches to: one handler, one price. An app
 charges differently for different work by exposing a handler for each.
+
+**Description**:
+Operator-written text saying what the work behind a route is. Attaches exactly where a price
+attaches — one handler, one description — comes from the connector's own configuration and from
+nowhere else, and rides both the greeting and a probe's reject. A menu, not a warranty: whoever
+reads one is reading text from a stranger. _(Decided and not yet built — ADR 0044.)_
 
 **Packet**:
 The unit of forwarding: a destination, an amount, an expiry, and a payload that is opaque to
@@ -54,9 +67,22 @@ A route pushed in by a controller with a time limit, which lapses unless renewed
 the mechanism by which a route to an unreachable peer stops being used.
 _Avoid_: learned route, dynamic route
 
+**Runtime route**:
+A route or peer written through the operator surface that survives a restart — the third shape
+beside static and leased. Durable like a static route, mutable like a leased one, and never able to
+take a key the config file owns: a colliding write is refused outright rather than shadowing or
+being shadowed.
+
 **Controller**:
 Whatever decides the connector's leased routes and peering. Outside the connector by
 definition — the connector never learns, announces, or discovers.
+
+**Operator**:
+The human or organisation that runs a connector. Owns the config file, the identity key and the
+operator surface, and is the only party that creates a peering or publishes a route. Distinct from
+a **controller**, which is automation an operator points at a connector; and distinct from the
+connector itself, which decides nothing the operator did not write down. Some verbs belong to the
+operator and not to the process: announcing is one.
 
 **Announcing**:
 Pushing facts about yourself into a network unprompted. A connector never does this: deciding to
@@ -70,10 +96,23 @@ sender asks directly and pays through the network, so what it learns by asking i
 intermediary can substitute.
 _Avoid_: discovery (for this — a connector answers, it does not discover)
 
+**Greeting**:
+What a connector answers an unpaid request to a priced route with: that route's terms — what it
+costs and what is needed to pay it — instead of the work. This is what makes a connector that sells
+safe to be reachable at all, because the unpaid case gets a defined, useful, unpaid answer rather
+than free service.
+_Avoid_: 402, x402 (those name the carrier, not the thing)
+
 **Route termination**:
 The property of a route that ends at this connector, where a packet becomes a delivery to
 an app. The point at which a payload stops being opaque: the terminating connector reads the
 packet's envelope to know what request to make.
+
+**Client destination**:
+An address that resolves to a live client session rather than to a handler. The connector delivers
+to that client and never terminates: it does not open the payload, does not derive a fulfilment,
+and takes back the one the client produced or rejects the packet. A destination is never both this
+and a route termination — an overlap is a reported configuration error, not a precedence question.
 
 **Envelope**:
 What a packet carries: going in, the request a terminating connector is to make of an app — a
@@ -82,6 +121,12 @@ body. One shape, two directions. It is a description of an HTTP message, not an 
 the app is handed ordinary HTTP, but nothing on the wire is text to be parsed.
 _Avoid_: inner request, proxied request, HTTP envelope (when the layer is already clear),
 response envelope (as a separate term — the response is an envelope)
+
+**Target**:
+The path inside an envelope, naming which of an app's endpoints the request is for. Always resolved
+_beneath_ the route's own configured handler path, never in place of it — so a packet can address
+more of an app than one entry point, and can never reach a neighbouring route to buy its work at
+this route's price.
 
 **Gift wrap**:
 The sealing of a packet's payload so that only its intended reader can open it. A sender seals to
@@ -95,6 +140,12 @@ termination that never recovered the secret — no identity key, or a wrap it co
 answers in plaintext. Sealed identifies the destination; unsealed identifies nobody.
 _Avoid_: encryption (when the layer is already clear), wrapper, seal
 
+**Identity key**:
+The key that names a connector to everyone outside it. A sender seals to it, so it is what makes a
+packet deliverable at all; and because a fulfilment derives from what it opens, it is load-bearing
+for payment and not only for confidentiality. Rotating it invalidates conditions already minted
+against the old one.
+
 **Packet plane**:
 The part of a connector on the path of every packet — routing, claim handling, forwarding.
 _Avoid_: data plane, hot path
@@ -106,13 +157,60 @@ _Avoid_: control plane, admin
 
 ### Protocol surfaces
 
+**Peering**:
+The configured bilateral relationship between two connectors: a counterparty key, a carriage to
+reach it on, a fee, and a cap. Created by an **operator** — in the config file or through the
+operator surface — and by nothing else. It cannot be bought, learned, earned or announced into
+existence.
+
 **Peer semantics**:
-The protocol two connectors speak to each other. Both ends are operator-controlled.
+What a peer interaction _means_ — claim exchange, fees and minimum delivery, reject codes,
+accumulated cost. Both ends are operator-controlled. Says nothing about where the bytes ride:
+that is carriage, below.
+_Avoid_: peer wire (it named a deleted transport and this layer at once; see ADR 0027)
+
+**Peer carriage**:
+Where a peer interaction's bytes ride. There are two, and a connector may expose both: **BTP**
+over `wss://`, and **ILP-over-HTTP** over `https://` — the same two the client edge already
+serves. Which one a connector exposes, and which it dials for a given peer, is operator policy,
+never a protocol constant. Below the transport port there is one pipeline: a PREPARE that arrived
+over HTTP is indistinguishable from one that arrived over BTP, and peer behaviour that exists on
+one carriage and not the other is a defect rather than a property of the carriage.
+_Avoid_: peer wire, peer transport (when the layer is already clear)
+
+**Interaction**:
+The unit a role attaches to: one BTP session, from its websocket upgrade to its close, or one
+HTTP request.
+
+**Peer role**:
+The authority of one interaction — `peer` or `client`. Decided by authentication, never by which
+listener the bytes arrived on: an interaction is a `peer` only if it is bound to a configured peer
+id and carries a claim on one of that peer's channels that verifies against the counterparty key
+that peering configures. There is no third role, no unroled state, and no fallthrough — anything
+that is not a proven peer is a client.
+_Avoid_: peer wire, peer session (for the role rather than the connection)
 
 **Client edge**:
 The protocol a client speaks to the connector it attaches to. The far end is installed on
 machines the operator does not control.
 _Avoid_: client API, ingress
+
+**Vector**:
+A committed input/output pair — a wrapped packet, an envelope, a condition, the fulfilment it
+derives — that every implementation replays as its own suite. Vectors are generated from the
+properties, never captured from whatever an implementation happened to emit, and reproducing them
+is what conformance means. Prose describing the wire is not normative; these are.
+_Avoid_: fixture, golden file, test case (when the cross-repo contract is what is meant)
+
+**Peer wire** _(retired term, [ADR 0027](docs/adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md), issue #679)_:
+One word for three things: a raw-TCP transport, the semantics layer riding on it, and the
+direction an arrival came from. The transport was deleted and never carried a production packet;
+the other two are **peer carriage** and **peer role** above. Retired rather than renamed, because
+each sense needed a different word. Still appears, deliberately, in three places: ADR bodies and
+five ADR filenames, which are historical records and do not move; `peer_wire_addr`, which
+`connector-config` parses **solely to reject** an old config that still sets it; and
+`STORE_PEER_WIRE_BIND` in `infra/`, the same tombstone convention. Deleting either identifier
+would let a stale config load with the key silently ignored.
 
 ### Value
 
@@ -127,6 +225,13 @@ Each claim supersedes the last, so a lost claim costs nothing and a replayed cla
 nothing.
 _Avoid_: receipt, voucher, payment, balance proof
 
+**Covering claim**:
+The claim that pays for one particular packet, carried **with** it rather than trailing behind it.
+A packet arriving without one is greeted, not carried. This is what removes accumulation from the
+model: nothing is ever owed between packets, so there is no window for a counterparty to walk away
+inside. Enforced today at the client edge and at a priced termination; the forwarded case is decided
+and not yet enforced (ADR 0042).
+
 **Nonce**:
 The counter that orders claims within a channel. A payee accepts a claim only if its nonce
 advances.
@@ -139,7 +244,7 @@ Value a payee had delivered but did not yet hold a claim for, under the pre-#868
 One packet under normal flow; more only when a payer had fulfilled packets and stopped claiming.
 With a covering claim mandatory on every peer PREPARE (ADR 0031), this state no longer arises in
 normal operation and nothing tracks it. Kept here because the term still appears in historical
-prose (`docs/protocol/peer-semantics-spec.md` §3.2–§3.4, §5.3; [`docs/protocol/money-model.md`](docs/protocol/money-model.md)).
+prose (`docs/protocol/peer-semantics-spec.md` §3.2–§3.4, §5.3; [`docs/protocol/money-model-pre-868.md`](docs/protocol/money-model-pre-868.md)).
 
 **Ceiling** _(retired term, ADR 0033, issue #882)_:
 The exposure a peering relation tolerated before the connector stopped forwarding for that
@@ -168,9 +273,14 @@ expired. An in-flight packet carries value — its claim rides with it — so va
 between the forward and its outcome. Bounding that risk is the sender's business, not the
 protocol's: small packets, and larger ones only on a path that has earned it.
 
+**Journal**:
+The durable record of what was signed or is otherwise irreversible — claims sent, claims accepted,
+and the watermarks that came with them. It is the only money state the connector persists, which is
+why recovery is replay rather than reconciliation between two stores that can disagree.
+
 **Projection**:
-Money state derived by replaying claims and fulfilments — balances and exposure. Never a
-source of truth, always rebuildable.
+Money state derived by replaying the journal — per-peer balances. Never a source of truth, always
+rebuildable. (It once projected **exposure** as well; that is retired, ADR 0033.)
 
 **Settlement**:
 Making a claim's promised value real on-chain, by redeeming the latest claim or by
@@ -207,6 +317,13 @@ fee rejects the packet rather than delivering less.
 A packet sent in the expectation that it will be rejected, in order to learn from the reject
 what the path costs. Not a distinct kind of packet — only a way of using one.
 
+**Signer**:
+What holds a connector's keys and signs with them — claims, settlement transactions, operator
+writes. A local key or a key-management backend, with rotation, and nothing more: no mnemonic
+recovery, no seed management, no human authentication. Those belong to an end-user wallet, which a
+connector is not.
+_Avoid_: wallet, key manager, custody
+
 **Settlement backend**:
 The chain-specific implementation of opening, funding, closing and redeeming for one
 chain.
@@ -216,3 +333,15 @@ chain.
 **Store**:
 The storage node.
 _Avoid_: DVM
+
+### Operations
+
+**Breaking deploy**:
+A build that makes a configuration a box already runs invalid — a new required key, a renamed
+field, a narrowed type. It may never ride an automatic tag move: either the change is made
+backward-compatible first, or a promotion lands the config before the image.
+
+**Promotion**:
+Moving the tag a box follows to one specific build, deliberately. The only moment at which a
+candidate image and the fleet's committed configuration are in the same place, and therefore the
+only place a breaking deploy can be caught.

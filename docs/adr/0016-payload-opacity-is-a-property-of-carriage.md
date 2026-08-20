@@ -1,5 +1,7 @@
 # Payload opacity is a property of carriage, so a terminating connector reads the envelope
 
+**Status:** Partly superseded by [0017](0017-the-typescript-connector-is-a-prototype.md). The **conformance half is dead** — there is no conformance target, and the Rust connector implements neither client edge v1 nor a compatibility path to it. The **first half is Accepted** — opacity is a property of carriage, a terminating connector reads the envelope — and [0018](0018-a-payload-is-sealed-to-the-terminating-connector.md) makes it structural.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 > **Partially superseded.** The first half of this ADR — opacity is a property of carriage, and a

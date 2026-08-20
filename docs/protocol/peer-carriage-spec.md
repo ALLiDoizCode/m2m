@@ -8,8 +8,8 @@ this prose and `vectors/wire-vectors.json` disagree about an encoding, the vecto
 this text is the bug.** §10 enumerates the vectors that must exist for that sentence to mean
 anything.
 **End-to-end money model**, of which the claim re-derivation here is one step:
-[`money-model.md`](money-model.md).
-**Implements:** [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-role-is-deleted.md).
+[`money-model-pre-868.md`](money-model-pre-868.md).
+**Implements:** [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md).
 This document carries ADR 0027's decisions through to the wire; it does not re-decide them. Where
 it sharpens or resolves an ambiguity in that ADR it says so, in §12.
 **Consumers:** issue #676 (the two carriage implementations behind the `PeerTransport` port),
@@ -1249,7 +1249,7 @@ clauses marked retired or historical), adding **carriage**, **expose**, **dial**
 relation** as defined in §0.1 and §2 — the first three from ADR 0027, the fourth already implicit in
 `peer-semantics-spec.md` §3.3's "per peering relation".
 
-It implements [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-role-is-deleted.md)
+It implements [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md)
 and carries, without restating,
 [ADR 0004](../adr/0004-value-moves-on-fulfilment.md),
 [ADR 0005](../adr/0005-claims-are-truth-balances-are-a-projection.md),
@@ -1260,7 +1260,7 @@ and carries, without restating,
 [ADR 0019](../adr/0019-a-terminating-connector-derives-the-fulfilment.md),
 [ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md),
 [ADR 0023](../adr/0023-oer-length-determinants-are-canonical.md),
-[ADR 0024](../adr/0024-peer-role-claims-sign-the-eip-712-balance-proof.md) and
+[ADR 0024](../adr/0024-peer-wire-claims-sign-the-eip-712-balance-proof.md) and
 [ADR 0025](../adr/0025-an-envelope-target-is-confined-beneath-the-handler-path.md).
 
 It does not reintroduce raw-TCP framing, a `transport` selector, a peer-specific claim encoding, a

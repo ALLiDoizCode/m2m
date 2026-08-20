@@ -1,5 +1,7 @@
 # An envelope target is confined beneath the route's handler path, never in place of it
 
+**Status:** Accepted, amended in place by issue #621. Live: `resolve_target_under_handler` in `connector-runtime/src/app_client.rs`.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 `HttpAppClient::deliver` (`crates/connector-runtime/src/app_client.rs`) resolved a sealed

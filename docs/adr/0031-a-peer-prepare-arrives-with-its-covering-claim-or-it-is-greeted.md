@@ -1,5 +1,7 @@
 # A peer PREPARE arrives with its covering claim, or it is greeted
 
+**Status:** Superseded by [0042](0042-a-packet-carries-its-claim.md) — **entirely, not amended**. Every clause of its Decision was false of the shipped binary. Kept for the reasoning that produced the rule, and for the record that its claim to leave [0004](0004-value-moves-on-fulfilment.md)'s anti-prepay argument undisturbed was itself wrong.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 > **Superseded entirely by [ADR 0042](0042-a-packet-carries-its-claim.md).** Every clause of the

@@ -1,5 +1,7 @@
 # Client BTP rides the client edge; peers stay on the peer wire
 
+**Status:** Partly superseded by [0027](0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md). Its **peer conclusion is dead** — "peers never use it: connector↔connector traffic stays on the raw-TCP peer wire". Its **architecture is Accepted** and is the precedent 0027 builds the peer side on: one gate, two carriages, factored so they cannot drift. Its "every BTP session is a client session by construction" argument is replaced by role-by-authentication.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 > **Conclusion partly superseded, architecture reaffirmed (2026-08-03) by
