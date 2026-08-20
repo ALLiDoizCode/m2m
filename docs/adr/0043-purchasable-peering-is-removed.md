@@ -1,5 +1,7 @@
 # Purchasable peering is removed
 
+**Status:** Accepted. **Retires [0037](0037-a-purchased-peering-is-a-terminated-route-whose-work-is-a-table-write.md), [0038](0038-a-peer-sale-lease-demotes-at-match-time-and-reaps-off-the-hot-path.md) and [0039](0039-abuse-bounds-on-a-purchased-peering-refuse-not-refund.md) in full.** Restores [0006](0006-the-connector-is-mechanism-not-policy.md) without qualification. Removed config keys are parsed-and-rejected traps rather than silent drops.
+
 **Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
 
 **A peering cannot be bought.** It is created by the operator — in the config file, or through the

@@ -1,5 +1,7 @@
 # The operator surface splits read authority from write authority
 
+**Status:** Accepted. Live in `crates/connector-operator` (`rfc9421.rs`, `write_auth.rs`).
+
 **Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
 
 Reads on the operator surface — inspection, metrics, anything a dashboard needs — are

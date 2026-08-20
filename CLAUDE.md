@@ -116,3 +116,19 @@ that never existed at repo or org scope and failed on every push to `main`.
 If staging is wanted later, author it fresh against the Linode/baked-image
 model above, not a resurrected SSH workflow. (On-chain contract deployment
 for Solana/Mina is unrelated — see "Chain-Specific Build & Deploy" above.)
+
+---
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as GitHub issues in `toon-protocol/connector`, driven by the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage labels, unrenamed — and kept distinct from the `agent:*` Sandcastle triggers. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` plus `docs/adr/` at the repo root. See `docs/agents/domain.md`.

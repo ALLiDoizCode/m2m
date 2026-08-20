@@ -1,5 +1,7 @@
 # A probe answers what a route costs and what it does
 
+**Status:** Accepted, **not yet built**. No `description` field exists in `connector-config`'s route schema, and nothing carries one on a greeting or a reject. Extends [0011](0011-rejects-accumulate-fees-and-probes-discover-cost.md), [0020](0020-a-price-is-flat-and-attaches-to-a-handler.md) and [0022](0022-a-connector-answers-it-does-not-announce.md).
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 A probe already learns what a path costs

@@ -23,11 +23,11 @@ describes it — for what it used, read this file's history.
 - **Client:** `reqwest` 0.11 with `rustls-tls` and `default-features = false` — no OpenSSL in the
   build, which is what lets the container image be an Alpine build.
 - **Peer transport:** none shipped. The raw-TCP transport was deleted in issue #679; per
-  [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-role-is-deleted.md)
+  [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md)
   peers ride the carriages the client edge already serves — BTP (RFC-0023) over `wss://` or
   ILP-over-HTTP over `https://` — so peering adds no transport dependency of its own. The
   `PeerTransport` port remains; the semantics it carries are
-  [`docs/protocol/peer-semantics-spec.md`](../protocol/peer-semantics-spec.md) §3–§6.
+  [`docs/protocol/peer-semantics-pre-868.md`](../protocol/peer-semantics-pre-868.md) §3–§6.
 
 ## Cryptography
 

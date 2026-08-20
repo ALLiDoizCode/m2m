@@ -7,7 +7,7 @@
 //!
 //! It is the **carriage**: where the bytes ride. It is not the semantics.
 //! Claim exchange, flush, fees, minimum delivery and the refusal taxonomy
-//! are `peer-semantics-spec.md` §3--§6's and live above the
+//! are `peer-semantics-pre-868.md` §3--§6's and live above the
 //! [`connector_runtime::PeerTransport`] port, unchanged by which wire carried
 //! them. This crate maps §3's table onto requests and responses, and nothing
 //! else:

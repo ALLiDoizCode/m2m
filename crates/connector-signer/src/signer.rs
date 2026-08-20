@@ -87,7 +87,7 @@ pub trait Signer: Send + Sync {
 /// `public_key` -- the counterpart to [`Signer::sign`] that needs no
 /// `Signer` at all, since checking a signature takes only the public key a
 /// verifier already holds (a peer's claim-verification key, per
-/// `docs/protocol/peer-semantics-spec.md` §1.1). Never returns an error: a
+/// `docs/protocol/peer-semantics-pre-868.md` §1.1). Never returns an error: a
 /// malformed public key or signature simply fails to verify, exactly like
 /// one that verifies against the wrong digest.
 pub fn verify(public_key: &PublicKeyBytes, digest: &[u8; 32], signature: &Signature) -> bool {

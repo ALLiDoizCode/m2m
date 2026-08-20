@@ -1,5 +1,7 @@
 # A paid delivery's attribution stays on the connector, never on the app
 
+**Status:** Partly superseded by [0040](0040-a-verified-payment-is-stated-to-the-app.md). Its **conclusion is reversed** — "no successor header, and there should not be one". Its **reasoning is Accepted**, and the `client_channel_id` span-to-journal join it built is what 0040 is implemented from.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 > **The conclusion below is superseded by

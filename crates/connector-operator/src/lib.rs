@@ -2077,7 +2077,7 @@ mod tests {
                 // `peer_signer.sign` produces a recovery id in
                 // `libsecp256k1`'s own `{0, 1}` convention
                 // (`connector_signer::crypto::sign_digest`), exactly what
-                // the wire carries (peer-semantics-spec.md §3.5). No `+ 27`
+                // the wire carries (peer-semantics-pre-868.md §3.5). No `+ 27`
                 // here: `EvmSettlementBackend::redeem` is the one place
                 // that gets normalized to the Ethereum-wallet `{27, 28}`
                 // range `TokenNetwork`'s on-chain `ECDSA.recover` requires

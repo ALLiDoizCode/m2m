@@ -1,5 +1,7 @@
 # The Rust connector settles on EVM and Solana only; Mina is dropped
 
+**Status:** Accepted. No successor record, and it holds in the tree: the Cargo workspace has no Mina crate. (`packages/mina-zkapp` is the deployed zkApp, which this record never touched.)
+
 **Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
 
 Mina is the only chain with no Rust path for the work that matters: its five zkApp methods

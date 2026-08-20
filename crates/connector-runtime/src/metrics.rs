@@ -52,7 +52,7 @@ impl Metrics {
         .expect("valid metric");
         let exposure = IntGauge::new(
             "toon_exposure",
-            "Unclaimed exposure to peers. Always 0 and has no producer: the credit-window accounting this named is retired (ADR 0031, ADR 0033, issue #882) -- every peer PREPARE now carries its own covering claim, so there is no trailing exposure to report.",
+            "Unclaimed exposure to peers. Always 0 and has no producer: the credit-window accounting this named was retired by ADR 0033 (issue #882). Nothing tracks trailing exposure, so there is nothing to report. The metric name is kept for scrape-config stability.",
         )
         .expect("valid metric");
         let settlement_total = IntCounter::new(

@@ -881,7 +881,7 @@ fn generate_peer_claim_evm_case(fixture: &ClaimFixture) -> PeerClaimCase {
     }
 }
 
-/// §10.2 item 4: marked **aspirational**, exactly as `peer-semantics-spec.md`
+/// §10.2 item 4: marked **aspirational**, exactly as `peer-semantics-pre-868.md`
 /// §3.5 marks the Solana claim row -- pinning the shape before an emitting
 /// implementation exists on this connector (outbound peer claims are
 /// EVM-only, `claim_json::encode`'s own doc). What *does* exist and is

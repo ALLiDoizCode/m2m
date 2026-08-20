@@ -1,5 +1,7 @@
 # The Rust fleet runs in parallel under its own address space
 
+**Status:** Partly superseded by [0017](0017-the-typescript-connector-is-a-prototype.md) (the comparison half), and otherwise **spent**: the parallel fleet was switched off (issue #872), and no `infra/` config carries the temporary prefix any more. Kept for the migration mechanism and for the record of what the first deployment falsified.
+
 **Scope:** fleet and operations — not connector-internal, not wire law. See the [ADR index](README.md).
 
 The Rust connectors are deployed alongside the TypeScript ones, under a different ILP prefix,

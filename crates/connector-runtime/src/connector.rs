@@ -775,7 +775,7 @@ impl Connector {
 
     /// Configure the channel this node claims against when it owes
     /// `peer_id` for value it forwarded and `peer_id` fulfilled (issue
-    /// #423, peer-semantics-spec.md §3.5).
+    /// #423, peer-semantics-pre-868.md §3.5).
     pub fn with_peer_claim_channel(
         mut self,
         peer_id: impl Into<String>,
@@ -786,7 +786,7 @@ impl Connector {
     }
 
     /// Configure the EVM address whose signature this node accepts on an
-    /// inbound claim for `channel_id` (issue #423, peer-semantics-spec.md §1.1's
+    /// inbound claim for `channel_id` (issue #423, peer-semantics-pre-868.md §1.1's
     /// "a configured peer id and verification key"; issue #575: this is now
     /// the channel's counterparty *address*, recovered from an EIP-712
     /// `BalanceProof` signature, not a raw public key checked against a
@@ -1163,7 +1163,7 @@ impl Connector {
                 // condition is the exact shape a naive "unconditional
                 // announce" packet takes, and this connector has no such
                 // packet type to fall back to (ADR 0004, ADR 0022,
-                // peer-semantics-spec.md §3.1): attach a real condition instead.
+                // peer-semantics-pre-868.md §3.1): attach a real condition instead.
                 message: "prepare carries no execution condition -- every prepare must carry \
                     a real, non-zero 32-byte execution condition chosen by the sender; retry \
                     with one attached rather than an unconditional/announce-style packet"
@@ -1245,7 +1245,7 @@ impl Connector {
 
     /// The peer semantics's entry point (issue #423): accepts an inbound PREPARE
     /// exactly like [`Connector::handle_prepare`], but also verifies and
-    /// watermarks whatever claim it carries (peer-semantics-spec.md §3.2).
+    /// watermarks whatever claim it carries (peer-semantics-pre-868.md §3.2).
     ///
     /// The claim outcome and the PREPARE outcome are independent -- a
     /// rejected claim does not reject the PREPARE it rode in on (§3.4), and
@@ -1258,7 +1258,7 @@ impl Connector {
     /// route paid for by nothing (or by less than the route is worth) got
     /// the same free service ADR 0028 already closed off at the client
     /// edge. This is a per-packet gate, not a relation-wide throttle
-    /// (`peer-semantics-spec.md` §5.4): it is answered from the amount already
+    /// (`peer-semantics-pre-868.md` §5.4): it is answered from the amount already
     /// on this PREPARE via the same `client_route` lookup the client edge
     /// prices with (ADR 0028) and leaves the claim exchange itself (§3.2)
     /// untouched, and carries no x402 greeting of its own: since issue #880
@@ -1367,7 +1367,7 @@ impl Connector {
     /// recognizes (`ProbeDenied::NoOpenChannel` otherwise -- see
     /// [`Connector::recognizes_channel`] for what makes that satisfiable on
     /// a deployed node), and even then only within a rate limit per that
-    /// identity (`ProbeDenied::RateLimited` otherwise) -- peer-semantics-spec.md
+    /// identity (`ProbeDenied::RateLimited` otherwise) -- peer-semantics-pre-868.md
     /// §5.2's consequences, `docs/protocol/client-edge-spec.md` §1.6.
     /// Neither denial reaches [`Connector::handle_prepare`]: the packet is
     /// never forwarded.
@@ -1434,12 +1434,12 @@ impl Connector {
 
     /// Verify and, if valid, accept a claim received over the peer semantics --
     /// whether it rode a PREPARE or a FLUSH -- advancing its channel's
-    /// watermark (issue #423, peer-semantics-spec.md §3.4).
+    /// watermark (issue #423, peer-semantics-pre-868.md §3.4).
     pub fn handle_peer_claim(&self, claim: WireClaim) -> ClaimAckOutcome {
         self.claims.accept_inbound(&claim)
     }
 
-    /// Send a FLUSH frame (peer-semantics-spec.md §3.3) for every peer whose
+    /// Send a FLUSH frame (peer-semantics-pre-868.md §3.3) for every peer whose
     /// claim has waited at least `flush_interval` since it armed, as of
     /// this connector's injected clock -- the mechanism that bounds
     /// trailing exposure once traffic to a peer stops rather than leaving a
@@ -1571,7 +1571,7 @@ impl Connector {
     /// Forward `prepare` to `peer_route`'s peer, covering it from the
     /// outbound CLIENT ledger when this hop is configured for that (issue
     /// #881), or piggybacking whatever claim this connector currently owes
-    /// it on the peer ledger otherwise (issue #423, peer-semantics-spec.md
+    /// it on the peer ledger otherwise (issue #423, peer-semantics-pre-868.md
     /// §3.2). Only once the answer is a genuine fulfilment, verified
     /// against `prepare`'s own execution condition, and only when the
     /// packet was NOT already covered by a client-role claim, does a fresh
@@ -1775,7 +1775,7 @@ impl Connector {
                 }
                 outcome
             }
-            // ADR 0011, peer-semantics-spec.md §5.2: this hop's own fee is added
+            // ADR 0011, peer-semantics-pre-868.md §5.2: this hop's own fee is added
             // only once it has genuinely reached `peer_id` and relays a
             // reject that peer itself decided on -- never on a reject this
             // transport synthesized locally (`reached_peer` false) because
@@ -3461,7 +3461,7 @@ mod tests {
     /// sent.
     ///
     /// A claim rides the packet *after* the one it pays for
-    /// (peer-semantics-spec.md §3.3/§3.5, `record_fulfillment`'s own doc), so
+    /// (peer-semantics-pre-868.md §3.3/§3.5, `record_fulfillment`'s own doc), so
     /// this sends two PREPAREs: the first only arms the outbound claim, and
     /// the second is what actually carries it to the receiver for
     /// `accept_inbound` to judge.
@@ -5842,7 +5842,7 @@ mod tests {
         /// The hop that cannot reach its own next hop never actually
         /// forwarded the packet, so its own fee is never added -- only the
         /// hops before it, which genuinely reached their peer, add theirs
-        /// (peer-semantics-spec.md §5.2: fee is added only when relaying a
+        /// (peer-semantics-pre-868.md §5.2: fee is added only when relaying a
         /// REJECT "received from its own next hop").
         #[tokio::test]
         async fn a_hop_that_cannot_reach_its_peer_does_not_add_its_own_fee() {

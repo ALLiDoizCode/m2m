@@ -1,5 +1,7 @@
 # An operator announces a node; the node still does not
 
+**Status:** **Retired by [0046](0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md)** — an announce assumes a relay, and a network of pure connectors has none. Kept for its reasoning about _who_ may announce, which is right about the question it asks and is what stops a sidecar being rebuilt. **One part survives:** issue #807's amendment, under which the packet path reads `[announce]`'s `addresses` and `btp_endpoint` to _answer_ with in the x402 greeting. That is answering, not announcing; those two fields are re-homed by 0046 rather than removed.
+
 **Scope:** fleet and operations — not connector-internal, not wire law. See the [ADR index](README.md).
 
 A running connector never pushes facts about itself into a network. An **operator** may, by running

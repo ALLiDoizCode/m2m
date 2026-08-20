@@ -1,5 +1,7 @@
 # A price is flat, attaches to a handler, and buys an answer
 
+**Status:** Accepted, narrowed by [0040](0040-a-verified-payment-is-stated-to-the-app.md) — a delivery whose covering client claim this connector verified itself now states `X-TOON-Payer` / `X-TOON-Amount` / `X-TOON-Chain`. Everything else stands, and [0044](0044-a-probe-answers-what-a-route-costs-and-what-it-does.md) extends handler granularity from price to description.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 A price is flat per packet, as a fee is. Pricing granularity is handler granularity: one handler,

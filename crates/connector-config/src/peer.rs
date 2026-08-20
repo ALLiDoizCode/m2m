@@ -39,7 +39,7 @@ const DEFAULT_PEER_TIMEOUT_MS: u64 = 30_000;
 /// * The largest *forwarded* amount this fleet ever ran was the retired
 ///   apex's `g.toon.ario` leg: a client paid `1002`, the apex kept a fee of
 ///   `2`, and **1000** went over the peering (`docs/devnet-pricing.md`, "The
-///   apex forward"; `docs/protocol/money-model.md`'s worked example).
+///   apex forward"; `docs/protocol/money-model-pre-868.md`'s worked example).
 /// * The largest single packet observed live on the fleet is **1998**
 ///   (`docs/operators/parallel-fleet-comparison.md`'s
 ///   `[write] … amount=1998`), and the retired TypeScript `announcePrice`

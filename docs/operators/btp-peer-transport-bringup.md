@@ -13,7 +13,7 @@
 > claim (ADR 0031) regardless of which side dials.
 
 Operator runbook for
-[ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-role-is-deleted.md).
+[ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md).
 
 > **This replaces the four-phase migration plan that used to live at
 > `btp-peer-transport-migration.md`.** That plan assumed traffic had to be drained off the raw-TCP
@@ -124,7 +124,7 @@ The configuration surface for peering, and what changed when the raw-TCP transpo
 deleted (issue #677). This is the section every peer-related config error names: if a
 connector refused to start and sent you here, find your error message below.
 
-- **Decision:** [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-role-is-deleted.md)
+- **Decision:** [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md)
   — connectors peer over BTP or ILP-over-HTTP; the raw-TCP transport is deleted.
 - **Normative detail:** [`docs/protocol/peer-carriage-spec.md`](../protocol/peer-carriage-spec.md)
   — the role rule, the two carriages, and §11's config requirements.

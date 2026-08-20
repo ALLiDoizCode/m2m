@@ -1,5 +1,7 @@
 # A runtime peer/route table never shadows the config file
 
+**Status:** Accepted. Extends [0009](0009-one-typed-config-file-no-environment-layer.md) and [0006](0006-the-connector-is-mechanism-not-policy.md). **Survives [0043](0043-purchasable-peering-is-removed.md) intact** — a durable runtime table is what an operator needs and was never about selling. Live: `connector-runtime/src/peer_route_store.rs`.
+
 **Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
 
 Issue #884 (toon-meta#316, child C1 of #867 "sell peering") makes the peer/route table mutable and
@@ -103,3 +105,62 @@ feeding an unchanged algorithm.
   already does: `PeerTransport` answers a synthesized `T01`, not a crash and not a silent drop.
   Wiring a sold peering into live carriage dial/accept machinery is explicitly out of this issue's
   scope (#867's later children, C2--C4: pricing, leasing/expiry, abuse bounds).
+
+## Update (issue #1059) — the rule covered writes; boot is a separate case with a separate answer
+
+This record says a colliding runtime row is _"refused outright rather than shadowing or being
+shadowed."_ That is true of the **write** path — `Connector::upsert_runtime_peer` and
+`upsert_runtime_peer_route` both check `config_peer_ids` and return `OwnedByConfig` before touching
+the table. It has never been true of **load**, and load was never considered.
+
+### What the binary does today
+
+`Connector::with_runtime_peer_route_store` stores the loaded snapshot verbatim into its `ArcSwap`s.
+There is no collision check at boot. Both rows exist, and `select_configured_route` picks between
+them by `(matched prefix length, RouteRank)`, where `RouteRank` orders
+`Leased(0) < RuntimePeer(1) < Peer(2) < App(3)` — so at equal prefix length the config row wins.
+
+Three sequences follow, and only the first was ever described:
+
+1. A runtime row exists; the config later gains the same key; restart. **Both load. The config row
+   wins at packet time and the runtime row persists, inert.** That is shadowing — the thing this
+   record's sentence disclaims.
+2. The config owns a key; a runtime write for it is refused; the config later loses the key; restart.
+   **Nothing returns**, because the refused write never persisted. Correct already.
+3. A runtime row is shadowed as in (1); the config later loses the key; restart. **The shadowed row
+   silently becomes live again** — a row an operator wrote months ago taking effect on a restart
+   nobody connected to it.
+
+### Decision
+
+**On load, a runtime row whose key the configuration file owns is deleted, not shadowed.** The
+deletion is written back to the snapshot, logged at `warn` naming the id or prefix and the snapshot
+path, and counted.
+
+Ownership therefore becomes **permanent** rather than a precedence that flips back. Sequence (3)
+cannot arise: there is no shadowed row to revive.
+
+### Why deletion, and not refusal to boot
+
+Refusing to start is the more obvious reading of this record's original sentence, and it matches this
+repository's habit of stopping by name rather than loading with something silently ignored (the
+tombstone rule, ADR 0009). It was rejected on failure mode: **it lets an operator brick a serving node
+by editing a configuration file**, with recovery requiring a hand-edit of the JSON snapshot on a box
+that will not start. For a fleet, an outage is a worse outcome than a dropped row.
+
+Deletion is also the more honest resolution of the underlying conflict. Both rows are operator intent,
+but they are not equal: the configuration file is the **committed, reviewed** artifact that
+[0041](0041-a-moving-tag-carries-the-fleets-committed-config-or-it-does-not-move.md)'s release gate
+runs over, while a runtime row is an ad-hoc write over the operator surface. When an operator
+overrides themselves, the reviewed artifact should win, and it should win permanently.
+
+**Silence is the part that must not survive.** The status quo's defect is not that a row loses — it is
+that nothing says so. A deletion that is logged and counted is recoverable in one operator action; a
+shadowing that is not logged is a behaviour change waiting for an unrelated restart.
+
+### Note on how this was ruled
+
+Neither the record nor the binary had an answer here, so wayfinder map #1049's scope-based default —
+_connector architecture, therefore the code wins and the record is amended_ — did not apply. The
+record is extended to cover a case it never reached, **and** the behaviour changes. Issue #1060-adjacent
+implementation work is tracked separately.

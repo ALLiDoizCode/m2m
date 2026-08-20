@@ -1,5 +1,7 @@
 # Connectors peer over BTP or ILP-over-HTTP; the raw-TCP peer wire is deleted
 
+**Status:** Accepted. **Supersedes [0003](0003-clean-room-peer-wire-versioned-client-edge.md)'s peer-wire half, [0026](0026-client-btp-rides-the-client-edge-peers-stay-on-the-peer-wire.md)'s peer conclusion, and [0022](0022-a-connector-answers-it-does-not-announce.md)'s "private, plaintext and unauthenticated" consequence.** Amended by [0033](0033-the-exposure-machinery-is-retired-not-restated.md): every clause reasoning with `flush_interval_ms` or an explicit `ceiling` is historical — both are now config keys parsed only to be rejected, and `AcceptOnlyPeerWithoutCeiling` no longer exists. **Amended again by issue #1068:** this record's own #882 banner says every peering "is bounded instead by ADR 0031's covering-claim requirement". [0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md) is superseded **in full** by [0042](0042-a-packet-carries-its-claim.md), whose forwarded half is still unbuilt — so read that sentence as citing 0042, and as true today only at a priced termination. The decision this record makes is untouched.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 > **The flush timer and the exposure ceiling this ADR reasons with throughout are retired** by
@@ -19,7 +21,7 @@ constant — and a connector may expose both.
 
 The raw-TCP peer wire of [ADR 0003](0003-clean-room-peer-wire-versioned-client-edge.md) —
 `crates/connector-runtime/src/peer_wire.rs`, `crates/connector-runtime/src/network_peer_transport.rs`,
-`docs/protocol/peer-semantics-spec.md` §1–§2 — is **deleted, first, before the replacement is built**,
+`docs/protocol/peer-semantics-pre-868.md` §1–§2 — is **deleted, first, before the replacement is built**,
 because it has never carried a production packet and there is therefore nothing to migrate off.
 
 **One peer pipeline, two carriages.** This is not two peer implementations. It is the shape
@@ -54,7 +56,7 @@ third document.** Any reference to "ADR 0026, connectors peer over BTP" means th
 - **ADR 0022's consequence** that the peer wire is "private, plaintext and unauthenticated on its own
   segment". The peer transport is now public-capable, TLS-encrypted and authenticated. ADR 0022's
   actual decision — a connector answers, it does not announce — is unaffected.
-- **`docs/protocol/peer-semantics-spec.md` §1–§2** (framing and packet structure). §3–§6 — claim exchange,
+- **`docs/protocol/peer-semantics-pre-868.md` §1–§2** (framing and packet structure). §3–§6 — claim exchange,
   fees and minimum delivery, reject codes and accumulated cost, consistency — survive as the
   _semantics_ both carriages carry, and are re-hosted rather than rewritten.
 
@@ -402,7 +404,7 @@ a wire. **There is no live traffic.** No box configures `[[peers]]`, no claim ha
 
 1. **Delete the raw-TCP transport now** (#679). `peer_wire.rs`, the raw-TCP halves of
    `network_peer_transport.rs`, `peer_wire_addr`, `[[peers]].addr` as a `SocketAddr`, and
-   `peer-semantics-spec.md` §1–§2. The `PeerTransport` port and `InProcessPeerTransport` **stay** — the
+   `peer-semantics-pre-868.md` §1–§2. The `PeerTransport` port and `InProcessPeerTransport` **stay** — the
    port is the seam this whole plan rests on, and everything above it
    (`Connector::forward_via_peer_route`, `ClaimBook`, fees, routing) is untouched. A pure subtraction
    that cannot break production.

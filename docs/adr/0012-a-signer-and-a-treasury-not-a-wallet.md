@@ -1,5 +1,7 @@
 # The connector holds a signer and a treasury, not a wallet
 
+**Status:** Accepted in part. The **signer half is live** — `connector-signer::Signer` / `LocalSigner` / `KmsSigner`. The **treasury half is retired**: `connector-signer::treasury` was deleted by issue #556 with no successor record, and `connector-settlement`'s `SettlementBackend` does the collateral job. Nothing named `Treasury` remains in `crates/`.
+
 **Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
 
 Key handling collapses to one crate exposing a `Signer` — a local key or a key management

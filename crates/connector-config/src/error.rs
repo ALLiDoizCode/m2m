@@ -527,13 +527,16 @@ pub enum ConfigError {
     )]
     PeerAddrRemoved { id: String },
 
-    /// §11's removed-field row, `ceiling` half (ADR 0033, issue #882): every
-    /// peer PREPARE now carries its own covering claim (ADR 0031), so there
-    /// is no trailing exposure left for a ceiling to bound.
+    /// §11's removed-field row, `ceiling` half (ADR 0033, issue #882):
+    /// nothing tracks trailing exposure any more, so there is nothing for a
+    /// ceiling to bound. Cites the record that removed the machinery, not the
+    /// reasoning behind it (issue #1068) -- ADR 0042's covering-claim rule is
+    /// a target record whose forwarded half is unbuilt, and a boot error must
+    /// not depend on it.
     #[error(
-        "peer '{id}' sets 'ceiling', which was removed once every peer PREPARE carries its own \
-         covering claim (ADR 0031, ADR 0033, issue #882) -- there is no trailing exposure left \
-         for a ceiling to bound, so delete the key rather than replace it; see \
+        "peer '{id}' sets 'ceiling', which was removed when the exposure machinery was retired \
+         (ADR 0033, issue #882) -- nothing tracks trailing exposure, so there is nothing for a \
+         ceiling to bound. Delete the key rather than replace it; see \
          docs/operators/btp-peer-transport-bringup.md"
     )]
     PeerCeilingRemoved { id: String },
@@ -543,9 +546,9 @@ pub enum ConfigError {
     /// nothing left to flush.
     #[error(
         "peer '{id}' sets 'flush_interval_ms', which was removed for the same reason 'ceiling' \
-         was (ADR 0031, ADR 0033, issue #882): a claim no longer trails the fulfilment it \
-         covers, so there is no pending claim left to flush on a timer. Delete the key rather \
-         than replace it; see docs/operators/btp-peer-transport-bringup.md"
+         was (ADR 0033, issue #882): nothing tracks trailing exposure, so there is no pending \
+         claim for a timer to flush. Delete the key rather than replace it; see \
+         docs/operators/btp-peer-transport-bringup.md"
     )]
     PeerFlushIntervalRemoved { id: String },
 

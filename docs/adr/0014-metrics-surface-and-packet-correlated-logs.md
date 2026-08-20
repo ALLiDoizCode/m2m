@@ -1,5 +1,7 @@
 # The metrics surface is decided, not accreted, and logs correlate a packet by its condition
 
+**Status:** Accepted, amended by [0033](0033-the-exposure-machinery-is-retired-not-restated.md). Four of the five metrics stand. `toon_exposure` is kept at its decided name for scrape-config stability and is **permanently zero with no producer**, because the projection it was shaped for is retired.
+
 **Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
 
 The Rust connector exposes exactly five decided metrics — `toon_packets_total`,
