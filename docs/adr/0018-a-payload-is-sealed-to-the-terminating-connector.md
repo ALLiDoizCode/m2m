@@ -1,6 +1,6 @@
 # A packet's payload is sealed to the terminating connector
 
-**Status:** Accepted. Bounded by [0032](0032-a-client-destination-is-never-a-route-termination.md) — "the terminating connector" means a route termination, never a client destination. Live: `connector-signer`'s gift wrap, `connector-domain::envelope`.
+**Status:** Accepted. Bounded by [0032](0032-a-client-destination-is-never-a-route-termination.md) — "the terminating connector" means a route termination, never a client destination. Live: `connector-signer`'s gift wrap, `connector-domain::envelope`. **Amended by [0054](0054-an-unsealed-termination-reject-answers-where-to-ask.md)** (issue #1071): a reject raised _at_ a termination is **not always sealed** — a termination that never recovered the shared secret (no identity key, or a wrap it could not open) answers in plaintext. `CONTEXT.md` carried the correct law throughout and this record did not. Its `GET /identity` citation is one path segment short of `/ilp/identity`; the key reported there is the sealing key.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
