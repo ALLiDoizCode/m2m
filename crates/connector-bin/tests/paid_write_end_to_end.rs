@@ -941,7 +941,9 @@ price = {SOLANA_ROUTE_PRICE}
     let channel_bytes = channel_pubkey.to_bytes();
     let genuine_nonce = 1u64;
     let genuine_message = connector_signer::solana_balance_proof_message(
-        &[7u8; 32],
+        &Pubkey::from_str(LOCAL_TEST_PROGRAM_ID)
+            .expect("valid local test program id")
+            .to_bytes(),
         &channel_bytes,
         genuine_nonce,
         SOLANA_ROUTE_PRICE,
@@ -998,8 +1000,14 @@ price = {SOLANA_ROUTE_PRICE}
     let forged_prepare = sample_prepare("g.example.app", forged_data, &forged_shared);
     let forged_nonce = 2u64;
     let forged_amount = 2 * SOLANA_ROUTE_PRICE;
+    // The REAL program id, deliberately: this claim must be refused because
+    // the SIGNER is wrong, not because the program is. Signing it under a
+    // fixture program id would have the gate reject it for the wrong reason
+    // and the test would stop proving what it says it proves.
     let forged_message = connector_signer::solana_balance_proof_message(
-        &[7u8; 32],
+        &Pubkey::from_str(LOCAL_TEST_PROGRAM_ID)
+            .expect("valid local test program id")
+            .to_bytes(),
         &channel_bytes,
         forged_nonce,
         forged_amount,

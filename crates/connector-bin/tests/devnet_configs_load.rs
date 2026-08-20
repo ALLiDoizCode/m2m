@@ -1825,7 +1825,7 @@ const SETTLEMENT_CONTRACT_ADDRESS_ROLLBACK_TARGET: &str =
 /// asserted as literals here, exactly like [`FLEET_LIVE_REGISTRY`] and
 /// [`EXPECTED_STORE_PRICE`], so that reading the expected values back out of the
 /// file under test cannot make this pass on a file that drifted.
-const FLEET_SOLANA_PROGRAM_ID: &str = "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx";
+const FLEET_SOLANA_PROGRAM_ID: &str = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip";
 const FLEET_SOLANA_USDC_MINT: &str = "xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in";
 
 /// The settlement asset's scale on every chain this fleet settles on: ADR

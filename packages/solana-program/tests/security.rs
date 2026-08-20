@@ -294,11 +294,14 @@ fn build_claim_instruction(
 }
 
 fn build_balance_proof_message(
+    program_id: &Pubkey,
     channel_pda: &Pubkey,
     nonce: u64,
     transferred_amount: u64,
 ) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(48);
+    let mut msg = Vec::with_capacity(96);
+    msg.extend_from_slice(b"TOON-BALPROOF-V2");
+    msg.extend_from_slice(program_id.as_ref());
     msg.extend_from_slice(channel_pda.as_ref());
     msg.extend_from_slice(&nonce.to_le_bytes());
     msg.extend_from_slice(&transferred_amount.to_le_bytes());
@@ -413,7 +416,7 @@ async fn submit_claim(
     nonce: u64,
     transferred_amount: u64,
 ) -> Result<(), solana_program_test::BanksClientError> {
-    let message = build_balance_proof_message(channel_pda, nonce, transferred_amount);
+    let message = build_balance_proof_message(&PROGRAM_ID, channel_pda, nonce, transferred_amount);
     let dalek_keypair = to_dalek_keypair(claimer);
     let ed25519_ix = new_ed25519_instruction(&dalek_keypair, &message);
     let claim_ix = build_claim_instruction(
@@ -968,7 +971,7 @@ async fn test_invalid_signature_security_edge_case() {
     .await;
 
     // Sign a WRONG message (different transferred_amount in the signed message)
-    let wrong_message = build_balance_proof_message(&channel_pda, 1, 9999);
+    let wrong_message = build_balance_proof_message(&PROGRAM_ID, &channel_pda, 1, 9999);
     let dalek_keypair = to_dalek_keypair(&participant_a);
     let ed25519_ix = new_ed25519_instruction(&dalek_keypair, &wrong_message);
 
@@ -1021,7 +1024,7 @@ async fn test_unauthorized_signer_security_edge_case() {
     .await;
 
     // Outsider signs a valid balance proof but is not a participant
-    let message = build_balance_proof_message(&channel_pda, 1, 5000);
+    let message = build_balance_proof_message(&PROGRAM_ID, &channel_pda, 1, 5000);
     let dalek_outsider = to_dalek_keypair(&outsider);
     let ed25519_ix = new_ed25519_instruction(&dalek_outsider, &message);
     let claim_ix = build_claim_instruction(
@@ -1197,7 +1200,7 @@ async fn test_claim_with_wrong_channel_pda() {
 
     // Try to claim on channel 2's PDA using participant A's signature
     // The balance proof references channel 2's PDA but participant A is not in channel 2
-    let message = build_balance_proof_message(&channel_pda_2, 1, 5000);
+    let message = build_balance_proof_message(&PROGRAM_ID, &channel_pda_2, 1, 5000);
     let dalek_keypair = to_dalek_keypair(&participant_a);
     let ed25519_ix = new_ed25519_instruction(&dalek_keypair, &message);
     let claim_ix = build_claim_instruction(

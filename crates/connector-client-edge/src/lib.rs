@@ -2289,7 +2289,7 @@ mod tests {
         let solana_terms = X402SolanaSettlementTerms {
             chain: "solana".to_string(),
             settlement_address: "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin".to_string(),
-            program_id: "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx".to_string(),
+            program_id: "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip".to_string(),
             token_address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
             decimals: 6,
         };
