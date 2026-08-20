@@ -108,15 +108,16 @@ outside this repository.
 
 This is the group that spells out the nginx sentence at the top of this page.
 
-| #                                                                       | Decision                                                               | Status                                        |
-| ----------------------------------------------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------- |
-| [0018](0018-a-payload-is-sealed-to-the-terminating-connector.md)        | A packet's payload is sealed to the terminating connector              | Accepted — bounded by 0032                    |
-| [0019](0019-a-terminating-connector-derives-the-fulfilment.md)          | A terminating connector derives the fulfilment it is paid against      | Accepted — bounded by 0032                    |
-| [0025](0025-an-envelope-target-is-confined-beneath-the-handler-path.md) | An envelope target is confined beneath the route's handler path        | Accepted                                      |
-| [0032](0032-a-client-destination-is-never-a-route-termination.md)       | A client destination is never a route termination                      | Accepted — bounds 0018 and 0019               |
-| [0040](0040-a-verified-payment-is-stated-to-the-app.md)                 | A verified payment is stated to the app; an unverified one by nobody   | Accepted — supersedes 0036's conclusion       |
-| [0016](0016-payload-opacity-is-a-property-of-carriage.md)               | Payload opacity is a property of carriage                              | Partly superseded by 0017 — first half stands |
-| [0036](0036-a-paid-deliverys-attribution-stays-on-the-connector.md)     | A paid delivery's attribution stays on the connector, never on the app | Partly superseded by 0040 — reasoning stands  |
+| #                                                                                               | Decision                                                                      | Status                                           |
+| ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------ |
+| [0018](0018-a-payload-is-sealed-to-the-terminating-connector.md)                                | A packet's payload is sealed to the terminating connector                     | Accepted — bounded by 0032                       |
+| [0019](0019-a-terminating-connector-derives-the-fulfilment.md)                                  | A terminating connector derives the fulfilment it is paid against             | Accepted — bounded by 0032                       |
+| [0025](0025-an-envelope-target-is-confined-beneath-the-handler-path.md)                         | An envelope target is confined beneath the route's handler path               | Accepted                                         |
+| [0032](0032-a-client-destination-is-never-a-route-termination.md)                               | A client destination is never a route termination                             | Accepted — bounds 0018 and 0019                  |
+| [0048](0048-routing-precedence-is-length-then-rank-and-a-lease-cannot-capture-a-termination.md) | Routing precedence is length, then rank; a lease cannot capture a termination | Accepted — **partly not yet built**; bounds 0032 |
+| [0040](0040-a-verified-payment-is-stated-to-the-app.md)                                         | A verified payment is stated to the app; an unverified one by nobody          | Accepted — supersedes 0036's conclusion          |
+| [0016](0016-payload-opacity-is-a-property-of-carriage.md)                                       | Payload opacity is a property of carriage                                     | Partly superseded by 0017 — first half stands    |
+| [0036](0036-a-paid-deliverys-attribution-stays-on-the-connector.md)                             | A paid delivery's attribution stays on the connector, never on the app        | Partly superseded by 0040 — reasoning stands     |
 
 ### Discovery
 
