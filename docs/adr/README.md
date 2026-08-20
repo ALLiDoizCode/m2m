@@ -241,10 +241,21 @@ grandfather.
 
 ## Related, and not an ADR
 
-`docs/protocol/` holds the specifications the protocol records above are the decision trail
-for — `client-edge-spec.md`, `peer-carriage-spec.md`, `peer-semantics-pre-868.md`, `money-model-pre-868.md`,
-and `wire-vectors.md`. Per ADR 0021 those prose specs are **non-normative**; the committed
-vectors are the contract.
+`docs/protocol/` holds the specifications the protocol records above are the decision trail for.
+Since [0045](0045-a-behavioural-rule-is-normative-prose-until-its-vector-lands.md) they are **not
+uniformly non-normative** — a behavioural rule is normative prose until its vector lands, per rule
+rather than per document:
+
+| file                                                         | role                                                                                                                                                                                         |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`configuration-spec.md`](../protocol/configuration-spec.md) | the configuration contract — **prose-normative permanently**, since configuration is not vectorable ([0047](0047-the-configuration-schema-is-implementation-detail-capabilities-are-law.md)) |
+| `client-edge-spec.md`                                        | the client edge specification                                                                                                                                                                |
+| `peer-carriage-spec.md`                                      | the peering specification                                                                                                                                                                    |
+| `wire-vectors.md`                                            | the vector companion                                                                                                                                                                         |
+| `money-model-pre-868.md`                                     | **history** — the pre-#868 credit window (issue #1056)                                                                                                                                       |
+| `peer-semantics-pre-868.md`                                  | **history** — claimed normative status over retired mechanisms (issue #1065)                                                                                                                 |
+
+The committed vectors remain the contract for anything a vector covers.
 
 [`CONTEXT.md`](../../CONTEXT.md) is the glossary — terms only, no decisions. These records are the
 decisions. When they disagree, the record is the older document and the glossary is what the
