@@ -189,17 +189,65 @@ pub fn verify_evm_balance_proof(
     recover_evm_signer(&digest, signature).as_ref() == Some(expected_counterparty)
 }
 
-/// The 48-byte message a Solana claim's Ed25519 signature covers
-/// (`docs/protocol/client-edge-spec.md` §1.3's `solana` claim).
+/// The domain tag every Solana balance-proof message begins with. Sixteen
+/// bytes exactly, so the layout below is fixed-size arithmetic.
+///
+/// Distinct from [`SOLANA_CHALLENGE_DOMAIN_TAG`](crate::claim_state_challenge)
+/// in both length and content, so a claim-state challenge and a balance proof
+/// can never be mistaken for one another whatever their fields.
+pub const SOLANA_BALANCE_PROOF_DOMAIN_TAG: &[u8; 16] = b"TOON-BALPROOF-V2";
+
+/// The 96-byte message a Solana claim's Ed25519 signature covers
+/// (ADR 0053, issue #1082).
+///
+/// | bytes | field |
+/// | --- | --- |
+/// | 0..16 | [`SOLANA_BALANCE_PROOF_DOMAIN_TAG`] |
+/// | 16..48 | `program_id` — the settlement program this channel lives under |
+/// | 48..80 | `channel_account` |
+/// | 80..88 | `nonce`, u64 little-endian |
+/// | 88..96 | `transferred_amount`, u64 little-endian |
+///
+/// # Why the program id is in here
+///
+/// Before ADR 0053 this message was 48 bytes -- channel account, nonce,
+/// amount -- and bound **nothing about which chain the channel lives on**.
+/// Its EVM counterpart binds `chain_id` and `token_network_address` through
+/// the EIP-712 domain separator, which is the whole point of ADR 0024; the
+/// Solana side had no equivalent. A signature was therefore valid for its
+/// channel account on **any** cluster where that account existed, and the
+/// separation we had came from program ids happening to differ between
+/// deployments -- a deployment accident standing in for a cryptographic
+/// guarantee.
+///
+/// The program id is the binding a program can actually enforce. On chain a
+/// program knows its own id and nothing about which cluster it runs on, so a
+/// cluster string here would be unverifiable: the program could not rebuild
+/// the message to compare against. A claim's declared `cluster` therefore
+/// stays what it always was -- **a routing hint, never a security boundary**
+/// -- and is checked off chain against the settlement backend's own cluster,
+/// which closes issue #975's honest-misconfiguration case. The forgery case
+/// is closed here, by the bytes.
+///
+/// # Why a domain tag, and not an appended field
+///
+/// ADR 0053 asks for a domain-separated construction rather than an
+/// append. An appended field is silently truncatable by a verifier that
+/// expects the old length: a 48-byte prefix of this message is not a valid
+/// message under either scheme, and a verifier written against the old
+/// layout rejects it outright rather than reading a shorter one as complete.
 pub fn solana_balance_proof_message(
+    program_id: &[u8; 32],
     channel_account: &[u8; 32],
     nonce: u64,
     transferred_amount: u64,
-) -> [u8; 48] {
-    let mut message = [0u8; 48];
-    message[0..32].copy_from_slice(channel_account);
-    message[32..40].copy_from_slice(&nonce.to_le_bytes());
-    message[40..48].copy_from_slice(&transferred_amount.to_le_bytes());
+) -> [u8; 96] {
+    let mut message = [0u8; 96];
+    message[0..16].copy_from_slice(SOLANA_BALANCE_PROOF_DOMAIN_TAG);
+    message[16..48].copy_from_slice(program_id);
+    message[48..80].copy_from_slice(channel_account);
+    message[80..88].copy_from_slice(&nonce.to_le_bytes());
+    message[88..96].copy_from_slice(&transferred_amount.to_le_bytes());
     message
 }
 
@@ -212,6 +260,7 @@ pub fn solana_balance_proof_message(
 /// anything -- this function only checks the signature is genuine for
 /// whatever key it is given.
 pub fn verify_solana_balance_proof(
+    program_id: &[u8; 32],
     channel_account: &[u8; 32],
     nonce: u64,
     transferred_amount: u64,
@@ -224,7 +273,8 @@ pub fn verify_solana_balance_proof(
     let Ok(signature) = ed25519_dalek::Signature::from_bytes(signature) else {
         return false;
     };
-    let message = solana_balance_proof_message(channel_account, nonce, transferred_amount);
+    let message =
+        solana_balance_proof_message(program_id, channel_account, nonce, transferred_amount);
     use ed25519_dalek::Verifier;
     public_key.verify(&message, &signature).is_ok()
 }
@@ -374,14 +424,111 @@ mod tests {
         ed25519_dalek::Keypair::generate(&mut OsRng)
     }
 
+    /// A fixed settlement-program id for the Solana cases below. Its value
+    /// carries no meaning; what matters is that it is part of the signed
+    /// message, so a signature made under it does not verify under another
+    /// (ADR 0053, issue #1082).
+    const TEST_PROGRAM_ID: [u8; 32] = [9u8; 32];
+
+    /// ADR 0053, issue #1082: the property the whole change exists for.
+    ///
+    /// Before it, a Solana claim's signature covered the channel account, the
+    /// nonce and the amount, and **nothing about which chain the channel
+    /// lived on** -- so a signature was valid for its account on any cluster
+    /// where that account existed. The separation we had came from program
+    /// ids happening to differ between deployments, which is a deployment
+    /// accident rather than a cryptographic guarantee.
+    #[test]
+    fn a_solana_signature_does_not_verify_under_a_different_program() {
+        let keypair = generate_solana_keypair();
+        let channel_account = [3u8; 32];
+        let other_program = [0xAAu8; 32];
+        assert_ne!(TEST_PROGRAM_ID, other_program);
+
+        let message = solana_balance_proof_message(&TEST_PROGRAM_ID, &channel_account, 7, 500);
+        let signature = keypair.sign(&message);
+        let public_key = keypair.public.to_bytes();
+
+        assert!(verify_solana_balance_proof(
+            &TEST_PROGRAM_ID,
+            &channel_account,
+            7,
+            500,
+            &signature.to_bytes(),
+            &public_key,
+        ));
+        assert!(
+            !verify_solana_balance_proof(
+                &other_program,
+                &channel_account,
+                7,
+                500,
+                &signature.to_bytes(),
+                &public_key,
+            ),
+            "a claim signed against one settlement program must not verify \
+             against another -- that is the cross-cluster replay ADR 0053 closes"
+        );
+    }
+
+    /// The EVM counterpart of this property is
+    /// `changing_any_evm_proof_field_invalidates_a_prior_signature`. This is
+    /// the Solana one, and it now covers the program id as well.
+    #[test]
+    fn changing_any_solana_proof_field_invalidates_a_prior_signature() {
+        let keypair = generate_solana_keypair();
+        let public_key = keypair.public.to_bytes();
+        let account = [3u8; 32];
+        let signature = keypair
+            .sign(&solana_balance_proof_message(
+                &TEST_PROGRAM_ID,
+                &account,
+                7,
+                500,
+            ))
+            .to_bytes();
+
+        for (label, program, acct, nonce, amount) in [
+            ("program id", [0xAAu8; 32], account, 7u64, 500u64),
+            ("channel account", TEST_PROGRAM_ID, [4u8; 32], 7, 500),
+            ("nonce", TEST_PROGRAM_ID, account, 8, 500),
+            ("transferred amount", TEST_PROGRAM_ID, account, 7, 501),
+        ] {
+            assert!(
+                !verify_solana_balance_proof(
+                    &program,
+                    &acct,
+                    nonce,
+                    amount,
+                    &signature,
+                    &public_key
+                ),
+                "changing the {label} must invalidate a prior signature"
+            );
+        }
+    }
+
+    /// The domain tag is what makes the old 48-byte layout unreadable as a
+    /// prefix of this one: a verifier written against it sees a length
+    /// mismatch rather than a truncated message (ADR 0053's "domain-separated
+    /// construction, not an append").
+    #[test]
+    fn the_message_is_96_bytes_and_begins_with_its_domain_tag() {
+        let message = solana_balance_proof_message(&TEST_PROGRAM_ID, &[3u8; 32], 7, 500);
+        assert_eq!(message.len(), 96);
+        assert_eq!(&message[0..16], SOLANA_BALANCE_PROOF_DOMAIN_TAG);
+        assert_eq!(&message[16..48], &TEST_PROGRAM_ID);
+    }
+
     #[test]
     fn a_genuine_solana_signature_verifies_against_its_signers_key() {
         let keypair = generate_solana_keypair();
         let channel_account = [3u8; 32];
-        let message = solana_balance_proof_message(&channel_account, 7, 500);
+        let message = solana_balance_proof_message(&TEST_PROGRAM_ID, &channel_account, 7, 500);
         let signature = keypair.sign(&message);
 
         assert!(verify_solana_balance_proof(
+            &TEST_PROGRAM_ID,
             &channel_account,
             7,
             500,
@@ -395,10 +542,11 @@ mod tests {
         let keypair = generate_solana_keypair();
         let other_keypair = generate_solana_keypair();
         let channel_account = [3u8; 32];
-        let message = solana_balance_proof_message(&channel_account, 7, 500);
+        let message = solana_balance_proof_message(&TEST_PROGRAM_ID, &channel_account, 7, 500);
         let signature = keypair.sign(&message);
 
         assert!(!verify_solana_balance_proof(
+            &TEST_PROGRAM_ID,
             &channel_account,
             7,
             500,
@@ -411,11 +559,12 @@ mod tests {
     fn a_truncated_solana_signature_fails_to_verify_rather_than_panicking() {
         let keypair = generate_solana_keypair();
         let channel_account = [3u8; 32];
-        let message = solana_balance_proof_message(&channel_account, 7, 500);
+        let message = solana_balance_proof_message(&TEST_PROGRAM_ID, &channel_account, 7, 500);
         let signature = keypair.sign(&message);
         let truncated = &signature.to_bytes()[..10];
 
         assert!(!verify_solana_balance_proof(
+            &TEST_PROGRAM_ID,
             &channel_account,
             7,
             500,
@@ -428,12 +577,13 @@ mod tests {
     fn a_corrupted_solana_signature_fails_to_verify_rather_than_panicking() {
         let keypair = generate_solana_keypair();
         let channel_account = [3u8; 32];
-        let message = solana_balance_proof_message(&channel_account, 7, 500);
+        let message = solana_balance_proof_message(&TEST_PROGRAM_ID, &channel_account, 7, 500);
         let signature = keypair.sign(&message);
         let mut corrupted = signature.to_bytes();
         corrupted[0] ^= 0xff;
 
         assert!(!verify_solana_balance_proof(
+            &TEST_PROGRAM_ID,
             &channel_account,
             7,
             500,
@@ -446,12 +596,13 @@ mod tests {
     fn a_malformed_solana_public_key_fails_to_verify_rather_than_panicking() {
         let keypair = generate_solana_keypair();
         let channel_account = [3u8; 32];
-        let message = solana_balance_proof_message(&channel_account, 7, 500);
+        let message = solana_balance_proof_message(&TEST_PROGRAM_ID, &channel_account, 7, 500);
         let signature = keypair.sign(&message);
 
         // An all-zero "public key" is not a valid Ed25519 point.
         let malformed_key = [0u8; 32];
         assert!(!verify_solana_balance_proof(
+            &TEST_PROGRAM_ID,
             &channel_account,
             7,
             500,
@@ -464,11 +615,12 @@ mod tests {
     fn changing_any_solana_field_invalidates_a_prior_signature() {
         let keypair = generate_solana_keypair();
         let channel_account = [3u8; 32];
-        let message = solana_balance_proof_message(&channel_account, 7, 500);
+        let message = solana_balance_proof_message(&TEST_PROGRAM_ID, &channel_account, 7, 500);
         let signature = keypair.sign(&message);
         let public_key = keypair.public.to_bytes();
 
         assert!(!verify_solana_balance_proof(
+            &TEST_PROGRAM_ID,
             &[9u8; 32],
             7,
             500,
@@ -476,6 +628,7 @@ mod tests {
             &public_key,
         ));
         assert!(!verify_solana_balance_proof(
+            &TEST_PROGRAM_ID,
             &channel_account,
             8,
             500,
@@ -483,6 +636,7 @@ mod tests {
             &public_key,
         ));
         assert!(!verify_solana_balance_proof(
+            &TEST_PROGRAM_ID,
             &channel_account,
             7,
             501,

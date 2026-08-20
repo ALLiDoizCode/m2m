@@ -504,7 +504,7 @@ impl SolanaSettlementBackend {
             .0 == pubkey
         })?;
         let units = to_units(cumulative_amount).ok()?;
-        let message = wire::balance_proof_message(&pubkey, nonce, units);
+        let message = wire::balance_proof_message(&self.program_id, &pubkey, nonce, units);
         Some(counterparty.sign_message(&message).as_ref().to_vec())
     }
 
@@ -897,7 +897,8 @@ impl SettlementBackend for SolanaSettlementBackend {
                 claim.signature.len()
             ))
         })?;
-        let message = wire::balance_proof_message(&pubkey, claim.nonce, transferred_units);
+        let message =
+            wire::balance_proof_message(&self.program_id, &pubkey, claim.nonce, transferred_units);
         let ed25519_instruction =
             wire::ed25519_verify_instruction(&counterparty_pubkey, &signature, &message);
         let claim_instruction = Instruction::new_with_bytes(

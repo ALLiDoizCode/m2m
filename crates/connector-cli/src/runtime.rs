@@ -714,7 +714,13 @@ impl ClientChannelSource for SolanaChannelSource {
             .channel_counterparty_deposit(Pubkey::new_from_array(*channel_account))
             .await
             .map_err(|error| ChannelLookupFailed(error.to_string()))?;
+        // The program is this backend's own: a channel resolved from chain
+        // was found under the program this node settles with, and a claim on
+        // it signs that program id (ADR 0053, issue #1082). It is never taken
+        // from the claim, which declares a `cluster` that nothing signs.
+        let program_id = self.backend.program_id().to_bytes();
         Ok(resolved.map(|(counterparty, deposit)| SolanaChannel {
+            program_id,
             counterparty: counterparty.to_bytes(),
             deposit_floor: DepositFloor::AtLeast(deposit),
         }))
@@ -929,7 +935,11 @@ fn wire_peer_channels(
             }
             PeerChannelConfig::Solana(solana) => {
                 connector = connector
-                    .with_solana_channel(claim_channel, solana.counterparty_key())
+                    .with_solana_channel(
+                        claim_channel,
+                        solana.counterparty_key(),
+                        solana.program_id(),
+                    )
                     .map_err(|_| RuntimeError::PeerChannelSolanaUnusable {
                         channel_account: claim_channel.to_string(),
                     })?;
@@ -1426,6 +1436,19 @@ fn client_channels(
     solana_source: Option<Arc<dyn ClientChannelSource>>,
 ) -> ClientChannelRegistry {
     let mut channels = ClientChannelRegistry::new();
+    // The one Solana settlement program this node runs under. A configured
+    // Solana client channel lives beneath it, and a claim on that channel
+    // signs its id (ADR 0053, issue #1082) -- so it is read from
+    // `[settlement.solana]` rather than declared a second time per channel.
+    // A node with no Solana backend records no Solana client channels: it
+    // could not verify a claim on one anyway.
+    let solana_program_id = config
+        .settlements()
+        .iter()
+        .find_map(|settlement| match settlement {
+            connector_config::SettlementConfig::Solana(solana) => Some(solana.program_id()),
+            connector_config::SettlementConfig::Evm(_) => None,
+        });
     for channel in config.client_channels() {
         match channel {
             ClientChannelConfig::Evm(evm) => {
@@ -1452,8 +1475,33 @@ fn client_channels(
                     );
             }
             ClientChannelConfig::Solana(solana) => {
+                // A client channel this node accepts claims on lives under
+                // the one Solana program this node settles with, so the
+                // program id comes from `[settlement.solana]` rather than
+                // being declared a second time per channel -- ADR 0053, and
+                // the same "no second declaration" rule that closed #981.
+                let Some(program_id) = solana_program_id else {
+                    // A claim on this channel signs the settlement program's
+                    // id (ADR 0053), and without a `[settlement.solana]`
+                    // block there is none to sign against -- so this node
+                    // could not verify a claim on it even if it recorded it.
+                    // Skipped rather than recorded-and-always-refused, and
+                    // said out loud rather than dropped: a silent skip is the
+                    // failure mode this repo refuses everywhere else.
+                    //
+                    // Hardening this into a config-load refusal is the better
+                    // answer and is deliberately not done here -- it is a
+                    // `connector-config` change with its own error variant.
+                    tracing::warn!(
+                        channel_account = %solana.channel_account(),
+                        "a Solana client channel is configured with no [settlement.solana] \
+                         block, so this node has no settlement program to verify its claims \
+                         against and will not record it (ADR 0053)"
+                    );
+                    continue;
+                };
                 channels
-                    .record_solana(solana.channel_account(), solana.counterparty())
+                    .record_solana(solana.channel_account(), solana.counterparty(), program_id)
                     .expect("config load already validated both fields as base58 32-byte accounts");
             }
         }
@@ -2659,8 +2707,17 @@ counterparty = "{counterparty}"
             )
         });
 
+        // ADR 0053 / issue #1082: a claim on a Solana channel signs the
+        // settlement program's id, so a Solana client channel configured with
+        // no `[settlement.solana]` block has nothing to verify against and is
+        // not recorded. The config still parses -- this is a wiring decision,
+        // not a parse error -- and the skip is logged.
         let channels = client_channels(&config, None, None);
-        assert!(!channels.is_empty());
+        assert!(
+            channels.is_empty(),
+            "a Solana client channel with no settlement backend has no program id to verify \
+             claims against, so it must not be recorded"
+        );
         let ClientChannelConfig::Solana(solana) = &config.client_channels()[0] else {
             panic!("expected a Solana client channel");
         };

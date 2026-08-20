@@ -3535,12 +3535,17 @@ mod tests {
             // below.
             let mut channels = ClientChannelRegistry::new();
             channels
-                .record_solana(&channel_account_base58, &counterparty_base58)
+                .record_solana(
+                    &channel_account_base58,
+                    &counterparty_base58,
+                    "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+                )
                 .expect("valid base58 32-byte accounts");
 
             let nonce = 1u64;
             let transferred_amount = 100u64;
             let message = connector_signer::solana_balance_proof_message(
+                &[7u8; 32],
                 &channel_account,
                 nonce,
                 transferred_amount,
@@ -3615,12 +3620,17 @@ mod tests {
 
             let mut channels = ClientChannelRegistry::new();
             channels
-                .record_solana(&channel_account_base58, &real_counterparty_base58)
+                .record_solana(
+                    &channel_account_base58,
+                    &real_counterparty_base58,
+                    "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+                )
                 .expect("valid base58 32-byte accounts");
 
             let nonce = 1u64;
             let transferred_amount = 100u64;
             let message = connector_signer::solana_balance_proof_message(
+                &[7u8; 32],
                 &channel_account,
                 nonce,
                 transferred_amount,
@@ -3702,6 +3712,7 @@ mod tests {
                 crate::channels::test_source::FakeSolanaChannelSource::knowing(vec![(
                     channel_account,
                     crate::SolanaChannel {
+                        program_id: [7u8; 32],
                         counterparty: counterparty_keypair.public.to_bytes(),
                         deposit_floor: crate::DepositFloor::AtLeast(1_000_000),
                     },
@@ -3715,6 +3726,7 @@ mod tests {
             let nonce = 1u64;
             let transferred_amount = 100u64;
             let message = connector_signer::solana_balance_proof_message(
+                &[7u8; 32],
                 &channel_account,
                 nonce,
                 transferred_amount,
@@ -3788,7 +3800,12 @@ mod tests {
             let channel_account = [0x45u8; 32];
             let channel_account_base58 = bs58::encode(channel_account).into_string();
             let signer_base58 = bs58::encode(keypair.public.to_bytes()).into_string();
-            let message = connector_signer::solana_balance_proof_message(&channel_account, 1, 100);
+            let message = connector_signer::solana_balance_proof_message(
+                &[7u8; 32],
+                &channel_account,
+                1,
+                100,
+            );
             let signature_base64 = BASE64.encode(keypair.sign(&message).to_bytes());
 
             let claim_json = format!(

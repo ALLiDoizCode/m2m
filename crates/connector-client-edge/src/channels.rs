@@ -641,6 +641,14 @@ pub struct EvmChannel {
 /// the channel account, nonce and amount alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SolanaChannel {
+    /// The settlement program this channel lives under, raw 32 bytes.
+    ///
+    /// Signed into every balance proof for this channel (ADR 0053, issue
+    /// #1082), so a signature made against one deployment does not verify
+    /// against another. Resolved from the same source as `counterparty` --
+    /// a configured row, or the chain -- and never from the claim, which
+    /// declares a `cluster` that nothing signs.
+    pub program_id: [u8; 32],
     /// The raw Ed25519 public key whose signature this connector accepts on
     /// a claim for this channel -- never the claim's own
     /// `signerPublicKey`.
@@ -989,14 +997,18 @@ impl ClientChannelRegistry {
         &mut self,
         channel_account: &str,
         counterparty: &str,
+        program_id: &str,
     ) -> Result<(), InvalidChannelIdentifier> {
         let key = decode_base58_bytes::<32>(channel_account)
             .ok_or_else(|| InvalidChannelIdentifier(channel_account.to_string()))?;
         let counterparty = decode_base58_bytes::<32>(counterparty)
             .ok_or_else(|| InvalidChannelIdentifier(counterparty.to_string()))?;
+        let program_id = decode_base58_bytes::<32>(program_id)
+            .ok_or_else(|| InvalidChannelIdentifier(program_id.to_string()))?;
         self.solana.insert(
             key,
             SolanaChannel {
+                program_id,
                 counterparty,
                 // Config declares a counterparty, never an amount -- see
                 // this module's doc on the declared-channel exemption.
@@ -1728,6 +1740,7 @@ mod tests {
 
     fn solana_channel() -> SolanaChannel {
         SolanaChannel {
+            program_id: [7u8; 32],
             counterparty: [0x09; 32],
             deposit_floor: DepositFloor::AtLeast(1_000),
         }
@@ -1833,12 +1846,17 @@ mod tests {
         let account = bs58::encode([3u8; 32]).into_string();
         let counterparty = bs58::encode([7u8; 32]).into_string();
         registry
-            .record_solana(&account, &counterparty)
+            .record_solana(
+                &account,
+                &counterparty,
+                "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+            )
             .expect("a 32-byte base58 account");
 
         assert_eq!(
             registry.solana(&[3u8; 32], A_BUYER).await,
             Ok(Some(SolanaChannel {
+                program_id: [7u8; 32],
                 counterparty: [7u8; 32],
                 deposit_floor: DepositFloor::Unknown,
             }))
@@ -2084,13 +2102,18 @@ mod tests {
         let counterparty = bs58::encode([9u8; 32]).into_string();
         let mut registry = ClientChannelRegistry::new();
         registry
-            .record_solana(&account, &counterparty)
+            .record_solana(
+                &account,
+                &counterparty,
+                "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+            )
             .expect("a 32-byte base58 account");
         let registry = registry.with_solana_source(source.clone());
 
         assert_eq!(
             registry.solana(&[7u8; 32], A_BUYER).await,
             Ok(Some(SolanaChannel {
+                program_id: [7u8; 32],
                 counterparty: [9u8; 32],
                 deposit_floor: DepositFloor::Unknown,
             }))
@@ -2148,6 +2171,7 @@ mod tests {
             .record_solana(
                 &bs58::encode([3u8; 32]).into_string(),
                 &bs58::encode([7u8; 32]).into_string(),
+                "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
             )
             .expect("a 32-byte base58 account");
 

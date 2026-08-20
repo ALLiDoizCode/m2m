@@ -1361,6 +1361,7 @@ name = "connector-vectors"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "bs58",
  "chrono",
  "connector-btp",
  "connector-config",

@@ -511,6 +511,7 @@ mod tests {
             .record_solana(
                 &base58_encode(&SOLANA_CHANNEL_ACCOUNT),
                 &base58_encode(&solana_signer().public.to_bytes()),
+                "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
             )
             .expect("a 32-byte base58 channel account");
         channels

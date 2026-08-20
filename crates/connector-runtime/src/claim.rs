@@ -238,6 +238,15 @@ pub struct ChannelDomain {
 /// wire's counterpart to that decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SolanaChannel {
+    /// The settlement program this channel lives under, raw 32 bytes.
+    ///
+    /// Part of every balance-proof message this channel's claims sign
+    /// (ADR 0053, issue #1082), so a signature made against one deployment
+    /// does not verify against another. Before #1082 nothing about the chain
+    /// was signed, and the separation between clusters came from program ids
+    /// happening to differ -- a deployment accident standing in for a
+    /// cryptographic guarantee.
+    pub program_id: [u8; 32],
     /// The raw 32 bytes the channel account's base58 id decodes to --
     /// parsed once, at [`ClaimBook::set_solana_channel`] time, exactly as
     /// [`ChannelDomain`]'s `OnChainChannelId` is.
@@ -671,13 +680,16 @@ impl ClaimBook {
         &mut self,
         channel_account: impl Into<String>,
         counterparty_public_key: &str,
+        program_id: &str,
     ) -> Result<(), InvalidSolanaChannel> {
         let channel_account = channel_account.into();
         let account_bytes = parse_base58_32("channel account", &channel_account)?;
         let counterparty_public_key = parse_base58_32("counterparty key", counterparty_public_key)?;
+        let program_id = parse_base58_32("program id", program_id)?;
         self.solana_channels.insert(
             channel_account,
             SolanaChannel {
+                program_id,
                 channel_account: account_bytes,
                 counterparty_public_key,
             },
@@ -831,6 +843,7 @@ impl ClaimBook {
                 (solana_signer, solana_channels.get(&ledger.channel_id))
             {
                 let message = solana_balance_proof_message(
+                    &channel.program_id,
                     &channel.channel_account,
                     ledger.nonce,
                     ledger.cumulative_amount,
@@ -972,6 +985,7 @@ impl ClaimBook {
             }
             Binding::Solana(solana_signer, channel) => {
                 let message = solana_balance_proof_message(
+                    &channel.program_id,
                     &channel.channel_account,
                     ledger.nonce,
                     ledger.cumulative_amount,
@@ -1159,6 +1173,7 @@ impl ClaimBook {
                     return Err(ClaimRejectReason::UnknownChannel);
                 };
                 if verify_solana_balance_proof(
+                    &channel.program_id,
                     &channel.channel_account,
                     claim.nonce,
                     claim.cumulative_amount,
@@ -2841,8 +2856,12 @@ mod tests {
         /// A book that accepts claims on `account(n)` signed by `signer`.
         fn book_with_solana_channel(n: u8, signer: &Keypair) -> ClaimBook {
             let mut book = ClaimBook::new(None, HashMap::new(), HashMap::new());
-            book.set_solana_channel(base58(&account(n)), &base58(&signer.public.to_bytes()))
-                .expect("a 32-byte base58 account and key");
+            book.set_solana_channel(
+                base58(&account(n)),
+                &base58(&signer.public.to_bytes()),
+                "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+            )
+            .expect("a 32-byte base58 account and key");
             book
         }
 
@@ -2850,7 +2869,7 @@ mod tests {
         /// 48-byte balance-proof message -- exactly what a peer's own
         /// Solana signing path produces.
         fn sign_solana(signer: &Keypair, n: u8, nonce: u64, amount: u64) -> WireClaim {
-            let message = solana_balance_proof_message(&account(n), nonce, amount);
+            let message = solana_balance_proof_message(&[7u8; 32], &account(n), nonce, amount);
             WireClaim {
                 channel_id: base58(&account(n)),
                 nonce,
@@ -2892,8 +2911,12 @@ mod tests {
             let peer = keypair(1);
             let claim = sign_solana(&peer, 1, 1, 100);
             let mut book = book_with_solana_channel(1, &peer);
-            book.set_solana_channel(base58(&account(1)), &base58(&keypair(2).public.to_bytes()))
-                .unwrap();
+            book.set_solana_channel(
+                base58(&account(1)),
+                &base58(&keypair(2).public.to_bytes()),
+                "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+            )
+            .unwrap();
 
             assert_eq!(
                 book.accept_inbound(&claim),
@@ -3036,14 +3059,30 @@ mod tests {
             let mut book = ClaimBook::new(None, HashMap::new(), HashMap::new());
             let good = base58(&account(1));
 
-            assert!(book.set_solana_channel(&good, "not base58 0OIl").is_err());
             assert!(book
-                .set_solana_channel(bs58::encode([0u8; 31]).into_string(), &good)
+                .set_solana_channel(
+                    &good,
+                    "not base58 0OIl",
+                    "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+                )
                 .is_err());
             assert!(book
-                .set_solana_channel(&good, &bs58::encode([0u8; 33]).into_string())
+                .set_solana_channel(
+                    bs58::encode([0u8; 31]).into_string(),
+                    &good,
+                    "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+                )
                 .is_err());
-            assert!(book.set_solana_channel("", &good).is_err());
+            assert!(book
+                .set_solana_channel(
+                    &good,
+                    &bs58::encode([0u8; 33]).into_string(),
+                    "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+                )
+                .is_err());
+            assert!(book
+                .set_solana_channel("", &good, "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx")
+                .is_err());
 
             // Nothing was registered by any of those, so a genuine claim
             // still finds no channel.
@@ -3091,8 +3130,12 @@ mod tests {
             let peer = keypair(1);
             let evm_key = derive_evm_address(&LocalSigner::generate("k").public_key().unwrap());
             let mut book = book_with_peer("peer-b", &channel_id(1), evm_key);
-            book.set_solana_channel(base58(&account(1)), &base58(&peer.public.to_bytes()))
-                .unwrap();
+            book.set_solana_channel(
+                base58(&account(1)),
+                &base58(&peer.public.to_bytes()),
+                "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+            )
+            .unwrap();
 
             book.record_fulfillment("peer-b", 100, now()).unwrap();
             assert_eq!(
@@ -3244,8 +3287,12 @@ mod tests {
                 let public_key = LocalEd25519Signer::from_secret_bytes(seed)
                     .expect("32 bytes is a valid seed")
                     .public_key();
-                book.set_solana_channel(base58(&account(n)), &base58(&public_key))
-                    .expect("a 32-byte base58 account and key");
+                book.set_solana_channel(
+                    base58(&account(n)),
+                    &base58(&public_key),
+                    "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+                )
+                .expect("a 32-byte base58 account and key");
                 book
             }
 
@@ -3257,6 +3304,7 @@ mod tests {
                 book.set_solana_channel(
                     base58(&account(1)),
                     &base58(&keypair(1).public.to_bytes()),
+                    "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
                 )
                 .unwrap();
 
@@ -3322,6 +3370,7 @@ mod tests {
                 let claim = book.record_fulfillment("peer-b", 100, now()).unwrap();
 
                 assert!(verify_solana_balance_proof(
+                    &[7u8; 32],
                     &account(1),
                     claim.nonce,
                     claim.cumulative_amount,
@@ -3329,6 +3378,7 @@ mod tests {
                     &own_public_key,
                 ));
                 assert!(!verify_solana_balance_proof(
+                    &[7u8; 32],
                     &account(1),
                     claim.nonce,
                     claim.cumulative_amount,
@@ -3368,6 +3418,7 @@ mod tests {
                     .unwrap()
                     .public_key();
                 assert!(verify_solana_balance_proof(
+                    &[7u8; 32],
                     &account(1),
                     pending.nonce,
                     pending.cumulative_amount,

@@ -630,6 +630,19 @@ pub struct PeerAuthCase {
 #[derive(Debug, Serialize)]
 pub struct PeerClaimCase {
     pub name: &'static str,
+    /// The exact bytes this claim's signature covers, hex-encoded.
+    ///
+    /// For Solana this is [`connector_signer::solana_balance_proof_message`]'s
+    /// 96 bytes -- domain tag, settlement program id, channel account, nonce,
+    /// transferred amount (ADR 0053, issue #1082). It is the cross-repo
+    /// contract for that format, and the only thing keeping its **three**
+    /// in-tree copies in step: this crate's, `connector-settlement-solana`'s
+    /// `wire::balance_proof_message`, and the on-chain program's own
+    /// `expected_message`.
+    ///
+    /// Empty for EVM, whose signed bytes are an EIP-712 digest already
+    /// pinned by `claim_digest_hex`.
+    pub signed_message_hex: String,
     pub blockchain: &'static str,
     pub json: String,
     pub btp_raw_hex: String,
@@ -870,6 +883,7 @@ fn generate_peer_claim_evm_case(fixture: &ClaimFixture) -> PeerClaimCase {
 
     PeerClaimCase {
         name: "peer_claim_evm",
+        signed_message_hex: String::new(),
         blockchain: "evm",
         json,
         btp_raw_hex: hex_of(&raw_entry.data),
@@ -887,8 +901,19 @@ fn generate_peer_claim_evm_case(fixture: &ClaimFixture) -> PeerClaimCase {
 /// EVM-only, `claim_json::encode`'s own doc). What *does* exist and is
 /// exercised here for real is the inbound half: `claim_json::parse`
 /// already accepts a Solana claim (issue #732).
+/// Decode a base58 32-byte fixture, panicking on a bad literal -- these are
+/// hardcoded in this file, so a failure here is a typo, not input.
+fn bs58_32(value: &str) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    let decoded = bs58::decode(value).into_vec().expect("a base58 fixture");
+    assert_eq!(decoded.len(), 32, "fixture is not 32 bytes: {value}");
+    out.copy_from_slice(&decoded);
+    out
+}
+
 fn generate_peer_claim_solana_case() -> PeerClaimCase {
     let channel_account = "GDDMwNyyx8uB6zrqwBFHjLLG3TBYk2F1Mh6usnNPUsqk";
+    let program_id = "11111111111111111111111111111111";
     let signer_public_key = "11111111111111111111111111111113";
     let signature_bytes = seq_bytes::<64>(0xe1);
     let json = serde_json::json!({
@@ -930,6 +955,12 @@ fn generate_peer_claim_solana_case() -> PeerClaimCase {
 
     PeerClaimCase {
         name: "peer_claim_solana",
+        signed_message_hex: hex_of(&connector_signer::solana_balance_proof_message(
+            &bs58_32(program_id),
+            &bs58_32(channel_account),
+            1,
+            250_000,
+        )),
         blockchain: "solana",
         json,
         btp_raw_hex: hex_of(&raw_entry.data),
