@@ -1,6 +1,6 @@
 # A packet carries its claim
 
-**Status:** Accepted — **a target record, partly built**. **Supersedes [0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md)**, retires [0004](0004-value-moves-on-fulfilment.md)'s headline, and amends [0010](0010-flat-per-packet-fee-and-minimum-delivery.md) and [0011](0011-rejects-accumulate-fees-and-probes-discover-cost.md). Built: the cap (`max_packet_amount`, with a default) and the send half (`[[pay_channels]]` populating `outbound_client_hops`, issue #881). Not built: requiring a covering claim on **forwarded** arrivals, and the resolution of `ClaimEnforcement::Observe`. Until those land, forwarding runs [0004](0004-value-moves-on-fulfilment.md)'s model end to end.
+**Status:** Accepted — **a target record, partly built**. **Supersedes [0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md)**, retires [0004](0004-value-moves-on-fulfilment.md)'s headline, and amends [0010](0010-flat-per-packet-fee-and-minimum-delivery.md) and [0011](0011-rejects-accumulate-fees-and-probes-discover-cost.md). Built: the cap (`max_packet_amount`, with a default) and the send half (`[[pay_channels]]` populating `outbound_client_hops`, issue #881). Not built: requiring a covering claim on **forwarded** arrivals. (`ClaimEnforcement::Observe` was the _other_ item listed here; it is resolved — **deleted**, issue #1062 — and it never governed forwarded arrivals in the first place, since `payment_required` filters to `ClientRouteKind::Terminated`. The two debts were independent and this line used to read as though they were one.) Until those land, forwarding runs [0004](0004-value-moves-on-fulfilment.md)'s model end to end.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
@@ -127,3 +127,46 @@ accumulation back.
 **A signature sits on the hot path of every packet at every hop**, as ADR 0004 already noted. That
 cost is now permanent rather than provisional, and is what this record buys: no peering is ever owed
 anything between packets, so no peering can be left holding value a counterparty declines to cover.
+
+## Update (issue #1062) — `ClaimEnforcement::Observe` is deleted, and it was never the forwarded half
+
+This record's Status line listed two unbuilt items together: requiring a covering claim on
+**forwarded** arrivals, and the resolution of `ClaimEnforcement::Observe`. **They are independent, and
+listing them together was misleading.** `connector_peer_btp::price_gate::payment_required` filters to
+`ClientRouteKind::Terminated`, so `Observe` only ever governed the ADR 0029 price gate at a terminated
+route. It never touched forwarding.
+
+### `Observe` is deleted
+
+It was a migration ramp and said so — _"Migration-only (issue #883): the packet is admitted exactly as
+it was before issue #880, but logged so an operator can confirm real admissions before flipping this
+peering to enforce."_ Its own type documentation carried a dated sunset: delete once every `[[peers]]`
+row reads `Enforce` and the rollout runbook confirms it, no later than 2026-11-01.
+
+**Both preconditions were already met.** No committed configuration sets it — the single occurrence is
+a commented-out example in `deploy/connector-rust/connector.toml`. And
+`docs/operators/claim-policy-rollout.md` states outright that the two peerings the ramp existed for
+were destroyed with the apex box (issue #872): _"there is nothing left to flip from `observe` to
+`enforce` on either leg, and no live peering traffic on this fleet at all."_
+
+### The reason that makes it more than housekeeping
+
+**`Observe` is observable, so it cannot be excused as local policy.** A peer can tell: it receives
+service without a covering claim. Under
+[0047](0047-the-configuration-schema-is-implementation-detail-capabilities-are-law.md), an observable
+fact is protocol law — so had this survived, the specification would have had to document the
+protocol's own bypass. A protocol that ships a documented not-enforcing mode has specified how to
+ignore it.
+
+### What is given up, and why it is affordable
+
+The canary step for a future peering bring-up, which `claim-policy-rollout.md` says it is still there
+for. Smaller than it looks: **an enforce-mode refusal is already logged just as loudly** — the same
+line, at the same level, by deliberate design (_"Refusing is logged rather than silent"_). An operator
+bringing up a new peering can watch shortfalls today without admitting unpaid packets. What `Observe`
+uniquely bought was not breaking **live** traffic while watching, and there is none to break until
+somebody deliberately creates a peering — at which point re-adding a canary with a record explaining it
+beats carrying one for years against a hypothetical.
+
+`claim_enforcement` becomes a parsed-and-rejected key, the `ceiling` / `flush_interval_ms` /
+`[peer_sale]` convention.
