@@ -1,14 +1,15 @@
 # Peer carriage specification
 
-**Status:** **Live — becomes the peering specification** (wayfinder map #1049, issue #1065). Its
+**Status:** **Live — this is the peering specification** (wayfinder map #1049, issues #1065, #1073).
+Its known stale citations are corrected: §5.3's `T04` claim (false since the cap landed — see
+[ADR 0049](../adr/0049-the-cap-bounds-one-packet-is-discovered-by-t04-and-is-set-from-outside.md)),
+§5.3's and §6.4's citations of ADR 0031 (superseded in full by
+[0042](../adr/0042-a-packet-carries-its-claim.md)), I7's "P1/P2 rule" (P1 has not decided role since
+issue #868), and the semantics row in §0, which treated a now-frozen document as normative. Its
 "Normative for the carriage mapping" scope survives: [ADR 0045](../adr/0045-a-behavioural-rule-is-normative-prose-until-its-vector-lands.md)
 blesses exactly this narrower form, where prose binds a rule until a vector covers it and the vectors
-win on any encoding disagreement. Carries known stale citations to
-[ADR 0031](../adr/0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md) (superseded
-in full by [0042](../adr/0042-a-packet-carries-its-claim.md)) at §5.3, §6.4, §1.10 and I7, and a §6.3
-rule stated over a retired key; these are corrected as this document becomes the peering spec, not
-before. _Originally:_ Normative for the carriage mapping, in the same sense
-[`peer-semantics-pre-868.md`](peer-semantics-pre-868.md) §3–§6 are normative — this is an operator-to-operator
+win on any encoding disagreement. _Originally:_ Normative for the carriage mapping, in the same sense
+[`peer-semantics-pre-868.md`](peer-semantics-pre-868.md) §3–§6 were said to be normative — this is an operator-to-operator
 wire, and a third-party connector has nothing else to implement against. Subject to
 [ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md) where bytes are concerned: **where
 this prose and `vectors/wire-vectors.json` disagree about an encoding, the vectors are right and
@@ -31,11 +32,11 @@ SHOULD, SHOULD NOT and MAY are per RFC 2119.
 
 ADR 0027 split one document into two layers.
 
-| Layer                                                                                                                                                                                 | Where it is specified                                                                                                                                                                              |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Semantics** — what a peer interaction _means_: claim exchange, flush, claim acknowledgement, claim contents, fees and minimum delivery, reject codes, accumulated cost, consistency | [`peer-semantics-pre-868.md`](peer-semantics-pre-868.md) **§3–§6**, normative except where marked superseded (§3.2–§3.4, ADR 0031) or retired (§3.3's `flushIntervalMs`, §5.3's ceiling, ADR 0033) |
-| **Carriage** — _where the bytes ride_ for each of those concepts, on each of the two wires a connector already serves                                                                 | **this document**                                                                                                                                                                                  |
-| **Framing** — the deleted raw-TCP stream and its six frame types                                                                                                                      | gone: `peer-semantics-pre-868.md` §1–§2, superseded by ADR 0027, implementation removed by issue #679                                                                                              |
+| Layer                                                                                                                                                             | Where it is specified                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Semantics** — what a peer interaction _means_: claim exchange, claim acknowledgement, claim contents, fees and minimum delivery, reject codes, accumulated cost | **the records**, not a prose spec. [`peer-semantics-pre-868.md`](peer-semantics-pre-868.md) is **frozen history** (issue #1065): it claimed normative status over §3.2's trailing claim, §3.3's flush, §5.3's ceiling and §5.4's greeting gate, all retired or superseded. Its three live sections — §3.1, §4, §5.2 — migrate to the payment and packet-flow specifications. Authority meanwhile: [ADR 0010](../adr/0010-flat-per-packet-fee-and-minimum-delivery.md), [0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md), [0042](../adr/0042-a-packet-carries-its-claim.md), [0049](../adr/0049-the-cap-bounds-one-packet-is-discovered-by-t04-and-is-set-from-outside.md), [0051](../adr/0051-a-reject-code-binds-where-a-sender-must-act-differently.md) |
+| **Carriage** — _where the bytes ride_ for each of those concepts, on each of the two wires a connector already serves                                             | **this document**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| **Framing** — the deleted raw-TCP stream and its six frame types                                                                                                  | gone: `peer-semantics-pre-868.md` §1–§2, superseded by ADR 0027, implementation removed by issue #679                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 
 **This document sits beside `peer-semantics-pre-868.md` §3–§6. It supersedes nothing in them.** It does
 not restate them and MUST NOT be read as replacing them: every existing citation of §3.2, §3.3,
@@ -685,10 +686,19 @@ requirements:
 
 **Retired 2026-08-10 by [ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md)
 (issue #882).** `peer-semantics-pre-868.md` §5.3 no longer describes live behaviour: exposure is not
-tracked, `ceiling` is not live configuration, and no PREPARE is ever rejected `T04`. The
-accept-only HTTP peering's ceiling configuration obligation (§6.4, §11) is retired with it — an
-accept-only peering now loads with no ceiling-shaped config at all, bounded only by the
-covering-claim requirement every peering already carries (ADR 0031).
+tracked and `ceiling` is not live configuration. The accept-only HTTP peering's ceiling
+configuration obligation (§6.4, §11) is retired with it — an accept-only peering now loads with no
+ceiling-shaped config at all.
+
+> **Corrected 2026-08-20 (issue #1073).** An earlier version of this section added "and no PREPARE is
+> ever rejected `T04`". That was true between issue #424 and the cap landing, and is **false now**: a
+> packet exceeding a peering's **cap** is refused `T04`, never carried and never split, and the
+> reject's message states the cap
+> ([ADR 0049](../adr/0049-the-cap-bounds-one-packet-is-discovered-by-t04-and-is-set-from-outside.md)).
+> The bound an accept-only peering carries is that cap, plus the covering-claim requirement
+> ([ADR 0042](../adr/0042-a-packet-carries-its-claim.md)) — **live at a priced termination, and not
+> yet built for a forwarded arrival**. Cited to 0042 rather than to ADR 0031, which 0042 supersedes
+> in full.
 
 ---
 
@@ -818,7 +828,9 @@ Three consequences, in the order an operator meets them — the third retired by
    unreachable — it **cannot send the FLUSH at all**. The claim stays pending until it can dial
    again. `flushIntervalMs` no longer exists as configuration (ADR 0033), and the ceiling that used
    to bound its counterparty during that window is retired with it — every peer PREPARE this
-   connector admits still requires its own covering claim (ADR 0031) regardless of this case.
+   connector admits still requires its own covering claim ([ADR 0042](../adr/0042-a-packet-carries-its-claim.md),
+   which supersedes ADR 0031 in full) regardless of this case — live at a priced termination, and not
+   yet built for a forwarded arrival.
 3. ~~**The ceiling is the accept-only payee's only real bound, and MUST be explicit.**~~ **Retired**
    (ADR 0033, issue #882). An accept-only peering now loads with no ceiling-shaped config at all;
    `AcceptOnlyPeerWithoutCeiling` no longer exists. Kept here, struck through, only so a reader
@@ -987,9 +999,15 @@ change anything above the port is a signal the seam is wrong.
 **I6 — One relation, one set of watermarks.** §2.5: watermarks and the ledger are per peering
 relation, never per carriage or per connection.
 
-**I7 — One role decision.** §1: the same P1/P2 rule, the same downgrade behaviour and the same
-named regression test on both carriages, with the credential in one JSON shape (§1.4) so a
-carriage cannot accept a credential the other would refuse.
+**I7 — One role decision.** §1: the same **P2/P3** rule — a channel binding _and_ a verified claim
+on one of that peer's channels — the same downgrade behaviour, and the same named regression test on
+both carriages, with the credential in one JSON shape (§1.4) so a carriage cannot accept a credential
+the other would refuse.
+
+> **Corrected 2026-08-20 (issue #1073).** This invariant said "the same P1/P2 rule". **P1 — the
+> `{peerId, secret}` bearer credential — has not decided role since issue #868**, as §1's own banner
+> records; role is P2 **and** P3. The credential still exists as a carriage artifact and still has to
+> be framed identically on both wires, which is what the rest of this invariant is about.
 
 **Any peer behaviour that exists on one carriage and not the other, other than the two this
 document names as carriage properties (§6.4's origination asymmetry and §7.2's claim race), is a
