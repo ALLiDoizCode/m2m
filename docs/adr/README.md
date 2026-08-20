@@ -94,6 +94,7 @@ outside this repository.
 | [0033](0033-the-exposure-machinery-is-retired-not-restated.md)                         | The exposure machinery is retired, not restated                                      | Accepted — **retires `ceiling`, `flush_interval_ms`, exposure**    |
 | [0049](0049-the-cap-bounds-one-packet-is-discovered-by-t04-and-is-set-from-outside.md) | The cap bounds one packet, is discovered by its `T04`, and is set from outside       | Accepted — **partly not yet built**; corrects CONTEXT.md           |
 | [0035](0035-request-request-binding-ships-no-new-mechanism.md)                         | Request-request binding ships no new mechanism                                       | Accepted                                                           |
+| [0052](0052-permissionless-payment-is-guaranteed-and-a-claim-is-what-authorises.md)    | Permissionless payment is guaranteed; a claim, never an identity, authorises         | Accepted — the client edge's first record                          |
 
 ### The wire and its carriage
 
