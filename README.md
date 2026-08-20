@@ -377,7 +377,7 @@ sides — see
 The carriage mapping is specified in
 [`docs/protocol/peer-carriage-spec.md`](docs/protocol/peer-carriage-spec.md). The semantics it
 carries — claim exchange, flush, fees, minimum delivery, the refusal taxonomy — are
-unchanged and still specified in [`docs/protocol/peer-semantics-spec.md`](docs/protocol/peer-semantics-spec.md)
+unchanged and still specified in [`docs/protocol/peer-semantics-pre-868.md`](docs/protocol/peer-semantics-pre-868.md)
 §3–§6; that document's §1–§2 (the deleted raw-TCP frame protocol) no longer describes anything
 this binary ships.
 

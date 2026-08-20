@@ -27,7 +27,7 @@ describes it — for what it used, read this file's history.
   peers ride the carriages the client edge already serves — BTP (RFC-0023) over `wss://` or
   ILP-over-HTTP over `https://` — so peering adds no transport dependency of its own. The
   `PeerTransport` port remains; the semantics it carries are
-  [`docs/protocol/peer-semantics-spec.md`](../protocol/peer-semantics-spec.md) §3–§6.
+  [`docs/protocol/peer-semantics-pre-868.md`](../protocol/peer-semantics-pre-868.md) §3–§6.
 
 ## Cryptography
 

@@ -1,6 +1,11 @@
 # Client edge specification
 
-**Status:** Non-normative. [ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md) makes the
+**Status:** **Live — becomes the client edge specification** (wayfinder map #1049, issue #1065).
+Known corrections pending: §2 and §3.4 cite [ADR 0013](../adr/0013-cut-over-through-a-parallel-address-space.md)
+as live authority and it is spent (the fleet was switched off, issue #872); §3.2 describes
+`GET /ilp/versions` in the present tense and no such route exists — version discovery moves to the node
+self-description (issue #1054, #1060); §1.4 says no settlement address is configured while the greeting
+publishes several. _Originally:_ Non-normative. [ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md) makes the
 Rust implementation (`crates/connector-client-edge`) the definition of this wire, and the committed
 vector set (`vectors/wire-vectors.json`, issue #527) — fixed literal fixtures pushed through the
 real implementation and self-verified against the same functions the invariants listed in
@@ -37,7 +42,7 @@ described this as the edge transport for one-shot, stateless purchases: a buyer,
 browser, or an agent that only consumes. That source no longer exists in this repository but is
 recoverable from git history prior to #465. That BTP did double duty is exactly the conflation
 [ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md) retires: the peer semantics
-(`docs/protocol/peer-semantics-spec.md`) is redesigned freely because both its ends are
+(`docs/protocol/peer-semantics-pre-868.md`) is redesigned freely because both its ends are
 operator-controlled, which is never true of a client. This document therefore specifies the
 client edge as **ILP-over-HTTP** — `POST /ilp` — since that is the transport whose far end is
 genuinely uncontrolled and whose shape carries forward as "version 1" of the versioned scheme. A
@@ -607,7 +612,7 @@ connector no longer "charges a percentage spread with no per-hop fee accumulatio
 percentage anywhere ([ADR 0010](../adr/0010-flat-per-packet-fee-and-minimum-delivery.md)), and a
 REJECT genuinely does accumulate cost: `connector_domain::Reject` carries an `accumulated_cost`
 field that sums every hop's flat fee and adds a terminated route's price
-(`docs/protocol/peer-semantics-spec.md` §5.2, issues #523/#545/#584). That field is **not** part of the
+(`docs/protocol/peer-semantics-pre-868.md` §5.2, issues #523/#545/#584). That field is **not** part of the
 RFC-0027 OER encoding — it rides beside the packet — so this edge reports it in a header. Version 1
 does not change to gain it: the request/response shape below is unchanged.
 

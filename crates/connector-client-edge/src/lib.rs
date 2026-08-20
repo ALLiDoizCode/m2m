@@ -944,7 +944,7 @@ fn claim_rejected_response(rejection: ClaimIngestRejection, price: u64) -> Respo
 /// 0028). `None` when the packet is within its price, or when the route is
 /// not one this rule governs.
 ///
-/// The arithmetic this protects is `peer-semantics-spec.md` §4's, at the one hop
+/// The arithmetic this protects is `peer-semantics-pre-868.md` §4's, at the one hop
 /// where "upstream" is a client rather than a peer: this connector collects
 /// `price`, forwards `amount - fee`, and so earns `fee` exactly when
 /// `amount == price`. Let the client pick a larger `amount` and it picks
@@ -1214,7 +1214,7 @@ async fn handle_ilp(
     tracing::debug!(identity = %identity.id(), "client-edge request identity resolved");
 
     // client-edge-spec.md v1 carries no minimum-delivery field (§4 of
-    // peer-semantics-spec.md scopes it to the peer semantics) -- a client-originated
+    // peer-semantics-pre-868.md scopes it to the peer semantics) -- a client-originated
     // packet declares no guarantee yet, so this hop enforces none, exactly
     // matching today's actual (unguaranteed) behavior.
     //

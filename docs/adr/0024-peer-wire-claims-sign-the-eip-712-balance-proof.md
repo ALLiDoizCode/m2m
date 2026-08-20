@@ -21,7 +21,7 @@ second answer to the same question.
 
 ## The disagreement this records
 
-`docs/protocol/peer-semantics-spec.md` §3.5 already said, before this issue, that an `evm` claim's
+`docs/protocol/peer-semantics-pre-868.md` §3.5 already said, before this issue, that an `evm` claim's
 signature is _"ECDSA over the EIP-712 balance-proof digest"_. The implementation disagreed with
 its own specification: `ClaimBook::record_fulfillment`/`accept_inbound` signed and verified a
 SHA-256 tuple instead. This was invisible because nothing had ever redeemed a peer-wire claim on

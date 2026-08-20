@@ -1,6 +1,27 @@
 # Peer semantics specification (formerly the peer wire specification)
 
-**Status:** Normative for §3–§6. **§1–§2 are deleted** — superseded by
+**Status:** **HISTORY. Not normative, not maintained against the binary.** Frozen and renamed
+2026-08-20 (issue #1065, wayfinder map #1049). Four of its six live sections describe mechanisms that
+have since been retired or superseded — §3.2's trailing claim and §5.4's greeting gate by
+[ADR 0042](../adr/0042-a-packet-carries-its-claim.md), §3.3's flush and §5.3's ceiling by
+[ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md) — while §5.1 states that
+nothing emits `T04` (it does; see [ADR 0049](../adr/0049-the-cap-bounds-one-packet-is-discovered-by-t04-and-is-set-from-outside.md))
+and §3.5 states there is no Ed25519 claim path (there is, and a Solana claim vector is committed).
+It claimed **normative** status over all of it, which is why it is frozen rather than amended: a rule
+describing a deleted mechanism can never be vectored, so under
+[ADR 0045](../adr/0045-a-behavioural-rule-is-normative-prose-until-its-vector-lands.md) it would sit
+in the debt ledger forever, uncloseable.
+
+**Its live remnants — §3.1 (a real execution condition is mandatory), §4 (fee and minimum-delivery
+fields) and §5.2 (the accumulated-cost field) — migrate to the payment and packet-flow specifications.**
+Nothing here is authoritative in the meantime; the records are
+([0010](../adr/0010-flat-per-packet-fee-and-minimum-delivery.md),
+[0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md),
+[0042](../adr/0042-a-packet-carries-its-claim.md),
+[0048](../adr/0048-routing-precedence-is-length-then-rank-and-a-lease-cannot-capture-a-termination.md),
+[0049](../adr/0049-the-cap-bounds-one-packet-is-discovered-by-t04-and-is-set-from-outside.md)).
+
+_Originally:_ Normative for §3–§6. **§1–§2 are deleted** — superseded by
 [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md),
 and the implementation they described was removed in issue #679.
 Originally: normative, version 1 — clean-room design per [ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md).

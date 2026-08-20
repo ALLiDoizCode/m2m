@@ -244,7 +244,7 @@ Value a payee had delivered but did not yet hold a claim for, under the pre-#868
 One packet under normal flow; more only when a payer had fulfilled packets and stopped claiming.
 With a covering claim mandatory on every peer PREPARE (ADR 0031), this state no longer arises in
 normal operation and nothing tracks it. Kept here because the term still appears in historical
-prose (`docs/protocol/peer-semantics-spec.md` §3.2–§3.4, §5.3; [`docs/protocol/money-model-pre-868.md`](docs/protocol/money-model-pre-868.md)).
+prose (`docs/protocol/peer-semantics-pre-868.md` §3.2–§3.4, §5.3; [`docs/protocol/money-model-pre-868.md`](docs/protocol/money-model-pre-868.md)).
 
 **Ceiling** _(retired term, ADR 0033, issue #882)_:
 The exposure a peering relation tolerated before the connector stopped forwarding for that

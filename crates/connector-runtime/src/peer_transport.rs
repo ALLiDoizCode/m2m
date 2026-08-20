@@ -1,6 +1,6 @@
 //! The peer transport port: forwards a [`Prepare`] to another connector for
 //! the next hop, optionally carrying a claim (issue #423), and flushes a
-//! claim on its own when nothing else is going out (peer-semantics-spec.md
+//! claim on its own when nothing else is going out (peer-semantics-pre-868.md
 //! §3.3).
 //!
 //! **This port is the seam ADR 0027 rests on.** The raw-TCP transport that
@@ -53,7 +53,7 @@ pub struct PeerForward {
     /// `response` is this transport's own synthesized `T01` (see
     /// [`peer_unreachable`]). The caller (issue #426, ADR 0011) needs this
     /// to decide whether its own fee belongs on an outgoing REJECT: only a
-    /// hop that actually forwarded earns one (peer-semantics-spec.md §5.2).
+    /// hop that actually forwarded earns one (peer-semantics-pre-868.md §5.2).
     pub reached_peer: bool,
     /// The x402 terms the peer quoted while refusing the packet (issue
     /// #874), or `None` when it quoted none. **Absence means "no terms were
@@ -118,7 +118,7 @@ impl PeerForward {
 /// the destination (ADR 0010) -- carried alongside `prepare` rather than
 /// inside it, and passed to the peer unchanged so every hop enforces it
 /// against the same figure. `claim` piggybacks whatever this connector
-/// currently owes `peer_id` (peer-semantics-spec.md §3.2).
+/// currently owes `peer_id` (peer-semantics-pre-868.md §3.2).
 ///
 /// See [`PeerForward`] for what comes back, and in particular for why a
 /// carriage that read x402 terms off a refusal must report them rather than
@@ -134,13 +134,13 @@ pub trait PeerTransport: Send + Sync {
     ) -> PeerForward;
 
     /// Send `claim` with no packet to ride -- the flush mechanism
-    /// (peer-semantics-spec.md §3.3) that covers the case traffic to `peer_id`
+    /// (peer-semantics-pre-868.md §3.3) that covers the case traffic to `peer_id`
     /// has stopped. Returns [`ClaimAckOutcome::NotSent`] if `peer_id`
     /// could not be reached.
     async fn flush(&self, peer_id: &str, claim: WireClaim) -> ClaimAckOutcome;
 }
 
-/// §2.2, §5.1 of `peer-semantics-spec.md`: a peer this connector could not reach
+/// §2.2, §5.1 of `peer-semantics-pre-868.md`: a peer this connector could not reach
 /// rejects `T01`. Never `T00`, and never a silent drop. Every carriage
 /// reaches this through [`PeerForward::unreachable`], so the refusal an
 /// unreachable peer produces has one definition rather than one per wire.
@@ -427,7 +427,7 @@ mod tests {
         }
         assert_eq!(ack, ClaimAckOutcome::NotSent);
         // Never reached: nothing forwarded, so no fee ever belongs to this
-        // hop (ADR 0011, peer-semantics-spec.md §5.2).
+        // hop (ADR 0011, peer-semantics-pre-868.md §5.2).
         assert!(!reached);
     }
 

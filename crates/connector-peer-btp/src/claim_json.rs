@@ -106,7 +106,7 @@ pub fn canonical_evm_channel_id(channel_id: &str) -> String {
 }
 
 /// `0x` + 64 lower-case hex, the shape `locksRoot` takes when locks are
-/// hashed as zeros -- which is always, per `peer-semantics-spec.md` §3.5 and
+/// hashed as zeros -- which is always, per `peer-semantics-pre-868.md` §3.5 and
 /// ADR 0024. Neither field enters the digest as anything else, on either
 /// edge.
 const ZERO_BYTES32: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";

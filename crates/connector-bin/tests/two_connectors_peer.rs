@@ -140,7 +140,7 @@ const PEER_FEE: u64 = 100;
 /// Equal to [`peer_bound_prepare`]'s declared `amount`, which is the whole
 /// arithmetic in one line: the payer collects `CLIENT_PRICE` from the
 /// client, forwards `CLIENT_PRICE - PEER_FEE` to the payee
-/// (`peer-semantics-spec.md` §4), and so earns exactly `PEER_FEE`. A larger
+/// (`peer-semantics-pre-868.md` §4), and so earns exactly `PEER_FEE`. A larger
 /// declared amount is refused -- see
 /// [`a_client_may_not_declare_more_than_the_forwarded_route_charges`].
 const CLIENT_PRICE: u64 = 10 * PEER_FEE;
@@ -684,7 +684,7 @@ fn peer_journal(state_dir: &std::path::Path) -> String {
 /// survive the hop's own fee.
 ///
 /// `support::sample_prepare` mints an `amount: 0` packet, which is right
-/// for a terminated route and wrong for a forwarding one: `peer-semantics-spec.md`
+/// for a terminated route and wrong for a forwarding one: `peer-semantics-pre-868.md`
 /// §4 computes `A' = A - fee` and rejects **`R01`** when `A'` falls below
 /// the sender's `minimumDelivery` floor, so a zero-amount packet never
 /// reaches the peer transport at all -- it is refused one layer earlier, by
@@ -1165,7 +1165,7 @@ async fn two_connectors_move_a_paid_packet(carriage: Carriage) {
     cross(b"across the peering", 1).await;
 
     // **Twice, because value moves on fulfilment** (ADR 0004,
-    // `peer-semantics-spec.md` §3.2). The payer owes nothing until the first
+    // `peer-semantics-pre-868.md` §3.2). The payer owes nothing until the first
     // crossing has actually fulfilled, so the claim covering crossing *n*
     // is signed after it and rides crossing *n + 1*. One packet proves
     // delivery; the second is what proves the peering is *paid*, which is

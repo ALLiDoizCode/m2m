@@ -67,7 +67,7 @@ all.
 
 [ADR 0004](0004-value-moves-on-fulfilment.md) established that value is owed on fulfilment, so a
 claim can only follow the fulfilment that created the obligation: "the claim covering it follows the
-fulfilment rather than riding the outgoing PREPARE." `peer-semantics-spec.md` §3.2 is the mechanism that
+fulfilment rather than riding the outgoing PREPARE." `peer-semantics-pre-868.md` §3.2 is the mechanism that
 falls out of it — the claim rides the **next** frame to that peer, and the flush timer (§3.3) bounds
 how long the last packet of a burst stays uncovered. `T04`'s ceiling (§5.3) bounds how much
 uncovered value accumulates in the meantime. That window — trailing exposure, bounded by a timer and

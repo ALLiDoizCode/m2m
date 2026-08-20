@@ -26,7 +26,7 @@
 //!   an outbound claim (`connector-runtime/src/claim.rs:881`), not a
 //!   hand-rolled digest.
 //! - **Wire**: [`connector_runtime::WireClaim::encode`]/`decode` -- the
-//!   exact peer-role byte shape (peer-semantics-spec.md §3.5), round-tripped
+//!   exact peer-role byte shape (peer-semantics-pre-868.md §3.5), round-tripped
 //!   before anything is submitted, so a bug in the wire codec would show up
 //!   here as a decode failure rather than being silently bypassed.
 //! - **Verify**: [`connector_signer::verify_evm_balance_proof`] -- the

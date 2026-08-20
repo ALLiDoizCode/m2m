@@ -27,7 +27,7 @@ behaviour.
 
 **And three documents claim nothing emits `T04`** — `connector-domain/src/packet.rs`'s own
 constructor doc (_"nothing in this codebase emits `T04` any more"_), ADR 0033's body, and
-`peer-semantics-spec.md` §5.1–§5.3, which additionally omit the cap refusal entirely. All three were
+`peer-semantics-pre-868.md` §5.1–§5.3, which additionally omit the cap refusal entirely. All three were
 true between issue #424 and the cap landing; none is true now. `Connector` emits `T04` for the cap
 refusal, and the glossary was the only document that had it right.
 
@@ -73,5 +73,5 @@ authoritative regardless. That is what decided clause 4: once the rejection is a
 advisory source is a surface to maintain and keep honest, for the saving of one packet.
 
 **Three documents need correcting** and none of them is this record's to fix: `packet.rs`'s
-constructor doc, ADR 0033's body, and `peer-semantics-spec.md` §5.1–§5.3. They are named here so the
+constructor doc, ADR 0033's body, and `peer-semantics-pre-868.md` §5.1–§5.3. They are named here so the
 correction is not re-derived.

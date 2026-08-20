@@ -1,7 +1,14 @@
 # Peer carriage specification
 
-**Status:** Normative for the carriage mapping, in the same sense
-[`peer-semantics-spec.md`](peer-semantics-spec.md) §3–§6 are normative — this is an operator-to-operator
+**Status:** **Live — becomes the peering specification** (wayfinder map #1049, issue #1065). Its
+"Normative for the carriage mapping" scope survives: [ADR 0045](../adr/0045-a-behavioural-rule-is-normative-prose-until-its-vector-lands.md)
+blesses exactly this narrower form, where prose binds a rule until a vector covers it and the vectors
+win on any encoding disagreement. Carries known stale citations to
+[ADR 0031](../adr/0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md) (superseded
+in full by [0042](../adr/0042-a-packet-carries-its-claim.md)) at §5.3, §6.4, §1.10 and I7, and a §6.3
+rule stated over a retired key; these are corrected as this document becomes the peering spec, not
+before. _Originally:_ Normative for the carriage mapping, in the same sense
+[`peer-semantics-pre-868.md`](peer-semantics-pre-868.md) §3–§6 are normative — this is an operator-to-operator
 wire, and a third-party connector has nothing else to implement against. Subject to
 [ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md) where bytes are concerned: **where
 this prose and `vectors/wire-vectors.json` disagree about an encoding, the vectors are right and
@@ -24,13 +31,13 @@ SHOULD, SHOULD NOT and MAY are per RFC 2119.
 
 ADR 0027 split one document into two layers.
 
-| Layer                                                                                                                                                                                 | Where it is specified                                                                                                                                                                        |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Semantics** — what a peer interaction _means_: claim exchange, flush, claim acknowledgement, claim contents, fees and minimum delivery, reject codes, accumulated cost, consistency | [`peer-semantics-spec.md`](peer-semantics-spec.md) **§3–§6**, normative except where marked superseded (§3.2–§3.4, ADR 0031) or retired (§3.3's `flushIntervalMs`, §5.3's ceiling, ADR 0033) |
-| **Carriage** — _where the bytes ride_ for each of those concepts, on each of the two wires a connector already serves                                                                 | **this document**                                                                                                                                                                            |
-| **Framing** — the deleted raw-TCP stream and its six frame types                                                                                                                      | gone: `peer-semantics-spec.md` §1–§2, superseded by ADR 0027, implementation removed by issue #679                                                                                           |
+| Layer                                                                                                                                                                                 | Where it is specified                                                                                                                                                                              |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Semantics** — what a peer interaction _means_: claim exchange, flush, claim acknowledgement, claim contents, fees and minimum delivery, reject codes, accumulated cost, consistency | [`peer-semantics-pre-868.md`](peer-semantics-pre-868.md) **§3–§6**, normative except where marked superseded (§3.2–§3.4, ADR 0031) or retired (§3.3's `flushIntervalMs`, §5.3's ceiling, ADR 0033) |
+| **Carriage** — _where the bytes ride_ for each of those concepts, on each of the two wires a connector already serves                                                                 | **this document**                                                                                                                                                                                  |
+| **Framing** — the deleted raw-TCP stream and its six frame types                                                                                                                      | gone: `peer-semantics-pre-868.md` §1–§2, superseded by ADR 0027, implementation removed by issue #679                                                                                              |
 
-**This document sits beside `peer-semantics-spec.md` §3–§6. It supersedes nothing in them.** It does
+**This document sits beside `peer-semantics-pre-868.md` §3–§6. It supersedes nothing in them.** It does
 not restate them and MUST NOT be read as replacing them: every existing citation of §3.2, §3.3,
 §3.4, §3.5, §4, §5.1, §5.2 and §5.3 — in the code, in ADRs 0010/0011/0024, and in
 `client-edge-spec.md` — continues to resolve there, and this document cites them the same way. A
@@ -156,7 +163,7 @@ not merely recovered by #875's retry arm after a refusal teaches this node it mu
 no such config keeps riding the peer ledger's `pending_claim` (ADR 0004's postpay convention),
 untouched: bilateral peer-to-peer forwarding is not what #868/#881 changed, per §3.1 below — "a
 **peer-role** PREPARE reaching this node's `Forwarded` routes is still priced by the claim exchange
-of §4 and `peer-semantics-spec.md` §3 alone".
+of §4 and `peer-semantics-pre-868.md` §3 alone".
 
 **What "configured via `with_outbound_client_hop`" means in a config file**, since for a while it
 meant nothing an operator could write and the covering therefore never ran on a deployed node: it is
@@ -370,8 +377,8 @@ undefined trust is what leaks.
   and appended to the peer claim ledger;
 - being a next hop: packets from this interaction may be forwarded per the routing table, and this
   peering relation may be a route's next hop;
-- `minimumDelivery` honoured as a sender declaration (§5, `peer-semantics-spec.md` §4);
-- `accumulatedCost` relayed with this hop's own fee added (`peer-semantics-spec.md` §5.2);
+- `minimumDelivery` honoured as a sender declaration (§5, `peer-semantics-pre-868.md` §4);
+- `accumulatedCost` relayed with this hop's own fee added (`peer-semantics-pre-868.md` §5.2);
 - FLUSH accepted (§6).
 
 **Peer role does NOT grant:** free carriage; a route the routing table does not have; any operator
@@ -469,7 +476,7 @@ Where the failure is detectable from this connector's own configuration alone, i
 
 What is **not** locally detectable — whether the remote actually exposes what we dial — MUST
 surface as an ordinary dial failure with the peer id and the attempted endpoint named, and packets
-routed to that peer MUST reject `T01` (`peer-semantics-spec.md` §5.1), never `T00` and never a silent
+routed to that peer MUST reject `T01` (`peer-semantics-pre-868.md` §5.1), never `T00` and never a silent
 drop.
 
 ### 2.3 Origination
@@ -514,21 +521,21 @@ it is the one on which claims cannot race (§7).
 
 ## 3. Frame carriage
 
-The normative mapping. Each row is a concept from `peer-semantics-spec.md` §3–§6 and where its bytes
+The normative mapping. Each row is a concept from `peer-semantics-pre-868.md` §3–§6 and where its bytes
 ride on each carriage.
 
-| Concept (`peer-semantics-spec.md`) | BTP carriage (`wss://`)                                                                                                                    | ILP-over-HTTP carriage (`https://`)                                                                                 |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
-| PREPARE (§3.1)                     | **MESSAGE** (type 6), OER PREPARE in `ilpPacket`                                                                                           | **POST**, OER PREPARE as the request body                                                                           |
-| FULFILL (§3.1)                     | **RESPONSE** (type 1) under the MESSAGE's `requestId`, OER FULFILL in `ilpPacket`                                                          | **200**, OER FULFILL as the response body                                                                           |
-| REJECT (§5.1)                      | **RESPONSE** under the MESSAGE's `requestId`, OER REJECT in `ilpPacket`                                                                    | **200**, OER REJECT as the response body                                                                            |
-| piggybacked claim (§3.2)           | `payment-channel-claim` protocolData entry, **raw UTF-8 JSON** (§4)                                                                        | `ILP-Payment-Channel-Claim` request header, `base64(JSON)` (§4)                                                     |
-| **FLUSH** (§3.3)                   | **TRANSFER** (type 7): `amount` = the claim's new cumulative, claim in `payment-channel-claim`, no `ilpPacket`                             | **POST with an empty body** plus the claim header — the standalone-claim shape of `client-edge-spec.md` §1.9 step 5 |
-| **CLAIM_ACK** (§3.4)               | `claim-ack` protocolData entry on the RESPONSE that already answers the claim-bearing frame (§5)                                           | `Toon-Claim-Ack` response header on the response that already answers the claim-bearing request (§5)                |
-| `minimumDelivery` (§4)             | `toon-minimum-delivery` protocolData entry on the MESSAGE, decimal-uint64 UTF-8 (§5.1)                                                     | `Toon-Minimum-Delivery` request header, decimal-uint64 ASCII (§5.1)                                                 |
-| `accumulatedCost` (§5.2)           | `toon-accumulated-cost` entry on the REJECT's RESPONSE, decimal-uint64 UTF-8 — **already implemented on the client edge, reused verbatim** | `Toon-Accumulated-Cost` response header — **already implemented on the client edge, reused verbatim**               |
-| peer credential (§1.4)             | `auth` protocolData entry, raw UTF-8 JSON                                                                                                  | `Toon-Peer-Auth` request header, `base64(JSON)`                                                                     |
-| flush prompt (§6.4)                | _(none — the payee can originate on BTP)_                                                                                                  | `Toon-Flush-Requested` response header, optional (§6.4)                                                             |
+| Concept (`peer-semantics-pre-868.md`) | BTP carriage (`wss://`)                                                                                                                    | ILP-over-HTTP carriage (`https://`)                                                                                 |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| PREPARE (§3.1)                        | **MESSAGE** (type 6), OER PREPARE in `ilpPacket`                                                                                           | **POST**, OER PREPARE as the request body                                                                           |
+| FULFILL (§3.1)                        | **RESPONSE** (type 1) under the MESSAGE's `requestId`, OER FULFILL in `ilpPacket`                                                          | **200**, OER FULFILL as the response body                                                                           |
+| REJECT (§5.1)                         | **RESPONSE** under the MESSAGE's `requestId`, OER REJECT in `ilpPacket`                                                                    | **200**, OER REJECT as the response body                                                                            |
+| piggybacked claim (§3.2)              | `payment-channel-claim` protocolData entry, **raw UTF-8 JSON** (§4)                                                                        | `ILP-Payment-Channel-Claim` request header, `base64(JSON)` (§4)                                                     |
+| **FLUSH** (§3.3)                      | **TRANSFER** (type 7): `amount` = the claim's new cumulative, claim in `payment-channel-claim`, no `ilpPacket`                             | **POST with an empty body** plus the claim header — the standalone-claim shape of `client-edge-spec.md` §1.9 step 5 |
+| **CLAIM_ACK** (§3.4)                  | `claim-ack` protocolData entry on the RESPONSE that already answers the claim-bearing frame (§5)                                           | `Toon-Claim-Ack` response header on the response that already answers the claim-bearing request (§5)                |
+| `minimumDelivery` (§4)                | `toon-minimum-delivery` protocolData entry on the MESSAGE, decimal-uint64 UTF-8 (§5.1)                                                     | `Toon-Minimum-Delivery` request header, decimal-uint64 ASCII (§5.1)                                                 |
+| `accumulatedCost` (§5.2)              | `toon-accumulated-cost` entry on the REJECT's RESPONSE, decimal-uint64 UTF-8 — **already implemented on the client edge, reused verbatim** | `Toon-Accumulated-Cost` response header — **already implemented on the client edge, reused verbatim**               |
+| peer credential (§1.4)                | `auth` protocolData entry, raw UTF-8 JSON                                                                                                  | `Toon-Peer-Auth` request header, `base64(JSON)`                                                                     |
+| flush prompt (§6.4)                   | _(none — the payee can originate on BTP)_                                                                                                  | `Toon-Flush-Requested` response header, optional (§6.4)                                                             |
 
 Header names are matched case-insensitively per RFC 9110; the canonical lower-case forms are the
 ones the vectors pin.
@@ -546,8 +553,8 @@ additively extensible) and MUST NOT be emitted.
 - **ADR 0024's EIP-712 `BalanceProof` digest is untouched**, on both carriages. A peer claim signs
   exactly the digest `connector_signer::evm_balance_proof_digest` produces today, over exactly the
   fields the deployed `TokenNetwork.sol` typehash requires, `lockedAmount`/`locksRoot` included and
-  hashed as zeros (`peer-semantics-spec.md` §3.5). Only carriage moves.
-- **`peer-semantics-spec.md` §5.1's reject-code table is unchanged, but `F06_UNEXPECTED_PAYMENT` now has
+  hashed as zeros (`peer-semantics-pre-868.md` §3.5). Only carriage moves.
+- **`peer-semantics-pre-868.md` §5.1's reject-code table is unchanged, but `F06_UNEXPECTED_PAYMENT` now has
   one peer use** (issue #880, correcting what this bullet said before it landed): a peer PREPARE
   addressed to one of this node's own **`Terminated`** routes, reached over either carriage, MUST
   carry a claim whose advance over that channel's watermark covers the route's `price`, or it is
@@ -562,14 +569,14 @@ additively extensible) and MUST NOT be emitted.
   untouched, exactly like the amount check.
 
   **Every other peer PREPARE is still answered by nothing of the sort.** Peer fees are bilateral
-  configuration (`peer-semantics-spec.md` §4), not a negotiation, and `requiredTransport` (issue #701) is
+  configuration (`peer-semantics-pre-868.md` §4), not a negotiation, and `requiredTransport` (issue #701) is
   a client-edge route policy with no peer analogue. This survives [ADR
   0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md) unchanged, and the
   distinction is worth stating because that ADR looks at first like it contradicts this rule. A
   `[[routes]]` entry naming a `peer_id` now carries a `price`, and a **client-role** PREPARE to
   it is greeted, claim-gated and journaled exactly as one to a terminated route is (issue #620).
   That is the client-facing direction of the same node. A **peer-role** PREPARE reaching this
-  node's `Forwarded` routes is still priced by the claim exchange of §4 and `peer-semantics-spec.md` §3
+  node's `Forwarded` routes is still priced by the claim exchange of §4 and `peer-semantics-pre-868.md` §3
   alone -- greeting it would invent a negotiation where a bilateral agreement already exists. The
   route's `price` is a fact about this node's client edge; its `fee` is the fact its peers agreed
   to. The gate above binds only where the client edge's `price` and this node's own termination
@@ -609,7 +616,7 @@ that header on a peer-role request.
 ### 4.1 Validation
 
 A peer claim is validated by the same gate, in the same order, that
-`peer-semantics-spec.md` §3.2 and §3.4 and `client-edge-spec.md` §1.3 already describe — structure,
+`peer-semantics-pre-868.md` §3.2 and §3.4 and `client-edge-spec.md` §1.3 already describe — structure,
 then freshness against the watermark, then value, then cryptography — with the peer-side
 differences that were already true and are unchanged by carriage:
 
@@ -620,11 +627,11 @@ differences that were already true and are unchanged by carriage:
   MUST be applied before a watermark is read or written. A connector that keyed a peer watermark by
   literal text would grant a fresh watermark per spelling, and one signed claim would buy carriage
   once per casing it was retyped in;
-- the four refusal reasons are `peer-semantics-spec.md` §3.4's four, unchanged (§5.2).
+- the four refusal reasons are `peer-semantics-pre-868.md` §3.4's four, unchanged (§5.2).
 
 ### 4.2 Recovery id
 
-Unchanged from `peer-semantics-spec.md` §3.5: an `evm` signature is 65 bytes `r ‖ s ‖ v`, with `v` as
+Unchanged from `peer-semantics-pre-868.md` §3.5: an `evm` signature is 65 bytes `r ‖ s ‖ v`, with `v` as
 libsecp256k1 emits it (`{0, 1}`), never the wallet `{27, 28}` convention. The one place the
 conversion happens is immediately before on-chain submission. Both carriages carry the byte
 unchanged, and the vectors pin it (§10).
@@ -636,7 +643,7 @@ unchanged, and the vectors pin it (§10).
 ### 5.1 `minimumDelivery`
 
 `minimumDelivery` is a sender declaration, set once by the original sender and unchanged by every
-hop (`peer-semantics-spec.md` §4). RFC-0027 has no field for it, so it rides the carriage:
+hop (`peer-semantics-pre-868.md` §4). RFC-0027 has no field for it, so it rides the carriage:
 
 | Carriage | Field                          | Encoding                                              |
 | -------- | ------------------------------ | ----------------------------------------------------- |
@@ -648,13 +655,13 @@ Normative handling:
 - **Absent means zero.** A claim-free floor is the correct default and the one the deleted wire's
   fixed-width field expressed as `0`.
 - A **malformed** value — not decimal digits, empty, or exceeding `u64::MAX` — MUST reject the
-  PREPARE with `F01` (`peer-semantics-spec.md` §5.1). It MUST NOT be silently treated as zero: zero is
+  PREPARE with `F01` (`peer-semantics-pre-868.md` §5.1). It MUST NOT be silently treated as zero: zero is
   the weakest possible floor, and quietly substituting it for an unparseable one converts a
   framing bug into an under-delivery.
 - A forwarding hop MUST re-emit the value **unchanged** on its outbound PREPARE, on whichever
   carriage that outbound hop uses. Crossing carriages MUST NOT alter it. This is the one
   carriage-layer field that propagates; §8.3 states the general rule.
-- The inequality of `peer-semantics-spec.md` §4 (`A' = A − fee`, reject `R01` if `A' < M`) is computed
+- The inequality of `peer-semantics-pre-868.md` §4 (`A' = A − fee`, reject `R01` if `A' < M`) is computed
   identically on both carriages by the existing `connector_domain::fee::amount_after_fee`.
 - On a **client**-role interaction the field MUST be ignored (§1.7).
 
@@ -665,7 +672,7 @@ Already implemented on the client edge on both carriages and **reused verbatim**
 decimal uint64 text, both already constant-named in `connector-client-edge`. The peer carriage adds
 no new encoding.
 
-The semantics are entirely `peer-semantics-spec.md` §5.2's and are not restated here. Two carriage-level
+The semantics are entirely `peer-semantics-pre-868.md` §5.2's and are not restated here. Two carriage-level
 requirements:
 
 - The field rides **only** a REJECT's response. A connector MUST NOT emit it beside a FULFILL, and
@@ -677,7 +684,7 @@ requirements:
 ### 5.3 Ceiling
 
 **Retired 2026-08-10 by [ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md)
-(issue #882).** `peer-semantics-spec.md` §5.3 no longer describes live behaviour: exposure is not
+(issue #882).** `peer-semantics-pre-868.md` §5.3 no longer describes live behaviour: exposure is not
 tracked, `ceiling` is not live configuration, and no PREPARE is ever rejected `T04`. The
 accept-only HTTP peering's ceiling configuration obligation (§6.4, §11) is retired with it — an
 accept-only peering now loads with no ceiling-shaped config at all, bounded only by the
@@ -703,14 +710,14 @@ The body in both cases is the same JSON, raw UTF-8 on BTP and `base64(JSON)` in 
 { "result": "rejected", "reason": "signature_invalid" }
 ```
 
-`reason` is exactly one of `peer-semantics-spec.md` §3.4's four, unchanged and not extensible without a
+`reason` is exactly one of `peer-semantics-pre-868.md` §3.4's four, unchanged and not extensible without a
 spec change: `signature_invalid`, `nonce_not_advancing`, `amount_not_advancing`, `unknown_channel`.
 These are the wire spellings of `connector_runtime::ClaimRejectReason`'s four variants; a fifth
 variant added to that enum without a corresponding change here and to the vectors is a wire break.
 
 ### 6.2 Independence of the two verdicts
 
-**Preserved exactly, on both carriages.** `peer-semantics-spec.md` §3.4 is explicit that a `rejected`
+**Preserved exactly, on both carriages.** `peer-semantics-pre-868.md` §3.4 is explicit that a `rejected`
 claim does not reject the PREPARE the claim rode on. On the wire:
 
 - BTP: one RESPONSE carries **two independent answers** — `ilpPacket` answers the packet, the
@@ -728,10 +735,10 @@ Therefore, normatively:
   accounting.
 - The **consequence** is policy above the carriage: the payee's watermark did not advance, so it
   holds no claim covering what that peer's packets asked of it, and it SHOULD stop forwarding to
-  that peer until a valid claim restores the watermark (`peer-semantics-spec.md` §3.4). The exposure
+  that peer until a valid claim restores the watermark (`peer-semantics-pre-868.md` §3.4). The exposure
   accounting that used to quantify this is retired
   ([ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md), issue #882, with
-  `peer-semantics-spec.md` §5.3); the SHOULD above is unchanged by that and is now the whole of the
+  `peer-semantics-pre-868.md` §5.3); the SHOULD above is unchanged by that and is now the whole of the
   consequence.
 
 A `claim-ack` MUST NOT appear on a response answering a frame that carried no claim. If one
@@ -776,7 +783,7 @@ the payer, so retransmission is required and must be safe:
 
 - A payer whose claim was not acknowledged MUST retransmit the **latest pending claim** for that
   channel — byte-identical if nothing has changed, or the newer, higher-nonce, higher-cumulative
-  claim if further fulfilments have occurred since (`peer-semantics-spec.md` §3.2 step 3, unchanged: a
+  claim if further fulfilments have occurred since (`peer-semantics-pre-868.md` §3.2 step 3, unchanged: a
   newer claim supersedes an older pending one, and acknowledging the newer one clears both).
 - A payee that receives a claim whose `(channel, nonce, cumulative, signature)` is **byte-identical
   to the claim already at its current watermark** MUST answer `{"result":"accepted"}`, MUST NOT
@@ -794,7 +801,7 @@ standing between a lost ack and a permanently wedged peering. It is derived from
 ADR 0027 names this as the price of the HTTP carriage. Stated mechanically:
 
 **On HTTP, only the dialing side can originate. Packets therefore flow only in the dialing
-direction; debt flows in the direction packets flow (`peer-semantics-spec.md` §3.2 — the sender owes);
+direction; debt flows in the direction packets flow (`peer-semantics-pre-868.md` §3.2 — the sender owes);
 therefore on a one-way-dialed HTTP peering the dialing side is structurally the payer and the
 accept-only side is structurally the payee.**
 
@@ -905,9 +912,9 @@ between a **peer hop** and a **termination**, because the two carriages make it 
   for every forwarding hop, on both carriages.
 - A forwarding connector MUST verify `sha256(fulfillment) == executionCondition` on every FULFILL it
   relays upstream, **before** treating the packet as fulfilled for its own claim accounting
-  (`peer-semantics-spec.md` §3.1). This is what makes the far end's derivation safe to rely on without
+  (`peer-semantics-pre-868.md` §3.1). This is what makes the far end's derivation safe to rely on without
   opening anything: a hop is paid only against a preimage it cannot forge.
-- `peer-semantics-spec.md` §3.1's other rule is unchanged on both carriages: an absent or all-zero
+- `peer-semantics-pre-868.md` §3.1's other rule is unchanged on both carriages: an absent or all-zero
   `executionCondition` is `F01`, with no derived-preimage fallback.
 
 ### 8.2 A termination reached over a peering
@@ -921,10 +928,10 @@ supplies no preimage and there is no `TOON-Fulfillment` response header.
 
 The one thing the peer arrival _does_ change is accounting. Before any of the above happens, the
 terminating connector checks that the PREPARE's own `amount` covers that route's `price`
-(`peer-semantics-spec.md` §5.4, issue #752); an arrival that does not is refused `F03` with
+(`peer-semantics-pre-868.md` §5.4, issue #752); an arrival that does not is refused `F03` with
 `accumulatedCost = 0` and the wrap is never opened. An arrival that clears that check is delivered
 exactly as described above, and if the termination itself then rejects it, the REJECT carries that
-route's configured price as `accumulatedCost` (`peer-semantics-spec.md` §5.2); the peer hop that
+route's configured price as `accumulatedCost` (`peer-semantics-pre-868.md` §5.2); the peer hop that
 forwarded to it adds its own fee on the way back.
 
 ### 8.3 The layering invariant
@@ -1033,7 +1040,7 @@ fixture.
    **unchanged** against the existing claim section of `wire-vectors.json`, demonstrating ADR 0024
    is untouched by carriage.
 4. `peer_claim_solana` _(pair)_ — the `solana` claim JSON, marked aspirational exactly as
-   `peer-semantics-spec.md` §3.5 marks that row, so the shape is pinned before an implementation exists.
+   `peer-semantics-pre-868.md` §3.5 marks that row, so the shape is pinned before an implementation exists.
 
 **Claim-bearing PREPARE**
 
@@ -1110,7 +1117,7 @@ Required surface:
 - `[peers].expose` — a set drawn from `{"btp", "http"}`; `[]` is legal and means dial-only (§2.1).
 - Per peer: `id`; optional `endpoint` (a URL whose scheme is `wss://` or `https://`, with host and
   port, SNI-capable — omitted means accept-only); `credential` (§1.4); the per-peering-relation
-  `fee` (`peer-semantics-spec.md` §4); and this document's `claim_ack_timeout_ms` and
+  `fee` (`peer-semantics-pre-868.md` §4); and this document's `claim_ack_timeout_ms` and
   `peer_answer_timeout_ms` (§6.3, default 30 000 each). `ceiling`/`flush_interval_ms` were also
   required here before [ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md)
   (issue #882); both are retired and now parsed only as removed-field traps
@@ -1196,7 +1203,7 @@ Recorded explicitly so review can accept or overturn each, rather than discoveri
    issue #882) along with the ceiling itself. The hint is still only a hint.
 4. **The idempotent re-ack (§6.3) is derived, not stated.** ADR 0027 fixes "missing ack means not
    acknowledged" and requires a timeout, both of which imply retransmission; nothing in the ADR or
-   in `peer-semantics-spec.md` §3.2 says what a payee does with a byte-identical retransmission. Without
+   in `peer-semantics-pre-868.md` §3.2 says what a payee does with a byte-identical retransmission. Without
    the rule in §6.3, a lost ack permanently wedges a peering, since the payer's only honest
    retransmission is refused `nonce_not_advancing`. The rule is a strict narrowing of §3.2 that
    changes no exposure.
@@ -1218,7 +1225,7 @@ Recorded explicitly so review can accept or overturn each, rather than discoveri
    the relation's name on both sides, presented by the dialer and looked up by the accepter, so a
    peering establishes only when the two files carry the same literal string. There is deliberately
    no separate "the id this peer knows me by" field; a second name for one relation is a second
-   thing to keep in step, and this is a bilateral configuration either way (`peer-semantics-spec.md`
+   thing to keep in step, and this is a bilateral configuration either way (`peer-semantics-pre-868.md`
    §4). **A mismatched id is invisible by design** (§1.6 keeps an unconfigured id silent), so it is
    the first thing to check when a peering will not establish.
 8. **One node-wide, default-false opt-in may widen which endpoint _schemes_ resolve (§2.1).**
@@ -1247,7 +1254,7 @@ fee, minimum delivery, probe — of which _exposure_, _ceiling_ and _flush_ are 
 [ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md) and appear above only in
 clauses marked retired or historical), adding **carriage**, **expose**, **dial** and **peering
 relation** as defined in §0.1 and §2 — the first three from ADR 0027, the fourth already implicit in
-`peer-semantics-spec.md` §3.3's "per peering relation".
+`peer-semantics-pre-868.md` §3.3's "per peering relation".
 
 It implements [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md)
 and carries, without restating,

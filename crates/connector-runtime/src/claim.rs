@@ -1,5 +1,5 @@
 //! Per-peering-relation claim exchange (ADR 0004, ADR 0005, ADR 0024,
-//! `docs/protocol/peer-semantics-spec.md` §3, issue #423): signing and tracking
+//! `docs/protocol/peer-semantics-pre-868.md` §3, issue #423): signing and tracking
 //! the claim this connector owes a peer on fulfilment, and verifying and
 //! watermarking a claim a peer sends back. The nonce/watermark rule itself
 //! lives in `connector_domain::validate_claim`; this module is the
@@ -30,7 +30,7 @@ use thiserror::Error;
 use crate::journal::{InMemoryJournal, Journal, JournalError};
 use crate::operator_view::ClaimView;
 
-/// A claim as it travels the wire (peer-semantics-spec.md §3.5): a channel
+/// A claim as it travels the wire (peer-semantics-pre-868.md §3.5): a channel
 /// identifier, a nonce, a cumulative amount, and a signature. `channel_id`
 /// is expected to already name the channel's on-chain `bytes32` (see
 /// [`ClaimBook::set_channel_domain`]) -- this type itself carries it as an
@@ -137,7 +137,7 @@ impl WireClaim {
     }
 }
 
-/// Why a claim was rejected (peer-semantics-spec.md §3.4's CLAIM_ACK reasons).
+/// Why a claim was rejected (peer-semantics-pre-868.md §3.4's CLAIM_ACK reasons).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaimRejectReason {
     SignatureInvalid,
@@ -167,7 +167,7 @@ impl ClaimRejectReason {
     }
 }
 
-/// The outcome of sending a claim (peer-semantics-spec.md §3.4): [`ClaimAckOutcome::NotSent`]
+/// The outcome of sending a claim (peer-semantics-pre-868.md §3.4): [`ClaimAckOutcome::NotSent`]
 /// when no claim rode this frame at all, distinct from a claim that rode it
 /// and was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,7 +208,7 @@ impl ClaimAckOutcome {
 pub(crate) type OnChainChannelId = [u8; 32];
 
 /// The EIP-712 domain a channel's claims are signed and verified under
-/// (`docs/protocol/peer-semantics-spec.md` §3.5, ADR 0024, issue #575/#566): the
+/// (`docs/protocol/peer-semantics-pre-868.md` §3.5, ADR 0024, issue #575/#566): the
 /// chain a channel is deployed on and the `TokenNetwork` contract that
 /// verifies a claim's signature on redemption. Configured per channel
 /// rather than assumed node-wide -- each token gets its own `TokenNetwork`
@@ -362,7 +362,7 @@ pub(crate) fn parse_channel_id(channel_id: &str) -> Result<OnChainChannelId, Inv
 }
 
 /// Build the [`EvmBalanceProof`] a peer claim's digest is computed
-/// over. `locked_amount`/`locks_root` are always zero (peer-semantics-spec.md
+/// over. `locked_amount`/`locks_root` are always zero (peer-semantics-pre-868.md
 /// §3.5, ADR 0004) but still hashed -- omitting them would compute a
 /// different digest than `TokenNetwork.sol`'s own typehash produces
 /// (`connector_signer::claim_signature`'s own doc comment). `nonce` and
@@ -857,7 +857,7 @@ impl ClaimBook {
     /// The latest claim this connector has ever accepted on `channel_id`
     /// (issue #425), ready to submit to a `SettlementBackend::redeem` --
     /// never a superseded one, since the projection this reads from only
-    /// ever retains the highest-nonce claim (peer-semantics-spec.md §3.4).
+    /// ever retains the highest-nonce claim (peer-semantics-pre-868.md §3.4).
     /// `None` if no claim has ever been accepted on this channel.
     pub fn latest_inbound_claim(&self, channel_id: &str) -> Option<connector_settlement::Claim> {
         let (nonce, cumulative_amount, signature) = self
@@ -883,7 +883,7 @@ impl ClaimBook {
     /// [`ClaimBook::verify_signature`] hold to. Exactly one claim is
     /// produced per call -- never batched: a second fulfilment before the
     /// first claim has gone out simply supersedes it with a fresher nonce
-    /// and a higher cumulative amount (peer-semantics-spec.md §3.2). Does
+    /// and a higher cumulative amount (peer-semantics-pre-868.md §3.2). Does
     /// nothing -- and leaves this peer's ledger untouched -- for a peer
     /// with no configured channel, or a channel whose chain has no signer
     /// or no binding configured (AC3): every one of those is a reason a
@@ -1039,7 +1039,7 @@ impl ClaimBook {
     }
 
     /// The claim owed to `peer_id`, if one is pending -- what the next
-    /// frame out to that peer should carry (peer-semantics-spec.md §3.2).
+    /// frame out to that peer should carry (peer-semantics-pre-868.md §3.2).
     pub fn pending_claim(&self, peer_id: &str) -> Option<WireClaim> {
         self.outbound
             .read()
@@ -1069,7 +1069,7 @@ impl ClaimBook {
 
     /// Every peer whose pending claim has waited at least `flush_interval`
     /// since it armed, as of `now` -- what a flush sweep should send
-    /// (peer-semantics-spec.md §3.3). Checked fresh against the injected clock,
+    /// (peer-semantics-pre-868.md §3.3). Checked fresh against the injected clock,
     /// like `Connector`'s leased-route expiry, rather than driven by a
     /// stored deadline.
     pub fn due_for_flush(
@@ -1098,7 +1098,7 @@ impl ClaimBook {
     /// names the claim actually pending: a fresher fulfilment may already
     /// have superseded it while the acknowledgement was in flight, and
     /// acknowledging the stale nonce must not clear that newer claim
-    /// (peer-semantics-spec.md §3.2).
+    /// (peer-semantics-pre-868.md §3.2).
     pub fn acknowledge_outbound(&self, peer_id: &str, nonce: u64, outcome: ClaimAckOutcome) {
         if let ClaimAckOutcome::Rejected(reason) = outcome {
             // Same rationale as `accept_inbound`'s warn (issue #832): a peer
@@ -1174,7 +1174,7 @@ impl ClaimBook {
     }
 
     /// Verify and, if valid, accept an inbound `claim`, advancing the
-    /// watermark on its `channel_id` (peer-semantics-spec.md §3.4). Independent
+    /// watermark on its `channel_id` (peer-semantics-pre-868.md §3.4). Independent
     /// of whatever PREPARE the claim rode in on -- a rejected claim does
     /// not reject that PREPARE, and this method never looks at one. Both
     /// an unregistered channel and one with no domain configured are
@@ -1183,7 +1183,7 @@ impl ClaimBook {
     ///
     /// A claim this connector judged good but could not durably record is
     /// [`ClaimAckOutcome::NotSent`] -- *not acknowledged*
-    /// (peer-semantics-spec.md §6.3) -- and its watermark advance is rolled
+    /// (peer-semantics-pre-868.md §6.3) -- and its watermark advance is rolled
     /// back, so the payer's retransmission is judged fresh again. It is
     /// neither `Accepted` (there is no record to back that) nor
     /// `Rejected` (§6.1's four reasons are all verdicts on the claim
@@ -1265,7 +1265,7 @@ impl ClaimBook {
                     // The committer has already put this channel's
                     // watermark back (see `group_commit_loop`), so the
                     // same claim retransmitted is still good.
-                    // peer-semantics-spec.md §6.3: *not acknowledged* is the
+                    // peer-semantics-pre-868.md §6.3: *not acknowledged* is the
                     // honest answer -- no ack header rides the response,
                     // the payer's claim stays pending, and it retransmits.
                     // Answering `accepted` would claim a record this node
@@ -1538,7 +1538,7 @@ fn group_commit_loop(receiver: mpsc::Receiver<QueuedCommit>, state: CommitState)
 /// the moment a signed claim becomes visible to `pending_claim`, and
 /// therefore transmittable. In batch order, so when one peer's ledger
 /// advanced twice in a batch the fresher claim is the one left pending
-/// (peer-semantics-spec.md §3.2's supersession), and under one lock hold.
+/// (peer-semantics-pre-868.md §3.2's supersession), and under one lock hold.
 fn arm_pending_claims(
     outbound: &RwLock<HashMap<String, OutboundLedger>>,
     resolved: &[(CommitEffect, mpsc::Sender<bool>)],
@@ -2180,7 +2180,7 @@ mod tests {
             assert_eq!(book.accept_inbound(&second), ClaimAckOutcome::Accepted);
 
             // Only the higher-nonce claim is redeemable -- the superseded
-            // first claim is never returned (peer-semantics-spec.md §3.4: claims
+            // first claim is never returned (peer-semantics-pre-868.md §3.4: claims
             // supersede rather than accumulate).
             let redeemable = book.latest_inbound_claim(&channel_id(1)).unwrap();
             assert_eq!(redeemable.nonce, 2);
@@ -2775,7 +2775,7 @@ mod tests {
         }
 
         /// The inbound half of the same rule: an acceptance that cannot be
-        /// journaled is not acknowledged (peer-semantics-spec.md §6.3) and its
+        /// journaled is not acknowledged (peer-semantics-pre-868.md §6.3) and its
         /// watermark is restored, so the payer's retransmission of the
         /// very same claim is judged fresh rather than bouncing off its
         /// own unrecorded ghost.

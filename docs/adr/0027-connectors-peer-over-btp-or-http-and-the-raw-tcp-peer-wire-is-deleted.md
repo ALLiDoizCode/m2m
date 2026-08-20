@@ -21,7 +21,7 @@ constant — and a connector may expose both.
 
 The raw-TCP peer wire of [ADR 0003](0003-clean-room-peer-wire-versioned-client-edge.md) —
 `crates/connector-runtime/src/peer_wire.rs`, `crates/connector-runtime/src/network_peer_transport.rs`,
-`docs/protocol/peer-semantics-spec.md` §1–§2 — is **deleted, first, before the replacement is built**,
+`docs/protocol/peer-semantics-pre-868.md` §1–§2 — is **deleted, first, before the replacement is built**,
 because it has never carried a production packet and there is therefore nothing to migrate off.
 
 **One peer pipeline, two carriages.** This is not two peer implementations. It is the shape
@@ -56,7 +56,7 @@ third document.** Any reference to "ADR 0026, connectors peer over BTP" means th
 - **ADR 0022's consequence** that the peer wire is "private, plaintext and unauthenticated on its own
   segment". The peer transport is now public-capable, TLS-encrypted and authenticated. ADR 0022's
   actual decision — a connector answers, it does not announce — is unaffected.
-- **`docs/protocol/peer-semantics-spec.md` §1–§2** (framing and packet structure). §3–§6 — claim exchange,
+- **`docs/protocol/peer-semantics-pre-868.md` §1–§2** (framing and packet structure). §3–§6 — claim exchange,
   fees and minimum delivery, reject codes and accumulated cost, consistency — survive as the
   _semantics_ both carriages carry, and are re-hosted rather than rewritten.
 
@@ -404,7 +404,7 @@ a wire. **There is no live traffic.** No box configures `[[peers]]`, no claim ha
 
 1. **Delete the raw-TCP transport now** (#679). `peer_wire.rs`, the raw-TCP halves of
    `network_peer_transport.rs`, `peer_wire_addr`, `[[peers]].addr` as a `SocketAddr`, and
-   `peer-semantics-spec.md` §1–§2. The `PeerTransport` port and `InProcessPeerTransport` **stay** — the
+   `peer-semantics-pre-868.md` §1–§2. The `PeerTransport` port and `InProcessPeerTransport` **stay** — the
    port is the seam this whole plan rests on, and everything above it
    (`Connector::forward_via_peer_route`, `ClaimBook`, fees, routing) is untouched. A pure subtraction
    that cannot break production.

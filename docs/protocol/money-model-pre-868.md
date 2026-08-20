@@ -24,7 +24,7 @@
 How value actually moved across a forwarded packet, end to end, **under the pre-#868 credit
 window**: which claim was signed, by whom, on which channel, and at which instant. Written for
 issue #865, because the pieces existed in seven
-places — `peer-carriage-spec.md`, `peer-semantics-spec.md`, ADR 0004, ADR 0028, `devnet-pricing.md`,
+places — `peer-carriage-spec.md`, `peer-semantics-pre-868.md`, ADR 0004, ADR 0028, `devnet-pricing.md`,
 `CONTEXT.md`, `README.md` — and nothing joined them, and the repo had no diagram at all.
 
 Every claim below is cited to a line this document's author opened and read on 2026-08-07, against
@@ -404,7 +404,7 @@ What that changed, relative to this document:
   uncovered packet is admitted regardless.
 - **ADR 0004 inverts for the peer path.** "The claim covering it follows the fulfilment rather than
   riding the outgoing PREPARE" (`docs/adr/0004-value-moves-on-fulfilment.md:4`, restated at
-  `docs/protocol/peer-semantics-spec.md:86`) stops being true peer-side; value and its covering claim
+  `docs/protocol/peer-semantics-pre-868.md:86`) stops being true peer-side; value and its covering claim
   would travel together.
 - **`peer-carriage-spec.md` §1.5 inverts.** "A connector MUST determine role before it decodes a
   claim" (`docs/protocol/peer-carriage-spec.md:145-148`) is an ordering that exists precisely
@@ -435,7 +435,7 @@ This document is the joining piece; these remain authoritative for their own sco
 
 | Topic                                          | Document                                                          |
 | ---------------------------------------------- | ----------------------------------------------------------------- |
-| Claim frames, ack, flush, exposure on the wire | `docs/protocol/peer-semantics-spec.md` §3.2–3.4, §5.2–5.4         |
+| Claim frames, ack, flush, exposure on the wire | `docs/protocol/peer-semantics-pre-868.md` §3.2–3.4, §5.2–5.4      |
 | Carriage, roles, re-derivation of the claim    | `docs/protocol/peer-carriage-spec.md` §1.5, §2.5, §3.1, §11       |
 | Client edge: greeting, claim gate, cost        | `docs/protocol/client-edge-spec.md` §1.3, §1.4, §1.6              |
 | Value moves on fulfilment                      | `docs/adr/0004-value-moves-on-fulfilment.md`                      |

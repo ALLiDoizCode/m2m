@@ -42,7 +42,7 @@ know the rest of the path from its own configuration.
   what the client pays this connector; whatever the rest of the path costs is paid out of it, by
   this connector, and is this operator's problem rather than the client's.
 - `fee` — unchanged from ADR 0010: what **this hop retains** for carriage, realized on the wire as
-  the difference between the amount received and the amount forwarded (`peer-semantics-spec.md` §4).
+  the difference between the amount received and the amount forwarded (`peer-semantics-pre-868.md` §4).
 
 Neither is derived from the other. A connector cannot compute a path price from its own fee — it
 does not know what the next hop charges — so the operator writes down what it has agreed to
@@ -65,7 +65,7 @@ because forwarded" is a defect, not a design.
 **A priced forwarded route never carries more than it was paid.** A client-edge PREPARE to a
 forwarded destination whose route is priced above zero is refused `F03_INVALID_AMOUNT` when its
 declared `amount` exceeds that `price`. The intended arithmetic is `amount == price`: this hop
-collects `price` from the client, forwards `price - fee` (`peer-semantics-spec.md` §4, unchanged,
+collects `price` from the client, forwards `price - fee` (`peer-semantics-pre-868.md` §4, unchanged,
 including its `R01` minimum-delivery rule), and so earns exactly its `fee` — §4's own "a hop's
 earnings are the difference between the cumulative it receives from upstream and the cumulative it
 sends downstream", stated at the one hop where "upstream" is a client rather than a peer.
@@ -108,7 +108,7 @@ it, so the fix is a rollback rather than a pre-admission refusal.
 **The peer-facing direction.** `peer-carriage-spec.md` §3.1 stands verbatim: a connector MUST NOT
 answer a **peer-role** PREPARE with the x402 greeting. Everything above is the _client-facing_
 direction of the same node. Peer fees remain bilateral configuration, never a negotiation, and a
-peer-role arrival is priced by the claim exchange of `peer-semantics-spec.md` §3, not by a 402.
+peer-role arrival is priced by the claim exchange of `peer-semantics-pre-868.md` §3, not by a 402.
 
 **Charging for a peer-wire arrival at the terminating connector** — issue #620's second gap — was
 left open here. This decision made the first hop's client leg payable, which is what a

@@ -237,7 +237,7 @@ grandfather.
 ## Related, and not an ADR
 
 `docs/protocol/` holds the specifications the protocol records above are the decision trail
-for — `client-edge-spec.md`, `peer-carriage-spec.md`, `peer-semantics-spec.md`, `money-model-pre-868.md`,
+for — `client-edge-spec.md`, `peer-carriage-spec.md`, `peer-semantics-pre-868.md`, `money-model-pre-868.md`,
 and `wire-vectors.md`. Per ADR 0021 those prose specs are **non-normative**; the committed
 vectors are the contract.
 

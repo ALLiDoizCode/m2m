@@ -45,7 +45,7 @@ pub(crate) fn is_valid_ilp_address(address: &str) -> bool {
 /// `fee` is only meaningful alongside `peer_id` (ADR 0010) and defaults to
 /// zero there: it is what this hop *retains* of the price, realized on the
 /// wire as the difference between the amount received and the amount
-/// forwarded (`peer-semantics-spec.md` §4). `transport` is only meaningful
+/// forwarded (`peer-semantics-pre-868.md` §4). `transport` is only meaningful
 /// alongside `handler_url` (toon-meta#262 decision 11, issue #701) -- not
 /// because a forwarded route is unreachable over a client transport (ADR
 /// 0028 makes it reachable over both), but because the policy is not
