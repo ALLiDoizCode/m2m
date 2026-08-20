@@ -53,20 +53,20 @@ already built, shipped and removed on purpose.
 Internal to this codebase. Changing one of these changes how the connector is built; it does
 not change what anything else must do.
 
-| #                                                                        | Decision                                                               | Status                                       |
-| ------------------------------------------------------------------------ | ---------------------------------------------------------------------- | -------------------------------------------- |
-| [0001](0001-rust-workspace-library-first.md)                             | The connector is a Rust library first, a binary second                 | Accepted                                     |
-| [0002](0002-drop-mina-from-the-rust-connector.md)                        | Settles on EVM and Solana only; Mina is dropped                        | Accepted                                     |
-| [0005](0005-claims-are-truth-balances-are-a-projection.md)               | Claims are the source of truth; balances are a projection              | Accepted, amended by 0033                    |
-| [0006](0006-the-connector-is-mechanism-not-policy.md)                    | The connector is mechanism; discovery and route policy live outside it | Accepted — restored in full by 0043          |
-| [0007](0007-testing-doctrine-fakes-yes-mocks-no.md)                      | Property tests over a pure core; fakes are allowed, mocks are not      | Accepted                                     |
-| [0008](0008-operator-surface-splits-read-from-write.md)                  | The operator surface splits read authority from write authority        | Accepted                                     |
-| [0009](0009-one-typed-config-file-no-environment-layer.md)               | Configuration is one typed file with no environment-variable layer     | Accepted — extended by 0034                  |
-| [0012](0012-a-signer-and-a-treasury-not-a-wallet.md)                     | The connector holds a signer and a treasury, not a wallet              | Accepted in part — the treasury half is gone |
-| [0014](0014-metrics-surface-and-packet-correlated-logs.md)               | The metrics surface is decided, not accreted                           | Accepted, amended by 0033                    |
-| [0015](0015-read-mostly-state-is-a-swapped-snapshot.md)                  | Read-mostly state is a swapped snapshot; the packet path never locks   | Accepted                                     |
-| [0034](0034-a-runtime-peer-route-table-never-shadows-the-config-file.md) | A runtime peer/route table never shadows the config file               | Accepted — extends 0009; survives 0043       |
-| [0043](0043-purchasable-peering-is-removed.md)                           | Purchasable peering is removed                                         | Accepted — **retires 0037, 0038, 0039**      |
+| #                                                                        | Decision                                                               | Status                                        |
+| ------------------------------------------------------------------------ | ---------------------------------------------------------------------- | --------------------------------------------- |
+| [0001](0001-rust-workspace-library-first.md)                             | The connector is a Rust library first, a binary second                 | Accepted                                      |
+| [0002](0002-drop-mina-from-the-rust-connector.md)                        | Settles on EVM and Solana only; Mina is dropped                        | Accepted                                      |
+| [0005](0005-claims-are-truth-balances-are-a-projection.md)               | Claims are the source of truth; balances are a projection              | Accepted, amended by 0033                     |
+| [0006](0006-the-connector-is-mechanism-not-policy.md)                    | The connector is mechanism; discovery and route policy live outside it | Accepted — restored in full by 0043           |
+| [0007](0007-testing-doctrine-fakes-yes-mocks-no.md)                      | Property tests over a pure core; fakes are allowed, mocks are not      | Accepted                                      |
+| [0008](0008-operator-surface-splits-read-from-write.md)                  | The operator surface splits read authority from write authority        | Accepted                                      |
+| [0009](0009-one-typed-config-file-no-environment-layer.md)               | Configuration is one typed file with no environment-variable layer     | Accepted — extended by 0034; amended by #1057 |
+| [0012](0012-a-signer-and-a-treasury-not-a-wallet.md)                     | The connector holds a signer and a treasury, not a wallet              | Accepted in part — the treasury half is gone  |
+| [0014](0014-metrics-surface-and-packet-correlated-logs.md)               | The metrics surface is decided, not accreted                           | Accepted, amended by 0033                     |
+| [0015](0015-read-mostly-state-is-a-swapped-snapshot.md)                  | Read-mostly state is a swapped snapshot; the packet path never locks   | Accepted                                      |
+| [0034](0034-a-runtime-peer-route-table-never-shadows-the-config-file.md) | A runtime peer/route table never shadows the config file               | Accepted — extends 0009; survives 0043        |
+| [0043](0043-purchasable-peering-is-removed.md)                           | Purchasable peering is removed                                         | Accepted — **retires 0037, 0038, 0039**       |
 
 ---
 
@@ -178,30 +178,31 @@ Checked against `crates/` and `packages/` on 2026-08-19. A record is not wrong f
 deleted thing — it is a record of a decision, made at a time. This table exists so a reader
 does not go looking.
 
-| Record | Names                                                                   | State in the tree                                                                                    |
-| ------ | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| 0001   | `connector-api`, `connector-admin`                                      | Shipped as `connector-client-edge` and `connector-operator`. `ConnectorNode` deleted (#457).         |
-| 0003   | the raw-TCP peer wire, `POST /ilp/v{N}`                                 | Wire deleted (0027). The versioned edge path was never built; the edge serves `/ilp`.                |
-| 0005   | `connector-core`, ceiling arithmetic                                    | The crate shipped as `connector-domain`. Exposure/ceiling retired (0033).                            |
-| 0007   | `connector-core`                                                        | Shipped as `connector-domain`.                                                                       |
-| 0012   | `Treasury`, `ChainClient`, `TreasuryError`                              | **Deleted** (#556). `connector-settlement`'s `SettlementBackend` does the job.                       |
-| 0013   | the parallel prefix, the TypeScript fleet                               | **Gone.** No `infra/` config carries the temporary prefix; the fleet was switched off (#872).        |
-| 0014   | `toon_exposure`                                                         | Name kept for scrape stability; **permanently zero, no producer** (0033).                            |
-| 0016   | client edge version 1, `http-proxy-handler.js`                          | **Gone.** No conformance target exists (0017).                                                       |
-| 0017   | `packages/connector`, `fleet_compare.rs`                                | **Both deleted**, as this record asked.                                                              |
-| 0023   | `packages/shared/src/encoding/oer.ts`                                   | **Package gone from this repo** (only untracked build output remains). The rule still binds.         |
-| 0024   | `SettlementChannel.sol`, `connector_domain::claim_digest`               | **Both deleted** (#578, #589) — the deletion this record required, plus a retarget it noted.         |
-| 0026   | the raw-TCP peer wire peers "stay on"                                   | Deleted (0027). Its BTP carriage and the shared codec live in `connector-btp`.                       |
-| 0027   | `flush_interval_ms`, `ceiling`, `AcceptOnlyPeerWithoutCeiling`          | Keys parsed **only to be rejected by name**; the error variant is gone (0033).                       |
-| 0029   | the `T04` exposure ceiling                                              | Retired (0033). Its own `F03` price gate is live.                                                    |
-| 0031   | `require_claim`-style enforcement on every peer PREPARE                 | Never true of the binary. Superseded (0042).                                                         |
-| 0037   | `[peer_sale]`, `deliver_peer_sale`, the peer-sale route kind            | **Deleted** (0043). `[peer_sale]` is a config key parsed only to be rejected by name.                |
-| 0038   | the purchase lease, its demotion and reaping                            | **Deleted** (0043).                                                                                  |
-| 0039   | `max_purchased_rows`, `max_routes_per_payer`, `max_prefix_length`       | **Deleted** (0043).                                                                                  |
-| 0042   | a covering claim on forwarded arrivals; `ClaimEnforcement::Observe`     | **Not built.** The cap and the send half (`[[pay_channels]]`) are. See its Status line.              |
-| 0044   | a route `description`                                                   | **Not built.** No such field in `connector-config`.                                                  |
-| 0045   | the rule-classification gate, numbered rule ids                         | **Not built.** Needs the successor doc set (#1065); no rule ids exist yet.                           |
-| 0030   | `connector announce`, the kind:10032 event, `[announce]`'s publish keys | **Removal pending** (0046). `[announce]`'s `addresses`/`btp_endpoint` stay — they feed the greeting. |
+| Record | Names                                                                   | State in the tree                                                                                        |
+| ------ | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| 0001   | `connector-api`, `connector-admin`                                      | Shipped as `connector-client-edge` and `connector-operator`. `ConnectorNode` deleted (#457).             |
+| 0003   | the raw-TCP peer wire, `POST /ilp/v{N}`                                 | Wire deleted (0027). The versioned edge path was never built; the edge serves `/ilp`.                    |
+| 0005   | `connector-core`, ceiling arithmetic                                    | The crate shipped as `connector-domain`. Exposure/ceiling retired (0033).                                |
+| 0007   | `connector-core`                                                        | Shipped as `connector-domain`.                                                                           |
+| 0012   | `Treasury`, `ChainClient`, `TreasuryError`                              | **Deleted** (#556). `connector-settlement`'s `SettlementBackend` does the job.                           |
+| 0013   | the parallel prefix, the TypeScript fleet                               | **Gone.** No `infra/` config carries the temporary prefix; the fleet was switched off (#872).            |
+| 0014   | `toon_exposure`                                                         | Name kept for scrape stability; **permanently zero, no producer** (0033).                                |
+| 0016   | client edge version 1, `http-proxy-handler.js`                          | **Gone.** No conformance target exists (0017).                                                           |
+| 0017   | `packages/connector`, `fleet_compare.rs`                                | **Both deleted**, as this record asked.                                                                  |
+| 0023   | `packages/shared/src/encoding/oer.ts`                                   | **Package gone from this repo** (only untracked build output remains). The rule still binds.             |
+| 0024   | `SettlementChannel.sol`, `connector_domain::claim_digest`               | **Both deleted** (#578, #589) — the deletion this record required, plus a retarget it noted.             |
+| 0026   | the raw-TCP peer wire peers "stay on"                                   | Deleted (0027). Its BTP carriage and the shared codec live in `connector-btp`.                           |
+| 0027   | `flush_interval_ms`, `ceiling`, `AcceptOnlyPeerWithoutCeiling`          | Keys parsed **only to be rejected by name**; the error variant is gone (0033).                           |
+| 0029   | the `T04` exposure ceiling                                              | Retired (0033). Its own `F03` price gate is live.                                                        |
+| 0031   | `require_claim`-style enforcement on every peer PREPARE                 | Never true of the binary. Superseded (0042).                                                             |
+| 0037   | `[peer_sale]`, `deliver_peer_sale`, the peer-sale route kind            | **Deleted** (0043). `[peer_sale]` is a config key parsed only to be rejected by name.                    |
+| 0038   | the purchase lease, its demotion and reaping                            | **Deleted** (0043).                                                                                      |
+| 0039   | `max_purchased_rows`, `max_routes_per_payer`, `max_prefix_length`       | **Deleted** (0043).                                                                                      |
+| 0042   | a covering claim on forwarded arrivals; `ClaimEnforcement::Observe`     | **Not built.** The cap and the send half (`[[pay_channels]]`) are. See its Status line.                  |
+| 0044   | a route `description`                                                   | **Not built.** No such field in `connector-config`.                                                      |
+| 0045   | the rule-classification gate, numbered rule ids                         | **Not built.** Needs the successor doc set (#1065); no rule ids exist yet.                               |
+| 0030   | `connector announce`, the kind:10032 event, `[announce]`'s publish keys | **Removal pending** (0046). `[announce]`'s `addresses`/`btp_endpoint` stay — they feed the greeting.     |
+| 0009   | the `child-expander`, `apex`, `[[children]]`                            | **Removal pending** (#1057). No committed config ever used them; both become parsed-to-be-rejected keys. |
 
 **A removed config key is never silently dropped.** `peer_wire_addr`, `ceiling`,
 `flush_interval_ms` and `[peer_sale]` are all still parsed, purely so a node whose committed TOML

@@ -38,3 +38,50 @@ environmental configuration is no longer possible, and that is intentional.
 Reload is a restart. Since the configuration value is immutable, changing the file means
 restarting the process — acceptable because the things that need to change while running have
 been moved to the operator surface by design.
+
+## Update (issue #1057) — `apex` and `[[children]]` are removed; the desugaring principle is not
+
+The "Consequences" section above cites the child-expander as this record's worked example of
+load-time desugaring:
+
+> Desugaring happens at load. The existing `child-expander` already establishes the pattern: a
+> `children:` block is expanded into ordinary routes before the routing table exists, "so the packet
+> path stays topology-blind."
+
+**That example is removed. The pattern it illustrates is not.**
+
+### What they were
+
+`apex` was an ILP address prefix. Each `[[children]]` entry — `{name, handler_url, price?,
+transport?}` — desugared at load into an ordinary route at `<apex>.<name>`, always an app route and
+never a peer route. `apex` was read only when `children` was non-empty, so on its own it was inert.
+
+### Why they go
+
+**Nothing uses them.** No committed configuration in this repository sets either key — not
+`deploy/connector-rust/connector.toml`, not the local stack, not either Linode box. Every one writes
+explicit `[[routes]]`. The form was ported from the TypeScript `child-expander` whose source is no
+longer in this repository, and no operator adopted it.
+
+**Keeping it would have made it a compatibility question.** This repo's configuration is being written
+down as a specification for the first time. A convenience form that reaches that document forces a
+second implementer to decide whether to implement it — converting thirty lines of unused sugar into an
+interoperability obligation. Deleting it is cheaper than specifying it, and re-adding sugar later is
+trivial and would arrive with a record saying why, which is strictly better than existing because
+TypeScript had it.
+
+**`apex` was also a name collision waiting to be documented.** In this repository "apex" otherwise
+names the retired devnet apex box (`g.toon.apex`, retired by issue #872). A glossary entry for the
+config key would have arrived pre-confused.
+
+### What survives
+
+**The pattern.** Desugaring at load, so the runtime sees only primitives and the packet path stays
+topology-blind, remains this record's rule. It loses its example, not its force — and it has work
+waiting for it: the node self-description (issue #1060) and the re-homing of `[announce]`'s greeting
+fields (ADR 0046, issue #1074) are both shaped by it.
+
+**Both keys are parsed to be rejected by name**, per this record's own standing rule that a removed
+config key is never silently dropped — the `peer_wire_addr` / `ceiling` / `[peer_sale]` precedent. An
+operator whose committed TOML still sets `apex` or `[[children]]` stops at boot, by name, rather than
+loading with the key ignored.
