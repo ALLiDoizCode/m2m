@@ -14,7 +14,7 @@ in the debt ledger forever, uncloseable.
 
 **Its live remnants have migrated.** §3.1 (a real execution condition is mandatory) and §4 (fee and
 minimum-delivery fields) are now [`packet-flow-spec.md`](packet-flow-spec.md) PF-01 and PF-12 – PF-17;
-§5.2 (the accumulated-cost field) is that document's §5. Read those, not these.
+§5.2 (the accumulated-cost field) is that document's §5, restated as PM-19 in [`payment-spec.md`](payment-spec.md). Read those, not these.
 Nothing here is authoritative in the meantime; the records are
 ([0010](../adr/0010-flat-per-packet-fee-and-minimum-delivery.md),
 [0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md),

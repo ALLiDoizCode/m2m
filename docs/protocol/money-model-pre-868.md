@@ -17,7 +17,8 @@
 > current gap; that record, not this banner, is the authority. There is no exposure tracking and no
 > `flush_interval_ms` (ADR 0033); those really are gone.
 >
-> **This document is history and is not maintained against the binary.** It was renamed to
+> **Superseded by [`payment-spec.md`](payment-spec.md)**, which describes what money does now. This
+> document is history and is not maintained against the binary. It was renamed to
 > `money-model-pre-868.md` on 2026-08-20 precisely because this banner had gone stale twice in three
 > days: a filename holds without upkeep, a banner does not.
 
