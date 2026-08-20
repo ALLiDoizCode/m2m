@@ -48,3 +48,55 @@ Choosing a flat fee is what makes cost discoverable in one shot. Because the fig
 vary with the amount carried, a path's cost is a constant a client can learn once and cache;
 see ADR 0011, which replaces the price discovery lost with `announcePrice` and the x402
 greeting.
+
+## Update (issue #1072) — minimum delivery is a peer-path field, and a client role MUST ignore it
+
+This record says _"every packet declares the amount that must reach its destination."_ That was
+written when the peer path was the whole story, and it generalises a **peer** rule into a universal.
+It is narrowed here to what the design actually is, and always was.
+
+### A client-originated packet declares none, deliberately
+
+`connector-client-edge` calls `handle_prepare_with_client_channel(prepare, 0, …)` — a floor of zero —
+and says why: _"client-edge-spec v1 carries no minimum-delivery field… a client-originated packet
+declares no guarantee yet, so this hop enforces none."_
+
+**A client's guarantee is the price, not a floor.** [0028](0028-a-forwarded-route-is-priced-at-the-client-edge.md)
+prices a forwarded route at the client edge and requires it carry no more than it was paid, and the
+invariant `price − fee >= next hop price` is what protects a client across the whole path. A client has
+already bought a stated route at a stated price.
+
+A **peer** needs minimum delivery for the opposite reason: it is carrying on someone else's behalf,
+with no price of its own to lean on, and must be able to bound its own erosion. That asymmetry is the
+whole content of the field, and stating it as universal obscured it.
+
+Adding a client-side floor as well would give one guarantee two mechanisms that can disagree — a client
+declaring a floor contradicting the price it paid has no good resolution. The pricing invariant is the
+one that binds.
+
+### A client role MUST **ignore** the field — not reject it, not apply it
+
+This rule binds every implementation and had no record at all (sweep finding F-27). Its only source
+was `connector-peer-btp/src/fields.rs`, `connector-peer-http/src/headers.rs` and a spec that is now
+frozen history.
+
+> `role` is taken rather than assumed because the field is a **peer** grant: on a client-role
+> interaction it MUST be ignored — not rejected and not applied — **so a client SDK that sets an
+> unrecognised entry is not broken by a peer feature.**
+
+The reason is forward compatibility, and **ignoring is the only behaviour that achieves it**.
+Rejecting looks like the safer choice and is the wrong one: it turns a client's harmless extra header
+into a refused packet, which is precisely the breakage the rule exists to prevent. A second
+implementer choosing "reject" as the conservative default would be conforming to this record's old
+wording and breaking real clients.
+
+### Ruling note
+
+The map's scope default (#1049) says a **protocol law** record wins and the binary has a bug. That
+default is argued against here, and the evidence is that the counter-argument was written down in two
+crates and a specification — the signature of a deliberate narrowing nobody recorded, rather than
+drift. Reading [0028](0028-a-forwarded-route-is-priced-at-the-client-edge.md)'s pricing invariant makes
+it conclusive: the client-side guarantee already exists and is not this field.
+
+**Everything else in this record stands:** flat per-packet fees, and a hop that cannot meet a declared
+minimum delivery after its fee rejecting (`R01`) rather than forwarding less.
