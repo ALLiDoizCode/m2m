@@ -43,47 +43,45 @@ key_file = "/app/data/signer.key"
 # does `handler_url.join(&target)`, and RFC 3986 makes an absolute-path
 # reference REPLACE the base's path.
 #
-# `price = 0`, AND THAT IS NOT AN OVERSIGHT. A priced termination is
-# incompatible with the peering this topology runs, and the incompatibility is
-# a deadlock rather than a degradation:
+# `price = 1000`: THIS NODE BOTH TERMINATES AND PRICES THIS ROUTE, which is the
+# whole subject of the topology and is not a shape a peered config here could
+# hold until #1103. A peer PREPARE to a route its payee both terminates and
+# prices must arrive carrying a claim that covers that price, or it is refused
+# `F06` with the x402 greeting (`peer-carriage-spec.md` §3.1, issue #880).
 #
-#   * `peer-carriage-spec.md` §3.1 / issue #880: a peer PREPARE to a route this
-#     node both TERMINATES and PRICES must arrive carrying a claim that covers
-#     that price, or it is refused `F06` with the x402 greeting;
-#   * ADR 0004: value moves on fulfilment, so a peering's payer owes nothing
-#     until a crossing has fulfilled -- the FIRST crossing therefore carries no
-#     claim, by design;
-#   * so the first crossing is refused, which means it never fulfils, which
-#     means nothing is ever owed, which means the second carries no claim
-#     either. It never recovers.
+# Under ADR 0004's postpay convention nothing can satisfy that, and the failure
+# is a deadlock rather than a degradation: value moves on fulfilment, so a
+# peering's payer owes nothing until a crossing has fulfilled -- the FIRST
+# crossing therefore carries no claim, is refused, never fulfils, leaves
+# nothing owed, and the second carries none either. It never recovers.
 #
-# ADR 0042's answer to that deadlock is `[[pay_channels]]`: cover the PREPARE
-# before sending it rather than after it fulfils. THIS TOPOLOGY CONFIGURES NO
-# SUCH ROW, so the deadlock above is what it would get, and `price = 0` is what
-# avoids it.
+# WHAT BREAKS THE CIRCLE IS ON A, NOT HERE. A holds a `[[pay_channels]]` row
+# (ADR 0042 item 2), which covers each PREPARE *before* it is sent instead of
+# owing for it after it fulfils, so crossing 1 arrives already paid for. See
+# that row for the other half of this arrangement.
 #
-# It is worth recording what happened when a row WAS tried here, because it
-# found a real defect rather than a property of peering. With a
-# `[[pay_channels]]` row on A and `price = 1000` here, crossing 1 fulfilled and
-# crossing 2 was refused `F06`, and B's journal held `nonce 1 -> 1000` followed
-# by `nonce 2 -> 1000`: the payer re-signed the same cumulative amount at a
-# fresh nonce, because `POST /ilp/claim-state` answered a channel B holds as a
-# PEER channel out of B's CLIENT-edge book, which no peer claim ever reaches.
-# That is issue #1102, fixed -- the endpoint now answers a peer channel out of
-# the peer book -- and covering a priced peer termination is therefore a live
-# option. It is deliberately not wired here: this topology mirrors
-# `two_connectors_peer.rs`, and pricing one payee and not the other would make
-# them prove different things. #1102's own tests assert the fix without a
-# container.
+# That row asks THIS node, on every packet, where its claims on the channel
+# stand -- `POST /ilp/claim-state`, the receiver being the only authority on
+# its own watermark. Until #1103 this node answered a channel it holds as a
+# `[[peer_channels]]` row out of its CLIENT-edge book, which no peer claim ever
+# reaches: nonce 0 / cumulative 0 forever, so A re-signed one cumulative amount
+# at a fresh nonce on every packet, each claim was accepted and advanced
+# nothing, and every crossing after the first was refused `F06`,
+# `advanced: 0, shortfall: 1000` (issue #1102). Measured on this topology
+# before the fix, not reasoned about.
 #
-# The peering is still genuinely paid: what A owes B is the forwarded amount,
-# not this route's price, and `[[peer_channels]]` below is what that claim is
-# written against. `two_connectors_peer.rs` prices its payee's terminated route
-# at 0 for exactly the same reason.
+# THE FIGURE IS THE WHOLE OF WHAT A FORWARDS -- the rehearsal sends 1000 and A
+# retains nothing (`fee = 0`) -- so the gate has no slack in either direction.
+# A claim advancing one unit less than the packet's own value is an `F06`
+# rather than a discount, and an arrival carrying less than this price is an
+# `F03` before the app is ever reached (`handle_peer_prepare`, ADR 0029).
+# `local_topologies_load.rs` holds this number and the rehearsal's `--amount`
+# and `PRICE` to one value; the rehearsal itself then reads this node's claim
+# journal and fails unless every crossing was covered.
 [[routes]]
 prefix = "g.local.two-hop.b.app"
 handler_url = "http://stub-app:3100/"
-price = 0
+price = 1000
 
 # ── The peering ──────────────────────────────────────────────────────────────
 # The same relation id A writes, and the same secret, from the same file
