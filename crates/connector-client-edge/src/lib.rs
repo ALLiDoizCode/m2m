@@ -52,7 +52,11 @@
 //! signature over a domain-separated challenge, distinct from a real
 //! claim's signature. Also purely a read against existing state
 //! ([`ClientClaimGate::watermark`], [`ClientClaimGate::channels`],
-//! [`ClientClaimGate::last_claim_time`]); it never calls `ingest`/`admit`,
+//! [`ClientClaimGate::last_claim_time`] -- plus, for a channel this node
+//! holds as a `[[peer_channels]]` row,
+//! [`connector_runtime::Connector::peer_channel_watermark`], because that
+//! is the book judging claims on it, issue #1102); it never calls
+//! `ingest`/`admit`,
 //! so it adds nothing to the packet admission path #686/#688/#690 spent
 //! this edge's history keeping cheap.
 

@@ -64,6 +64,15 @@ libsecp256k1 = "0.6"
 # claim code already gets.
 proptest = "1"
 rand = "0.7"
+# The payer half of `tests/pay_channel_claim_state_round_trip.rs`:
+# `OwnedHttpClaimState` asks a real `POST /ilp/claim-state` over a real
+# socket, and its constructor takes the caller's own client. Same 0.11 and
+# same feature set `connector-runtime` builds it against, so the test dials
+# with exactly the client a deployed node would.
+reqwest = { version = "0.11", default-features = false, features = [
+  "rustls-tls",
+  "json",
+] }
 tempfile = "3"
 # The client half of the BTP integration test (`tests/btp_session.rs`): a
 # real websocket session against a served router, since `tower::oneshot`
