@@ -2,7 +2,8 @@
 # =============================================================================
 # Provision the key material a local topology needs, and fund it.
 #
-#   local/keys.sh <topology>        # e.g. local/keys.sh solo
+#   local/keys.sh <topology>                  # e.g. local/keys.sh solo
+#   local/keys.sh <topology> solana-channels  # after the nodes are serving
 #
 # Everything lands in local/.keys/<topology>/<node>/, which is GITIGNORED.
 # Nothing this script writes is ever committed: ADR 0012 makes key material a
@@ -60,8 +61,23 @@
 set -euo pipefail
 
 TOPOLOGY="${1:-}"
+# Two stages, because they cannot run at the same moment. `keys` is everything
+# that has to exist BEFORE a node starts -- the key files it mounts, their
+# funding, and the EVM peering channels. `solana-channels` is the one thing
+# that can only happen AFTER: a Solana channel is opened by submitting an
+# `InitializeChannel` instruction, and the only thing in this repository that
+# can submit one is a RUNNING connector's `POST /channels`
+# (`local/open-solana-channel.py` has the long version). `make local-up` calls
+# both, in that order, with the connectors started in between.
+STAGE="${2:-keys}"
 if [[ -z "$TOPOLOGY" ]]; then
-  echo "usage: local/keys.sh <topology>   (one of: solo, two-hop, mixed-chain)" >&2
+  echo "usage: local/keys.sh <topology> [stage]" >&2
+  echo "       topology: solo, two-hop, mixed-chain" >&2
+  echo "       stage:    keys (default, pre-boot) | solana-channels (post-boot)" >&2
+  exit 1
+fi
+if [[ "$STAGE" != "keys" && "$STAGE" != "solana-channels" ]]; then
+  echo "ERROR: unknown stage '$STAGE'. Known stages: keys, solana-channels." >&2
   exit 1
 fi
 
@@ -105,6 +121,12 @@ CHANNEL_DEPOSIT=100000000
 # (`peer-semantics-pre-868.md` §6.4), so the payer is the side that can
 # actually be owed against.
 #
+# A SOLANA peering carries a fifth field: the host port that compose publishes
+# the payer's client edge on. Its channel is opened through that node's own
+# operator surface rather than with a chain CLI, so this table has to know
+# where to reach it. An EVM peering has no fifth field and needs none -- `cast`
+# talks to the chain, not to a node.
+#
 # Indices are disjoint across topologies as well as across nodes. They need
 # not be -- no two topologies are ever up at once -- but a settlement address
 # that appears in exactly one committed config is one fewer thing to
@@ -120,7 +142,7 @@ case "$TOPOLOGY" in
     ;;
   mixed-chain)
     NODES="connector-a:7:17 connector-b:8:18 connector-c:9:19"
-    PEERINGS="a-b:evm:connector-a:connector-b b-c:solana:connector-b:connector-c"
+    PEERINGS="a-b:evm:connector-a:connector-b b-c:solana:connector-b:connector-c:3004"
     ;;
   *)
     echo "ERROR: unknown topology '$TOPOLOGY'." >&2
@@ -223,6 +245,97 @@ config_must_name() {
   fi
 }
 
+# The Solana public key a node signs settlement with, base58 -- the identity
+# that IS a channel participant, derived by the binary that will sign with it.
+solana_settlement_address() {
+  base58 "$("$CONNECTOR" send --operator-key "$(node_dir "$1")/settlement-solana.key" \
+    --print-keyid)"
+}
+
+# The channel PDA the deployed program derives for a Solana peering:
+# `find_program_address(["channel", min, max, mint])`
+# (packages/solana-program/src/processor.rs). A pure function of the program,
+# the mint and the two participants, so it is computed rather than read -- and
+# then asserted against both committed configs, which is what makes committing
+# it legitimate.
+solana_channel_account() {
+  local channel_min channel_max
+  read -r channel_min channel_max <<<"$(sorted_solana_pair "$1" "$2")"
+  solana find-program-derived-address "$SOLANA_PROGRAM_ID" \
+    string:channel "pubkey:$channel_min" "pubkey:$channel_max" "pubkey:$SOLANA_USDC_MINT" \
+    --url "$SOLANA_RPC"
+}
+
+# ── Stage two: the Solana peering channels ───────────────────────────────────
+# Runs AFTER the connectors are serving, which is the whole reason it is a
+# separate stage. The EVM leg below is opened with `cast send` because
+# `openChannel` is an ordinary contract call; Solana's `InitializeChannel` is a
+# positional account list under an 8-byte discriminator and no chain CLI can
+# build one. The only submitter in this repository is a running node's
+# `POST /channels` (ADR 0008's third write), which reaches
+# `SolanaSettlementBackend::open` and signs with that node's own
+# `[settlement.solana]` key -- the very identity the channel's participant is.
+#
+# So opening it is the OPERATOR's job, after boot, not the connector's at boot:
+# ADR 0009's config is read once and creates nothing, and `[[peer_channels]]`
+# says which claims a node accepts, not what to go and build on a chain.
+#
+# `local/open-solana-channel.py` does the write and then reads the account back
+# off the validator, refusing to report success unless the deployed program's
+# own account layout agrees with the committed config. That assertion is the
+# point: nothing on the peer path reads a chain (CF-23), so an unopened channel
+# rehearses exactly as green as a real one unless something looks.
+open_solana_channels() {
+  local found=0
+  for peering in $PEERINGS; do
+    IFS=':' read -r id chain payer payee port <<<"$peering"
+    [[ "$chain" == "solana" ]] || continue
+    found=1
+
+    if [[ -z "$port" ]]; then
+      echo "ERROR: the '$id' Solana peering names no operator port in this script's topology" >&2
+      echo "       table. Its channel is opened through the payer's own operator surface, so" >&2
+      echo "       the table has to say which published port that is." >&2
+      exit 1
+    fi
+
+    local payer_account payee_account channel_account
+    payer_account="$(solana_settlement_address "$payer")"
+    payee_account="$(solana_settlement_address "$payee")"
+    channel_account="$(solana_channel_account "$payer_account" "$payee_account")"
+    config_must_name "$channel_account" "$(node_config "$payer")" \
+      "the '$id' peering's channel account"
+    config_must_name "$channel_account" "$(node_config "$payee")" \
+      "the '$id' peering's channel account"
+
+    echo "'$id': opening $channel_account through $payer's operator surface"
+    "$HERE/open-solana-channel.py" \
+      --rpc-url "$SOLANA_RPC" \
+      --operator-url "http://127.0.0.1:$port" \
+      --operator-key "$(node_dir "$payer")/operator-send.key" \
+      --program-id "$SOLANA_PROGRAM_ID" \
+      --token-mint "$SOLANA_USDC_MINT" \
+      --channel-account "$channel_account" \
+      --payer "$payer_account" \
+      --payee "$payee_account" \
+      --settlement-timeout-seconds 3600
+  done
+
+  if [[ "$found" == "0" ]]; then
+    echo "'$TOPOLOGY' has no Solana peering; nothing to open."
+  fi
+}
+
+if [[ "$STAGE" == "solana-channels" ]]; then
+  if [[ ! -d "$KEYS" ]]; then
+    echo "ERROR: $KEYS does not exist. Run 'local/keys.sh $TOPOLOGY' first -- this stage" >&2
+    echo "       signs an operator write with a key that stage provisions." >&2
+    exit 1
+  fi
+  open_solana_channels
+  exit 0
+fi
+
 mkdir -p "$KEYS"
 chmod 700 "$KEYS"
 
@@ -317,7 +430,7 @@ done
 # `secret`, and this is why the file form exists: a peering secret in a
 # committed config is a credential in a public repository.
 for peering in $PEERINGS; do
-  IFS=':' read -r id _chain payer payee <<<"$peering"
+  IFS=':' read -r id _chain payer payee _port <<<"$peering"
   secret_file="peer-$id-secret"
   if [[ ! -f "$(node_dir "$payer")/$secret_file" ]]; then
     openssl rand -hex 32 >"$(node_dir "$payer")/$secret_file"
@@ -378,7 +491,7 @@ done
 # names a channel nobody could redeem is not a payment, and the difference
 # does not show up until someone tries.
 for peering in $PEERINGS; do
-  IFS=':' read -r id chain payer payee <<<"$peering"
+  IFS=':' read -r id chain payer payee _port <<<"$peering"
   payer_config="$(node_config "$payer")"
   payee_config="$(node_config "$payee")"
 
@@ -446,34 +559,31 @@ for peering in $PEERINGS; do
       ;;
 
     solana)
-      payer_account="$(base58 "$("$CONNECTOR" send \
-        --operator-key "$(node_dir "$payer")/settlement-solana.key" --print-keyid)")"
-      payee_account="$(base58 "$("$CONNECTOR" send \
-        --operator-key "$(node_dir "$payee")/settlement-solana.key" --print-keyid)")"
+      payer_account="$(solana_settlement_address "$payer")"
+      payee_account="$(solana_settlement_address "$payee")"
       config_must_name "$payer_account" "$payee_config" "$payer's Solana settlement key"
       config_must_name "$payee_account" "$payer_config" "$payee's Solana settlement key"
 
-      # The channel PDA the deployed program would use for these two
-      # participants: `find_program_address(["channel", min, max, mint])`
-      # (packages/solana-program/src/processor.rs). Computed rather than read,
-      # because it is a pure function -- and asserted against both committed
-      # configs, which is what makes committing it legitimate.
-      read -r channel_min channel_max <<<"$(sorted_solana_pair "$payer_account" "$payee_account")"
-      channel_account="$(solana find-program-derived-address "$SOLANA_PROGRAM_ID" \
-        string:channel "pubkey:$channel_min" "pubkey:$channel_max" "pubkey:$SOLANA_USDC_MINT" \
-        --url "$SOLANA_RPC")"
+      channel_account="$(solana_channel_account "$payer_account" "$payee_account")"
       config_must_name "$channel_account" "$payer_config" "the '$id' peering's channel account"
       config_must_name "$channel_account" "$payee_config" "the '$id' peering's channel account"
       echo "'$id': channel account $channel_account"
 
-      # NOT OPENED ON CHAIN, and said plainly rather than left to be noticed.
-      # Opening one means submitting an `OpenChannel` instruction to the
-      # deployed program, and nothing in this repository can do that from a
-      # shell -- there is no `connector channel open` verb and the Solana CLI
-      # cannot build an arbitrary instruction. The EVM leg above IS opened and
-      # funded, so the honest summary of this directory is: a peering's claim
-      # is real cryptography on both chains, and its collateral is real on
-      # EVM only. Closing that gap is a tool, not a config change.
+      # OPENED, but not here: the `solana-channels` stage does it once the
+      # payer's node is serving, because `POST /channels` is the only submitter
+      # of an `InitializeChannel` this repository has (see that stage's own
+      # comment). What this stage can do is make the address falsifiable, which
+      # is the two `config_must_name` calls above.
+      #
+      # It is opened and NOT funded, and that is the one place the two chains
+      # still differ. `packages/solana-program`'s `Deposit` requires the
+      # depositing participant to sign for their OWN side, while the settlement
+      # port's `fund` deposits into the COUNTERPARTY's -- which the EVM
+      # `TokenNetwork` permits and this program does not. So there is no
+      # operation on any surface that puts this node's own collateral behind
+      # its own claims on Solana, and none is invented here. A claim on this
+      # channel is real cryptography against a real, open channel; its
+      # collateral is real on EVM only.
       ;;
   esac
 done
