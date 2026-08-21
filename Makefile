@@ -211,6 +211,15 @@ local-build:
 # the container being Up is not sufficient evidence. In a multi-node topology
 # each node also waits on the one it dials, so `--wait` here means every hop on
 # the path is serving, not just the one the packet is handed to.
+#
+# And that is why keys.sh runs TWICE. A Solana peering's channel cannot be
+# opened before its node is up: `InitializeChannel` is a positional account
+# list under an 8-byte discriminator, no chain CLI can build one, and the only
+# submitter in this repository is a running node's `POST /channels` (ADR 0008's
+# third write). The second call opens it and then reads it back off the
+# validator, failing this target if the deployed program's own account layout
+# disagrees with the committed config. It is a no-op on a topology with no
+# Solana peering, which is `solo` and `two-hop`.
 local-up: local-build solana-build
 	@test -n "$(LOCAL_NODES)" || { \
 		echo "ERROR: LOCAL_TOPOLOGY='$(LOCAL_TOPOLOGY)' has no LOCAL_NODES_ entry in this Makefile."; \
@@ -222,6 +231,7 @@ local-up: local-build solana-build
 	cargo build --release -p connector
 	./local/keys.sh $(LOCAL_TOPOLOGY)
 	$(LOCAL_COMPOSE) up -d --wait $(LOCAL_NODES)
+	./local/keys.sh $(LOCAL_TOPOLOGY) solana-channels
 
 # `-v`, and that matters. The named volumes here hold the connectors' claim
 # journals, and both local chains wipe their own state on every start -- so

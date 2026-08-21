@@ -104,13 +104,38 @@ token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
 # `channel_account` is the address `find_program_address(["channel", min, max,
 # mint])` produces for these two participants under this program
 # (packages/solana-program/src/processor.rs). `local/keys.sh` recomputes it and
-# refuses to proceed if this line disagrees. It is NOT opened on chain -- see
-# that script's own note on why, and what that does and does not cost.
+# refuses to proceed if this line disagrees, and its `solana-channels` stage
+# then OPENS it -- through this node's own operator surface below, because that
+# is the only submitter of an `InitializeChannel` this repository has. It is
+# opened and not funded: the program's `Deposit` requires the depositing
+# participant to sign for their own side, which no surface here exposes.
 [[peer_channels]]
 peer_id = "b-c"
 channel_account = "G5mXQzfZb4tXWX7cQvXP9ZJnDBcUo6irWTmGGtX3xpzL"
 counterparty_key = "93mxPHokL6EhVxzVicSyouEhvTVGUcKXKtHH1uTmw2Aw"
 program_id = "HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR"
+
+# ── The operator surface, and the one job it has here ────────────────────────
+# C has none, deliberately (CF-31): an absent table means the surface is not
+# started at all rather than started unauthenticated, and an unused one is two
+# more credentials to provision. This node has one for a reason C's comment
+# cannot claim -- it is the ONLY way the Solana channel above gets opened.
+#
+# `packages/solana-program`'s `InitializeChannel` is a positional account list
+# under an 8-byte discriminator; the Solana CLI cannot build an arbitrary
+# program instruction and `spl-token` knows only SPL Token, so no chain tool in
+# this repository can submit one. `POST /channels` (ADR 0008's third write,
+# issue #459) can: it reaches `SolanaSettlementBackend::open`, which signs with
+# `[settlement.solana]`'s key below -- the very identity `channel_account` is
+# derived from and the one that will sign every claim on it. `local/keys.sh
+# <topology> solana-channels` makes that write once the node is serving.
+#
+# Both values are paths, written into the gitignored key directory by
+# `local/keys.sh`: `write_keys` holds only PUBLIC halves, and `bearer_token`
+# gates reads alone -- no shared secret can move value (ADR 0008).
+[operator]
+bearer_token_file = "/app/data/operator-bearer-token"
+write_keys_file = "/app/data/operator-write-keys"
 
 # ── Settlement: BOTH chains, and this is not decoration ──────────────────────
 # A `[[peer_channels]]` row can only be signed for if this node holds the

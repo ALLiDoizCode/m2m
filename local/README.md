@@ -122,12 +122,13 @@ alternative (a fixed throwaway key checked in under `local/`) would introduce
 one. EVM and Solana take disjoint index ranges, so no 32 bytes is ever used on
 both curves.
 
-Every address a committed config names is then **checked against the chain**
-before anything starts: `keys.sh` derives each settlement address, resolves the
-deployed `TokenNetwork`, opens the peering's channel and reads back its id, and
+Every address a committed config names is then **checked against the chain**:
+`keys.sh` derives each settlement address, resolves the deployed
+`TokenNetwork`, opens the EVM peering's channel and reads back its id, and
 computes the Solana channel PDA — and refuses to provision, naming the value it
-computed, if a committed file disagrees. That check is what makes
-committed-not-generated safe here.
+computed, if a committed file disagrees. Its `solana-channels` stage then opens
+the Solana channel once the nodes are serving and reads _that_ account back
+too. Those checks are what make committed-not-generated safe here.
 
 Funding involves **no faucet on either chain** — the faucet is an app-layer
 service and is not part of the connector:
@@ -223,11 +224,33 @@ which was tried. They are opened and funded anyway, for the reason
 nobody could redeem is not a payment, and the difference does not show up until
 somebody tries.
 
-The Solana peering's channel account is the real PDA the deployed program would
-derive for its two participants, computed by `keys.sh` and asserted against
-both committed configs — but it is **not opened on chain**. Opening one means
-submitting an `OpenChannel` instruction, and nothing in this repository can do
-that from a shell: there is no `connector channel open` verb and the Solana CLI
-cannot build an arbitrary instruction. So the honest summary is that a
-peering's claim is real cryptography on both chains and its collateral is real
-on EVM only. Closing that is a tool, not a config change.
+The Solana peering's channel is opened too, and by a different route, because
+nothing in this repository can submit an `InitializeChannel` from a shell: it
+is a positional account list under an 8-byte discriminator, `spl-token` knows
+only SPL Token, and the Solana CLI cannot build an arbitrary program
+instruction. The only submitter is a **running node's `POST /channels`** — ADR
+0008's third write — which reaches `SolanaSettlementBackend::open` and signs
+with that node's own `[settlement.solana]` key. That is the right party as well
+as the only available one: the channel's on-chain participant _is_ that
+settlement identity, and it is the identity that will sign every claim on the
+channel.
+
+Which is why `keys.sh` runs twice. `local/keys.sh <topology>` is everything
+that has to exist before a node starts; `local/keys.sh <topology>
+solana-channels` runs after `--wait`, and `make local-up` calls both with the
+containers started in between. The second stage delegates to
+`local/open-solana-channel.py`, which makes the signed write and then reads the
+account back off the validator, refusing to report success unless the deployed
+program's own layout agrees with the committed config — the discriminator, both
+participants, the mint, and `Opened` status. It is idempotent: a channel
+already at the expected address is left alone and still asserted.
+
+**Opened is not funded, and that is where the two chains still differ.** The
+settlement port's `fund` deposits into the _counterparty's_ on-chain balance,
+which the EVM `TokenNetwork` permits (`setTotalDeposit` takes a participant and
+pulls from `msg.sender`) and `packages/solana-program` does not — its `Deposit`
+requires the depositing participant to sign for their own side, so
+`SolanaSettlementBackend::fund` refuses outright on a `connect`-built backend.
+No surface anywhere puts a node's own collateral behind its own Solana claims,
+so none is faked here. The honest summary is now: a peering's channel is real
+on both chains, and its collateral is real on EVM only.
