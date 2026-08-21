@@ -106,6 +106,15 @@ pub struct PaymentRequired {
 /// possibly recorded), so coverage is the claim's own advance rather than
 /// the zero advance past the watermark it just became.
 ///
+/// It MUST also be read from the book that judges the claim --
+/// [`Connector::peer_channel_watermark`], which is
+/// [`connector_runtime::ClaimBook`]'s own durable inbound watermark, keyed
+/// by channel. A watermark from any per-process record disagrees with the
+/// judgement across a restart, and the disagreement is money: the book
+/// replays its journal, the record starts empty, and the first priced peer
+/// PREPARE after a restart is measured against zero and so credited with
+/// its claim's whole cumulative amount (issue #1104).
+///
 /// Coverage requires the claim book's own verdict to be
 /// [`ClaimAckOutcome::Accepted`], not merely that a claim decoded: a forged
 /// signature or a replayed nonce still decodes and can still declare any

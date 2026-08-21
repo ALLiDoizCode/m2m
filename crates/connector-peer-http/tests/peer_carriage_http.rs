@@ -33,7 +33,8 @@ use connector_peer_http::headers::{Headers, PeerRequest, PeerResponse};
 use connector_peer_http::{HttpPeerTransport, NAT_NOTE};
 use connector_runtime::{
     ChannelDomain, ClaimAckOutcome, ClaimRejectReason, ClaimSignature, Clock, Connector,
-    FakeAppClient, InProcessPeerTransport, PeerForward, PeerTransport, TestClock, WireClaim,
+    FakeAppClient, InMemoryJournal, InProcessPeerTransport, Journal, PeerForward, PeerTransport,
+    TestClock, WireClaim,
 };
 use connector_signer::{
     derive_evm_address, evm_balance_proof_digest, EvmBalanceProof, LocalSigner, Signer,
@@ -129,6 +130,49 @@ fn payee_with_route(payer: &dyn Signer, route: StaticRoute) -> Arc<Connector> {
         .with_channel_verification_key(channel_id(), counterparty)
         .with_channel_domain(channel_id(), domain())
         .expect("a bytes32 channel id"),
+    )
+}
+
+/// The one priced, terminated route issue #880's gate and issue #1104's
+/// restart tests both need.
+fn priced_route() -> StaticRoute {
+    StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap()
+}
+
+/// This payee's identity key, deterministic so that a node built before a
+/// restart and the one built after it are the same node to a sender that
+/// sealed to it (issue #1104).
+fn payee_identity() -> Arc<dyn Signer> {
+    Arc::new(LocalSigner::from_secret_bytes("payee-identity", [0x5c; 32]).expect("identity signer"))
+}
+
+/// As [`payee_with_route`], but journaling to `journal` and delivering to
+/// `app_client`: the fixture a **restart** needs (issue #1104). The journal
+/// is the only thing a node keeps across one (ADR 0005), so a second
+/// connector built over the same journal -- new `ClaimBook`, new
+/// `AcceptedClaims`, new everything else -- is exactly what a restarted
+/// payee is, with its inbound watermarks rebuilt by replay.
+fn payee_journaling_to(
+    payer: &dyn Signer,
+    route: StaticRoute,
+    app_client: Arc<FakeAppClient>,
+    journal: Arc<dyn Journal>,
+) -> Arc<Connector> {
+    let counterparty = derive_evm_address(&payer.public_key().unwrap());
+    Arc::new(
+        Connector::new(
+            vec![route],
+            vec![],
+            app_client,
+            Arc::new(InProcessPeerTransport::new()),
+            clock(),
+        )
+        .with_channel_verification_key(channel_id(), counterparty)
+        .with_channel_domain(channel_id(), domain())
+        .expect("a bytes32 channel id")
+        .with_identity_signer(payee_identity())
+        .with_journal(journal)
+        .expect("the journal replays clean"),
     )
 }
 
@@ -1230,6 +1274,187 @@ async fn a_covering_claim_is_admitted_exactly_as_today() {
         data,
     };
 
+    let response = peer
+        .handle(request(
+            Some((PEER_ID, SECRET)),
+            Some(&claim_as_json(&claim, &payer_signer)),
+            prepare.encode(),
+        ))
+        .await;
+
+    assert_eq!(ack_on(&response), Some(ClaimAckOutcome::Accepted));
+    assert!(
+        response.headers.get(PAYMENT_REQUIRED_HEADER).is_none(),
+        "an admitted packet carries no greeting"
+    );
+    let fulfill = connector_domain::Fulfill::decode(&response.body).expect("a fulfil");
+    let opened = connector_signer::giftwrap::open_response(&shared_secret, &fulfill.data)
+        .expect("open the sealed fulfil");
+    let opened = connector_domain::EnvelopeResponse::decode(&opened).expect("decode envelope");
+    assert_eq!(opened.body, response_body);
+    assert_eq!(app_client.deliveries().len(), 1);
+}
+
+// ─── issue #1104: coverage is the claim's advance past the **durable**
+// watermark, so a payee restart never credits a claim with its whole
+// cumulative amount. §0.1's one pipeline: the BTP twin of each of these
+// lives in `connector-peer-btp`'s own `peer_carriage.rs` ───
+
+/// An app that actually answers `route`'s handler, so a packet the gate
+/// admits visibly **fulfils**: without the fix, issue #1104's packet is
+/// served for free rather than merely getting past one check.
+fn serving_app(route: &StaticRoute, body: &[u8]) -> Arc<FakeAppClient> {
+    let app_client = Arc::new(FakeAppClient::new());
+    app_client.respond(
+        route.handler_url(),
+        connector_runtime::AppOutcome::Answered {
+            response: connector_domain::EnvelopeResponse {
+                status: 200,
+                headers: vec![],
+                body: body.to_vec(),
+            },
+        },
+    );
+    app_client
+}
+
+/// A PREPARE genuinely sealed to [`payee_identity`] (ADR 0018/0019), with
+/// the shared secret its answer can be opened with. Orthogonal to the price
+/// gate, but what lets an admitted packet actually fulfil rather than be
+/// refused for want of sealing -- so "admitted" can be proved by the app
+/// having been reached.
+fn sealed_prepare(amount: u64) -> (Prepare, [u8; 32]) {
+    let envelope = connector_domain::EnvelopeRequest {
+        method: "POST".to_string(),
+        target: "/".to_string(),
+        headers: vec![],
+        body: b"hello".to_vec(),
+    };
+    let identity_public = payee_identity().public_key().expect("identity public key");
+    let (data, shared_secret) =
+        connector_signer::giftwrap::seal_request(&envelope.encode(), &identity_public)
+            .expect("seal");
+    let condition = connector_domain::derive_condition(
+        &connector_signer::giftwrap::derive_fulfillment(&shared_secret),
+    );
+    (
+        Prepare {
+            amount,
+            expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
+            execution_condition: condition,
+            destination: "g.example.app".to_string(),
+            data,
+        },
+        shared_secret,
+    )
+}
+
+/// Carries this channel to cumulative 50 000 on a payee journaling to
+/// `journal`, then drops that whole node -- the state a restarted payee
+/// replays from. A FLUSH (§3): the claim header with an empty ILP body.
+async fn journal_at_fifty_thousand(payer: &LocalSigner, journal: Arc<dyn Journal>) {
+    let peer = accepting(
+        payee_journaling_to(
+            payer,
+            priced_route(),
+            Arc::new(FakeAppClient::new()),
+            journal,
+        ),
+        bound_policy(),
+    );
+    let claim = sign_claim(payer, 1, 50_000);
+    let response = peer
+        .handle(request(
+            Some((PEER_ID, SECRET)),
+            Some(&claim_as_json(&claim, payer)),
+            Vec::new(),
+        ))
+        .await;
+    assert_eq!(
+        ack_on(&response),
+        Some(ClaimAckOutcome::Accepted),
+        "the pre-restart claim is what the journal records"
+    );
+}
+
+/// The bug: after a restart `ClaimBook` has replayed its journal and is at
+/// cumulative 50 000, while `AcceptedClaims` -- in-memory and per-process
+/// -- is empty. A claim at cumulative 50 001 is one unit of genuinely new
+/// money and cannot buy a packet priced at 25. Measured against the empty
+/// per-process record it would be credited with all 50 001 and buy it
+/// (issue #1104).
+#[tokio::test]
+async fn a_restart_does_not_credit_a_claim_with_the_amount_it_already_paid() {
+    let payer_signer = LocalSigner::generate("payer");
+    let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+    journal_at_fifty_thousand(&payer_signer, Arc::clone(&journal)).await;
+
+    // The restart: a second node over the same journal and nothing else.
+    let route = priced_route();
+    let app_client = serving_app(&route, b"free service");
+    let peer = accepting(
+        payee_journaling_to(
+            &payer_signer,
+            route,
+            Arc::clone(&app_client),
+            Arc::clone(&journal),
+        ),
+        bound_policy(),
+    );
+
+    let claim = sign_claim(&payer_signer, 2, 50_001); // advances 1, the price is 25
+    let (prepare, _) = sealed_prepare(25);
+    let response = peer
+        .handle(request(
+            Some((PEER_ID, SECRET)),
+            Some(&claim_as_json(&claim, &payer_signer)),
+            prepare.encode(),
+        ))
+        .await;
+
+    assert_eq!(
+        ack_on(&response),
+        Some(ClaimAckOutcome::Accepted),
+        "the claim itself is good -- its nonce and amount both advance the durable watermark, \
+         which is why the book's verdict cannot catch this on its own"
+    );
+    let reject = connector_domain::Reject::decode(&response.body)
+        .expect("a reject -- anything else means the app served this for free");
+    assert_eq!(reject.code.as_str(), "F06");
+    assert!(
+        response.headers.get(PAYMENT_REQUIRED_HEADER).is_some(),
+        "the x402 greeting rides it"
+    );
+    assert!(
+        app_client.deliveries().is_empty(),
+        "one unit of new money must not buy a packet priced at 25"
+    );
+}
+
+/// The other side of the same boundary: after the same restart, a claim
+/// that genuinely advances the durable watermark by the price is admitted
+/// and reaches the app. The fix must not make a restart refuse real money.
+#[tokio::test]
+async fn a_restart_still_admits_a_claim_that_genuinely_advances_by_the_price() {
+    let payer_signer = LocalSigner::generate("payer");
+    let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+    journal_at_fifty_thousand(&payer_signer, Arc::clone(&journal)).await;
+
+    let route = priced_route();
+    let response_body = b"served after the restart".to_vec();
+    let app_client = serving_app(&route, &response_body);
+    let peer = accepting(
+        payee_journaling_to(
+            &payer_signer,
+            route,
+            Arc::clone(&app_client),
+            Arc::clone(&journal),
+        ),
+        bound_policy(),
+    );
+
+    let claim = sign_claim(&payer_signer, 2, 50_025); // advances exactly the price
+    let (prepare, shared_secret) = sealed_prepare(25);
     let response = peer
         .handle(request(
             Some((PEER_ID, SECRET)),
