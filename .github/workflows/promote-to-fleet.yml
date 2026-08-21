@@ -77,7 +77,24 @@
 #      box's own committed `connector-rust.toml`. This is the connector-side
 #      half of the rule in ADR 0041 — the same failure that took the relay's
 #      swap maker down on 2026-08-16, checked before it can happen here.
-#   4. After the retag, fleet-health.yml probes both boxes and this run goes
+#   4. **Deploy ordering, when a release says one is needed** (ADR 0055). A
+#      release cut by release-connector.yml carries a machine-readable
+#      `config-change-required: true|false` line in its GitHub Release body.
+#      Where any release being crossed says `true`, this workflow refuses
+#      unless (a) the committed box configs actually changed across that same
+#      range, and (b) the operator names the `fleet-ops.yml config-apply` run
+#      that put them on the boxes. That is ADR 0041 rule 2 — "the committed
+#      box config is updated and applied FIRST, and the tag moves after" —
+#      turned from advice into a check. swap#134 happened precisely because
+#      that ordering lived only in a PR body, where nothing read it.
+#
+#      This does not duplicate check 3. Check 3 boots the candidate against
+#      the configs COMMITTED HERE and so proves image-fits-committed-config;
+#      it cannot see the bytes on the box, and the bytes on the box are what
+#      Watchtower will recreate against. Check 4 is the only one that covers
+#      that gap, and the only tool it has for it is a human attestation with
+#      a run URL attached, which is why it asks for one rather than a tickbox.
+#   5. After the retag, fleet-health.yml probes both boxes and this run goes
 #      red if they did not come back. A promotion that breaks the fleet
 #      reports as a failure, with the alert issue already open.
 #
@@ -85,6 +102,22 @@
 # Dispatch this workflow again naming the previous `rust-sha-` tag, with
 # `allow_rollback: true`. Every build ever published keeps its immutable tag,
 # so there is always something to name.
+#
+# Check 4 runs on a rollback too, over the range being UNDONE rather than the
+# range being carried. Rolling back across a release that needed a config
+# change means the config has to move back with it, in the mirror-image order
+# — the same trap fleet-ops.yml documents and docs/operators/fleet-release-
+# and-health.md restates ("if the rollback target predates a field the box's
+# committed config now sets, the config must be rolled back too").
+#
+# ── THIS WORKFLOW IS THE ONLY THING THAT MOVES `:rust-release` ──────────────
+# release-connector.yml (ADR 0055) automates build → handle → GitHub Release
+# and then CALLS this workflow rather than retagging itself. That is
+# deliberate and it is asserted by
+# `the_release_workflow_never_moves_the_fleet_tag_itself` in
+# crates/connector-bin/tests/fleet_release_gate.rs: a second mover would mean
+# a second copy of every check above, and the copy that is not exercised on
+# the ordinary path is the one that rots.
 
 name: promote-to-fleet
 
@@ -110,6 +143,41 @@ on:
         type: boolean
         required: false
         default: false
+      config_applied_run:
+        description: >-
+          URL or run id of the fleet-ops.yml `config-apply` that put the
+          committed box configs on the boxes. Required only when a release
+          being crossed says `config-change-required: true`; recorded in the
+          summary either way.
+        type: string
+        required: false
+        default: ''
+
+  # Called by release-connector.yml (ADR 0055). A release automates the
+  # labour around the promotion; it does not get its own copy of the
+  # promotion, so every check above runs identically whether a human
+  # dispatched this workflow directly or a release did.
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+      reason:
+        type: string
+        required: false
+        default: ''
+      allow_rollback:
+        type: boolean
+        required: false
+        default: false
+      skip_health_check:
+        type: boolean
+        required: false
+        default: false
+      config_applied_run:
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -149,6 +217,18 @@ jobs:
           # `rust-main` would reintroduce exactly the auto-on-green behaviour
           # this workflow exists to replace, one indirection further away.
           if ! echo "$TAG" | grep -Eq '^rust-sha-[0-9a-f]{7}$'; then
+            # The release handle alias (`rust-2026.08.21.1`, applied by
+            # release-connector.yml) IS immutable and would be safe to
+            # promote, but it is refused anyway: one accepted shape means one
+            # thing for the ancestry check to parse a commit out of, and the
+            # handle carries no commit. The GitHub Release for a handle names
+            # its `rust-sha-` tag in the body, so the answer is one click away
+            # rather than a puzzle -- say so instead of just failing.
+            if echo "$TAG" | grep -Eq '^rust-[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]+$'; then
+              echo "::error::'$TAG' is a release-handle alias, not a build tag."
+              echo "::error::Open the GitHub Release ${TAG#rust-} and promote the 'rust-sha-' tag its body names."
+              exit 1
+            fi
             echo "::error::'$TAG' is not an immutable build tag. Promote a 'rust-sha-<7 hex>' tag."
             echo "::error::Floating tags (rust-main, rust-release) must never be promoted — that is auto-on-green by another name."
             exit 1
@@ -224,6 +304,145 @@ jobs:
             echo "::error::That would roll the live fleet backwards. Re-dispatch with allow_rollback: true if that is what you mean."
             exit 1
           fi
+
+      # ── The deploy-ordering gate (ADR 0041 rule 2, ADR 0055) ──────────────
+      # ADR 0041 rule 2 says a config key with no safe default makes its
+      # release a BREAKING DEPLOY: "the committed box config is updated and
+      # applied first, and the tag moves after". Until now that sentence was
+      # advice. swap#134's own PR body carried the identical sentence about
+      # its own key — "needs one added key BEFORE the new image boots" — and
+      # the relay's maker crash-looped anyway, because a PR body is not a
+      # check and nobody was reading it at the moment the tag moved.
+      #
+      # release-connector.yml makes the claim machine-readable instead: every
+      # GitHub Release it cuts carries a `config-change-required: true|false`
+      # line. This step reads every release BEING CROSSED by this promotion
+      # and, if any of them says `true`, demands two things the claim implies:
+      #
+      #   (a) the committed box configs actually changed across the same
+      #       range. A release that says it needs a config change while
+      #       infra/linode-*/connector-rust.toml sat untouched is swap#134
+      #       exactly — the fix applied to the box and never committed. This
+      #       half is machine truth and needs no human.
+      #   (b) a `fleet-ops.yml config-apply` run is named. Nothing here can
+      #       see the bytes on the box: the boot gate below proves the image
+      #       fits the config committed HERE, and Watchtower will recreate
+      #       against whatever is on the box. A named run URL is the weakest
+      #       honest evidence for that gap, and it is deliberately a string
+      #       rather than a tickbox — it lands in the run summary as a trail
+      #       somebody can follow later.
+      #
+      # Direction matters. A forward promotion crosses (incumbent, candidate];
+      # a rollback UNDOES (candidate, incumbent] and needs the config moved
+      # back with it, so the same range logic runs with the endpoints swapped.
+      #
+      # A promotion with no incumbent, or of a build with no release, is not
+      # refused: rollback targets and hand-published `rust-sha-` builds predate
+      # this field and must stay promotable. That is a real hole and it is the
+      # bounded one — the boot gate below still runs on every promotion.
+      - name: A crossed release that requires a config change must have had it landed and applied
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE: ${{ steps.resolve.outputs.candidate }}
+          INCUMBENT_SHA: ${{ steps.resolve.outputs.incumbent_sha }}
+          CONFIG_APPLIED_RUN: ${{ inputs.config_applied_run }}
+        run: |
+          set -euo pipefail
+          SHORT="${CANDIDATE#rust-sha-}"
+
+          if [ -z "$INCUMBENT_SHA" ] || ! git cat-file -e "$INCUMBENT_SHA^{commit}" 2>/dev/null; then
+            echo "::warning::No comparable incumbent revision — no release range to read. Skipping the ordering gate."
+            exit 0
+          fi
+
+          if [ "${ROLLBACK:-0}" = "1" ]; then
+            FROM="$SHORT"; TO="$INCUMBENT_SHA"
+            echo "Rollback: reading the releases being UNDONE, ($FROM, $TO]."
+          else
+            FROM="$INCUMBENT_SHA"; TO="$SHORT"
+            echo "Forward: reading the releases being CARRIED, ($FROM, $TO]."
+          fi
+
+          RANGE=$(git rev-list "$FROM..$TO")
+          if [ -z "$RANGE" ]; then
+            echo "✓ No commits between the two builds — nothing to cross."
+            exit 0
+          fi
+
+          # `gh api`, not `gh release list`: that command's `--json` cannot
+          # return `targetCommitish` or `body` (only createdAt, isDraft,
+          # isLatest, isPrerelease, name, publishedAt, tagName), and both are
+          # needed here -- the commit to place the release in the range, and
+          # the body to read the declaration out of. One paginated call gets
+          # both for every release, instead of one `gh release view` per.
+          #
+          # The line test is exact after trimming CR and trailing blanks,
+          # matching what release-connector.yml writes verbatim. The two
+          # literals are held together by
+          # `the_release_body_and_the_promotion_gate_agree_on_the_ordering_field`
+          # in crates/connector-bin/tests/fleet_release_gate.rs, because a
+          # silent disagreement here reads as a PASS: the grep finds nothing
+          # and every promotion is waved through looking checked.
+          DECLARED=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '
+            .[]
+            | select(.draft | not)
+            | select(
+                ((.body // "")
+                 | split("\n")
+                 | map(sub("\r$"; "") | sub("[ \t]+$"; ""))
+                 | any(. == "config-change-required: true"))
+              )
+            | [.tag_name, .target_commitish] | @tsv')
+
+          DEMANDING=""
+          while IFS=$'\t' read -r RTAG RTARGET; do
+            [ -n "${RTAG:-}" ] || continue
+            # A release cut against a BRANCH name carries no commit we can
+            # place in the range. release-connector.yml always passes
+            # `--target <full sha>`; anything else is not one of ours.
+            case "$RTARGET" in
+              [0-9a-f]*) ;;
+              *) continue ;;
+            esac
+            [ "${#RTARGET}" -eq 40 ] || continue
+            printf '%s\n' "$RANGE" | grep -qx "$RTARGET" || continue
+
+            echo "  $RTAG ($RTARGET) — config-change-required: true, and inside the range"
+            DEMANDING="$DEMANDING $RTAG"
+          done <<EOF
+          $DECLARED
+          EOF
+
+          if [ -z "$DEMANDING" ]; then
+            echo "✓ No crossed release requires a config change."
+            exit 0
+          fi
+
+          echo "Releases demanding a config change:$DEMANDING"
+
+          CHANGED=$(git diff --name-only "$FROM" "$TO" -- \
+            infra/linode-relay/connector-rust.toml \
+            infra/linode-store/connector-rust.toml)
+          if [ -z "$CHANGED" ]; then
+            echo "::error::Release(s)$DEMANDING declare config-change-required: true, but neither box's"
+            echo "::error::committed connector-rust.toml changed between $FROM and $TO."
+            echo "::error::That is the 2026-08-16 shape: the config fix exists only on the box, or not at all."
+            echo "::error::Land it in infra/linode-relay/ and/or infra/linode-store/ first. See ADR 0041 rule 2."
+            exit 1
+          fi
+          echo "✓ Committed box config changed across the range:"
+          printf '    %s\n' $CHANGED
+
+          if [ -z "$CONFIG_APPLIED_RUN" ]; then
+            echo "::error::Release(s)$DEMANDING declare config-change-required: true and the committed"
+            echo "::error::box config did change — but no config_applied_run was given, so nothing says the"
+            echo "::error::BOXES have it. Watchtower recreates against the file on the box, not this repo."
+            echo "::error::Apply it, then re-dispatch naming the run:"
+            echo "::error::  gh workflow run fleet-ops.yml -f box=relay -f operation=config-apply -f apply=true"
+            echo "::error::  gh workflow run fleet-ops.yml -f box=ario  -f operation=config-apply -f apply=true"
+            exit 1
+          fi
+          echo "✓ Operator attests the config was applied: $CONFIG_APPLIED_RUN"
 
       # ── The config-compatibility gate (ADR 0041) ──────────────────────────
       # The box's `connector-rust.toml` is BIND-MOUNTED: it is not in the
@@ -318,6 +537,7 @@ jobs:
             echo "| Moving tag | \`:$MOVING_TAG\` |"
             echo "| Previous | \`${{ steps.resolve.outputs.incumbent_sha }}\` |"
             echo "| Rollback | \`${ROLLBACK:-0}\` |"
+            echo "| Config applied by | ${{ inputs.config_applied_run }} |"
             echo "| Reason | ${{ inputs.reason }} |"
             echo ""
             echo "Both boxes' label-scoped Watchtower recreates \`connector-rust\` and \`announce\` within ~60s."

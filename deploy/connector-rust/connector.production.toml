@@ -1,0 +1,223 @@
+# =============================================================================
+# connector-rust — PRODUCTION configuration skeleton (ADR 0056)
+# =============================================================================
+# ── READ THIS BEFORE ANYTHING ELSE ──────────────────────────────────────────
+# **This file does not describe a running node, and there is no production
+# node.** No machine, no mainnet contract, no key, no DNS name, no deploy.
+# Production is a NAMED, EMPTY tier: named so that the questions it raises can
+# be written down where they will be found, empty because none of them has
+# been answered.
+#
+# Every value below is a placeholder that FAILS TO LOAD on purpose. That is
+# the same pattern this directory's `connector.toml` uses (ADR 0009: the
+# connector either runs with a valid configuration or refuses to start and
+# says why), and here it is doing more work than documentation: a file that
+# loaded would be a file somebody could `docker run`, and this one must not be
+# runnable by accident. If you fill it in, you are not editing a template —
+# you are standing up a production node, and ADR 0056's open questions are
+# your checklist.
+#
+# ── WHY IT IS HERE AND NOT UNDER infra/ ─────────────────────────────────────
+# `infra/linode-relay/connector-rust.toml` and
+# `infra/linode-store/connector-rust.toml` are REAL, gate-checked box configs.
+# `promote-to-fleet.yml` boots the candidate image against both of them before
+# it will move `:rust-release` (ADR 0041), `fleet-health.yml`'s config-compat
+# job re-runs that on any PR touching them, and
+# `crates/connector-bin/tests/devnet_configs_load.rs` asserts over their
+# contents. A placeholder file in that directory has exactly two futures: it
+# breaks a gate, or somebody "fixes" it into something real. `deploy/` is
+# where this repository keeps recipes rather than deployments, so a skeleton
+# belongs here.
+#
+# ── WHAT CANNOT BE FILLED IN YET, AND WHY ───────────────────────────────────
+# Two of these are hard blockers, not omissions:
+#
+#   1. **There is no mainnet `TokenNetworkRegistry`.** `packages/contracts` has
+#      never been deployed to an EVM mainnet. `contract_address` below has no
+#      correct value to hold, and inventing one is not a smaller problem than
+#      leaving it invalid — a connector that boots against the wrong registry
+#      resolves `getTokenNetwork()` to the wrong channel contract and accepts
+#      claims that settle nowhere.
+#   2. **The Solana payment-channel program is devnet-only.** The deployed
+#      program id `2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip` exists on
+#      Solana devnet and nowhere else. A claim's signed domain binds the
+#      settlement program (ADR 0053), so a mainnet claim would have to name a
+#      mainnet program that does not exist, and a devnet program id under a
+#      mainnet RPC is a node that takes money for claims it can never redeem.
+#
+# Neither is a config problem. Both are deployments that have not happened,
+# and both are prerequisites of this tier existing at all.
+#
+# ── THE TIERS ───────────────────────────────────────────────────────────────
+#   local       docker-compose chain profiles + `local/` (issue #1099).
+#               Disposable, funded from genesis, no shared state.
+#   devnet      Two Linode boxes. Public testnets (Base Sepolia, Solana
+#               devnet), faucet-funded, `:rust-release` moved by a human
+#               dispatch (ADR 0041, ADR 0055).
+#   production  This file. Nothing else.
+#
+# `CLAUDE.md`'s Environments table is the short version of the same thing.
+# =============================================================================
+
+# ── Client edge ──────────────────────────────────────────────────────────────
+# The bind address for `POST /ilp` (docs/protocol/client-edge-spec.md). 0.0.0.0
+# so a container's published port reaches it.
+#
+# UNANSWERED FOR THIS TIER: the devnet publishes this port straight through
+# nginx on each box. A production node's exposure story — who may reach the
+# client edge, from where, behind what — has not been decided, and the answer
+# may well be that this binds loopback and something else fronts it. Note that
+# there is no separate peer port to reason about: a node that exposes a peer
+# carriage serves it on the paths the client edge already serves (BTP on
+# `GET /ilp/btp`, ILP-over-HTTP on `POST /ilp`), and role is decided by the
+# credential, never by the listener.
+client_edge_addr = "0.0.0.0:3000"
+
+# ── Durable claim state (issue #605) ─────────────────────────────────────────
+# Where the claim journals live. Their replay before serving is what makes a
+# replay watermark survive a restart; without one, every channel's watermark
+# resets to "no claim ever seen" and a client is handed every claim it already
+# spent back as free service.
+#
+# In a container this MUST be a mounted volume, not a path in the writable
+# layer — a watermark that dies with the container is the same defect one
+# indirection down. The image runs as uid 10001.
+#
+# UNANSWERED FOR THIS TIER: on devnet this is a Docker named volume on a box
+# nobody backs up, which is survivable because devnet money is faucet money.
+# A production node's journal is the record of what it has been paid. Its
+# durability, its backup and its restore rehearsal are the first three things
+# this tier needs and none of them exists.
+state_dir = "/app/state"
+
+# ── Signer (ADR 0012) ────────────────────────────────────────────────────────
+# A location, never a key. `key_file` holds 32 raw bytes or 64 hex characters
+# encoding a secp256k1 secret key. The connector holds a SIGNER, not a wallet:
+# there is no mnemonic recovery, no seed management and no wallet database, and
+# none may be reintroduced here.
+#
+# The path below is deliberately not a path any deployment uses, so a stray
+# `docker run` finds nothing to read and stops with
+# `failed to read signer key_file`.
+#
+# UNANSWERED FOR THIS TIER: devnet keys are `openssl rand -hex 32` on the box,
+# generated once by hand and never rotated. That is not a production answer.
+# Custody, generation ceremony, rotation and revocation are all open, and they
+# are the questions this tier cannot be stood up without.
+[signer]
+key_file = "/nonexistent/production-signer-key-does-not-exist"
+
+# ── Routes ───────────────────────────────────────────────────────────────────
+# Static, explicit and durable (ADR 0006). `price` is required on every
+# terminated route (issue #520) and is never silently free — write `price = 0`
+# if free was deliberate. Denominated in the smallest unit of whatever this
+# node settles in (ADR 0010).
+#
+# The prefix below is `g.example.…` rather than anything under `g.toon.`: a
+# production address space has not been allocated, and borrowing the devnet's
+# prefixes would produce a node claiming to terminate addresses the devnet
+# already answers for.
+#
+# `handler_url` must name the app's real path, not its origin. A bare origin
+# does NOT come back as a reject: under ADR 0020 a non-2xx from the app is a
+# real answer that consumed real work, so it rides home on a FULFILL carrying
+# `status: 404` and the payer is charged in full for nothing. That is the
+# devnet's #492, and it fails silently rather than loudly.
+[[routes]]
+prefix = "g.example.production.app"
+handler_url = "http://REPLACE-ME-no-production-app-exists:0/REPLACE-ME"
+price = 0
+
+# ── Operator surface (ADR 0008) ──────────────────────────────────────────────
+# Reads (peers, routes, channels, claims, identity, the write audit log and
+# `GET /metrics`) need the bearer token and nothing else. Writes (`POST
+# /packets`) need an RFC 9421 signature from a key on the allowlist and nothing
+# else — a shared secret is NEVER sufficient to move value.
+#
+# Both placeholders below are invalid and this file will not load until they
+# are replaced: the token is the `CHANGE-ME-` literal, and the write key is not
+# 64 hex characters.
+#
+# NOTE THE FILE FORMS. Any config that is committed must use `bearer_token_file`
+# and `write_keys_file` instead of the literals (issue #1003) — every config in
+# this repository is public, and a literal in one is a credential in a public
+# repository. Setting both forms for the same setting is refused at load:
+# exactly one of them says where the value comes from. The literals appear here
+# only because this file is a skeleton that will never hold a real value; a
+# production config that is committed anywhere must not copy that choice.
+#
+#   bearer_token_file = "/app/data/operator-bearer-token"
+#   write_keys_file   = "/app/data/operator-write-keys"
+#
+# UNANSWERED FOR THIS TIER: who holds the write key, and what the audit trail
+# of a production write is answerable to.
+[operator]
+bearer_token = "CHANGE-ME-there-is-no-production-operator-token"
+write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-NO-PRODUCTION-KEY-EXISTS"]
+
+# ── Settlement: EVM ──────────────────────────────────────────────────────────
+# BLOCKED. See the header: `packages/contracts` has never been deployed to an
+# EVM mainnet, so `contract_address` — the `TokenNetworkRegistry` this node
+# resolves every channel through — has no correct value in existence.
+#
+# `decimals` is checked against the token's own on-chain `decimals()` at
+# startup and a disagreement refuses the boot (#564), so a stale value here is
+# a loud failure rather than a mispriced route. That check is one of the few
+# things below that would work unchanged in production.
+#
+# Every node that might ever accept a given claim must agree on WHICH
+# deployment it resolves against — a claim resolves against one, and one only.
+# On devnet that agreement is why both boxes carry byte-identical settlement
+# blocks. Production would need the same agreement, over contracts that do not
+# yet exist, with whatever set of nodes production turns out to mean.
+#
+# The placeholders are not `0x`-prefixed hex and will not parse as addresses.
+[settlement.evm]
+rpc_url = "REPLACE-ME-no-mainnet-rpc-chosen"
+contract_address = "REPLACE-ME-NO-MAINNET-TOKENNETWORKREGISTRY-IS-DEPLOYED"
+token_address = "REPLACE-ME-no-mainnet-token-chosen"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "/nonexistent/production-evm-settlement-key-does-not-exist"
+
+# ── Settlement: Solana ───────────────────────────────────────────────────────
+# BLOCKED, and more sharply than the EVM side.
+#
+# The payment-channel program in `packages/solana-program` is deployed at
+# `2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip` on **Solana devnet** and
+# nowhere else. ADR 0053 binds the settlement program into a Solana claim's
+# signed message, so the program id is not a deployment detail a node can be
+# vague about: it is part of what the counterparty signed. Pointing this
+# section at a mainnet RPC while naming the devnet program id produces a node
+# that accepts claims it can never redeem — it takes the money and has no
+# on-chain counterparty to settle against.
+#
+# Mina is not a settlement chain for this binary and no section for it belongs
+# here at any tier (ADR 0002).
+[settlement.solana]
+rpc_url = "REPLACE-ME-no-mainnet-rpc-chosen"
+program_id = "REPLACE-ME-NO-MAINNET-PAYMENT-CHANNEL-PROGRAM-IS-DEPLOYED"
+token_address = "REPLACE-ME-no-mainnet-mint-chosen"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "/nonexistent/production-solana-settlement-key-does-not-exist"
+
+# ── Announce ─────────────────────────────────────────────────────────────────
+# Deliberately absent, and not by oversight. ADR 0046 removed the kind:10032
+# announce: it assumes a relay, and a connector needs none. Both devnet boxes
+# still carry an `[announce]` block because they front a devnet that has one;
+# a production node starts with no such assumption, and this skeleton does not
+# hand it one for free.
+#
+# `[[peers]]`, `[[peer_channels]]`, `[[pay_channels]]` and `[[client_channels]]`
+# are absent for the same reason: a peering, and a channel, are relationships
+# with a counterparty. There is no production counterparty. See this
+# directory's `connector.toml` for the fully commented shape of each, and
+# docs/protocol/peer-carriage-spec.md for what establishing one requires.
+#
+# `RawConfig` is `deny_unknown_fields` (ADR 0009). A key removed from the
+# binary is parsed in order to be rejected BY NAME, never silently ignored —
+# which is the other half of why the box config and the image are a matched
+# pair, and why ADR 0041 governs the order they change in.
