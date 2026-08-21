@@ -221,6 +221,13 @@ jobs:
           echo "Release handle: $HANDLE  (commit $SHORT)"
 
       - name: A required config change must be committed and attested
+        env:
+          # Through `env`, not interpolated into the script: an operator-typed
+          # string reaching a `run:` body verbatim is a quoting break waiting
+          # to happen, and a confusing one -- the run fails inside a step whose
+          # whole job is to fail informatively.
+          CONFIG_CHANGE: ${{ inputs.config_change_required }}
+          APPLIED_RUN: ${{ inputs.config_applied_run }}
         run: |
           set -euo pipefail
           # Checked here as well as in promote-to-fleet.yml, and the
@@ -229,11 +236,11 @@ jobs:
           # the build or twelve minutes after it. promote-to-fleet.yml's copy
           # is the one that binds, because a promotion can also be dispatched
           # without ever passing through this workflow.
-          if [ '${{ inputs.config_change_required }}' != 'true' ]; then
+          if [ "$CONFIG_CHANGE" != 'true' ]; then
             echo "config-change-required: false — nothing to check."
             exit 0
           fi
-          if [ -z '${{ inputs.config_applied_run }}' ]; then
+          if [ -z "$APPLIED_RUN" ]; then
             echo "::error::config_change_required is ticked but config_applied_run is empty."
             echo "::error::ADR 0041 rule 2: the committed box config is updated and APPLIED first,"
             echo "::error::and the tag moves after. Land the config, then:"
@@ -242,7 +249,7 @@ jobs:
             echo "::error::then re-dispatch this workflow naming that run."
             exit 1
           fi
-          echo "✓ config change attested as applied: ${{ inputs.config_applied_run }}"
+          echo "✓ config change attested as applied: $APPLIED_RUN"
 
   # ── 2. The build ──────────────────────────────────────────────────────────
   # The SAME workflow a green merge runs. A release does not get its own
