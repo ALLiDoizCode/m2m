@@ -7,6 +7,26 @@ and an authenticated `GET /metrics`.
 
 All commands below run from the repository root.
 
+## Two templates live here
+
+| File                        | For                                                                                                                                                                    |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `connector.toml`            | **This walkthrough.** Fill it in and run a node. Its placeholders are invalid on purpose so a half-edited file refuses to start rather than starting wrong (ADR 0009). |
+| `connector.production.toml` | **A skeleton for a tier that does not exist.** Do not fill it in. It documents what standing production up would require, and every value in it is invalid on purpose. |
+
+The second one needs a word of warning, because it looks like the first. There
+is no production tier: no machine, no mainnet contract, no key, no deploy
+([ADR 0056](../../docs/adr/0056-production-is-a-named-empty-tier.md)). Two of
+its settings cannot be filled in even in principle — `packages/contracts` has
+never been deployed to an EVM mainnet, so there is no `TokenNetworkRegistry`
+to name, and the Solana payment-channel program
+(`2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip`) exists on devnet only, which
+matters because ADR 0053 binds the settlement program into a claim's signed
+message. Copying a devnet address across to "make it valid" produces a node
+that boots, looks healthy, and cannot redeem a claim.
+`crates/connector-bin/tests/production_skeleton_is_inert.rs` fails the build if
+that happens.
+
 ## Pulling the published image
 
 `.github/workflows/publish-connector-rust-image.yml` publishes this image to
@@ -27,6 +47,7 @@ Tags:
 | `rust-sha-<short-sha>` | Immutable — pins the exact commit the binary was built from. Use this for any deployment that needs a reproducible pin (e.g. #490's devnet overlay).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `rust-main`            | Floating — always the most recent build off `main`. Convenience only; do not pin a deployment to it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `rust-release`         | Floating, and **not a build output** — it is a PROMOTION tag. Both devnet boxes' label-scoped Watchtower follows it and recreates `connector-rust` + `announce` within ~60s of it moving, so it moves only by an explicit `promote-to-fleet.yml` dispatch that retags a chosen `rust-sha-` after checking it still boots both boxes' committed `connector-rust.toml`. It is deliberately **not** pushed by the publish workflow: #990 made it move on every green `main`, which made every merge an unvalidated deploy to the live client edge on two machines and contradicted the design of record in toon-meta#403 / #989. See [ADR 0041](../../docs/adr/0041-a-moving-tag-carries-the-fleets-committed-config-or-it-does-not-move.md) and [`docs/operators/fleet-release-and-health.md`](../../docs/operators/fleet-release-and-health.md). |
+| `rust-2026.08.21.1`    | Immutable — a **release handle** alias for the `rust-sha-` digest a release was cut from, applied by [`release-connector.yml`](../../.github/workflows/release-connector.yml) and never moved. UTC date, then that day's ordinal. Deliberately not semver (see below), and deliberately **not** promotable: `promote-to-fleet.yml` takes a `rust-sha-` tag, because the ancestry check needs a commit and a handle carries none. The GitHub Release of the same name says which `rust-sha-` to promote. See [ADR 0055](../../docs/adr/0055-a-release-is-one-dispatch-and-the-ordering-rides-as-data.md).                                                                                                                                                                                                                                        |
 
 There is no semver tag series here: no crate under `crates/` has a release
 process yet, and inventing one for the image alone would claim a stability
@@ -35,6 +56,16 @@ contract the binary hasn't earned. Compare
 describes the semver/cosign contract the old TypeScript image had — that
 image is no longer published (4.0.0), and this one does not (yet) carry an
 equivalent contract.
+
+The release handle is what a version number would otherwise have been, minus
+the promise: `2026.08.21.1` says when this state of the world was cut and in
+what order, and nothing about compatibility. The one fact a MAJOR bump is
+usually overloaded to carry — "there is a deploy ordering here" — rides as a
+`config-change-required: true|false` field on the release instead, which
+`promote-to-fleet.yml` reads and refuses on. An integer cannot be read by a
+workflow; a field can. [ADR 0055](../../docs/adr/0055-a-release-is-one-dispatch-and-the-ordering-rides-as-data.md)
+is the record; `package.json`'s `"version": "3.3.0"` is TypeScript-era residue
+belonging to `packages/`, not this binary's version.
 
 ```bash
 docker pull ghcr.io/toon-protocol/connector:rust-sha-<short-sha>
@@ -51,6 +82,35 @@ deploy/connector-rust/local-stack` if you need to read what it did.
 
 Skip to [step 6](#6-run-it) to run it — the config/key setup in steps 1-4
 below is identical whether you built the image locally or pulled it.
+
+### Cutting a release
+
+One dispatch, and everything after it is automated — build, handle, GitHub
+Release, the config-boot gate, the `:rust-release` move, the fleet probe:
+
+```bash
+gh workflow run release-connector.yml \
+  -f reason="claim-state fix, verified on the relay"
+```
+
+It is `workflow_dispatch` **only**, and must stay that way. A green merge to
+`main` does not reach the boxes and that is deliberate: the connector is the
+client edge on both machines and `announce` is the same image, so one bad
+digest takes the whole devnet's paid-write path dark at once (ADR 0041
+Decision 3). Auto-on-green for this image shipped once (#990) and was
+reverted.
+
+`config_change_required` has **no default** — its first and preselected option
+is a `-- select --` sentinel the workflow refuses by name, so the ordering
+question has to be answered rather than skipped. Answer `yes` only when the
+build cannot boot the committed box configs as they stand (a new required key,
+a renamed field, a narrowed type); a price or endpoint edit the running binary
+also accepts is `no`. On `yes`, land the config here, apply it with
+`fleet-ops.yml config-apply`, and pass that run's URL as `config_applied_run` —
+one per box that changed. The promotion **verifies** it: right workflow, green
+conclusion, `operation=config-apply`, `apply=true` (a dry run is refused), the
+right box, and started after the config's commit.
+`docs/operators/fleet-release-and-health.md` is the procedure.
 
 ## 1. Generate a signer key
 

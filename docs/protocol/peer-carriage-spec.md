@@ -176,6 +176,13 @@ on-chain channel), and `client_edge_url`: that hop's own `POST /ilp` endpoint, a
 signing key is `[settlement.evm]`'s and no second key exists (ADR 0030). The table is additive: a
 peering with no row is the "no such config" case above, byte for byte.
 
+The hop being asked MUST answer that ask out of the book that judges the channel — for a channel it
+holds as a `[[peer_channels]]` row, its **peer** book, not its client edge's (`client-edge-spec.md`
+§1.10, issue #1102). One channel in both roles with one hop is the shape this table is for, and a hop
+that answers out of a book no peer claim reaches reports nonce 0 forever: the payer then re-signs one
+cumulative amount at a fresh nonce on every packet, each claim is accepted and advances nothing, and
+a priced termination refuses everything after the first crossing with `F06`, `advanced = 0`.
+
 #### Peer role is not a prerequisite for paid carriage
 
 Stated here because #863 was originally filed while standing up an `apex-relay` peering, and implied

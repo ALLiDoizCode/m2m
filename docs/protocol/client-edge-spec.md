@@ -1098,6 +1098,18 @@ endpoint reports, not a hypothetical one.
   available/nonce figures beside it remain exact across a restart regardless, since those still
   come from the durable watermark.
 
+**Which book answers (issue #1102).** A connector keeps two inbound books — this edge's own, and the
+peer semantics's `ClaimBook` — and the watermark reported above is the one belonging to the book that
+actually judges claims on that channel. Which book that is is a property of the **channel**, never of
+who is asking: a channel this node holds as a `[[peer_channels]]` row is judged by the peer book and
+MUST be reported from it; every other channel is this edge's and is reported from here. The two sets
+cannot overlap, because a channel named in both `[[peer_channels]]` and `[[client_channels]]` is a
+load-time refusal. This matters because a `[[pay_channels]]` payer (ADR 0042 item 2) asks this endpoint
+about a channel it holds with its next hop in both roles at once, and signs its next claim from the
+answer: answered out of the wrong book, it re-signs one cumulative amount at a fresh nonce forever.
+`lastClaimTime` is the one field that does not follow — the peer book records no timestamp for an
+accepted claim, so a peer channel reports `null` there, within the best-effort licence above.
+
 **What a failed entry reveals.** `ok: false` carries only `error`, one of:
 
 - `"expired"` — `expires` is not in the future. A fact about the request, safe to report exactly.

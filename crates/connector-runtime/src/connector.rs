@@ -11,7 +11,7 @@ use connector_domain::x402::X402PaymentRequired;
 use connector_domain::{
     amount_after_fee, condition_is_present, fulfillment_matches_condition, is_expired,
     is_valid_ilp_address, select_route, EnvelopeRequest, Fulfill, PacketResponse, Prepare, Reject,
-    RejectCode,
+    RejectCode, Watermark,
 };
 use connector_settlement::{ChannelId, Claim, SettlementBackend, SettlementError};
 use connector_signer::giftwrap::{derive_fulfillment, open_request, seal_response};
@@ -1324,6 +1324,46 @@ impl Connector {
         if !recognized.contains(channel_id) {
             recognized.insert(channel_id.to_string());
         }
+    }
+
+    /// Where a channel this node holds as a **peer** channel stands in the
+    /// book that actually judges its claims -- [`crate::ClaimBook`]'s own
+    /// inbound watermark -- or `None` when this node holds no peer channel
+    /// by that name.
+    ///
+    /// A connector keeps two inbound books (`crate::outbound_client`'s
+    /// header has the table), and which one is the authority for a channel
+    /// is a property of the **channel**, never of who is asking: a claim
+    /// naming a `[[peer_channels]]` row is judged here, and
+    /// `Config::load` refuses a channel that is also a `[[client_channels]]`
+    /// row (`ConfigError::ChannelInBothNamespaces`), so at most one book
+    /// can ever be the authority. That is what lets
+    /// `POST /ilp/claim-state` answer a payer correctly without knowing
+    /// which role the payer holds.
+    ///
+    /// `Some(Watermark { nonce: 0, cumulative_amount: 0 })` for a
+    /// configured peer channel nothing has claimed on yet -- deliberately
+    /// not `None`, which would send the caller back to the wrong book for
+    /// exactly the first claim on a channel.
+    ///
+    /// Covers both chains: an EVM `channel_id` (`0x` + 64 hex) and a
+    /// Solana `channel_account` (base58) are drawn from disjoint spellings,
+    /// so one lookup cannot answer for the other chain by accident.
+    #[must_use]
+    pub fn peer_channel_watermark(&self, channel_id: &str) -> Option<Watermark> {
+        if !self.claims.has_verification_key(channel_id)
+            && !self.claims.has_solana_channel(channel_id)
+        {
+            return None;
+        }
+        Some(
+            self.claims
+                .inbound_watermark(channel_id)
+                .unwrap_or(Watermark {
+                    nonce: 0,
+                    cumulative_amount: 0,
+                }),
+        )
     }
 
     /// Whether `channel_id` is a channel this connector recognizes: either

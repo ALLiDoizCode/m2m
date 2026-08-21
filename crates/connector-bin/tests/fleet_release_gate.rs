@@ -1,6 +1,9 @@
-//! Guards the fleet's release gate: the promotion tag, the config-compatibility
-//! rule, and the health probe's coverage. [ADR
-//! 0041](../../../docs/adr/0041-a-moving-tag-carries-the-fleets-committed-config-or-it-does-not-move.md).
+//! Guards the fleet's release gate: the release dispatch, the promotion tag,
+//! the config-compatibility rule, the deploy-ordering rule, and the health
+//! probe's coverage. [ADR
+//! 0041](../../../docs/adr/0041-a-moving-tag-carries-the-fleets-committed-config-or-it-does-not-move.md)
+//! and [ADR
+//! 0055](../../../docs/adr/0055-a-release-is-one-dispatch-and-the-ordering-rides-as-data.md).
 //!
 //! Deliberately a SEPARATE harness from `devnet_configs_load.rs` rather than
 //! more cases appended to it. That file asserts what the committed *overlays*
@@ -10,14 +13,21 @@
 //! reconciliation of the overlays and this gate can land independently
 //! without either one's assertions rewriting the other's.
 //!
-//! Every case here is a regression test for something that actually happened
-//! on 2026-08-16, and each one names it.
+//! Most cases here are regression tests for something that actually happened
+//! on 2026-08-16, and each one names it. The cases added with ADR 0055 are the
+//! exception and are honest about it: they guard a shape that has not failed
+//! yet, because the shape they guard — a workflow that builds, versions,
+//! publishes and promotes in one run — is one trigger away from being the
+//! auto-on-green connector#990 already caused once, and the trigger would look
+//! like a convenience rather than a reversal.
 
 use std::collections::BTreeSet;
 
 const PUBLISH_CONNECTOR_WORKFLOW: &str =
     include_str!("../../../.github/workflows/publish-connector-rust-image.yml");
 const PROMOTE_WORKFLOW: &str = include_str!("../../../.github/workflows/promote-to-fleet.yml");
+const RELEASE_WORKFLOW: &str = include_str!("../../../.github/workflows/release-connector.yml");
+const FLEET_OPS_WORKFLOW: &str = include_str!("../../../.github/workflows/fleet-ops.yml");
 const FLEET_HEALTH_WORKFLOW: &str = include_str!("../../../.github/workflows/fleet-health.yml");
 const RELAY_SWAP_CONFIG: &str = include_str!("../../../infra/linode-relay/swap.config.json");
 const RELAY_SWAP_OVERLAY: &str =
@@ -80,6 +90,472 @@ fn the_build_workflow_publishes_candidates_and_never_moves_the_promotion_tag() {
         "publish-connector-rust-image.yml no longer publishes an immutable \
          `rust-sha-` tag. promote-to-fleet.yml can only promote one of those, \
          and it is also the only thing a rollback can name. Tags found: {tags:?}"
+    );
+}
+
+/// The top-level `on:` keys of a workflow, by indentation, ignoring comments.
+/// The workflows here discuss their triggers at length in prose, so a test
+/// keyed on the word `push` alone would be asserting a paragraph.
+fn workflow_triggers(raw: &str) -> BTreeSet<String> {
+    let mut triggers = BTreeSet::new();
+    let mut inside = false;
+    for line in raw.lines() {
+        if line.trim_start().starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        if !inside {
+            inside = line == "on:";
+            continue;
+        }
+        // Any further line at column 0 ends the block.
+        if !line.starts_with(' ') {
+            break;
+        }
+        let trimmed = line.trim_start();
+        let indent = line.len() - trimmed.len();
+        if indent == 2 {
+            if let Some(key) = trimmed.split(':').next() {
+                triggers.insert(key.to_string());
+            }
+        }
+    }
+    triggers
+}
+
+/// THE regression test for ADR 0055's one hard constraint, which is the
+/// second half of one ADR 0041 Decision 3 already states: a release is a
+/// human act, and everything after it is automated. Not the act itself.
+///
+/// `release-connector.yml` builds, versions, publishes a GitHub Release and
+/// then promotes — which is to say it is one `workflow_run:` away from being
+/// auto-on-green with four extra steps in the middle. connector#990 was the
+/// one-line version of that mistake and it reached both live devnet boxes
+/// within ~60s of every merge. The reasoning has not changed since:
+/// `connector-rust` is the client edge on BOTH boxes and `announce` is the
+/// same image, so one bad digest takes the whole devnet's paid-write path
+/// dark on two machines at once.
+///
+/// A `pull_request` trigger would be no better than a `push` one here — this
+/// workflow ends in a move of the tag the fleet follows.
+#[test]
+fn the_release_workflow_is_dispatch_only() {
+    let triggers = workflow_triggers(RELEASE_WORKFLOW);
+    let expected: BTreeSet<String> = ["workflow_dispatch".to_string()].into_iter().collect();
+
+    assert_eq!(
+        triggers, expected,
+        "release-connector.yml is triggered by something other than a human \
+         dispatch. It ends in a promotion of `:rust-release`, which both \
+         devnet boxes' Watchtower follows, so ANY automatic trigger here is \
+         auto-on-green for the one image ADR 0041 Decision 3 holds back — the \
+         connector is not auto-deployed at all. That shipped once \
+         (connector#990) and was reverted."
+    );
+}
+
+/// The release workflow must not grow its own copy of the promotion.
+///
+/// Every check standing between a build and the live fleet lives in
+/// promote-to-fleet.yml: the immutable-tag shape, on-main provenance, the
+/// no-silent-rollback ancestry, the boot against both boxes' committed
+/// configs, and the deploy-ordering gate. A retag issued from
+/// release-connector.yml would route around all five, and a second copy of
+/// them would be the copy that is not exercised on the ordinary path — which
+/// is the one that rots. So there is exactly one mover and the release
+/// delegates to it.
+#[test]
+fn the_release_workflow_never_moves_the_fleet_tag_itself() {
+    assert!(
+        !RELEASE_WORKFLOW.contains("MOVING_TAG"),
+        "release-connector.yml knows the name of the moving tag. It has no \
+         business with it: it hands a `rust-sha-` tag to promote-to-fleet.yml, \
+         which owns `:rust-release` and every check in front of moving it."
+    );
+
+    // The workflow DOES retag — it aliases the built manifest under its
+    // release handle (`rust-2026.08.21.1`), which is immutable and follows
+    // nothing. What it must never do is point a retag at the tag the fleet
+    // follows. Prose is not the subject here: the header and the `promote`
+    // input's own description both say `:rust-release` out loud, deliberately,
+    // and a test that banned the string would be asserting a paragraph.
+    for (i, line) in RELEASE_WORKFLOW.lines().enumerate() {
+        let retag_shaped =
+            line.contains("imagetools") || line.contains("-t ") || line.contains("docker push");
+        assert!(
+            !(line.contains("rust-release") && retag_shaped),
+            "release-connector.yml line {} retags `rust-release`:\n  {}\n\
+             `:rust-release` is moved by promote-to-fleet.yml and by nothing \
+             else — that is where the immutable-tag shape, the on-main \
+             provenance, the no-silent-rollback ancestry, the boot against \
+             both boxes' committed configs and the deploy-ordering gate all \
+             live. A retag here routes around all five.",
+            i + 1,
+            line.trim()
+        );
+    }
+    assert!(
+        RELEASE_WORKFLOW.contains("uses: ./.github/workflows/promote-to-fleet.yml"),
+        "release-connector.yml no longer calls promote-to-fleet.yml. A release \
+         that does not end in the gated promotion either does not deploy, or \
+         deploys past the gate. If holding the fleet back was the intent, that \
+         is the `promote: false` input, not a deleted job."
+    );
+    assert!(
+        PROMOTE_WORKFLOW.contains("workflow_call:"),
+        "promote-to-fleet.yml is no longer callable, so release-connector.yml \
+         cannot delegate to it. Being callable is what keeps ONE thing moving \
+         `:rust-release` across both the direct-dispatch and the release path."
+    );
+}
+
+/// One build definition, shared with green main.
+///
+/// A release that ran its own `docker build` would be a second place to keep
+/// in step with the Dockerfile, the amd64-only decision (#487's recorded
+/// reversal) and the ADR 0009 refuses-without-a-config assertion — and it
+/// would be the copy that runs rarely, so its drift would surface on a
+/// release day, which is the worst available day for it.
+#[test]
+fn a_release_builds_through_the_same_workflow_a_green_main_does() {
+    assert!(
+        PUBLISH_CONNECTOR_WORKFLOW.contains("workflow_call:"),
+        "publish-connector-rust-image.yml is no longer callable. \
+         release-connector.yml calls it so a release and a green merge produce \
+         a build from one definition."
+    );
+    assert!(
+        RELEASE_WORKFLOW.contains("uses: ./.github/workflows/publish-connector-rust-image.yml"),
+        "release-connector.yml no longer builds through \
+         publish-connector-rust-image.yml. If it grew its own build step there \
+         are now two build definitions, and only one of them runs on an \
+         ordinary day."
+    );
+    assert!(
+        !RELEASE_WORKFLOW.contains("docker/build-push-action"),
+        "release-connector.yml builds an image itself. It must call \
+         publish-connector-rust-image.yml instead — see both files' headers \
+         and ADR 0055."
+    );
+}
+
+/// The machine-readable field the release writes and the promotion reads.
+///
+/// Same class of assertion as
+/// [`the_config_compat_gate_reproduces_the_makers_committed_service_environment`]
+/// below, and it exists for the same reason: two files describing one fact in
+/// two places drift, and this drift reads as a PASS. Rename or reformat the
+/// line in release-connector.yml and promote-to-fleet.yml greps for something
+/// no release carries, finds nothing, and waves every promotion through while
+/// reporting that it checked.
+const CONFIG_CHANGE_FIELD: &str = "config-change-required";
+
+#[test]
+fn the_release_body_and_the_promotion_gate_agree_on_the_ordering_field() {
+    assert!(
+        RELEASE_WORKFLOW.contains(&format!("{CONFIG_CHANGE_FIELD}: ${{CONFIG_CHANGE}}")),
+        "release-connector.yml no longer writes a `{CONFIG_CHANGE_FIELD}:` \
+         line into the release body. That line is ADR 0041 rule 2 in \
+         machine-readable form — the ordering swap#134 recorded only in a PR \
+         body, where nothing read it — and promote-to-fleet.yml greps for it."
+    );
+    assert!(
+        PROMOTE_WORKFLOW.contains(&format!("any(. == \"{CONFIG_CHANGE_FIELD}: true\")")),
+        "promote-to-fleet.yml no longer tests release bodies for a \
+         `{CONFIG_CHANGE_FIELD}: true` line. A gate that reads nothing passes \
+         everything, and it does so while reporting green — worse than no \
+         gate, because somebody is relying on it. Note the shape it looks for \
+         is an EXACT line after trimming CR and trailing blanks, which is what \
+         release-connector.yml writes; if you loosen one side, loosen both."
+    );
+}
+
+/// The refusal itself, both halves.
+///
+/// Declaring `config-change-required: true` obliges two things and neither is
+/// optional:
+///
+/// * the committed box configs actually changed across the range being
+///   crossed — otherwise the release claims a config change that exists only
+///   on a box, or nowhere. That is the 2026-08-16 shape exactly: swap#134's
+///   `tokenNetworkAddress` fix was hand-applied to the relay and never
+///   committed, so a redeploy from the tree would have reproduced the outage.
+/// * a `fleet-ops.yml config-apply` run is named. Nothing in CI can see the
+///   bytes on the box, and the bytes on the box are what Watchtower recreates
+///   against. The boot gate proves image-fits-COMMITTED-config and stops
+///   there; this is the only thing covering the rest of the distance.
+#[test]
+fn promotion_refuses_a_declared_config_change_that_was_not_landed_and_applied() {
+    assert!(
+        PROMOTE_WORKFLOW.contains("git diff --name-only"),
+        "promote-to-fleet.yml no longer checks that the committed box configs \
+         changed across the range a config-requiring release covers. Without \
+         it a release can declare the fleet needs a config change while \
+         infra/linode-*/connector-rust.toml sits untouched — the 2026-08-16 \
+         outage, where the fix lived only on the box."
+    );
+    assert!(
+        PROMOTE_WORKFLOW.contains("config_applied_run"),
+        "promote-to-fleet.yml no longer takes or checks `config_applied_run`. \
+         The boot gate proves the image fits the config COMMITTED HERE; it \
+         cannot see the box, and Watchtower recreates against the box. Naming \
+         the fleet-ops run that applied it is the only evidence available for \
+         that gap."
+    );
+    assert!(
+        PROMOTE_WORKFLOW.contains("operation=config-apply"),
+        "promote-to-fleet.yml's config-ordering refusal no longer prints the \
+         fleet-ops.yml command that resolves it. An error naming the rule but \
+         not the remedy is how a gate gets routed around."
+    );
+}
+
+/// The lines of a `workflow_dispatch` input's own block, by indentation.
+fn input_block(raw: &str, name: &str) -> String {
+    let needle = format!("      {name}:");
+    let Some(start) = raw.find(&needle) else {
+        panic!("no `{name}` input found — this test is asserting over a shape that moved");
+    };
+    let mut out = String::new();
+    for (i, line) in raw[start..].lines().enumerate() {
+        if i > 0 && !line.trim().is_empty() {
+            let indent = line.len() - line.trim_start().len();
+            if indent <= 6 {
+                break;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Fail-open on the ordering question is the exact shape of the 2026-08-16
+/// outage: nobody decided the ordering did not matter, nobody was even asked.
+///
+/// `config_change_required` was a `type: boolean` defaulting to `false`, so a
+/// forgetful operator silently got the old behaviour. A checkbox cannot be
+/// tri-state; a `choice` can, because GitHub always preselects the FIRST
+/// option — so the first option is a sentinel the workflow refuses by name,
+/// and an absent answer becomes indistinguishable from a wrong one.
+///
+/// The refusal has to be in `version`, before `build`, or a release that will
+/// be refused still burns ten minutes of runner first.
+#[test]
+fn the_release_workflow_refuses_an_unanswered_ordering_question() {
+    let block = input_block(RELEASE_WORKFLOW, "config_change_required");
+
+    assert!(
+        block.contains("type: choice"),
+        "config_change_required is not a `choice`. A `boolean` cannot express \
+         \"not answered\" — it arrives as `false`, which is the fail-open the \
+         sentinel exists to remove. Block:\n{block}"
+    );
+    assert!(
+        !block.contains("type: boolean"),
+        "config_change_required is a boolean again. GitHub renders it as a \
+         pre-ticked-or-unticked box, so an operator who reads nothing dispatches \
+         `false` — silently claiming this build needs no config change. Block:\n{block}"
+    );
+
+    // The sentinel must be the FIRST option, because that is the one GitHub
+    // preselects. Any other position and the form still arrives pre-answered.
+    let options = block
+        .split_once("options:")
+        .map(|(_, rest)| rest.to_string())
+        .expect("config_change_required has no `options:` list");
+    let first = options
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("- "))
+        .expect("config_change_required's `options:` list is empty");
+    assert!(
+        first.contains("-- select --"),
+        "config_change_required's first option is `{first}`, not the `-- select --` \
+         sentinel. GitHub preselects the first option, so whatever sits there is \
+         what an operator who reads nothing submits. Putting a real answer first \
+         restores the fail-open."
+    );
+
+    assert!(
+        RELEASE_WORKFLOW.contains("the ordering question was not answered"),
+        "release-connector.yml no longer refuses the sentinel. The choice list \
+         alone changes nothing — something has to reject the preselected value."
+    );
+}
+
+/// Where the apply evidence actually comes from, and the drift that would
+/// silently destroy it.
+///
+/// A `workflow_dispatch` run's inputs are NOT on the run object: it has no
+/// `inputs` key, and `fleet-ops.yml` sets no `run-name:`, so `display_title`
+/// is the bare string "fleet-ops" (checked against 12 real runs). The only
+/// place `box`, `operation` and `apply` survive is the runner's echo of
+/// `fleet-ops.yml`'s **job-level `env:` block** into the log.
+///
+/// That is a consequence of how fleet-ops.yml happens to be written, not a
+/// GitHub contract and not a thing fleet-ops.yml knows it is providing. If
+/// those move out of job `env` — inlined per step, renamed, read straight from
+/// `inputs` — the log stops carrying them, and the gate that reads them stops
+/// being able to check anything. It fails closed when it cannot read them, so
+/// the live consequence is refused promotions rather than waved-through ones;
+/// this case is here so the cause is named at build time instead of at 2am.
+///
+/// Same class as
+/// [`the_config_compat_gate_reproduces_the_makers_committed_service_environment`]:
+/// two files depending on one fact, and only one of them knows it.
+const FLEET_OPS_LOGGED_INPUTS: &[&str] = &["BOX", "OPERATION", "APPLY"];
+
+#[test]
+fn the_apply_verification_reads_what_fleet_ops_actually_records() {
+    for key in FLEET_OPS_LOGGED_INPUTS {
+        let declared = format!("{key}: ${{{{ inputs.");
+        assert!(
+            FLEET_OPS_WORKFLOW.contains(&declared),
+            "fleet-ops.yml no longer declares `{key}` as job-level `env:` from an \
+             input. That echo is the ONLY record of a config-apply run's \
+             parameters — the run object has no `inputs` key and the workflow \
+             sets no `run-name:` — so promote-to-fleet.yml's ordering gate can \
+             no longer tell a config-apply from a box-status. Either restore it, \
+             or give fleet-ops.yml a `run-name:` carrying the same facts and \
+             teach the gate to read that instead. Do not simply delete the check."
+        );
+        assert!(
+            PROMOTE_WORKFLOW.contains(&format!("field {key}")),
+            "promote-to-fleet.yml no longer extracts `{key}` from the fleet-ops \
+             run's log, so it is not checking that half of the apply."
+        );
+    }
+
+    // The extraction has to match the runner's actual line shape: two spaces,
+    // the key, a colon, a space. Verified against 12 real fleet-ops runs.
+    assert!(
+        PROMOTE_WORKFLOW.contains("grep -E \"^  $1: \""),
+        "promote-to-fleet.yml's log extraction no longer matches the runner's \
+         env-echo line shape (two spaces, KEY, ': '). If the shape it looks for \
+         is wrong the gate finds nothing — and because it fails closed, that \
+         reads as every promotion being refused rather than as a bug here."
+    );
+}
+
+/// The apply run is VERIFIED, not believed.
+///
+/// This began as an attestation: a non-empty string, recorded in the summary
+/// and trusted. ADR 0041's own thesis refuses that — "the enforceable half has
+/// to be a check on the config the fleet actually has" — so an unverifiable
+/// string was precisely the unenforceable half that record says is not
+/// sufficient. It cost every release some friction and bought an audit line
+/// nobody could rely on.
+///
+/// Five conditions, each its own refusal. Every one of them is a way a named
+/// run can be real, green, and still not evidence that the boxes have the
+/// config:
+///
+/// * a run of some other workflow entirely;
+/// * a fleet-ops run that failed;
+/// * a fleet-ops run that was `box-status`, `config-read`, `deploy` — anything
+///   that never writes a config file;
+/// * `apply=false`, which is a DRY RUN: it reads the box, prints the diff, and
+///   writes nothing. This is the most dangerous of the five, because the run is
+///   a genuine `config-apply` and concludes green;
+/// * an apply that ran BEFORE the config commit, which applied the previous
+///   file — the same outage with a receipt attached.
+#[test]
+fn promotion_verifies_the_named_apply_run_rather_than_believing_it() {
+    let required: &[(&str, &str)] = &[
+        (
+            "actions/runs/$RID",
+            "fetch the named run's metadata at all",
+        ),
+        (
+            "!= '.github/workflows/fleet-ops.yml'",
+            "check the run is a run of fleet-ops.yml (not merely that a run id exists)",
+        ),
+        (
+            "!= 'success'",
+            "check the run concluded successfully",
+        ),
+        (
+            "!= 'config-apply'",
+            "check the run's operation was config-apply and not box-status/config-read/deploy",
+        ),
+        (
+            "ran with apply=false",
+            "reject a DRY RUN — a genuine config-apply with apply=false reads the box, prints a diff and writes nothing, and still concludes green",
+        ),
+        (
+            "-gt \"$RWHEN\"",
+            "check the apply STARTED AFTER the config commit — an earlier apply applied the previous file",
+        ),
+    ];
+
+    for (needle, what) in required {
+        assert!(
+            PROMOTE_WORKFLOW.contains(needle),
+            "promote-to-fleet.yml no longer appears to {what} (looked for \
+             `{needle}`). Dropping one of these turns the ordering gate back \
+             into an attestation — a string that costs a release friction and \
+             proves nothing, which is exactly what ADR 0041 says is not \
+             sufficient. If the check genuinely cannot be made, say so in ADR \
+             0055 rather than leaving the workflow implying it happens."
+        );
+    }
+
+    // Coverage is per-box: `ario` is the store box's Linode label, which is
+    // what fleet-ops.yml's `box` input takes. One run naming one box does not
+    // cover a range in which both boxes' configs moved.
+    assert!(
+        PROMOTE_WORKFLOW.contains("infra/linode-store/connector-rust.toml) B=ario"),
+        "promote-to-fleet.yml no longer maps the store box's committed config \
+         to the `ario` box label. fleet-ops.yml takes `ario`, not `store`, so a \
+         wrong mapping here either refuses a valid apply forever or accepts a \
+         relay apply as cover for a store config change."
+    );
+    assert!(
+        PROMOTE_WORKFLOW.contains("\n  actions: read"),
+        "promote-to-fleet.yml no longer GRANTS `actions: read` at workflow scope \
+         (a commented-out line does not count, which is how this assertion was \
+         first written and how mutation testing caught it). Without the scope \
+         the ordering gate cannot read the fleet-ops run's logs, and since it \
+         fails closed, every config-requiring promotion is refused."
+    );
+}
+
+/// The handle is a date and an ordinal, and it is not semver.
+///
+/// deploy/connector-rust/README.md's reasoning about the image tags binds
+/// here too: no crate under `crates/` has a release process, every one is
+/// `0.1.0`, and a semver series "would claim a stability contract the binary
+/// hasn't earned". Someone eventually pins against a version number, and a
+/// MAJOR that means nothing is worse than no number at all — so the deploy
+/// ordering a MAJOR usually smuggles rides as data instead.
+///
+/// The other half of the same decision: `:rust-release` still moves only from
+/// a `rust-sha-` tag. The handle alias is immutable and would be safe to
+/// promote, but one accepted shape means one thing for the ancestry check to
+/// parse a commit out of, and the handle carries no commit.
+#[test]
+fn the_release_handle_is_a_dated_ordinal_and_never_a_semver_series() {
+    assert!(
+        RELEASE_WORKFLOW.contains("date -u +%Y.%m.%d"),
+        "release-connector.yml no longer cuts its handle from a UTC date. A \
+         local date makes the series non-monotonic for anyone west of \
+         Greenwich, and a handle that is not a date is a version number \
+         wearing a disguise. See ADR 0055."
+    );
+    assert!(
+        !RELEASE_WORKFLOW.contains("semantic-release"),
+        "release-connector.yml reaches for a semver series. Every crate under \
+         `crates/` is 0.1.0 with no release process; a version here would \
+         claim a stability contract the binary has not earned. See ADR 0055 \
+         and deploy/connector-rust/README.md."
+    );
+    assert!(
+        PROMOTE_WORKFLOW.contains("^rust-[0-9]{4}"),
+        "promote-to-fleet.yml no longer recognises a release-handle alias in \
+         order to refuse it BY NAME. It is refused because the handle carries \
+         no commit for the ancestry check, and an operator who reaches for it \
+         should be told where the `rust-sha-` tag is rather than only that the \
+         input was wrong."
     );
 }
 
