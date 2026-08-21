@@ -1,0 +1,101 @@
+name: Local Topologies
+
+# The shipped IMAGE, run against real containerised chains.
+#
+# This is not a second copy of the Rust gate. `cargo test` covers the
+# connector's behaviour far better than a container can -- it spawns its own
+# anvil and solana-test-validator per test (ADR 0007) and never touches
+# docker-compose. What it structurally cannot check is the thing every deploy
+# depends on: that the image, running as uid 10001, with a mounted
+# `connector.toml`, mounted key files and a real volume at `/app/state`, boots
+# and moves a packet.
+#
+# `promote-to-fleet.yml` checks the first half of that against the fleet's own
+# committed configs, and can only WARN on the second -- its own comment says
+# why: "Most likely an unreachable settlement RPC from this runner (ADR 0009
+# refuses to start on one)". A GitHub runner has no chain to reach. Here it
+# does, so "did not reach a serving state" is an assertion rather than a
+# warning. The two checks are complementary and neither subsumes the other:
+# promotion proves image-matches-fleet-config, this proves
+# image-serves-and-settles.
+#
+# Path-filtered rather than run on every PR: a docs-only change cannot break
+# this, and the image build is the expensive part.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'packages/solana-program/**'
+      - 'packages/contracts/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'deploy/connector-rust/Dockerfile'
+      - 'docker-compose.yml'
+      - 'infra/solana/**'
+      - 'local/**'
+      - '.github/workflows/local-topologies.yml'
+
+jobs:
+  solo:
+    name: Solo topology (image + both chains + a real packet)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # packages/contracts' forge-std and openzeppelin-contracts. The
+          # compose anvil service self-heals with `forge install` if they are
+          # missing, but fetching them here is faster and keeps the failure
+          # mode "the submodule moved" rather than "the deploy timed out".
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # `cast` -- local/keys.sh funds the EVM settlement account with it.
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+
+      # `solana`, `solana-keygen`, `spl-token` and `cargo-build-sbf` all ship
+      # in this one bundle. Same pinned release ci.yml's rust-gate installs.
+      - name: Install Solana CLI tools
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.21/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+
+      - name: Cache Solana platform-tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/solana
+          key: solana-platform-tools-${{ runner.os }}-v1.52
+
+      - name: Cache Cargo registry and workspace target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: local-topologies-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            local-topologies-${{ runner.os }}-
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # No `if: ...docker available...` guard, deliberately. ADR 0007's rule
+      # for a missing chain binary applies here for the same reason: a step
+      # that skips and reports success is worse than a missing check, because
+      # it claims one. If the tooling is absent this job fails.
+      - name: Bring the topology up, send a real packet, tear it down
+        run: make local-verify
+
+      # No log-capture step here on purpose: `make local-verify` must tear the
+      # stack down on the failure path too, so by the time a workflow step ran
+      # the containers would be gone. The target dumps the logs itself, before
+      # it tears anything down.

@@ -1,134 +1,221 @@
 # CLAUDE.md
 
-Multi-chain ILP connector with EVM, Solana, and Mina payment channel settlement. Monorepo using npm workspaces (TypeScript) + a Rust crate (Solana program).
+A multi-chain ILP connector: one Rust binary that forwards packets for payment and
+settles on EVM and Solana. `README.md` is the map of the repository and `CONTEXT.md`
+is the vocabulary; this file covers what an agent working here needs that neither
+of those says — how to run things, where keys and money come from, and the rules
+that are easy to get wrong.
 
-> **Detailed rules live in `_bmad-output/project-context.md`** -- coding standards, architecture, testing rules, chain-specific patterns, and critical implementation rules are all there. It is auto-loaded by BMAD workflows. This file covers only: quick-start setup, gotchas, tooling defaults, and MCP workflow instructions.
+Where this file and an ADR disagree, **the ADR wins**. Where an ADR and a spec
+disagree, the ADR wins too (`docs/adr/`).
 
-## Terminology
+## What is and is not the connector
 
-- Use **"app"** (or **"handler"** when referring to the HTTP endpoint specifically) for the HTTP service the connector POSTs local delivery to — the thing the operator runs at `handler_url` in `toon.json`. Examples: "the app returns 200/4xx", "the handler endpoint", "any HTTP service is a TOON node app".
-- The legacy term **"BLS"** (Business Logic Server) is **deprecated** as of 2026-05-01 (Epic 39, Story 39.15). It originated when the local delivery handler had to import the TOON SDK and do ILP-aware work; that role no longer exists post-Epic-39. Do not introduce "BLS" in new code, comments, docs, or commit messages. The migration is complete in code: `packages/` has zero remaining "BLS" occurrences. Other repo locations — `CHANGELOG.md`, `docs/`, `scripts/`, `_bmad-output/` — may still reference the legacy term as historical record.
-- The term **"terminator"** (and "connector-as-terminator", "app-behind-terminator") is **deprecated**. There is no separate "terminator" role: it is just the **connector** acting as a paid reverse proxy in front of an **app**. The two roles are **`app`** and **`connector`**. Use "connector" (or "the connector acting as a paid reverse proxy") instead. Do not introduce "terminator" in new code, comments, docs, config, compose services/profiles, route addresses, or commit messages. NOTE: this does **not** affect the route-**termination** feature schema — the TypeScript types `RouteTermination`/`RouteTerminationRegistry`/`RouteTerminationSink`, functions `resolveTermination`/`toRouteTermination`, the `termination` config fields, and `checkRequestBinding` are the "route termination" feature and are unchanged.
-- **Never** use "agent runtime" — that term is deprecated from before "BLS" and is not coming back.
+The connector is the Rust workspace under `crates/`, built as the `connector`
+binary. Nothing else in this repository is the connector:
 
-## Quick Start
+- `packages/contracts` — the Solidity `TokenNetwork` / `TokenNetworkRegistry` the
+  EVM backend binds to.
+- `packages/solana-program` — the payment-channel program the Solana backend drives.
+  A Cargo workspace member, excluded from the workspace test gate; it has its own
+  `cargo test-sbf` job.
+- `packages/faucet`, `packages/mina-zkapp`, `packages/mina-usdc-faucet-web`,
+  `packages/announcer` — devnet tooling and a standalone announcer sidecar. These
+  are the only reason npm, Jest and `package.json` still exist here. `npm test`
+  runs them; it does not test the connector.
 
-```bash
-# Prerequisites: Node.js >= 22.11.0, npm >= 10.0.0
-npm install
-npm run build    # Builds shared first, then all workspaces (including mina-zkapp)
-make test        # Run all tests
-make lint        # ESLint
-npm run format:check
-```
+Mina is **not** a settlement chain for the Rust connector (ADR 0002 — o1js proof
+generation is JavaScript-only and a Node sidecar was refused). `packages/mina-zkapp`
+is the separately deployed zkApp and is out of scope for connector work.
 
-### Local Infrastructure
+The **app** (or **handler**, for the HTTP endpoint specifically) is the payment-oblivious
+service behind a route's `handler_url`. Composition of a connector with an app lives
+in the _app's_ repository, not here — this repo builds only the connector image.
+Do not use "terminator", "BLS", or "agent runtime"; all three are retired names.
 
-```bash
-make anvil-up / anvil-down / anvil-logs    # EVM (Anvil + Token Faucet)
-make solana-up / solana-down / solana-logs  # Solana test validator
-make mina-up / mina-down / mina-logs       # Mina lightnet
-make infra-up / infra-down                 # All chains at once
-```
-
-### Chain-Specific Build & Deploy
-
-```bash
-# Solana (requires Rust toolchain + Solana CLI)
-make solana-build   # BPF program
-make solana-test    # Rust integration tests
-make solana-deploy-devnet DEPLOYER_KEYPAIR=path/to/keypair.json
-
-# Mina (requires o1js, installed via npm install)
-make mina-build     # zkApp
-make mina-test      # zkApp tests
-make mina-deploy-devnet DEPLOYER_KEY=<base58-private-key>
-```
-
-Run `make help` for the full target list. Deployment guides: `docs/solana-deployment.md`, `docs/mina-deployment.md`.
-
-## Testing Guidelines
-
-**Never use mocks.** All tests must use real implementations.
-
-**E2E and Integration Tests:** Always run against local Docker containers (Anvil, Solana test validator, Mina lightnet). Use the local infrastructure commands:
+## Commands
 
 ```bash
-make infra-up      # Start all chain containers
-make anvil-up      # Start EVM container only
-make solana-up     # Start Solana container only
-make mina-up       # Start Mina container only
+make rust-build     # cargo build --workspace
+make rust-test      # cargo test --workspace --exclude payment-channel  (the gate)
+make solana-test    # cargo test-sbf, the on-chain program
+make test           # npm/Jest: faucet, mina-zkapp, announcer — NOT the connector
+make lint           # ESLint only. CI also runs cargo fmt --check and clippy -D warnings.
 
-# Run tests against live containers
-cargo test --workspace --exclude payment-channel
-
-make infra-down    # Stop all containers
+make local-verify   # the shipped IMAGE against real chains: up, send a packet, down
 ```
 
-Mock-free testing ensures the connector works correctly with actual blockchain behavior, catching real-world issues like gas estimation failures, nonce conflicts, and protocol-level edge cases.
+CI's Rust gate is `cargo fmt --all -- --check`, `cargo build --workspace`,
+`cargo test --workspace --exclude payment-channel`, an assertion that no integration
+harness executed zero tests, and `cargo clippy --workspace --exclude payment-channel
+--all-targets -- -D warnings`. `packages/contracts` has a separate Foundry job
+(`forge test`) that no make target currently runs.
 
-## Default UI Library: shadcn-ui v4
+## Testing
 
-shadcn-ui v4 is the **only** UI component library. Do not use Material-UI, Ant Design, Chakra UI, or custom components for functionality shadcn-ui already provides.
+**No mocks.** A fake that upholds a port's contract suite is a legitimate test
+subject; a stub that asserts a sequence of calls is not (ADR 0007). The three tiers:
 
-**Workflow**: `get_component_demo` first -> `get_component` only if deep customization needed -> `list_blocks`/`get_block` for complex UIs -> verify in browser with Playwright MCP.
+1. **Property tests over `connector-domain`** — no I/O, no clock. Route selection,
+   claim validation, nonce and watermark rules, fee arithmetic, expiry.
+2. **Contract suites**, defined once per port and run against every implementation
+   of it. `connector-settlement`'s `assert_upholds_the_contract` is the model.
+3. **Integration tests against a real chain**, only where chain behaviour is the
+   subject: gas estimation, nonce conflicts, confirmation semantics.
 
-## Playwright MCP -- Browser Verification
+### Tier 3 does not use the Docker containers
 
-Use Playwright MCP tools (`mcp__playwright__browser_*`) after UI changes. Prefer `browser_snapshot` over `take_screenshot` for interaction. Use `console_messages` and `network_requests` to debug.
+This is the thing most often gotten wrong here. `cargo test` **spawns its own
+disposable chain per test** and tears it down on drop:
 
-## Development Workflow Rules
+- `connector_settlement_evm::test_support::Anvil::spawn` forks `anvil` on its own port.
+- `connector_settlement_solana::test_support::SolanaValidator::spawn` forks
+  `solana-test-validator` and loads `payment_channel.so` into genesis at a fixed
+  program id, rebuilding the `.so` first if the sources changed.
 
-### Stop-the-Line Policy (AG3) — RETIRED with the embedded node (#457)
+Nothing under `crates/` dials `localhost:8545` or `localhost:8899`. Starting
+`make anvil-up` before `cargo test` changes nothing. The containers exist for
+running a node by hand, not for the test gate.
 
-Epic 37's stop-the-line policy hung off the nightly HTTP-surface suite
-(`.github/workflows/nightly-http-surface.yml`, plus the `test:admin-surface`,
-`test:cross-surface` and `test:packet-flow` scripts). All of it exercised the
-TypeScript connector's in-process admin/BTP/packet-flow surfaces, which #457
-deleted along with `ConnectorNode`; the workflow and the scripts are gone.
+A missing chain binary **fails CI and skips locally**. `require_anvil()` /
+`require_solana_test_validator()` panic when `CI` is set, because a guard that
+returns early and reports `passed` in `0.00s` is worse than a missing test.
+Never add a skip-when-unavailable branch that can go green in CI.
 
-The policy's point still stands — parallel-surface drift must not ship
-undetected (`/metrics` returned 404 in every deployed image since inception,
-caught only by Town's integration test). Re-establishing an equivalent nightly
-against the **Rust** connector belongs with #431's cutover.
+Install Foundry (`anvil`, `forge`, `cast`) and the Solana CLI to run the full gate
+locally. `forge` is needed for `abi_provenance`, which rebuilds the contracts and
+diffs the committed ABI.
 
----
+### What the containers ARE for
 
-## Interledger RFC Skill Activation
+`local/` — the shipped image, run against real containerised chains. It exists for
+the one thing `cargo test` structurally cannot check: that the **image**, as uid
+10001, with a mounted `connector.toml`, mounted key files and a real volume at
+`/app/state`, boots and moves a packet. `make local-verify` brings it up, sends a
+real packet and tears it down; `.github/workflows/local-topologies.yml` runs it on
+PRs touching the crates, the Dockerfile or the compose files.
 
-When the user asks about Interledger protocols or RFCs, **immediately activate** the relevant skill(s) without asking -- use `mcp__interledger_org-v4_Docs__search_rfcs_documentation`. Activate multiple skills if the question spans several RFCs.
+It is complementary to `promote-to-fleet.yml`, not a duplicate. That gate checks a
+candidate image against the _fleet's_ committed configs and can only warn when the
+node fails to serve, because a GitHub runner has no chain to reach. `local/` has
+chains, so serving is an assertion — but its configs necessarily name local
+container URLs, so it can never be the fleet check. Promotion proves
+image-matches-fleet-config; `local/` proves image-serves-and-settles.
 
-| User question                          | Skills to activate                                   |
-| -------------------------------------- | ---------------------------------------------------- |
-| "How does STREAM work with ILPv4?"     | `rfc-0029-stream`, `rfc-0027-interledger-protocol-4` |
-| "What's the payment pointer format?"   | `rfc-0026-payment-pointers`                          |
-| "Explain the Interledger architecture" | `rfc-0001-interledger-architecture`                  |
+`connector send` is the binary's third verb (after serving and `announce`). It forms
+a real packet — an OER `Prepare` gift-wrapped to the terminating connector (ADR
+0018), under a condition derived from that wrap (ADR 0019), inside an RFC
+9421-signed `POST /packets` (ADR 0008) — and is what drives the topologies. It is an
+operator tool, not a client SDK: it holds no channel and signs no claim.
+`--expect-fulfill` makes a non-fulfilled packet a non-zero exit, which is what makes
+the rehearsal a gate rather than a report. `--print-keyid` answers "what value goes
+in this node's `[operator] write_keys`" from the binary that will do the signing.
 
----
+## Keys
 
-## Deployment status
+Key material is referenced **by location, never by value** (ADR 0009, ADR 0012).
+Every key is a file path in the config; no key is ever inline, and there is no
+environment-variable layer to smuggle one through.
 
-There is **no production or staging deploy target yet.** The deploy path is
-`.github/workflows/devnet-deploy.yml` plus the `deploy/` bundle, driven by the
-`LINODE_CLI_TOKEN` secret (the Linode / baked-image model). A prior generic
-SSH-based CD workflow was removed (issue #407) because it assumed secrets
-that never existed at repo or org scope and failed on every push to `main`.
-If staging is wanted later, author it fresh against the Linode/baked-image
-model above, not a resurrected SSH workflow. (On-chain contract deployment
-for Solana/Mina is unrelated — see "Chain-Specific Build & Deploy" above.)
+The connector holds a **signer**, not a wallet. ADR 0012's treasury half was deleted
+(#556) — collateral is `SettlementBackend`'s job. There is no mnemonic recovery, no
+seed management and no wallet database, and none should be reintroduced; end-user
+key handling belongs to `toon-client`.
 
----
+A node reads these:
 
-## Agent skills
+| Config                             | File                    | What it signs                                           |
+| ---------------------------------- | ----------------------- | ------------------------------------------------------- |
+| `[signer] key_file`                | `signer.key`            | claims and gift-wrap; 32 raw bytes or 64 hex, secp256k1 |
+| `[settlement.evm.key] key_file`    | `settlement.key`        | EVM settlement transactions                             |
+| `[settlement.solana.key] key_file` | `settlement-solana.key` | Solana settlement transactions                          |
+| `[announce] key_file`              | `announce.key`          | the announcer sidecar's Nostr identity                  |
 
-### Issue tracker
+`[operator] write_keys` is different: it holds the **public** halves (64 hex each) of
+the keys allowed to make an authenticated write. The private half lives with whoever
+is calling, never on the node. `[operator] bearer_token` gates reads only — no shared
+secret is ever sufficient to move value (ADR 0008).
 
-Issues live as GitHub issues in `toon-protocol/connector`, driven by the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Generate one with `openssl rand -hex 32 > signer.key`, or let `local/keys.sh
+<topology>` do the whole set for a local topology — it also funds them, which is a
+separate failure ("the connector refused to start" and "its settlement account has
+no ETH" look identical otherwise). Everything it writes lands in `local/.keys/`,
+which is gitignored.
 
-### Triage labels
+In a container, `state_dir` must be a mounted volume: the image runs as uid 10001
+and creates `/app/state` owned by that uid precisely so a fresh named volume
+inherits it.
 
-The five canonical triage labels, unrenamed — and kept distinct from the `agent:*` Sandcastle triggers. See `docs/agents/triage-labels.md`.
+**Never commit key material.** `tools/ci/check-tracked-secrets.sh` fails the build on
+a tracked file matching `*-keypair.json`, `*.key`, `*.secret`, `deployer-wallet.json`
+or `testnet-wallets.json`, inspecting `git ls-files` rather than the working tree —
+a `.gitignore` rule does nothing for a file already in the index. It **also** checks
+content: a Solana keypair is a bare JSON array of 64 bytes and can be called
+anything, so name matching alone would miss it (and did — `infra/solana/usdc-authority.json`
+is a real, spendable key matching no pattern). Deliberate exceptions are allowlisted
+there by path, each with a reason.
 
-### Domain docs
+## Where money comes from
 
-Single-context: `CONTEXT.md` plus `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+Local and devnet fund completely differently. Do not carry an assumption from one
+to the other.
+
+**Local EVM (anvil).** Genesis funds 10 accounts with 10,000 ETH each; account 0
+(`0xf39F…2266`) is the deployer everything uses. `DeployLocal.s.sol` deploys a
+mintable `MockERC20` USDC at 6 decimals, plus `TokenNetworkRegistry`, `TokenNetwork`
+and `RollingSwapChannel`. USDC is **minted on demand** (`deploy_mock_token`,
+`MockERC20.mint`), never dripped. No faucet is involved.
+
+**Local Solana.** The validator entrypoint airdrops to the genesis-funded validator
+identity and uses it as the deploy fee payer, so no keypair is committed for it.
+`infra/solana/create-usdc-mint.sh` creates a deterministic mock USDC mint and seeds
+a treasury from `infra/solana/usdc-authority.json`. That script refuses any RPC URL
+containing "mainnet" — it mints unlimited supply of a mock token from a committed
+keypair and has no mainnet-shaped mode. In tests, funding is
+`test_support::fund()`, a plain `request_airdrop`.
+
+**Devnet** settles on _public_ chains — Base Sepolia and Solana devnet — and is
+funded by the faucet box (`infra/linode-faucet/`) and its treasuries, not by any of
+the above. The faucet is a separate service and is not part of the connector.
+
+**Mainnet.** Nothing here funds it and no mainnet deployment exists. The Solana
+mint script and the local topology are devnet-and-below only.
+
+## Environments
+
+| Tier           | What it is                                                                                                                                                                                |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **local**      | `docker-compose.yml` chain profiles, and the connector image run against them. Disposable, funded from genesis, no shared state.                                                          |
+| **devnet**     | Two Linode boxes (`infra/linode-relay/`, `infra/linode-store/`). Containers follow the `rust-release` tag via a label-scoped Watchtower and bind-mount a committed `connector-rust.toml`. |
+| **production** | Does not exist. No machines, no mainnet contracts, no keys.                                                                                                                               |
+
+`:rust-release` is a **promotion tag**, not a build output. It moves only by an
+explicit `promote-to-fleet.yml` dispatch, which first checks the candidate image
+still boots both boxes' committed configs. A green merge does not reach the boxes,
+and that is deliberate (ADR 0041): the connector is the client edge on both machines,
+so one bad digest takes the whole devnet's paid-write path dark at once. Do not wire
+`:rust-release` to move on green `main` — that shipped once (#990) and was reverted.
+
+Configuration is **one typed TOML file**, validated once at boot, immutable for the
+process lifetime, with `deny_unknown_fields` (ADR 0009). There is no environment-
+variable override layer; `CONFIG_FILE`, `TOON_MNEMONIC` and friends do nothing. A
+removed config key is parsed in order to be _rejected by name_, never silently ignored.
+Because the binary and the box's bind-mounted TOML are a matched pair in both
+directions, adding a required config key is a **breaking deploy**: land the config
+first, then move the tag.
+
+## Pointers
+
+- `README.md` — repository map, crate roles, how to run the gate.
+- `CONTEXT.md` — the vocabulary. Read before writing docs or naming anything.
+- `docs/adr/` — numbered decisions; the tiebreaker for everything above.
+- `vectors/wire-vectors.json` — the normative cross-repo wire contract for
+  `toon-client`, `rig` and `swap` (ADR 0021). Prose is not normative. Regenerate with
+  `cargo run -p connector-vectors --bin generate-vectors` after any change to the
+  envelope, gift wrap, fulfilment derivation or claim signing.
+- `docs/operators/` — runbooks. `admin-api.md` and `load-testing-guide.md` document
+  the **retired** TypeScript connector and are banner-marked as such.
+- `docs/agents/` — issue tracker, triage labels, domain docs conventions.
+
+When asked about Interledger protocol semantics, activate the relevant `rfc-*` skill
+rather than answering from memory.

@@ -1,0 +1,106 @@
+# =============================================================================
+# local/solo -- one connector, both chains, a payment-oblivious app.
+#
+# LOCAL / DEV ONLY. `infra/linode-*` owns devnet; nothing here is deployed,
+# published or SSH'd anywhere, and every chain this file names is disposable.
+#
+# What this topology is FOR: proving the SHIPPED IMAGE runs. `cargo test`
+# already covers the connector's behaviour far better than a container can --
+# it spawns its own anvil and solana-test-validator per test (ADR 0007). What
+# it structurally cannot check is the thing every deploy depends on: that the
+# image, running as uid 10001, with this file mounted at
+# /app/config/connector.toml, key files under /app/data and a real volume at
+# /app/state, boots and serves a packet. `promote-to-fleet.yml` checks half of
+# that against the fleet's own configs and can only WARN on the other half,
+# because a GitHub runner has no chain to reach. Here there is one.
+#
+# Every address below is deterministic, which is what lets this file be
+# committed rather than generated. Secrets are not: every key is a PATH
+# (ADR 0009/0012), written by `local/keys.sh` into a gitignored directory.
+# =============================================================================
+
+# 0.0.0.0 so the container's published port reaches it.
+client_edge_addr = "0.0.0.0:3000"
+
+# A named volume in compose.yml, not a bind mount: the image runs as uid 10001
+# and creates this path so a fresh named volume inherits that ownership. Without
+# a state_dir every channel's watermark lives in process memory, and a restart
+# hands a payer every claim it already spent back as free service (issue #605).
+state_dir = "/app/state"
+
+[signer]
+key_file = "/app/data/signer.key"
+
+# ── The one locally-terminated route ─────────────────────────────────────────
+# `stub-app` is the connector image's second binary: it answers `POST /`, holds
+# no secret and performs no cryptography, so it supplies nothing toward the
+# packet's fulfilment -- the connector derives that itself from the sealed
+# request (ADR 0019). That is the property worth having behind a route here:
+# "the app answered" and "the packet was paid for" stay separable.
+#
+# The trailing slash on handler_url is load-bearing. `HttpAppClient::deliver`
+# does `handler_url.join(&target)`, and RFC 3986 makes an absolute-path
+# reference REPLACE the base's path -- so the sender's `--target /` and this
+# base have to agree on where the app actually serves.
+[[routes]]
+prefix = "g.local.solo"
+handler_url = "http://stub-app:3100/"
+price = 0
+
+# ── Operator surface (ADR 0008) ──────────────────────────────────────────────
+# Both are FILES, not literals, and both are written by local/keys.sh. The
+# bearer token gates reads; `write_keys` is the ed25519 PUBLIC-key allowlist
+# that gates `POST /packets` -- which is how `connector send` originates the
+# packet this topology exists to prove. Nothing secret is committed: the
+# allowlist holds public keys, and the private half never leaves .keys/.
+[operator]
+bearer_token_file = "/app/data/operator-bearer-token"
+write_keys_file = "/app/data/operator-write-keys"
+
+# ── Settlement: BOTH chains, live at once ────────────────────────────────────
+# Deliberately both. `two_ledgers_never_merge.rs` is named for this concern and
+# proves it in-process; nothing else stands a node up with an EVM and a Solana
+# backend attached simultaneously and boots it. A present-but-unsatisfiable
+# settlement block is a hard startup failure, so this section coming up at all
+# is itself the assertion.
+#
+# `contract_address` is the TokenNetworkRegistry, NOT a TokenNetwork:
+# `EvmSettlementBackend::connect` resolves `getTokenNetwork(token_address)`
+# through the registry and refuses to start if that comes back zero (issue
+# #576). Naming a TokenNetwork here makes the node refuse to start -- it has no
+# `getTokenNetwork`.
+#
+# Both addresses are deterministic outputs of `DeployLocal.s.sol` run by
+# anvil's account 0 at fixed nonces, which the compose `anvil` service runs on
+# every start. They are stable across `down`/`up` because the chain is reset
+# with it.
+[settlement.evm]
+rpc_url = "http://anvil:8545"
+contract_address = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
+token_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+# `connect` reads the token's own `decimals()` and refuses to start if the two
+# disagree (issue #564), so this matches the mock USDC actually deployed.
+decimals = 6
+
+[settlement.evm.key]
+key_file = "/app/data/settlement.key"
+
+# `program_id` is the id `infra/solana/entrypoint.sh` loads payment_channel.so
+# under at genesis, and equals
+# `connector_settlement_solana::test_support::LOCAL_TEST_PROGRAM_ID` --
+# `local_program_id_is_shared.rs` fails if those two drift. It is committable
+# precisely because the entrypoint passes a BARE `--bpf-program` id rather than
+# deploying against a per-machine keypair.
+#
+# `token_address` is the deterministic mock mint from
+# `infra/solana/create-usdc-mint.sh`, seeded by `make solana-mint-usdc`. That
+# target fails loudly rather than warning, because a validator without this
+# mint cannot satisfy this line and the node will refuse to start.
+[settlement.solana]
+rpc_url = "http://solana-validator:8899"
+program_id = "HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR"
+token_address = "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "/app/data/settlement-solana.key"

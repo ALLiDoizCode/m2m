@@ -32,6 +32,9 @@ base64 = "0.22"
 # against the through-URL (its x402 greeting and its `/ilp/identity`), and
 # the clock the PREPARE's expiry and the event's `created_at` are read from.
 chrono = "0.4"
+# `connector send` signs its RFC 9421 operator write with an ed25519 key --
+# the same curve and the same crate `connector-operator` verifies with.
+ed25519-dalek = "1"
 ethers = { version = "2", default-features = false, features = ["rustls"] }
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }

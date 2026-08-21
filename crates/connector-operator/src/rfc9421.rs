@@ -274,23 +274,25 @@ fn verify_content_digest(header_value: Option<&str>, body: &[u8]) -> Result<(), 
     Ok(())
 }
 
-/// Compute the RFC 9530 `Content-Digest` field value for `body`. The
+/// Compute the RFC 9530 `Content-Digest` field value for `body`.
+///
+/// This used to be gated behind `test-util`, on the reasoning that "the
 /// connector itself never signs a write -- it only verifies one an
-/// operator's own tooling already signed -- so this exists purely for
-/// tests (in this crate, and -- behind the `test-util` feature,
-/// `crate::test_support` -- in any crate downstream that needs to
-/// construct a validly-signed request against a real config-driven
-/// connector, e.g. `connector-cli`'s settlement lifecycle test).
-#[cfg(any(test, feature = "test-util"))]
+/// operator's own tooling already signed". That stopped being true when
+/// `connector send` landed: the binary now *is* an operator's own tooling,
+/// originating a packet through `POST /packets` on another node. Signing is
+/// therefore ordinary shipped code, and gating it behind a test feature
+/// would mean the released binary could not do the one thing the verb is
+/// for. Verification stays where it was; only the signing half moved.
 pub fn compute_content_digest(body: &[u8]) -> String {
     format!("sha-256=:{}:", BASE64.encode(Sha256::digest(body)))
 }
 
 /// Hex-encode a keypair's public key the way `keyid` is written on the
-/// wire. Shared by every test across this crate that needs to sign a
-/// write request -- see [`compute_content_digest`]'s doc comment for the
-/// `test-util` feature's purpose.
-#[cfg(any(test, feature = "test-util"))]
+/// wire -- and the way an operator writes it into a node's
+/// `[operator] write_keys` allowlist, so a caller can print the value it
+/// must be allowlisted under. See [`compute_content_digest`] for why this
+/// is no longer behind `test-util`.
 pub fn keyid_hex(keypair: &ed25519_dalek::Keypair) -> String {
     keypair
         .public
@@ -302,10 +304,11 @@ pub fn keyid_hex(keypair: &ed25519_dalek::Keypair) -> String {
 
 /// Sign a well-formed write request, returning the three headers a
 /// caller needs (`signature-input`, `signature`, `content-digest`).
-/// Shared by every test across this crate that needs to construct a
-/// validly-signed request -- see [`compute_content_digest`]'s doc comment
-/// for the `test-util` feature's purpose.
-#[cfg(any(test, feature = "test-util"))]
+///
+/// The inverse of this crate's own verification path, and held to it by
+/// that path's tests -- so a change to either side that breaks the pair
+/// fails here rather than at a node that refuses a real write. See
+/// [`compute_content_digest`] for why this is no longer behind `test-util`.
 pub fn sign_request(
     keypair: &ed25519_dalek::Keypair,
     method: &str,

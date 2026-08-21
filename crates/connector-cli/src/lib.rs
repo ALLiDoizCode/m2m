@@ -40,6 +40,7 @@
 mod announce;
 mod peer_transport;
 mod runtime;
+mod send;
 
 use std::fmt;
 use std::net::SocketAddr;
@@ -67,6 +68,8 @@ pub enum CliError {
     Runtime(RuntimeError),
     /// The `announce` subcommand ran and failed (issue #784).
     Announce(AnnounceError),
+    /// The `send` subcommand ran and failed.
+    Send(send::SendError),
 }
 
 impl fmt::Display for CliError {
@@ -76,6 +79,7 @@ impl fmt::Display for CliError {
             CliError::Config(source) => write!(f, "{source}"),
             CliError::Runtime(source) => write!(f, "{source}"),
             CliError::Announce(source) => write!(f, "{source}"),
+            CliError::Send(source) => write!(f, "{source}"),
         }
     }
 }
@@ -94,6 +98,12 @@ impl From<RuntimeError> for CliError {
     }
 }
 
+impl From<send::SendError> for CliError {
+    fn from(source: send::SendError) -> Self {
+        CliError::Send(source)
+    }
+}
+
 impl From<AnnounceError> for CliError {
     fn from(source: AnnounceError) -> Self {
         CliError::Announce(source)
@@ -104,12 +114,17 @@ impl From<AnnounceError> for CliError {
 /// else does. See this module's header for why the collision with a config
 /// file of the same name is refused rather than resolved.
 const ANNOUNCE_VERB: &str = "announce";
+const SEND_VERB: &str = "send";
 
 const USAGE: &str = "usage:\n  \
      connector <config-file>\n  \
      connector announce --config <config-file> <relay-discovery-url> \
      [--to <ilp-address>] [--btp-url <wss-url>] [--target <path>] \
-     [--via-own-routing] [--dry-run]";
+     [--via-own-routing] [--dry-run]\n  \
+     connector send --operator <url> --operator-key <file> --to <ilp-address> \
+     --seal-to <url> [--amount <n>] [--target <path>] [--method <verb>] \
+     [--body <file|-> ] [--expires-in <seconds>] [--expect-fulfill] [--dry-run]\n  \
+     connector send --operator-key <file> --print-keyid";
 
 /// What the process arguments asked for, before anything has been loaded.
 #[derive(Debug, PartialEq, Eq)]
@@ -120,6 +135,14 @@ enum Invocation {
     Announce {
         config_path: String,
         options: AnnounceOptions,
+    },
+    Send {
+        options: send::SendOptions,
+    },
+    /// `connector send --operator-key <file> --print-keyid`: derive and print
+    /// the allowlist value for a key file, touching no network.
+    PrintKeyid {
+        key_file: String,
     },
 }
 
@@ -132,6 +155,14 @@ enum Invocation {
 fn parse_args<S: AsRef<str>>(args: &[S]) -> Result<Invocation, CliError> {
     let usage = || CliError::Usage(USAGE.to_string());
     let first = args.get(1).map(AsRef::as_ref).ok_or_else(usage)?;
+
+    if first == SEND_VERB {
+        // Unlike `announce`, `send` is never ambiguous with a config path:
+        // it takes no positional argument at all, so a bare `connector send`
+        // is a usage error rather than two possible readings.
+        let rest: Vec<&str> = args[2..].iter().map(AsRef::as_ref).collect();
+        return parse_send_args(&rest);
+    }
 
     if first != ANNOUNCE_VERB {
         return Ok(Invocation::Serve {
@@ -231,6 +262,12 @@ pub fn load_config<S: AsRef<str>>(args: &[S]) -> Result<Config, CliError> {
     let path = match parse_args(args)? {
         Invocation::Serve { config_path } => config_path,
         Invocation::Announce { config_path, .. } => config_path,
+        Invocation::Send { .. } | Invocation::PrintKeyid { .. } => {
+            return Err(CliError::Usage(format!(
+                "'{SEND_VERB}' loads no configuration: it is a client of another node's operator \
+                 surface, not a node.\n\n{USAGE}"
+            )))
+        }
     };
     Config::load(Path::new(&path)).map_err(CliError::from)
 }
@@ -290,7 +327,179 @@ pub async fn run<S: AsRef<str>>(args: &[S]) -> Result<Command, CliError> {
                 summary: describe(&outcome),
             })
         }
+        Invocation::Send { options } => {
+            let outcome = send::send(&options).await?;
+            Ok(Command::Finished {
+                summary: describe_send(&outcome),
+            })
+        }
+        Invocation::PrintKeyid { key_file } => Ok(Command::Finished {
+            summary: send::print_keyid(&key_file)?,
+        }),
     }
+}
+
+/// The one line an operator reads after a send. The keyid is on it for the
+/// same reason the announce prints its event id: it is the value they will
+/// need next, and for a refused write it is the only actionable fact.
+fn describe_send(outcome: &send::SendOutcome) -> String {
+    let head = format!(
+        "{} base units to {} (signed as keyid {})",
+        outcome.amount, outcome.destination, outcome.keyid
+    );
+    match &outcome.outcome {
+        send::Outcome::Fulfilled { status, body } => format!(
+            "FULFILL -- {head}\nthe terminating app answered {status}:\n{}",
+            String::from_utf8_lossy(body)
+        ),
+        send::Outcome::FulfilledWithWrongFulfillment => format!(
+            "FULFILL WITH THE WRONG FULFILMENT -- {head}\nThe packet was fulfilled, but not by a \
+             connector holding this sender's gift-wrap secret: the fulfilment does not match the \
+             one this wrap derives (ADR 0019). --seal-to almost certainly names a different node \
+             from the one that actually terminated the packet."
+        ),
+        send::Outcome::Rejected { code, message } => {
+            format!("REJECT {code} -- {head}\n{message}")
+        }
+        send::Outcome::NotSent => {
+            format!("DRY RUN -- would have sent {head}. Nothing was sent and nothing was paid.")
+        }
+    }
+}
+
+/// Parse everything after `connector send`.
+fn parse_send_args(rest: &[&str]) -> Result<Invocation, CliError> {
+    let mut operator_url: Option<String> = None;
+    let mut operator_key_file: Option<String> = None;
+    let mut destination: Option<String> = None;
+    let mut seal_to: Option<String> = None;
+    let mut target: Option<String> = None;
+    let mut method: Option<String> = None;
+    let mut body_arg: Option<String> = None;
+    let mut amount_arg: Option<String> = None;
+    let mut expires_arg: Option<String> = None;
+    let mut dry_run = false;
+    let mut expect_fulfill = false;
+    let mut print_keyid = false;
+
+    let mut index = 0;
+    while index < rest.len() {
+        let argument = rest[index];
+        let slot = match argument {
+            "--operator" => Some(&mut operator_url),
+            "--operator-key" => Some(&mut operator_key_file),
+            "--to" => Some(&mut destination),
+            "--seal-to" => Some(&mut seal_to),
+            "--target" => Some(&mut target),
+            "--method" => Some(&mut method),
+            "--body" => Some(&mut body_arg),
+            "--amount" => Some(&mut amount_arg),
+            "--expires-in" => Some(&mut expires_arg),
+            _ => None,
+        };
+        if let Some(slot) = slot {
+            let value = rest
+                .get(index + 1)
+                .ok_or_else(|| CliError::Usage(format!("{argument} needs a value\n\n{USAGE}")))?;
+            *slot = Some((*value).to_string());
+            index += 2;
+            continue;
+        }
+        match argument {
+            "--dry-run" => dry_run = true,
+            "--expect-fulfill" => expect_fulfill = true,
+            "--print-keyid" => print_keyid = true,
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unexpected argument '{other}' -- '{SEND_VERB}' takes no positional \
+                     arguments\n\n{USAGE}"
+                )))
+            }
+        }
+        index += 1;
+    }
+
+    let required = |value: Option<String>, flag: &str, why: &str| {
+        value.ok_or_else(|| CliError::Usage(format!("send needs {flag}: {why}\n\n{USAGE}")))
+    };
+
+    // `--print-keyid` reads one file and prints one line. It deliberately
+    // requires none of the rest: the whole point is to answer "what goes in
+    // write_keys" before there is a node to send to.
+    if print_keyid {
+        return Ok(Invocation::PrintKeyid {
+            key_file: required(
+                operator_key_file,
+                "--operator-key <file>",
+                "the key file whose allowlist value you want printed",
+            )?,
+        });
+    }
+
+    let amount = match amount_arg {
+        None => 0,
+        Some(text) => text.parse::<u64>().map_err(|_| {
+            CliError::Usage(format!(
+                "--amount must be a non-negative integer, not '{text}'"
+            ))
+        })?,
+    };
+    let expires_in_seconds = match expires_arg {
+        None => 300,
+        Some(text) => text.parse::<i64>().map_err(|_| {
+            CliError::Usage(format!(
+                "--expires-in must be an integer number of seconds, not '{text}'"
+            ))
+        })?,
+    };
+    let body = match body_arg.as_deref() {
+        None => Vec::new(),
+        Some("-") => {
+            use std::io::Read;
+            let mut buffer = Vec::new();
+            std::io::stdin().read_to_end(&mut buffer).map_err(|error| {
+                CliError::Usage(format!("could not read the body from stdin: {error}"))
+            })?;
+            buffer
+        }
+        Some(path) => std::fs::read(path).map_err(|error| {
+            CliError::Usage(format!("could not read the body from '{path}': {error}"))
+        })?,
+    };
+
+    Ok(Invocation::Send {
+        options: send::SendOptions {
+            operator_url: required(
+                operator_url,
+                "--operator <url>",
+                "the node whose operator surface originates the packet",
+            )?,
+            operator_key_file: required(
+                operator_key_file,
+                "--operator-key <file>",
+                "the ed25519 key whose public half is on that node's [operator] write_keys",
+            )?,
+            destination: required(
+                destination,
+                "--to <ilp-address>",
+                "the packet's destination",
+            )?,
+            seal_to: required(
+                seal_to,
+                "--seal-to <url>",
+                "the client edge of the connector that TERMINATES this packet -- a payload is \
+             sealed to the terminating node (ADR 0018), which in a multi-hop topology is not \
+             the node given to --operator",
+            )?,
+            amount,
+            target: target.unwrap_or_else(|| "/".to_string()),
+            method: method.unwrap_or_else(|| "POST".to_string()),
+            body,
+            expires_in_seconds,
+            dry_run,
+            expect_fulfill,
+        },
+    })
 }
 
 /// The one line an operator reads after an announce. The event id is on it

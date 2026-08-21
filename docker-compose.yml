@@ -8,11 +8,8 @@
 #   make solana-up     Start Solana test validator
 #   make solana-down   Stop Solana services
 #   make solana-logs   Follow Solana logs
-#   make mina-up       Start Mina lightnet
-#   make mina-down     Stop Mina services
-#   make mina-logs     Follow Mina logs
-#   make infra-up      Start all chains (EVM + Solana + Mina)
-#   make infra-down    Stop all chains (EVM + Solana + Mina; preserves volumes)
+#   make infra-up      Start every chain the connector settles on (EVM + Solana)
+#   make infra-down    Stop them (preserves volumes)
 
 # ── Shared json-file log rotation for the long-running dev-chain services ──
 # Incident 2026-06-26: on the self-hosted devnet box the solana-validator wrote
@@ -20,8 +17,8 @@
 # of an oversized rocksdb ledger, which helped fill the box disk to 100%. A full
 # disk silently FREEZES Solana block production (slot stops advancing) while
 # /health still returns "ok", so faucet/settlement writes hang then 500
-# ("Transaction was not confirmed in 30s") with no obvious cause. anvil, faucet
-# and mina-lightnet are similarly chatty. Cap every such service's container log
+# ("Transaction was not confirmed in 30s") with no obvious cause. anvil and the
+# faucet are similarly chatty. Cap every such service's container log
 # at 30 MB total (10 MB x 3 rotated files) so logs can never fill /var/lib/docker.
 # (The solana ledger itself is bounded separately by --limit-ledger-size in
 # infra/solana/entrypoint.sh — the two together are the durable disk-full fix.)
@@ -87,15 +84,34 @@ services:
       - '8545:8545'
     restart: unless-stopped
     logging: *default-logging
+    # Healthy means THE SETTLEMENT TOPOLOGY IS DEPLOYED, not merely that the
+    # RPC answers. `cast client` succeeds the moment anvil binds, which is
+    # seconds before `forge script` finishes deploying — and everything
+    # downstream that waits on this health gate then races the deploy:
+    #
+    #   * `EvmSettlementBackend::connect` resolves getTokenNetwork() through
+    #     the registry and refuses to start when it comes back empty, so the
+    #     connector dies with "failed to decode empty bytes" (observed
+    #     exactly this, via local/'s solo topology).
+    #   * a `cast send` of `mint(...)` to an address with NO CODE does not
+    #     revert — it is an ordinary call to a plain account — so funding
+    #     scripts report success having minted nothing.
+    #   * issue #104's original symptom was this same class: the faucet
+    #     reporting tokenReady:true with no token on-chain.
+    #
+    # `cast code` on the TokenNetworkRegistry returns `0x` until the deploy
+    # lands, and its bytecode after. The address is the deterministic output
+    # of DeployLocal.s.sol run by account 0 at a fixed nonce, which is the
+    # same reason a committed config can name it.
     healthcheck:
       test:
         [
           'CMD-SHELL',
-          "cast client --rpc-url http://localhost:8545 2>&1 | grep -q 'anvil' || exit 1",
+          "test \"$$(cast code 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 --rpc-url http://localhost:8545 2>/dev/null)\" != '0x' || exit 1",
         ]
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 3
+      retries: 30
       start_period: 15s
 
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -249,30 +265,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
-
-  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  # Mina Lightnet - Local Mina Network with Accounts Manager & Archive
-  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  # NOTE: Mina lightnet requires 4-8 GB RAM. Ensure Docker Desktop has
-  # sufficient memory allocated (at least 8 GB recommended).
-  mina-lightnet:
-    image: o1labs/mina-local-network:compatible-latest-lightnet
-    profiles:
-      - mina
-    ports:
-      - '3085:3085' # GraphQL
-      - '8181:8181' # Accounts manager
-      - '8282:8282' # Explorer
-      - '5433:5432' # Archive PostgreSQL (remapped to avoid conflicts with local Postgres on 5432)
-    deploy:
-      resources:
-        limits:
-          memory: 8g
-    restart: unless-stopped
-    logging: *default-logging
-    healthcheck:
-      test: ['CMD-SHELL', 'curl -sf http://localhost:8181/list-acquired-accounts || exit 1']
-      interval: 15s
-      timeout: 10s
-      retries: 10
-      start_period: 120s

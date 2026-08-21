@@ -8,8 +8,8 @@
 //! local `anvil` fixture (issue #577).
 //!
 //! Every other chain-backed test in this workspace (`contract_suite.rs`,
-//! `local_stack_rehearsal.rs`'s `on_chain` module, `gas_and_nonce.rs`)
-//! proves the same backend against a `TokenNetwork` this test run itself
+//! `gas_and_nonce.rs`) proves the same backend against a `TokenNetwork`
+//! this test run itself
 //! deployed a minute ago. That is real proof that the Rust code and the
 //! *source* `packages/contracts/src/TokenNetwork.sol` agree -- but #566's
 //! own acceptance criterion is explicit that it is not enough: whether a

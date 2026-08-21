@@ -1955,8 +1955,8 @@ btp_endpoint = "wss://proxy.ario.example/ilp/btp"
     }
 
     /// A configured notice appears on the announce's own schema field, in
-    /// the shape `packages/announcer/src/event.ts`'s `OperatorNotice` and
-    /// the local-stack script's `NOTICE` object both already publish.
+    /// the shape `packages/announcer/src/event.ts`'s `OperatorNotice`
+    /// already publishes.
     #[test]
     fn a_configured_notice_appears_on_the_wire_verbatim() {
         let notice = Notice {

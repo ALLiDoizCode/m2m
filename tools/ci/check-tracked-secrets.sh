@@ -29,13 +29,26 @@ PATTERNS=(
   'testnet-wallets.json'
 )
 
-# Explicit allowlist for tracked files that are key-SHAPED by name but hold
-# no real secret. Every entry needs a comment saying why. Empty today: the
-# one file that used to be here (the Solana program keypair above) was
-# untracked, not allowlisted, since program keypairs are exactly the class
-# this guard exists to catch.
+# Explicit allowlist for tracked files that are key-shaped -- by name or by
+# CONTENT (see `is_solana_keypair_json`) -- but hold no real secret. Every
+# entry needs a comment saying why.
+#
+# Both entries below are deliberately committed throwaway local-chain
+# material. They were previously not allowlisted and not caught either: their
+# names match none of the PATTERNS above, so the guard simply never saw them.
+# That is the hole the content check closes -- "this file is safe" is now a
+# stated fact with a reason, rather than a coincidence of what it is called.
 ALLOWLIST=(
-  # path/to/file.key  # why this one is safe to track
+  # The mock-USDC mint authority + USDC treasury source for the LOCAL Solana
+  # validator and the devnet faucet box. Mints an unlimited supply of a mock
+  # token that has no relationship to real USDC, and
+  # infra/solana/create-usdc-mint.sh hard-refuses any RPC URL naming mainnet.
+  infra/solana/usdc-authority.json
+  # The mock-USDC mint's own keypair. Committed so the mint lands at the SAME
+  # address across every `solana-test-validator --reset`, which is what lets a
+  # committed connector.toml name it in `token_address`. Same mock token, same
+  # mainnet refusal.
+  infra/solana/usdc-mint.json
 )
 
 is_allowlisted() {
@@ -59,10 +72,37 @@ matches_pattern() {
   return 1
 }
 
+# A Solana keypair file is a bare JSON array of 64 byte values, and it can be
+# called ANYTHING -- `usdc-authority.json` matches no pattern above and is a
+# real, spendable key. Name matching alone therefore cannot be the whole
+# guard: it catches the conventional names and misses every other one.
+#
+# This reads a tracked file only far enough to decide its SHAPE and never
+# prints, logs or echoes a byte of it. `head -c` bounds the read so a large
+# tracked file costs nothing here.
+is_solana_keypair_json() {
+  local path="$1"
+  [[ "$path" == *.json ]] || return 1
+  [[ -f "$path" ]] || return 1
+  local head_bytes
+  head_bytes="$(head -c 4096 -- "$path" 2>/dev/null | tr -d '[:space:]')"
+  # `[n,n,...]`, digits and commas only. A config JSON has braces, quotes or
+  # letters and is rejected before the element count is ever considered.
+  [[ "$head_bytes" =~ ^\[[0-9,]+\]?$ ]] || return 1
+  local stripped="${head_bytes#[}"
+  stripped="${stripped%]}"
+  local count
+  count="$(awk -F',' '{print NF}' <<<"$stripped")"
+  [[ "$count" -eq 64 ]]
+}
+
 violations=()
 while IFS= read -r path; do
   [[ -z "$path" ]] && continue
-  if matches_pattern "$path" && ! is_allowlisted "$path"; then
+  if is_allowlisted "$path"; then
+    continue
+  fi
+  if matches_pattern "$path" || is_solana_keypair_json "$path"; then
     violations+=("$path")
   fi
 done < <(git ls-files)
@@ -77,4 +117,4 @@ if [[ "${#violations[@]}" -gt 0 ]]; then
   exit 1
 fi
 
-echo "No tracked key-shaped files found."
+echo "No tracked key-shaped files found (checked names and Solana-keypair content)."
