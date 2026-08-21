@@ -100,12 +100,17 @@ digest takes the whole devnet's paid-write path dark at once (ADR 0041
 Decision 3). Auto-on-green for this image shipped once (#990) and was
 reverted.
 
-Tick `config_change_required` **only** when the build cannot boot the
-committed box configs as they stand — a new required key, a renamed field, a
-narrowed type. Then land the config here, apply it with `fleet-ops.yml
-config-apply`, and pass that run's URL as `config_applied_run`; the promotion
-refuses without it. `docs/operators/fleet-release-and-health.md` is the
-procedure.
+`config_change_required` has **no default** — its first and preselected option
+is a `-- select --` sentinel the workflow refuses by name, so the ordering
+question has to be answered rather than skipped. Answer `yes` only when the
+build cannot boot the committed box configs as they stand (a new required key,
+a renamed field, a narrowed type); a price or endpoint edit the running binary
+also accepts is `no`. On `yes`, land the config here, apply it with
+`fleet-ops.yml config-apply`, and pass that run's URL as `config_applied_run` —
+one per box that changed. The promotion **verifies** it: right workflow, green
+conclusion, `operation=config-apply`, `apply=true` (a dry run is refused), the
+right box, and started after the config's commit.
+`docs/operators/fleet-release-and-health.md` is the procedure.
 
 ## 1. Generate a signer key
 

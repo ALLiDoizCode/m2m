@@ -109,27 +109,63 @@ nothing for anything to watch.
 So the ordering rides as a field a workflow can read. `config-change-required: true` on a release is
 a claim, and `promote-to-fleet.yml` makes the claim cost something.
 
-### What the ordering gate can and cannot see
+### What the ordering gate checks, and what it still cannot see
 
-Two obligations follow from `config-change-required: true`, and they are checkable to different
-depths. Saying so precisely matters more than the gate looking strong:
+Two obligations follow from `config-change-required: true`. An earlier draft of this record made the
+first a check and the second an **attestation** — a required string, recorded in the run summary and
+believed. That was wrong, and it was wrong by this project's own standard: ADR 0041's thesis is that
+"the enforceable half has to be a check on the config the fleet actually has", so an unverifiable
+string is exactly the unenforceable half that record says is not sufficient. It cost every release
+some friction and bought an audit line nobody could rely on. Both halves are checks now.
 
-- **The committed box configs must actually have changed** across the range this promotion crosses.
-  This is machine truth: `git diff` over `infra/linode-relay/connector-rust.toml` and
-  `infra/linode-store/connector-rust.toml` between the incumbent's commit and the candidate's. A
-  release that says the fleet needs a config change while those files sat untouched is the
-  2026-08-16 shape exactly — the fix applied to the box and never committed, so a redeploy from the
-  tree reproduces the outage.
-- **The boxes must actually have it.** Nothing in CI can see this. ADR 0041's existing boot gate
-  proves the candidate image accepts the config **committed here**; Watchtower recreates the
-  container against the config **on the box**, and those are different files whenever a
-  `config-apply` has not been run. The only evidence available is a human naming the fleet-ops
-  `config-apply` run, which is why `config_applied_run` is a required string rather than a tickbox:
-  a URL is harder to click through than a checkbox and it lands in the run summary as a trail.
+**One: the committed box configs must actually have changed** across the range this promotion
+crosses. `git diff` over `infra/linode-relay/connector-rust.toml` and
+`infra/linode-store/connector-rust.toml` between the incumbent's commit and the candidate's. A
+release that says the fleet needs a config change while those files sat untouched is the 2026-08-16
+shape exactly — the fix applied to the box and never committed, so a redeploy from the tree
+reproduces the outage.
 
-The gate is honest about the second being an attestation. An attestation that is refused-by-default
-and recorded is a considerable improvement on a sentence in a PR body; it is not a proof, and this
-record does not claim it is.
+**Two: the boxes must actually have it**, evidenced by a named `fleet-ops.yml` `config-apply` run
+that is then verified. Five conditions, each its own refusal, because each is a way a named run can
+be real, green, and still not evidence:
+
+| Checked                                                            | The run it rejects                                                                                                                                             |
+| ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| the run exists and its `path` is `.github/workflows/fleet-ops.yml` | a run id from some other workflow, or one that does not exist                                                                                                  |
+| `conclusion == success`                                            | an apply that failed — it applied nothing                                                                                                                      |
+| `operation == config-apply`                                        | `box-status`, `config-read`, `pin-verify`, `restart`, `deploy`, `announce` — none of which writes a config file                                                |
+| `apply == true`                                                    | **a dry run.** The most dangerous of the five: a genuine `config-apply` with `apply=false` reads the box, prints the diff, writes nothing, and concludes green |
+| the run **started after** the config's commit, per box             | an apply that predates the commit and therefore applied the previous file — the same outage with a receipt attached                                            |
+
+Coverage is per box. Where both boxes' configs moved — the common case, since their settlement
+blocks are deliberately identical — one run naming one box is a refusal, and `config_applied_run`
+takes a list.
+
+**Where that evidence comes from, and why it is fragile enough to name.** A `workflow_dispatch`
+run's inputs are not on the run object: it has no `inputs` key, and `fleet-ops.yml` sets no
+`run-name:`, so `display_title` is the bare string `fleet-ops` — verified against twelve real runs
+rather than assumed. The only surviving record of `box`, `operation` and `apply` is the runner's
+echo of `fleet-ops.yml`'s **job-level `env:` block** into the run log, which the gate reads through
+`actions: read`. That is a consequence of how that file happens to be written, not a contract it
+knows it is providing, so `the_apply_verification_reads_what_fleet_ops_actually_records` in
+`crates/connector-bin/tests/fleet_release_gate.rs` fails the build if those move out of job `env`.
+Reading it needs no change to `fleet-ops.yml`, and none was made: that file is on the live ops path.
+
+**What is still not proved, stated plainly rather than implied away:**
+
+- **That the box's file is still that content now.** The gate proves a successful apply of the
+  committed config happened after the config commit. A hand-edit on the box afterwards is invisible
+  to it, and hand-edits are precisely what ADR 0041's Consequences section warns are the historical
+  norm for these files.
+- **Runs whose logs have aged out.** GitHub's default retention is 90 days. An older apply cannot be
+  read, and the gate **refuses** rather than assuming — an apply nobody can read is an apply nobody
+  can check. That is the right direction to fail, and it does mean a very old apply must be re-run.
+- **Forgery, in the narrow sense.** The evidence is log text, and a `fleet-ops` input is
+  operator-supplied. This is not a privilege boundary and is not treated as one: anyone who can
+  dispatch `fleet-ops` can dispatch a promotion. The gate defends against forgetfulness and against
+  a plausible-looking wrong run, not against someone deliberately constructing a false one.
+- **A wrong `no`.** See the Consequences below — the answer is now compulsory, but it is still a
+  judgement, and a wrong one is only partly caught.
 
 ### Why promotion stays one workflow
 
@@ -151,10 +187,16 @@ build definition, one Dockerfile contract, one amd64-only decision, one ADR 0009
    ordinal of that day's releases. Not semver. The handle is also an immutable image alias
    (`rust-2026.08.21.1`) and the value of the image's `org.opencontainers.image.version` label.
 4. **Deploy ordering rides as data**, not as an overloaded integer. Each release body carries
-   `config-change-required: true|false` on a line of its own.
-5. **`promote-to-fleet.yml` refuses** when a release it crosses declares `config-change-required:
-true` and either the committed box configs did not change across that range, or no
-   `config_applied_run` is named. The check runs on a rollback too, over the range being undone.
+   `config-change-required: true|false` on a line of its own, and the question that produces it is
+   **compulsory** — the dispatch input is a `choice` whose first and preselected option is a
+   sentinel the workflow refuses by name, so an unanswered release is refused before it is built.
+   There is no default, because there is no safe one.
+5. **`promote-to-fleet.yml` refuses** when a release it crosses declares
+   `config-change-required: true` and either the committed box configs did not change across that
+   range, or the named `fleet-ops` `config-apply` run does not verify. Verification is five
+   conditions — right workflow, `success`, `operation=config-apply`, `apply=true` (not a dry run),
+   and started after the config's commit — checked per box, and failing closed when the evidence
+   cannot be read. The check runs on a rollback too, over the range being undone.
 6. **`:rust-release` is moved by `promote-to-fleet.yml` and by nothing else**, and a build is
    produced by `publish-connector-rust-image.yml` and by nothing else. The release workflow calls
    both; it reimplements neither.
@@ -172,12 +214,23 @@ half-failure: the recovery is to land and apply the config and then dispatch `pr
 directly with the `rust-sha-` tag the release names, not to re-run the release and burn a second
 handle on the same code. `promote: false` asks for the same state on purpose.
 
-**One more thing an operator must know before dispatching.** `config_change_required` is a judgement
-the release author makes, and a wrong `false` is not caught by this gate. It is partly caught by the
-one beneath it: if the build genuinely needs a config key the committed files lack, ADR 0041's boot
-gate refuses the promotion with `missing field`. What a wrong `false` still gets past is the
-"applied to the box" half — which is the half nothing can check. This record does not pretend
-otherwise.
+**The ordering question cannot be skipped, only answered.** An earlier draft of this record
+accepted a `type: boolean` defaulting to `false`, and wrote the resulting gap down as a limitation.
+That was the wrong trade and the passage is replaced rather than softened: defaulting to `false`
+means a forgetful operator silently gets the old behaviour, and fail-open on the ordering question
+is the exact shape of the 2026-08-16 outage — nobody decided the ordering did not matter, nobody was
+even asked. A checkbox cannot be tri-state, so the input is a `choice` whose first option is a
+sentinel (`-- select --`). GitHub always preselects the first option, so the form arrives
+pre-filled with an answer the `version` job rejects by name, before a build is spent. An absent
+answer is now indistinguishable from a wrong one, which is the point.
+
+**A wrong answer is still possible, and is only partly caught.** `config_change_required` remains a
+judgement: nothing can derive "this binary needs a new key" from the repository. A wrong `yes` costs
+a refused promotion and is self-correcting. A wrong `no` is the dangerous one, and it is caught in
+part by the gate beneath — a build that genuinely needs a key the committed files lack fails ADR
+0041's boot gate with `missing field`. What a wrong `no` still gets past is the applied-to-the-box
+half, because that half is only reached when the answer is `yes`. Compelling the answer removes the
+silent case; it does not remove the mistaken one.
 
 **The release handle is not a promotion input.** `promote-to-fleet.yml` accepts `rust-sha-<7 hex>`
 and refuses `rust-2026.08.21.1`, even though the alias is immutable and would be safe. One accepted
@@ -192,7 +245,13 @@ behaviour exists), while a release build gets a group of its own keyed by run id
 merge cannot cancel it. A cancelled release build would otherwise leave a handle and a GitHub
 Release naming an image that was never pushed.
 
-**This is a target record.** Written and asserted, but not exercised: no release has been cut and
-`:rust-release` has not moved under it. It becomes true when a first release is dispatched and both
-boxes come back green — and specifically when the ordering gate has been seen to refuse something,
-because a gate whose refusal path has never run is a gate nobody has tested.
+**This is a target record.** Written and asserted, but not exercised as a whole: no release has
+been cut and `:rust-release` has not moved under it. It becomes true when a first release is
+dispatched and both boxes come back green.
+
+The refusal paths themselves are not merely reasoned about. The apply-run verification was run
+against five real `fleet-ops` runs — a `config-read`, a failed `deploy`, a dry-run `deploy`, a
+nonexistent id, and a malformed token, each correctly refused — and against ten synthetic cases
+covering the true positive, both-boxes coverage, a dry-run apply, a wrong-workflow run, an apply
+predating the config commit, and unreadable logs. The sentinel step was run over its own six cases.
+What remains unexercised is the whole path end to end, on a real release, against the live fleet.

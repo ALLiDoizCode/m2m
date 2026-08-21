@@ -97,18 +97,26 @@ on:
         required: true
       config_change_required:
         description: >-
-          Does this build REQUIRE a committed box config change to boot? Tick
-          only for a new required key, a renamed field or a narrowed type
-          (ADR 0041 rule 2). A price or endpoint edit that the old binary also
-          accepts is not this.
-        type: boolean
-        required: false
-        default: false
+          Does this build REQUIRE a committed box config change to boot? `yes`
+          only for a new required key, a renamed field or a narrowed type (ADR
+          0041 rule 2) — a price or endpoint edit the old binary also accepts
+          is `no`. There is no default: leaving the sentinel selected refuses
+          the release.
+        type: choice
+        required: true
+        default: '-- select --'
+        options:
+          - '-- select --'
+          - 'no'
+          - 'yes'
       config_applied_run:
         description: >-
-          URL or run id of the fleet-ops.yml `config-apply` that put the
-          committed box configs on the boxes. Required when the box above is
-          ticked; passed straight through to promote-to-fleet.yml.
+          URL(s) or run id(s) of the fleet-ops.yml `config-apply` run that put
+          the committed box configs on the boxes — one per box that changed,
+          space- or comma-separated. Required when the answer above is `yes`.
+          promote-to-fleet.yml VERIFIES these: workflow, conclusion, operation,
+          apply=true, box coverage, and that the run started after the config
+          commit.
         type: string
         required: false
         default: ''
@@ -138,6 +146,10 @@ permissions:
   contents: write
   packages: write
   issues: write
+  # promote-to-fleet.yml's ordering gate reads the fleet-ops run's LOGS -- the
+  # only place a workflow_dispatch run's inputs survive. A called workflow is
+  # capped by its caller, so the scope has to be granted here too.
+  actions: read
 
 concurrency:
   # Never two releases at once: the handle is computed from the tags that
@@ -158,6 +170,7 @@ jobs:
       handle: ${{ steps.handle.outputs.handle }}
       sha: ${{ steps.handle.outputs.sha }}
       short: ${{ steps.handle.outputs.short }}
+      config_change: ${{ steps.ordering.outputs.config_change }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -220,7 +233,22 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Release handle: $HANDLE  (commit $SHORT)"
 
-      - name: A required config change must be committed and attested
+      # ── The ordering question must be ANSWERED, not defaulted ───────────
+      # This was a `type: boolean` defaulting to false, and a forgetful
+      # operator therefore got the old behaviour silently. Fail-open on the
+      # ordering question is the exact shape of the 2026-08-16 outage: nobody
+      # decided that the ordering did not matter, nobody was even asked.
+      #
+      # A checkbox cannot be tri-state, so the input is a `choice` whose FIRST
+      # option is a sentinel. GitHub always preselects the first option, so
+      # the dispatch form arrives pre-filled with an answer this step refuses
+      # by name — an absent answer is now indistinguishable from a wrong one,
+      # which is the point.
+      #
+      # It runs in `version`, before `build`, so a release that will be
+      # refused costs no runner time.
+      - name: The deploy-ordering question must be answered
+        id: ordering
         env:
           # Through `env`, not interpolated into the script: an operator-typed
           # string reaching a `run:` body verbatim is a quoting break waiting
@@ -230,26 +258,42 @@ jobs:
           APPLIED_RUN: ${{ inputs.config_applied_run }}
         run: |
           set -euo pipefail
-          # Checked here as well as in promote-to-fleet.yml, and the
-          # duplication is deliberate: this one is FREE and immediate, and it
-          # is the difference between "you forgot the run URL" arriving before
-          # the build or twelve minutes after it. promote-to-fleet.yml's copy
-          # is the one that binds, because a promotion can also be dispatched
-          # without ever passing through this workflow.
-          if [ "$CONFIG_CHANGE" != 'true' ]; then
-            echo "config-change-required: false — nothing to check."
+          case "$CONFIG_CHANGE" in
+            'yes') ANSWER=true ;;
+            'no') ANSWER=false ;;
+            *)
+              echo "::error::config_change_required is still '$CONFIG_CHANGE' — the ordering question was not answered."
+              echo "::error::"
+              echo "::error::You are being asked ONE thing: does this build refuse to boot against the"
+              echo "::error::box configs as they are committed today? A new required key, a renamed"
+              echo "::error::field or a narrowed type means 'yes'. A price or endpoint edit that the"
+              echo "::error::running binary also accepts means 'no'."
+              echo "::error::"
+              echo "::error::There is no default because there is no safe one. ADR 0041 rule 2: when a"
+              echo "::error::build needs a config change, the committed box config is updated and"
+              echo "::error::APPLIED first, and the tag moves after. Getting that order wrong is what"
+              echo "::error::crash-looped the relay's maker on 2026-08-16 (swap#134)."
+              exit 1
+              ;;
+          esac
+          echo "config_change=$ANSWER" >> "$GITHUB_OUTPUT"
+
+          if [ "$ANSWER" != 'true' ]; then
+            echo "config-change-required: false — no ordering constraint on this release."
             exit 0
           fi
           if [ -z "$APPLIED_RUN" ]; then
-            echo "::error::config_change_required is ticked but config_applied_run is empty."
+            echo "::error::config_change_required is 'yes' but config_applied_run is empty."
             echo "::error::ADR 0041 rule 2: the committed box config is updated and APPLIED first,"
             echo "::error::and the tag moves after. Land the config, then:"
             echo "::error::  gh workflow run fleet-ops.yml -f box=relay -f operation=config-apply -f apply=true"
             echo "::error::  gh workflow run fleet-ops.yml -f box=ario  -f operation=config-apply -f apply=true"
-            echo "::error::then re-dispatch this workflow naming that run."
+            echo "::error::then re-dispatch naming that run (one per box that changed)."
+            echo "::error::promote-to-fleet.yml verifies it: workflow, conclusion, operation,"
+            echo "::error::apply=true, box coverage, and that it started after the config commit."
             exit 1
           fi
-          echo "✓ config change attested as applied: $APPLIED_RUN"
+          echo "config-change-required: true; apply run(s) to verify at promotion: $APPLIED_RUN"
 
   # ── 2. The build ──────────────────────────────────────────────────────────
   # The SAME workflow a green merge runs. A release does not get its own
@@ -310,7 +354,7 @@ jobs:
           SHA: ${{ needs.version.outputs.sha }}
           BUILD_TAG: ${{ needs.build.outputs.image_tag }}
           DIGEST: ${{ needs.build.outputs.digest }}
-          CONFIG_CHANGE: ${{ inputs.config_change_required }}
+          CONFIG_CHANGE: ${{ needs.version.outputs.config_change }}
           APPLIED_RUN: ${{ inputs.config_applied_run }}
           REASON: ${{ inputs.reason }}
           NOTES: ${{ inputs.notes }}
@@ -374,7 +418,7 @@ jobs:
             echo "| Image | \`$IMAGE:${{ needs.build.outputs.image_tag }}\` |"
             echo "| Handle alias | \`$IMAGE:rust-${{ needs.version.outputs.handle }}\` |"
             echo "| Digest | \`${{ needs.build.outputs.digest }}\` |"
-            echo "| Config change required | \`${{ inputs.config_change_required }}\` |"
+            echo "| Config change required | \`${{ needs.version.outputs.config_change }}\` |"
             echo "| Config applied by | ${{ inputs.config_applied_run }} |"
             echo "| Promoting | \`${{ inputs.promote }}\` |"
             echo "| Reason | ${{ inputs.reason }} |"
@@ -410,4 +454,5 @@ jobs:
       contents: read
       packages: write
       issues: write
+      actions: read
     secrets: inherit

@@ -211,7 +211,11 @@ adding any automatic trigger reverses ADR 0041 Decision 3. Releases are named by
 monotonic handle (`2026.08.21.1`, UTC date plus that day's ordinal), never semver: every
 crate is `0.1.0` with no release process, so a version series would claim a stability
 contract the binary has not earned. Deploy ordering rides as a `config-change-required:
-true|false` field on the release, which the promotion reads and refuses on.
+true|false` field on the release, which the promotion reads and refuses on. That question
+has no default — the dispatch input's preselected option is a sentinel the workflow rejects,
+because fail-open on deploy ordering is the shape of the swap#134 outage. When the answer is
+yes, the named `fleet-ops config-apply` run is **verified** (right workflow, green, real
+apply not a dry run, right box, and after the config's commit), not taken on trust.
 (`package.json`'s `"version": "3.3.0"` is TypeScript-era residue; leave it alone.)
 
 Configuration is **one typed TOML file**, validated once at boot, immutable for the

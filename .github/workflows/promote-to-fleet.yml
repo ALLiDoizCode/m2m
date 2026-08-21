@@ -91,9 +91,17 @@
 #      This does not duplicate check 3. Check 3 boots the candidate against
 #      the configs COMMITTED HERE and so proves image-fits-committed-config;
 #      it cannot see the bytes on the box, and the bytes on the box are what
-#      Watchtower will recreate against. Check 4 is the only one that covers
-#      that gap, and the only tool it has for it is a human attestation with
-#      a run URL attached, which is why it asks for one rather than a tickbox.
+#      Watchtower will recreate against. Check 4 is the only one covering
+#      that gap.
+#
+#      The named run is VERIFIED, not believed. Five conditions, all of them
+#      refusals: the run exists and is a run of fleet-ops.yml; it concluded
+#      `success`; it was `operation=config-apply` and NOT a dry run
+#      (`apply=true`); it covers every box whose committed config changed
+#      across the crossed range; and it STARTED AFTER that config's commit,
+#      because an apply predating the commit applied the previous file. Where
+#      both boxes changed, one run covering one box is a refusal -- name
+#      both. ADR 0055 records what this does and does not prove.
 #   5. After the retag, fleet-health.yml probes both boxes and this run goes
 #      red if they did not come back. A promotion that breaks the fleet
 #      reports as a failure, with the alert issue already open.
@@ -182,6 +190,13 @@ on:
 permissions:
   contents: read
   packages: write
+  # The deploy-ordering gate reads the LOGS of the fleet-ops `config-apply`
+  # run it is given, because that is the only place a `workflow_dispatch`
+  # run's inputs survive -- the run object has no `inputs` key and
+  # fleet-ops.yml sets no `run-name:`, so `display_title` is the bare string
+  # "fleet-ops". Without this scope the gate cannot read them, and it refuses
+  # the promotion rather than assuming the best.
+  actions: read
   # The `verify` job calls fleet-health.yml, which opens/closes the rolling
   # alert issue. A called workflow cannot hold more permission than its
   # caller grants, so this must be declared here too or the health job
@@ -433,16 +448,168 @@ jobs:
           echo "✓ Committed box config changed across the range:"
           printf '    %s\n' $CHANGED
 
+          # Which BOXES must have been applied, and the moment each one's
+          # config last moved. `ario` is the store box's Linode label, which
+          # is what fleet-ops.yml's `box` input takes -- not "store".
+          REQUIRED=""
+          for F in $CHANGED; do
+            case "$F" in
+              infra/linode-relay/connector-rust.toml) B=relay ;;
+              infra/linode-store/connector-rust.toml) B=ario ;;
+              *) echo "::error::unexpected path $F"; exit 1 ;;
+            esac
+            # Committer date, not author date: a rebase moves the committer
+            # date FORWARD, which is the safe direction for an
+            # "applied-after" test.
+            WHEN=$(git log -1 --format=%ct "$FROM..$TO" -- "$F")
+            echo "  $B must have been applied after $(date -u -d "@$WHEN" +%Y-%m-%dT%H:%M:%SZ) ($F)"
+            REQUIRED="$REQUIRED $B:$WHEN"
+          done
+
           if [ -z "$CONFIG_APPLIED_RUN" ]; then
             echo "::error::Release(s)$DEMANDING declare config-change-required: true and the committed"
             echo "::error::box config did change — but no config_applied_run was given, so nothing says the"
             echo "::error::BOXES have it. Watchtower recreates against the file on the box, not this repo."
-            echo "::error::Apply it, then re-dispatch naming the run:"
+            echo "::error::Apply it, then re-dispatch naming the run URL(s) — one per box that changed:"
             echo "::error::  gh workflow run fleet-ops.yml -f box=relay -f operation=config-apply -f apply=true"
             echo "::error::  gh workflow run fleet-ops.yml -f box=ario  -f operation=config-apply -f apply=true"
             exit 1
           fi
-          echo "✓ Operator attests the config was applied: $CONFIG_APPLIED_RUN"
+
+          # ── Verify the named run(s) rather than believing them ─────────────
+          # This used to be an attestation: a non-empty string, recorded and
+          # trusted. ADR 0041's own thesis refuses that -- "the enforceable
+          # half has to be a check on the config the fleet actually has" --
+          # so an unverifiable string is precisely the unenforceable half it
+          # says is not sufficient. It cost every release some friction and
+          # bought an audit line nobody could rely on.
+          #
+          # `workflow_dispatch` inputs are NOT on the run object: it has no
+          # `inputs` key, and fleet-ops.yml sets no `run-name:`, so
+          # `display_title` is the bare string "fleet-ops" (verified against
+          # 12 real runs). What IS recorded is fleet-ops.yml's job-level
+          # `env:` block -- BOX, OPERATION, SERVICE, APPLY -- which the runner
+          # echoes into the log before every step. That is a consequence of
+          # how that file is written, not a GitHub contract, so
+          # `the_apply_verification_reads_what_fleet_ops_actually_records` in
+          # crates/connector-bin/tests/fleet_release_gate.rs fails the build
+          # if fleet-ops.yml stops declaring them there. Every branch below
+          # fails CLOSED: an unreadable log refuses the promotion, it never
+          # waves it through.
+          COVERED=""
+          for TOKEN in $(echo "$CONFIG_APPLIED_RUN" | tr ',' ' '); do
+            RID=$(echo "$TOKEN" | grep -oE '[0-9]{6,}' | tail -1 || true)
+            if [ -z "$RID" ]; then
+              echo "::error::'$TOKEN' contains no run id. Give the run URL or its numeric id."
+              exit 1
+            fi
+            echo "::group::fleet-ops run $RID"
+
+            # `if !`, not `|| true`: on a 404 `gh api` exits 1 but still
+            # prints the error BODY to stdout, so a swallowed exit code turns
+            # "no such run" into a refusal whose message quotes a JSON blob at
+            # the operator. Verified against a bogus run id.
+            if ! META=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RID" \
+              --jq '[.path, .conclusion, .run_started_at, .event] | @tsv' 2>/dev/null); then
+              echo "::error::no run $RID in $GITHUB_REPOSITORY, or it is not readable."
+              echo "::error::Name the fleet-ops config-apply run by its URL or its numeric id."
+              exit 1
+            fi
+            IFS=$'\t' read -r RPATH RCONC RSTART REVENT <<EOF2
+          $META
+          EOF2
+            echo "path=$RPATH conclusion=$RCONC started=$RSTART event=$REVENT"
+
+            if [ "$RPATH" != '.github/workflows/fleet-ops.yml' ]; then
+              echo "::error::run $RID is '$RPATH', not fleet-ops.yml. Only a fleet-ops run applies a box config."
+              exit 1
+            fi
+            if [ "$RCONC" != 'success' ]; then
+              echo "::error::fleet-ops run $RID concluded '$RCONC'. A config-apply that did not succeed did not apply anything."
+              exit 1
+            fi
+
+            # The logs are the only place the inputs survive. 410 Gone once
+            # they age out (90 days by default) -- which refuses the
+            # promotion rather than passing it, because an apply nobody can
+            # read is an apply nobody can check.
+            if ! gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RID/logs" > "$RUNNER_TEMP/$RID.zip" 2>/dev/null; then
+              echo "::error::cannot read logs for fleet-ops run $RID (expired, or actions:read is missing)."
+              echo "::error::Without them nothing can confirm the run was a config-apply for the right box."
+              echo "::error::Re-run the apply and name the new run."
+              exit 1
+            fi
+            # python3, not `unzip | sed`: both are on ubuntu-latest, but
+            # this one can be run outside a runner, which is how the truth
+            # table below was actually exercised against real fleet-ops runs
+            # rather than reasoned about. A gate nobody has run is a gate.
+            python3 - "$RUNNER_TEMP/$RID.zip" > "$RUNNER_TEMP/$RID.log" <<'PY'
+          import re, sys, zipfile
+
+          z = zipfile.ZipFile(sys.argv[1])
+          ansi = re.compile(r"\x1b\[[0-9;]*m")
+          stamp = re.compile(r"^\S+Z ")
+          for name in z.namelist():
+              for raw in z.read(name).decode("utf-8", "replace").splitlines():
+                  print(ansi.sub("", stamp.sub("", raw)).rstrip())
+          PY
+
+            field() {
+              grep -E "^  $1: " "$RUNNER_TEMP/$RID.log" | sed -E "s/^  $1: //" | sort -u
+            }
+            R_OP=$(field OPERATION)
+            R_BOX=$(field BOX)
+            R_APPLY=$(field APPLY)
+            echo "recorded: OPERATION='$R_OP' BOX='$R_BOX' APPLY='$R_APPLY'"
+            echo "::endgroup::"
+
+            # One value each, or the log is not telling us one story.
+            for PAIR in "OPERATION:$R_OP" "BOX:$R_BOX" "APPLY:$R_APPLY"; do
+              K=${PAIR%%:*}; V=${PAIR#*:}
+              if [ -z "$V" ] || [ "$(printf '%s' "$V" | wc -l)" -gt 0 ]; then
+                echo "::error::could not read a single $K from fleet-ops run $RID's log (got '$V')."
+                echo "::error::fleet-ops.yml records these as job-level env; if that changed, this gate must be updated, not bypassed."
+                exit 1
+              fi
+            done
+
+            if [ "$R_OP" != 'config-apply' ]; then
+              echo "::error::fleet-ops run $RID was operation '$R_OP', not config-apply. It did not write a config file."
+              exit 1
+            fi
+            if [ "$R_APPLY" != 'true' ]; then
+              echo "::error::fleet-ops run $RID ran with apply=false. That is a DRY RUN: it read the box, printed a diff, and wrote nothing."
+              exit 1
+            fi
+
+            RSTART_EPOCH=$(date -u -d "$RSTART" +%s)
+            COVERED="$COVERED $R_BOX:$RSTART_EPOCH"
+            echo "✓ run $RID: config-apply, apply=true, success, box=$R_BOX"
+          done
+
+          # Every box whose committed config moved must be covered by a run
+          # that STARTED AFTER that move. An apply that predates the config
+          # commit applied the previous file, which is the same outage with a
+          # receipt attached.
+          rc=0
+          for REQ in $REQUIRED; do
+            RB=${REQ%%:*}; RWHEN=${REQ#*:}
+            BEST=""
+            for COV in $COVERED; do
+              CB=${COV%%:*}; CWHEN=${COV#*:}
+              if [ "$CB" = "$RB" ] && [ "$CWHEN" -gt "$RWHEN" ]; then BEST="$CWHEN"; fi
+            done
+            if [ -z "$BEST" ]; then
+              echo "::error::box '$RB' had its committed connector-rust.toml changed in this range, and no"
+              echo "::error::named fleet-ops config-apply run for '$RB' started after $(date -u -d "@$RWHEN" +%Y-%m-%dT%H:%M:%SZ)."
+              echo "::error::Apply it and name that run:"
+              echo "::error::  gh workflow run fleet-ops.yml -f box=$RB -f operation=config-apply -f apply=true"
+              rc=1
+            else
+              echo "✓ box '$RB' applied at $(date -u -d "@$BEST" +%Y-%m-%dT%H:%M:%SZ), after its config commit."
+            fi
+          done
+          exit $rc
 
       # ── The config-compatibility gate (ADR 0041) ──────────────────────────
       # The box's `connector-rust.toml` is BIND-MOUNTED: it is not in the

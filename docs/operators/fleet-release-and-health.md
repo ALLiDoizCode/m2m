@@ -65,12 +65,12 @@ gh workflow run release-connector.yml \
 Run it **on the commit you want released** — `gh workflow run --ref <branch-or-sha>` — and it must
 be on `main`. The `version` job checks that before spending ten minutes on a build.
 
-| Input                    | When you set it                                                                                                                                                                                            |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `reason`                 | Always. Required. It lands in the release notes and both run summaries, and it is the only record of _why_ this digest.                                                                                    |
-| `config_change_required` | Only when the build **cannot boot the committed box configs as they stand** — a new required key, a renamed field, a narrowed type. A price or endpoint edit that the old binary also accepts is not this. |
-| `config_applied_run`     | Whenever the box above is ticked. The URL of the `fleet-ops.yml config-apply` run that put the committed configs on the boxes. The promotion refuses without it.                                           |
-| `promote`                | Untick to cut a release and leave the fleet where it is — a named, published build that the boxes do not take yet.                                                                                         |
+| Input                    | When you set it                                                                                                                                                                                                                                                                                                      |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `reason`                 | Always. Required. It lands in the release notes and both run summaries, and it is the only record of _why_ this digest.                                                                                                                                                                                              |
+| `config_change_required` | **Always** — it has no default. `yes` only when the build **cannot boot the committed box configs as they stand** (a new required key, a renamed field, a narrowed type); `no` for a price or endpoint edit the running binary also accepts. Leaving `-- select --` selected refuses the release before it is built. |
+| `config_applied_run`     | Whenever the answer above is `yes`. The URL(s) of the `fleet-ops.yml config-apply` run(s) that put the committed configs on the boxes — **one per box that changed**, space- or comma-separated. Verified, not taken on trust: see below.                                                                            |
+| `promote`                | Untick to cut a release and leave the fleet where it is — a named, published build that the boxes do not take yet.                                                                                                                                                                                                   |
 
 The handle is `2026.08.21.1`: UTC date, then that day's ordinal. It is **not** semver and does not
 claim to be — every crate under `crates/` is `0.1.0` with no release process, so a version series
@@ -201,16 +201,31 @@ those config changes — and where any of them says `true` it demands both halve
    `infra/linode-relay/connector-rust.toml` and `infra/linode-store/connector-rust.toml`). A release
    claiming a config change while those files sat untouched is the 2026-08-16 shape exactly: the fix
    applied to the box and never committed here.
-2. **A `fleet-ops.yml config-apply` run is named** (`config_applied_run`). Nothing in CI can see the
-   bytes on the box, and the bytes on the box are what Watchtower recreates against — the boot gate
-   above proves only that the image fits the config committed _here_. This half is an attestation,
-   not a proof, and it is a URL rather than a tickbox so that it lands in the run summary as a trail
-   somebody can follow.
+2. **A `fleet-ops.yml config-apply` run is named and verified** (`config_applied_run`). Nothing in
+   CI can see the bytes on the box, and the bytes on the box are what Watchtower recreates against —
+   the boot gate above proves only that the image fits the config committed _here_. So the named run
+   is checked, five ways, each its own refusal:
 
-Neither half fires when `config-change-required` is `false`, and a wrong `false` is **not** caught
-here. It is partly caught one gate down: a build that genuinely needs a key the committed files lack
-fails the boot gate with `missing field`. What a wrong `false` still gets past is the applied-to-the-box
-half, which nothing can check.
+   | Checked                                               | Rejects                                                                                                                       |
+   | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+   | the run's `path` is `.github/workflows/fleet-ops.yml` | a run id from some other workflow, or one that does not exist                                                                 |
+   | `conclusion == success`                               | an apply that failed, and so applied nothing                                                                                  |
+   | `operation == config-apply`                           | `box-status`, `config-read`, `pin-verify`, `restart`, `deploy`, `announce`                                                    |
+   | `apply == true`                                       | **a dry run** — a real `config-apply` with `apply=false` reads the box, prints the diff, writes nothing, and still goes green |
+   | the run **started after** the config's commit         | an apply that predates the commit, and therefore applied the previous file                                                    |
+
+   Coverage is per box, so where both boxes' configs changed you must name both runs. The evidence
+   comes from the run's **logs** — a `workflow_dispatch` run's inputs are nowhere on the run object,
+   and `fleet-ops.yml` sets no `run-name:`, so its job-level `env:` echo is the only surviving
+   record. If the logs cannot be read (they age out at 90 days), the promotion is **refused**, not
+   waved through.
+
+Neither half fires when `config-change-required` is `false`. The answer can no longer be _omitted_ —
+the dispatch input's first and preselected option is a `-- select --` sentinel the release refuses
+by name — but it can still be **wrong**, and a wrong `no` is only partly caught: a build that
+genuinely needs a key the committed files lack fails the boot gate with `missing field`, while a
+build that boots fine against the committed config but needs it _applied_ slips through, because
+that check is only reached when the answer is `yes`.
 
 A promotion of a build with no release at all — a rollback target from before this existed, or a
 hand-published `rust-sha-` — is not refused. That is a deliberate hole, and the boot gate still runs

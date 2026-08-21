@@ -27,6 +27,7 @@ const PUBLISH_CONNECTOR_WORKFLOW: &str =
     include_str!("../../../.github/workflows/publish-connector-rust-image.yml");
 const PROMOTE_WORKFLOW: &str = include_str!("../../../.github/workflows/promote-to-fleet.yml");
 const RELEASE_WORKFLOW: &str = include_str!("../../../.github/workflows/release-connector.yml");
+const FLEET_OPS_WORKFLOW: &str = include_str!("../../../.github/workflows/fleet-ops.yml");
 const FLEET_HEALTH_WORKFLOW: &str = include_str!("../../../.github/workflows/fleet-health.yml");
 const RELAY_SWAP_CONFIG: &str = include_str!("../../../infra/linode-relay/swap.config.json");
 const RELAY_SWAP_OVERLAY: &str =
@@ -305,6 +306,217 @@ fn promotion_refuses_a_declared_config_change_that_was_not_landed_and_applied() 
         "promote-to-fleet.yml's config-ordering refusal no longer prints the \
          fleet-ops.yml command that resolves it. An error naming the rule but \
          not the remedy is how a gate gets routed around."
+    );
+}
+
+/// The lines of a `workflow_dispatch` input's own block, by indentation.
+fn input_block(raw: &str, name: &str) -> String {
+    let needle = format!("      {name}:");
+    let Some(start) = raw.find(&needle) else {
+        panic!("no `{name}` input found — this test is asserting over a shape that moved");
+    };
+    let mut out = String::new();
+    for (i, line) in raw[start..].lines().enumerate() {
+        if i > 0 && !line.trim().is_empty() {
+            let indent = line.len() - line.trim_start().len();
+            if indent <= 6 {
+                break;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Fail-open on the ordering question is the exact shape of the 2026-08-16
+/// outage: nobody decided the ordering did not matter, nobody was even asked.
+///
+/// `config_change_required` was a `type: boolean` defaulting to `false`, so a
+/// forgetful operator silently got the old behaviour. A checkbox cannot be
+/// tri-state; a `choice` can, because GitHub always preselects the FIRST
+/// option — so the first option is a sentinel the workflow refuses by name,
+/// and an absent answer becomes indistinguishable from a wrong one.
+///
+/// The refusal has to be in `version`, before `build`, or a release that will
+/// be refused still burns ten minutes of runner first.
+#[test]
+fn the_release_workflow_refuses_an_unanswered_ordering_question() {
+    let block = input_block(RELEASE_WORKFLOW, "config_change_required");
+
+    assert!(
+        block.contains("type: choice"),
+        "config_change_required is not a `choice`. A `boolean` cannot express \
+         \"not answered\" — it arrives as `false`, which is the fail-open the \
+         sentinel exists to remove. Block:\n{block}"
+    );
+    assert!(
+        !block.contains("type: boolean"),
+        "config_change_required is a boolean again. GitHub renders it as a \
+         pre-ticked-or-unticked box, so an operator who reads nothing dispatches \
+         `false` — silently claiming this build needs no config change. Block:\n{block}"
+    );
+
+    // The sentinel must be the FIRST option, because that is the one GitHub
+    // preselects. Any other position and the form still arrives pre-answered.
+    let options = block
+        .split_once("options:")
+        .map(|(_, rest)| rest.to_string())
+        .expect("config_change_required has no `options:` list");
+    let first = options
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("- "))
+        .expect("config_change_required's `options:` list is empty");
+    assert!(
+        first.contains("-- select --"),
+        "config_change_required's first option is `{first}`, not the `-- select --` \
+         sentinel. GitHub preselects the first option, so whatever sits there is \
+         what an operator who reads nothing submits. Putting a real answer first \
+         restores the fail-open."
+    );
+
+    assert!(
+        RELEASE_WORKFLOW.contains("the ordering question was not answered"),
+        "release-connector.yml no longer refuses the sentinel. The choice list \
+         alone changes nothing — something has to reject the preselected value."
+    );
+}
+
+/// Where the apply evidence actually comes from, and the drift that would
+/// silently destroy it.
+///
+/// A `workflow_dispatch` run's inputs are NOT on the run object: it has no
+/// `inputs` key, and `fleet-ops.yml` sets no `run-name:`, so `display_title`
+/// is the bare string "fleet-ops" (checked against 12 real runs). The only
+/// place `box`, `operation` and `apply` survive is the runner's echo of
+/// `fleet-ops.yml`'s **job-level `env:` block** into the log.
+///
+/// That is a consequence of how fleet-ops.yml happens to be written, not a
+/// GitHub contract and not a thing fleet-ops.yml knows it is providing. If
+/// those move out of job `env` — inlined per step, renamed, read straight from
+/// `inputs` — the log stops carrying them, and the gate that reads them stops
+/// being able to check anything. It fails closed when it cannot read them, so
+/// the live consequence is refused promotions rather than waved-through ones;
+/// this case is here so the cause is named at build time instead of at 2am.
+///
+/// Same class as
+/// [`the_config_compat_gate_reproduces_the_makers_committed_service_environment`]:
+/// two files depending on one fact, and only one of them knows it.
+const FLEET_OPS_LOGGED_INPUTS: &[&str] = &["BOX", "OPERATION", "APPLY"];
+
+#[test]
+fn the_apply_verification_reads_what_fleet_ops_actually_records() {
+    for key in FLEET_OPS_LOGGED_INPUTS {
+        let declared = format!("{key}: ${{{{ inputs.");
+        assert!(
+            FLEET_OPS_WORKFLOW.contains(&declared),
+            "fleet-ops.yml no longer declares `{key}` as job-level `env:` from an \
+             input. That echo is the ONLY record of a config-apply run's \
+             parameters — the run object has no `inputs` key and the workflow \
+             sets no `run-name:` — so promote-to-fleet.yml's ordering gate can \
+             no longer tell a config-apply from a box-status. Either restore it, \
+             or give fleet-ops.yml a `run-name:` carrying the same facts and \
+             teach the gate to read that instead. Do not simply delete the check."
+        );
+        assert!(
+            PROMOTE_WORKFLOW.contains(&format!("field {key}")),
+            "promote-to-fleet.yml no longer extracts `{key}` from the fleet-ops \
+             run's log, so it is not checking that half of the apply."
+        );
+    }
+
+    // The extraction has to match the runner's actual line shape: two spaces,
+    // the key, a colon, a space. Verified against 12 real fleet-ops runs.
+    assert!(
+        PROMOTE_WORKFLOW.contains("grep -E \"^  $1: \""),
+        "promote-to-fleet.yml's log extraction no longer matches the runner's \
+         env-echo line shape (two spaces, KEY, ': '). If the shape it looks for \
+         is wrong the gate finds nothing — and because it fails closed, that \
+         reads as every promotion being refused rather than as a bug here."
+    );
+}
+
+/// The apply run is VERIFIED, not believed.
+///
+/// This began as an attestation: a non-empty string, recorded in the summary
+/// and trusted. ADR 0041's own thesis refuses that — "the enforceable half has
+/// to be a check on the config the fleet actually has" — so an unverifiable
+/// string was precisely the unenforceable half that record says is not
+/// sufficient. It cost every release some friction and bought an audit line
+/// nobody could rely on.
+///
+/// Five conditions, each its own refusal. Every one of them is a way a named
+/// run can be real, green, and still not evidence that the boxes have the
+/// config:
+///
+/// * a run of some other workflow entirely;
+/// * a fleet-ops run that failed;
+/// * a fleet-ops run that was `box-status`, `config-read`, `deploy` — anything
+///   that never writes a config file;
+/// * `apply=false`, which is a DRY RUN: it reads the box, prints the diff, and
+///   writes nothing. This is the most dangerous of the five, because the run is
+///   a genuine `config-apply` and concludes green;
+/// * an apply that ran BEFORE the config commit, which applied the previous
+///   file — the same outage with a receipt attached.
+#[test]
+fn promotion_verifies_the_named_apply_run_rather_than_believing_it() {
+    let required: &[(&str, &str)] = &[
+        (
+            "actions/runs/$RID",
+            "fetch the named run's metadata at all",
+        ),
+        (
+            "!= '.github/workflows/fleet-ops.yml'",
+            "check the run is a run of fleet-ops.yml (not merely that a run id exists)",
+        ),
+        (
+            "!= 'success'",
+            "check the run concluded successfully",
+        ),
+        (
+            "!= 'config-apply'",
+            "check the run's operation was config-apply and not box-status/config-read/deploy",
+        ),
+        (
+            "ran with apply=false",
+            "reject a DRY RUN — a genuine config-apply with apply=false reads the box, prints a diff and writes nothing, and still concludes green",
+        ),
+        (
+            "-gt \"$RWHEN\"",
+            "check the apply STARTED AFTER the config commit — an earlier apply applied the previous file",
+        ),
+    ];
+
+    for (needle, what) in required {
+        assert!(
+            PROMOTE_WORKFLOW.contains(needle),
+            "promote-to-fleet.yml no longer appears to {what} (looked for \
+             `{needle}`). Dropping one of these turns the ordering gate back \
+             into an attestation — a string that costs a release friction and \
+             proves nothing, which is exactly what ADR 0041 says is not \
+             sufficient. If the check genuinely cannot be made, say so in ADR \
+             0055 rather than leaving the workflow implying it happens."
+        );
+    }
+
+    // Coverage is per-box: `ario` is the store box's Linode label, which is
+    // what fleet-ops.yml's `box` input takes. One run naming one box does not
+    // cover a range in which both boxes' configs moved.
+    assert!(
+        PROMOTE_WORKFLOW.contains("infra/linode-store/connector-rust.toml) B=ario"),
+        "promote-to-fleet.yml no longer maps the store box's committed config \
+         to the `ario` box label. fleet-ops.yml takes `ario`, not `store`, so a \
+         wrong mapping here either refuses a valid apply forever or accepts a \
+         relay apply as cover for a store config change."
+    );
+    assert!(
+        PROMOTE_WORKFLOW.contains("\n  actions: read"),
+        "promote-to-fleet.yml no longer GRANTS `actions: read` at workflow scope \
+         (a commented-out line does not count, which is how this assertion was \
+         first written and how mutation testing caught it). Without the scope \
+         the ordering gate cannot read the fleet-ops run's logs, and since it \
+         fails closed, every config-requiring promotion is refused."
     );
 }
 
