@@ -139,6 +139,15 @@ RUN apk add --no-cache ca-certificates && \
     mkdir -p /app/state && chown connector:connector /app/state
 
 COPY --from=builder /workspace/target/release/connector /usr/local/bin/connector
+# `stub-app` is the connector package's second [[bin]], so `-p connector`
+# above already built it -- this copies it rather than compiling anything new.
+# It is the payment-oblivious app behind a route in `local/`'s topologies: a
+# connector needs *something* to terminate to, and shipping the trivial one in
+# the same image is what keeps those topologies from needing an app repo. It
+# holds no secret, performs no cryptography and answers `POST /` (see its
+# module header), so nothing about it is reachable unless an operator points a
+# route at it deliberately.
+COPY --from=builder /workspace/target/release/stub-app /usr/local/bin/stub-app
 
 USER connector
 ENTRYPOINT ["/usr/local/bin/connector"]

@@ -462,7 +462,12 @@ docker run --rm -it \
 - Use `http://localhost:3085/graphql` as the GraphQL endpoint for the connector config. Note: the deploy script (`tools/mina/deploy-zkapp.ts`) enforces HTTPS unconditionally, so for lightnet deployments either set the `graphqlUrl` in the connector YAML config (which does not enforce HTTPS) and deploy using the o1js `Mina.LocalBlockchain()` API directly, or temporarily bypass the HTTPS check in a local copy of the deploy script
 - Pre-funded accounts are available via the accounts manager at `http://localhost:8181`
 
-> **Note:** Docker lightnet Makefile targets (`mina-up`, `mina-down`, `mina-logs`) are not yet available. Use `docker run` directly for local development.
+> **Note:** There are no `mina-up` / `mina-down` / `mina-logs` Makefile targets, and the
+> repository's `docker-compose.yml` carries no Mina profile. They existed briefly and were
+> removed: [ADR 0002](adr/0002-drop-mina-from-the-rust-connector.md) drops Mina from the Rust
+> connector, so a local Mina node has no connector to serve — the `mina-lightnet` service was
+> dialled by nothing in this repository, and the faucet's Mina leg points at **public devnet**
+> rather than at it. Use `docker run` directly, as above, for zkApp work against a local network.
 
 ---
 

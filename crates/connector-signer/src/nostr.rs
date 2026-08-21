@@ -14,10 +14,9 @@
 //! ECDSA* signature over a digest -- a different algorithm with a different
 //! encoding, verified by different code. `libsecp256k1` 0.6 (this crate's
 //! ECDSA implementation) does not do Schnorr at all, hence `k256`'s
-//! `schnorr` module here; `local_stack_rehearsal.rs` and
-//! `devnet_store_leg_probe.rs` already reach for the same crate for the same
-//! reason, which is precisely why this belongs behind one function instead
-//! of being hand-rolled a third time.
+//! `schnorr` module here; `devnet_store_leg_probe.rs` already reaches for
+//! the same crate for the same reason, which is precisely why this belongs
+//! behind one function instead of being hand-rolled a second time.
 //!
 //! # The id is a serialization, and the serialization is the spec
 //!

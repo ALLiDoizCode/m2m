@@ -39,17 +39,23 @@ mod rfc9421;
 mod write_auth;
 
 /// Signing helpers for constructing a validly-signed operator write from
-/// outside this crate -- gated behind the `test-util` feature (rather than
-/// `#[cfg(test)]` alone) for the same reason `connector-settlement`'s own
-/// `contract` module is: a downstream crate's *own* tests (here,
-/// `connector-cli`'s real-chain settlement lifecycle test, issue #542,
-/// which needs a genuinely signed write against the operator surface
-/// `connector-cli::runtime::router` mounts) cannot see anything behind
-/// `#[cfg(test)]`, since that cfg is only active while this crate compiles
-/// its own test binary.
+/// outside this crate.
+///
+/// Ungated. These were behind `test-util` while the only callers were tests,
+/// but `connector send` (the binary's third verb) signs a real
+/// `POST /packets` with exactly these, so they are shipped code now. The
+/// verification half is unaffected and stays private to this crate.
+pub mod signing {
+    pub use crate::rfc9421::{compute_content_digest, keyid_hex, sign_request};
+}
+
+/// The old name for [`signing`], kept so the `test-util` feature keeps
+/// meaning what it meant to existing callers (`connector-cli`'s settlement
+/// lifecycle test, issue #542). New code should use [`signing`] directly --
+/// there is nothing test-only about it any more.
 #[cfg(feature = "test-util")]
 pub mod test_support {
-    pub use crate::rfc9421::{compute_content_digest, keyid_hex, sign_request};
+    pub use crate::signing::{compute_content_digest, keyid_hex, sign_request};
 }
 
 use std::sync::Arc;

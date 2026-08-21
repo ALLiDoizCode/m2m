@@ -157,9 +157,8 @@ pub struct AnnounceNotice {
 }
 
 /// `resolveNotice`'s default in every other announce path this issue
-/// touches (`packages/announcer/src/config.ts`,
-/// `deploy/connector-rust/local-stack/publish-announces.mjs`) -- an
-/// operator who sets a notice but no severity gets the least alarming one.
+/// touches (`packages/announcer/src/config.ts`) -- an operator who sets a
+/// notice but no severity gets the least alarming one.
 const DEFAULT_NOTICE_SEVERITY: &str = "info";
 
 /// The facts a node cannot introspect about itself, fully validated.
@@ -335,9 +334,8 @@ impl AnnounceConfig {
 /// only whether one was configured at all and whether its severity is one
 /// of the two the wire schema allows.
 ///
-/// Mirrors `resolveNotice` in `packages/announcer/src/config.ts` and
-/// `deploy/connector-rust/local-stack/publish-announces.mjs`'s identical
-/// function, field for field: `id`/`summary`/`url` must all be set
+/// Mirrors `resolveNotice` in `packages/announcer/src/config.ts` field for
+/// field: `id`/`summary`/`url` must all be set
 /// together (or none at all), and an unrecognized `severity` is a load
 /// error on this, the WRITE side -- unlike core's *parser*, which degrades
 /// an unknown severity to `info` for lenience on the READ side.
@@ -901,7 +899,7 @@ mod tests {
 
     /// `id`/`summary`/`url` all set, `severity` omitted, resolves with the
     /// default severity -- mirroring `resolveNotice` in
-    /// `packages/announcer/src/config.ts` and the local-stack script's copy.
+    /// `packages/announcer/src/config.ts`.
     #[test]
     fn a_full_notice_resolves_and_defaults_its_severity_to_info() {
         let mut with_notice = raw(None);

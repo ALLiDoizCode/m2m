@@ -40,12 +40,14 @@ equivalent contract.
 docker pull ghcr.io/toon-protocol/connector:rust-sha-<short-sha>
 ```
 
-For a **whole stack** on one machine rather than a single node — connector,
-relay, a local `anvil` carrying the settlement topology, and a real paid write
-plus on-chain redeem end to end — see
-[`local-stack/README.md`](local-stack/README.md). That is a rehearsal, not a
-deployment: nothing in it is published or pinned, and every key in it is a test
-fixture.
+A `local-stack/` bundle used to sit here — the connector plus the published
+relay image plus a host `anvil`, driven end to end. It is deleted. It was
+app-layer by construction (its subject was a paid write landing on a _relay_),
+it pinned a relay image by sha that would rot, and its chain lived on the host
+behind a hand-run Python TCP forwarder because `anvil` binds loopback. Local
+composition of a connector with an app belongs in the app's own repository;
+this repo builds only the connector image. `git log --diff-filter=D --
+deploy/connector-rust/local-stack` if you need to read what it did.
 
 Skip to [step 6](#6-run-it) to run it — the config/key setup in steps 1-4
 below is identical whether you built the image locally or pulled it.
