@@ -71,11 +71,10 @@ key_file = "/app/data/signer.key"
 # PEER channel out of B's CLIENT-edge book, which no peer claim ever reaches.
 # That is issue #1102, fixed -- the endpoint now answers a peer channel out of
 # the peer book -- and covering a priced peer termination is therefore a live
-# option. It is deliberately not wired here: this topology is the
-# containerised counterpart of `two_connectors_peer.rs`, which prices its
-# payee's terminated route at 0, and changing that would change what the two
-# of them prove together. #1102's own tests need no container to assert the
-# fix.
+# option. It is deliberately not wired here: this topology mirrors
+# `two_connectors_peer.rs`, and pricing one payee and not the other would make
+# them prove different things. #1102's own tests assert the fix without a
+# container.
 #
 # The peering is still genuinely paid: what A owes B is the forwarded amount,
 # not this route's price, and `[[peer_channels]]` below is what that claim is
