@@ -4,7 +4,10 @@
 (`.github/workflows/release-connector.yml`) and asserted by
 `crates/connector-bin/tests/fleet_release_gate.rs`, but no release has been cut with it and
 `:rust-release` has not moved under it. Extends [0041](0041-a-moving-tag-carries-the-fleets-committed-config-or-it-does-not-move.md);
-reverses nothing in it.
+reverses nothing in it. **0041's own Status line is deliberately untouched** — this folder's
+convention has a record name its amender, but 0041 is Accepted and this one is not, and marking a
+live record as amended by a proposal would make the proposal look binding. Add the back-reference
+when this is accepted, not before.
 
 **Scope:** deployment law for this fleet — not protocol. See the [ADR index](README.md).
 
