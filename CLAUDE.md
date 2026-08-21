@@ -183,11 +183,19 @@ mint script and the local topology are devnet-and-below only.
 
 ## Environments
 
-| Tier           | What it is                                                                                                                                                                                |
-| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **local**      | `docker-compose.yml` chain profiles, and the connector image run against them. Disposable, funded from genesis, no shared state.                                                          |
-| **devnet**     | Two Linode boxes (`infra/linode-relay/`, `infra/linode-store/`). Containers follow the `rust-release` tag via a label-scoped Watchtower and bind-mount a committed `connector-rust.toml`. |
-| **production** | Does not exist. No machines, no mainnet contracts, no keys.                                                                                                                               |
+| Tier           | What it is                                                                                                                                                                                                           |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **local**      | `docker-compose.yml` chain profiles, and the connector image run against them. Disposable, funded from genesis, no shared state.                                                                                     |
+| **devnet**     | Two Linode boxes (`infra/linode-relay/`, `infra/linode-store/`). Containers follow the `rust-release` tag via a label-scoped Watchtower and bind-mount a committed `connector-rust.toml`.                            |
+| **production** | **Named and empty** (ADR 0056). No machines, no mainnet contracts, no keys, no deploy. Its one artefact is `deploy/connector-rust/connector.production.toml`, a skeleton in which every value is invalid on purpose. |
+
+Production is blocked on two deployments, not on configuration: `packages/contracts`
+has never been deployed to an EVM mainnet, so there is no `TokenNetworkRegistry` to
+name, and the Solana payment-channel program is devnet-only — and ADR 0053 binds the
+settlement program into a claim's signed message, so a mainnet node naming the devnet
+program takes money for claims it can never redeem. Do not fill the skeleton in, and
+do not put it under `infra/`: those are gate-checked box configs.
+`crates/connector-bin/tests/production_skeleton_is_inert.rs` fails the build on either.
 
 `:rust-release` is a **promotion tag**, not a build output. It moves only by an
 explicit `promote-to-fleet.yml` dispatch, which first checks the candidate image
@@ -195,6 +203,20 @@ still boots both boxes' committed configs. A green merge does not reach the boxe
 and that is deliberate (ADR 0041): the connector is the client edge on both machines,
 so one bad digest takes the whole devnet's paid-write path dark at once. Do not wire
 `:rust-release` to move on green `main` — that shipped once (#990) and was reverted.
+
+A **release** is one human dispatch of `release-connector.yml` (ADR 0055), after which
+build → handle → GitHub Release → the config-boot gate → the tag move → `fleet-health.yml`
+all happen without further input. It is `workflow_dispatch` only, and must stay that way —
+adding any automatic trigger reverses ADR 0041 Decision 3. Releases are named by a
+monotonic handle (`2026.08.21.1`, UTC date plus that day's ordinal), never semver: every
+crate is `0.1.0` with no release process, so a version series would claim a stability
+contract the binary has not earned. Deploy ordering rides as a `config-change-required:
+true|false` field on the release, which the promotion reads and refuses on. That question
+has no default — the dispatch input's preselected option is a sentinel the workflow rejects,
+because fail-open on deploy ordering is the shape of the swap#134 outage. When the answer is
+yes, the named `fleet-ops config-apply` run is **verified** (right workflow, green, real
+apply not a dry run, right box, and after the config's commit), not taken on trust.
+(`package.json`'s `"version": "3.3.0"` is TypeScript-era residue; leave it alone.)
 
 Configuration is **one typed TOML file**, validated once at boot, immutable for the
 process lifetime, with `deny_unknown_fields` (ADR 0009). There is no environment-

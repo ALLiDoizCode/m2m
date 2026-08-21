@@ -13,6 +13,19 @@
 > `rust-release`, is not published by that workflow: it is the devnet fleet's promotion
 > tag, moved only by `.github/workflows/promote-to-fleet.yml` after a validation gate
 > (ADR 0041). It does not yet have a written contract.
+>
+> The Rust image does now have a **release series**, and it deliberately is not the one
+> described below. `.github/workflows/release-connector.yml` (ADR
+> [0055](docs/adr/0055-a-release-is-one-dispatch-and-the-ordering-rides-as-data.md)) cuts a
+> **monotonic handle** — `2026.08.21.1`, a UTC date and that day's ordinal — published as a
+> GitHub Release and as an immutable `rust-<handle>` image alias. It is not semver, for the
+> reason `deploy/connector-rust/README.md` gives: every crate under `crates/` is `0.1.0`
+> with no release process, and a semver series would claim exactly the stability contract
+> this document describes for an image that no longer exists. The one guarantee below that
+> the handle **does** keep is label correctness: `org.opencontainers.image.version` on a
+> released manifest equals the handle it was cut under, so `docker inspect` on a box
+> answers "which release is this?". Nothing else here binds the Rust image: there is no
+> cosign signature, no npm artifact, and no API-stability promise.
 
 This document describes the supply-chain guarantees the connector project makes
 about its published artifacts (npm package and GHCR container image), and the

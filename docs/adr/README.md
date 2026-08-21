@@ -1,6 +1,6 @@
 # Architecture decision records
 
-44 records. **Every one now carries a `**Status:**` line under its title** — that line, not this
+56 records. **Every one now carries a `**Status:**` line under its title** — that line, not this
 index, is the authority for whether a record is live. This page is the map: what is live, grouped
 by area; what is dead, grouped by what killed it; and what the folder still says that the code no
 longer does.
@@ -31,10 +31,11 @@ scope; it does not move them.
 
 ## The status vocabulary
 
-Five values, and they mean different things. Three of them still describe a live record.
+Seven values, and they mean different things. Four of them describe a record that is not dead.
 
 | Status                     | Means                                                                                             |
 | -------------------------- | ------------------------------------------------------------------------------------------------- |
+| **Proposed**               | **Not** live and **not** binding. Written to be argued with. Say what would make it true.         |
 | **Accepted**               | Live. Binding as written.                                                                         |
 | **Accepted, amended by N** | Live. A later record changed a clause without disturbing the decision. Read both.                 |
 | **Accepted in part**       | Live in part. A named half is dead; the rest binds. Read the Status line for which is which.      |
@@ -45,6 +46,13 @@ Five values, and they mean different things. Three of them still describe a live
 "Retired" is the load-bearing one. A retirement record is the most valuable document in this
 folder: it is the only thing standing between a future contributor and a feature this project
 already built, shipped and removed on purpose.
+
+"Proposed" is the newest and the one most easily abused. It is **not** a softer "Accepted", and it
+is not the same as "Accepted, **not yet built**" — that status marks a decision that binds and has
+not been implemented, and there are several. A **Proposed** record binds nothing: it may be
+rejected outright, and code written against it is written on spec. It carries the same obligation
+every other status does — say what would make it true — and it stops being Proposed by being argued
+to a conclusion, not by being left alone long enough.
 
 ---
 
@@ -143,6 +151,8 @@ how another repository is regarded.
 | ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- | ----------------------------------------- |
 | [0017](0017-the-typescript-connector-is-a-prototype.md)                              | The TypeScript connector is a prototype, not a reference implementation | Accepted — a judgement about another repo |
 | [0041](0041-a-moving-tag-carries-the-fleets-committed-config-or-it-does-not-move.md) | A moving tag carries the fleet's committed config, or it does not move  | Accepted                                  |
+| [0055](0055-a-release-is-one-dispatch-and-the-ordering-rides-as-data.md)             | A release is one dispatch, and the deploy ordering rides as data        | **Proposed** — extends 0041               |
+| [0056](0056-production-is-a-named-empty-tier.md)                                     | Production is a named, empty tier                                       | **Proposed** — describes an absence       |
 
 ---
 

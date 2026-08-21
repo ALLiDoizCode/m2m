@@ -237,7 +237,11 @@ default branch (#645, #989). Pin an exact `rust-sha-` tag; `rust-main` moves. A 
 `rust-release`, is the devnet fleet's PROMOTION tag — it is not a build output and moves only by
 a `promote-to-fleet.yml` dispatch
 ([ADR 0041](docs/adr/0041-a-moving-tag-carries-the-fleets-committed-config-or-it-does-not-move.md)).
-The separate
+A **release** — one dispatch of `release-connector.yml`, which then builds, names, publishes,
+gates and promotes without further input — cuts a monotonic handle such as `2026.08.21.1` and
+aliases the image under `rust-2026.08.21.1`. Not semver, and dispatch-only on purpose
+([ADR 0055](docs/adr/0055-a-release-is-one-dispatch-and-the-ordering-rides-as-data.md)). The
+separate
 `ghcr.io/toon-protocol/connector-rust` package this used to name is retired and gets no new
 builds.
 
