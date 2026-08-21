@@ -144,6 +144,19 @@ impl Default for PeerAcceptPolicy {
 /// the payer's next fulfilment produces a genuinely newer claim --
 /// recovering it belongs with the claim journal's own durability (ADR
 /// 0005), not with a carriage.
+///
+/// # What it is *not*: the money baseline
+///
+/// That cost is tolerable for the re-ack above, which is a per-relation,
+/// per-process question, and is **not** tolerable for anything arithmetic.
+/// The price-coverage gate (issue #880) read its prior watermark from here
+/// and so measured a claim's advance against a record that a restart had
+/// zeroed while `ClaimBook` had replayed its journal: the first priced peer
+/// PREPARE after a payee restart was credited with its claim's whole
+/// cumulative amount as new payment (issue #1104). Coverage now reads
+/// [`connector_runtime::Connector::peer_channel_watermark`] -- the book
+/// that actually judges the claim -- and this record answers the re-ack
+/// alone.
 #[derive(Debug, Default)]
 pub struct AcceptedClaims {
     /// `(peer id, canonical channel id)` → the claim at that watermark.
@@ -179,11 +192,19 @@ impl AcceptedClaims {
     }
 
     /// This relation's watermark for `channel_id` (domain
-    /// [`connector_domain::Watermark`]), `None` if no claim has ever been
-    /// recorded for it -- the same "nothing to advance past" case
-    /// [`connector_domain::validate_price`] already treats as watermark
-    /// zero. Read *before* [`Self::record`] to get the watermark a fresh
-    /// claim must advance past, not the one it just became (issue #880).
+    /// [`connector_domain::Watermark`]) *as this process has seen it*,
+    /// `None` if no claim has been recorded for it since this process
+    /// started.
+    ///
+    /// **Never a baseline for money arithmetic.** `None` here does not mean
+    /// "nothing has ever been claimed on this channel", only "not since
+    /// this process started", and treating the two as the same is issue
+    /// #1104. Anything measuring a claim's *advance* -- the price-coverage
+    /// gate above all -- reads
+    /// [`connector_runtime::Connector::peer_channel_watermark`], which is
+    /// [`connector_runtime::ClaimBook`]'s own durable figure and the one
+    /// the claim is about to be judged against. What this answers is what
+    /// this record is for: what one relation has observed in one process.
     #[must_use]
     pub fn watermark(
         &self,
@@ -514,14 +535,28 @@ impl PeerSession {
         protocol_data: &[ProtocolData],
         ilp_packet: &[u8],
     ) -> Result<(), SessionGone> {
-        // Peeked before `judge_claim` below may record this claim, so the
-        // price-coverage check further down judges the claim's own advance
-        // past the watermark it rode in on, not the one it just became
-        // (issue #880).
-        let prior_watermark = self.binding.role().peer_id().and_then(|peer_id| {
+        // Peeked before `judge_claim` below may advance this channel's
+        // watermark, so the price-coverage check further down judges the
+        // claim's own advance past the watermark it rode in on, not the one
+        // it just became (issue #880).
+        //
+        // It is read from the book that is about to judge the claim --
+        // `ClaimBook`'s own durable inbound watermark, keyed by channel as
+        // that book keys it -- and never from `AcceptedClaims`, which is
+        // in-memory and per-process. Reading the per-process record made
+        // coverage disagree with the judgement across a restart: the book
+        // replays its journal and the record does not, so the first priced
+        // peer PREPARE after a restart was credited with its claim's whole
+        // cumulative amount as new payment (issue #1104).
+        // The peer id gates the read (§1.5 does not read a client's claim
+        // at all) and is no part of it: a channel's watermark is a property
+        // of the channel, which is how `ClaimBook` keys it.
+        let prior_watermark = self.binding.role().peer_id().and_then(|_| {
             let raw = claim_json::from_protocol_data(protocol_data)?;
             let claim = claim_json::parse(raw).ok()?;
-            self.state.accepted.watermark(peer_id, &claim.channel_id)
+            self.state
+                .connector
+                .peer_channel_watermark(&claim.channel_id)
         });
 
         // Claims are judged **inline, in arrival order** (§7.1) -- before
