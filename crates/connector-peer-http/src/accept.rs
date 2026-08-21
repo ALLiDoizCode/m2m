@@ -245,15 +245,22 @@ impl PeerHttpState {
 
         // Decoded once, here, for the price-coverage check further down --
         // and only for a peer, since §1.5 does not read a client's claim at
-        // all. Its watermark is read *before* `judge_claim` below may record
-        // this very claim, so that check judges the claim's own advance past
-        // the watermark it rode in on, not the one it just became (issue
-        // #880).
+        // all. Its watermark is read *before* `judge_claim` below may
+        // advance it, so that check judges the claim's own advance past the
+        // watermark it rode in on, not the one it just became (issue #880).
+        //
+        // It is read from the book that is about to judge the claim --
+        // `ClaimBook`'s own durable inbound watermark, keyed by channel as
+        // that book keys it -- and never from `AcceptedClaims`, which is
+        // in-memory and per-process. Reading the per-process record made
+        // coverage disagree with the judgement across a restart: the book
+        // replays its journal and the record does not, so the first priced
+        // peer PREPARE after a restart was credited with its claim's whole
+        // cumulative amount as new payment (issue #1104).
         let claim = role.peer_id().and_then(|_| claim_on(&request));
-        let prior_watermark = role
-            .peer_id()
-            .zip(claim.as_ref())
-            .and_then(|(peer_id, claim)| self.accepted.watermark(peer_id, &claim.channel_id));
+        let prior_watermark = claim
+            .as_ref()
+            .and_then(|claim| self.connector.peer_channel_watermark(&claim.channel_id));
 
         let ack = self.judge_claim(&role, &request);
 
