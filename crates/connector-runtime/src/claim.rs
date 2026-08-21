@@ -620,6 +620,27 @@ impl ClaimBook {
         self.solana_channels.contains_key(channel_account)
     }
 
+    /// The watermark this book holds for `channel_id` -- the highest nonce
+    /// and cumulative amount [`ClaimBook::accept_inbound`] has accepted on
+    /// it (`None` before any claim has). Rebuilt from the journal on
+    /// restart like every other figure here, so it survives one.
+    ///
+    /// Read by [`crate::Connector::peer_channel_watermark`], which is what
+    /// answers `POST /ilp/claim-state` for a channel this node holds as a
+    /// **peer** channel. That endpoint used to answer every channel out of
+    /// the client edge's own book, which for a peer channel is a book no
+    /// claim on it ever reaches -- so a `[[pay_channels]]` payer was told
+    /// nonce 0 forever and re-signed the same cumulative amount at a fresh
+    /// nonce on every packet.
+    #[must_use]
+    pub fn inbound_watermark(&self, channel_id: &str) -> Option<Watermark> {
+        self.inbound_watermarks
+            .read()
+            .expect("inbound watermarks lock poisoned")
+            .get(channel_id)
+            .copied()
+    }
+
     /// Whether `channel_id` already has a signing domain configured (issue
     /// #780) -- lets a caller that discovers channels dynamically (a
     /// client-edge payout resolved on demand rather than declared in

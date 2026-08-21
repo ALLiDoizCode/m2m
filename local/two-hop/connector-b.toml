@@ -57,21 +57,25 @@ key_file = "/app/data/signer.key"
 #     means nothing is ever owed, which means the second carries no claim
 #     either. It never recovers.
 #
-# ADR 0042's answer is `[[pay_channels]]`: cover the PREPARE before sending it
-# rather than after it fulfils. That does not work here either, and the reason
-# is worth writing down because `pay_channel.rs` calls holding the peer and
-# client roles on one channel "the deployed shape". An outbound client claim's
-# cumulative amount comes from the receiver's `POST /ilp/claim-state`, which
-# answers out of the CLIENT-edge book (`ClientClaimGate::watermark`) -- while a
-# claim arriving on the peer carriage advances the PEER book. Nothing
-# reconciles the two, so the payer re-signs the SAME cumulative amount at a
-# fresh nonce on every packet. The payee accepts each one (a nonce did
-# advance) and each one buys nothing: `advanced = 0`, `shortfall = price`, F06.
+# ADR 0042's answer to that deadlock is `[[pay_channels]]`: cover the PREPARE
+# before sending it rather than after it fulfils. THIS TOPOLOGY CONFIGURES NO
+# SUCH ROW, so the deadlock above is what it would get, and `price = 0` is what
+# avoids it.
 #
-# Measured on this topology rather than reasoned about: with a
+# It is worth recording what happened when a row WAS tried here, because it
+# found a real defect rather than a property of peering. With a
 # `[[pay_channels]]` row on A and `price = 1000` here, crossing 1 fulfilled and
-# crossing 2 was refused, and B's journal held `nonce 1 -> 1000` followed by
-# `nonce 2 -> 1000`. The numbers are in this branch's PR.
+# crossing 2 was refused `F06`, and B's journal held `nonce 1 -> 1000` followed
+# by `nonce 2 -> 1000`: the payer re-signed the same cumulative amount at a
+# fresh nonce, because `POST /ilp/claim-state` answered a channel B holds as a
+# PEER channel out of B's CLIENT-edge book, which no peer claim ever reaches.
+# That is issue #1102, fixed -- the endpoint now answers a peer channel out of
+# the peer book -- and covering a priced peer termination is therefore a live
+# option. It is deliberately not wired here: this topology is the
+# containerised counterpart of `two_connectors_peer.rs`, which prices its
+# payee's terminated route at 0, and changing that would change what the two
+# of them prove together. #1102's own tests need no container to assert the
+# fix.
 #
 # The peering is still genuinely paid: what A owes B is the forwarded amount,
 # not this route's price, and `[[peer_channels]]` below is what that claim is

@@ -198,13 +198,15 @@ run's money check without this run having paid anything.
 
 Two consequences worth knowing before editing a config here:
 
-- **A peer termination cannot be priced.** A route a node both terminates and
-  prices refuses a peer PREPARE that arrives without a covering claim (`F06`,
-  issue #880) — and a postpay peering's first crossing carries none, so the
-  peering deadlocks rather than charging. Every terminated route in a peered
-  topology is therefore `price = 0`, and what a hop is actually paid is the
-  forwarded amount. `local/two-hop/connector-b.toml` has the long version,
-  including why `[[pay_channels]]` is not the way out.
+- **A postpay peer termination cannot be priced.** A route a node both
+  terminates and prices refuses a peer PREPARE that arrives without a covering
+  claim (`F06`, issue #880) — and a postpay peering's first crossing carries
+  none, so the peering deadlocks rather than charging. ADR 0042's
+  `[[pay_channels]]` is the way out, and no topology here configures one — so
+  every terminated route in a peered topology is `price = 0`, and what a hop is
+  actually paid is the forwarded amount. `local/two-hop/connector-b.toml` has
+  the long version, including the defect a `[[pay_channels]]` row found here
+  (issue #1102, since fixed).
 - **No hop may charge a fee.** `POST /packets` declares
   `minimum_delivery = amount` (ADR 0010), so `amount_after_fee` refuses any hop
   that would retain anything. Every forwarded route here is `fee = 0`; a
