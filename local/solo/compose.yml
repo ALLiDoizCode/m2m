@@ -49,7 +49,7 @@ services:
     volumes:
       - ./local/solo/connector.toml:/app/config/connector.toml:ro
       # Written by local/keys.sh, gitignored, never committed (ADR 0012).
-      - ./local/.keys/solo:/app/data:ro
+      - ./local/.keys/solo/connector:/app/data:ro
       # A NAMED volume, not a bind mount: the image creates /app/state owned by
       # uid 10001 so a fresh named volume inherits that ownership. A host bind
       # mount arrives root-owned and the connector refuses to start.
@@ -121,7 +121,7 @@ services:
       - --expect-fulfill
     # Repo-root-relative, as above.
     volumes:
-      - ./local/.keys/solo:/app/data:ro
+      - ./local/.keys/solo/connector:/app/data:ro
 
 volumes:
   solo-state:

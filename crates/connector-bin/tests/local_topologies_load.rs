@@ -1,5 +1,5 @@
-//! The committed `local/*/connector.toml` files load, and say what the
-//! compose file beside them assumes they say.
+//! The committed `local/*/*.toml` files load, and say what the compose file
+//! beside them assumes they say.
 //!
 //! `local/`'s configs are committed rather than generated, for the reason ADR
 //! 0009 gives: a config nobody reads is a config nobody reviews. The cost of
@@ -10,20 +10,53 @@
 //! ones, and they are cheaper to check because everything they name is
 //! deterministic.
 //!
-//! What is substituted, and only this: the key files (real key material is
-//! never committed -- `local/keys.sh` writes them into a gitignored directory
-//! at run time), `state_dir` and `client_edge_addr` (container paths and fixed
-//! ports that no test host can supply). Every other line -- the route, the
-//! price, every settlement address -- is the literal committed content.
+//! Multi-node topologies add a second kind of drift this file has to catch,
+//! and it is the expensive one: a value that must be written IDENTICALLY into
+//! two or three files. A peering's id, its channel, and the settlement
+//! addresses each side names as the other's `counterparty_key` are all facts
+//! held in two places at once, and every one of them fails at run time as a
+//! refused claim rather than as a refused config. `local/keys.sh` checks the
+//! chain-derived half (it computes each address and channel and refuses to
+//! provision if a committed file disagrees); this checks the file-to-file
+//! half, which needs no chain.
+//!
+//! What is substituted, and only this: the key files, the peering secrets
+//! (real key material is never committed -- `local/keys.sh` writes them into a
+//! gitignored directory at run time), `state_dir` and `client_edge_addr`
+//! (container paths and fixed ports that no test host can supply). Every other
+//! line -- the routes, the prices, every settlement and channel address -- is
+//! the literal committed content.
 
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::Path;
 
-use connector_config::Config;
+use connector_config::{Config, PeerChannelConfig, SettlementChain};
 use connector_settlement_solana::test_support::LOCAL_TEST_PROGRAM_ID;
 
 const SOLO_CONFIG: &str = include_str!("../../../local/solo/connector.toml");
 const SOLO_COMPOSE: &str = include_str!("../../../local/solo/compose.yml");
+
+const TWO_HOP_A: &str = include_str!("../../../local/two-hop/connector-a.toml");
+const TWO_HOP_B: &str = include_str!("../../../local/two-hop/connector-b.toml");
+const TWO_HOP_COMPOSE: &str = include_str!("../../../local/two-hop/compose.yml");
+
+const MIXED_A: &str = include_str!("../../../local/mixed-chain/connector-a.toml");
+const MIXED_B: &str = include_str!("../../../local/mixed-chain/connector-b.toml");
+const MIXED_C: &str = include_str!("../../../local/mixed-chain/connector-c.toml");
+const MIXED_COMPOSE: &str = include_str!("../../../local/mixed-chain/compose.yml");
+
+/// Every committed config under `local/`, with the path a failure should name.
+/// Written out rather than globbed so a new topology that forgets its own test
+/// still has to touch this list.
+const EVERY_CONFIG: &[(&str, &str)] = &[
+    ("local/solo/connector.toml", SOLO_CONFIG),
+    ("local/two-hop/connector-a.toml", TWO_HOP_A),
+    ("local/two-hop/connector-b.toml", TWO_HOP_B),
+    ("local/mixed-chain/connector-a.toml", MIXED_A),
+    ("local/mixed-chain/connector-b.toml", MIXED_B),
+    ("local/mixed-chain/connector-c.toml", MIXED_C),
+];
 
 /// A file holding `contents`, kept alive by the returned handle.
 fn file_with(dir: &Path, name: &str, contents: &str) -> std::path::PathBuf {
@@ -44,6 +77,21 @@ fn replace_expecting_a_match(raw: &str, from: &str, to: &str) -> String {
     raw.replace(from, to)
 }
 
+/// Every `/app/data/...` path a committed config names, found by scanning the
+/// text rather than by listing them here. A new topology that introduces a new
+/// key file gets substituted without this test being edited -- and, more to
+/// the point, cannot get *missed*: [`loadable`] refuses to return a string
+/// that still contains a container path.
+fn container_paths(raw: &str) -> BTreeSet<&str> {
+    let mut found = BTreeSet::new();
+    for (index, _) in raw.match_indices("\"/app/data/") {
+        let quoted = &raw[index + 1..];
+        let end = quoted.find('"').expect("a quoted path is closed");
+        found.insert(&quoted[..end]);
+    }
+    found
+}
+
 /// The committed text with only the unsupplyable lines swapped out.
 fn loadable(raw: &str, dir: &Path) -> String {
     let key = file_with(
@@ -57,48 +105,113 @@ fn loadable(raw: &str, dir: &Path) -> String {
         "allowlist",
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
     );
+    // Non-empty on purpose: an empty configured peering secret matches nothing
+    // by construction and `resolve_peers` refuses it at load
+    // (`peer-carriage-spec.md` §1.6), so a blank sandbox file would make every
+    // peered config here fail for a reason that says nothing about the config.
+    let secret = file_with(dir, "peer-secret", "a-sandbox-peering-secret");
     let state = dir.join("state");
     std::fs::create_dir_all(&state).expect("create sandbox state dir");
 
     let mut out = raw.to_string();
-    for line in [
-        "key_file = \"/app/data/signer.key\"",
-        "key_file = \"/app/data/settlement.key\"",
-        "key_file = \"/app/data/settlement-solana.key\"",
-    ] {
-        out = replace_expecting_a_match(&out, line, &format!("key_file = \"{}\"", key.display()));
+    for path in container_paths(raw) {
+        let name = path.rsplit('/').next().expect("a path has a last segment");
+        let substitute = match name {
+            "operator-bearer-token" => &bearer,
+            "operator-write-keys" => &allowlist,
+            other if other.ends_with(".key") => &key,
+            other if other.ends_with("-secret") => &secret,
+            other => panic!(
+                "no sandbox stand-in for the container file `{other}`. Add one here -- a config \
+                 that names a file this test cannot supply cannot be checked at all."
+            ),
+        };
+        out = out.replace(path, &substitute.display().to_string());
     }
-    out = replace_expecting_a_match(
-        &out,
-        "bearer_token_file = \"/app/data/operator-bearer-token\"",
-        &format!("bearer_token_file = \"{}\"", bearer.display()),
-    );
-    out = replace_expecting_a_match(
-        &out,
-        "write_keys_file = \"/app/data/operator-write-keys\"",
-        &format!("write_keys_file = \"{}\"", allowlist.display()),
-    );
     out = replace_expecting_a_match(
         &out,
         "state_dir = \"/app/state\"",
         &format!("state_dir = \"{}\"", state.display()),
     );
-    replace_expecting_a_match(
+    out = replace_expecting_a_match(
         &out,
         "client_edge_addr = \"0.0.0.0:3000\"",
         "client_edge_addr = \"127.0.0.1:0\"",
-    )
+    );
+    // Comments in these files talk about container paths at length, and
+    // should: `/app/state`'s ownership and `/app/config/connector.toml`'s
+    // mount are the two things a reader most needs told. Only SETTINGS have to
+    // have been substituted.
+    for line in out.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        assert!(
+            !line.contains("/app/"),
+            "`{line}` still names a container path, so whatever loads below is not what this \
+             test thinks it is checking"
+        );
+    }
+    out
 }
+
+/// Load one committed config in a sandbox of its own. Every test here goes
+/// through this, so "it loads" is asserted once per file and never by
+/// accident.
+fn load(name: &str, raw: &str) -> Config {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = file_with(dir.path(), "connector.toml", &loadable(raw, dir.path()));
+    Config::load(&path).unwrap_or_else(|error| panic!("{name} must load: {error}"))
+}
+
+/// The one `[[peer_channels]]` row a node holds for `peer_id`. Every config
+/// here has exactly one per peering, and a second would mean two answers to
+/// "whose signature do we accept", so this asserts that rather than taking the
+/// first.
+fn peer_channel<'a>(config: &'a Config, peer_id: &str) -> &'a PeerChannelConfig {
+    let rows: Vec<&PeerChannelConfig> = config
+        .peer_channels()
+        .iter()
+        .filter(|channel| channel.peer_id() == peer_id)
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "expected exactly one [[peer_channels]] row for peering '{peer_id}'"
+    );
+    rows[0]
+}
+
+fn evm_channel<'a>(
+    config: &'a Config,
+    peer_id: &str,
+) -> &'a connector_config::EvmPeerChannelConfig {
+    match peer_channel(config, peer_id) {
+        PeerChannelConfig::Evm(evm) => evm,
+        PeerChannelConfig::Solana(_) => {
+            panic!("peering '{peer_id}' is declared on Solana, but this leg settles on EVM")
+        }
+    }
+}
+
+fn solana_channel<'a>(
+    config: &'a Config,
+    peer_id: &str,
+) -> &'a connector_config::SolanaPeerChannelConfig {
+    match peer_channel(config, peer_id) {
+        PeerChannelConfig::Solana(solana) => solana,
+        PeerChannelConfig::Evm(_) => {
+            panic!("peering '{peer_id}' is declared on EVM, but this leg settles on Solana")
+        }
+    }
+}
+
+// ─── solo ────────────────────────────────────────────────────────────────────
 
 #[test]
 fn the_solo_topologys_committed_config_loads() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = file_with(
-        dir.path(),
-        "connector.toml",
-        &loadable(SOLO_CONFIG, dir.path()),
-    );
-    let config = Config::load(&path).expect("local/solo/connector.toml must load");
+    let config = load("local/solo/connector.toml", SOLO_CONFIG);
 
     assert_eq!(
         config.routes().len(),
@@ -112,6 +225,10 @@ fn the_solo_topologys_committed_config_loads() {
         "the point of the solo topology is BOTH settlement backends attached at once -- the one \
          shape `cargo test` never stands up and no fleet box is checked in"
     );
+    assert!(
+        config.peers().is_empty(),
+        "solo is one node: a peering here would be a second topology wearing solo's name"
+    );
 }
 
 /// The program id is committable only because `infra/solana/entrypoint.sh`
@@ -120,13 +237,18 @@ fn the_solo_topologys_committed_config_loads() {
 /// at an account that does not exist and the node refuses to start with
 /// nothing naming the cause.
 #[test]
-fn the_solo_config_names_the_program_id_the_local_validator_loads() {
-    assert!(
-        SOLO_CONFIG.contains(LOCAL_TEST_PROGRAM_ID),
-        "local/solo/connector.toml must name {LOCAL_TEST_PROGRAM_ID} as its \
-         [settlement.solana] program_id -- the id infra/solana/entrypoint.sh loads \
-         payment_channel.so under"
-    );
+fn every_config_that_settles_on_solana_names_the_program_id_the_local_validator_loads() {
+    for (name, raw) in [
+        ("local/solo/connector.toml", SOLO_CONFIG),
+        ("local/mixed-chain/connector-b.toml", MIXED_B),
+        ("local/mixed-chain/connector-c.toml", MIXED_C),
+    ] {
+        assert!(
+            raw.contains(LOCAL_TEST_PROGRAM_ID),
+            "{name} must name {LOCAL_TEST_PROGRAM_ID} as its [settlement.solana] program_id -- \
+             the id infra/solana/entrypoint.sh loads payment_channel.so under"
+        );
+    }
 }
 
 /// Names that live in two files at once. A compose service rename or a moved
@@ -166,33 +288,424 @@ fn the_solo_config_and_its_compose_file_agree() {
          written relative to the REPOSITORY ROOT, because compose resolves relative paths \
          against the project directory -- the directory of the first `-f` file."
     );
+}
+
+// ─── two-hop ─────────────────────────────────────────────────────────────────
+
+/// The containerised counterpart of `two_connectors_peer.rs`: A forwards, B
+/// terminates, and the only path between them is the peering.
+#[test]
+fn the_two_hop_topologys_committed_configs_load() {
+    let payer = load("local/two-hop/connector-a.toml", TWO_HOP_A);
+    let payee = load("local/two-hop/connector-b.toml", TWO_HOP_B);
+
     assert!(
-        SOLO_COMPOSE.contains("--expect-fulfill"),
-        "the sender must run with --expect-fulfill, or the rehearsal reports a REJECT and exits \
-         zero -- a green tick over an unpaid, undelivered packet"
+        payer.routes().is_empty(),
+        "A must terminate NOTHING -- a locally terminated route would give a fulfilled packet a \
+         second possible explanation, and the whole topology asserts there is only one"
+    );
+    assert_eq!(payer.peer_routes().len(), 1);
+    let forward = &payer.peer_routes()[0];
+    assert_eq!(forward.prefix(), "g.local.two-hop.b");
+    assert_eq!(forward.peer_id(), "a-b");
+    assert!(
+        forward.price() > 0,
+        "ADR 0028: a forwarded route with no price is the free gateway issue #620 exists for"
+    );
+    assert_eq!(
+        forward.fee(),
+        0,
+        "`POST /packets` passes `minimum_delivery = amount`, so `amount_after_fee` refuses any \
+         hop that retains anything -- a non-zero fee here makes the rehearsal see R01 instead of \
+         a delivery"
+    );
+
+    assert_eq!(payee.peer_routes().len(), 0, "B forwards nothing onward");
+    assert_eq!(payee.routes().len(), 1);
+    assert_eq!(payee.routes()[0].prefix(), "g.local.two-hop.b.app");
+    assert!(
+        payee.routes()[0].prefix().starts_with(forward.prefix()),
+        "the app's address must sit UNDER the prefix A forwards, or longest-prefix matching \
+         sends the packet somewhere else entirely"
+    );
+    assert_eq!(
+        payee.routes()[0].price(),
+        0,
+        "a route a node both TERMINATES and PRICES refuses a peer PREPARE arriving without a \
+         covering claim (F06, issue #880), and a postpay peering's first crossing carries none \
+         by construction (ADR 0004) -- so a price here deadlocks the peering instead of charging \
+         for it. `two_connectors_peer.rs` prices its payee's terminated route at 0 for the same \
+         reason. What A owes B is the FORWARDED AMOUNT, which this figure has nothing to do with."
+    );
+
+    for (name, config) in [("A", &payer), ("B", &payee)] {
+        assert_eq!(
+            config.settlements().len(),
+            1,
+            "{name} settles on EVM alone in this topology"
+        );
+        assert_eq!(config.settlements()[0].chain(), SettlementChain::Evm);
+    }
+    assert!(
+        payer.operator().is_some(),
+        "the rehearsal originates its packet through A's `POST /packets`"
+    );
+    assert!(
+        payee.operator().is_none(),
+        "CF-31: B is never sent to directly, and an unused operator surface is two more \
+         credentials to provision for nothing"
     );
 }
 
-/// No credential may be written literally into a committed config, local or
-/// not: `bearer_token`/`write_keys` inline is a secret in a public repository.
-/// Line-anchored on the key left of the `=`, because `bearer_token_file`
-/// starts with `bearer_token` and the file's own prose names both at length.
 #[test]
-fn the_solo_config_carries_no_literal_credential() {
-    for field in ["bearer_token", "write_keys"] {
-        for line in SOLO_CONFIG.lines() {
-            let line = line.trim();
-            if line.starts_with('#') {
-                continue;
+fn the_two_hop_peering_is_written_identically_on_both_sides() {
+    let payer = load("local/two-hop/connector-a.toml", TWO_HOP_A);
+    let payee = load("local/two-hop/connector-b.toml", TWO_HOP_B);
+
+    // §1.2's P1 holds only when the two files agree on the literal string:
+    // `[[peers]].id` names the RELATION, and it is the `peerId` the dialing
+    // side presents. `two_connectors_peer.rs` records what a mismatch does --
+    // the dialer is admitted as an ordinary client, silently.
+    assert_eq!(payer.peers().len(), 1);
+    assert_eq!(payee.peers().len(), 1);
+    assert_eq!(payer.peers()[0].id(), payee.peers()[0].id());
+    assert!(
+        payer.peers()[0].endpoint().is_some(),
+        "A dials, so A's row carries the endpoint"
+    );
+    assert!(
+        payee.peers()[0].endpoint().is_none(),
+        "on ILP-over-HTTP only the dialing side can originate (§6.4), so B's row must have no \
+         endpoint -- one there would claim a direction this peering does not have"
+    );
+
+    let a = evm_channel(&payer, "a-b");
+    let b = evm_channel(&payee, "a-b");
+    assert_eq!(
+        a.channel_id(),
+        b.channel_id(),
+        "one channel, two files: a claim names it by this string and the payee looks its \
+         verification key up under the same one"
+    );
+    assert_eq!(a.chain_id(), b.chain_id());
+    assert_eq!(
+        a.token_network(),
+        b.token_network(),
+        "the EIP-712 domain is half of what a balance proof is signed under -- a disagreement \
+         here recovers to a different address and every claim is refused"
+    );
+    assert_ne!(
+        a.counterparty_key(),
+        b.counterparty_key(),
+        "each side names the OTHER's settlement address. The same value in both files means one \
+         node is configured to accept its own signature."
+    );
+}
+
+#[test]
+fn the_two_hop_configs_and_their_compose_file_agree() {
+    for service in ["stub-app:", "connector-a:", "connector-b:", "sender:"] {
+        assert!(
+            TWO_HOP_COMPOSE.contains(service),
+            "local/two-hop/compose.yml no longer declares a `{service}` service"
+        );
+    }
+    for mount in [
+        "./local/two-hop/connector-a.toml:/app/config/connector.toml:ro",
+        "./local/two-hop/connector-b.toml:/app/config/connector.toml:ro",
+        "./local/.keys/two-hop/connector-a:/app/data:ro",
+        "./local/.keys/two-hop/connector-b:/app/data:ro",
+    ] {
+        assert!(
+            TWO_HOP_COMPOSE.contains(mount),
+            "local/two-hop/compose.yml must mount `{mount}` -- written relative to the \
+             REPOSITORY ROOT, because compose resolves relative paths against the directory of \
+             the first `-f` file. A key directory is named after the service that mounts it, \
+             which is also the name local/keys.sh writes."
+        );
+    }
+    assert!(
+        TWO_HOP_CONFIG_PAIR
+            .iter()
+            .all(|raw| raw.contains("http://anvil:8545")),
+        "both nodes must name the compose `anvil` service"
+    );
+    assert!(
+        TWO_HOP_B.contains("http://stub-app:3100/"),
+        "B's handler_url must name the compose `stub-app` service and its command-line port"
+    );
+    assert!(
+        TWO_HOP_A.contains("endpoint = \"http://connector-b:3000/ilp\""),
+        "A's peer endpoint must name B's compose service and the port its client_edge_addr binds"
+    );
+    assert!(
+        TWO_HOP_COMPOSE.contains("--expect-fulfill"),
+        "the sender must run with --expect-fulfill, or the rehearsal reports a REJECT and exits \
+         zero -- a green tick over an unpaid, undelivered packet"
+    );
+
+    // The money assertion, and the third copy of the channel id. The sender
+    // greps B's claim journal for it, because `--expect-fulfill` cannot see a
+    // refused claim: the verdict rides back in `Toon-Claim-Ack` and never
+    // gates the packet.
+    let payer = load("local/two-hop/connector-a.toml", TWO_HOP_A);
+    let channel_id = evm_channel(&payer, "a-b").channel_id().to_string();
+    assert!(
+        TWO_HOP_COMPOSE.contains(&format!("CHANNEL={channel_id}")),
+        "the sender must grep B's claim journal for the peering's own channel id ({channel_id}), \
+         or the rehearsal passes over a peering that carried both packets for free"
+    );
+    assert!(
+        TWO_HOP_COMPOSE.contains("peer-claims.log"),
+        "the journal the sender reads is `peer-claims.log`, the name \
+         `connector_cli::runtime`'s PEER_CLAIM_JOURNAL gives it under state_dir"
+    );
+}
+
+const TWO_HOP_CONFIG_PAIR: [&str; 2] = [TWO_HOP_A, TWO_HOP_B];
+
+// ─── mixed-chain ─────────────────────────────────────────────────────────────
+
+/// The shape nothing else in this repository covers: one node holding two
+/// settlement backends with a peering on each, so a packet crosses a chain
+/// boundary between two hops.
+///
+/// Not a conversion, and this test is written so it could not be mistaken for
+/// one: every price and every forwarded amount on the path is the same figure.
+/// ADR 0010 replaced the spread with a flat per-packet fee and value
+/// conversion is the `swap` repository's job.
+#[test]
+fn the_mixed_chain_topology_puts_one_node_on_both_chains() {
+    let a = load("local/mixed-chain/connector-a.toml", MIXED_A);
+    let b = load("local/mixed-chain/connector-b.toml", MIXED_B);
+    let c = load("local/mixed-chain/connector-c.toml", MIXED_C);
+
+    assert_eq!(
+        a.settlements().len(),
+        1,
+        "A settles on EVM alone and cannot verify a Solana claim"
+    );
+    assert_eq!(a.settlements()[0].chain(), SettlementChain::Evm);
+    assert_eq!(
+        c.settlements().len(),
+        1,
+        "C settles on Solana alone and cannot verify an EIP-712 balance proof -- which is what \
+         makes a packet arriving there evidence of a real chain boundary rather than of one \
+         chain with two config shapes"
+    );
+    assert_eq!(c.settlements()[0].chain(), SettlementChain::Solana);
+
+    let mut chains: Vec<SettlementChain> = b.settlements().iter().map(|s| s.chain()).collect();
+    chains.sort_by_key(|chain| format!("{chain:?}"));
+    assert_eq!(
+        chains,
+        vec![SettlementChain::Evm, SettlementChain::Solana],
+        "B is the boundary: it holds BOTH backends, and a peering can only be signed for on a \
+         chain whose settlement key this node has"
+    );
+
+    assert_eq!(
+        evm_channel(&b, "a-b").chain_id(),
+        31_337,
+        "the EVM half of the boundary is judged under anvil's own chain id"
+    );
+    assert_eq!(
+        solana_channel(&b, "b-c").program_id(),
+        LOCAL_TEST_PROGRAM_ID,
+        "the Solana half names the deployed program, which ADR 0053 binds into the signed \
+         message -- a claim rendered under another deployment does not verify"
+    );
+}
+
+#[test]
+fn the_mixed_chain_path_is_one_prefix_per_hop_and_one_amount_end_to_end() {
+    let a = load("local/mixed-chain/connector-a.toml", MIXED_A);
+    let b = load("local/mixed-chain/connector-b.toml", MIXED_B);
+    let c = load("local/mixed-chain/connector-c.toml", MIXED_C);
+
+    assert!(a.routes().is_empty(), "A terminates nothing");
+    assert!(b.routes().is_empty(), "B terminates nothing -- it is a hop");
+    assert_eq!(a.peer_routes().len(), 1);
+    assert_eq!(b.peer_routes().len(), 1);
+    assert_eq!(c.peer_routes().len(), 0);
+    assert_eq!(c.routes().len(), 1);
+
+    let first = &a.peer_routes()[0];
+    let second = &b.peer_routes()[0];
+    let app = &c.routes()[0];
+    assert_eq!(first.prefix(), "g.local.mixed.b");
+    assert_eq!(second.prefix(), "g.local.mixed.b.c");
+    assert_eq!(app.prefix(), "g.local.mixed.b.c.app");
+    assert!(
+        second.prefix().starts_with(first.prefix()) && app.prefix().starts_with(second.prefix()),
+        "each hop's route must be a prefix of the next, or longest-prefix matching sends the \
+         packet off the path this topology describes"
+    );
+
+    assert_eq!(first.fee(), 0);
+    assert_eq!(second.fee(), 0);
+    assert_eq!(
+        first.price(),
+        second.price(),
+        "no hop retains anything and there is no rate anywhere (ADR 0010), so the amount that \
+         leaves A is the amount that leaves B. A different figure would be the beginning of a \
+         conversion, which is the `swap` repository's job and not this connector's -- and the \
+         chain boundary in the middle is exactly where somebody would be tempted to put one."
+    );
+    assert_eq!(
+        app.price(),
+        0,
+        "the termination is unpriced for the reason two-hop's payee is: a priced peer \
+         termination refuses an uncovered arrival (F06) and a postpay peering's first crossing \
+         is uncovered by construction"
+    );
+}
+
+#[test]
+fn the_mixed_chain_peerings_are_written_identically_on_both_sides() {
+    let a = load("local/mixed-chain/connector-a.toml", MIXED_A);
+    let b = load("local/mixed-chain/connector-b.toml", MIXED_B);
+    let c = load("local/mixed-chain/connector-c.toml", MIXED_C);
+
+    let a_side = evm_channel(&a, "a-b");
+    let b_evm = evm_channel(&b, "a-b");
+    assert_eq!(a_side.channel_id(), b_evm.channel_id());
+    assert_eq!(a_side.chain_id(), b_evm.chain_id());
+    assert_eq!(a_side.token_network(), b_evm.token_network());
+    assert_ne!(
+        a_side.counterparty_key(),
+        b_evm.counterparty_key(),
+        "each side names the OTHER's settlement address"
+    );
+
+    let b_solana = solana_channel(&b, "b-c");
+    let c_side = solana_channel(&c, "b-c");
+    assert_eq!(b_solana.channel_account(), c_side.channel_account());
+    assert_eq!(b_solana.program_id(), c_side.program_id());
+    assert_ne!(
+        b_solana.counterparty_key(),
+        c_side.counterparty_key(),
+        "each side names the OTHER's Solana settlement key"
+    );
+
+    assert_eq!(
+        b.peers().len(),
+        2,
+        "B is on both ends of a peering: it accepts from A and dials C"
+    );
+    assert!(
+        b.peers().iter().any(|peer| peer.endpoint().is_some())
+            && b.peers().iter().any(|peer| peer.endpoint().is_none()),
+        "exactly the asymmetry the boundary is made of -- one peering B dials and one it accepts"
+    );
+}
+
+#[test]
+fn the_mixed_chain_configs_and_their_compose_file_agree() {
+    for service in [
+        "stub-app:",
+        "connector-a:",
+        "connector-b:",
+        "connector-c:",
+        "sender:",
+    ] {
+        assert!(
+            MIXED_COMPOSE.contains(service),
+            "local/mixed-chain/compose.yml no longer declares a `{service}` service"
+        );
+    }
+    for node in ["connector-a", "connector-b", "connector-c"] {
+        for mount in [
+            format!("./local/mixed-chain/{node}.toml:/app/config/connector.toml:ro"),
+            format!("./local/.keys/mixed-chain/{node}:/app/data:ro"),
+        ] {
+            assert!(
+                MIXED_COMPOSE.contains(&mount),
+                "local/mixed-chain/compose.yml must mount `{mount}` -- repository-root-relative, \
+                 and the key directory named after the service that mounts it"
+            );
+        }
+    }
+    assert!(
+        MIXED_A.contains("endpoint = \"http://connector-b:3000/ilp\"")
+            && MIXED_B.contains("endpoint = \"http://connector-c:3000/ilp\""),
+        "each dialing side's peer endpoint must name the next node's compose service"
+    );
+    assert!(
+        MIXED_C.contains("http://stub-app:3100/"),
+        "C's handler_url must name the compose `stub-app` service and its command-line port"
+    );
+    assert!(
+        MIXED_COMPOSE.contains("--expect-fulfill"),
+        "the sender must run with --expect-fulfill"
+    );
+
+    // Both journals, both identifiers -- the whole topology in two greps. An
+    // EVM `channel_id` accepted at B and a base58 Solana `channel_account`
+    // accepted at C, neither of which `--expect-fulfill` can see.
+    let b = load("local/mixed-chain/connector-b.toml", MIXED_B);
+    let evm = evm_channel(&b, "a-b").channel_id().to_string();
+    let solana = solana_channel(&b, "b-c").channel_account().to_string();
+    assert!(
+        MIXED_COMPOSE.contains(&format!("/app/b-state {evm} ")),
+        "the sender must read B's claim journal for the EVM peering's channel id ({evm})"
+    );
+    assert!(
+        MIXED_COMPOSE.contains(&format!("/app/c-state {solana} ")),
+        "the sender must read C's claim journal for the Solana peering's channel account \
+         ({solana}) -- without it a packet can reach the app having crossed the chain boundary \
+         for free"
+    );
+}
+
+// ─── every config ────────────────────────────────────────────────────────────
+
+/// No credential may be written literally into a committed config, local or
+/// not: `bearer_token`/`write_keys` inline is a secret in a public repository,
+/// and so is a peering's shared `secret`. Line-anchored on the key left of the
+/// `=`, because each of those names is a prefix of its own `_file` form and
+/// these files' prose names both at length.
+#[test]
+fn no_local_config_carries_a_literal_credential() {
+    for (name, raw) in EVERY_CONFIG {
+        for field in ["bearer_token", "write_keys", "secret"] {
+            for line in raw.lines() {
+                let line = line.trim();
+                if line.starts_with('#') {
+                    continue;
+                }
+                let Some((left, _)) = line.split_once('=') else {
+                    continue;
+                };
+                assert_ne!(
+                    left.trim(),
+                    field,
+                    "{name} sets `{field}` literally. Credentials are named by path \
+                     (`{field}_file`) and written by local/keys.sh -- never committed."
+                );
             }
-            let Some((left, _)) = line.split_once('=') else {
-                continue;
-            };
-            assert_ne!(
-                left.trim(),
-                field,
-                "local/solo/connector.toml sets `{field}` literally. Operator credentials are \
-                 named by path (`{field}_file`) and written by local/keys.sh -- never committed."
+        }
+    }
+}
+
+/// Every peering a config declares is bound to a channel, and every channel
+/// row names a peering that exists. `Config::load` already refuses both
+/// (`PeerUnbound`, `PeerChannelOrphaned`), so this is not a second
+/// implementation of that rule -- it is the assertion that these particular
+/// files reach load at all with their peerings intact, which is the thing a
+/// hand-edited multi-node config gets wrong.
+#[test]
+fn every_local_peering_is_bound_to_a_channel() {
+    for (name, raw) in EVERY_CONFIG {
+        let config = load(name, raw);
+        for peer in config.peers() {
+            assert!(
+                config
+                    .peer_channels()
+                    .iter()
+                    .any(|channel| channel.peer_id() == peer.id()),
+                "{name} declares peering '{}' with no [[peer_channels]] row",
+                peer.id()
             );
         }
     }

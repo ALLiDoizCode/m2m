@@ -1,0 +1,182 @@
+# =============================================================================
+# local/two-hop -- two connectors, one peering, a packet that crosses it.
+#
+# Merged ON TOP of the repository-root docker-compose.yml so the chains are the
+# SAME services `make anvil-up` brings up, on one network:
+#
+#   docker compose -f docker-compose.yml -f local/two-hop/compose.yml \
+#     --profile evm --profile solana --profile two-hop up -d
+#
+# `make local-up LOCAL_TOPOLOGY=two-hop` does exactly that. One compose project
+# means one network, which means the connectors reach the chain and each other
+# by service name -- `anvil:8545`, `connector-b:3000`.
+#
+# This is the containerised counterpart of `crates/connector-bin/tests/
+# two_connectors_peer.rs`, which proves the same peering in-process against an
+# anvil it spawns per test. What that cannot say anything about is the image:
+# two of them, as uid 10001, each with its own mounted config, its own key
+# files and its own state volume, discovering each other over a container
+# network. That is this.
+# =============================================================================
+
+services:
+  # ── The payment-oblivious app, behind B ────────────────────────────────────
+  # The connector image's second binary. Not published: only B dials it, which
+  # is what makes "the app was reached" evidence that a packet crossed the
+  # peering rather than something the host could arrange directly.
+  stub-app:
+    image: connector-rust:local
+    profiles: [two-hop]
+    entrypoint: ['/usr/local/bin/stub-app']
+    command: ['0.0.0.0:3100']
+    expose:
+      - '3100'
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+
+  # ── B: the accepting half ──────────────────────────────────────────────────
+  # Started first, and A waits on its health gate: A dials B, and a peering
+  # whose far side is not yet serving answers `T01 peer unreachable` rather
+  # than failing loudly, so bringing them up in an undefined order would make
+  # the first rehearsal a coin toss.
+  connector-b:
+    image: connector-rust:local
+    profiles: [two-hop]
+    command: ['/app/config/connector.toml']
+    # PATHS ARE RELATIVE TO THE REPOSITORY ROOT, not to this file. Compose
+    # resolves relative bind mounts against the PROJECT directory, which is the
+    # directory of the FIRST `-f` file -- always ./docker-compose.yml here.
+    volumes:
+      - ./local/two-hop/connector-b.toml:/app/config/connector.toml:ro
+      # Written by local/keys.sh, gitignored, never committed (ADR 0012). One
+      # directory per node, named after this service.
+      - ./local/.keys/two-hop/connector-b:/app/data:ro
+      # A NAMED volume, not a bind mount: the image creates /app/state owned by
+      # uid 10001 so a fresh named volume inherits that ownership. A host bind
+      # mount arrives root-owned and the connector refuses to start.
+      - two-hop-b-state:/app/state
+    ports:
+      # Published to loopback only, on a port no other topology uses so two of
+      # them can be up at once without a collision the operator has to diagnose.
+      - '127.0.0.1:3002:3000'
+    depends_on:
+      anvil:
+        condition: service_healthy
+      stub-app:
+        condition: service_started
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    healthcheck:
+      # GET /ilp/identity is unauthenticated and free, and answering it means
+      # the config loaded, the settlement backend connected, and the router is
+      # serving. `docker ps` showing "Up" proves none of that.
+      #
+      # 127.0.0.1, NOT localhost. `client_edge_addr = "0.0.0.0:3000"` binds
+      # IPv4 only, while `localhost` inside the container resolves `::1` first
+      # -- so busybox wget gets "Connection refused" from a healthy connector.
+      test:
+        ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:3000/ilp/identity || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ── A: the forwarding half, and the node the rehearsal is handed to ────────
+  connector-a:
+    image: connector-rust:local
+    profiles: [two-hop]
+    command: ['/app/config/connector.toml']
+    volumes:
+      - ./local/two-hop/connector-a.toml:/app/config/connector.toml:ro
+      - ./local/.keys/two-hop/connector-a:/app/data:ro
+      - two-hop-a-state:/app/state
+    ports:
+      - '127.0.0.1:3001:3000'
+    depends_on:
+      anvil:
+        condition: service_healthy
+      connector-b:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:3000/ilp/identity || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ── The rehearsal ──────────────────────────────────────────────────────────
+  # Its own profile so `up` never starts it: a one-shot that exits 0 or 1, run
+  # by `make local-rehearse` via `docker compose run --rm`.
+  #
+  # TWO packets, not one, and that is not belt-and-braces. Value moves on
+  # fulfilment (ADR 0004), so the payer owes nothing until the first crossing
+  # has actually fulfilled: the claim covering crossing n is signed after it
+  # and rides crossing n+1. One packet proves DELIVERY and can say nothing
+  # about payment; the second is what makes the peering paid. This is exactly
+  # why `two_connectors_peer.rs` crosses twice too.
+  #
+  # Then the money is asserted, because `--expect-fulfill` cannot: a peer
+  # claim's verdict rides back in the `Toon-Claim-Ack` header and never gates
+  # the packet (`handle_peer_prepare` -- the ack and the answer are separate),
+  # so a peering whose claims were all refused still fulfils every packet.
+  # B's own claim journal is where "the claim was accepted" is written down,
+  # and the channel id grepped for is the same literal both connector.toml
+  # files name -- `local_topologies_load.rs` holds the three copies together.
+  sender:
+    image: connector-rust:local
+    profiles: [sender]
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        set -e
+        send() {
+          /usr/local/bin/connector send \
+            --operator     http://connector-a:3000 \
+            --operator-key /app/data/operator-send.key \
+            --to           g.local.two-hop.b.app \
+            --seal-to      http://connector-b:3000 \
+            --target       / \
+            --amount       1000 \
+            --body         /app/data/payload.json \
+            --expect-fulfill
+        }
+        echo '--- crossing 1: proves delivery across the peering'
+        send
+        echo '--- crossing 2: carries the claim covering crossing 1'
+        send
+
+        CHANNEL=0x57c5462d40a3c60fa89b8fe4f3f24cf560947a413df9a691499e58abea1d63f8
+        if ! grep -q "$$CHANNEL" /app/payee-state/peer-claims.log 2>/dev/null; then
+          echo "the peering was NOT paid: B's claim journal records no accepted claim on" >&2
+          echo "$$CHANNEL -- both packets were carried for free." >&2
+          echo '--- B/peer-claims.log follows ---' >&2
+          cat /app/payee-state/peer-claims.log >&2 || echo '(the journal does not exist)' >&2
+          exit 1
+        fi
+        echo "--- B's claim journal records an accepted claim on $$CHANNEL"
+    volumes:
+      # A's keys: the sender signs the operator write with A's allowlisted key
+      # and posts the fixture body from the same directory.
+      - ./local/.keys/two-hop/connector-a:/app/data:ro
+      # B's state volume, READ-ONLY, purely to read the claim journal. The
+      # sender runs as the same uid 10001 that wrote it.
+      - two-hop-b-state:/app/payee-state:ro
+
+volumes:
+  two-hop-a-state:
+  two-hop-b-state:

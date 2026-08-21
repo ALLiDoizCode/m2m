@@ -1,0 +1,90 @@
+# =============================================================================
+# local/mixed-chain -- connector C. Settles on Solana, and knows nothing else.
+#
+# LOCAL / DEV ONLY. `infra/linode-*` owns devnet; nothing here is deployed,
+# published or SSH'd anywhere, and every chain this file names is disposable.
+#
+# The far end of the boundary, and the mirror of A: one chain, one peering, no
+# idea that the hop before B was on a different one. A packet arriving here has
+# crossed anvil and then the Solana validator, and this node can tell only
+# because its own peering's claims are ed25519.
+#
+# The rehearsal's payload is sealed to THIS node's `[signer]` identity (ADR
+# 0018) -- neither A nor B can open it, and `connector send --seal-to` naming
+# either of them is reported as "FULFILL WITH THE WRONG FULFILMENT" rather than
+# quietly passing.
+# =============================================================================
+
+client_edge_addr = "0.0.0.0:3000"
+
+# Where the Solana peering's inbound claim watermarks are written, and the file
+# the rehearsal reads to prove the Solana leg was actually paid rather than
+# merely traversed (`peer-claims.log`).
+state_dir = "/app/state"
+
+# CF-17: the peer carriage rides this node's own listener. C dials nobody, so
+# there is no `peer_allow_plaintext_endpoints` here -- the opt-in widens which
+# schemes this node may DIAL, and C never does.
+peer_expose = "http"
+
+[signer]
+key_file = "/app/data/signer.key"
+
+# ── The terminated route ─────────────────────────────────────────────────────
+# `stub-app` is the connector image's second binary: it answers `POST /`, holds
+# no secret and performs no cryptography, so it contributes nothing to the
+# packet's fulfilment -- this connector derives that itself from the sealed
+# request (ADR 0019). The trailing slash is load-bearing (`handler_url.join`
+# and RFC 3986).
+#
+# `price = 0`, for the reason `local/two-hop/connector-b.toml` sets out at
+# length: a route this node both TERMINATES and PRICES refuses a peer PREPARE
+# that arrives without a covering claim (`F06`, issue #880), and a postpay
+# peering's first crossing carries none by construction (ADR 0004) -- so a
+# priced termination here deadlocks the peering rather than charging for it.
+# What B owes this node is the forwarded amount, and `[[peer_channels]]` below
+# is what that claim is written against.
+[[routes]]
+prefix = "g.local.mixed.b.c.app"
+handler_url = "http://stub-app:3100/"
+price = 0
+
+# ── The Solana peering ───────────────────────────────────────────────────────
+# No `endpoint`: B dials us, which on ILP-over-HTTP makes this node the payee
+# (§6.4).
+[[peers]]
+id = "b-c"
+
+[peers.credential]
+secret_file = "/app/data/peer-b-c-secret"
+
+# The other half of B's Solana row. `counterparty_key` is B's Solana
+# SETTLEMENT public key -- the identity a claim on this channel must be signed
+# by, and the one thing this node checks a signature against (CF-23).
+# `program_id` is bound into the signed message since ADR 0053, so a claim
+# rendered against another deployment of the same program does not verify here
+# even though every other field matches.
+[[peer_channels]]
+peer_id = "b-c"
+channel_account = "G5mXQzfZb4tXWX7cQvXP9ZJnDBcUo6irWTmGGtX3xpzL"
+counterparty_key = "BCXtFg3PtZwxVDBDGmknPzxHUtweYxb4YygrchiQKk7y"
+program_id = "HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR"
+
+# No `[operator]` section, deliberately (CF-31): an absent table means the
+# surface is not started at all, rather than started unauthenticated. The
+# rehearsal hands its packet to A.
+
+# ── Settlement: Solana only ──────────────────────────────────────────────────
+# No `[settlement.evm]`, and that is the assertion this node makes: it holds no
+# EVM identity, cannot sign an EIP-712 balance proof, and could not verify one
+# -- so a packet reaching it has genuinely been handed across a chain boundary
+# rather than carried on one chain the whole way with a differently-shaped
+# config in the middle.
+[settlement.solana]
+rpc_url = "http://solana-validator:8899"
+program_id = "HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR"
+token_address = "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "/app/data/settlement-solana.key"
