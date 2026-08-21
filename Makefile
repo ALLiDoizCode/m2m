@@ -52,6 +52,7 @@ help:
 	@echo "  make local-verify         up + rehearse + down, as CI runs it"
 	@echo "  make local-down           Stop it"
 	@echo "  make local-logs           Follow its logs"
+	@echo "  LOCAL_TOPOLOGY=<name>     Which topology: solo (default), two-hop, mixed-chain"
 	@echo ""
 	@echo "Maintenance:"
 	@echo "  make clean                Remove build artifacts"
@@ -175,6 +176,16 @@ LOCAL_TOPOLOGY ?= solo
 LOCAL_COMPOSE := docker compose -f docker-compose.yml -f local/$(LOCAL_TOPOLOGY)/compose.yml \
 	--profile evm --profile solana --profile $(LOCAL_TOPOLOGY)
 
+# The connector services each topology runs, listed rather than discovered.
+# `up -d --wait` with no arguments would start every service in the enabled
+# profiles -- which includes the `faucet`, an app-layer service local/ has no
+# business running (local/README.md, "Connector layer only"). Naming them keeps
+# that decision visible instead of leaving it to a profile's membership.
+LOCAL_NODES_solo := connector
+LOCAL_NODES_two-hop := connector-a connector-b
+LOCAL_NODES_mixed-chain := connector-a connector-b connector-c
+LOCAL_NODES = $(LOCAL_NODES_$(LOCAL_TOPOLOGY))
+
 # The image the topologies run. Built from this working tree, deliberately: the
 # question is whether THIS commit's image boots, and pulling a published tag
 # would answer it about some other commit.
@@ -193,20 +204,34 @@ local-build:
 # address does not revert, so the funding silently does nothing and the
 # connector then dies resolving getTokenNetwork().
 #
-# On the connector: this target's contract is that when it returns, the
-# topology can be SENT TO. Its health gate is a real request to the client
+# On the connectors: this target's contract is that when it returns, the
+# topology can be SENT TO. Their health gate is a real request to the client
 # edge, so returning before that passes hands `local-rehearse` a connector that
 # is merely "Started" -- the distinction ADR 0041 had to learn for the fleet:
-# the container being Up is not sufficient evidence.
+# the container being Up is not sufficient evidence. In a multi-node topology
+# each node also waits on the one it dials, so `--wait` here means every hop on
+# the path is serving, not just the one the packet is handed to.
 local-up: local-build solana-build
+	@test -n "$(LOCAL_NODES)" || { \
+		echo "ERROR: LOCAL_TOPOLOGY='$(LOCAL_TOPOLOGY)' has no LOCAL_NODES_ entry in this Makefile."; \
+		echo "       Known topologies: solo two-hop mixed-chain."; \
+		exit 1; \
+	}
 	$(LOCAL_COMPOSE) up -d --wait anvil solana-validator
 	$(MAKE) solana-mint-usdc
 	cargo build --release -p connector
 	./local/keys.sh $(LOCAL_TOPOLOGY)
-	$(LOCAL_COMPOSE) up -d --wait connector
+	$(LOCAL_COMPOSE) up -d --wait $(LOCAL_NODES)
 
+# `-v`, and that matters. The named volumes here hold the connectors' claim
+# journals, and both local chains wipe their own state on every start -- so
+# keeping the journals across a down/up pairs a live watermark with a chain
+# that no longer has the history behind it. Concretely it also makes the
+# rehearsal's money assertion vacuous: a peered topology's sender proves the
+# peering was paid by reading the payee's journal, and a journal left behind by
+# the LAST run satisfies that read without this run having paid anything.
 local-down:
-	$(LOCAL_COMPOSE) down
+	$(LOCAL_COMPOSE) down -v
 
 local-logs:
 	$(LOCAL_COMPOSE) logs -f
@@ -214,6 +239,12 @@ local-logs:
 # The assertion. `connector send --expect-fulfill` exits non-zero on anything
 # that is not a correctly-fulfilled packet, so this target's exit status is the
 # verdict -- there is no output to grep and nothing that can pass by printing.
+#
+# A topology with a peering asks its `sender` for a second thing, because
+# `--expect-fulfill` structurally cannot cover it: a peer claim's verdict rides
+# back in `Toon-Claim-Ack` and never gates the packet, so a peering whose every
+# claim was refused still fulfils. Those senders read the payee's own claim
+# journal afterwards and exit non-zero if the crossing was carried for free.
 local-rehearse:
 	$(LOCAL_COMPOSE) --profile sender run --rm sender
 

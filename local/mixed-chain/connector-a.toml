@@ -1,0 +1,91 @@
+# =============================================================================
+# local/mixed-chain -- connector A. Settles on EVM, and knows nothing else.
+#
+# LOCAL / DEV ONLY. `infra/linode-*` owns devnet; nothing here is deployed,
+# published or SSH'd anywhere, and every chain this file names is disposable.
+#
+# A -> B on EVM, B -> C on Solana, and the packet reaches C's app. What this
+# topology is FOR is the middle: ONE node holding two settlement backends and a
+# peering on each, so a packet crosses a chain boundary between two hops.
+#
+# It is NOT a conversion. The connector has no exchange rate -- ADR 0010
+# replaced the spread with a flat per-packet fee, and value conversion is the
+# `swap` repository's job. Every amount on this path is the same 6-decimal
+# USDC-shaped integer from end to end; what differs is which chain each
+# peering's claims are written against.
+#
+# A's role in that is to be the ordinary end: one chain, one peering, no idea
+# that the hop after B is on a different one. Routing does not carry chain, and
+# a hop that had to know would be a hop that could disagree.
+# =============================================================================
+
+client_edge_addr = "0.0.0.0:3000"
+
+# The peer claim ledger's home (issue #605).
+state_dir = "/app/state"
+
+# Issue #678, gap 3. B is a plain container port with no TLS terminator in
+# front of it. Node-wide and default false (CF-18); every deployed config
+# leaves it unset, and a node that sets it logs a WARN naming every plaintext
+# peering at startup.
+peer_allow_plaintext_endpoints = true
+
+[signer]
+key_file = "/app/data/signer.key"
+
+# ── The only path onward ─────────────────────────────────────────────────────
+# `g.local.mixed.b` is B's own subtree; the destination the rehearsal sends to
+# is `g.local.mixed.b.c.app`, three labels deeper. Longest-prefix matching does
+# the rest, and each hop's route is a prefix of the next hop's -- which is what
+# makes the address itself say where the packet went.
+#
+# `fee = 0` is forced by how the packet is originated, not by the peering:
+# `POST /packets` passes `minimum_delivery = prepare.amount`, so
+# `amount_after_fee` refuses any hop that would discount it (ADR 0010). See
+# `local/two-hop/connector-a.toml` for the longer note; it applies to every
+# forwarded route in this directory.
+[[routes]]
+prefix = "g.local.mixed.b"
+peer_id = "a-b"
+fee = 0
+price = 1000
+
+[[peers]]
+id = "a-b"
+endpoint = "http://connector-b:3000/ilp"
+
+[peers.credential]
+secret_file = "/app/data/peer-a-b-secret"
+
+# The EVM half of the boundary. `counterparty_key` is B's EVM settlement
+# address; B's own file names A's. `channel_id` is a real channel on the local
+# anvil, opened and funded by `local/keys.sh`, which refuses to proceed if the
+# chain does not produce exactly this id.
+[[peer_channels]]
+peer_id = "a-b"
+channel_id = "0x221b5e73fba2099b690a94e668d575a75d136c249795f5b20146bf7d0403e423"
+counterparty_key = "0x23618e81E3f5cdF7f54C3d65f7FBc0aBf5B21E8f"
+chain_id = 31337
+token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
+
+# ── Operator surface (ADR 0008) ──────────────────────────────────────────────
+# Only this node has one: `connector send` originates the rehearsal's packet
+# through `POST /packets` here, and nothing sends to B or C directly.
+[operator]
+bearer_token_file = "/app/data/operator-bearer-token"
+write_keys_file = "/app/data/operator-write-keys"
+
+# ── Settlement: EVM only ─────────────────────────────────────────────────────
+# `contract_address` is the TokenNetworkRegistry, NOT the TokenNetwork the
+# peer channel above names (issue #576): `connect` resolves
+# `getTokenNetwork(token_address)` through the registry and refuses to start if
+# that comes back zero. The key here is also this node's peer-claim signing key
+# (ADR 0030), which is why its address is what B's `counterparty_key` names.
+[settlement.evm]
+rpc_url = "http://anvil:8545"
+contract_address = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
+token_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "/app/data/settlement.key"

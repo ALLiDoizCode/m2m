@@ -1,0 +1,123 @@
+# =============================================================================
+# local/two-hop -- connector B, the ACCEPTING half of the peering.
+#
+# LOCAL / DEV ONLY. `infra/linode-*` owns devnet; nothing here is deployed,
+# published or SSH'd anywhere, and every chain this file names is disposable.
+#
+# B terminates the app's prefix and accepts one peering. It dials nothing --
+# there is no `endpoint` on its `[[peers]]` row -- which on ILP-over-HTTP makes
+# it structurally the payee (peer-carriage-spec.md §6.4): only the dialing side
+# can originate, so packets and debt both flow one way across this peering.
+#
+# The packet the rehearsal sends is sealed to THIS node's `[signer]` identity,
+# not to A's (ADR 0018): a payload is sealed to the connector that TERMINATES
+# it, and A is a forwarding hop that cannot open it. `connector send`'s
+# `--seal-to` is what says so, and getting it wrong is reported distinctly --
+# "FULFILL WITH THE WRONG FULFILMENT" -- rather than as a decode failure.
+# =============================================================================
+
+client_edge_addr = "0.0.0.0:3000"
+
+# The peer claim ledger's home. This is the node that RECEIVES claims, so this
+# is the file the rehearsal reads to prove the peering was actually paid rather
+# than merely traversed (`peer-claims.log`, written by `ClaimBook`).
+state_dir = "/app/state"
+
+# CF-17: peer carriages ride this node's own listener, told apart from clients
+# by authentication rather than by port -- there is no second socket (ADR 0027).
+# `"http"` rather than `"both"` because this topology dials one carriage; the
+# BTP twin is exercised in-process by `two_connectors_peer.rs`, which runs every
+# assertion over both.
+peer_expose = "http"
+
+[signer]
+key_file = "/app/data/signer.key"
+
+# ── The terminated route ─────────────────────────────────────────────────────
+# `stub-app` is the connector image's second binary: it answers `POST /`, holds
+# no secret and performs no cryptography, so it supplies nothing toward the
+# packet's fulfilment -- the connector derives that itself from the sealed
+# request (ADR 0019).
+#
+# The trailing slash on handler_url is load-bearing. `HttpAppClient::deliver`
+# does `handler_url.join(&target)`, and RFC 3986 makes an absolute-path
+# reference REPLACE the base's path.
+#
+# `price = 0`, AND THAT IS NOT AN OVERSIGHT. A priced termination is
+# incompatible with the peering this topology runs, and the incompatibility is
+# a deadlock rather than a degradation:
+#
+#   * `peer-carriage-spec.md` §3.1 / issue #880: a peer PREPARE to a route this
+#     node both TERMINATES and PRICES must arrive carrying a claim that covers
+#     that price, or it is refused `F06` with the x402 greeting;
+#   * ADR 0004: value moves on fulfilment, so a peering's payer owes nothing
+#     until a crossing has fulfilled -- the FIRST crossing therefore carries no
+#     claim, by design;
+#   * so the first crossing is refused, which means it never fulfils, which
+#     means nothing is ever owed, which means the second carries no claim
+#     either. It never recovers.
+#
+# ADR 0042's answer is `[[pay_channels]]`: cover the PREPARE before sending it
+# rather than after it fulfils. That does not work here either, and the reason
+# is worth writing down because `pay_channel.rs` calls holding the peer and
+# client roles on one channel "the deployed shape". An outbound client claim's
+# cumulative amount comes from the receiver's `POST /ilp/claim-state`, which
+# answers out of the CLIENT-edge book (`ClientClaimGate::watermark`) -- while a
+# claim arriving on the peer carriage advances the PEER book. Nothing
+# reconciles the two, so the payer re-signs the SAME cumulative amount at a
+# fresh nonce on every packet. The payee accepts each one (a nonce did
+# advance) and each one buys nothing: `advanced = 0`, `shortfall = price`, F06.
+#
+# Measured on this topology rather than reasoned about: with a
+# `[[pay_channels]]` row on A and `price = 1000` here, crossing 1 fulfilled and
+# crossing 2 was refused, and B's journal held `nonce 1 -> 1000` followed by
+# `nonce 2 -> 1000`. The numbers are in this branch's PR.
+#
+# The peering is still genuinely paid: what A owes B is the forwarded amount,
+# not this route's price, and `[[peer_channels]]` below is what that claim is
+# written against. `two_connectors_peer.rs` prices its payee's terminated route
+# at 0 for exactly the same reason.
+[[routes]]
+prefix = "g.local.two-hop.b.app"
+handler_url = "http://stub-app:3100/"
+price = 0
+
+# ── The peering ──────────────────────────────────────────────────────────────
+# The same relation id A writes, and the same secret, from the same file
+# `local/keys.sh` copied into both key directories. No `endpoint`: A dials us.
+[[peers]]
+id = "a-b"
+
+[peers.credential]
+secret_file = "/app/data/peer-a-b-secret"
+
+# The other half of A's row. Same channel, same EIP-712 domain, and the
+# `counterparty_key` pointed the other way: this is A's SETTLEMENT address,
+# whose signature this node accepts on a claim for this channel -- never the
+# signer address the claim declares about itself (CF-23).
+[[peer_channels]]
+peer_id = "a-b"
+channel_id = "0x57c5462d40a3c60fa89b8fe4f3f24cf560947a413df9a691499e58abea1d63f8"
+counterparty_key = "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
+chain_id = 31337
+token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
+
+# No `[operator]` section, deliberately (CF-31): an absent table means the
+# surface is not started at all. Nothing sends to this node directly -- the
+# rehearsal hands its packet to A, which is the whole point -- so an operator
+# surface here would be an unused authenticated endpoint with two more key
+# files behind it.
+
+# ── Settlement: EVM only ─────────────────────────────────────────────────────
+# The same registry, token and decimals A names. It has to be the same
+# deployment: a claim this node accepts is written against the channel A opened
+# on these contracts, and a node pointed at a different registry cannot resolve
+# it.
+[settlement.evm]
+rpc_url = "http://anvil:8545"
+contract_address = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
+token_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "/app/data/settlement.key"

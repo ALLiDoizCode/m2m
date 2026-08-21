@@ -12,6 +12,12 @@ make local-down
 Or `make local-verify` for all three, which is what CI runs
 (`.github/workflows/local-topologies.yml`).
 
+`LOCAL_TOPOLOGY` picks which one; `solo` is the default.
+
+```sh
+make local-verify LOCAL_TOPOLOGY=mixed-chain
+```
+
 ## What this is for, and what it is not
 
 `cargo test` covers the connector's behaviour far better than a container can.
@@ -53,33 +59,75 @@ nothing left to forward.
 
 ## Topologies
 
-| Topology         | What it proves                                                                                                                              |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`solo/`](solo/) | The image boots on a mounted config with **both** settlement backends live at once, and a real packet reaches the app behind its one route. |
+| Topology                       | Nodes | What it proves                                                                                                                                                                                    |
+| ------------------------------ | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`solo/`](solo/)               | 1     | The image boots on a mounted config with **both** settlement backends live at once, and a real packet reaches the app behind its one route.                                                       |
+| [`two-hop/`](two-hop/)         | 2     | Two images peered over ILP-over-HTTP. A packet originated at A crosses the peering to B's app, and A pays for the crossing with a real EIP-712 claim on a real funded channel on the local anvil. |
+| [`mixed-chain/`](mixed-chain/) | 3     | A↔B settles on EVM, B↔C on Solana, and B holds **both** backends. A packet originated at A reaches C's app, crossing a chain boundary in the middle.                                              |
 
 `two_ledgers_never_merge.rs` is named for the both-chains concern and proves it
 in-process; `solo` is the only place a node is actually stood up with an EVM and
 a Solana backend attached simultaneously.
 
+`two-hop` is the containerised counterpart of
+`crates/connector-bin/tests/two_connectors_peer.rs`, which proves the same
+peering in-process against an `anvil` it spawns per test — and therefore says
+nothing about the image, the mounted config, or two nodes finding each other
+over a network. Its own header is the reference for what a peering has to
+assert; this is that path with the containers left in.
+
+`mixed-chain` is the shape with **no coverage anywhere else in the repository**.
+It is not a conversion: the connector has no exchange rate (ADR 0010 replaced
+the spread with a flat per-packet fee, and value conversion is the `swap`
+repo's job). It is one node settling with different peers on different chains,
+and every amount on the path is the same integer end to end.
+
 ## Keys and money
 
 Both are the same rule: nothing is committed, and nothing is assumed.
 
-`local/keys.sh <topology>` generates every key into `local/.keys/<topology>/`,
-which is gitignored, and then **funds** it. There is no fixed throwaway key
-checked in anywhere, so there is no allowlist exception to reason about and no
-key in git history to explain later. Every `key_file` in a committed
-`connector.toml` here is a path (ADR 0009, ADR 0012).
+`local/keys.sh <topology>` generates every key into
+`local/.keys/<topology>/<node>/`, which is gitignored, and then **funds** it.
+Nothing it writes is committed, and every `key_file` in a committed
+`connector.toml` here is a path (ADR 0009, ADR 0012). One directory per node,
+named after that node's compose service; the node's config is
+`local/<topology>/<node>.toml`.
 
 Per node it writes `signer.key`, `settlement.key`, `settlement-solana.key`,
-`operator-bearer-token`, `operator-write-keys` and `operator-send.key`. The last
-two are a pair: the allowlist holds the **public** half (derived by the same
-binary that will sign, so the two cannot disagree), and `connector send` holds
-the private half. Ask for the allowlist value directly with:
+`settlement-solana-cli.json`, `operator-bearer-token`, `operator-write-keys`,
+`operator-send.key` and — for each peering the node is in — a shared
+`peer-<id>-secret`. The operator two are a pair: the allowlist holds the
+**public** half (derived by the same binary that will sign, so the two cannot
+disagree), and `connector send` holds the private half. Ask for the allowlist
+value directly with:
 
 ```sh
 connector send --operator-key <file> --print-keyid
 ```
+
+### Random and derived, and why the split exists
+
+`signer.key`, `operator-send.key`, `operator-bearer-token` and the peering
+secrets are **random**. None of them appears in a committed file, so nothing
+depends on their value.
+
+The two settlement keys are **derived**, per node, from anvil's own published
+test mnemonic at a fixed index. They have to be: a `[[peer_channels]]` row
+names the `counterparty_key` whose signature this node accepts, and a committed
+config cannot say "whatever address the other container happened to generate".
+The mnemonic is public knowledge — anvil prints it on every start, and account
+0's private key was already in `keys.sh` as the local chain's deployer — so
+deriving from it introduces no secret that did not already exist, and the
+alternative (a fixed throwaway key checked in under `local/`) would introduce
+one. EVM and Solana take disjoint index ranges, so no 32 bytes is ever used on
+both curves.
+
+Every address a committed config names is then **checked against the chain**
+before anything starts: `keys.sh` derives each settlement address, resolves the
+deployed `TokenNetwork`, opens the peering's channel and reads back its id, and
+computes the Solana channel PDA — and refuses to provision, naming the value it
+computed, if a committed file disagrees. That check is what makes
+committed-not-generated safe here.
 
 Funding involves **no faucet on either chain** — the faucet is an app-layer
 service and is not part of the connector:
@@ -106,10 +154,11 @@ from the fulfilment that wrap derives (ADR 0019), inside an RFC 9421-signed
 
 ```sh
 connector send \
-  --operator  http://127.0.0.1:3000 \   # whose /packets originates it
-  --operator-key local/.keys/solo/operator-send.key \
-  --to        g.local.solo \            # the ILP destination
-  --seal-to   http://127.0.0.1:3000 \   # the connector that TERMINATES it
+  --operator  http://127.0.0.1:3001 \   # whose /packets originates it (two-hop's A)
+  --operator-key local/.keys/two-hop/connector-a/operator-send.key \
+  --to        g.local.two-hop.b.app \   # the ILP destination
+  --seal-to   http://127.0.0.1:3002 \   # the connector that TERMINATES it (B)
+  --amount    1000 \
   --body      payload.json \
   --expect-fulfill
 ```
@@ -124,3 +173,59 @@ returns its self-description) this flag becomes optional.
 reported and the process exits 0 — right for an operator probing what a route
 does, wrong for CI, where a run that prints `REJECT F02` and goes green is the
 same nothing-asserted success ADR 0007 bans elsewhere.
+
+## What `--expect-fulfill` cannot see
+
+A peering's money is not on the packet's answer. A peer claim's verdict rides
+back in the `Toon-Claim-Ack` header and never gates the packet
+(`handle_peer_prepare` returns the answer and the ack side by side), so a
+peering whose every claim was refused still FULFILLs every packet. A rehearsal
+that only checked the exit status would go green over a peering carrying
+traffic for free — the same nothing-asserted success ADR 0007 bans elsewhere.
+
+So `two-hop` and `mixed-chain` cross **twice** and then read the payee's own
+claim journal. Twice, because value moves on fulfilment (ADR 0004): the payer
+owes nothing until the first crossing has fulfilled, so the claim covering
+crossing _n_ is signed after it and rides crossing _n + 1_. One packet proves
+delivery and can say nothing about payment. `two_connectors_peer.rs` crosses
+twice for exactly the same reason.
+
+This is also why `make local-down` removes the state volumes. Both local chains
+wipe their own state on every start, so keeping a claim journal across a
+down/up pairs a live watermark with a chain that no longer has the history
+behind it — and, concretely, a journal left by the last run satisfies this
+run's money check without this run having paid anything.
+
+Two consequences worth knowing before editing a config here:
+
+- **A peer termination cannot be priced.** A route a node both terminates and
+  prices refuses a peer PREPARE that arrives without a covering claim (`F06`,
+  issue #880) — and a postpay peering's first crossing carries none, so the
+  peering deadlocks rather than charging. Every terminated route in a peered
+  topology is therefore `price = 0`, and what a hop is actually paid is the
+  forwarded amount. `local/two-hop/connector-b.toml` has the long version,
+  including why `[[pay_channels]]` is not the way out.
+- **No hop may charge a fee.** `POST /packets` declares
+  `minimum_delivery = amount` (ADR 0010), so `amount_after_fee` refuses any hop
+  that would retain anything. Every forwarded route here is `fee = 0`; a
+  non-zero one turns the rehearsal into `R01`.
+
+## What a peer claim does and does not check
+
+`ClaimBook` verifies a peer claim's signature against the `counterparty_key`
+its operator configured, and nothing else (CF-23). It reads no chain. So the
+channels `keys.sh` opens and funds on anvil are not what makes a crossing
+verify — a topology would rehearse green against a channel with a zero deposit,
+which was tried. They are opened and funded anyway, for the reason
+`two_connectors_peer.rs`'s fixture does the same: a claim naming a channel
+nobody could redeem is not a payment, and the difference does not show up until
+somebody tries.
+
+The Solana peering's channel account is the real PDA the deployed program would
+derive for its two participants, computed by `keys.sh` and asserted against
+both committed configs — but it is **not opened on chain**. Opening one means
+submitting an `OpenChannel` instruction, and nothing in this repository can do
+that from a shell: there is no `connector channel open` verb and the Solana CLI
+cannot build an arbitrary instruction. So the honest summary is that a
+peering's claim is real cryptography on both chains and its collateral is real
+on EVM only. Closing that is a tool, not a config change.
