@@ -1,0 +1,156 @@
+# =============================================================================
+# local/mixed-chain -- connector B. THE CHAIN BOUNDARY.
+#
+# LOCAL / DEV ONLY. `infra/linode-*` owns devnet; nothing here is deployed,
+# published or SSH'd anywhere, and every chain this file names is disposable.
+#
+# This is the file the topology exists for. B accepts a peering whose claims
+# are EIP-712 balance proofs against a channel on anvil, and dials a peering
+# whose claims are ed25519 messages against a channel account on the local
+# Solana validator -- so ONE node, ONE packet path, and the money changes chain
+# in the middle of it.
+#
+# Nothing in this file converts anything. The amount that arrives from A is the
+# amount that leaves for C (`fee = 0`, see below); there is no rate, and ADR
+# 0010 deleted the spread that would have implied one. What the two peerings
+# disagree about is only which ledger a claim is redeemable on.
+#
+# The shape has no coverage anywhere else in this repository.
+# `two_ledgers_never_merge.rs` proves the two backends stay separate inside one
+# process, and `local/solo` stands a node up with both attached -- but neither
+# has a second node on the far side of either chain, so neither can show a
+# packet crossing from one to the other.
+# =============================================================================
+
+client_edge_addr = "0.0.0.0:3000"
+
+# Two claim ledgers' worth of watermarks -- the EVM peering's inbound and the
+# Solana peering's outbound -- in one journal, keyed by channel. They do not
+# merge: an EVM `channel_id` is `0x` + 64 hex and a Solana `channel_account` is
+# base58, drawn from disjoint spellings, so no name either chain produces can
+# collide with the other's (`Connector::recognizes_solana_channel`).
+state_dir = "/app/state"
+
+# Both axes, because this node is on both ends of a peering: it ACCEPTS from A
+# (`peer_expose`) and DIALS C (`peer_allow_plaintext_endpoints`, since C is a
+# plain container port with no TLS terminator). Expose and dial are separate
+# settings with separate spellings for exactly this reason -- a carriage name
+# and a URL scheme (peer-carriage-spec.md §2.1).
+peer_expose = "http"
+peer_allow_plaintext_endpoints = true
+
+[signer]
+key_file = "/app/data/signer.key"
+
+# ── Onward to C ──────────────────────────────────────────────────────────────
+# B terminates nothing. `g.local.mixed.b.c` is C's subtree under B's own, so
+# the destination `g.local.mixed.b.c.app` matches here and is forwarded, while
+# A's table matched the shorter `g.local.mixed.b` and forwarded to here.
+#
+# `fee = 0` for the same operator-surface reason A's row carries it: a packet
+# originated through `POST /packets` declares `minimum_delivery = amount`, so
+# no hop on its path may retain anything.
+[[routes]]
+prefix = "g.local.mixed.b.c"
+peer_id = "b-c"
+fee = 0
+price = 1000
+
+# ── The EVM peering: A dials in ──────────────────────────────────────────────
+# No `endpoint`: A dials us, which on ILP-over-HTTP makes this node the payee
+# of that peering (§6.4).
+[[peers]]
+id = "a-b"
+
+[peers.credential]
+secret_file = "/app/data/peer-a-b-secret"
+
+# ── The Solana peering: we dial C ────────────────────────────────────────────
+[[peers]]
+id = "b-c"
+endpoint = "http://connector-c:3000/ilp"
+
+[peers.credential]
+secret_file = "/app/data/peer-b-c-secret"
+
+# The EVM row: A's claims, judged against the anvil channel A opened, under the
+# EIP-712 domain that channel's `TokenNetwork` verifies (ADR 0024).
+# `counterparty_key` is A's EVM SETTLEMENT address -- the channel's on-chain
+# participant -- never the signer address the claim declares about itself
+# (CF-23).
+[[peer_channels]]
+peer_id = "a-b"
+channel_id = "0x221b5e73fba2099b690a94e668d575a75d136c249795f5b20146bf7d0403e423"
+counterparty_key = "0x14dC79964da2C08b23698B3D3cc7Ca32193d9955"
+chain_id = 31337
+token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
+
+# The Solana row (issue #759), and the other side of the boundary. A different
+# SHAPE, not a different spelling of the same one: `channel_account` is a
+# program-derived address rather than an EVM-style `channel_id`, there is no
+# `chain_id` because Solana has no numeric chain id, and there is no
+# `token_network` because there is no per-token verifying contract -- the
+# channel account IS the whole of a Solana claim's signed message.
+# `program_id` is required rather than optional (a Solana claim's `programId`
+# is not an optional wire field), and since ADR 0053 it is BOUND INTO the
+# signed message, so a claim rendered under a different program does not verify
+# here.
+#
+# `counterparty_key` is C's Solana settlement public key, and this node signs
+# its own outbound claims on this channel with `[settlement.solana]`'s key --
+# the same "the participant is the settlement identity" rule the EVM row above
+# follows, on the other curve.
+#
+# `channel_account` is the address `find_program_address(["channel", min, max,
+# mint])` produces for these two participants under this program
+# (packages/solana-program/src/processor.rs). `local/keys.sh` recomputes it and
+# refuses to proceed if this line disagrees. It is NOT opened on chain -- see
+# that script's own note on why, and what that does and does not cost.
+[[peer_channels]]
+peer_id = "b-c"
+channel_account = "G5mXQzfZb4tXWX7cQvXP9ZJnDBcUo6irWTmGGtX3xpzL"
+counterparty_key = "93mxPHokL6EhVxzVicSyouEhvTVGUcKXKtHH1uTmw2Aw"
+program_id = "HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR"
+
+# ── Settlement: BOTH chains, and this is not decoration ──────────────────────
+# A `[[peer_channels]]` row can only be signed for if this node holds the
+# matching settlement key: `peer_claim_identity` reads `[settlement.evm]`'s and
+# `peer_claim_identity_solana` reads `[settlement.solana]`'s, and a node
+# missing one signs no claim on that chain at all. So the two tables below are
+# what make the two rows above live rather than inert.
+#
+# A present-but-unsatisfiable settlement table is a hard startup failure (ADR
+# 0009/CF-25), so this section coming up at all is itself an assertion: the
+# registry resolved a TokenNetwork for the token, the token's own `decimals()`
+# agreed with the 6 written here (issue #564), the Solana program was reachable
+# AND proven to behave like the deployed payment-channel program, and the mint
+# was owned by the SPL Token program with matching decimals.
+
+[settlement.evm]
+rpc_url = "http://anvil:8545"
+contract_address = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
+token_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "/app/data/settlement.key"
+
+# `program_id` is the id `infra/solana/entrypoint.sh` loads payment_channel.so
+# under at genesis, and equals
+# `connector_settlement_solana::test_support::LOCAL_TEST_PROGRAM_ID` --
+# `local_program_id_is_shared.rs` fails if those two drift. It is committable
+# precisely because the entrypoint passes a BARE `--bpf-program` id rather than
+# deploying against a per-machine keypair.
+#
+# `token_address` is the deterministic mock mint from
+# `infra/solana/create-usdc-mint.sh`, seeded by `make solana-mint-usdc`. That
+# target fails loudly rather than warning, because a validator without this
+# mint cannot satisfy this line and the node will refuse to start.
+[settlement.solana]
+rpc_url = "http://solana-validator:8899"
+program_id = "HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR"
+token_address = "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "/app/data/settlement-solana.key"
