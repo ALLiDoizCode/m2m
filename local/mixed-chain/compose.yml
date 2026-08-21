@@ -157,6 +157,12 @@ services:
   # journal stayed empty crossed a chain boundary for free, and
   # `--expect-fulfill` could not have noticed -- a peer claim's verdict rides
   # back in `Toon-Claim-Ack` and never gates the packet.
+  #
+  # Around those, one on-chain read: the Solana channel account exists and
+  # belongs to the payment-channel program. A journal grep proves a claim was
+  # ACCEPTED, which is a signature check against a configured key and reads no
+  # chain -- so it stays green against a channel nobody ever opened, which is
+  # exactly what this topology used to ship.
   sender:
     image: connector-rust:local
     profiles: [sender]
@@ -164,6 +170,45 @@ services:
     command:
       - |
         set -e
+
+        # The Solana peering's channel, BEFORE anything is sent. Nothing on the
+        # peer path reads a chain -- `ClaimBook` checks a claim's signature
+        # against the configured `counterparty_key` and nothing else (CF-23) --
+        # so a topology whose channel account was never opened rehearses
+        # exactly as green as one whose channel is real, journal grep included.
+        # This is the one check that can tell them apart, and it runs first so
+        # the failure names the missing channel rather than a puzzling claim.
+        #
+        # Existence plus owner is the whole assertion: the address is a PDA
+        # `find_program_address(["channel", min, max, mint])` produces, and only
+        # the program itself can create an account at its own derived address.
+        # `local/keys.sh <topology> solana-channels` opens it and checks the
+        # participants, mint and status; this checks that the thing it opened
+        # is still there when the packet flies.
+        #
+        # `commitment: confirmed`, named rather than defaulted, and load-bearing:
+        # getAccountInfo defaults to FINALIZED, which a channel opened seconds
+        # ago by `make local-up` is not yet -- so the default made this fail on
+        # a good topology and pass a minute later. Confirmed is also the level
+        # the Solana backend itself reads and writes at
+        # (`CommitmentConfig::confirmed()`), so this sees exactly what the node
+        # that opened it sees.
+        #
+        # `content-type: application/json` likewise: busybox wget sends
+        # `application/x-www-form-urlencoded` for a --post-data body, and the
+        # validator answers that with 415.
+        channel_open() {
+          if ! wget -q -O - --header 'content-type: application/json' \
+              --post-data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getAccountInfo\",\"params\":[\"$$1\",{\"encoding\":\"base64\",\"commitment\":\"confirmed\"}]}" \
+              http://solana-validator:8899 | grep -q "\"owner\":\"$$2\""; then
+            echo "NO CHANNEL: $$1 is not an account of the payment-channel program $$2 on the local validator." >&2
+            echo "            The Solana peering's claims would name a channel nobody could redeem." >&2
+            exit 1
+          fi
+          echo "--- the Solana peering's channel $$1 is live on chain, owned by $$2"
+        }
+        channel_open G5mXQzfZb4tXWX7cQvXP9ZJnDBcUo6irWTmGGtX3xpzL HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR
+
         send() {
           /usr/local/bin/connector send \
             --operator     http://connector-a:3000 \

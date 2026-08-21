@@ -46,6 +46,15 @@ const MIXED_B: &str = include_str!("../../../local/mixed-chain/connector-b.toml"
 const MIXED_C: &str = include_str!("../../../local/mixed-chain/connector-c.toml");
 const MIXED_COMPOSE: &str = include_str!("../../../local/mixed-chain/compose.yml");
 
+/// The provisioning script, read as text for the one fact it holds that no
+/// config does: which published port each Solana peering's channel is opened
+/// through. That channel is opened by an operator write to a RUNNING node
+/// (`POST /channels`, the only submitter of an `InitializeChannel` here), so
+/// the script has to know where to reach it, and a port that drifts from the
+/// compose file fails as a refused connection during bring-up rather than as
+/// anything a reader could trace back.
+const KEYS_SCRIPT: &str = include_str!("../../../local/keys.sh");
+
 /// Every committed config under `local/`, with the path a failure should name.
 /// Written out rather than globbed so a new topology that forgets its own test
 /// still has to touch this list.
@@ -600,6 +609,55 @@ fn the_mixed_chain_peerings_are_written_identically_on_both_sides() {
     );
 }
 
+/// B holds an operator surface and C does not, and the asymmetry is load-
+/// bearing rather than incidental.
+///
+/// The Solana peering's `channel_account` is a real program-derived address,
+/// and something has to submit the `InitializeChannel` that puts an account
+/// there. No chain tool in this repository can: it is a positional account
+/// list under an 8-byte discriminator, `spl-token` knows only SPL Token, and
+/// the Solana CLI cannot build an arbitrary program instruction. The only
+/// submitter is `POST /channels` (ADR 0008's third write, issue #459), which
+/// reaches `SolanaSettlementBackend::open` and signs with the node's own
+/// `[settlement.solana]` key -- the identity the PDA is derived from. B is the
+/// peering's payer, so B is that node, so B has the surface. C never opens
+/// anything and keeps CF-31's absent table.
+#[test]
+fn the_mixed_chain_solana_payer_can_be_told_to_open_its_channel() {
+    let a = load("local/mixed-chain/connector-a.toml", MIXED_A);
+    let b = load("local/mixed-chain/connector-b.toml", MIXED_B);
+    let c = load("local/mixed-chain/connector-c.toml", MIXED_C);
+
+    assert!(
+        a.operator().is_some(),
+        "the rehearsal originates its packet through A's `POST /packets`"
+    );
+    assert!(
+        b.operator().is_some(),
+        "B is the Solana peering's payer, and `POST /channels` on this surface is the only way \
+         anything in this repository can open the channel `[[peer_channels]]` names. Without it \
+         the topology settles against an address nobody ever created."
+    );
+    assert!(
+        c.operator().is_none(),
+        "CF-31: C originates nothing and opens nothing, and an unused operator surface is two \
+         more credentials to provision"
+    );
+
+    // The port `local/keys.sh` posts that write to, and the port compose
+    // publishes B's client edge on. Two files, one number.
+    assert!(
+        KEYS_SCRIPT.contains("b-c:solana:connector-b:connector-c:3004"),
+        "local/keys.sh's topology table must name the host port B's operator surface is \
+         published on -- that is where its `solana-channels` stage sends `POST /channels`"
+    );
+    assert!(
+        MIXED_COMPOSE.contains("'127.0.0.1:3004:3000'"),
+        "local/mixed-chain/compose.yml must publish B's client edge on 3004, the port \
+         local/keys.sh opens the Solana channel through"
+    );
+}
+
 #[test]
 fn the_mixed_chain_configs_and_their_compose_file_agree() {
     for service in [
@@ -655,6 +713,19 @@ fn the_mixed_chain_configs_and_their_compose_file_agree() {
         "the sender must read C's claim journal for the Solana peering's channel account \
          ({solana}) -- without it a packet can reach the app having crossed the chain boundary \
          for free"
+    );
+
+    // And the one thing neither journal can say. A journal records that a
+    // claim's SIGNATURE checked out against a configured key (CF-23) -- it
+    // reads no chain, so it stays green against a channel account nobody ever
+    // opened, which is exactly what this topology shipped with. The sender
+    // therefore asks the validator itself, before it sends anything.
+    let program = solana_channel(&b, "b-c").program_id().to_string();
+    assert!(
+        MIXED_COMPOSE.contains(&format!("channel_open {solana} {program}")),
+        "the sender must check on chain that {solana} is an account of the payment-channel \
+         program {program} -- a claim journal cannot tell an open channel from a derived \
+         address nobody created"
     );
 }
 
