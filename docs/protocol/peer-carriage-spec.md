@@ -576,6 +576,19 @@ additively extensible) and MUST NOT be emitted.
   peer PREPARE is priced independently of the bilateral fee. A route explicitly priced at `0` is
   untouched, exactly like the amount check.
 
+  **Which record "that channel's watermark" means**, since reading the wrong one is free service:
+  the **durable** one, out of the book that judges the claim — `ClaimBook`'s own inbound watermark
+  for that channel, keyed by channel alone as that book keys it, read before the claim is judged and
+  so possibly advanced. Never a per-process record of what a carriage has observed. `AcceptedClaims`
+  holds one of those for §6.3's byte-identical re-ack, which is correctly a per-relation, per-process
+  question, and a restart empties it while the book replays its journal (ADR 0005). Coverage measured
+  against the emptied record read zero, so the first priced peer PREPARE after a payee restart was
+  credited with its claim's whole cumulative amount instead of its advance — one packet per restart
+  per channel, at the gate standing between a priced termination and free service
+  ([issue #1104](https://github.com/toon-protocol/connector/issues/1104)). The claim book's verdict
+  does not catch this on its own: such a claim's nonce and amount both genuinely advance, so it is
+  `accepted`; only the baseline was wrong.
+
   **Every other peer PREPARE is still answered by nothing of the sort.** Peer fees are bilateral
   configuration (`peer-semantics-pre-868.md` §4), not a negotiation, and `requiredTransport` (issue #701) is
   a client-edge route policy with no peer analogue. This survives [ADR
