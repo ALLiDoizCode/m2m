@@ -57,8 +57,10 @@ key_file = "/app/data/signer.key"
 # `amount_after_fee` refuses when `amount - fee` falls below it. So an
 # operator-originated packet cannot pay any hop a fee: a non-zero `fee` here
 # makes `connector send` see `R01` rather than a delivery. The peering is still
-# genuinely paid -- see `[[peer_channels]]` below; the payer of record is
-# simply the operator, who is the sender.
+# genuinely paid -- see the `[[peer_channels]]` and `[[pay_channels]]` rows
+# below: this node covers the whole forwarded amount with a claim before the
+# packet leaves. The payer of record on the client leg is simply the operator,
+# who is the sender.
 [[routes]]
 prefix = "g.local.two-hop.b"
 peer_id = "a-b"
@@ -110,6 +112,55 @@ channel_id = "0x57c5462d40a3c60fa89b8fe4f3f24cf560947a413df9a691499e58abea1d63f8
 counterparty_key = "0x976EA74026E726554dB657fA54763abd0C3a0aa9"
 chain_id = 31337
 token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
+
+# ── Paying for the crossing, BEFORE it crosses (ADR 0042 item 2) ─────────────
+# `[[pay_channels]]` makes this node cover a forwarded PREPARE with a
+# client-role claim before it is sent, instead of owing for it after it
+# fulfils. That is the only reason B can price the route it terminates: under
+# ADR 0004's postpay convention the claim covering crossing n is signed after
+# crossing n has fulfilled, so the FIRST crossing carries nothing, a priced
+# peer termination refuses it `F06` (issue #880), it never fulfils, nothing is
+# ever owed, and the second carries nothing either. `cover_forward` breaks that
+# circle by minting the claim first, so crossing 1 arrives already paid for.
+# B's own `price` comment is the other half of this.
+#
+# ONE CHANNEL, TWO ROLES, WITH ONE HOP. This row names the same `channel_id`
+# the `[[peer_channels]]` row above does, and `Config::load` permits exactly
+# that -- `pay_channel.rs` calls it "the deployed shape": the peer role for
+# what arrives, the client role for what this node sends. A packet covered
+# here is not owed a second time on the peer ledger; `forward_via_peer_route`
+# is built for it. (The collision it DOES refuse is with `[[client_channels]]`,
+# a channel this node receives on.)
+#
+# Only the facts nothing can derive are written here (ADR 0030's table):
+#
+#   * the SIGNING KEY is `[settlement.evm]`'s -- no second key is introduced,
+#     because the channel's on-chain participant IS this node's settlement
+#     address, exactly as for the peer role;
+#   * the NONCE AND CUMULATIVE AMOUNT are B's, asked over `POST
+#     /ilp/claim-state` at `client_edge_url` on every covered packet, never
+#     remembered and never guessed. B answers a channel it holds as a
+#     `[[peer_channels]]` row out of its PEER book, which is issue #1102's fix
+#     and the whole reason this row can exist here at all: answered out of B's
+#     client-edge book it reports nonce 0 / cumulative 0 forever, and this node
+#     then re-signs one cumulative amount at a fresh nonce on every packet --
+#     accepted every time and buying nothing;
+#   * the CHANNEL ID and the EIP-712 DOMAIN are the peer row's own, because
+#     both roles sign against the very same on-chain channel.
+#
+# `client_edge_url` is B's `POST /ilp` -- the same URL the peering dials, and
+# still written out rather than derived from it: a `wss://` peering has no HTTP
+# client edge to derive one from, and guessing is the class of mistake ADR 0030
+# refuses. `http://` needs `peer_allow_plaintext_endpoints` above, for the same
+# reason the peering's own endpoint does: the claim-state ask carries a signed
+# EIP-712 challenge -- a capability to read this channel's state -- in the
+# clear.
+[[pay_channels]]
+peer_id = "a-b"
+channel_id = "0x57c5462d40a3c60fa89b8fe4f3f24cf560947a413df9a691499e58abea1d63f8"
+chain_id = 31337
+token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
+client_edge_url = "http://connector-b:3000/ilp"
 
 # ── Operator surface (ADR 0008) ──────────────────────────────────────────────
 # Only this node has one, because only this node is sent to: `connector send`

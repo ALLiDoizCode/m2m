@@ -302,7 +302,7 @@ fn the_solo_config_and_its_compose_file_agree() {
 // ─── two-hop ─────────────────────────────────────────────────────────────────
 
 /// The containerised counterpart of `two_connectors_peer.rs`: A forwards, B
-/// terminates, and the only path between them is the peering.
+/// terminates and PRICES, and the only path between them is the peering.
 #[test]
 fn the_two_hop_topologys_committed_configs_load() {
     let payer = load("local/two-hop/connector-a.toml", TWO_HOP_A);
@@ -337,14 +337,14 @@ fn the_two_hop_topologys_committed_configs_load() {
         "the app's address must sit UNDER the prefix A forwards, or longest-prefix matching \
          sends the packet somewhere else entirely"
     );
-    assert_eq!(
-        payee.routes()[0].price(),
-        0,
-        "a route a node both TERMINATES and PRICES refuses a peer PREPARE arriving without a \
-         covering claim (F06, issue #880), and a postpay peering's first crossing carries none \
-         by construction (ADR 0004) -- so a price here deadlocks the peering instead of charging \
-         for it. `two_connectors_peer.rs` prices its payee's terminated route at 0 for the same \
-         reason. What A owes B is the FORWARDED AMOUNT, which this figure has nothing to do with."
+    assert!(
+        payee.routes()[0].price() > 0,
+        "B both TERMINATES and PRICES this route, which is what this topology is for. Such a \
+         route refuses a peer PREPARE that arrives without a claim covering the price (F06, \
+         issue #880), and under ADR 0004's postpay ordering the first crossing carries none -- \
+         so this figure is payable only because A covers each PREPARE before sending it. \
+         `the_two_hop_payer_covers_every_crossing_before_it_is_sent` is the other half; dropping \
+         it and leaving this priced deadlocks the peering rather than charging for it."
     );
 
     for (name, config) in [("A", &payer), ("B", &payee)] {
@@ -363,6 +363,73 @@ fn the_two_hop_topologys_committed_configs_load() {
         payee.operator().is_none(),
         "CF-31: B is never sent to directly, and an unused operator surface is two more \
          credentials to provision for nothing"
+    );
+}
+
+/// The half of a priced peer termination that lives on the PAYER (ADR 0042
+/// item 2, issue #881).
+///
+/// Without this row A owes B only once a crossing has fulfilled (ADR 0004), so
+/// the first crossing would arrive uncovered, be refused `F06`, never fulfil,
+/// and leave nothing owed for the second to carry -- the deadlock
+/// `connector-b.toml` describes at length. With it, `cover_forward` mints the
+/// claim before the packet is sent and every crossing arrives paid for.
+///
+/// Every field of the row restates a fact held somewhere else, which is
+/// exactly the drift this file exists to catch: a claim signed under a domain
+/// that is not the channel's recovers to a different address and is refused at
+/// the far gate with the packet already handed over.
+#[test]
+fn the_two_hop_payer_covers_every_crossing_before_it_is_sent() {
+    let payer = load("local/two-hop/connector-a.toml", TWO_HOP_A);
+    let payee = load("local/two-hop/connector-b.toml", TWO_HOP_B);
+
+    assert_eq!(
+        payer.pay_channels().len(),
+        1,
+        "A pays exactly one hop from exactly one channel: the outbound client ledger keeps one \
+         nonce line per next hop, so two rows for one hop would be two channels on one line"
+    );
+    let pays_from = &payer.pay_channels()[0];
+    let peer_channel = evm_channel(&payer, "a-b");
+    assert_eq!(pays_from.peer_id(), "a-b");
+    assert_eq!(
+        pays_from.channel_id(),
+        peer_channel.channel_id(),
+        "one on-chain channel held in BOTH roles with one hop -- the peer role for what arrives, \
+         the client role for what A sends. `pay_channel.rs` calls that the deployed shape and \
+         `Config::load` permits exactly it; what it refuses is the same channel also appearing \
+         in `[[client_channels]]`."
+    );
+    assert_eq!(
+        pays_from.chain_id(),
+        peer_channel.chain_id(),
+        "both roles sign against the very same on-chain channel, so the EIP-712 domain cannot \
+         differ between them"
+    );
+    assert_eq!(
+        pays_from.token_network(),
+        peer_channel.token_network(),
+        "the other half of that domain, and the half a typo hides in: a claim signed under the \
+         wrong `verifyingContract` recovers to some other address and is refused as a forgery"
+    );
+    assert_eq!(
+        Some(pays_from.client_edge_url()),
+        payer.peers()[0].endpoint(),
+        "the claim-state ask goes to B's own `POST /ilp`. It happens to be the URL this peering \
+         dials, and is still written out rather than derived from it -- a `wss://` peering has \
+         no HTTP client edge to derive one from (ADR 0030)."
+    );
+    assert!(
+        TWO_HOP_A.contains("peer_allow_plaintext_endpoints = true"),
+        "an `http://` client_edge_url is refused at load without it, for the same reason an \
+         `http://` peer endpoint is: the claim-state ask carries a signed EIP-712 challenge in \
+         the clear"
+    );
+    assert!(
+        payee.pay_channels().is_empty(),
+        "B pays nobody. It dials nothing, and on ILP-over-HTTP only the dialing side can \
+         originate (§6.4), so packets and debt both flow one way across this peering."
     );
 }
 
@@ -453,21 +520,51 @@ fn the_two_hop_configs_and_their_compose_file_agree() {
          zero -- a green tick over an unpaid, undelivered packet"
     );
 
-    // The money assertion, and the third copy of the channel id. The sender
-    // greps B's claim journal for it, because `--expect-fulfill` cannot see a
-    // refused claim: the verdict rides back in `Toon-Claim-Ack` and never
-    // gates the packet.
+    // The money assertion, and the third copy of every figure in it. The
+    // sender reads B's claim journal because `--expect-fulfill` cannot be
+    // trusted with the whole question: a peer claim's verdict rides back in
+    // `Toon-Claim-Ack` and never gates the packet (#1101 proved that by
+    // breaking this peering's `chain_id` and watching it stay green).
     let payer = load("local/two-hop/connector-a.toml", TWO_HOP_A);
+    let payee = load("local/two-hop/connector-b.toml", TWO_HOP_B);
     let channel_id = evm_channel(&payer, "a-b").channel_id().to_string();
     assert!(
         TWO_HOP_COMPOSE.contains(&format!("CHANNEL={channel_id}")),
-        "the sender must grep B's claim journal for the peering's own channel id ({channel_id}), \
+        "the sender must read B's claim journal for the peering's own channel id ({channel_id}), \
          or the rehearsal passes over a peering that carried both packets for free"
     );
     assert!(
         TWO_HOP_COMPOSE.contains("peer-claims.log"),
         "the journal the sender reads is `peer-claims.log`, the name \
          `connector_cli::runtime`'s PEER_CLAIM_JOURNAL gives it under state_dir"
+    );
+    assert!(
+        TWO_HOP_COMPOSE.contains("inbound_claim_accepted"),
+        "the sender reads the journal line by line rather than grepping for the channel id, \
+         because a claim that merely EXISTS proves nothing -- issue #1102's repeat claims were \
+         all in this file. `inbound_claim_accepted` is `connector_runtime::journal`'s own \
+         encoding of an accepted claim and this is where the two are held together."
+    );
+
+    let price = payee.routes()[0].price();
+    assert!(
+        TWO_HOP_COMPOSE.contains(&format!("PRICE={price}")),
+        "the sender charges its verdict against B's committed price ({price}): every accepted \
+         claim must advance by at least that much. A price dropped here without dropping it in \
+         compose is a rehearsal asserting a figure nobody is charging."
+    );
+    assert!(
+        TWO_HOP_COMPOSE.contains(&format!("AMOUNT={price}")),
+        "the packet carries exactly the price ({price}). Less is an F03 before the app is \
+         reached (`handle_peer_prepare`, ADR 0029); more would leave the coverage gate slack, \
+         since A covers the whole forwarded amount and B only charges its price -- and a \
+         rehearsal with slack cannot tell a shortfall from a discount."
+    );
+    assert!(
+        TWO_HOP_COMPOSE.contains("CROSSINGS=2"),
+        "two crossings, and the sender must expect exactly as many covered claims. The second \
+         is the one issue #1102 broke: a payer told nonce 0 forever re-signs crossing 1's \
+         cumulative amount, so one crossing cannot see the defect and two can."
     );
 }
 
@@ -564,9 +661,12 @@ fn the_mixed_chain_path_is_one_prefix_per_hop_and_one_amount_end_to_end() {
     assert_eq!(
         app.price(),
         0,
-        "the termination is unpriced for the reason two-hop's payee is: a priced peer \
-         termination refuses an uncovered arrival (F06) and a postpay peering's first crossing \
-         is uncovered by construction"
+        "C terminates under a POSTPAY peering: a priced peer termination refuses an uncovered \
+         arrival (F06, issue #880) and a postpay peering's first crossing is uncovered by \
+         construction (ADR 0004), so a price here deadlocks the b-c leg rather than charging \
+         for it. two-hop's payee IS priced, and the difference is a `[[pay_channels]]` row on \
+         its payer -- covering before the send instead of owing after the fulfil. Nothing \
+         forbids the same here; it is simply not what this topology is about."
     );
 }
 
