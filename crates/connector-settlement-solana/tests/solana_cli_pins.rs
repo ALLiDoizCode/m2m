@@ -121,10 +121,28 @@ const PROGRAM_MANIFEST: &str = include_str!("../../../packages/solana-program/Ca
 /// allowlist, and for the same reason: a blanket rule with no escape hatch
 /// gets deleted rather than amended.
 ///
-/// `infra/linode/bootstrap.sh` provisions a devnet box and tracks
-/// `release.anza.xyz/stable`. It builds nothing and gates nothing -- the CLI it
-/// lands is an operator convenience on a machine, not an input to any artifact
-/// this repository ships -- so pinning it is a separate decision from this one.
+/// `infra/linode/bootstrap.sh` tracks `release.anza.xyz/stable`. It provisions
+/// the **self-hosted chain box** -- anvil, `solana-test-validator`, faucet,
+/// nginx -- not a connector box: `infra/linode-relay/bootstrap.sh` and
+/// `infra/linode-store/bootstrap.sh`, which do provision the boxes serving
+/// devnet, install no Solana CLI at all. That chain box was deleted in the
+/// public-chain cutover (`44b15bdc`, 2026-07-19, toon-meta#374); its own
+/// README and `endpoints.json` are banner-marked historical, and its sole
+/// caller -- `.github/workflows/devnet-deploy.yml`, `workflow_dispatch` only
+/// and behind the reviewer-gated `devnet` environment -- has not run since
+/// 2026-06-23, four weeks before the cutover.
+///
+/// It does **build**: line 67 runs `make solana-build`, and
+/// `docker-compose.yml` bind-mounts the resulting `payment_channel.so` into
+/// that box's validator at genesis, so the host CLI decides the program bytes
+/// that box runs. What it does not do is gate or ship anything -- no artifact
+/// this repository releases passes through it. Pinning it is therefore a
+/// separate decision from this one, and a smaller one than deleting the box's
+/// provisioning outright. Were it pinned, [`DEPLOY_PATH_CLI`] is what this
+/// file's own taxonomy demands: it is the CLI that builds a deployed program.
+/// Note also that the install sits behind `if ! command -v solana`, so a pin
+/// here only ever binds a blank disk -- it can never change the CLI on a box
+/// that already has one.
 const UNPINNED_BY_DESIGN: &[&str] = &["infra/linode/bootstrap.sh"];
 
 /// This file's own path, repo-relative. The walk below skips it: the prose
