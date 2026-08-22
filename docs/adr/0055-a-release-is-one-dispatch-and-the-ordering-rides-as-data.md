@@ -141,15 +141,35 @@ Coverage is per box. Where both boxes' configs moved — the common case, since 
 blocks are deliberately identical — one run naming one box is a refusal, and `config_applied_run`
 takes a list.
 
-**Where that evidence comes from, and why it is fragile enough to name.** A `workflow_dispatch`
-run's inputs are not on the run object: it has no `inputs` key, and `fleet-ops.yml` sets no
-`run-name:`, so `display_title` is the bare string `fleet-ops` — verified against twelve real runs
-rather than assumed. The only surviving record of `box`, `operation` and `apply` is the runner's
-echo of `fleet-ops.yml`'s **job-level `env:` block** into the run log, which the gate reads through
-`actions: read`. That is a consequence of how that file happens to be written, not a contract it
-knows it is providing, so `the_apply_verification_reads_what_fleet_ops_actually_records` in
-`crates/connector-bin/tests/fleet_release_gate.rs` fails the build if those move out of job `env`.
-Reading it needs no change to `fleet-ops.yml`, and none was made: that file is on the live ops path.
+**Where that evidence comes from, and why the run has to state it.** A `workflow_dispatch` run's
+inputs are not on the run object: it has no `inputs` key. `box`, `operation` and `apply` therefore
+have to be recovered from somewhere, and the first version of this gate recovered them from the
+runner's echo of `fleet-ops.yml`'s **job-level `env:` block** into the run log, read through
+`actions: read`. That worked, and it aged badly by construction: logs are retained for 90 days, the
+gate refuses what it cannot read, and so a real apply became unverifiable simply by getting old —
+recoverable only by re-running an apply against a live box to freshen the evidence for something
+that had already happened.
+
+So `fleet-ops.yml` now **states the three facts on the run itself**, through a `run-name:` that
+renders as `fleet-ops <operation> on <box> (apply=<true|false>)` and becomes the run's
+`display_title`. That is on the run object and lasts as long as the run does. Only the three inputs
+the gate checks appear in it, and all three are `choice` or `boolean`, so every field comes from a
+fixed set; the free-form `service` input is deliberately left out, because free text inside a title
+something else parses is how one run is made to read as another. Editing that file was not free —
+it is on the live ops path — but the alternative was a gate whose evidence expires.
+
+The log scrape stays, as the **fallback**, and is not vestigial: every `fleet-ops` run that existed
+when the `run-name:` landed has `display_title` equal to the bare workflow name `fleet-ops` —
+verified against twelve real runs rather than assumed — and the scrape is the only thing that
+verifies one of those at all. The gate tries the title, falls through to the log, and refuses when
+neither answers. Neither source is a GitHub contract; both are consequences of how `fleet-ops.yml`
+is written. `the_apply_verification_prefers_the_run_name_fleet_ops_carries` renders that file's own
+`run-name:` and runs the promotion's own parser over it, and
+`the_apply_verification_reads_what_fleet_ops_actually_records` fails the build if the `env:` block
+moves — both in `crates/connector-bin/tests/fleet_release_gate.rs`.
+
+The title is not **stronger** evidence than the log. It is rendered from the same operator-supplied
+inputs, so it proves exactly what the log proved; what changes is how long it lasts.
 
 **What is still not proved, stated plainly rather than implied away:**
 
@@ -157,9 +177,11 @@ Reading it needs no change to `fleet-ops.yml`, and none was made: that file is o
   committed config happened after the config commit. A hand-edit on the box afterwards is invisible
   to it, and hand-edits are precisely what ADR 0041's Consequences section warns are the historical
   norm for these files.
-- **Runs whose logs have aged out.** GitHub's default retention is 90 days. An older apply cannot be
-  read, and the gate **refuses** rather than assuming — an apply nobody can read is an apply nobody
-  can check. That is the right direction to fail, and it does mean a very old apply must be re-run.
+- **Pre-`run-name:` runs whose logs have aged out.** A run cut since the `run-name:` landed states
+  its box, operation and apply flag in its `display_title`, which does not expire. A run cut before
+  it does not, and falls back to logs GitHub retains for 90 days; past that the gate **refuses**
+  rather than assuming — an apply nobody can read is an apply nobody can check. That is the right
+  direction to fail, and for those older runs it still means re-running the apply.
 - **Forgery, in the narrow sense.** The evidence is log text, and a `fleet-ops` input is
   operator-supplied. This is not a privilege boundary and is not treated as one: anyone who can
   dispatch `fleet-ops` can dispatch a promotion. The gate defends against forgetfulness and against
@@ -254,4 +276,11 @@ against five real `fleet-ops` runs — a `config-read`, a failed `deploy`, a dry
 nonexistent id, and a malformed token, each correctly refused — and against ten synthetic cases
 covering the true positive, both-boxes coverage, a dry-run apply, a wrong-workflow run, an apply
 predating the config commit, and unreadable logs. The sentinel step was run over its own six cases.
-What remains unexercised is the whole path end to end, on a real release, against the live fleet.
+When the evidence moved onto the run title, the same loop — sliced out of the committed workflow
+rather than retyped — was run over eight more: a title-verified apply with the logs deliberately
+returning `410 Gone` (proving the title path needs no log at all), a title-verified dry run and a
+title-verified `box-status`, each refused; a bare `fleet-ops` title falling back to a log that
+carries a real apply, and to one that carries a dry run; a bare title with the logs gone, refused
+naming both dead ends; and a wrong-workflow and a failed run, refused before either source is
+consulted. What remains unexercised is the whole path end to end, on a real release, against the
+live fleet.

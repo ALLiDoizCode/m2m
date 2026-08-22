@@ -190,12 +190,14 @@ on:
 permissions:
   contents: read
   packages: write
-  # The deploy-ordering gate reads the LOGS of the fleet-ops `config-apply`
-  # run it is given, because that is the only place a `workflow_dispatch`
-  # run's inputs survive -- the run object has no `inputs` key and
-  # fleet-ops.yml sets no `run-name:`, so `display_title` is the bare string
-  # "fleet-ops". Without this scope the gate cannot read them, and it refuses
-  # the promotion rather than assuming the best.
+  # The deploy-ordering gate reads the fleet-ops `config-apply` run it is
+  # given: its metadata always, and its LOGS when the run predates
+  # fleet-ops.yml's `run-name:`. A `workflow_dispatch` run object has no
+  # `inputs` key, so the box, the operation and the apply flag come either
+  # from `display_title` (which fleet-ops.yml now renders them into) or from
+  # the runner's echo of that file's job-level `env:` block. Without this
+  # scope the gate can read neither, and it refuses the promotion rather than
+  # assuming the best.
   actions: read
   # The `verify` job calls fleet-health.yml, which opens/closes the rolling
   # alert issue. A called workflow cannot hold more permission than its
@@ -485,17 +487,41 @@ jobs:
           # bought an audit line nobody could rely on.
           #
           # `workflow_dispatch` inputs are NOT on the run object: it has no
-          # `inputs` key, and fleet-ops.yml sets no `run-name:`, so
-          # `display_title` is the bare string "fleet-ops" (verified against
-          # 12 real runs). What IS recorded is fleet-ops.yml's job-level
-          # `env:` block -- BOX, OPERATION, SERVICE, APPLY -- which the runner
-          # echoes into the log before every step. That is a consequence of
-          # how that file is written, not a GitHub contract, so
-          # `the_apply_verification_reads_what_fleet_ops_actually_records` in
-          # crates/connector-bin/tests/fleet_release_gate.rs fails the build
-          # if fleet-ops.yml stops declaring them there. Every branch below
-          # fails CLOSED: an unreadable log refuses the promotion, it never
-          # waves it through.
+          # `inputs` key. So the box, the operation and the apply flag have to
+          # be recovered, and there are two places they survive:
+          #
+          #   1. `display_title`, from fleet-ops.yml's `run-name:`. It is on
+          #      the run object, so it is readable for as long as the run
+          #      exists. PREFERRED.
+          #   2. the runner's echo of fleet-ops.yml's job-level `env:` block
+          #      -- BOX, OPERATION, APPLY -- into the run's LOGS. Logs age out
+          #      (90 days by default), so this is the weaker source; it is
+          #      also the ONLY source for every run cut before the `run-name:`
+          #      landed, which at the time of writing is all of them
+          #      (`display_title` on those is the bare workflow name,
+          #      "fleet-ops" -- verified against 12 real runs).
+          #
+          # So the title is tried FIRST and the log is the FALLBACK, rather
+          # than the title replacing the log: dropping the scrape would make
+          # yesterday's apply unverifiable, which is the same refusal this
+          # arrangement exists to remove. Both sources are held to
+          # fleet-ops.yml by
+          # `the_apply_verification_prefers_the_run_name_fleet_ops_carries`
+          # and `the_apply_verification_reads_what_fleet_ops_actually_records`
+          # in crates/connector-bin/tests/fleet_release_gate.rs -- neither the
+          # title format nor the env block is a GitHub contract, both are
+          # consequences of how that file is written, and the build fails if
+          # either moves.
+          #
+          # Every branch below fails CLOSED. Neither source readable is a
+          # refusal, not an assumption; so is a title this parser does not
+          # recognise, because the log is then consulted and must answer.
+          #
+          # What this does NOT add is trust. `run-name:` is rendered from the
+          # same operator-supplied inputs the log echoes, so it is evidence of
+          # the same strength, no more; ADR 0055 is explicit that forgery is
+          # not the threat model here, since anyone who can dispatch fleet-ops
+          # can dispatch a promotion. What changes is how long it lasts.
           COVERED=""
           for TOKEN in $(echo "$CONFIG_APPLIED_RUN" | tr ',' ' '); do
             RID=$(echo "$TOKEN" | grep -oE '[0-9]{6,}' | tail -1 || true)
@@ -505,20 +531,25 @@ jobs:
             fi
             echo "::group::fleet-ops run $RID"
 
+            # `.display_title` comes back LAST, so a title carrying a stray
+            # tab spills into the field nothing else reads rather than
+            # shifting the metadata this gate refuses on.
+            #
             # `if !`, not `|| true`: on a 404 `gh api` exits 1 but still
             # prints the error BODY to stdout, so a swallowed exit code turns
             # "no such run" into a refusal whose message quotes a JSON blob at
             # the operator. Verified against a bogus run id.
             if ! META=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RID" \
-              --jq '[.path, .conclusion, .run_started_at, .event] | @tsv' 2>/dev/null); then
+              --jq '[.path, .conclusion, .run_started_at, .event, .display_title] | @tsv' 2>/dev/null); then
               echo "::error::no run $RID in $GITHUB_REPOSITORY, or it is not readable."
               echo "::error::Name the fleet-ops config-apply run by its URL or its numeric id."
               exit 1
             fi
-            IFS=$'\t' read -r RPATH RCONC RSTART REVENT <<EOF2
+            IFS=$'\t' read -r RPATH RCONC RSTART REVENT RTITLE <<EOF2
           $META
           EOF2
             echo "path=$RPATH conclusion=$RCONC started=$RSTART event=$REVENT"
+            echo "title=$RTITLE"
 
             if [ "$RPATH" != '.github/workflows/fleet-ops.yml' ]; then
               echo "::error::run $RID is '$RPATH', not fleet-ops.yml. Only a fleet-ops run applies a box config."
@@ -529,21 +560,50 @@ jobs:
               exit 1
             fi
 
-            # The logs are the only place the inputs survive. 410 Gone once
-            # they age out (90 days by default) -- which refuses the
-            # promotion rather than passing it, because an apply nobody can
-            # read is an apply nobody can check.
-            if ! gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RID/logs" > "$RUNNER_TEMP/$RID.zip" 2>/dev/null; then
-              echo "::error::cannot read logs for fleet-ops run $RID (expired, or actions:read is missing)."
-              echo "::error::Without them nothing can confirm the run was a config-apply for the right box."
-              echo "::error::Re-run the apply and name the new run."
-              exit 1
+            # -- Source 1: the run's own title -------------------------------
+            # fleet-ops.yml's `run-name:` renders exactly
+            #   fleet-ops <operation> on <box> (apply=<true|false>)
+            # from its `box`, `operation` and `apply` inputs, every one of
+            # which is a `choice` or a `boolean`, so each field below comes
+            # from a fixed set. This lives on the RUN OBJECT and does not
+            # expire with the logs.
+            #
+            # The operation is parsed loosely and refused further down rather
+            # than pinned to `config-apply` here: a `box-status` run should be
+            # told what it was, not told its title is unreadable.
+            R_OP=""; R_BOX=""; R_APPLY=""; R_FROM=""
+            PARSED=$(printf '%s\n' "$RTITLE" \
+              | sed -nE 's/^fleet-ops ([a-z-]+) on ([a-z]+) \(apply=(true|false)\)$/\1 \2 \3/p')
+            if [ -n "$PARSED" ]; then
+              read -r R_OP R_BOX R_APPLY <<EOF3
+          $PARSED
+          EOF3
+              R_FROM="run-name"
             fi
-            # python3, not `unzip | sed`: both are on ubuntu-latest, but
-            # this one can be run outside a runner, which is how the truth
-            # table below was actually exercised against real fleet-ops runs
-            # rather than reasoned about. A gate nobody has run is a gate.
-            python3 - "$RUNNER_TEMP/$RID.zip" > "$RUNNER_TEMP/$RID.log" <<'PY'
+
+            # -- Source 2 (fallback): the job-level env echo in the logs ------
+            # Every fleet-ops run cut before the `run-name:` landed has
+            # `display_title` == "fleet-ops" and falls through to here, so this
+            # path is not legacy decoration: it is the only way an apply from
+            # yesterday verifies at all. It is the weaker source because logs
+            # are 410 Gone once they age out (90 days by default) -- which
+            # refuses the promotion rather than passing it, because an apply
+            # nobody can read is an apply nobody can check.
+            if [ -z "$R_FROM" ]; then
+              echo "title carries no fleet-ops run-name shape; falling back to the run log."
+              if ! gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RID/logs" > "$RUNNER_TEMP/$RID.zip" 2>/dev/null; then
+                echo "::error::cannot read logs for fleet-ops run $RID (expired, or actions:read is missing),"
+                echo "::error::and its title '$RTITLE' does not carry the box/operation/apply either."
+                echo "::error::Without one of the two, nothing can confirm the run was a config-apply for the right box."
+                echo "::error::Re-run the apply and name the new run: a run cut today records this in its"
+                echo "::error::title, which does not expire."
+                exit 1
+              fi
+              # python3, not `unzip | sed`: both are on ubuntu-latest, but
+              # this one can be run outside a runner, which is how the truth
+              # table below was actually exercised against real fleet-ops runs
+              # rather than reasoned about. A gate nobody has run is a gate.
+              python3 - "$RUNNER_TEMP/$RID.zip" > "$RUNNER_TEMP/$RID.log" <<'PY'
           import re, sys, zipfile
 
           z = zipfile.ZipFile(sys.argv[1])
@@ -554,21 +614,25 @@ jobs:
                   print(ansi.sub("", stamp.sub("", raw)).rstrip())
           PY
 
-            field() {
-              grep -E "^  $1: " "$RUNNER_TEMP/$RID.log" | sed -E "s/^  $1: //" | sort -u
-            }
-            R_OP=$(field OPERATION)
-            R_BOX=$(field BOX)
-            R_APPLY=$(field APPLY)
-            echo "recorded: OPERATION='$R_OP' BOX='$R_BOX' APPLY='$R_APPLY'"
+              field() {
+                grep -E "^  $1: " "$RUNNER_TEMP/$RID.log" | sed -E "s/^  $1: //" | sort -u
+              }
+              R_OP=$(field OPERATION)
+              R_BOX=$(field BOX)
+              R_APPLY=$(field APPLY)
+              R_FROM="log"
+            fi
+
+            echo "recorded via $R_FROM: OPERATION='$R_OP' BOX='$R_BOX' APPLY='$R_APPLY'"
             echo "::endgroup::"
 
-            # One value each, or the log is not telling us one story.
+            # One value each, or the evidence is not telling us one story.
             for PAIR in "OPERATION:$R_OP" "BOX:$R_BOX" "APPLY:$R_APPLY"; do
               K=${PAIR%%:*}; V=${PAIR#*:}
               if [ -z "$V" ] || [ "$(printf '%s' "$V" | wc -l)" -gt 0 ]; then
-                echo "::error::could not read a single $K from fleet-ops run $RID's log (got '$V')."
-                echo "::error::fleet-ops.yml records these as job-level env; if that changed, this gate must be updated, not bypassed."
+                echo "::error::could not read a single $K from fleet-ops run $RID via $R_FROM (got '$V')."
+                echo "::error::fleet-ops.yml records these in its run-name AND as job-level env; if"
+                echo "::error::either changed, this gate must be updated, not bypassed."
                 exit 1
               fi
             done
