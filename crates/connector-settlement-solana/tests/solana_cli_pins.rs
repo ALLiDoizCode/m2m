@@ -3,9 +3,10 @@
 //!
 //! Every `release.anza.xyz/<version>/install` in this repository resolves to
 //! one of the two constants below, and the cases in this file are what makes
-//! that true. GitHub Actions cannot share an `env:` across workflow files and
-//! `.sandcastle/Dockerfile` and `devbox.json` cannot read one at all, so the
-//! literal is necessarily repeated at each install site. The single source is
+//! that true. GitHub Actions cannot share an `env:` across workflow files,
+//! `.sandcastle/Dockerfile` and `devbox.json` cannot read one at all, and a
+//! runbook a human pastes from has to spell the command out, so the literal is
+//! necessarily repeated at each install site. The single source is
 //! therefore this file plus the guard: the pins live here with their reasons,
 //! the consumers carry a one-line pointer back, and
 //! [`every_installed_solana_cli_is_one_of_the_two_recorded_pins`] fails the
@@ -81,6 +82,65 @@
 //! bytes: `solana-program-reproducibility` compares two clean builds to each
 //! other. Do not read it as a provenance check against devnet.
 //!
+//! ## The two install sites aimed at a person
+//!
+//! `README.md`'s chain-binary table and `docs/operators/faucet-box-bringup.md`
+//! step 4 -- the two places here that tell a *human* to install this CLI with a
+//! command, and one lands on each pin.
+//!
+//! (`CLAUDE.md`'s "Install Foundry and the Solana CLI to run the full gate
+//! locally" is a third mention and is deliberately left unversioned: it is a
+//! one-line orientation sentence that gives no command and points at the README
+//! table below for the how. Pinning it would put a second copy of the same
+//! literal in a file nobody installs from. If it ever grows an actual command,
+//! it becomes a site and belongs in the walk like the rest.)
+//!
+//! The README row is [`RUST_GATE_CLI`], straightforwardly: it exists so a
+//! contributor can run `connector-settlement-solana`'s integration tier, which
+//! spawns `solana-test-validator`. That is [`RUST_GATE_CLI`]'s own definition,
+//! io_uring reason and all, and a local gate running a different CLI than
+//! `ci.yml`'s `rust-gate` is not the gate.
+//! [`the_readme_tells_a_contributor_to_install_the_cli_that_runs_the_program`]
+//! holds it there.
+//!
+//! The faucet runbook is the interesting one. The faucet box's
+//! `bootstrap.sh` installs no Solana CLI, so bringing that box up means a human
+//! typing an install command before running
+//! `infra/linode-faucet/generate-solana-treasury.sh`, which generates and
+//! airdrops the treasury key that box's Solana USDC leg spends from.
+//!
+//! That step used to read "install the Solana CLI" with no version, which this
+//! guard could not see: there was no literal to walk, only English. The fix was
+//! to make the runbook give the command, not to teach the walk to read English.
+//! A doc that hands an operator a copy-pasteable
+//! `release.anza.xyz/<version>/install` is both a better runbook and an ordinary
+//! consumer of this file, covered by
+//! [`every_installed_solana_cli_is_one_of_the_two_recorded_pins`] with no new
+//! machinery. Prose a scanner would have to interpret stays invisible on
+//! purpose -- a case that greps documentation for the word "install" would spend
+//! its life on false positives and be deleted, which is the failure this file's
+//! own allowlist comment warns about. The answer is to stop writing prose where
+//! a command belongs, and
+//! [`the_faucet_box_runbook_names_the_cli_it_tells_an_operator_to_install`] is
+//! the case that keeps this one from sliding back.
+//!
+//! It is pinned to [`DEPLOY_PATH_CLI`], even though that box builds nothing that
+//! gets deployed. Neither of [`RUST_GATE_CLI`]'s two reasons reaches it: no
+//! `solana-test-validator` runs there, and it compiles no Rust -- the faucet
+//! service reaches Solana through `@solana/web3.js` and `@solana/spl-token`
+//! inside its container and never shells out to the CLI, so the CLI is a bringup
+//! tool that stops being used after step 4. What is left is the weaker but real
+//! half of [`DEPLOY_PATH_CLI`]'s category: it is the version a human following a
+//! runbook in this repository installs, the same one `docs/solana-deployment.md`
+//! and `devbox.json` already put on a person's PATH. Holding a fresh box to the
+//! 2.1 line instead would import a CI workaround for a problem that box does not
+//! have, and would move that box's instructions every time the workspace's crate
+//! pins moved for reasons of their own. A third pin was rejected for want of an
+//! argument: `solana-keygen new` and `solana airdrop` are the only two commands
+//! that box runs, they behave the same on both lines, and a third version whose
+//! reason is "neither of the other two quite fits" is exactly the unexplained pin
+//! this file exists to prevent.
+//!
 //! # The asymmetry that cost a day
 //!
 //! Which of the two a job installs also decides whether it can bootstrap the
@@ -112,6 +172,10 @@ const SANDCASTLE_DOCKERFILE: &str = include_str!("../../../.sandcastle/Dockerfil
 const DEVBOX_JSON: &str = include_str!("../../../devbox.json");
 const DEPLOY_SCRIPT: &str = include_str!("../../../tools/solana/deploy.sh");
 const DEPLOY_RUNBOOK: &str = include_str!("../../../docs/solana-deployment.md");
+const README: &str = include_str!("../../../README.md");
+const FAUCET_RUNBOOK: &str = include_str!("../../../docs/operators/faucet-box-bringup.md");
+const FAUCET_TREASURY_SCRIPT: &str =
+    include_str!("../../../infra/linode-faucet/generate-solana-treasury.sh");
 const BUILD_SBF: &str = include_str!("../../../tools/solana/build-sbf.sh");
 const SETTLEMENT_MANIFEST: &str = include_str!("../Cargo.toml");
 const PROGRAM_MANIFEST: &str = include_str!("../../../packages/solana-program/Cargo.toml");
@@ -159,8 +223,9 @@ fn repo_root() -> PathBuf {
 
 /// Every `release.anza.xyz/<version>/install` in `raw`, as the `<version>`
 /// segment exactly as written. A plain string scan rather than a YAML or JSON
-/// parse: the four consumers are two workflows, a Dockerfile and a JSON file,
-/// and what matters is the literal each of them hands to `sh`.
+/// parse: the consumers are two workflows, a Dockerfile, a JSON file and an
+/// operator runbook, and what matters is the literal each of them hands to `sh`
+/// -- or, in the runbook's case, the literal it tells a person to paste.
 fn installed_versions(raw: &str) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     for tail in raw.split("release.anza.xyz/").skip(1) {
@@ -283,7 +348,9 @@ fn the_repository_installs_the_solana_cli_from_exactly_the_known_places() {
         ".github/workflows/ci.yml",
         ".github/workflows/local-topologies.yml",
         ".sandcastle/Dockerfile",
+        "README.md",
         "devbox.json",
+        "docs/operators/faucet-box-bringup.md",
         "infra/linode/bootstrap.sh",
     ]);
     let actual: BTreeSet<String> = solana_cli_installs().into_keys().collect();
@@ -352,6 +419,41 @@ fn the_deploy_runbook_and_the_deploy_script_name_the_deploy_path_cli() {
              runbook moves, the gate builds bytes nobody deploys."
         );
     }
+}
+
+#[test]
+fn the_readme_tells_a_contributor_to_install_the_cli_that_runs_the_program() {
+    assert_eq!(
+        installed_versions(README),
+        BTreeSet::from([RUST_GATE_CLI.to_string()]),
+        "README.md's table of chain binaries the test gate needs must give a {RUST_GATE_CLI} \
+         install command for solana-test-validator. That row named `Solana CLI` with no version \
+         once, which sends a contributor to whatever `stable` is that day -- a v3 validator whose \
+         io_uring assertion this repository's own sandbox cannot satisfy, on a workspace pinned to \
+         the 2.1 crate line. A local gate on a different CLI than ci.yml's rust-gate is not the \
+         gate."
+    );
+}
+
+#[test]
+fn the_faucet_box_runbook_names_the_cli_it_tells_an_operator_to_install() {
+    assert_eq!(
+        installed_versions(FAUCET_RUNBOOK),
+        BTreeSet::from([DEPLOY_PATH_CLI.to_string()]),
+        "docs/operators/faucet-box-bringup.md step 4 must hand the operator a {DEPLOY_PATH_CLI} \
+         install command. The faucet box's bootstrap.sh installs no Solana CLI, and step 4 is \
+         where a human puts one on a box that then holds a devnet USDC treasury. It said `install \
+         the Solana CLI` with no version once, and this guard could not see it -- prose has no \
+         literal to walk. Write the command, not the instruction."
+    );
+    assert!(
+        FAUCET_TREASURY_SCRIPT.contains("docs/operators/faucet-box-bringup.md step 4 names"),
+        "infra/linode-faucet/generate-solana-treasury.sh no longer points at \
+         docs/operators/faucet-box-bringup.md step 4 for which Solana CLI to install. It \
+         deliberately carries no version literal of its own so the two cannot drift; a pointer \
+         that stops resolving turns back into the unversioned `install it on the box` this case \
+         exists to prevent."
+    );
 }
 
 #[test]
