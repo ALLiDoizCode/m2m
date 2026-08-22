@@ -278,8 +278,14 @@ local-verify:
 # works even when that dir isn't on the caller's PATH (issue #238). Harmless if
 # already present or absent.
 SOLANA_BIN := $(HOME)/.local/share/solana/install/active_release/bin
+# Via tools/solana/build-sbf.sh rather than `cargo build-sbf` directly: on a
+# machine (or runner) whose $HOME/.cache/solana does not exist yet, the pinned
+# build panics before it reaches the network. The script's header has the
+# details; it is what makes `make solana-build` -- and so `make local-up` and
+# the local-topologies workflow -- bootstrap from cold instead of depending on
+# a CI cache entry having been written by some other job.
 solana-build:
-	cd packages/solana-program && PATH="$(SOLANA_BIN):$$PATH" cargo build-sbf --tools-version v1.52
+	cd packages/solana-program && PATH="$(SOLANA_BIN):$$PATH" $(CURDIR)/tools/solana/build-sbf.sh
 
 solana-test:
 	cd packages/solana-program && PATH="$(SOLANA_BIN):$$PATH" cargo test-sbf
