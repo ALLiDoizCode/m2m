@@ -4,8 +4,10 @@ One connector image, real containerised chains, a real packet. That is the
 whole scope.
 
 ```sh
-make local-up        # build the image, start the chains, provision keys, run it
-make local-rehearse  # send a real packet; non-zero unless it is fulfilled
+make local-up        # build the image, start the chains, provision keys and
+                     #   channels, run it
+make local-rehearse  # send real packets; non-zero unless they fulfil AND, on a
+                     #   peered topology, the payee's journal says it was paid
 make local-down
 ```
 
@@ -295,12 +297,25 @@ program's own layout agrees with the committed config — the discriminator, bot
 participants, the mint, and `Opened` status. It is idempotent: a channel
 already at the expected address is left alone and still asserted.
 
+Neither journal can corroborate any of that, which is why the rehearsal asks the
+chain rather than the payee. An accepted claim is a signature check against a
+configured key and nothing more, so a journal stays exactly as green against an
+address nobody ever created — which is what this topology used to settle
+against. `mixed-chain`'s sender therefore reads the channel account off the
+validator itself and checks that the payment-channel program owns it. That runs
+before anything is sent, so a failure names the missing channel rather than a
+puzzling claim further down.
+
 **Opened is not funded, and that is where the two chains still differ.** The
 settlement port's `fund` deposits into the _counterparty's_ on-chain balance,
-which the EVM `TokenNetwork` permits (`setTotalDeposit` takes a participant and
-pulls from `msg.sender`) and `packages/solana-program` does not — its `Deposit`
-requires the depositing participant to sign for their own side, so
+which the EVM `TokenNetwork` permits (`setTotalDeposit` names the participant
+being credited and pulls the tokens from `_msgSender()` — this contract is
+ERC-2771-aware, so the payer is the forwarded signer, which for the connector's
+own direct call is itself) and `packages/solana-program` does not — its
+`Deposit` requires the depositing participant to sign for their own side, so
 `SolanaSettlementBackend::fund` refuses outright on a `connect`-built backend.
-No surface anywhere puts a node's own collateral behind its own Solana claims,
-so none is faked here. The honest summary is now: a peering's channel is real
-on both chains, and its collateral is real on EVM only.
+No surface anywhere puts a node's own collateral behind its own Solana claims:
+`POST /channels/:id/fund` is the counterparty deposit just described, not this
+one, and there is no other — not on the port, not on either backend, not on the
+operator API. So none is faked here. The honest summary is now: a peering's
+channel is real on both chains, and its collateral is real on EVM only.

@@ -1,5 +1,25 @@
 # Solana Payment Channel Program -- Devnet Deployment & Operations Guide
 
+> **Half historical, and the halves are easy to tell apart.** Everything about
+> `packages/solana-program` itself -- building it, deploying it, its PDA seeds, its account
+> layout -- is current. Everything naming `chainProviders`, `SolanaPaymentChannelProvider`,
+> `ChainProviderRegistry` or a YAML config describes the **retired TypeScript connector**
+> ([ADR 0017](adr/0017-the-typescript-connector-is-a-prototype.md)) and nothing in `crates/`. The
+> Rust connector reads one TOML file
+> ([ADR 0009](adr/0009-one-typed-config-file-no-environment-layer.md)), configures Solana under
+> `[settlement.solana]`, and drives the program through
+> `connector-settlement-solana`'s `SettlementBackend`.
+>
+> One consequence is worth stating up front, because two sections below say the opposite of what
+> the shipped connector does: the Rust connector **does** open a Solana channel on demand --
+> `POST /channels` with `"chain":"solana"` reaches `SolanaSettlementBackend::open`, which submits
+> the `InitializeChannel`
+> ([ADR 0008](adr/0008-operator-surface-splits-read-from-write.md)'s third write, issue #459), and
+> [`local/mixed-chain`](../local/README.md) opens its peering's channel that way on every run. What
+> it does **not** do is deposit a node's own collateral: `packages/solana-program`'s `Deposit`
+> requires the depositing participant to sign for their own side, so `fund` refuses on the Solana
+> backend and that transfer is made from the participant's own wallet against the deployed program.
+
 This guide covers deploying the Solana payment channel program to devnet, configuring the `SolanaPaymentChannelProvider` in the connector, and operating payment channels in a test environment.
 
 ## Table of Contents

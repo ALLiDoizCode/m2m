@@ -337,8 +337,11 @@ always been.
 Turned on, `ws://` resolves onto the **BTP** carriage and `http://` onto the **ILP-over-HTTP** one:
 it widens which schemes resolve, never what they resolve to, and no other behaviour changes. It
 exists so a laptop-runnable end-to-end test can point one connector at another's loopback socket
-with no TLS terminator in between (`crates/connector-bin/tests/two_connectors_peer.rs` is the only
-config in this repo that sets it).
+with no TLS terminator in between, and everything that sets it is of that shape: the config pairs
+`crates/connector-bin/tests/two_connectors_peer.rs` and `connector-cli`'s own fixtures write at test
+time, and the peered topologies under [`local/`](../../local/README.md), whose peerings dial each
+other by container name over a private compose network. Every one of them is disposable by
+construction, which is the only setting in which this switch is defensible.
 
 **Never set it on a deployed node.** A peering carries the shared secret and every signed balance
 proof on it; in the clear, both are readable by anything on the path. A node that does set it logs a
