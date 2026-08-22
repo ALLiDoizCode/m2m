@@ -395,7 +395,8 @@ async function runLive(args: CliArgs): Promise<void> {
 
   console.log(
     '\nNext: pin tokenAddress + tokenId into infra/linode/endpoints.json' +
-      ' (mina.tokenAddress / mina.tokenId) and re-run `devnet.sh endpoints`.'
+      ' (mina.tokenAddress / mina.tokenId). That file is hand-maintained —' +
+      ' the generator that used to write it went with the chain box.'
   );
 
   // Contract account private keys to stderr only (never into piped stdout / CI logs).

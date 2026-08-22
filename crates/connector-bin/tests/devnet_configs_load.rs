@@ -193,30 +193,38 @@ const RELAY_NGINX_CONF: &str = include_str!("../../../infra/linode-relay/nginx/c
 /// #987's broken `/swap` form was fixed in one and left in the other once
 /// already -- and the template is what a rebuilt box starts from.
 ///
-/// # Why the faucet and chain boxes are in here now (issue #1013)
+/// # Why the faucet box is in here now (issue #1013)
 ///
 /// This list used to be the two WATCHTOWER-managed boxes only, on the reading
 /// that a literal upstream is a problem only where something recreates
-/// containers unattended. `infra/linode-faucet/` and `infra/linode/` were
-/// excluded on those grounds, and the exclusion was left as a comment with
-/// nothing enforcing it.
+/// containers unattended. `infra/linode-faucet/` and the self-hosted chain
+/// box's `infra/linode/nginx/` were excluded on those grounds, and the
+/// exclusion was left as a comment with nothing enforcing it.
 ///
 /// Two things were wrong with that. The narrow one: the chain box had already
-/// adopted the variable+resolver form everywhere except `mina.conf.template`
-/// (`devnet.conf.template`'s own header states the rule), so the exclusion was
-/// protecting drift, not a decision. The load-bearing one: only the *502 until
-/// someone reloads* half of the defect needs a Watchtower. The other half --
-/// an upstream container that is not running at parse time is `[emerg] host
-/// not found in upstream`, which exits the nginx MASTER and takes every server
-/// block with it, ACME included -- needs no recreate at all, and both excluded
-/// boxes build their images on-box, where `up -d --build` recreates a
-/// container exactly the way a Watchtower pull does.
+/// adopted the variable+resolver form everywhere except its own
+/// `mina.conf.template`, so the exclusion was protecting drift, not a
+/// decision. The load-bearing one: only the *502 until someone reloads* half
+/// of the defect needs a Watchtower. The other half -- an upstream container
+/// that is not running at parse time is `[emerg] host not found in upstream`,
+/// which exits the nginx MASTER and takes every server block with it, ACME
+/// included -- needs no recreate at all, and both excluded boxes build their
+/// images on-box, where `up -d --build` recreates a container exactly the way
+/// a Watchtower pull does.
 ///
 /// So the rule is no longer "boxes with a Watchtower": it is every box, and
 /// [`every_committed_box_nginx_file_is_covered_by_the_upstream_guards`] walks
 /// `infra/` and fails if a committed nginx file is missing from this list --
 /// which is what the old prose-only "add a box to this list when it gets a
 /// Watchtower" could not do.
+///
+/// The chain box's four templates were named here until its provisioning was
+/// deleted: that box went in the public-chain cutover (`44b15bdc`,
+/// 2026-07-19) and its `infra/linode/` scripts, compose overlay, nginx
+/// templates and `workflow_dispatch`-only caller
+/// (`.github/workflows/devnet-deploy.yml`) followed. Nothing was exempted to
+/// make that pass -- the files stopped existing, and the walk above is what
+/// proves this list still names every one that does.
 const BOX_NGINX_FILES: &[(&str, &str)] = &[
     (
         "infra/linode-relay/nginx/conf.d/node.conf",
@@ -242,32 +250,7 @@ const BOX_NGINX_FILES: &[(&str, &str)] = &[
         "infra/linode-faucet/nginx/node.conf.template",
         include_str!("../../../infra/linode-faucet/nginx/node.conf.template"),
     ),
-    (
-        "infra/linode/nginx/devnet.conf.template",
-        include_str!("../../../infra/linode/nginx/devnet.conf.template"),
-    ),
-    (
-        "infra/linode/nginx/evm.conf.template",
-        include_str!("../../../infra/linode/nginx/evm.conf.template"),
-    ),
-    (
-        "infra/linode/nginx/mina.conf.template",
-        include_str!("../../../infra/linode/nginx/mina.conf.template"),
-    ),
-    (
-        "infra/linode/nginx/sol.conf.template",
-        include_str!("../../../infra/linode/nginx/sol.conf.template"),
-    ),
 ];
-
-/// The chain box renders its nginx config into a directory its own
-/// `.gitignore` excludes (`infra/linode/.gitignore`: `nginx/conf.d/*.conf`),
-/// because which template it renders is a per-host choice
-/// (`NGINX_TEMPLATE=...`). The committed artifact for that box is therefore
-/// the template, and a rendered file found on disk is a local by-product of
-/// running `bootstrap.sh`/`devnet.sh` in a checkout -- not something
-/// [`BOX_NGINX_FILES`] should be asked to cover.
-const UNCOMMITTED_NGINX_RENDER_DIR: &str = "infra/linode/nginx/conf.d/";
 
 /// This test binary's own base port for [`Anvil::spawn`] -- distinct from
 /// other test binaries' bases (`connector-settlement-evm`'s own tests use
@@ -3131,9 +3114,6 @@ fn collect_nginx_files(dir: &std::path::Path, repo_root: &std::path::Path, out: 
             .to_string_lossy()
             .replace('\\', "/");
 
-        if relative.starts_with(UNCOMMITTED_NGINX_RENDER_DIR) {
-            continue;
-        }
         if relative.contains("/nginx/")
             && (relative.ends_with(".conf") || relative.ends_with(".template"))
         {
@@ -3158,7 +3138,8 @@ fn collect_nginx_files(dir: &std::path::Path, repo_root: &std::path::Path, out: 
 ///   1.31.3: `location /graphql` + `proxy_pass $up/node/devnet/v1/graphql;`
 ///   makes the upstream see `/node/devnet/v1/graphql`, every version.
 /// * End-to-end against the real upstream: the chain box's committed mina
-///   block, run verbatim in a throwaway nginx, returns **200** from
+///   block (deleted with that box's provisioning; see [`BOX_NGINX_FILES`]),
+///   run verbatim in a throwaway nginx, returned **200** from
 ///   `api.minascan.io`. The counterfactual #987 predicts
 ///   (`proxy_pass $up$request_uri;`) returns **404** -- `api.minascan.io`
 ///   serves `/node/devnet/v1/graphql` and 404s `/graphql`, so the two
@@ -3257,17 +3238,16 @@ fn no_variable_upstream_carries_a_static_uri_part() {
 /// [`every_static_uri_part_exemption_still_exists`] fails if an entry stops
 /// matching a real line, so a stale exemption is a red test rather than a
 /// widening nobody notices.
-const STATIC_URI_PART_EXEMPTIONS: &[(&str, &str, &str)] = &[(
-    "infra/linode/nginx/devnet.conf.template",
-    "$mina_upstream/node/devnet/v1/graphql",
-    "The Mina passthrough is not a prefix proxy: `api.minascan.io` serves \
-     the public devnet's GraphQL at one fixed path and 404s `/graphql`, so \
-     this location has exactly ONE upstream path and the static URI is the \
-     whole point. The query string it drops is not wanted either -- the \
-     GraphQL request travels in the POST body, and forwarding args to that \
-     upstream measurably raised its error rate (issue #1023). Verified 200 \
-     end-to-end against api.minascan.io with this block run verbatim.",
-)];
+///
+/// It is EMPTY. Its one entry was the chain box's Mina passthrough
+/// (`infra/linode/nginx/devnet.conf.template`, `proxy_pass
+/// $mina_upstream/node/devnet/v1/graphql`), where the static URI was the
+/// whole point: `api.minascan.io` serves the public devnet's GraphQL at one
+/// fixed path and 404s `/graphql`. That box's provisioning was deleted with
+/// the box (`44b15bdc`, 2026-07-19), so the exemption went the way this test
+/// says a stale one should -- dropped, because the line it excused is gone.
+/// Nothing in the surviving boxes' nginx needs one.
+const STATIC_URI_PART_EXEMPTIONS: &[(&str, &str, &str)] = &[];
 
 /// An exemption that no longer matches anything is worse than none: it reads
 /// as a live decision about a line that is gone, and it is one search-and-

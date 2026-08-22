@@ -1,4 +1,0 @@
-# Host-specific, generated, or secret — never commit.
-.env
-nginx/conf.d/*.conf
-endpoints.local.json

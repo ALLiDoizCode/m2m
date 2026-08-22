@@ -128,8 +128,9 @@ compile + per-tx proving time; keep Mina settlement **nightly, not per-PR**
 ## Devnet wiring (after Mina lands)
 
 - Deploy the USDC `FungibleToken` to public Mina devnet; pin `mina.tokenAddress` /
-  `mina.tokenId` in `infra/linode/endpoints.json` + the linode `devnet.sh`
-  generator (currently `mina.tokenId: null`).
+  `mina.tokenId` in `infra/linode/endpoints.json` (currently `mina.tokenId: null`).
+  That file is hand-maintained now — the chain box's `devnet.sh endpoints`
+  generator was deleted with the box's provisioning.
 - Add a Mina USDC funding path analogous to `fund-solana.sh` / the EVM faucet.
   (DONE, updated for the rate-limited redeploy: the token's mint is
   permissionless-but-recipient-signed, so funding is either the

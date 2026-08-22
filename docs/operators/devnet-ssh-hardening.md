@@ -95,10 +95,11 @@ a freshly created box passes; a box in an unexpected state fails closed and is l
 
 ## 4. Follow-on
 
-- **Access for CI.** There is currently no CI path to a _running_ box: `devnet-manage.sh` uses the
-  operator's personal `~/.ssh/id_rsa`, and `devnet-deploy.yml` injects an ephemeral key only at
-  rebuild time, which wipes the disk. Any workflow that operates live boxes needs a dedicated
-  devnet-scoped key authorized on them — a separate, deliberate step, and one that should land
-  _after_ the hardening above, not before.
+- **Access for CI.** `devnet-manage.sh` uses the operator's personal `~/.ssh/id_rsa`. The
+  dedicated devnet-scoped key this section asked for now exists as the `DEVNET_SSH_KEY` secret
+  (`fleet-ops.yml`, `fleet-health.yml`). The other half of the old answer — `devnet-deploy.yml`,
+  which injected an ephemeral key at rebuild time only, wiping the disk in the process — is gone:
+  it provisioned the self-hosted chain box, which was deleted in the 2026-07-19 public-chain
+  cutover, and the workflow was retired with it.
 - **Consider dropping public port 22** in favour of Linode's private networking or a bastion, once
   a CI path exists that does not depend on it.
