@@ -37,13 +37,24 @@ key_file = "/app/data/signer.key"
 # request (ADR 0019). The trailing slash is load-bearing (`handler_url.join`
 # and RFC 3986).
 #
-# `price = 0`, for the reason `local/two-hop/connector-b.toml` sets out at
-# length: a route this node both TERMINATES and PRICES refuses a peer PREPARE
-# that arrives without a covering claim (`F06`, issue #880), and a postpay
-# peering's first crossing carries none by construction (ADR 0004) -- so a
-# priced termination here deadlocks the peering rather than charging for it.
-# What B owes this node is the forwarded amount, and `[[peer_channels]]` below
-# is what that claim is written against.
+# `price = 0`, AND THAT IS A PROPERTY OF THE b-c PEERING RATHER THAN A RULE.
+# A route a node both TERMINATES and PRICES refuses a peer PREPARE that arrives
+# without a claim covering that price (`F06`, issue #880). The b-c peering is
+# POSTPAY: value moves on fulfilment (ADR 0004), so B owes this node nothing
+# until a crossing has fulfilled, the first crossing therefore carries no claim,
+# is refused, never fulfils, leaves nothing owed, and the second carries none
+# either. A price here deadlocks the peering instead of charging for it.
+#
+# WHAT WOULD CHANGE THAT IS A ROW ON B, NOT A FIGURE HERE. `local/two-hop` does
+# exactly that and its payee IS priced: a `[[pay_channels]]` row on the payer
+# (ADR 0042 item 2) covers each PREPARE *before* it is sent, so crossing 1
+# arrives already paid for. `local/two-hop/connector-a.toml` and
+# `connector-b.toml` are the two halves of that arrangement. Nothing forbids
+# the same on this leg; it is simply not what this topology is about, which is
+# one node holding a settlement backend on each of two chains.
+#
+# So what B owes this node is the forwarded amount, and `[[peer_channels]]`
+# below is what that claim is written against.
 [[routes]]
 prefix = "g.local.mixed.b.c.app"
 handler_url = "http://stub-app:3100/"
