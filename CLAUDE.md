@@ -92,8 +92,22 @@ diffs the committed ABI.
 the one thing `cargo test` structurally cannot check: that the **image**, as uid
 10001, with a mounted `connector.toml`, mounted key files and a real volume at
 `/app/state`, boots and moves a packet. `make local-verify` brings it up, sends a
-real packet and tears it down; `.github/workflows/local-topologies.yml` runs it on
-PRs touching the crates, the Dockerfile or the compose files.
+real packet, asserts the outcome and tears it down;
+`.github/workflows/local-topologies.yml` runs it on every push to `main` and on
+PRs touching the crates, the Dockerfile, the compose files, the contracts or
+`local/` itself — the path filter is there because a docs-only change elsewhere
+cannot break it and the image build is the expensive part.
+
+There are three topologies, chosen with `LOCAL_TOPOLOGY` (default `solo`), and CI
+runs all three: `solo` (one node, both settlement backends live at once),
+`two-hop` (two nodes peered over ILP-over-HTTP on anvil) and `mixed-chain` (three
+nodes, EVM on one leg and Solana on the other, with the middle node holding both
+backends). The peered two do not stop at delivery — they cross the peering more
+than once and then read the payee's own claim journal, because a peer claim's
+verdict rides back in `Toon-Claim-Ack` and never gates the packet, so
+`--expect-fulfill` alone would go green over a peering carrying traffic for free.
+`local/README.md` is the long version, and is worth reading before editing
+anything under `local/`.
 
 It is complementary to `promote-to-fleet.yml`, not a duplicate. That gate checks a
 candidate image against the _fleet's_ committed configs and can only warn when the
@@ -142,6 +156,12 @@ separate failure ("the connector refused to start" and "its settlement account h
 no ETH" look identical otherwise). Everything it writes lands in `local/.keys/`,
 which is gitignored.
 
+It has a second stage, `local/keys.sh <topology> solana-channels`, and `make
+local-up` calls it after the containers are serving. That ordering is forced: a
+Solana channel is created by an `InitializeChannel`, no chain CLI here can build
+one, and the only submitter is a running node's `POST /channels`. Opening it is
+therefore an operator write after boot, not something the config does at boot.
+
 In a container, `state_dir` must be a mounted volume: the image runs as uid 10001
 and creates `/app/state` owned by that uid precisely so a fresh named volume
 inherits it.
@@ -185,7 +205,7 @@ mint script and the local topology are devnet-and-below only.
 
 | Tier           | What it is                                                                                                                                                                                                           |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **local**      | `docker-compose.yml` chain profiles, and the connector image run against them. Disposable, funded from genesis, no shared state.                                                                                     |
+| **local**      | `docker-compose.yml` chain profiles, and the connector image run against them — that is `local/`. Disposable, funded from genesis, no shared state.                                                                  |
 | **devnet**     | Two Linode boxes (`infra/linode-relay/`, `infra/linode-store/`). Containers follow the `rust-release` tag via a label-scoped Watchtower and bind-mount a committed `connector-rust.toml`.                            |
 | **production** | **Named and empty** (ADR 0056). No machines, no mainnet contracts, no keys, no deploy. Its one artefact is `deploy/connector-rust/connector.production.toml`, a skeleton in which every value is invalid on purpose. |
 

@@ -13,7 +13,8 @@ connector/
   vectors/         # wire-vectors.json, the cross-repo contract (ADR 0021)
   docs/            # ADRs, protocol specs, operator docs
   deploy/          # container image and deployment recipes
-  infra/           # devnet overlays (Linode boxes, local chain compose files)
+  local/           # the shipped image run against real containerised chains (#1099)
+  infra/           # devnet overlays (Linode boxes) and local chain provisioning
   tools/           # fund-peers, and chain-specific scripts
   Cargo.toml       # the workspace manifest
 ```

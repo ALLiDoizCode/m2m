@@ -63,9 +63,11 @@ every other infra-touching ticket in this repo's history records when it applies
   the relay box has no legacy TypeScript identity to reproduce
   (`infra/linode-relay/connector-rust.toml`'s own header note), so its keys are new material, not
   a mnemonic-index reproduction.
-- The apex's `[operator]` surface (ADR 0008, issue #459) is enabled with a bearer token, so step 7
-  can open and fund a channel without hand-crafting a raw settlement transaction. Not a given
-  today: `infra/linode-node/connector-rust.toml` omits the section deliberately ("Operator surface
+- The apex's `[operator]` surface (ADR 0008, issue #459) is enabled, so step 7 can open a channel
+  without hand-crafting a raw settlement transaction. Note what that needs: `bearer_token` gates
+  reads, and step 7 is a **write**, so it also needs the private half of a key whose public half is
+  on `write_keys` — no shared secret is ever sufficient to move value. Not a given today:
+  `infra/linode-node/connector-rust.toml` omits the section deliberately ("Operator surface
   (optional)"), so enabling it per `deploy/connector-rust/README.md` steps 2–3 is itself work this
   precondition asks for.
 
@@ -135,7 +137,18 @@ every other infra-touching ticket in this repo's history records when it applies
    ```
 
    (`"chain":"solana"` for the Solana leg — a node settling on more than one chain refuses an
-   omitted `chain` as ambiguous.) Fund it with `POST /channels/:id/fund`. Record the resulting
+   omitted `chain` as ambiguous.) **On EVM**, fund it with `POST /channels/:id/fund`; that write
+   deposits into the _counterparty's_ on-chain balance, which `TokenNetwork.setTotalDeposit`
+   permits because it names the participant being credited and pulls the tokens from
+   `_msgSender()` — the caller, or its forwarded signer under ERC-2771. **On Solana it will not
+   work**, and the failure is by design rather than a gap in the runbook:
+   `packages/solana-program`'s `Deposit` requires the depositing participant to sign for their own
+   side, so `SolanaSettlementBackend::fund` refuses outright on a `connect`-built backend. The
+   Solana leg's collateral therefore comes from each participant's own wallet, submitted directly
+   against the deployed program — there is no operation for it on the settlement port, on either
+   backend, or on the operator surface.
+
+   Record the resulting
    `channel_id`/`channel_account`, the relay's `counterparty_key`, and (EVM) `chain_id` +
    `token_network` — exactly the fields `btp-peer-transport-bringup.md`'s "A correct peering"
    example's `[[peer_channels]]` row needs, one row on each side.
