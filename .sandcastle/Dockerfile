@@ -80,15 +80,19 @@ RUN curl -fsSL https://foundry.paradigm.xyz | bash \
 # the implementer cannot run this crate's tests locally and only finds out they're broken
 # once CI does.
 #
-# Pinned to v2.1.21, NOT the newer v3.x line ci.yml's pre-existing `solana-integration` job
-# installs: v3's solana-test-validator hard-requires io_uring, which this container's sandbox
+# Pinned to v2.1.21, NOT the v3.1.12 ci.yml's `solana-program` jobs install. This repository
+# installs two Solana CLI versions on purpose and they are not interchangeable; the reason for
+# each, and what would have to be true to change it, is recorded once in
+# crates/connector-settlement-solana/tests/solana_cli_pins.rs. That guard reads THIS file and
+# fails the build if the literal below drifts from it — a Dockerfile cannot read a workflow
+# variable, so the literal has to be repeated here and the guard is what keeps it honest.
+#
+# In short: v3's solana-test-validator hard-requires io_uring, which this container's sandbox
 # runtime does not permit (verified directly here — it panics with
-# `assertion failed: io_uring_supported()` even though the kernel itself supports io_uring).
-# v2.1.21 needs no io_uring and also matches the `=2.1.0` solana-program/solana-client/
-# solana-sdk pin in crates/connector-settlement-solana{,-program}/Cargo.toml, so the CLI
-# deploying and driving the program is the same release line the program is built against.
-# `.github/workflows/ci.yml`'s `rust-gate` job installs this exact version for the same reason
-# its Foundry install matches this image's.
+# `assertion failed: io_uring_supported()` even though the kernel itself supports io_uring),
+# and v2.1.21 matches the `=2.1.0` Solana crate pins the workspace compiles the program
+# against. `.github/workflows/ci.yml`'s `rust-gate` job installs this exact version for the
+# same reason its Foundry install matches this image's.
 RUN curl -sSfL https://release.anza.xyz/v2.1.21/install | sh
 
 # Add Claude, cargo, foundry and the Solana CLI to PATH

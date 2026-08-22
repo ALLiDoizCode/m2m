@@ -29,6 +29,20 @@
 # $HOME/.cache/solana/<version>/ on the way to installing a toolchain, but
 # never the parent.
 #
+# WHICH CLI YOU HAVE DECIDES WHETHER YOU EVER REACH IT
+#
+# That early return is why this repository's jobs split cleanly in half on a
+# cold cache, and it is worth knowing before diagnosing anything here. This
+# repository installs two Solana CLI versions deliberately -- v2.1.21 where the
+# program is run, v3.1.12 where the deployed artifact is built (the reason for
+# each is recorded once, in
+# crates/connector-settlement-solana/tests/solana_cli_pins.rs). v3.1.12's
+# built-in platform-tools line is v1.52, the very line pinned below, so those
+# jobs take the early return and never touch the failing read_dir. v2.1.21's is
+# v1.43, so those jobs always do. Every green v3 job on a cold cache was
+# evidence about that early return, not about that job's retry loop -- reading
+# it the other way is most of what made this expensive to find.
+#
 # So the failure is deterministic, not flaky, and no retry can fix it. It is
 # also why every green local-topologies run stood on a cache nothing
 # guaranteed: `actions/cache` created that directory as a side effect of

@@ -74,7 +74,11 @@ jobs:
           version: v1.7.1
 
       # `solana`, `solana-keygen`, `spl-token` and `cargo-build-sbf` all ship
-      # in this one bundle. Same pinned release ci.yml's rust-gate installs.
+      # in this one bundle. Same pinned release ci.yml's rust-gate installs --
+      # and NOT the v3.1.12 ci.yml's program jobs install, which is a separate
+      # deliberate pin. Both are recorded, with their reasons, in
+      # crates/connector-settlement-solana/tests/solana_cli_pins.rs; that guard
+      # fails the build if this literal drifts from what it records.
       - name: Install Solana CLI tools
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.21/install)"
