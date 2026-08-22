@@ -123,20 +123,39 @@ services:
   # Its own profile so `up` never starts it: a one-shot that exits 0 or 1, run
   # by `make local-rehearse` via `docker compose run --rm`.
   #
-  # TWO packets, not one, and that is not belt-and-braces. Value moves on
-  # fulfilment (ADR 0004), so the payer owes nothing until the first crossing
-  # has actually fulfilled: the claim covering crossing n is signed after it
-  # and rides crossing n+1. One packet proves DELIVERY and can say nothing
-  # about payment; the second is what makes the peering paid. This is exactly
-  # why `two_connectors_peer.rs` crosses twice too.
+  # TWO packets, and NOT for the reason a postpay peering needs two. Value
+  # moves on fulfilment (ADR 0004), so a peering that owes after the fact
+  # cannot pay for its own first crossing -- which is why a postpay rehearsal
+  # sends one packet to prove DELIVERY and a second to carry the claim covering
+  # it. This peering does not owe after the fact: A holds a `[[pay_channels]]`
+  # row (ADR 0042 item 2) and covers each PREPARE BEFORE it is sent, so
+  # crossing 1 arrives already paid for. That is exactly what lets B price the
+  # route it terminates, and pricing it is what this topology is for.
   #
-  # Then the money is asserted, because `--expect-fulfill` cannot: a peer
-  # claim's verdict rides back in the `Toon-Claim-Ack` header and never gates
-  # the packet (`handle_peer_prepare` -- the ack and the answer are separate),
-  # so a peering whose claims were all refused still fulfils every packet.
-  # B's own claim journal is where "the claim was accepted" is written down,
-  # and the channel id grepped for is the same literal both connector.toml
-  # files name -- `local_topologies_load.rs` holds the three copies together.
+  # The second crossing is what makes this a measurement rather than a
+  # demonstration, because it is the one issue #1102 broke. A covering payer
+  # asks the payee where its claims stand on every packet, and a payee that
+  # answers out of the wrong book says nonce 0 / cumulative 0 forever -- so
+  # crossing 2 re-signs crossing 1's cumulative amount at a fresh nonce,
+  # advances nothing, and is refused `F06`. One crossing cannot see that; two
+  # can, and did.
+  #
+  # Then the money is asserted from B's own claim journal, because the exit
+  # status is not enough on its own. #1101 proved that by breaking this
+  # peering's EIP-712 `chain_id` and watching every packet still FULFILL: a
+  # peer claim's verdict rides back in `Toon-Claim-Ack` and never gates the
+  # packet (`handle_peer_prepare` -- the ack and the answer are separate). A
+  # priced termination does turn an UNCOVERED arrival into an F06 the sender
+  # sees, but nothing in this container can check that the price is still
+  # there to be paid; `local_topologies_load.rs` holds PRICE, AMOUNT and both
+  # committed configs to one figure, which is the half this container cannot
+  # do. What this container CAN read is what B wrote down -- every accepted
+  # claim on the peering's channel and what each one actually advanced -- and
+  # that advance is the exact quantity the coverage gate charges against
+  # (`price_gate::payment_required`). So that is what is asserted: fewer
+  # accepted claims than crossings, or any one of them advancing less than the
+  # price, fails the run. A claim that merely EXISTS proves nothing here --
+  # that is what a `nonce 2 -> 1000` repeat is.
   sender:
     image: connector-rust:local
     profiles: [sender]
@@ -144,6 +163,14 @@ services:
     command:
       - |
         set -e
+        # The four figures this rehearsal is written around. AMOUNT and PRICE
+        # are one number on purpose (see connector-b.toml): the price is the
+        # whole of what A forwards, so the coverage gate has no slack.
+        AMOUNT=1000
+        PRICE=1000
+        CROSSINGS=2
+        CHANNEL=0x57c5462d40a3c60fa89b8fe4f3f24cf560947a413df9a691499e58abea1d63f8
+        JOURNAL=/app/payee-state/peer-claims.log
         send() {
           /usr/local/bin/connector send \
             --operator     http://connector-a:3000 \
@@ -151,24 +178,54 @@ services:
             --to           g.local.two-hop.b.app \
             --seal-to      http://connector-b:3000 \
             --target       / \
-            --amount       1000 \
+            --amount       "$$AMOUNT" \
             --body         /app/data/payload.json \
             --expect-fulfill
         }
-        echo '--- crossing 1: proves delivery across the peering'
+        echo '--- crossing 1: priced at B, covered by A before it is sent'
         send
-        echo '--- crossing 2: carries the claim covering crossing 1'
+        echo '--- crossing 2: the covering claim must ADVANCE, not repeat'
         send
 
-        CHANNEL=0x57c5462d40a3c60fa89b8fe4f3f24cf560947a413df9a691499e58abea1d63f8
-        if ! grep -q "$$CHANNEL" /app/payee-state/peer-claims.log 2>/dev/null; then
-          echo "the peering was NOT paid: B's claim journal records no accepted claim on" >&2
-          echo "$$CHANNEL -- both packets were carried for free." >&2
-          echo '--- B/peer-claims.log follows ---' >&2
-          cat /app/payee-state/peer-claims.log >&2 || echo '(the journal does not exist)' >&2
+        if [ ! -f "$$JOURNAL" ]; then
+          echo "B kept no claim journal at $$JOURNAL, so nothing was ever accepted and" >&2
+          echo "both crossings were carried for free." >&2
           exit 1
         fi
-        echo "--- B's claim journal records an accepted claim on $$CHANNEL"
+        echo "--- what B was actually paid, out of B's own claim journal"
+        # One line per accepted claim on this channel, in the order ClaimBook
+        # wrote them: `inbound_claim_accepted <channel> <nonce> <cumulative>
+        # <signature>`, tab separated (`connector_runtime::journal`).
+        if ! awk -F '\t' -v channel="$$CHANNEL" -v price="$$PRICE" -v crossings="$$CROSSINGS" '
+              $$1 == "inbound_claim_accepted" && $$2 == channel {
+                accepted = accepted + 1
+                advance = $$4 - cumulative
+                printf "    claim %d: nonce %s, cumulative %s, advance %d\n", accepted, $$3, $$4, advance
+                if (advance < price) {
+                  printf "    ^^ that advance does not cover the %d this route costs\n", price
+                  short = 1
+                }
+                cumulative = $$4
+              }
+              END {
+                if (accepted < crossings) {
+                  printf "B accepted %d claims on this channel, but %d crossings were sent and every one of them had to be paid for\n", accepted, crossings
+                  exit 1
+                }
+                if (short) { exit 1 }
+                if (cumulative < crossings * price) {
+                  printf "the watermark on this channel stands at %d, and %d crossings at %d each is %d\n", cumulative, crossings, price, crossings * price
+                  exit 1
+                }
+                printf "    watermark %d = %d crossings x %d\n", cumulative, crossings, price
+              }
+            ' "$$JOURNAL"; then
+          echo 'the priced peer termination was NOT paid for -- see the claim lines above.' >&2
+          echo '--- B/peer-claims.log follows ---' >&2
+          cat "$$JOURNAL" >&2
+          exit 1
+        fi
+        echo "--- the peering paid B for every crossing it carried"
     volumes:
       # A's keys: the sender signs the operator write with A's allowlisted key
       # and posts the fixture body from the same directory.
