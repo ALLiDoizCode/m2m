@@ -70,6 +70,14 @@ Before deploying the Solana payment channel program, ensure the following are in
    solana --version
    ```
 
+   This floor is why CI's `solana-program` and `solana-program-reproducibility` jobs install
+   v3.1.12 rather than the v2.1.21 the Rust workspace gate installs: the reproducibility gate
+   has to build with the CLI this page tells you to deploy with, because the CLI changes the
+   `.so`'s bytes even with platform-tools pinned. Both pins, the measurement behind that claim
+   and what would have to be true to move either are recorded in
+   `crates/connector-settlement-solana/tests/solana_cli_pins.rs`, which fails the build if this
+   line and the workflows disagree.
+
 2. **Rust toolchain with BPF target** -- required for `cargo build-sbf`
 
    ```bash
