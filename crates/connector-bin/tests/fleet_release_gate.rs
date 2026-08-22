@@ -22,6 +22,8 @@
 //! like a convenience rather than a reversal.
 
 use std::collections::BTreeSet;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 const PUBLISH_CONNECTOR_WORKFLOW: &str =
     include_str!("../../../.github/workflows/publish-connector-rust-image.yml");
@@ -383,22 +385,28 @@ fn the_release_workflow_refuses_an_unanswered_ordering_question() {
     );
 }
 
-/// Where the apply evidence actually comes from, and the drift that would
-/// silently destroy it.
+/// The apply evidence's FALLBACK source, and the drift that would silently
+/// destroy it.
 ///
 /// A `workflow_dispatch` run's inputs are NOT on the run object: it has no
-/// `inputs` key, and `fleet-ops.yml` sets no `run-name:`, so `display_title`
-/// is the bare string "fleet-ops" (checked against 12 real runs). The only
-/// place `box`, `operation` and `apply` survive is the runner's echo of
+/// `inputs` key. `fleet-ops.yml` now renders the three the gate cares about
+/// into its `run-name:`, which is the durable source and is guarded by
+/// [`the_apply_verification_prefers_the_run_name_fleet_ops_carries`] — but
+/// every fleet-ops run cut before that landed has `display_title` == the bare
+/// workflow name "fleet-ops" (checked against 12 real runs), and for those the
+/// only place `box`, `operation` and `apply` survive is the runner's echo of
 /// `fleet-ops.yml`'s **job-level `env:` block** into the log.
 ///
-/// That is a consequence of how fleet-ops.yml happens to be written, not a
-/// GitHub contract and not a thing fleet-ops.yml knows it is providing. If
-/// those move out of job `env` — inlined per step, renamed, read straight from
-/// `inputs` — the log stops carrying them, and the gate that reads them stops
-/// being able to check anything. It fails closed when it cannot read them, so
-/// the live consequence is refused promotions rather than waved-through ones;
-/// this case is here so the cause is named at build time instead of at 2am.
+/// So this case does not retire with the `run-name:`; it retires when the last
+/// pre-`run-name:` run stops being nameable, which is not a date this file can
+/// know. Until then the fallback is the only way an apply from before the
+/// change verifies at all, and it is a consequence of how fleet-ops.yml
+/// happens to be written rather than a GitHub contract. If those move out of
+/// job `env` — inlined per step, renamed, read straight from `inputs` — the
+/// log stops carrying them and the fallback stops being able to check
+/// anything. It fails closed when it cannot read them, so the live consequence
+/// is refused promotions rather than waved-through ones; this case is here so
+/// the cause is named at build time instead of at 2am.
 ///
 /// Same class as
 /// [`the_config_compat_gate_reproduces_the_makers_committed_service_environment`]:
@@ -412,17 +420,22 @@ fn the_apply_verification_reads_what_fleet_ops_actually_records() {
         assert!(
             FLEET_OPS_WORKFLOW.contains(&declared),
             "fleet-ops.yml no longer declares `{key}` as job-level `env:` from an \
-             input. That echo is the ONLY record of a config-apply run's \
-             parameters — the run object has no `inputs` key and the workflow \
-             sets no `run-name:` — so promote-to-fleet.yml's ordering gate can \
-             no longer tell a config-apply from a box-status. Either restore it, \
-             or give fleet-ops.yml a `run-name:` carrying the same facts and \
-             teach the gate to read that instead. Do not simply delete the check."
+             input. That echo is the only record of a config-apply run's \
+             parameters for every run cut BEFORE this file carried a \
+             `run-name:` — the run object has no `inputs` key and those runs' \
+             `display_title` is the bare workflow name — so removing it makes \
+             an apply from before the change permanently unverifiable, and \
+             promote-to-fleet.yml fails closed on exactly that. The `run-name:` \
+             covers new runs and does not cover old ones. Restore it; do not \
+             delete the check on the strength of the title being there now."
         );
         assert!(
             PROMOTE_WORKFLOW.contains(&format!("field {key}")),
             "promote-to-fleet.yml no longer extracts `{key}` from the fleet-ops \
-             run's log, so it is not checking that half of the apply."
+             run's log. The log is the fallback for runs whose title predates \
+             fleet-ops.yml's `run-name:`, so dropping it does not simplify the \
+             gate — it makes those runs unverifiable, and the gate refuses what \
+             it cannot verify."
         );
     }
 
@@ -434,6 +447,176 @@ fn the_apply_verification_reads_what_fleet_ops_actually_records() {
          env-echo line shape (two spaces, KEY, ': '). If the shape it looks for \
          is wrong the gate finds nothing — and because it fails closed, that \
          reads as every promotion being refused rather than as a bug here."
+    );
+}
+
+/// The durable half of the apply evidence: the run's own title.
+///
+/// The gate's job is to establish, about a named `fleet-ops` run, which box it
+/// touched, which operation it ran, and whether `apply` was really true. A
+/// `workflow_dispatch` run object carries none of that — it has no `inputs`
+/// key — so the first version of this gate read the runner's echo of
+/// fleet-ops.yml's job-level `env:` block out of the run's LOGS. Logs age out
+/// (90 days by default) and the gate refuses what it cannot read, so a
+/// perfectly good apply became unverifiable simply by getting old, and the
+/// only remedy was to re-run an apply against a live box to produce fresher
+/// evidence of a thing that had already happened.
+///
+/// `run-name:` moves the same three facts onto the run object, where they live
+/// as `display_title` for as long as the run does. It is not stronger
+/// evidence — it is rendered from the same operator-supplied inputs the log
+/// echoes, and ADR 0055 is explicit that forgery is not the threat model — it
+/// is evidence that does not expire.
+///
+/// This case exists because the format is now a CONTRACT between two files
+/// that do not import each other, which is the same drift
+/// [`the_release_body_and_the_promotion_gate_agree_on_the_ordering_field`]
+/// guards and it fails the same way: reword the title and the parser matches
+/// nothing. That direction is at least fail-closed (the gate falls through to
+/// the log and then refuses when it has aged out), but a promotion refused for
+/// a reason nobody can see is still a 2am problem, so it is caught here.
+///
+/// Rather than restating the shape in prose, the case RENDERS fleet-ops.yml's
+/// own `run-name:` and runs promote-to-fleet.yml's own parser over it.
+const FLEET_OPS_RUN_NAME_PARSE: &str =
+    r"s/^fleet-ops ([a-z-]+) on ([a-z]+) \(apply=(true|false)\)$/\1 \2 \3/p";
+
+/// The `run-name:` value fleet-ops.yml commits, quotes stripped.
+fn fleet_ops_run_name() -> String {
+    let line = FLEET_OPS_WORKFLOW
+        .lines()
+        .find(|l| l.starts_with("run-name:"))
+        .expect(
+            "fleet-ops.yml has no top-level `run-name:`. The deploy-ordering gate reads \
+             a config-apply run's box/operation/apply off `display_title`, and without \
+             this line every run's title is the bare workflow name — which throws the \
+             gate back onto logs that expire at 90 days. See ADR 0055.",
+        );
+    line["run-name:".len()..]
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'')
+        .to_string()
+}
+
+/// Run promote-to-fleet.yml's own sed script over a title, exactly as the
+/// workflow does. Shelling out rather than reimplementing the regex is the
+/// point: a Rust-side copy of the pattern would be a third place for it to
+/// drift, and this way the thing under test is the string the gate ships.
+fn parse_title_the_way_the_gate_does(title: &str) -> String {
+    let mut child = Command::new("sed")
+        .arg("-nE")
+        .arg(FLEET_OPS_RUN_NAME_PARSE)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("could not run `sed` — it is what promote-to-fleet.yml parses the title with");
+    child
+        .stdin
+        .take()
+        .expect("sed stdin")
+        .write_all(format!("{title}\n").as_bytes())
+        .expect("write title to sed");
+    let out = child.wait_with_output().expect("sed exited");
+    String::from_utf8(out.stdout)
+        .expect("sed output is utf-8")
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn the_apply_verification_prefers_the_run_name_fleet_ops_carries() {
+    let run_name = fleet_ops_run_name();
+
+    for input in ["inputs.box", "inputs.operation", "inputs.apply"] {
+        assert!(
+            run_name.contains(input),
+            "fleet-ops.yml's `run-name:` does not carry `{input}`: `{run_name}`. All three \
+             are what promote-to-fleet.yml has to establish about a named config-apply \
+             run, and a title missing one is a title the gate cannot use."
+        );
+    }
+
+    // `service` is a free-form string input; the other three are `choice` and
+    // `boolean`, so their values come from a fixed set. Free text inside a
+    // title something else PARSES is how one run is made to read as another,
+    // and `service` answers nothing the gate asks.
+    assert!(
+        !run_name.contains("inputs.service"),
+        "fleet-ops.yml's `run-name:` interpolates the free-form `service` input: \
+         `{run_name}`. Only the fixed-set inputs belong in a title the ordering gate \
+         parses — an operator-typed service name can be made to read as another box."
+    );
+    assert!(
+        !run_name.contains("secrets."),
+        "fleet-ops.yml's `run-name:` interpolates a secret: `{run_name}`. A run title is \
+         as visible as the run itself, and this workflow holds an SSH key with root on \
+         the devnet boxes."
+    );
+
+    // Render the committed template the way a real dispatch would, then run
+    // the gate's own parser over it. This is the assertion that actually binds
+    // the two files: a reworded title fails HERE rather than silently at 2am.
+    let rendered = run_name
+        .replace("${{ inputs.operation }}", "config-apply")
+        .replace("${{ inputs.box }}", "relay")
+        .replace("${{ inputs.apply }}", "true");
+    assert!(
+        !rendered.contains("${{"),
+        "rendering fleet-ops.yml's `run-name:` left an unsubstituted expression: \
+         `{rendered}`. The template grew an interpolation this test does not know how \
+         to fill in, so it is no longer checking what a real run's title looks like."
+    );
+    assert_eq!(
+        parse_title_the_way_the_gate_does(&rendered),
+        "config-apply relay true",
+        "promote-to-fleet.yml's parser does not read the title fleet-ops.yml renders \
+         (`{rendered}`). The two files agree on this format and nothing else connects \
+         them; when they disagree the gate falls through to the log scrape and then \
+         refuses once those logs have aged out, so the failure surfaces as a promotion \
+         that cannot be made rather than as this mismatch."
+    );
+
+    // …and the gate has to actually contain that parser, not merely be
+    // parseable by one this test made up.
+    assert!(
+        PROMOTE_WORKFLOW.contains(FLEET_OPS_RUN_NAME_PARSE),
+        "promote-to-fleet.yml no longer parses the fleet-ops run title with \
+         `{FLEET_OPS_RUN_NAME_PARSE}`. Either it stopped reading `display_title` — \
+         which puts every config-requiring promotion back on logs that expire — or the \
+         pattern moved and this test is asserting over a shape that no longer exists."
+    );
+    assert!(
+        PROMOTE_WORKFLOW.contains(".display_title"),
+        "promote-to-fleet.yml no longer fetches `.display_title` with the run's \
+         metadata, so the title it parses is never read."
+    );
+
+    // The historical case, which is every fleet-ops run that exists today: a
+    // bare workflow name must NOT parse, so the gate falls through to the log
+    // rather than inventing a box from a title that says nothing.
+    assert_eq!(
+        parse_title_the_way_the_gate_does("fleet-ops"),
+        "",
+        "the gate's title parser matches the bare workflow name `fleet-ops`, which is \
+         the `display_title` of every run cut before the `run-name:` landed. Matching \
+         it would mean reading a box and an apply flag out of a title that carries \
+         neither."
+    );
+
+    // …and the fallback those runs depend on is still wired up, with the
+    // refusal that fires when neither source can answer.
+    assert!(
+        PROMOTE_WORKFLOW.contains("actions/runs/$RID/logs"),
+        "promote-to-fleet.yml no longer falls back to the fleet-ops run's logs. Every \
+         apply that happened before the `run-name:` landed has a bare title, so the \
+         scrape is the only thing that verifies one — removing it does not simplify \
+         the gate, it refuses yesterday's apply."
+    );
+    assert!(
+        PROMOTE_WORKFLOW.contains("does not carry the box/operation/apply either"),
+        "promote-to-fleet.yml no longer refuses when NEITHER the title nor the logs \
+         answer. That branch is the whole fail-closed property: two sources that can \
+         each come up empty must end in a refusal, never in a default."
     );
 }
 

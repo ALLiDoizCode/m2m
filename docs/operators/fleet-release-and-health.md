@@ -214,11 +214,16 @@ those config changes — and where any of them says `true` it demands both halve
    | `apply == true`                                       | **a dry run** — a real `config-apply` with `apply=false` reads the box, prints the diff, writes nothing, and still goes green |
    | the run **started after** the config's commit         | an apply that predates the commit, and therefore applied the previous file                                                    |
 
-   Coverage is per box, so where both boxes' configs changed you must name both runs. The evidence
-   comes from the run's **logs** — a `workflow_dispatch` run's inputs are nowhere on the run object,
-   and `fleet-ops.yml` sets no `run-name:`, so its job-level `env:` echo is the only surviving
-   record. If the logs cannot be read (they age out at 90 days), the promotion is **refused**, not
-   waved through.
+   Coverage is per box, so where both boxes' configs changed you must name both runs.
+
+   A `workflow_dispatch` run's inputs are nowhere on the run object, so the box, the operation and
+   the apply flag are recovered from one of two places. First choice is the run's **title**:
+   `fleet-ops.yml` carries a `run-name:` that renders as
+   `fleet-ops config-apply on relay (apply=true)`, and that lives on the run object for as long as
+   the run does. Runs cut before that landed have the bare title `fleet-ops`, and fall back to the
+   job-level `env:` echo in the run's **logs**. If neither can be read — the title says nothing and
+   the logs have aged out at 90 days — the promotion is **refused**, not waved through; re-run the
+   apply and name the new run, whose title will not expire.
 
 Neither half fires when `config-change-required` is `false`. The answer can no longer be _omitted_ —
 the dispatch input's first and preselected option is a `-- select --` sentinel the release refuses

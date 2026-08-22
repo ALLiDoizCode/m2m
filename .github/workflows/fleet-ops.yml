@@ -64,6 +64,39 @@
 
 name: fleet-ops
 
+# ── THE RUN'S TITLE IS THE APPLY RECEIPT ────────────────────────────────────
+# A `config-apply` run here is the ONLY evidence anything downstream has that
+# a box actually received a committed config, and promote-to-fleet.yml's
+# deploy-ordering gate (ADR 0055, ADR 0041 rule 2) refuses a promotion that
+# cannot produce one. That gate has to answer three questions about a named
+# run: which box, which operation, and was it a real apply or a dry run.
+#
+# A `workflow_dispatch` run object carries none of that — it has no `inputs`
+# key — so the gate originally read the runner's echo of the job-level `env:`
+# block out of the run's LOGS. Logs age out (90 days by default), and an
+# apply nobody can read is refused rather than assumed, so a perfectly good
+# apply became unverifiable simply by getting old, and the only remedy was to
+# re-run an apply against a live box to freshen evidence of something that
+# had already happened.
+#
+# `run-name:` fixes that at the source: it becomes the run's `display_title`,
+# which lives on the run object for as long as the run does. The gate parses
+# this exact shape and falls back to the log scrape for the runs that predate
+# it, so the format is a contract rather than decoration —
+# `the_apply_verification_prefers_the_run_name_fleet_ops_carries` in
+# crates/connector-bin/tests/fleet_release_gate.rs renders this line and runs
+# the gate's own parser over it.
+#
+# Only `box`, `operation` and `apply` appear, and that is deliberate twice
+# over. They are the three the gate checks, and all three are `choice` or
+# `boolean` inputs, so their values come from a fixed set and no operator can
+# type a title that reads as a different box. `service` is a free-form string
+# and is left out: it answers nothing the gate asks, and free text inside a
+# title something else parses is how one run is made to read as another.
+# Nothing secret-bearing belongs here either — a run title is as visible as
+# the run, and this workflow holds a key with root on the devnet boxes.
+run-name: "fleet-ops ${{ inputs.operation }} on ${{ inputs.box }} (apply=${{ inputs.apply }})"
+
 on:
   workflow_dispatch:
     inputs:
