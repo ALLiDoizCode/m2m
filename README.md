@@ -328,7 +328,12 @@ no second port. The split is read from write
   under the channel they act on — `/channels/:id/fund`, `/channels/:id/redeem`,
   `/channels/:id/redeem-latest`, `/channels/:id/close`, `/channels/:id/cooperative-close` — plus
   `DELETE /peers/:id` and `DELETE /routes/peers/:prefix` (issue #884). Channel operations answer
-  `503` when no `[settlement]` backend is configured.
+  `503` when no `[settlement]` backend is configured. `/channels/:id/fund` reaches EVM only, and
+  not because Solana is unfinished: it deposits into the _counterparty's_ balance, which
+  `TokenNetwork.setTotalDeposit` permits and `packages/solana-program`'s `Deposit` refuses — that
+  instruction requires the depositing participant to sign for their own side, so a Solana channel's
+  collateral is deposited from each participant's own wallet against the deployed program, and no
+  operation here, on either backend, or on the settlement port does it for them.
 
 `POST`/`DELETE /peers*` and `/routes/peers*` (issue #884) are the runtime-mutable, durable
 peer/route table: unlike `/routes/leased` (a TTL-bound push that lapses on its own and never
@@ -410,8 +415,13 @@ Some integration tests need a real chain and **skip locally when it is absent, b
 | `solana-test-validator` | Solana CLI                                     | `connector-settlement-solana`                                                                      |
 
 `make anvil-up` / `make solana-up` bring up the Docker profiles if you would rather not install
-them. `packages/solana-program` is excluded from the workspace gate and has its own job
-(`cargo test-sbf`).
+them — but note that nothing under `crates/` dials them: every chain-backed test spawns its own
+`anvil` or `solana-test-validator` and throws it away. `packages/solana-program` is excluded from
+the workspace gate and has its own job (`cargo test-sbf`).
+
+The containers exist for [`local/`](local/README.md), which asks a different question and is a
+separate gate: the shipped **image**, on a mounted config, against real chains. Run one with
+`make local-verify LOCAL_TOPOLOGY=<solo|two-hop|mixed-chain>`.
 
 ## Where the design lives
 
@@ -461,6 +471,14 @@ Beside the workspace, and not part of the connector:
   `npm test` runs them, not the connector.
 - [`packages/announcer`](packages/announcer) — a standalone `kind:10032` announcer sidecar for the
   client edge (ADR 0022: the connector answers, it does not announce, so this lives outside it).
+- [`local/`](local/README.md) — the shipped image run against real containerised chains: three
+  compose topologies (`solo`, `two-hop`, `mixed-chain`), the keys and channels to provision them,
+  and a rehearsal that sends a real packet — and, on the two peered topologies, then reads the
+  payee's own claim journal, because a peer claim's verdict never gates the packet.
+  `.github/workflows/local-topologies.yml` runs all three, on pushes to `main` and on any PR
+  touching the crates, the image or `local/` itself. It checks the one thing `cargo test`
+  structurally cannot: that the **image**, on a mounted config with mounted key files, boots and
+  moves a packet.
 - [`infra/`](infra) and [`deploy/`](deploy) — devnet overlays and deployment recipes.
 
 ## Devnet

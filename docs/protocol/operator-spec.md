@@ -159,6 +159,16 @@ outside it in fact.
 | a channel: open, fund, redeem, close            | the operator surface, against a settlement backend                |
 | originating a packet outward                    | the operator surface                                              |
 
+**`fund` is the one row above whose reach depends on the chain.** It deposits into the
+_counterparty's_ on-chain balance — `TokenNetwork.setTotalDeposit` names the participant being
+credited and pulls the tokens from `_msgSender()`, the ERC-2771 forwarded signer, which for the
+connector's own direct call is itself — and `packages/solana-program`'s `Deposit` does not permit
+that: it requires the depositing participant to sign for their own side, so the Solana backend
+refuses the call rather than pretending. A node's own collateral behind its own Solana claims is
+deposited from
+that participant's wallet, directly against the deployed program; there is no operation for it here,
+on either backend, or on the settlement port. `open`, `redeem` and `close` reach both chains.
+
 **A runtime row can never take a key the configuration file owns.** A colliding write is refused
 outright, and on the next boot a runtime row whose key the file has since claimed is **deleted**, not
 shadowed — ownership is permanent rather than a precedence that flips back
