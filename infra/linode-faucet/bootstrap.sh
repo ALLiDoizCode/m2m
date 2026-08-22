@@ -24,6 +24,35 @@ set -a; . "$HERE/.env"; set +a
 COMPOSE=(docker compose -f infra/linode-faucet/docker-compose.faucet.yml)
 
 echo "==> [1/5] System packages"
+# Docker is UNPINNED BY DESIGN; do not "fix" this with VERSION= or --version.
+# Three reasons, each sufficient on its own:
+#
+#   1. The `command -v docker` guard means this only ever runs on a blank
+#      disk, so a pin could never change the daemon on a live box -- it would
+#      only decide what a REBUILD gets. Nothing on these boxes upgrades the
+#      host engine: there is no unattended-upgrades, no `apt-get upgrade`
+#      anywhere in this repo, and the label-scoped Watchtower recreates
+#      containers, never the engine under them. A reprovision is therefore the
+#      ONLY event that ever patches Docker here, and a pin would spend it
+#      reinstalling a frozen version forever.
+#   2. It would not pin what this script actually uses. get.docker.com's
+#      VERSION/--version applies to `docker-ce`, `docker-ce-cli` and
+#      `docker-ce-rootless-extras`; `containerd.io`, `docker-buildx-plugin`
+#      and `docker-compose-plugin` are installed unversioned -- and every step
+#      below is `docker compose`. A pin would read as reproducible in review
+#      while the runtime and the compose plugin still floated.
+#   3. It would add a hard failure at this point, ahead of firewall.sh and
+#      harden-ssh.sh: the script `exit 1`s when the requested version is not
+#      among the `apt-cache madison` results, Docker does not promise to keep
+#      old versions in its apt repo, and `set -e` would abort a rebuild with
+#      the box still open-ported and password-SSH-able.
+#
+# If a specific engine version ever does become load-bearing, it must arrive
+# with a bump owner: pin `docker-ce`/`docker-ce-cli` out of the apt repo this
+# script leaves configured (`apt-get install --only-upgrade docker-ce
+# docker-ce-cli containerd.io` is the upgrade path Docker's own docs give for
+# a convenience-script install), record the version in git, and name whoever
+# moves it. A pin with no bump story rots into a known-vulnerable daemon.
 if ! command -v docker >/dev/null 2>&1; then
   curl -fsSL https://get.docker.com | sh
 fi
