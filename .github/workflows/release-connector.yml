@@ -146,9 +146,10 @@ permissions:
   contents: write
   packages: write
   issues: write
-  # promote-to-fleet.yml's ordering gate reads the fleet-ops run's LOGS -- the
-  # only place a workflow_dispatch run's inputs survive. A called workflow is
-  # capped by its caller, so the scope has to be granted here too.
+  # promote-to-fleet.yml's ordering gate reads the fleet-ops run it is given --
+  # its `display_title`, and its LOGS for runs cut before fleet-ops.yml carried
+  # a `run-name:`. A called workflow is capped by its caller, so the scope has
+  # to be granted here too.
   actions: read
 
 concurrency:
