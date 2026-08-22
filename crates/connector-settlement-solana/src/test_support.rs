@@ -132,6 +132,14 @@ fn collect_program_sources(dir: &Path, out: &mut Vec<PathBuf>) -> Option<()> {
 /// where the v2.1 CLI's default tools line produces a differently-sized
 /// binary entirely (`packages/solana-program/deployments/devnet-public.md`,
 /// "Reproducible-build comparison").
+///
+/// The pin is applied by shelling through `tools/solana/build-sbf.sh` rather
+/// than spawning `cargo build-sbf` here, so this harness gets the same
+/// cold-machine bootstrap every other caller does: on a checkout that has
+/// never built the program, a bare pinned `cargo build-sbf` panics on a
+/// missing `$HOME/.cache/solana` long before it reaches the network. That
+/// script's header explains why, and it is also what refuses a build that
+/// silently fell back to the CLI's built-in toolchain line.
 fn ensure_program_built() -> bool {
     let fingerprint = program_source_fingerprint();
     let built_from_these_sources = fingerprint.is_some()
@@ -139,8 +147,7 @@ fn ensure_program_built() -> bool {
     if program_so_path().exists() && built_from_these_sources {
         return true;
     }
-    let status = Command::new("cargo")
-        .args(["build-sbf", "--tools-version", "v1.52"])
+    let status = Command::new(workspace_root().join("tools/solana/build-sbf.sh"))
         .current_dir(workspace_root().join("packages/solana-program"))
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())

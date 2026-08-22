@@ -216,11 +216,14 @@ jobs:
           echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
 
       # connector-settlement-solana's test harness builds packages/solana-program with
-      # `cargo build-sbf --tools-version v1.52` when target/deploy/payment_channel.so is
-      # not already in the cached `target` dir (issue #567) -- cache the platform-tools
+      # the pinned platform-tools line when target/deploy/payment_channel.so is not
+      # already in the cached `target` dir (issue #567) -- cache the platform-tools
       # install exactly like the solana-program job below does, so a workspace-cache miss
-      # doesn't also re-download the SBF toolchain (and hit the flaky network resolution
-      # panic, issue #105) inside a test run.
+      # doesn't also re-download the SBF toolchain inside a test run.
+      #
+      # A speed-up, not a dependency: the harness builds through
+      # tools/solana/build-sbf.sh, which bootstraps $HOME/.cache/solana from cold.
+      # A miss here costs a download, not a red job.
       - name: Cache Solana platform-tools
         uses: actions/cache@v4
         with:
@@ -295,6 +298,15 @@ jobs:
           path: ~/.cache/solana
           key: solana-platform-tools-${{ runner.os }}-v1.52
 
+      # `cargo test-sbf` is cargo-build-sbf underneath, and that reads
+      # $HOME/.cache/solana before creating it -- a cold cache is a panic, not a
+      # download (tools/solana/build-sbf.sh's header). This job cannot go through
+      # that script (it runs test-sbf, not build-sbf), so it pre-creates the
+      # directory the same way the reproducibility job below does. A no-op once
+      # the cache restores.
+      - name: Ensure platform-tools cache directory exists
+        run: mkdir -p ~/.cache/solana
+
       - name: Cache Solana program build
         uses: actions/cache@v4
         with:
@@ -350,38 +362,23 @@ jobs:
           sh -c "$(curl -sSfL https://release.anza.xyz/v3.1.12/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
 
-      # Caching the platform-tools dir keyed on the tools-version avoids the
-      # flaky network resolution panic (issue #105), same as the solana-program
-      # job above. mkdir -p defends against a cold cache (no prior key match):
-      # a from-scratch ~/.cache/solana directory with no `solana` subdirectory
-      # yet has been observed to make cargo-build-sbf panic on an internal
-      # unwrap before it ever reaches the network, rather than creating the
-      # directory itself -- pre-creating it is a no-op once the cache restores.
+      # Purely a speed-up now: both builds below go through
+      # tools/solana/build-sbf.sh, which creates $HOME/.cache/solana itself (the
+      # cold-cache panic this step's `mkdir -p` used to hand-patch) and retries
+      # the flaky version resolution (issue #105). A miss here costs a download,
+      # not a red job.
       - name: Cache Solana platform-tools
         uses: actions/cache@v4
         with:
           path: ~/.cache/solana
           key: solana-platform-tools-${{ runner.os }}-v1.52
 
-      - name: Ensure platform-tools cache directory exists
-        run: mkdir -p ~/.cache/solana
-
       # Quoted: an unquoted YAML scalar treats " #1 (clean)" as a comment, which
       # collapsed these four step names to "Build"/"Hash build" in the run log and
       # hid which of the two builds a failure came from.
       - name: "Build #1 (clean)"
         working-directory: packages/solana-program
-        run: |
-          n=0
-          until cargo build-sbf --tools-version v1.52; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "cargo build-sbf (build #1) failed after $n attempts"
-              exit 1
-            fi
-            echo "cargo build-sbf attempt $n failed (likely flaky tools-version resolution) — retrying in 5s..."
-            sleep 5
-          done
+        run: ../../tools/solana/build-sbf.sh
 
       # No working-directory here on purpose: packages/solana-program is a member of
       # the root Cargo workspace, so cargo build-sbf writes to the workspace-root
@@ -418,7 +415,7 @@ jobs:
 
       - name: "Build #2 (clean)"
         working-directory: packages/solana-program
-        run: cargo build-sbf --tools-version v1.52
+        run: ../../tools/solana/build-sbf.sh
 
       - name: "Hash build #2 and assert reproducibility"
         run: |
