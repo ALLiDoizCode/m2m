@@ -403,27 +403,25 @@ jobs:
         run: |
           sha256sum target/deploy/payment_channel.so | awk '{print $1}' > /tmp/build1.sha256
           echo "Build #1 sha256: $(cat /tmp/build1.sha256)"
-          # The SBF target dir's name depends on the platform-tools line:
-          # v1.44+ writes target/sbpf-solana-solana, older lines wrote
-          # target/sbf-solana-solana (rust_target_triple() in Agave's
-          # cargo-build-sbf). Remove whichever exists — and FAIL if neither
-          # does, because rm'ing a nonexistent dir is exactly how this gate
-          # was once a tautology: build #2 recompiled nothing and the two
-          # hashes were equal by construction (this PR's review).
-          removed=0
-          for dir in target/sbf-solana-solana target/sbpf-solana-solana; do
-            if [ -d "$dir" ]; then
-              rm -rf "$dir"
-              echo "Reset $dir"
-              removed=1
-            fi
-          done
-          if [ "$removed" -eq 0 ]; then
-            echo "::error::no SBF target dir found to reset — the toolchain's target triple"
-            echo "::error::changed again, and build #2 would recompile nothing. Add the new"
-            echo "::error::dir name here, or the reproducibility assertion proves nothing."
+          # build-sbf.sh builds in a cargo target directory of the pinned
+          # platform-tools line's own — see reason (4) in its header — so the
+          # directory to reset is now named, not guessed. It used to be
+          # guessed: cargo-build-sbf's own target triple is the CLI's
+          # (rust_target_triple() in Agave), sbf-solana-solana on the 2.1 line
+          # and sbpf-solana-solana on 3.x, so this step had to try both.
+          # FAIL if it is not there, because rm'ing a nonexistent dir is
+          # exactly how this gate was once a tautology: build #2 recompiled
+          # nothing and the two hashes were equal by construction.
+          line_dir="target/sbf-tools-$(tools/solana/build-sbf.sh --print-tools-version)"
+          if [ ! -d "$line_dir" ]; then
+            echo "::error::$line_dir does not exist — build #1 did not build where this step"
+            echo "::error::resets, so build #2 would recompile nothing and this job would"
+            echo "::error::assert reproducibility by construction. Reconcile this with"
+            echo "::error::tools/solana/build-sbf.sh's --target-dir."
             exit 1
           fi
+          rm -rf "$line_dir"
+          echo "Reset $line_dir"
           rm -rf target/deploy
 
       - name: "Build #2 (clean)"

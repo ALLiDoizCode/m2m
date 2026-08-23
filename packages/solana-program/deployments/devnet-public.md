@@ -108,7 +108,12 @@ Keypairs used for this deploy live outside the repo (scratchpad, not committed).
 or upgrade:
 
 ```bash
-cd packages/solana-program && cargo build-sbf
+# ../../../tools/solana/build-sbf.sh, never a bare `cargo build-sbf`: the bare
+# form takes the CLI's default platform-tools line, which is the 112,513-byte
+# binary the comparison table below calls the wrong one. `make
+# solana-deploy-devnet` (tools/solana/deploy.sh) does this whole block pinned
+# and is the supported path; these commands are what it runs.
+cd packages/solana-program && ../../../tools/solana/build-sbf.sh
 solana program deploy target/deploy/payment_channel.so \
   --program-id <program-keypair.json> \
   --upgrade-authority <deployer.json> \
