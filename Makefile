@@ -337,8 +337,35 @@ SOLANA_BIN := $(HOME)/.local/share/solana/install/active_release/bin
 solana-build:
 	cd packages/solana-program && PATH="$(SOLANA_BIN):$$PATH" $(CURDIR)/tools/solana/build-sbf.sh
 
-solana-test:
-	cd packages/solana-program && PATH="$(SOLANA_BIN):$$PATH" cargo test-sbf
+# Asked of the script that applies it rather than written out again, so this
+# target and tools/solana/build-sbf.sh cannot name different lines. Recursively
+# expanded (`=`, not `:=`) so `make help` does not shell out for it.
+PLATFORM_TOOLS_VERSION = $(shell $(CURDIR)/tools/solana/build-sbf.sh --print-tools-version)
+# Pinned, and after solana-build, for two reasons that are easy to miss because
+# `cargo test-sbf` looks like it only runs tests.
+#
+# It BUILDS: solana-program's tests call `ProgramTest::new`, which loads
+# target/deploy/payment_channel.so when one is there instead of running the
+# processor natively -- which is the whole reason this target is test-sbf and
+# not `cargo test`. Bare, it built that .so with whatever line the installed
+# CLI defaults to (v1.43 on the 2.1 line this repository installs to RUN the
+# program), so the on-chain program's own gate ran against a binary CI never
+# tests: ci.yml's solana-program job passes --tools-version v1.52. A local gate
+# on a different toolchain than the gate is not the gate.
+#
+# It also WRITES target/deploy/payment_channel.so, which
+# connector-settlement-solana's validator harness and infra/solana/entrypoint.sh
+# both load. Leaving a v1.43 binary there was this repository's one reachable
+# way to get two platform-tools lines into one cargo target directory -- see
+# reason (4) in tools/solana/build-sbf.sh's header for what that used to do.
+#
+# The solana-build dependency is not just ordering: a bare pinned
+# `cargo test-sbf` on a cold $HOME/.cache/solana hits exactly the panic
+# build-sbf.sh exists to prevent. Running it first bootstraps the cache and
+# installs the pinned line, after which the version check short-circuits
+# offline and this cannot flake.
+solana-test: solana-build
+	cd packages/solana-program && PATH="$(SOLANA_BIN):$$PATH" cargo test-sbf --tools-version $(PLATFORM_TOOLS_VERSION)
 
 solana-deploy-devnet:
 ifndef DEPLOYER_KEYPAIR
