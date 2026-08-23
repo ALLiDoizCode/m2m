@@ -114,9 +114,30 @@ every other infra-touching ticket in this repo's history records when it applies
    Both scripts refuse to overwrite an existing key/env line, so a re-run against a box that
    already has a treasury is a safe no-op error, not a silent second key. Neither one's tooling is
    installed by `bootstrap.sh` (it installs docker, git, jq, gettext-base, openssl, ufw, curl,
-   iptables and nothing else): install the Solana CLI (`solana`, `solana-keygen`) before running
-   `generate-solana-treasury.sh`, and `node` plus this repo's `node_modules` (`npm ci` at the repo
-   root — that is where `mina-signer` resolves from) before running `generate-mina-treasury.sh`.
+   iptables and nothing else), so install each by hand on the box first.
+
+   `generate-solana-treasury.sh` needs `solana` and `solana-keygen`. Install **v3.1.12** — not
+   `stable`, and not whatever a package manager offers:
+
+   ```sh
+   sh -c "$(curl -sSfL https://release.anza.xyz/v3.1.12/install)"
+   export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+   ```
+
+   That version is a choice, not a default. This repository installs exactly two Solana CLIs and
+   `crates/connector-settlement-solana/tests/solana_cli_pins.rs` records both with their reasons;
+   a case in that file fails the build if this line names a third. v3.1.12 is the one a human
+   following a runbook here installs — `docs/solana-deployment.md`'s prerequisites and
+   `devbox.json`'s `init_hook` already put exactly it on a person's PATH. The other pin, v2.1.21,
+   is held to the 2.1 line by two things that do not exist on this box: `solana-test-validator`'s
+   io_uring requirement and the workspace's `=2.1.0` crate pins. This box runs no validator and
+   compiles no Rust — the faucet service itself reaches Solana through `@solana/web3.js` and
+   `@solana/spl-token` inside its container and never shells out to the CLI, so the CLI is a
+   bringup tool only and nothing here needs it again after step 4.
+
+   `generate-mina-treasury.sh` needs `node` plus this repo's `node_modules` (`npm ci` at the repo
+   root — that is where `mina-signer` resolves from).
+
    Each script checks for its binaries up front and exits with a clear error rather than
    half-doing the work. A `.env` copied from `.env.example` already carries an _empty_
    `MINA_USDC_TREASURY_KEY=` line — which is why the overwrite check only trips on a non-empty

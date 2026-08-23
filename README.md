@@ -408,11 +408,18 @@ contract suite that every implementation, real and fake, is run against.
 Some integration tests need a real chain and **skip locally when it is absent, but panic when
 `CI` is set** — so the gate can never go green without one:
 
-| Needs                   | Get it with                                    | Tests                                                                                              |
-| ----------------------- | ---------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `anvil` (Foundry)       | `curl -L https://foundry.paradigm.xyz \| bash` | `connector-settlement-evm`, `connector-cli`, `connector-client-edge`, `connector-bin`              |
-| `forge`                 | same                                           | `connector-settlement-evm`'s `abi_provenance` (rebuilds the contracts and diffs the committed ABI) |
-| `solana-test-validator` | Solana CLI                                     | `connector-settlement-solana`                                                                      |
+| Needs                   | Get it with                                                      | Tests                                                                                              |
+| ----------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `anvil` (Foundry)       | `curl -L https://foundry.paradigm.xyz \| bash`                   | `connector-settlement-evm`, `connector-cli`, `connector-client-edge`, `connector-bin`              |
+| `forge`                 | same                                                             | `connector-settlement-evm`'s `abi_provenance` (rebuilds the contracts and diffs the committed ABI) |
+| `solana-test-validator` | `sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.21/install)"` | `connector-settlement-solana`                                                                      |
+
+That Solana CLI version is not `stable` and not arbitrary. This repository installs exactly two,
+for opposite reasons, and `crates/connector-settlement-solana/tests/solana_cli_pins.rs` records
+both with the evidence behind them: v2.1.21 wherever the program is **run**, because v3's
+`solana-test-validator` hard-requires io_uring and because the workspace pins the Solana crates to
+`=2.1.0`, and v3.1.12 wherever a deployed artifact is **built**. This row is the run side, so it is
+the same CLI `ci.yml`'s `rust-gate` installs — a local gate on a different one is not the gate.
 
 `make anvil-up` / `make solana-up` bring up the Docker profiles if you would rather not install
 them — but note that nothing under `crates/` dials them: every chain-backed test spawns its own
