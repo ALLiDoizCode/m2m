@@ -83,6 +83,44 @@
 #    the whole resolution offline and the pin is honoured deterministically.
 #    Resolution can only go wrong on the run that has to fetch it.
 #
+# 4. Build in a cargo target directory of this toolchain line's OWN, and name
+#    the output directory explicitly. This is the difference between "the pin
+#    was requested" and "the pin is what came out", and without it the two
+#    come apart silently and permanently.
+#
+#    Every `--tools-version` shares one cargo target directory
+#    (`target/sbf-solana-solana` under a 2.1.x CLI), and inside it the leaf
+#    cdylib is written to `release/deps/payment_channel.so` with NO
+#    per-toolchain suffix -- unlike every dependency, which cargo names
+#    `solana_program-<hash>.so` and keeps one copy per line. So two lines
+#    overwrite each other's only copy of the program, while each keeps its own
+#    `.fingerprint` entry saying it is up to date. Whichever line built last
+#    owns the file; every later build of the other line is "Fresh", never
+#    re-links, and cargo-build-sbf strips-and-copies the WRONG line's bytes
+#    into target/deploy. Measured on this source, 2026-08-23, one machine:
+#
+#      pinned v1.52 from clean      RECOMPILED  target/deploy = 109,416 bytes
+#      bare `cargo build-sbf`       RECOMPILED  target/deploy = 112,680 bytes
+#      pinned v1.52 again           Fresh       target/deploy = 112,680 bytes  <-- exit 0
+#      pinned v1.52 a third time    Fresh       target/deploy = 112,680 bytes
+#
+#    It never recovers: only editing the program's source forces the leaf to
+#    re-link, and until someone does, `make solana-build`, `tools/solana/
+#    deploy.sh` and connector-settlement-solana's validator harness all take a
+#    v1.43 binary that no provenance record, size figure or reproducibility
+#    gate here describes. Check (3) cannot see it, because the pinned
+#    toolchain IS installed -- it simply was not the one that produced these
+#    bytes.
+#
+#    Splitting the target directory per line removes the shared file, so the
+#    outcome is correct by construction rather than checked afterwards, which
+#    also means it holds for a line this repository has not thought of. The
+#    price is one dependency build per line; there is normally one line.
+#    `--sbf-out-dir` is then passed explicitly, because cargo-build-sbf
+#    defaults it to <target-dir>/deploy and everything downstream --
+#    deploy.sh, the harness, infra/solana/entrypoint.sh -- reads the
+#    workspace's `target/deploy`.
+#
 set -euo pipefail
 
 # The one platform-tools line every artifact statement in this repo is made
@@ -91,6 +129,15 @@ set -euo pipefail
 PLATFORM_TOOLS_VERSION="${PLATFORM_TOOLS_VERSION:-v1.52}"
 ATTEMPTS="${SBF_BUILD_ATTEMPTS:-3}"
 
+# Answers "which platform-tools line does this repository build with" from the
+# script that applies it, so a caller needing the literal -- the Makefile's
+# solana-test target -- does not keep a second copy of it. Before anything
+# else: it must not build, install or create directories.
+if [[ "${1:-}" == "--print-tools-version" ]]; then
+    echo "$PLATFORM_TOOLS_VERSION"
+    exit 0
+fi
+
 # cargo-build-sbf reads $HOME directly rather than XDG_CACHE_HOME, so this is
 # the path it will use, on Linux and macOS alike.
 cache_dir="$HOME/.cache/solana"
@@ -98,13 +145,51 @@ pinned_toolchain="$cache_dir/$PLATFORM_TOOLS_VERSION/platform-tools"
 
 mkdir -p "$cache_dir"
 
+# Where cargo would put things, resolved the way cargo resolves it, because
+# both paths below have to agree with what the rest of the repository reads.
+# `locate-project --workspace` rather than a path relative to this script:
+# the caller chose the directory (see the header), and a member crate's build
+# output lands in the WORKSPACE root's target/, not its own.
+target_root="${CARGO_TARGET_DIR:-$(dirname "$(cargo locate-project --workspace --message-format plain)")/target}"
+# One cargo target directory per platform-tools line -- reason (4) above.
+line_target_dir="$target_root/sbf-tools-$PLATFORM_TOOLS_VERSION"
+# ...but one output directory for all of them, the one everything downstream
+# reads.
+sbf_out_dir="$target_root/deploy"
+
+# The other half of (4). Splitting the target directory stops this line from
+# INHERITING another's bytes, but not from failing to overwrite them:
+# cargo-build-sbf's strip-and-copy into --sbf-out-dir is skipped when the
+# destination is newer than the artifact it would copy (`file_older_or_missing`
+# in Agave's cargo-build-sbf), and a cargo run that relinks nothing leaves this
+# line's artifact at whatever mtime it last had. So a bare `cargo build-sbf`
+# that wrote target/deploy a second ago still wins, and the pinned build exits
+# 0 having copied nothing:
+#
+#   target/sbf-tools-v1.52/.../release/payment_channel.so  17:58:58  (this line)
+#   target/deploy/payment_channel.so                       17:59:12  (v1.43's)
+#
+# Dating the destination back is enough, and it is the cheap side of the
+# comparison to move: touching this line's own artifact instead makes cargo
+# relink the cdylib on every run (9.4s against 1.7s here), because that file
+# is hard-linked into `deps/` and is cargo's own build output. The destination
+# is not cargo's. Only the timestamp changes -- no file is removed and no byte
+# is rewritten, which matters because several tests reach this script
+# concurrently (connector-settlement-solana's harness calls it per test) and
+# one of them may be loading that .so into a validator right now.
+if compgen -G "$sbf_out_dir/*.so" > /dev/null; then
+    touch -t 200001010000 "$sbf_out_dir"/*.so
+fi
+
 attempt=0
 while true; do
     attempt=$((attempt + 1))
 
     # ${1+"$@"} rather than "$@": under `set -u`, bash 3.2 -- which is still
     # what /bin/bash is on macOS -- treats an empty "$@" as an unbound variable.
-    if cargo build-sbf --tools-version "$PLATFORM_TOOLS_VERSION" ${1+"$@"}; then
+    # `-- --target-dir` last: everything after `--` is handed to `cargo build`.
+    if cargo build-sbf --tools-version "$PLATFORM_TOOLS_VERSION" \
+        --sbf-out-dir "$sbf_out_dir" ${1+"$@"} -- --target-dir "$line_target_dir"; then
         if [[ -d "$pinned_toolchain" ]]; then
             exit 0
         fi

@@ -71,7 +71,9 @@ disposable chain per test** and tears it down on drop:
 - `connector_settlement_evm::test_support::Anvil::spawn` forks `anvil` on its own port.
 - `connector_settlement_solana::test_support::SolanaValidator::spawn` forks
   `solana-test-validator` and loads `payment_channel.so` into genesis at a fixed
-  program id, rebuilding the `.so` first if the sources changed.
+  program id, rebuilding the `.so` first unless it is byte-for-byte the one the
+  harness itself last built from these sources — `target/deploy` is a drop box
+  `make solana-test` and a hand-run `cargo build-sbf` write to as well.
 
 Nothing under `crates/` dials `localhost:8545` or `localhost:8899`. Starting
 `make anvil-up` before `cargo test` changes nothing. The containers exist for
