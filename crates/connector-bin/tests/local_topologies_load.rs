@@ -55,6 +55,15 @@ const MIXED_COMPOSE: &str = include_str!("../../../local/mixed-chain/compose.yml
 /// anything a reader could trace back.
 const KEYS_SCRIPT: &str = include_str!("../../../local/keys.sh");
 
+/// The chain compose every topology here is merged ON TOP OF, and the Makefile
+/// that merges them. `local/<topology>/compose.yml` is only half of what
+/// `make local-up` runs: the `anvil` and `solana-validator` services come from
+/// the repository-root file, and one property of the first of those belongs to
+/// this file's subject rather than to any single topology (see
+/// `the_anvil_service_never_writes_the_source_tree_as_root`).
+const ROOT_COMPOSE: &str = include_str!("../../../docker-compose.yml");
+const MAKEFILE: &str = include_str!("../../../Makefile");
+
 /// Every committed config under `local/`, with the path a failure should name.
 /// Written out rather than globbed so a new topology that forgets its own test
 /// still has to touch this list.
@@ -827,6 +836,61 @@ fn the_mixed_chain_configs_and_their_compose_file_agree() {
          program {program} -- a claim journal cannot tell an open channel from a derived \
          address nobody created"
     );
+}
+
+// ─── the chains every topology runs on ───────────────────────────────────────
+
+/// The `anvil` service bind-mounts `./packages/contracts` READ-WRITE, and
+/// `forge` writes four things into it: `out/`, `cache/`, `broadcast/` and — on
+/// a checkout whose git submodules are not initialized — `lib/`. So the uid
+/// that container runs as decides who owns the developer's source tree once a
+/// topology has been brought up, and running it as root cost two failures that
+/// each looked like something else entirely:
+///
+///   * The artefacts came back root-owned, so the next `cargo test` could not
+///     rebuild them (`abi_provenance` runs a real `forge build` of
+///     `packages/contracts`) and the developer could not `rm -rf` them to
+///     recover without sudo. Running `local/` broke the unit-test gate, with
+///     nothing linking the two.
+///   * On a git worktree — or any checkout where `git submodule update --init`
+///     has not run — `lib/forge-std` and `lib/openzeppelin-contracts` exist
+///     and are EMPTY, owned by the developer. `forge install` clones into them
+///     and git refuses as root ("detected dubious ownership in repository at
+///     '/contracts/lib/forge-std'"), so the deploy compiled against absent
+///     OpenZeppelin sources and every topology failed bring-up with
+///     `container ... is unhealthy` and nothing else.
+///
+/// Both are the same root cause and have the same fix: run as the owner of the
+/// mount. That takes BOTH halves — the compose default is only reached by a
+/// hand-run `docker compose`, and everything under `local/` comes through the
+/// Makefile — so both are asserted here.
+#[test]
+fn the_anvil_service_never_writes_the_source_tree_as_root() {
+    for line in ROOT_COMPOSE.lines() {
+        let line = line.trim();
+        assert_ne!(
+            line, "user: root",
+            "docker-compose.yml runs a service as root. The `anvil` service bind-mounts \
+             ./packages/contracts read-write, so root there leaves the developer artefacts \
+             they cannot rebuild and cannot delete."
+        );
+    }
+    assert!(
+        ROOT_COMPOSE.contains("user: '${HOST_UID:-1000}:${HOST_GID:-1000}'"),
+        "docker-compose.yml's anvil service must run as the invoking user, so that what \
+         `forge` writes into the bind-mounted ./packages/contracts belongs to whoever ran it"
+    );
+    for export in [
+        "export HOST_UID := $(shell id -u)",
+        "export HOST_GID := $(shell id -g)",
+    ] {
+        assert!(
+            MAKEFILE.contains(export),
+            "the Makefile must `{export}` -- without it every `make local-*`, `make anvil-up` \
+             and `make infra-up` falls back to the compose default, which is right only for a \
+             uid-1000 developer and wrong for a CI runner"
+        );
+    }
 }
 
 // ─── every config ────────────────────────────────────────────────────────────

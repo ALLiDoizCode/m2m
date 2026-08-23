@@ -34,11 +34,44 @@ services:
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   anvil:
     image: ghcr.io/foundry-rs/foundry:latest
-    # Run as root: the foundry image's default non-root user cannot write
-    # forge's out/cache/broadcast dirs into the bind-mounted ./packages/contracts
-    # when the host dir is owned by a different UID (e.g. the CI runner) —
-    # `forge script` then fails with `"/contracts/out": Permission denied`. See #104.
-    user: root
+    # Run as the user who INVOKED make, not as root and not as the image's own
+    # `foundry` user. This service bind-mounts ./packages/contracts read-write
+    # and `forge` writes four things into it — out/, cache/, broadcast/ and, on
+    # a checkout whose submodules are not initialized, lib/ — so whoever this
+    # container is decides who owns the developer's source tree afterwards.
+    #
+    # `user: root` was the previous answer, for the reason #104 records: the
+    # image's baked-in uid 1000 cannot write the mount when the host dir
+    # belongs to a different uid (a CI runner is 1001), and `forge script` then
+    # dies with `"/contracts/out": Permission denied`. Running as the OWNER of
+    # the mount solves that without handing root a writable path into the tree,
+    # and root cost two distinct failures that both looked like something else:
+    #
+    #   * The artefacts came back root-owned, so the next `cargo test` could
+    #     not rebuild them — `abi_provenance` runs a real `forge build` of
+    #     packages/contracts — and the developer could not even `rm -rf` the
+    #     directory to recover without sudo. Running the local environment
+    #     broke the unit-test gate, with nothing connecting the two.
+    #   * On a git worktree, or any checkout where `git submodule update
+    #     --init` has not run, lib/forge-std and lib/openzeppelin-contracts
+    #     exist and are EMPTY, owned by the developer. `forge install` clones
+    #     into them and git refuses as root — "detected dubious ownership in
+    #     repository at '/contracts/lib/forge-std'" — so the self-heal below
+    #     never completed, the deploy compiled against absent OpenZeppelin
+    #     sources, and every topology under local/ failed bring-up with
+    #     `container ... is unhealthy` and no other clue.
+    #
+    # HOST_UID/HOST_GID are exported by the Makefile (`id -u` / `id -g`), so
+    # every `make anvil-up` / `make infra-up` / `make local-*` gets this right.
+    # A hand-run `docker compose up` falls back to 1000:1000, the image's own
+    # user and the common single-developer case.
+    user: '${HOST_UID:-1000}:${HOST_GID:-1000}'
+    environment:
+      # An arbitrary uid has no /etc/passwd entry in this image, so $HOME would
+      # resolve to `/`, which is not writable. forge needs a writable home: it
+      # downloads the solc pinned by foundry.toml into ~/.svm on every start
+      # (the image ships none) and git wants somewhere for its config.
+      HOME: /tmp
     profiles:
       - evm
       - app # issue #221 — reused by the app profile
@@ -62,21 +95,58 @@ services:
         # DeployLocal.s.sol imports forge-std + openzeppelin-contracts from
         # lib/ (git submodules). In CI the checkout fetches them via
         # `submodules: recursive`; for local dev / git worktrees where the
-        # submodules may not be initialized, fall back to `forge install` so the
-        # deploy is self-healing and the stack never comes up without the USDC
-        # token + TokenNetworkRegistry. See issue #104.
-        if [ ! -f lib/forge-std/src/Script.sol ] || [ ! -f lib/openzeppelin-contracts/contracts/access/Ownable.sol ]; then
-          echo "Foundry libs missing — running 'forge install'..."
-          forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts --no-git || forge install
-        fi
+        # submodules may not be initialized, install them here so the deploy is
+        # self-healing and the stack never comes up without the USDC token +
+        # TokenNetworkRegistry. See issue #104.
+        #
+        # ONE LIB AT A TIME, and each one repaired rather than topped up. A
+        # single `forge install a b` fails as a unit, so a half-installed lib/
+        # took the other lib down with it; and `forge install` into a directory
+        # that already holds a partial clone errors instead of fixing it, which
+        # is exactly the state a previously-failed run leaves behind. Removing
+        # the directory first is what makes this idempotent on a broken tree as
+        # well as on a clean one — and it is only possible at all because this
+        # container runs as the owner of the mount (see `user:` above).
+        install_lib() {
+          if [ -f "$$3" ]; then
+            return 0
+          fi
+          echo "Foundry lib $$1 is missing — installing $$2..."
+          rm -rf "$$1"
+          forge install "$$2" --no-git
+        }
+        install_lib lib/forge-std foundry-rs/forge-std \
+          lib/forge-std/src/Script.sol
+        install_lib lib/openzeppelin-contracts OpenZeppelin/openzeppelin-contracts \
+          lib/openzeppelin-contracts/contracts/access/Ownable.sol
 
         # Deploy must succeed: the faucet and the EVM settlement tests depend on
         # the USDC token + TokenNetworkRegistry existing at deterministic
         # addresses. A silent failure here (the old `|| echo non-fatal`) is what
         # left the faucet reporting tokenReady:true with no token on-chain (#104).
-        forge script script/DeployLocal.s.sol:DeployLocalScript --rpc-url http://localhost:8545 --broadcast --skip-simulation
+        #
+        # The success line is CONDITIONAL, which it was not. `sh -c` has no
+        # `set -e` here — it cannot have one, the whole point of the tail of
+        # this script is to keep anvil in the foreground — so a failed deploy
+        # printed "Anvil ready with contracts deployed!" and then served an
+        # empty chain forever. The healthcheck below still caught it, but what
+        # a developer read in the log said the opposite of what had happened.
+        if forge script script/DeployLocal.s.sol:DeployLocalScript \
+             --rpc-url http://localhost:8545 --broadcast --skip-simulation; then
+          echo "Anvil ready with contracts deployed!"
+        else
+          echo "============================================================"
+          echo "CONTRACT DEPLOY FAILED. This anvil is serving an EMPTY chain:"
+          echo "there is no MockERC20 USDC and no TokenNetworkRegistry on it,"
+          echo "so this container will never pass its healthcheck and nothing"
+          echo "that settles can start against it. The forge output above is"
+          echo "the reason; the container stays up so it can be read."
+          echo "============================================================"
+        fi
 
-        echo "Anvil ready with contracts deployed!"
+        # Anvil stays in the foreground either way. Exiting here would let
+        # `restart: unless-stopped` crash-loop the container, which replaces a
+        # readable log with a scrolling one.
         wait $$ANVIL_PID
     volumes:
       - ./packages/contracts:/contracts
