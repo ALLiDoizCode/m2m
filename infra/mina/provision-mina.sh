@@ -45,7 +45,7 @@ PUBLIC_FAUCET="https://faucet.minaprotocol.com"
 MIN_MINA_NANO=5000000000
 
 # Resolve token + admin-contract addresses (env wins, else committed deploy
-# result, else endpoints.json — the same fallback order as devnet.sh).
+# result, else endpoints.json).
 TOKEN_ADDR="${MINA_USDC_TOKEN:-}"
 ADMIN_CONTRACT="${MINA_USDC_ADMIN_CONTRACT:-}"
 if command -v jq >/dev/null 2>&1; then

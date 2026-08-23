@@ -185,29 +185,24 @@ const PROGRAM_MANIFEST: &str = include_str!("../../../packages/solana-program/Ca
 /// allowlist, and for the same reason: a blanket rule with no escape hatch
 /// gets deleted rather than amended.
 ///
-/// `infra/linode/bootstrap.sh` tracks `release.anza.xyz/stable`. It provisions
-/// the **self-hosted chain box** -- anvil, `solana-test-validator`, faucet,
-/// nginx -- not a connector box: `infra/linode-relay/bootstrap.sh` and
-/// `infra/linode-store/bootstrap.sh`, which do provision the boxes serving
-/// devnet, install no Solana CLI at all. That chain box was deleted in the
-/// public-chain cutover (`44b15bdc`, 2026-07-19, toon-meta#374); its own
-/// README and `endpoints.json` are banner-marked historical, and its sole
-/// caller -- `.github/workflows/devnet-deploy.yml`, `workflow_dispatch` only
-/// and behind the reviewer-gated `devnet` environment -- has not run since
-/// 2026-06-23, four weeks before the cutover.
+/// It is EMPTY, and that is the current answer rather than the absence of
+/// one. Its single entry was `infra/linode/bootstrap.sh`, which tracked
+/// `release.anza.xyz/stable` while provisioning the **self-hosted chain box**
+/// -- anvil, `solana-test-validator`, faucet, nginx -- a box that was deleted
+/// in the public-chain cutover (`44b15bdc`, 2026-07-19, toon-meta#374). This
+/// guard's own record of that ("Pinning it is a separate decision, and a
+/// smaller one than deleting the box's provisioning outright") is what the
+/// larger decision then took: the provisioning and its sole caller,
+/// `.github/workflows/devnet-deploy.yml`, are gone, so there is no unpinned
+/// install left to excuse. `infra/linode-relay/bootstrap.sh` and
+/// `infra/linode-store/bootstrap.sh`, which provision the boxes that DO serve
+/// devnet, install no Solana CLI at all.
 ///
-/// It does **build**: line 67 runs `make solana-build`, and
-/// `docker-compose.yml` bind-mounts the resulting `payment_channel.so` into
-/// that box's validator at genesis, so the host CLI decides the program bytes
-/// that box runs. What it does not do is gate or ship anything -- no artifact
-/// this repository releases passes through it. Pinning it is therefore a
-/// separate decision from this one, and a smaller one than deleting the box's
-/// provisioning outright. Were it pinned, [`DEPLOY_PATH_CLI`] is what this
-/// file's own taxonomy demands: it is the CLI that builds a deployed program.
-/// Note also that the install sits behind `if ! command -v solana`, so a pin
-/// here only ever binds a blank disk -- it can never change the CLI on a box
-/// that already has one.
-const UNPINNED_BY_DESIGN: &[&str] = &["infra/linode/bootstrap.sh"];
+/// The escape hatch stays because a blanket rule with no escape hatch gets
+/// deleted rather than amended. An entry added here needs the same thing the
+/// deleted one had: a named reason why the install decides nothing this
+/// repository ships.
+const UNPINNED_BY_DESIGN: &[&str] = &[];
 
 /// This file's own path, repo-relative. The walk below skips it: the prose
 /// above quotes the install URL in order to explain it, which would otherwise
@@ -351,7 +346,6 @@ fn the_repository_installs_the_solana_cli_from_exactly_the_known_places() {
         "README.md",
         "devbox.json",
         "docs/operators/faucet-box-bringup.md",
-        "infra/linode/bootstrap.sh",
     ]);
     let actual: BTreeSet<String> = solana_cli_installs().into_keys().collect();
     let actual: BTreeSet<&str> = actual.iter().map(String::as_str).collect();
