@@ -3,6 +3,17 @@
 
 .PHONY: help build test lint clean local-build local-up local-down local-logs local-rehearse local-verify rust-build rust-test anvil-up anvil-down anvil-logs solana-up solana-down solana-logs solana-mint-usdc solana-build solana-test solana-deploy-devnet infra-up infra-down mina-build mina-test mina-deploy-devnet
 
+# Who the `anvil` compose service runs as. That service bind-mounts
+# ./packages/contracts READ-WRITE and forge writes out/, cache/, broadcast/ and
+# — on a checkout whose submodules are not initialized — lib/ into it, so the
+# container's uid decides who owns the developer's source tree afterwards. As
+# root it left artefacts the developer could not rebuild or even delete, which
+# surfaced later and elsewhere as a failing `cargo test` (`abi_provenance`
+# reruns `forge build`). Exported so every `docker compose` this Makefile runs
+# picks it up; see the `user:` key in docker-compose.yml for the long version.
+export HOST_UID := $(shell id -u)
+export HOST_GID := $(shell id -g)
+
 # Default target - show help
 help:
 	@echo "Connector Development Commands"
@@ -226,7 +237,25 @@ local-up: local-build solana-build
 		echo "       Known topologies: solo two-hop mixed-chain."; \
 		exit 1; \
 	}
-	$(LOCAL_COMPOSE) up -d --wait anvil solana-validator
+	@$(LOCAL_COMPOSE) up -d --wait anvil solana-validator || { \
+		echo ""; \
+		echo "ERROR: the chains did not come up. Compose's own message is above:"; \
+		echo "         'address already in use'  -- something else already holds 8545 or"; \
+		echo "                                      8899. 'ss -tlnp | grep 8545' names it."; \
+		echo "         'is unhealthy'            -- the container started but never passed"; \
+		echo "                                      its gate. anvil's gate is 'the"; \
+		echo "                                      TokenNetworkRegistry has code', so an"; \
+		echo "                                      unhealthy anvil is a failed deploy."; \
+		echo "       Whatever did start is still running; 'make local-down' clears it."; \
+		anvil_log=$$($(LOCAL_COMPOSE) logs --no-color --no-log-prefix anvil 2>/dev/null \
+			| grep -vE '^(eth_|net_|web3_|anvil_|debug_|trace_|txpool_)' | tail -40); \
+		if [ -n "$$anvil_log" ]; then \
+			echo ""; \
+			echo "--- anvil's log, with the per-request RPC noise stripped ---"; \
+			echo "$$anvil_log"; \
+		fi; \
+		exit 1; \
+	}
 	$(MAKE) solana-mint-usdc
 	cargo build --release -p connector
 	./local/keys.sh $(LOCAL_TOPOLOGY)
@@ -263,12 +292,33 @@ local-rehearse:
 # The logs are dumped HERE rather than in a workflow step, because by the time
 # a workflow step runs the containers are already gone -- `local-down` removes
 # them, and it has to run on the failure path too or CI leaks a stack.
+#
+# BOTH failure paths, which is the fix for a gap this target shipped with:
+# `local-up` was a plain prerequisite line, so a bring-up that failed aborted
+# the recipe before either the log dump or `local-down` could run. The stack
+# was left standing -- containers, network and named volumes -- and the entire
+# diagnosis a developer got was compose's own `container ... is unhealthy`.
+# Measured, not reasoned about: an anvil whose contract deploy had failed hung
+# `local-up` for three minutes and then leaked two running chains.
+#
+# The dump drops two per-request noise streams -- the validator's ~30/sec slot
+# line and anvil's one line per RPC method -- because `--tail` is applied PER
+# SERVICE and those two fill their whole allowance with nothing. Filtering them
+# cannot hide a failure: the exit status is the verdict here, not the log.
 local-verify:
-	$(MAKE) local-up
-	@$(MAKE) local-rehearse; status=$$?; \
+	@$(MAKE) local-up; status=$$?; \
+	if [ $$status -eq 0 ]; then \
+		$(MAKE) local-rehearse; status=$$?; \
+		if [ $$status -ne 0 ]; then \
+			echo "=== rehearsal FAILED (exit $$status) -- logs follow ==="; \
+		fi; \
+	else \
+		echo "=== bring-up FAILED (exit $$status) -- logs follow ==="; \
+	fi; \
 	if [ $$status -ne 0 ]; then \
-		echo "=== rehearsal FAILED (exit $$status) -- logs follow ==="; \
-		$(LOCAL_COMPOSE) logs --no-color --tail=200 || true; \
+		$(LOCAL_COMPOSE) logs --no-color --tail=200 2>/dev/null \
+			| grep -vE '\| *(Processed Slot:|eth_|net_|web3_|anvil_|debug_|trace_|txpool_)' \
+			|| true; \
 	fi; \
 	$(MAKE) local-down; \
 	exit $$status
