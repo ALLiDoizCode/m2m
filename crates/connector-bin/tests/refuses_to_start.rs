@@ -426,6 +426,18 @@ channel_id = "0x{channel}"
 counterparty = "0x00000000000000000000000000000000000000aa"
 chain_id = 8453
 token_network_address = "0x00000000000000000000000000000000000000bb"
+
+# An EVM client channel needs `[settlement.evm]` too (issue #1138), and
+# this test is about the other requirement -- so it carries one, or the
+# refusal it asserts would never be the one reached.
+[settlement.evm]
+rpc_url = "http://127.0.0.1:8545"
+contract_address = "0x1234567890123456789012345678901234567890"
+token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "{key_file}"
 "#,
         key_file = key_file.path().display(),
         channel = "ab".repeat(32),
@@ -438,6 +450,50 @@ token_network_address = "0x00000000000000000000000000000000000000bb"
     assert!(
         stderr.contains("state_dir"),
         "expected the error to name the field to add, got: {stderr}"
+    );
+}
+
+/// The `[[client_channels]]` half of issue #1138's one rule, at the level
+/// an operator meets it: the binary refuses to start, names the table to
+/// add, and says why. The same config with `[settlement.evm]` present is
+/// the test above, which reaches a different refusal entirely.
+///
+/// A declared channel is deliberately usable with no *chain connection* --
+/// it is answered from memory, never resolved, and exempt from the deposit
+/// cap (issue #646). That latitude is over how much a counterparty may
+/// spend on a channel this node is a participant of. Without
+/// `[settlement.evm]` this node has no EVM address to be that participant,
+/// so it would serve paid writes for claims nothing it holds could redeem.
+#[test]
+fn exits_non_zero_when_an_evm_client_channel_has_no_evm_settlement_table() {
+    let key_file = write_raw_key_file();
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let config_file = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_file}"
+
+[[client_channels]]
+channel_id = "0x{channel}"
+counterparty = "0x00000000000000000000000000000000000000aa"
+chain_id = 8453
+token_network_address = "0x00000000000000000000000000000000000000bb"
+"#,
+        key_file = key_file.path().display(),
+        state_dir = state_dir.path().display(),
+        channel = "ab".repeat(32),
+    ));
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[settlement.evm]") && stderr.contains("on-chain participant"),
+        "expected the error to name the table to add and why, got: {stderr}"
     );
 }
 

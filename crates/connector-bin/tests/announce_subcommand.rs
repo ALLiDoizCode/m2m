@@ -515,6 +515,19 @@ addresses = ["g.test.ario"]
 http_endpoint = "https://node.test.example/ilp"
 btp_endpoint = "wss://node.test.example/ilp/btp"
 publish_to = "g.test.relay"
+
+# An EVM `[[peer_channels]]` row needs `[settlement.evm]` (issue #1138):
+# a peer claim is redeemed by the channel's on-chain participant, and that
+# address is this table's key -- the same key ADR 0024's outbound peer
+# claims are signed with, which is what this fixture is about.
+[settlement.evm]
+rpc_url = "http://127.0.0.1:8545"
+contract_address = "0x1234567890123456789012345678901234567890"
+token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "{key_file}"
 "#,
         state_dir = state_dir.display(),
         key_file = key_path.display(),

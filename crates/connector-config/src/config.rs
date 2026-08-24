@@ -16,7 +16,9 @@ use crate::peer::{parse_peer_exposure, resolve_peers, PeerConfig, PeerExposure, 
 use crate::peer_channel::{resolve_peer_channels, PeerChannelConfig, RawPeerChannel};
 use crate::route::{resolve_routes, PeerRouteConfig, RawChild, RawRoute, StaticRoute};
 use crate::secret::{RawSignerConfig, SecretLocation};
-use crate::settlement::{resolve_settlement, RawSettlementSection, SettlementConfig};
+use crate::settlement::{
+    resolve_settlement, RawSettlementSection, SettlementConfig, SettlementTables,
+};
 
 /// The config file's shape exactly as written -- convenience forms
 /// (`children`) intact, nothing yet validated. `deny_unknown_fields`
@@ -314,22 +316,24 @@ impl Config {
         let peer_expose = parse_peer_exposure(raw.peer_expose)?;
         let peer_allow_plaintext_endpoints = raw.peer_allow_plaintext_endpoints.unwrap_or(false);
         let peers = resolve_peers(raw.peers, peer_expose, peer_allow_plaintext_endpoints)?;
-        // Resolved before `[[peer_channels]]` rather than beside the other
-        // money tables below, because a Solana peer channel's settlement
-        // program is no longer a fact of its own row -- it is read from
-        // here (issue #1128), the same way `[[client_channels]]`'s Solana
-        // shape has read it since #1082. One program is the only program a
-        // node can submit a redemption to, so it is the only program a peer
-        // channel can be judged under; a row that named its own could
-        // disagree, and a node whose row and table disagreed accepted peer
-        // claims it could never redeem.
+        // Resolved before every channel table rather than beside the other
+        // money tables below, for two reasons that are now one rule.
+        //
+        // A Solana channel's settlement program is no longer a fact of its
+        // own row -- it is read from here (issues #1082, #1128), and one
+        // program is the only program a node can submit a redemption to.
+        //
+        // And a channel row whose chain has no `[settlement.<chain>]` table
+        // at all is refused by name (issue #1138): that table is where this
+        // node's on-chain identity on that chain comes from, so without it
+        // the node cannot be a participant of any channel there and every
+        // claim the row would admit is carriage rendered for money it can
+        // never collect. `SettlementTables` states the rule once, and all
+        // four channel tables -- peer, client, pay, on either chain --
+        // answer to it.
         let settlements = resolve_settlement(raw.settlement)?;
-        let solana_settlement_program_id =
-            settlements.iter().find_map(|settlement| match settlement {
-                SettlementConfig::Solana(solana) => Some(solana.program_id()),
-                SettlementConfig::Evm(_) => None,
-            });
-        let peer_channels = resolve_peer_channels(raw.peer_channels, solana_settlement_program_id)?;
+        let settlement_tables = SettlementTables::of(&settlements);
+        let peer_channels = resolve_peer_channels(raw.peer_channels, settlement_tables)?;
         for peer_route in &peer_routes {
             let Some(peer) = peers.iter().find(|peer| peer.id() == peer_route.peer_id()) else {
                 return Err(ConfigError::UnknownPeerId {
@@ -382,7 +386,7 @@ impl Config {
         }
         let operator = resolve_operator(raw.operator)?;
         let announce = resolve_announce(raw.announce)?;
-        let client_channels = resolve_client_channels(raw.client_channels)?;
+        let client_channels = resolve_client_channels(raw.client_channels, settlement_tables)?;
         let client_identities = resolve_client_identities(raw.client_identities)?;
         // Namespace disjointness (`peer-carriage-spec.md` §1.8). Peer and
         // client watermarks are separate records by design, which is only
@@ -425,9 +429,6 @@ impl Config {
         // refusing at load what would otherwise be a packet-time surprise
         // on the money path (ADR 0009).
         let pay_channels = resolve_pay_channels(raw.pay_channels, peer_allow_plaintext_endpoints)?;
-        let evm_settlement = settlements
-            .iter()
-            .any(|settlement| matches!(settlement, SettlementConfig::Evm(_)));
         for pay_channel in &pay_channels {
             // A row for a peering that does not exist pays nobody -- the
             // same reasoning `PeerChannelOrphaned` applies, and the same
@@ -466,7 +467,7 @@ impl Config {
             // under would reach the packet path and fail every forward it
             // was configured for, which is the failure ADR 0009 puts at
             // load instead.
-            if !evm_settlement {
+            if !settlement_tables.evm() {
                 return Err(ConfigError::PayChannelWithoutEvmSettlement {
                     peer_id: pay_channel.peer_id().to_string(),
                 });
@@ -1018,10 +1019,38 @@ handler_url = "http://localhost:5000"
     const PEER_KEY: &str = "0x2222222222222222222222222222222222222222";
     const PEER_TOKEN_NETWORK: &str = "0x3333333333333333333333333333333333333333";
 
+    /// An `[settlement.evm]` table and its key, in the shape a channel row
+    /// on this chain now requires (issue #1138): that table is where this
+    /// node's EVM address comes from, and a channel row names it as this
+    /// node's on-chain participant. Written once here rather than inline
+    /// in each fixture, since no test below is *about* how a settlement
+    /// table parses.
+    fn evm_settlement(key_path: &Path) -> String {
+        format!(
+            r#"
+[settlement.evm]
+rpc_url = "http://127.0.0.1:8545"
+contract_address = "0x1234567890123456789012345678901234567890"
+token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "{key_file}"
+"#,
+            key_file = key_path.display(),
+        )
+    }
+
     /// A `[[peers]]`/`[[peer_channels]]` pair in its correct shape, the
     /// one an operator should be able to copy. Every negative test below
     /// spoils exactly one thing about it, so what each error is *about* is
     /// the diff between it and this.
+    ///
+    /// It carries `[settlement.evm]` because since issue #1138 an EVM
+    /// channel row without one does not load: a peer claim is redeemed by
+    /// the channel's on-chain participant and that address is this table's
+    /// key, so a peering bound to an EVM channel on a node with no EVM
+    /// settlement is bound on paper only.
     fn peering_config(key_path: &Path, state_dir: &Path, spoil: &str) -> String {
         let base = format!(
             r#"
@@ -1031,7 +1060,7 @@ state_dir = "{state_dir}"
 
 [signer]
 key_file = "{key_file}"
-
+{settlement}
 [[peers]]
 id = "store"
 endpoint = "wss://store.example:443/btp"
@@ -1052,6 +1081,7 @@ price = 1000
 "#,
             state_dir = state_dir.display(),
             key_file = key_path.display(),
+            settlement = evm_settlement(key_path),
         );
         format!("{base}{spoil}")
     }
@@ -1687,6 +1717,162 @@ counterparty_key = "{SOLANA_COUNTERPARTY_KEY}"
         assert!(message.contains("[settlement.solana]"), "got: {message}");
     }
 
+    // -- "the settlement table this channel needs is absent" (issue #1138)
+    //
+    // One rule for all four channel tables, stated in
+    // `crate::settlement::SettlementTables` and in
+    // `docs/protocol/peer-carriage-spec.md` §11. These are the file-level
+    // proofs: what an operator actually meets, and the ordering between the
+    // refusals when one file trips more than one.
+
+    /// The EVM half of #1134's rule, at the level an operator meets it: a
+    /// peering bound to an EVM channel on a node with no `[settlement.evm]`
+    /// does not load. It used to load and verify the peer's inbound claims
+    /// under a domain no address this node holds could ever redeem at.
+    #[test]
+    fn rejects_an_evm_peer_channel_on_a_node_that_does_not_settle_on_evm() {
+        let result = load_peering(|text| {
+            let start = text.find("[settlement.evm]").expect("the fixture has one");
+            let end = text.find("[[peers]]").expect("the fixture has one");
+            let mut without = text.clone();
+            without.replace_range(start..end, "");
+            without
+        });
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::PeerChannelWithoutEvmSettlement { peer_id } if peer_id == "store"),
+        );
+        assert!(
+            message.contains("[settlement.evm]") && message.contains("InvalidParticipant"),
+            "got: {message}"
+        );
+    }
+
+    /// The client edge's EVM half, and the answer to the question issue
+    /// #1138 called the hard one: **the declared-channel path's latitude
+    /// does not extend to redeemability.** `DepositFloor::Unknown` lets an
+    /// operator vouch for how much a counterparty may spend on a channel
+    /// this node is a participant of; it is not a way to declare a channel
+    /// this node has no address to be a participant of.
+    #[test]
+    fn rejects_an_evm_client_channel_on_a_node_that_does_not_settle_on_evm() {
+        let state_dir = tempfile::tempdir().expect("temp state dir");
+        let channel = format!("0x{}", "ab".repeat(32));
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_path}"
+
+[[client_channels]]
+channel_id = "{channel}"
+counterparty = "0x00000000000000000000000000000000000000aa"
+chain_id = 8453
+token_network_address = "0x00000000000000000000000000000000000000bb"
+"#,
+                key_path = key_path.display(),
+                state_dir = state_dir.path().display(),
+            )
+        });
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::ClientChannelWithoutEvmSettlement { channel_id } if *channel_id == channel),
+        );
+        assert!(
+            message.contains("[settlement.evm]") && message.contains("not a policy"),
+            "got: {message}"
+        );
+    }
+
+    /// The client edge's Solana half, which was a `connector-cli`
+    /// warn-and-skip: the row loaded, was not recorded, and every claim on
+    /// it was then refused as an unknown channel. Refused by name at load
+    /// instead, so the two client-edge chains answer the question the same
+    /// way and both answer it the way the peer table does.
+    #[test]
+    fn rejects_a_solana_client_channel_on_a_node_that_does_not_settle_on_solana() {
+        let state_dir = tempfile::tempdir().expect("temp state dir");
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_path}"
+
+[[client_channels]]
+channel_account = "{SOLANA_CHANNEL_ACCOUNT}"
+counterparty = "{SOLANA_COUNTERPARTY_KEY}"
+"#,
+                key_path = key_path.display(),
+                state_dir = state_dir.path().display(),
+            )
+        });
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::ClientChannelWithoutSolanaSettlement { channel_account } if channel_account == SOLANA_CHANNEL_ACCOUNT),
+        );
+        assert!(
+            message.contains("[settlement.solana]") && message.contains("ADR 0053"),
+            "got: {message}"
+        );
+    }
+
+    /// A Solana `[[client_channels]]` row carries the program its claims
+    /// are judged under, filled in from `[settlement.solana]` (issues
+    /// #1082, #1138) rather than looked up again in `connector-cli`. The
+    /// value reaching a loaded `Config` is the settlement table's, by
+    /// construction.
+    #[test]
+    fn a_solana_client_channel_takes_its_program_id_from_the_settlement_table() {
+        let state_dir = tempfile::tempdir().expect("temp state dir");
+        let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
+        key_file
+            .write_all(b"not a real key")
+            .expect("write key file");
+        let text = format!(
+            "{}\n[[client_channels]]\nchannel_account = \"{SOLANA_COUNTERPARTY_KEY}\"\n\
+             counterparty = \"{SOLANA_CHANNEL_ACCOUNT}\"\n",
+            solana_peering_config(
+                key_file.path(),
+                state_dir.path(),
+                "",
+                Some(SOLANA_PROGRAM_ID),
+            ),
+        );
+        let config = Config::from_toml_str(&text, Path::new("test.toml")).expect("load");
+
+        let ClientChannelConfig::Solana(solana) = &config.client_channels()[0] else {
+            panic!("expected a Solana client channel");
+        };
+        assert_eq!(solana.program_id(), SOLANA_PROGRAM_ID);
+    }
+
+    /// The rule is **per chain**: a row needs the table for its own chain
+    /// and no other. This is the shape `local/mixed-chain/connector-c.toml`
+    /// is committed in -- a Solana peering on a node with no
+    /// `[settlement.evm]` at all -- and it must keep loading.
+    #[test]
+    fn a_solana_only_node_needs_no_evm_settlement_table() {
+        let config = load_solana_peering("").expect("load");
+
+        assert_eq!(config.peer_channels().len(), 1);
+        assert!(
+            config
+                .settlements()
+                .iter()
+                .all(|settlement| settlement.chain() == SettlementChain::Solana),
+            "the fixture must have no EVM settlement, or this proves nothing"
+        );
+    }
+
     /// The Solana counterpart of `rejects_one_channel_configured_in_both_namespaces`:
     /// the namespace-disjointness rule (§1.8) applies within the Solana
     /// chain too, not just EVM.
@@ -1765,26 +1951,19 @@ token_network_address = "{PEER_TOKEN_NETWORK}"
         key_file
             .write_all(b"not a real key")
             .expect("write key file");
+        // `peering_config` already carries `[settlement.evm]` -- the table
+        // an EVM `[[peer_channels]]` row needs since issue #1138, and the
+        // same one a covering claim is signed with.
         let base = peering_config(key_file.path(), state_dir.path(), "");
         let text = format!(
             r#"{base}
-[settlement.evm]
-rpc_url = "http://127.0.0.1:8545"
-contract_address = "0x1234567890123456789012345678901234567890"
-token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
-decimals = 6
-
-[settlement.evm.key]
-key_file = "{key_file}"
-
 [[pay_channels]]
 peer_id = "store"
 channel_id = "{PAY_CHANNEL}"
 chain_id = 31337
 token_network = "{PEER_TOKEN_NETWORK}"
 client_edge_url = "https://store.example/ilp"
-"#,
-            key_file = key_file.path().display(),
+"#
         );
         Config::from_toml_str(&edit(text), Path::new("test.toml"))
     }
@@ -1891,15 +2070,32 @@ token_network_address = "{PEER_TOKEN_NETWORK}"
     /// The signing key is `[settlement.evm]`'s and there is no second one
     /// (ADR 0030's table), so a row with no table to sign under is refused
     /// at load rather than failing every forward it was configured for.
+    ///
+    /// Built on the **Solana** peering rather than the EVM one, and that is
+    /// the shape of the rule rather than a convenience: since issue #1138
+    /// an EVM `[[peer_channels]]` row also needs `[settlement.evm]`, and
+    /// `PeerChannelUnbound` requires every peering to carry a channel row
+    /// -- so the only file that reaches this refusal is one peering over a
+    /// chain it does settle on while paying over one it does not.
     #[test]
     fn rejects_a_pay_channel_with_no_evm_settlement_table() {
-        let result = load_pay_channel_config(|text| {
-            let start = text.find("[settlement.evm]").expect("the fixture has one");
-            let end = text.find("[[pay_channels]]").expect("the fixture has one");
-            let mut without = text.clone();
-            without.replace_range(start..end, "");
-            without
-        });
+        let state_dir = tempfile::tempdir().expect("temp state dir");
+        let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
+        key_file
+            .write_all(b"not a real key")
+            .expect("write key file");
+        let text = format!(
+            "{}\n[[pay_channels]]\npeer_id = \"store\"\nchannel_id = \"{PAY_CHANNEL}\"\n\
+             chain_id = 31337\ntoken_network = \"{PEER_TOKEN_NETWORK}\"\n\
+             client_edge_url = \"https://store.example/ilp\"\n",
+            solana_peering_config(
+                key_file.path(),
+                state_dir.path(),
+                "",
+                Some(SOLANA_PROGRAM_ID),
+            ),
+        );
+        let result = Config::from_toml_str(&text, Path::new("test.toml"));
 
         let message = expect_error(
             result,
@@ -2894,11 +3090,12 @@ price = 7
 [operator]
 bearer_token = "operator-secret"
 write_keys = ["{key}"]
-"#,
+{settlement}"#,
                 key_file = key_path.display(),
                 state_dir = std::env::temp_dir()
                     .join("connector-config-every-section-state")
                     .display(),
+                settlement = evm_settlement(key_path),
             )
         })
         .expect("load");
@@ -2926,7 +3123,7 @@ client_edge_addr = "127.0.0.1:3000"
 
 [signer]
 key_file = "{key_path}"
-
+{settlement}
 [[client_channels]]
 channel_id = "0x{channel}"
 counterparty = "0x00000000000000000000000000000000000000aa"
@@ -2934,6 +3131,7 @@ chain_id = 8453
 token_network_address = "0x00000000000000000000000000000000000000bb"
 "#,
                 key_path = key_path.display(),
+                settlement = evm_settlement(key_path),
                 channel = "ab".repeat(32),
             )
         });
@@ -2960,7 +3158,7 @@ state_dir = "{state_dir}"
 
 [signer]
 key_file = "{key_path}"
-
+{settlement}
 [[client_channels]]
 channel_id = "0x{channel}"
 counterparty = "0x00000000000000000000000000000000000000aa"
@@ -2969,6 +3167,7 @@ token_network_address = "0x00000000000000000000000000000000000000bb"
 "#,
                 key_path = key_path.display(),
                 state_dir = state_dir.path().display(),
+                settlement = evm_settlement(key_path),
                 channel = "ab".repeat(32),
             )
         })

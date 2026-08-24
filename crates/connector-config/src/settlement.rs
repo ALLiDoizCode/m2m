@@ -364,6 +364,85 @@ impl SettlementConfig {
     }
 }
 
+/// Which `[settlement.<chain>]` tables a config declares, and the one
+/// value out of them a channel row needs -- the single input every "the
+/// settlement table this channel needs is absent" rule reads (issue
+/// #1138).
+///
+/// There is **one** such rule and it governs all four channel tables,
+/// because the reason is one reason. A `[settlement.<chain>]` table is not
+/// merely how a node *submits* a redemption: it is where the node's
+/// on-chain identity on that chain comes from. `[settlement.evm.key]` is
+/// this node's EVM address and `[settlement.solana.key]` its Solana one,
+/// the connector holds a signer rather than a wallet (ADR 0012), and
+/// "there is no second key to configure and none is invented" (ADR 0030,
+/// as [`crate::ConfigError::PayChannelWithoutEvmSettlement`] already says).
+/// A node with no table for a chain therefore has no address on it at all,
+/// so it cannot be a participant of any channel there:
+/// `TokenNetwork.claimFromChannel` refuses a caller that is not a
+/// participant (`InvalidParticipant`,
+/// `packages/contracts/src/TokenNetwork.sol:308`) and the Solana program
+/// refuses a `claimer` account that is not one (`UnauthorizedSigner`,
+/// `packages/solana-program/src/processor.rs:747`).
+///
+/// So a channel row whose chain has no settlement table names a channel
+/// this node is not in, and every claim admitted on that row is carriage
+/// rendered for money it can never collect. That is a **fact** about the
+/// chain with exactly one answer, not a policy an operator may set -- the
+/// same category issue #1136 put the EIP-712 domain in, and the reason
+/// `connector_client_edge::DepositFloor::Unknown`'s latitude does not
+/// reach it: a deposit floor is how much risk to take on a channel this
+/// node *is* a participant of, so it presupposes redeemability rather than
+/// conferring it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SettlementTables<'a> {
+    evm: bool,
+    solana_program_id: Option<&'a str>,
+}
+
+impl<'a> SettlementTables<'a> {
+    /// Read the tables off an already-resolved settlement list. Called
+    /// once in `Config::load`, immediately after `resolve_settlement`, so
+    /// every channel table is resolved against the same answer.
+    pub(crate) fn of(settlements: &'a [SettlementConfig]) -> Self {
+        SettlementTables {
+            evm: settlements
+                .iter()
+                .any(|settlement| matches!(settlement, SettlementConfig::Evm(_))),
+            solana_program_id: settlements.iter().find_map(|settlement| match settlement {
+                SettlementConfig::Solana(solana) => Some(solana.program_id()),
+                SettlementConfig::Evm(_) => None,
+            }),
+        }
+    }
+
+    /// The same answer, stated directly, for a channel-table unit test
+    /// that is about the channel row rather than about how a settlement
+    /// table parses. `Config::load` always uses [`Self::of`].
+    #[cfg(test)]
+    pub(crate) fn for_tests(evm: bool, solana_program_id: Option<&'a str>) -> Self {
+        SettlementTables {
+            evm,
+            solana_program_id,
+        }
+    }
+
+    /// Whether this node has an EVM settlement table, and therefore an EVM
+    /// on-chain identity a channel can name as its other participant.
+    pub(crate) fn evm(&self) -> bool {
+        self.evm
+    }
+
+    /// `[settlement.solana] program_id` -- the one program this node can
+    /// redeem a Solana claim under, and since ADR 0053 part of what every
+    /// Solana claim signs. `None` is a node with no Solana table at all,
+    /// which is both "no program to judge a claim under" and "no Solana
+    /// identity for a channel to be paid at".
+    pub(crate) fn solana_program_id(&self) -> Option<&'a str> {
+        self.solana_program_id
+    }
+}
+
 /// Parse a 20-byte EVM address written as 40 hex characters, an optional
 /// `0x`/`0X` prefix accepted since that is how every address in this
 /// workspace's own docs, infra and decision comments is already written

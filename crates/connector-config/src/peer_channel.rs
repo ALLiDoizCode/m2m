@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use crate::client_channel::{is_base58_32_bytes, parse_evm_address, parse_hex_bytes, to_hex};
 use crate::error::ConfigError;
-use crate::settlement::SettlementChain;
+use crate::settlement::{SettlementChain, SettlementTables};
 
 /// One `[[peer_channels]]` entry as written in the config file, in either
 /// chain shape this connector accepts (issue #759): EVM
@@ -224,7 +224,21 @@ impl PeerChannelConfig {
     }
 }
 
-fn resolve_evm_peer_channel(raw: RawEvmPeerChannel) -> Result<EvmPeerChannelConfig, ConfigError> {
+/// `tables` is which `[settlement.<chain>]` tables this node declares. An
+/// EVM peer channel needs the EVM one (issue #1138): not for its EIP-712
+/// domain, which the row declares, but because a claim on the channel is
+/// redeemed by the channel's on-chain participant and that address is
+/// `[settlement.evm.key]`'s. See [`SettlementTables`] for the one rule all
+/// four channel tables share.
+fn resolve_evm_peer_channel(
+    raw: RawEvmPeerChannel,
+    tables: SettlementTables<'_>,
+) -> Result<EvmPeerChannelConfig, ConfigError> {
+    if !tables.evm() {
+        return Err(ConfigError::PeerChannelWithoutEvmSettlement {
+            peer_id: raw.peer_id,
+        });
+    }
     let channel_id = parse_hex_bytes::<32>(&raw.channel_id).ok_or_else(|| {
         ConfigError::PeerChannelInvalidId {
             value: raw.channel_id.clone(),
@@ -251,15 +265,16 @@ fn resolve_evm_peer_channel(raw: RawEvmPeerChannel) -> Result<EvmPeerChannelConf
     })
 }
 
-/// `settlement_program_id` is `[settlement.solana] program_id`, or `None`
-/// for a node with no `[settlement.solana]` table at all. It is the only
-/// source of a Solana peer channel's program id (issue #1128); the row is
-/// refused outright if it tries to name a second one, and refused again if
-/// there is no table to read the first from.
+/// `tables.solana_program_id()` is `[settlement.solana] program_id`, or
+/// `None` for a node with no `[settlement.solana]` table at all. It is the
+/// only source of a Solana peer channel's program id (issue #1128); the row
+/// is refused outright if it tries to name a second one, and refused again
+/// if there is no table to read the first from.
 fn resolve_solana_peer_channel(
     raw: RawSolanaPeerChannel,
-    settlement_program_id: Option<&str>,
+    tables: SettlementTables<'_>,
 ) -> Result<SolanaPeerChannelConfig, ConfigError> {
+    let settlement_program_id = tables.solana_program_id();
     // Before the shape checks, because "you wrote a key that no longer
     // exists" explains the file better than "one of your other values is
     // malformed" when both are true -- and because this is the branch that
@@ -307,7 +322,7 @@ fn resolve_solana_peer_channel(
 
 pub(crate) fn resolve_peer_channels(
     raw: Vec<RawPeerChannel>,
-    settlement_program_id: Option<&str>,
+    tables: SettlementTables<'_>,
 ) -> Result<Vec<PeerChannelConfig>, ConfigError> {
     let mut seen_evm = HashSet::with_capacity(raw.len());
     let mut seen_solana = HashSet::with_capacity(raw.len());
@@ -316,7 +331,7 @@ pub(crate) fn resolve_peer_channels(
     for channel in raw {
         let channel = match channel {
             RawPeerChannel::Evm(evm) => {
-                let evm = resolve_evm_peer_channel(evm)?;
+                let evm = resolve_evm_peer_channel(evm, tables)?;
                 // Two rows for one channel is the same double-count hazard
                 // `ChannelInBothNamespaces` closes across namespaces, closed
                 // here within one: whichever row's counterparty key won
@@ -329,7 +344,7 @@ pub(crate) fn resolve_peer_channels(
                 PeerChannelConfig::Evm(evm)
             }
             RawPeerChannel::Solana(solana) => {
-                let solana = resolve_solana_peer_channel(solana, settlement_program_id)?;
+                let solana = resolve_solana_peer_channel(solana, tables)?;
                 if !seen_solana.insert(solana.channel_account.clone()) {
                     return Err(ConfigError::PeerChannelDuplicate {
                         value: solana.channel_account,
@@ -387,10 +402,14 @@ mod tests {
         })
     }
 
-    /// `resolve_peer_channels` for a node whose `[settlement.solana]` names
-    /// [`SETTLEMENT_PROGRAM_ID`] -- the ordinary case.
+    /// `resolve_peer_channels` for a node that settles on both chains,
+    /// with `[settlement.solana]` naming [`SETTLEMENT_PROGRAM_ID`] -- the
+    /// ordinary case.
     fn resolve(raw: Vec<RawPeerChannel>) -> Result<Vec<PeerChannelConfig>, ConfigError> {
-        resolve_peer_channels(raw, Some(SETTLEMENT_PROGRAM_ID))
+        resolve_peer_channels(
+            raw,
+            SettlementTables::for_tests(true, Some(SETTLEMENT_PROGRAM_ID)),
+        )
     }
 
     #[test]
@@ -546,8 +565,10 @@ mod tests {
     /// `PayChannelWithoutEvmSettlement`.
     #[test]
     fn a_solana_peer_channel_on_a_node_with_no_solana_settlement_is_refused() {
-        let result =
-            resolve_peer_channels(vec![raw_solana("store", SOME_SOLANA_ACCOUNT, None)], None);
+        let result = resolve_peer_channels(
+            vec![raw_solana("store", SOME_SOLANA_ACCOUNT, None)],
+            SettlementTables::for_tests(true, None),
+        );
 
         assert!(matches!(
             result,
@@ -564,7 +585,7 @@ mod tests {
     fn a_settlement_program_id_that_is_not_base58_32_bytes_is_refused_for_a_solana_row() {
         let result = resolve_peer_channels(
             vec![raw_solana("store", SOME_SOLANA_ACCOUNT, None)],
-            Some("not-base58!!!"),
+            SettlementTables::for_tests(true, Some("not-base58!!!")),
         );
 
         assert!(matches!(
@@ -575,12 +596,57 @@ mod tests {
     }
 
     /// An EVM row on a node with no Solana settlement is untouched by any
-    /// of the above -- the new refusals are Solana-shaped, and a node that
-    /// settles only on EVM keeps loading exactly as it did.
+    /// of the above -- those refusals are Solana-shaped, and a node that
+    /// settles only on EVM keeps loading exactly as it did. The rule is
+    /// per chain: a row needs the table for *its own* chain and no other.
     #[test]
     fn an_evm_peer_channel_needs_no_solana_settlement_table() {
-        let channels =
-            resolve_peer_channels(vec![raw("store", CHANNEL)], None).expect("EVM needs no Solana");
+        let channels = resolve_peer_channels(
+            vec![raw("store", CHANNEL)],
+            SettlementTables::for_tests(true, None),
+        )
+        .expect("EVM needs no Solana");
+        assert_eq!(channels.len(), 1);
+    }
+
+    /// The EVM half of the same rule (issue #1138). Not the Solana row's
+    /// missing input -- an EVM row declares its own EIP-712 domain, so the
+    /// file is complete and this node happily verified inbound peer claims
+    /// on it. What is missing is the node's EVM identity: a claim is
+    /// redeemed by the channel's on-chain participant, and that address is
+    /// `[settlement.evm.key]`'s.
+    #[test]
+    fn an_evm_peer_channel_on_a_node_with_no_evm_settlement_is_refused() {
+        let error = resolve_peer_channels(
+            vec![raw("store", CHANNEL)],
+            SettlementTables::for_tests(false, Some(SETTLEMENT_PROGRAM_ID)),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(&error, ConfigError::PeerChannelWithoutEvmSettlement { peer_id } if peer_id == "store"),
+            "got: {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("[settlement.evm]")
+                && message.contains("InvalidParticipant")
+                && message.contains("ADR 0024"),
+            "got: {message}"
+        );
+    }
+
+    /// A Solana peer row on a node that settles only on Solana keeps
+    /// loading: the EVM refusal is EVM-shaped, and the mirror of
+    /// `an_evm_peer_channel_needs_no_solana_settlement_table`. This is the
+    /// shape `local/mixed-chain/connector-c.toml` is committed in.
+    #[test]
+    fn a_solana_peer_channel_needs_no_evm_settlement_table() {
+        let channels = resolve_peer_channels(
+            vec![raw_solana("store", SOME_SOLANA_ACCOUNT, None)],
+            SettlementTables::for_tests(false, Some(SETTLEMENT_PROGRAM_ID)),
+        )
+        .expect("Solana needs no EVM");
         assert_eq!(channels.len(), 1);
     }
 
