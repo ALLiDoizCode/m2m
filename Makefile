@@ -1,7 +1,7 @@
 # Development workflow commands for Connector
 # Run 'make help' to see all available commands
 
-.PHONY: help build test lint clean local-build local-up local-down local-logs local-rehearse local-verify rust-build rust-test anvil-up anvil-down anvil-logs solana-up solana-down solana-logs solana-mint-usdc solana-build solana-test solana-deploy-devnet infra-up infra-down mina-build mina-test mina-deploy-devnet
+.PHONY: help build test lint clean contracts-libs local-build local-preflight local-up local-down local-logs local-rehearse local-verify rust-build rust-test anvil-up anvil-down anvil-logs solana-up solana-down solana-logs solana-mint-usdc solana-build solana-test solana-deploy-devnet infra-up infra-down mina-build mina-test mina-deploy-devnet
 
 # Who the `anvil` compose service runs as. That service bind-mounts
 # ./packages/contracts READ-WRITE and forge writes out/, cache/, broadcast/ and
@@ -61,8 +61,9 @@ help:
 	@echo "  make local-up             Build the image, start the chains, provision keys, run it"
 	@echo "  make local-rehearse       Send a real packet through it; non-zero unless fulfilled"
 	@echo "  make local-verify         up + rehearse + down, as CI runs it"
-	@echo "  make local-down           Stop it"
+	@echo "  make local-down           Stop it, and remove the state volumes with it"
 	@echo "  make local-logs           Follow its logs"
+	@echo "  make local-preflight      Ask whether this machine's one stack is free"
 	@echo "  LOCAL_TOPOLOGY=<name>     Which topology: solo (default), two-hop, mixed-chain"
 	@echo ""
 	@echo "Maintenance:"
@@ -96,8 +97,27 @@ lint:
 clean:
 	rm -rf packages/mina-zkapp/dist
 
+# packages/contracts' two git submodules, at the revisions this repository
+# pins, before anything compiles them.
+#
+# A prerequisite of every target that starts the `anvil` service, because that
+# service deploys DeployLocal.s.sol out of the bind-mounted ./packages/contracts
+# and will install the libs ITSELF if they are missing. That container install
+# named no revision until #1121: it took OpenZeppelin's default branch (5.7.0
+# observed) into a tree whose submodule says fcbae539 (5.5.0), and because the
+# mount is the developer's own source tree the next host-side `forge build`
+# compiled against it too -- including `abi_provenance`, which diffs the
+# committed ABI against a fresh build. Doing it here means the pin comes from
+# the checkout that HOLDS the pin. The container's install is still there, now
+# pinned by revision as well, for a hand-run `docker compose up`.
+#
+# Cheap and quiet when the tree is already right (~20ms), and it declines
+# rather than fails where there is no git checkout to read a pin out of.
+contracts-libs:
+	@./tools/contracts/init-libs.sh
+
 # Local Blockchain — EVM (Anvil + Faucet)
-anvil-up:
+anvil-up: contracts-libs
 	docker compose --profile evm up -d
 
 anvil-down:
@@ -169,7 +189,7 @@ solana-mint-usdc:
 # separately deployed zkApp and keeps its own build/test/deploy targets below.
 #
 # infra-down intentionally does NOT pass -v (preserves existing per-profile volumes).
-infra-up: solana-build
+infra-up: contracts-libs solana-build
 	docker compose --profile evm --profile solana up -d
 	$(MAKE) solana-mint-usdc
 
@@ -186,6 +206,20 @@ infra-down:
 LOCAL_TOPOLOGY ?= solo
 LOCAL_COMPOSE := docker compose -f docker-compose.yml -f local/$(LOCAL_TOPOLOGY)/compose.yml \
 	--profile evm --profile solana --profile $(LOCAL_TOPOLOGY)
+
+# The compose project every one of these targets works in. Declared in
+# docker-compose.yml as `name: connector` -- written out again here only so
+# `local-down` can address the project WITHOUT a compose file, which is what
+# lets it reach a stack some other topology started. The two are held to one
+# figure by `local_topologies_load.rs::every_local_target_names_one_compose_project`.
+#
+# It used to follow the directory, and that is issue #1122: a stack started
+# from a git worktree was a different project from the same repository's main
+# checkout, so `make local-down` in one could not see the other's containers,
+# network or -- the part that matters -- its state volumes. A `connector_solo-state`
+# survived two days on this machine that way, and a state volume outliving a run
+# is exactly what makes the next rehearsal's money assertion vacuous.
+LOCAL_PROJECT := connector
 
 # The connector services each topology runs, listed rather than discovered.
 # `up -d --wait` with no arguments would start every service in the enabled
@@ -231,7 +265,7 @@ local-build:
 # validator, failing this target if the deployed program's own account layout
 # disagrees with the committed config. It is a no-op on a topology with no
 # Solana peering, which is `solo` and `two-hop`.
-local-up: local-build solana-build
+local-up: local-preflight contracts-libs local-build solana-build
 	@test -n "$(LOCAL_NODES)" || { \
 		echo "ERROR: LOCAL_TOPOLOGY='$(LOCAL_TOPOLOGY)' has no LOCAL_NODES_ entry in this Makefile."; \
 		echo "       Known topologies: solo two-hop mixed-chain."; \
@@ -262,6 +296,17 @@ local-up: local-build solana-build
 	$(LOCAL_COMPOSE) up -d --wait $(LOCAL_NODES)
 	./local/keys.sh $(LOCAL_TOPOLOGY) solana-channels
 
+# Is this machine's one local stack free for this topology to take? Run as the
+# FIRST prerequisite of `local-up`, and separately of `local-verify`, so a
+# refusal costs nothing and -- more to the point -- so `local-verify` never
+# reaches its own failure path. That path ends in `local-down`, and tearing
+# down the stack this guard just refused to disturb would destroy the very
+# thing it protected: another checkout's containers and state volumes.
+#
+# Callable by hand too, to ask "is anything up, and whose?".
+local-preflight:
+	@./local/stack-guard.sh $(LOCAL_PROJECT) $(LOCAL_TOPOLOGY) $(CURDIR)
+
 # `-v`, and that matters. The named volumes here hold the connectors' claim
 # journals, and both local chains wipe their own state on every start -- so
 # keeping the journals across a down/up pairs a live watermark with a chain
@@ -269,8 +314,23 @@ local-up: local-build solana-build
 # rehearsal's money assertion vacuous: a peered topology's sender proves the
 # peering was paid by reading the payee's journal, and a journal left behind by
 # the LAST run satisfies that read without this run having paid anything.
+#
+# So it has to remove the volumes of whatever is actually up, not of whatever
+# LOCAL_TOPOLOGY happens to say -- and until the project name was fixed it
+# could not even do that much, because a stack started from another directory
+# was a different project and this target could not see it at all (#1122).
+# Both halves of the fix are here: `--remove-orphans` sweeps containers this
+# topology's files do not declare, and the volume pass afterwards is by PROJECT
+# LABEL rather than by anything the loaded files mention, so a `two-hop-b-state`
+# left by another topology is removed by a `LOCAL_TOPOLOGY=solo` teardown.
 local-down:
-	$(LOCAL_COMPOSE) down -v
+	$(LOCAL_COMPOSE) down -v --remove-orphans
+	@stale=$$(docker volume ls -q --filter label=com.docker.compose.project=$(LOCAL_PROJECT)); \
+	if [ -n "$$stale" ]; then \
+		echo "Removing state volumes left by another topology of this project:"; \
+		echo "$$stale" | sed 's/^/  /'; \
+		echo "$$stale" | xargs docker volume rm; \
+	fi
 
 local-logs:
 	$(LOCAL_COMPOSE) logs -f
@@ -305,7 +365,12 @@ local-rehearse:
 # line and anvil's one line per RPC method -- because `--tail` is applied PER
 # SERVICE and those two fill their whole allowance with nothing. Filtering them
 # cannot hide a failure: the exit status is the verdict here, not the log.
-local-verify:
+#
+# `local-preflight` is a PREREQUISITE rather than the first line of the recipe,
+# and that placement is the point: everything below ends in `local-down`, so a
+# refusal that arrived inside the recipe would tear down the other checkout's
+# stack the guard had just declined to touch.
+local-verify: local-preflight
 	@$(MAKE) local-up; status=$$?; \
 	if [ $$status -eq 0 ]; then \
 		$(MAKE) local-rehearse; status=$$?; \
