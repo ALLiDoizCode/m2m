@@ -225,9 +225,17 @@ pub const SOLANA_BALANCE_PROOF_DOMAIN_TAG: &[u8; 16] = b"TOON-BALPROOF-V2";
 /// cluster string here would be unverifiable: the program could not rebuild
 /// the message to compare against. A claim's declared `cluster` therefore
 /// stays what it always was -- **a routing hint, never a security boundary**
-/// -- and is checked off chain against the settlement backend's own cluster,
-/// which closes issue #975's honest-misconfiguration case. The forgery case
-/// is closed here, by the bytes.
+/// -- and is compared off chain against the cluster the node's own
+/// `[settlement.solana] rpc_url` names
+/// (`connector_client_edge::ClientClaimGate`, issue #975), which closes that
+/// issue's honest-misconfiguration case. The forgery case is closed here, by
+/// the bytes.
+///
+/// Note that when this record first shipped that comparison did not yet
+/// exist: the sentence above described the intended end state and the check
+/// landed later, with #976. Nothing in this module ever depended on it --
+/// the bytes below are the security property, and the cluster comparison is
+/// about the *record* a claim leaves behind.
 ///
 /// # Why a domain tag, and not an appended field
 ///

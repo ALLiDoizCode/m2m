@@ -1442,13 +1442,26 @@ fn client_channels(
     // `[settlement.solana]` rather than declared a second time per channel.
     // A node with no Solana backend records no Solana client channels: it
     // could not verify a claim on one anyway.
-    let solana_program_id = config
+    let solana_settlement = config
         .settlements()
         .iter()
         .find_map(|settlement| match settlement {
-            connector_config::SettlementConfig::Solana(solana) => Some(solana.program_id()),
+            connector_config::SettlementConfig::Solana(solana) => Some(solana),
             connector_config::SettlementConfig::Evm(_) => None,
         });
+    let solana_program_id = solana_settlement.map(|solana| solana.program_id());
+    // Which cluster this node settles on, when its `rpc_url` says (issue
+    // #975). A claim declaring a *different* cluster is refused rather than
+    // endorsed -- the one field in a Solana claim that names a chain, that
+    // no signature can ever bind (a Solana program cannot know its own
+    // cluster, ADR 0053), and that nothing compared before this.
+    //
+    // `cluster_hint` answers `None` for an `rpc_url` naming no cluster this
+    // connector recognises, and that `None` travels: a node that does not
+    // know where it is compares nothing rather than guessing.
+    if let Some(cluster) = solana_settlement.and_then(|solana| solana.cluster_hint()) {
+        channels = channels.with_solana_cluster(cluster);
+    }
     for channel in config.client_channels() {
         match channel {
             ClientChannelConfig::Evm(evm) => {
@@ -2723,6 +2736,116 @@ counterparty = "{counterparty}"
         };
         assert_eq!(solana.channel_account(), account);
         assert_eq!(solana.counterparty(), counterparty);
+    }
+
+    /// Issue #975's wiring, end to end from a config file: the cluster a
+    /// node settles on is read out of `[settlement.solana] rpc_url` and
+    /// reaches the claim gate, so a genuinely signed claim wearing another
+    /// chain's label is refused rather than endorsed.
+    ///
+    /// This is the issue's own live repro with the polarity reversed --
+    /// a devnet node told it is on mainnet, rather than a mainnet node told
+    /// it is on devnet. The check is symmetric, and this direction keeps a
+    /// mainnet RPC URL out of a committed config file (ADR 0056: production
+    /// is named and empty).
+    ///
+    /// Needs no validator: the channel is declared in the config, and the
+    /// cluster comparison happens before any chain read.
+    #[tokio::test]
+    async fn a_claim_wearing_another_clusters_label_is_refused_from_a_real_config() {
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine;
+        use ed25519_dalek::Signer as Ed25519Signer;
+        use rand::SeedableRng;
+
+        const PROGRAM_ID: [u8; 32] = [0xab; 32];
+        const CHANNEL_ACCOUNT: [u8; 32] = [3u8; 32];
+
+        let payer =
+            ed25519_dalek::Keypair::generate(&mut rand::rngs::StdRng::from_seed([13u8; 32]));
+        let program_id = Pubkey::new_from_array(PROGRAM_ID).to_string();
+        let channel_account = Pubkey::new_from_array(CHANNEL_ACCOUNT).to_string();
+        let counterparty = Pubkey::new_from_array(payer.public.to_bytes()).to_string();
+
+        let state_dir = tempfile::tempdir().expect("temp state dir");
+        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_path}"
+
+[settlement.solana]
+rpc_url = "https://api.devnet.solana.com"
+program_id = "{program_id}"
+token_address = "So11111111111111111111111111111111111111112"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "{key_path}"
+
+[[client_channels]]
+channel_account = "{channel_account}"
+counterparty = "{counterparty}"
+"#,
+                key_path = key_path.display(),
+                state_dir = state_dir.path().display(),
+            )
+        });
+
+        let channels = client_channels(&config, None, None);
+        let gate = ClientClaimGate::restore(channels, Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay");
+
+        // Genuinely signed, under the program this node really runs, by the
+        // counterparty the config really declares. Nothing about this claim
+        // is forged -- only its label is wrong, which is the whole of the
+        // defect.
+        let signed = |cluster: &str| {
+            let message = connector_signer::solana_balance_proof_message(
+                &PROGRAM_ID,
+                &CHANNEL_ACCOUNT,
+                1,
+                100,
+            );
+            let signature = BASE64.encode(payer.sign(&message).to_bytes());
+            format!(
+                r#"{{
+                    "version": "1.0",
+                    "blockchain": "solana",
+                    "messageId": "msg-1",
+                    "timestamp": "2026-02-02T12:00:00.000Z",
+                    "senderId": "peer-carol",
+                    "programId": "{program_id}",
+                    "channelAccount": "{channel_account}",
+                    "nonce": 1,
+                    "transferredAmount": "100",
+                    "signature": "{signature}",
+                    "signerPublicKey": "{counterparty}",
+                    "cluster": "{cluster}"
+                }}"#
+            )
+        };
+
+        assert_eq!(
+            gate.ingest(&signed("mainnet-beta"), 0).await,
+            Err(
+                connector_client_edge::ClaimIngestRejection::SolanaClusterMismatch {
+                    declared: "mainnet-beta".to_string(),
+                    configured: "devnet",
+                }
+            ),
+            "a node whose rpc_url names devnet must not endorse a claim labelled mainnet-beta"
+        );
+
+        // And the same claim, correctly labelled, still pays -- so what the
+        // config wired up is a comparison, not a blanket refusal.
+        assert!(
+            gate.ingest(&signed("devnet"), 0).await.is_ok(),
+            "a correctly labelled claim on the same channel and nonce must still be accepted"
+        );
     }
 
     /// Issue #605's startup half: a node that names a `state_dir` gets a
