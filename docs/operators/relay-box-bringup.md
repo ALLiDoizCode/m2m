@@ -83,7 +83,8 @@ every other infra-touching ticket in this repo's history records when it applies
 
 3. **Certs.** `cd infra/linode-relay && cp .env.example .env && $EDITOR .env` (set `DOMAIN`,
    `LETSENCRYPT_EMAIL`, and `LETSENCRYPT_STAGING=1` until DNS is confirmed — `.env.example` ships
-   `0`), then `./bootstrap.sh` — it opens the firewall (22/80/443 only, `firewall.sh`), pulls
+   `0`), then `./bootstrap.sh` — it hardens the box first (firewall to 22/80/443 only, then
+   key-only sshd; `infra/harden-box.sh`, ahead of everything that can fail), pulls
    images, renders `nginx/conf.d/node.conf` from the template for `${DOMAIN}`, starts the compose
    stack, and runs `init-letsencrypt.sh`, which seeds a self-signed cert, then requests a real one
    for both names once nginx can answer the ACME challenge. If issuance fails it logs a warning and

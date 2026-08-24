@@ -89,7 +89,9 @@ every other infra-touching ticket in this repo's history records when it applies
 3. **Certs.** `cd infra/linode-faucet && cp .env.example .env && $EDITOR .env` (set `DOMAIN`,
    `LETSENCRYPT_EMAIL`, and `LETSENCRYPT_STAGING=1` until DNS is confirmed reachable at this box's
    IP by other means — a direct curl by IP with `Host:` header, since the public name still points
-   elsewhere), then `./bootstrap.sh`. It opens the firewall (22/80/443 only), pulls the `nginx`/
+   elsewhere), then `./bootstrap.sh`. It hardens the box first — firewall to 22/80/443 only, then
+   key-only sshd (`infra/harden-box.sh`), ahead of everything that can fail, and it refuses to
+   finish quietly if that did not take — pulls the `nginx`/
    `certbot` base images, builds the faucet image, renders `nginx/conf.d/node.conf` from the
    template for `${DOMAIN}`, starts the compose stack, and runs `init-letsencrypt.sh`. Because the
    public name does not point here yet, the issuance attempt this step makes will fail ACME's
