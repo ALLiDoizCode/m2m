@@ -17,7 +17,9 @@
 //! -- creating or renewing a leased route (issue #427) -- and
 //! `POST /channels`, `POST /channels/:id/fund`, `POST /channels/:id/redeem`,
 //! `POST /channels/:id/close` (channel lifecycle, ADR 0008's third write,
-//! issue #459), `POST /channels/:id/redeem-latest` and
+//! issue #459), `POST /channels/:id/settle` (issue #1129 -- the write that
+//! *finishes* a close, once its challenge period has elapsed),
+//! `POST /channels/:id/redeem-latest` and
 //! `POST /channels/:id/cooperative-close` (on-chain redemption and
 //! cooperative close of whatever claim this node already holds, issue #425)
 //! -- are this crate's write endpoints. Every one calls
@@ -147,6 +149,7 @@ pub fn router(
         .route("/channels/:id/redeem", post(redeem_channel))
         .route("/channels/:id/redeem-latest", post(redeem_latest_claim))
         .route("/channels/:id/close", post(close_channel))
+        .route("/channels/:id/settle", post(settle_channel))
         .route("/channels/:id/cooperative-close", post(cooperative_close));
 
     reads.merge(writes).with_state(state)
@@ -681,6 +684,47 @@ async fn close_channel(
     channel_operation_response(state.connector.close_channel(&channel_id).await)
 }
 
+/// `POST /channels/:id/settle`: settle a closed channel whose challenge
+/// period has elapsed, paying each side's remaining deposit back out on
+/// chain and making the channel permanently done (issue #1129). No request
+/// body.
+///
+/// The seventh channel write, and the one that finishes what
+/// `POST /channels/:id/close` starts. Before it, `close` began a challenge
+/// period no operator surface could then settle: `cooperative-close` is a
+/// redeem plus that same close, so it did not finish one either, and the
+/// remainder came back only by calling the chain directly -- possible with
+/// `cast send` against `TokenNetwork.settleChannel`, and possible with
+/// *nothing* on Solana, whose CLI cannot build a `SettleChannel`
+/// instruction. That is the same argument that made `POST /channels` a
+/// write rather than a runbook (issue #459).
+///
+/// Authenticated like every other write here (ADR 0008), even though both
+/// chains make settling permissionless -- `TokenNetwork.settleChannel` and
+/// `packages/solana-program`'s `SettleChannel` each let any caller settle
+/// once the window has passed. The signature is not guarding who may
+/// settle; it is guarding this node's settlement key, which pays the gas
+/// and whose nonce sequence the transaction joins.
+///
+/// Settling before the window closes answers `400` with
+/// `SettlementError::SettlementNotYetDue` named in the body, exactly like
+/// every other settlement refusal on this surface -- a retry-later answer,
+/// not a different status code.
+async fn settle_channel(
+    State(state): State<OperatorState>,
+    Path(channel_id): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = require_write_auth(&state, &method, &uri, &headers, &body) {
+        return error.into_response();
+    }
+
+    channel_operation_response(state.connector.settle_channel(&channel_id).await)
+}
+
 /// `POST /channels/:id/redeem-latest`: redeem the latest claim this node
 /// has itself verified and accepted on the channel named by the path
 /// (issue #425) -- unlike `POST /channels/:id/redeem`, the caller supplies
@@ -970,6 +1014,46 @@ mod tests {
                 ))
                 .await
                 .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        /// `POST /channels/:id/settle` is a write (issue #1129), so it is
+        /// behind a signature like every other one -- an unsigned call is
+        /// refused before it reaches a settlement backend at all. Both
+        /// chains let *anyone* settle a channel whose window has passed,
+        /// which is exactly why this needs saying out loud: the signature
+        /// is not guarding the settlement, it is guarding this node's
+        /// settlement key and the gas it spends.
+        #[tokio::test]
+        async fn settling_a_channel_with_no_signature_at_all_is_rejected() {
+            let app = router_with_write_keys(vec![]);
+
+            let request = Request::builder()
+                .method("POST")
+                .uri("/channels/0xdeadbeef/settle")
+                .body(Body::empty())
+                .unwrap();
+
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        /// The read token is not a write credential, on this endpoint as on
+        /// every other (ADR 0008): no shared secret is ever sufficient to
+        /// move value, and settling moves every un-claimed deposit in a
+        /// channel.
+        #[tokio::test]
+        async fn a_bearer_token_alone_does_not_authorize_settling_a_channel() {
+            let app = router_with_write_keys(vec![]);
+
+            let request = Request::builder()
+                .method("POST")
+                .uri("/channels/0xdeadbeef/settle")
+                .header(header::AUTHORIZATION, "Bearer correct-token")
+                .body(Body::empty())
+                .unwrap();
+
+            let response = app.oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
 
@@ -1787,6 +1871,32 @@ mod tests {
                 .unwrap_or(false)
         }
 
+        /// "Fail loudly in CI, skip locally" (issue #471), the same rule
+        /// `connector_settlement_evm::test_support::require_anvil` states
+        /// for the shared harness. This module keeps its own `Anvil` rather
+        /// than depending on that one, and until issue #1129 it kept the
+        /// bare availability check too -- which meant a CI run with no
+        /// Foundry would have skipped these tests and reported success. A
+        /// guard that returns early and reports `passed` in `0.00s` is
+        /// worse than a missing test.
+        fn require_anvil() -> bool {
+            if anvil_available() {
+                return true;
+            }
+            if std::env::var_os("CI").is_some() {
+                panic!(
+                    "anvil is not on PATH, but CI is set -- the Rust Workspace Gate must \
+                     install Foundry (foundry-rs/foundry-toolchain) before this test runs. \
+                     Refusing to silently skip and report success here; see issue #471."
+                );
+            }
+            eprintln!(
+                "skipping: anvil is not on PATH (install Foundry: https://getfoundry.sh) -- \
+                 this test needs a real chain and only skips because this is not a CI run"
+            );
+            false
+        }
+
         struct Anvil {
             child: Child,
             rpc_url: String,
@@ -1861,6 +1971,45 @@ mod tests {
                 .unwrap()
         }
 
+        /// A signature from a key that is not on `[operator] write_keys`
+        /// buys nothing on `POST /channels/:id/settle` (issue #1129): the
+        /// allowlist is what revocation acts on, so a well-formed RFC 9421
+        /// signature from a retired operator must be as useless as none at
+        /// all. No chain is needed to prove it -- the refusal happens
+        /// before any settlement backend is consulted, which is why this
+        /// test has no `anvil` gate and still runs everywhere.
+        #[tokio::test]
+        async fn settling_a_channel_signed_by_a_key_not_on_the_allowlist_is_rejected() {
+            let stranger = keypair();
+            let allowed = keypair();
+            let app_client = Arc::new(FakeAppClient::new());
+            let clock = Arc::new(TestClock::new(chrono::Utc::now()));
+            let connector = Arc::new(Connector::new(
+                vec![],
+                vec![],
+                app_client,
+                Arc::new(InProcessPeerTransport::new()),
+                clock,
+            ));
+            let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
+            let app = router(
+                connector,
+                signer,
+                "correct-token".to_string(),
+                vec![allowed.public.to_bytes()],
+            );
+
+            let response = app
+                .oneshot(signed_post(
+                    &stranger,
+                    "/channels/0xdeadbeef/settle",
+                    Vec::new(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
         /// AC: "an EVM implementation opens, funds and closes a payment
         /// channel against a real chain", "channel lifecycle is driven
         /// entirely through the operator surface". Every step below is a
@@ -1870,10 +2019,7 @@ mod tests {
         #[tokio::test]
         async fn opening_funding_and_closing_a_channel_over_the_operator_surface_reaches_a_real_chain(
         ) {
-            if !anvil_available() {
-                eprintln!(
-                    "skipping: `anvil` not found on PATH (install via https://getfoundry.sh)"
-                );
+            if !require_anvil() {
                 return;
             }
 
@@ -1970,10 +2116,32 @@ mod tests {
             // accepted.
             let fund_again_body = serde_json::to_vec(&serde_json::json!({ "amount": 1 })).unwrap();
             let response = app
+                .clone()
                 .oneshot(signed_post(&keypair, &fund_path, fund_again_body))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+            // `close` above started a one-hour challenge period, and no
+            // time has passed: `POST /channels/:id/settle` must refuse, and
+            // refuse by name (issue #1129). The refusal is the interesting
+            // half here -- that the settle *succeeds* once the window has
+            // genuinely elapsed is proven against real chains, on both
+            // backends, from a config-driven node in
+            // `connector-cli/tests/settlement_lifecycle.rs`.
+            let settle_path = format!("/channels/{}/settle", opened.id);
+            let response = app
+                .oneshot(signed_post(&keypair, &settle_path, Vec::new()))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let message = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(
+                message.contains("not yet due"),
+                "an early settle must say the window is still open, not fail \
+                 generically: {message}"
+            );
         }
 
         /// AC (issue #425): "the latest received claim can be redeemed on
@@ -1989,10 +2157,7 @@ mod tests {
         /// claim reaches.
         #[tokio::test]
         async fn redeeming_the_latest_claim_and_closing_cooperatively_reach_a_real_chain() {
-            if !anvil_available() {
-                eprintln!(
-                    "skipping: `anvil` not found on PATH (install via https://getfoundry.sh)"
-                );
+            if !require_anvil() {
                 return;
             }
 

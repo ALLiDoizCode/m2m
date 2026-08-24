@@ -66,6 +66,11 @@ serde_json = "1"
 # solana-rpc-client, not the solana-client meta-crate -- see
 # crates/connector-settlement-solana/Cargo.toml for why.
 solana-rpc-client = "=2.1.0"
+# Derives the node's own associated token account, so the Solana settle
+# proof can read the SPL payout straight off the chain rather than trusting
+# a `ChannelView`. Pinned to the same version `connector-settlement-solana`
+# builds its instructions with.
+spl-associated-token-account = "=4.0.0"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tower = { version = "0.4", features = ["util"] }

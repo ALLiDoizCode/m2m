@@ -2550,6 +2550,37 @@ impl Connector {
         Ok(ChannelView::from(state))
     }
 
+    /// Settle `channel_id` (issue #1129) once its challenge period --
+    /// the `settlement_timeout` [`Connector::open_channel`] was given,
+    /// counted from [`Connector::close_channel`] -- has elapsed: the
+    /// remainder of each side's deposit is paid back out on chain and the
+    /// channel becomes permanently done.
+    ///
+    /// This is the operation that *finishes* a close. Nothing else does:
+    /// [`Connector::close_channel`] only starts the challenge window
+    /// (issue #574), and [`Connector::cooperative_close`] is a redeem
+    /// followed by that same close, so a channel closed by either route
+    /// still holds every un-claimed deposit until this runs. Before #1129
+    /// no surface reached it at all and the remainder was recoverable only
+    /// by an out-of-band chain call.
+    ///
+    /// [`SettlementError::SettlementNotYetDue`] while the window is still
+    /// open (or if the channel was never closed) -- a named, retry-later
+    /// answer rather than a generic backend failure. There is deliberately
+    /// no timer here that settles a channel on the node's own initiative:
+    /// when a node settles is an operator's call, made with an
+    /// authenticated write, exactly like when it closes.
+    pub async fn settle_channel(
+        &self,
+        channel_id: &str,
+    ) -> Result<ChannelView, ChannelOperationError> {
+        let state = self
+            .settlement_for_channel(channel_id)?
+            .settle(&ChannelId(channel_id.to_string()))
+            .await?;
+        Ok(ChannelView::from(state))
+    }
+
     /// Redeem the latest claim this node has accepted on `channel_id`
     /// (issue #425, story 36): looks up the highest-nonce claim this node
     /// has ever verified and accepted from that channel's counterparty --
@@ -2579,10 +2610,19 @@ impl Connector {
 
     /// Cooperatively close `channel_id` (issue #425, story 37): redeem
     /// whatever claim this node last accepted on it, then close -- one
-    /// operator-driven action rather than two, and no dispute window to
-    /// wait out, since this port's own `close` is already terminal the
-    /// instant it is called (`connector_settlement::SettlementBackend::close`'s
-    /// own docs). A channel with no claim ever accepted closes directly,
+    /// operator-driven action rather than two.
+    ///
+    /// "Cooperative" names the *claim* half only: it collects what this
+    /// node is owed in the same breath as closing, rather than leaving a
+    /// redemption to be raced into the challenge window afterwards. It
+    /// does **not** skip that window. This method was written (2026-07-26)
+    /// against a port where `close` was terminal; issue #574 reversed that
+    /// two days later, and `close` now starts a challenge period on both
+    /// chains -- so the deposits still sit on chain until
+    /// [`Connector::settle_channel`] runs (issue #1129). A caller wanting
+    /// the collateral back needs both.
+    ///
+    /// A channel with no claim ever accepted closes directly,
     /// exactly like [`Connector::close_channel`]. A claim already fully
     /// redeemed (`SettlementError::StaleClaim`, or `StaleNonce` -- issue
     /// #573 -- for the same already-redeemed claim) is not a reason to
