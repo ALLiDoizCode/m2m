@@ -833,6 +833,25 @@ mod tests {
         assert!(matches!(err, ClientClaimError::Malformed(_)));
     }
 
+    /// The Solana half of the case above, on the one field issue #1127
+    /// pinned. `programId` names the settlement program the
+    /// `channelAccount` lives under (`client-edge-spec.md` §1.3), and it is
+    /// **required**: a claim that omits it declares no program at all, which
+    /// is a different and worse thing than declaring the wrong one. Only the
+    /// EVM shape had a missing-field test before, so the required-ness of
+    /// this field rested on `required_str`'s implementation alone.
+    #[test]
+    fn a_solana_claim_with_no_program_id_is_malformed() {
+        let without =
+            solana_claim_json().replace(r#""programId": "11111111111111111111111111111111","#, "");
+        assert!(
+            !without.contains("programId"),
+            "the field really was removed"
+        );
+        let err = parse_client_claim(&without).unwrap_err();
+        assert!(matches!(err, ClientClaimError::Malformed(_)), "{err:?}");
+    }
+
     #[test]
     fn a_claim_with_a_field_in_the_wrong_format_for_its_chain_is_malformed() {
         let channel_id_field = format!(r#""channelId": "0x{}""#, "ab".repeat(32));

@@ -2673,6 +2673,37 @@ mod tests {
         const EVM_CHAIN_ID: u64 = 8453;
         const EVM_TOKEN_NETWORK_ADDRESS: [u8; 20] = [0x42; 20];
 
+        /// base58 of `[7u8; 32]`, the settlement program every Solana channel
+        /// in this module lives under -- so it is also the `programId` a
+        /// conforming claim on one of them declares
+        /// (`client-edge-spec.md` §1.3: the settlement program the
+        /// `channelAccount` lives under).
+        ///
+        /// Every Solana claim below used to declare its own *payer's* public
+        /// key here, which names no program at all. Nothing failed, because
+        /// the field grants nothing -- the signature is checked against the
+        /// channel's program (ADR 0053) -- but these fixtures are the closest
+        /// thing this crate has to a written-down example of a real claim,
+        /// and one that cannot be conformed to is worse than none (issue
+        /// #1127).
+        const SOLANA_CHANNEL_PROGRAM_BASE58: &str = "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx";
+
+        /// The literal above is base58 of `[7u8; 32]` -- the bytes the
+        /// balance proofs below are signed under and the
+        /// `FakeSolanaChannelSource` records. Nothing else in this module
+        /// says so, and a claim declaring a program its channel does not live
+        /// under is precisely what these fixtures are no longer supposed to
+        /// be.
+        #[test]
+        fn the_declared_solana_program_is_the_one_these_channels_live_under() {
+            assert_eq!(
+                bs58::decode(SOLANA_CHANNEL_PROGRAM_BASE58)
+                    .into_vec()
+                    .expect("a base58 literal"),
+                [7u8; 32],
+            );
+        }
+
         /// The one channel every claim below is presented on, recorded with
         /// [`evm_signer`]'s address as its counterparty (issue #558) -- a
         /// claim signed by anyone else, or naming any other channel, is
@@ -3542,7 +3573,7 @@ mod tests {
                 .record_solana(
                     &channel_account_base58,
                     &counterparty_base58,
-                    "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+                    SOLANA_CHANNEL_PROGRAM_BASE58,
                 )
                 .expect("valid base58 32-byte accounts");
 
@@ -3564,7 +3595,7 @@ mod tests {
                     "messageId": "msg-1",
                     "timestamp": "2026-02-02T12:00:00.000Z",
                     "senderId": "peer-bob",
-                    "programId": "{counterparty_base58}",
+                    "programId": "{SOLANA_CHANNEL_PROGRAM_BASE58}",
                     "channelAccount": "{channel_account_base58}",
                     "nonce": {nonce},
                     "transferredAmount": "{transferred_amount}",
@@ -3627,7 +3658,7 @@ mod tests {
                 .record_solana(
                     &channel_account_base58,
                     &real_counterparty_base58,
-                    "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+                    SOLANA_CHANNEL_PROGRAM_BASE58,
                 )
                 .expect("valid base58 32-byte accounts");
 
@@ -3650,7 +3681,7 @@ mod tests {
                     "messageId": "msg-1",
                     "timestamp": "2026-02-02T12:00:00.000Z",
                     "senderId": "peer-bob",
-                    "programId": "{forger_base58}",
+                    "programId": "{SOLANA_CHANNEL_PROGRAM_BASE58}",
                     "channelAccount": "{channel_account_base58}",
                     "nonce": {nonce},
                     "transferredAmount": "{transferred_amount}",
@@ -3745,7 +3776,7 @@ mod tests {
                     "messageId": "msg-1",
                     "timestamp": "2026-02-02T12:00:00.000Z",
                     "senderId": "peer-bob",
-                    "programId": "{counterparty_base58}",
+                    "programId": "{SOLANA_CHANNEL_PROGRAM_BASE58}",
                     "channelAccount": "{channel_account_base58}",
                     "nonce": {nonce},
                     "transferredAmount": "{transferred_amount}",
@@ -3819,7 +3850,7 @@ mod tests {
                     "messageId": "msg-1",
                     "timestamp": "2026-02-02T12:00:00.000Z",
                     "senderId": "peer-bob",
-                    "programId": "{signer_base58}",
+                    "programId": "{SOLANA_CHANNEL_PROGRAM_BASE58}",
                     "channelAccount": "{channel_account_base58}",
                     "nonce": 1,
                     "transferredAmount": "100",

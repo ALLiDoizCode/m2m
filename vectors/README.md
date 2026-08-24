@@ -212,10 +212,26 @@ wire_nonce, wire_cumulative_amount, wire_signature_hex }`: an EVM peer claim, th
 - **`claim_digest_hex`** (item 3) -- the same string as this file's `claim.cases[0].digest_hex`,
   repeated here rather than recomputed, demonstrating ADR 0024's EIP-712 digest is untouched by
   carriage.
-- **`claim_solana`** (item 4) -- shaped like `claim_evm`, over a Solana claim. **Aspirational**
+- **`claim_solana`** (item 4) -- shaped like `claim_evm`, over a Solana claim, plus
+  `signed_message_hex`: the 96-byte balance proof ADR 0053 defines, which is what this claim's
+  `signature` covers (`TOON-BALPROOF-V2` || `programId` || `channelAccount` || `nonce` ||
+  `transferredAmount`). **Aspirational**
   (`peer-semantics-pre-868.md` §3.5): this connector's outbound peer claims are EVM-only, so nothing today
   emits this shape, but `claim_json::parse` already accepts it inbound (issue #732) and this vector
   pins that shape before an emitter exists.
+
+  `programId` names **the settlement program the claim's `channelAccount` lives under**
+  (`docs/protocol/client-edge-spec.md` §1.3) -- byte-for-byte the value at offset 16 of
+  `signed_message_hex`, which `the_solana_claim_vector_declares_the_program_its_signature_is_bound_to`
+  asserts rather than leaves to the reader. It is not a free-form label: a payer who writes anything
+  else is declaring a program no channel of theirs lives under. This fixture used to declare the
+  **system program**, and that is why `schema_version` is now `2` (issue #1127) -- an SDK that
+  carried version 1's reading of this field into a real claim builder is emitting a non-conforming
+  claim. The value here is the deployed public-devnet payment-channel program
+  (`packages/solana-program/deployments/devnet-public.md`), an example settlement program in the
+  same way `claim.cases[0].chain_id` is Base Sepolia's real id -- a channel on another deployment
+  names that deployment's program instead.
+
 - **`prepare`** / **`prepare_no_claim`** (items 5, 6) -- `{ name, prepare, claim_json,
 minimum_delivery, btp_message_hex, http_headers, http_body_hex }`: a claim-bearing PREPARE.
   `prepare` is `{ amount, expires_at, execution_condition_hex, destination, data_hex }`, the OER
