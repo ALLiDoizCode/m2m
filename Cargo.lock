@@ -1310,6 +1310,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "connector-settlement",
+ "connector-settlement-evm",
  "connector-signer",
  "ethers",
  "libsecp256k1",

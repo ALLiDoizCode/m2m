@@ -64,28 +64,30 @@ pub struct SolanaSettlementBackend {
     token_mint: Pubkey,
     /// Present only for a [`deploy`](Self::deploy)-built backend:
     /// counterparty identities this backend privately holds keys for, so
-    /// this crate's own tests can drive a full open/fund/redeem/close/settle
-    /// lifecycle without a second, external actor. Two of them, because the
-    /// deployed program holds exactly one live channel per (pair, mint) --
-    /// its channel PDA is seeded `["channel", min, max, mint]` -- so a test
-    /// needing two concurrently-live, *fundable* channels (the port's
-    /// contract suite does: `counterparty`'s channel is still in its
-    /// challenge window when `instant_counterparty`'s opens) needs two
-    /// distinct counterparty identities with real keys.
+    /// this crate's own tests can stand in for the external actor that
+    /// would really deposit on the counterparty's side --
+    /// [`test_fund_counterparty`](Self::test_fund_counterparty) -- and
+    /// sign the claims this backend then redeems
+    /// ([`test_sign_claim`](Self::test_sign_claim)). Two of them, because
+    /// the deployed program holds exactly one live channel per (pair,
+    /// mint) -- its channel PDA is seeded `["channel", min, max, mint]` --
+    /// so a test needing two concurrently-live channels with real
+    /// counterparty collateral needs two distinct identities with real
+    /// keys.
     ///
-    /// This is not a shortcut around a real constraint -- it is the
-    /// answer to one. `packages/solana-program`'s `Deposit` instruction
-    /// requires the depositing participant to sign for *themselves*
-    /// (`processor.rs:309-311`, `:356-360`): unlike
-    /// `TokenNetwork.setTotalDeposit`, which lets any caller credit an
-    /// arbitrary participant's deposit from the caller's own token
-    /// balance (`EvmSettlementBackend::fund`'s "approve-then-deposit"),
-    /// there is no delegate-deposit path here. A `connect`-built
-    /// production backend never has any: real deposits happen from the
-    /// counterparty's own wallet directly against the deployed program
-    /// (rig opens and funds its own channel), never through this
-    /// backend's [`fund`](SettlementBackend::fund) -- see that method's
-    /// own doc for what it does without one.
+    /// `packages/solana-program`'s `Deposit` instruction requires the
+    /// depositing participant to sign for *themselves*
+    /// (`processor.rs:309-311`, `:356-360`): there is no delegate-deposit
+    /// path here, unlike `TokenNetwork.setTotalDeposit`, which lets any
+    /// caller credit an arbitrary participant from the caller's own token
+    /// balance. A `connect`-built production backend holds no such key and
+    /// needs none: [`fund`](SettlementBackend::fund) is a *self*-deposit
+    /// on both chains as of issue #1118, and the counterparty's own
+    /// deposit is the counterparty's own transaction. The port's contract
+    /// suite runs against a `connect`-built backend for exactly that
+    /// reason (`tests/contract_suite.rs`) -- these keys are a convenience
+    /// for this crate's other tests, not the thing that makes `fund`
+    /// work.
     counterparty_signers: Vec<Keypair>,
     /// Channel PDAs this backend has itself driven
     /// [`settle`](SettlementBackend::settle) to completion on -- see this
@@ -311,16 +313,8 @@ impl SolanaSettlementBackend {
             .map(|keypair| keypair.pubkey())
             .collect();
         for counterparty_pubkey in counterparty_pubkeys {
-            let create_counterparty_ata =
-                spl_associated_token_account::instruction::create_associated_token_account_idempotent(
-                    &backend.payer.pubkey(),
-                    &counterparty_pubkey,
-                    &backend.token_mint,
-                    &spl_token::id(),
-                );
-            backend.submit(&[create_counterparty_ata], &[]).await?;
             backend
-                .mint_test_tokens_to(&counterparty_pubkey, 1_000_000_000)
+                .test_mint_tokens_to(&counterparty_pubkey, 1_000_000_000)
                 .await?;
         }
 
@@ -508,6 +502,93 @@ impl SolanaSettlementBackend {
         Some(counterparty.sign_message(&message).as_ref().to_vec())
     }
 
+    /// Test/dev-only (issue #1118): mint `amount` of this backend's mock
+    /// mint into `owner`'s associated token account, creating that account
+    /// first if it does not exist. Only a [`deploy`](Self::deploy)-built
+    /// backend is the mint's authority, so only one of those can do this.
+    ///
+    /// The token faucet a test needs once `fund` is a *self*-deposit: a
+    /// [`connect`](Self::connect)-built backend spends its **own** tokens
+    /// to collateralise a channel, so a test standing one up has to put
+    /// real tokens in its ATA first -- exactly as a real deployment has to
+    /// (see `local/keys.sh`, which mints mock USDC to each node's EVM
+    /// settlement address and, as of issue #1118, must do the same for its
+    /// Solana one).
+    pub async fn test_mint_tokens_to(
+        &self,
+        owner: &Pubkey,
+        amount: u64,
+    ) -> Result<(), SettlementError> {
+        let create_ata =
+            spl_associated_token_account::instruction::create_associated_token_account_idempotent(
+                &self.payer.pubkey(),
+                owner,
+                &self.token_mint,
+                &spl_token::id(),
+            );
+        self.submit(&[create_ata], &[]).await?;
+        self.mint_test_tokens_to(owner, amount).await
+    }
+
+    /// Test/dev-only (issue #1118): deposit `amount` on the
+    /// **counterparty's** own side of `channel`, signed by whichever held
+    /// counterparty identity is that channel's participant -- the external
+    /// actor a real deployment supplies and this crate's own tests must
+    /// stand in for. What this crate wires
+    /// `connector_settlement::contract::ContractFixture::fund_counterparty`
+    /// to for a [`deploy`](Self::deploy)-built backend.
+    ///
+    /// This is the one deposit the deployed program will not let a node
+    /// make for somebody else: `Deposit` credits by signer
+    /// (`processor.rs:356-360`), so this works only because
+    /// [`deploy`](Self::deploy) privately holds the counterparty's key. It
+    /// is emphatically not a production path -- `fund` is the self-deposit
+    /// every real node uses.
+    ///
+    /// [`SettlementError::Backend`] on a [`connect`](Self::connect)-built
+    /// backend, which holds no such key.
+    pub async fn test_fund_counterparty(
+        &self,
+        channel: &ChannelId,
+        amount: u128,
+    ) -> Result<ChannelState, SettlementError> {
+        let (pubkey, account) = self.open_channel(channel).await?;
+        let Some(counterparty_signer) = self.counterparty_signers.iter().find(|keypair| {
+            let counterparty_pubkey = keypair.pubkey();
+            account.participant_a == counterparty_pubkey
+                || account.participant_b == counterparty_pubkey
+        }) else {
+            return Err(SettlementError::Backend(
+                "none of this backend's held counterparty keys is a participant of this channel \
+                 -- only a deploy()-built backend holds any, and depositing on a counterparty's \
+                 behalf is a test fixture's job, never a node's"
+                    .to_string(),
+            ));
+        };
+        let counterparty_pubkey = counterparty_signer.pubkey();
+        let units = to_units(amount)?;
+        let depositor_token_account = spl_associated_token_account::get_associated_token_address(
+            &counterparty_pubkey,
+            &self.token_mint,
+        );
+        let (vault, _bump) = wire::vault_pda(&pubkey, &self.program_id);
+
+        let instruction = Instruction::new_with_bytes(
+            self.program_id,
+            &wire::pack_deposit(units),
+            wire::Accounts::deposit(
+                &counterparty_pubkey,
+                &depositor_token_account,
+                &vault,
+                &pubkey,
+            ),
+        );
+        self.submit(&[instruction], &[counterparty_signer]).await?;
+
+        let (_pubkey, account) = self.open_channel(channel).await?;
+        self.to_channel_state(channel, &account)
+    }
+
     async fn ensure_own_ata_exists(&self) -> Result<(), SettlementError> {
         let instruction =
             spl_associated_token_account::instruction::create_associated_token_account_idempotent(
@@ -689,29 +770,36 @@ impl SolanaSettlementBackend {
     }
 
     /// Derive a single [`ChannelState`] from `account`'s two-sided shape
-    /// (mirrors `EvmSettlementBackend::read_state`'s own doc): `deposited`
-    /// and `redeemed` are the counterparty's own `deposit_x` and
-    /// `transferred_amount_x` -- what a claim signed by the counterparty
-    /// is bounded against on chain (`processor.rs:770-789`), and what
-    /// `redeem` actually advances (`processor.rs:800-807`).
+    /// (mirrors `EvmSettlementBackend::read_state`'s own doc):
+    /// `counterparty_deposited` and `redeemed` are the counterparty's own
+    /// `deposit_x` and `transferred_amount_x` -- what a claim signed by
+    /// the counterparty is bounded against on chain
+    /// (`processor.rs:770-789`), and what `redeem` actually advances
+    /// (`processor.rs:800-807`) -- while `own_deposited` is this backend's
+    /// own side of the same pair (issue #1118), what
+    /// [`fund`](SettlementBackend::fund) raises and what `SettleChannel`
+    /// eventually pays back out.
     fn to_channel_state(
         &self,
         channel: &ChannelId,
         account: &wire::ChannelAccount,
     ) -> Result<ChannelState, SettlementError> {
-        let (counterparty, deposited, redeemed) = if self.own_is_participant_a(account)? {
-            (
-                account.participant_b,
-                account.deposit_b,
-                account.transferred_amount_b,
-            )
-        } else {
-            (
-                account.participant_a,
-                account.deposit_a,
-                account.transferred_amount_a,
-            )
-        };
+        let (counterparty, deposited, own_deposited, redeemed) =
+            if self.own_is_participant_a(account)? {
+                (
+                    account.participant_b,
+                    account.deposit_b,
+                    account.deposit_a,
+                    account.transferred_amount_b,
+                )
+            } else {
+                (
+                    account.participant_a,
+                    account.deposit_a,
+                    account.deposit_b,
+                    account.transferred_amount_a,
+                )
+            };
         Ok(ChannelState {
             id: channel.clone(),
             counterparty: counterparty.to_bytes().to_vec(),
@@ -720,7 +808,8 @@ impl SolanaSettlementBackend {
                 wire::ChannelStatus::Closed => ChannelStatus::Closed,
                 wire::ChannelStatus::Settled => ChannelStatus::Settled,
             },
-            deposited: deposited as u128,
+            counterparty_deposited: deposited as u128,
+            own_deposited: own_deposited as u128,
             redeemed: redeemed as u128,
         })
     }
@@ -809,60 +898,39 @@ impl SettlementBackend for SolanaSettlementBackend {
         Ok(ChannelId(channel.to_string()))
     }
 
-    /// Deposits into the *counterparty's* own on-chain balance -- see
-    /// [`SolanaSettlementBackend::counterparty_signers`]'s doc for why that
-    /// requires this backend to itself hold a signing key for the
-    /// counterparty, which only a [`deploy`](SolanaSettlementBackend::deploy)-built
-    /// backend does. A [`connect`](SolanaSettlementBackend::connect)-built
-    /// production backend refuses with [`SettlementError::Backend`] naming
-    /// that gap, rather than silently depositing into its own balance
-    /// instead (which `redeem`'s bound check, reading the counterparty's
-    /// side, would never see).
+    /// A **self**-deposit (issue #1118): a `Deposit` signed by this
+    /// backend's own `[settlement.solana]` identity, moving `amount` from
+    /// the associated token account [`connect`](SolanaSettlementBackend::connect)
+    /// already creates at boot into the channel's vault PDA, crediting
+    /// this node's own side.
+    ///
+    /// This method used to attempt a deposit into the *counterparty's*
+    /// side and therefore could not work at all on a
+    /// [`connect`](SolanaSettlementBackend::connect)-built backend --
+    /// which is every real node -- because `packages/solana-program`'s
+    /// `Deposit` credits strictly by signer (`processor.rs:309-311`,
+    /// `:356-360`) and no node holds its counterparty's key. The
+    /// instruction was never missing; the port asked for the wrong one.
+    /// Depositing on a counterparty's behalf is now the fixture-only
+    /// [`test_fund_counterparty`](SolanaSettlementBackend::test_fund_counterparty).
     async fn fund(
         &self,
         channel: &ChannelId,
         amount: u128,
     ) -> Result<ChannelState, SettlementError> {
-        if self.counterparty_signers.is_empty() {
-            return Err(SettlementError::Backend(
-                "this backend has no signing authority for an external counterparty's own \
-                 on-chain deposit -- packages/solana-program's Deposit instruction requires the \
-                 depositing participant to sign for themselves, so real deposits happen from the \
-                 counterparty's own wallet directly against the deployed program, never through \
-                 this method in production"
-                    .to_string(),
-            ));
-        }
-        let (pubkey, account) = self.open_channel(channel).await?;
-        let Some(counterparty_signer) = self.counterparty_signers.iter().find(|keypair| {
-            let counterparty_pubkey = keypair.pubkey();
-            account.participant_a == counterparty_pubkey
-                || account.participant_b == counterparty_pubkey
-        }) else {
-            return Err(SettlementError::Backend(
-                "none of this backend's held counterparty keys is a participant of this channel"
-                    .to_string(),
-            ));
-        };
-        let counterparty_pubkey = counterparty_signer.pubkey();
+        let (pubkey, _account) = self.open_channel(channel).await?;
+        let own = self.payer.pubkey();
         let units = to_units(amount)?;
-        let depositor_token_account = spl_associated_token_account::get_associated_token_address(
-            &counterparty_pubkey,
-            &self.token_mint,
-        );
+        let depositor_token_account =
+            spl_associated_token_account::get_associated_token_address(&own, &self.token_mint);
         let (vault, _bump) = wire::vault_pda(&pubkey, &self.program_id);
 
         let instruction = Instruction::new_with_bytes(
             self.program_id,
             &wire::pack_deposit(units),
-            wire::Accounts::deposit(
-                &counterparty_pubkey,
-                &depositor_token_account,
-                &vault,
-                &pubkey,
-            ),
+            wire::Accounts::deposit(&own, &depositor_token_account, &vault, &pubkey),
         );
-        self.submit(&[instruction], &[counterparty_signer]).await?;
+        self.submit(&[instruction], &[]).await?;
 
         let (_pubkey, account) = self.open_channel(channel).await?;
         self.to_channel_state(channel, &account)
@@ -881,10 +949,10 @@ impl SettlementBackend for SolanaSettlementBackend {
                 already_redeemed: state.redeemed,
             });
         }
-        if claim.cumulative_amount > state.deposited {
+        if claim.cumulative_amount > state.counterparty_deposited {
             return Err(SettlementError::InsufficientChannelBalance {
                 requested: claim.cumulative_amount,
-                deposited: state.deposited,
+                deposited: state.counterparty_deposited,
             });
         }
 
@@ -997,7 +1065,8 @@ impl SettlementBackend for SolanaSettlementBackend {
             id: channel.clone(),
             counterparty: counterparty.to_bytes().to_vec(),
             status: ChannelStatus::Settled,
-            deposited: 0,
+            counterparty_deposited: 0,
+            own_deposited: 0,
             redeemed: 0,
         })
     }
@@ -1010,7 +1079,8 @@ impl SettlementBackend for SolanaSettlementBackend {
                 id: channel.clone(),
                 counterparty: Vec::new(),
                 status: ChannelStatus::Settled,
-                deposited: 0,
+                counterparty_deposited: 0,
+                own_deposited: 0,
                 redeemed: 0,
             }),
         }

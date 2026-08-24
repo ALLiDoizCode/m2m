@@ -73,10 +73,10 @@ async fn evm_settlement_backend_upholds_the_contract() {
         // `other_counterparty` is only ever opened against, never redeemed
         // from, so it needs no key this test holds. `instant_counterparty`
         // (the instant-settlement channel's own identity, issue #567) needs
-        // none either on this chain: `TokenNetwork.setTotalDeposit` lets the
-        // backend fund any participant from its own balance, and the one
-        // claim the suite sends that channel is the post-settlement one,
-        // rejected as `ChannelSettled` before any signature is checked.
+        // none either: the suite only ever *self*-deposits into that
+        // channel, and the one claim it sends there is the post-settlement
+        // one, rejected as `ChannelSettled` before any signature is
+        // checked.
         let other_counterparty = LocalWallet::new(&mut thread_rng())
             .address()
             .as_bytes()
@@ -86,6 +86,7 @@ async fn evm_settlement_backend_upholds_the_contract() {
             .as_bytes()
             .to_vec();
 
+        let backend = Arc::new(backend);
         let sign = move |channel: &ChannelId, nonce: u64, cumulative_amount: u128| {
             let proof = EvmBalanceProof {
                 channel_id: channel_id_bytes(&channel.0),
@@ -99,13 +100,35 @@ async fn evm_settlement_backend_upholds_the_contract() {
             sign_evm(&counterparty_secret, &evm_balance_proof_digest(&proof))
         };
 
+        // The counterparty's deposit. `TokenNetwork.setTotalDeposit` names
+        // the participant to credit separately from the caller whose
+        // tokens are pulled, so this backend *can* make it on their behalf
+        // -- but as of issue #1118 only a fixture may, through the
+        // `test-util`-gated `fund_counterparty`. `fund` itself is a
+        // self-deposit on this chain now, exactly as it always had to be
+        // on Solana, where `Deposit` credits strictly by signer.
+        let deposit_backend = Arc::clone(&backend);
+        let fund_counterparty = move |channel: &ChannelId, amount: u128| {
+            let backend = Arc::clone(&deposit_backend);
+            let channel = channel.clone();
+            let boxed: connector_settlement::contract::BoxFuture<'static, ()> =
+                Box::pin(async move {
+                    backend
+                        .fund_counterparty(&channel, amount)
+                        .await
+                        .expect("the counterparty deposits on their own side");
+                });
+            boxed
+        };
+
         let wait_rpc_url = rpc_url.clone();
         ContractFixture {
-            backend: Arc::new(backend) as Arc<dyn SettlementBackend>,
+            backend: backend as Arc<dyn SettlementBackend>,
             counterparty,
             other_counterparty,
             instant_counterparty,
             sign: Box::new(sign),
+            fund_counterparty: Box::new(fund_counterparty),
             instant_settlement_timeout: Duration::seconds(INSTANT_SETTLEMENT_TIMEOUT_SECONDS),
             advance_past_instant_settlement_timeout: Box::new(move || {
                 let rpc_url = wait_rpc_url.clone();

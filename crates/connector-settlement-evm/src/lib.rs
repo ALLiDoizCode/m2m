@@ -425,11 +425,94 @@ impl EvmSettlementBackend {
         }
     }
 
+    /// Approve-then-`setTotalDeposit`: two transactions, where a single
+    /// `payable` call sufficed for native ETH. Approving a large fixed
+    /// allowance, rather than exactly the increment, means a stale
+    /// approval from an earlier call (or another channel funded through
+    /// this same backend) is still always enough -- `deposit_lock` already
+    /// rules out two `fund` calls racing each other's approval.
+    ///
+    /// `total` is `participant`'s **new cumulative** deposit, not an
+    /// increment: that is `setTotalDeposit`'s own parameter
+    /// (`TokenNetwork.sol:252`), and computing it is the read-then-write
+    /// `deposit_lock` exists to serialize.
+    async fn set_total_deposit(
+        &self,
+        id: [u8; 32],
+        participant: Address,
+        total: U256,
+    ) -> Result<(), SettlementError> {
+        let approve = self.token.approve(self.contract.address(), U256::MAX);
+        let pending = approve.send().await.map_err(backend_error)?;
+        confirm(pending).await?;
+
+        let call = self.contract.set_total_deposit(id, participant, total);
+        let pending = call.send().await.map_err(backend_error)?;
+        confirm(pending).await?;
+        Ok(())
+    }
+
+    /// Test/dev-only (issue #1118): mint `amount` of this backend's token
+    /// to `owner`, which works only because the local chain's token is
+    /// `MockERC20` (`packages/contracts/test/mocks/MockERC20.sol`) and this
+    /// backend's signer is its minter.
+    ///
+    /// The EVM twin of `SolanaSettlementBackend::test_mint_tokens_to`, and
+    /// needed for the same reason: once `fund` is a self-deposit, each side
+    /// of a channel spends its **own** tokens to collateralise, so a test
+    /// standing up a second participant has to put real tokens in that
+    /// participant's balance first -- exactly as a real deployment has to.
+    #[cfg(any(test, feature = "test-util"))]
+    pub async fn mint_mock_tokens_to(
+        &self,
+        owner: Address,
+        amount: u128,
+    ) -> Result<(), SettlementError> {
+        let token = MockErc20Contract::new(self.token.address(), self.token.client());
+        let call = token.mint(owner, U256::from(amount));
+        let pending = call.send().await.map_err(backend_error)?;
+        confirm(pending).await?;
+        Ok(())
+    }
+
+    /// Deposit `amount` into the **counterparty's** side of `channel`,
+    /// from this backend's own token balance -- the delegate deposit
+    /// `TokenNetwork.setTotalDeposit` permits by naming the credited
+    /// participant separately from the caller whose tokens are pulled
+    /// (`TokenNetwork.sol:255`, `:273`, `:282`).
+    ///
+    /// **Not on the [`SettlementBackend`] port, and not for production**
+    /// (issue #1118). No node should pay for its counterparty's
+    /// collateral, and no other chain this port settles on can:
+    /// `packages/solana-program`'s `Deposit` credits strictly by signer.
+    /// This exists so a fixture can stand in for the external actor that
+    /// would really make that deposit -- it is what this crate's
+    /// `connector_settlement::contract::ContractFixture::fund_counterparty`
+    /// is wired to -- which is why it is `test-util`-gated rather than
+    /// merely documented as "do not call".
+    #[cfg(any(test, feature = "test-util"))]
+    pub async fn fund_counterparty(
+        &self,
+        channel: &ChannelId,
+        amount: u128,
+    ) -> Result<ChannelState, SettlementError> {
+        let _guard = self.deposit_lock.lock().await;
+
+        let (id, state) = self.open_channel(channel).await?;
+        let counterparty = Address::from_slice(&state.counterparty);
+        let new_total = U256::from(state.counterparty_deposited) + U256::from(amount);
+        self.set_total_deposit(id, counterparty, new_total).await?;
+        self.read_state(channel, id).await
+    }
+
     /// Derive a single [`ChannelState`] from `TokenNetwork`'s two-sided
-    /// state (issue #576's core mismatch): `deposited` is the
+    /// state (issue #576's core mismatch): `counterparty_deposited` is the
     /// counterparty's own `ParticipantState.deposit` -- the balance
     /// `claimFromChannel` actually bounds a claim against
-    /// (`TokenNetwork.sol:317`) -- and `redeemed` is
+    /// (`TokenNetwork.sol:317`) -- `own_deposited` is this backend's own
+    /// side of the same mapping (issue #1118), what
+    /// [`fund`](SettlementBackend::fund) raises and what
+    /// `settleChannel` eventually returns; and `redeemed` is
     /// `claimedAmounts[channelId][self]` -- what *this* backend has
     /// already pulled out via [`redeem`](SettlementBackend::redeem).
     /// Reading the sides the other way round would report a channel that
@@ -448,6 +531,12 @@ impl EvmSettlementBackend {
             .call()
             .await
             .map_err(backend_error)?;
+        let (own_deposit, _nonce, _transferred_amount) = self
+            .contract
+            .participants(id, self.own_address)
+            .call()
+            .await
+            .map_err(backend_error)?;
         let self_claimed = self
             .contract
             .claimed_amounts(id, self.own_address)
@@ -458,7 +547,8 @@ impl EvmSettlementBackend {
             id: channel.clone(),
             counterparty: counterparty.as_bytes().to_vec(),
             status: status_from_u8(state)?,
-            deposited: counterparty_deposit.as_u128(),
+            counterparty_deposited: counterparty_deposit.as_u128(),
+            own_deposited: own_deposit.as_u128(),
             redeemed: self_claimed.as_u128(),
         })
     }
@@ -752,6 +842,20 @@ impl SettlementBackend for EvmSettlementBackend {
         ))
     }
 
+    /// A **self**-deposit (issue #1118): `setTotalDeposit` is called
+    /// naming this backend's own `own_address` as the participant to
+    /// credit, so the tokens it pulls from this node land behind this
+    /// node's own claims and nowhere else. Until #1118 this named the
+    /// *counterparty* instead -- a delegate deposit `TokenNetwork` happens
+    /// to permit (caller and credited participant are independent
+    /// parameters, `TokenNetwork.sol:255`, `:273`, `:282`) and
+    /// `packages/solana-program` deliberately does not, which is what left
+    /// the Solana backend's `fund` an unconditional error. It is also the
+    /// shape production should never have: a node paying for its
+    /// counterparty's collateral out of its own token balance.
+    /// [`fund_counterparty`](Self::fund_counterparty) keeps the delegate
+    /// deposit available to this crate's own fixtures, where standing in
+    /// for an absent external actor is the whole point.
     async fn fund(
         &self,
         channel: &ChannelId,
@@ -762,23 +866,9 @@ impl SettlementBackend for EvmSettlementBackend {
         let _guard = self.deposit_lock.lock().await;
 
         let (id, state) = self.open_channel(channel).await?;
-        let counterparty = Address::from_slice(&state.counterparty);
-        let new_total = U256::from(state.deposited) + U256::from(amount);
-
-        // Approve-then-deposit: two transactions, where a single `payable`
-        // call sufficed for native ETH. Approving a large fixed allowance,
-        // rather than exactly `amount`, means a stale approval from an
-        // earlier call (or another channel funded through this same
-        // backend) is still always enough -- `deposit_lock` above already
-        // rules out two `fund` calls racing each other's approval.
-        let approve = self.token.approve(self.contract.address(), U256::MAX);
-        let pending = approve.send().await.map_err(backend_error)?;
-        confirm(pending).await?;
-
-        let call = self.contract.set_total_deposit(id, counterparty, new_total);
-        let pending = call.send().await.map_err(backend_error)?;
-        confirm(pending).await?;
-
+        let new_total = U256::from(state.own_deposited) + U256::from(amount);
+        self.set_total_deposit(id, self.own_address, new_total)
+            .await?;
         self.read_state(channel, id).await
     }
 
@@ -794,10 +884,10 @@ impl SettlementBackend for EvmSettlementBackend {
                 already_redeemed: state.redeemed,
             });
         }
-        if claim.cumulative_amount > state.deposited {
+        if claim.cumulative_amount > state.counterparty_deposited {
             return Err(SettlementError::InsufficientChannelBalance {
                 requested: claim.cumulative_amount,
-                deposited: state.deposited,
+                deposited: state.counterparty_deposited,
             });
         }
 

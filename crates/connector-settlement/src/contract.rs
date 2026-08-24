@@ -68,6 +68,26 @@ pub struct ContractFixture {
     /// hour), so this suite does not assume every backend can open a
     /// channel with an arbitrarily short (or zero) one.
     pub instant_settlement_timeout: Duration,
+    /// Make the channel's **counterparty** deposit `amount` on *their*
+    /// own side, raising [`crate::ChannelState::counterparty_deposited`] --
+    /// which is the only collateral a claim this backend redeems is ever
+    /// drawn from, and which [`SettlementBackend::fund`] deliberately
+    /// does not touch (issue #1118).
+    ///
+    /// A fixture capability rather than a port method, because on a real
+    /// chain this is somebody else's signed transaction from somebody
+    /// else's wallet. `packages/solana-program`'s `Deposit` credits
+    /// strictly by signer, so no node can ever perform it for a
+    /// counterparty; `TokenNetwork.setTotalDeposit` happens to allow it,
+    /// and defining the *port* around that one chain's affordance is
+    /// exactly what left `fund` unconditionally broken on the other.
+    /// Whatever standing in for that external actor costs -- a held
+    /// keypair, a second wallet, an in-process write -- is the fixture's
+    /// problem, not the port's.
+    ///
+    /// Called only against a channel this suite has open; it may assume
+    /// the channel is `counterparty`'s or `instant_counterparty`'s.
+    pub fund_counterparty: FundCounterpartyFn,
     /// Called once, after that channel is closed and before this suite
     /// asks it to settle, to make `instant_settlement_timeout` have
     /// elapsed without this suite waiting out real wall-clock time itself
@@ -87,6 +107,12 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// spelled-out trait object at every use site.
 pub type SignFn = Box<dyn Fn(&ChannelId, u64, u128) -> Vec<u8> + Send>;
 
+/// The shape of [`ContractFixture::fund_counterparty`] -- named for the
+/// same reason [`SignFn`] is. Asynchronous where `SignFn` is not: standing
+/// in for the counterparty's deposit means a real, confirmed transaction
+/// on every backend whose chain is real.
+pub type FundCounterpartyFn = Box<dyn Fn(&ChannelId, u128) -> BoxFuture<'static, ()> + Send>;
+
 /// Run every assertion the [`SettlementBackend`] port makes, against a
 /// freshly built implementation from `build`. A conforming implementation
 /// passes this function without modification -- that unmodified pass is
@@ -102,6 +128,7 @@ where
         other_counterparty,
         instant_counterparty,
         sign,
+        fund_counterparty,
         instant_settlement_timeout,
         advance_past_instant_settlement_timeout,
     } = build().await;
@@ -117,15 +144,43 @@ where
         .await
         .expect("channel_state");
     assert_eq!(state.status, ChannelStatus::Open);
-    assert_eq!(state.deposited, 0);
+    assert_eq!(state.counterparty_deposited, 0);
+    assert_eq!(state.own_deposited, 0);
     assert_eq!(state.redeemed, 0);
     assert_eq!(state.counterparty, counterparty);
 
-    // Funding increases the deposited balance, cumulatively across calls.
+    // `fund` is a SELF-deposit (issue #1118): it raises this backend's own
+    // collateral, cumulatively across calls, and moves the counterparty's
+    // side not at all. A backend on a chain that *could* credit the
+    // counterparty from the caller's own balance
+    // (`TokenNetwork.setTotalDeposit`) must not do so here -- this pair of
+    // assertions is what catches it if it does.
     let state = backend.fund(&channel, 100).await.expect("fund");
-    assert_eq!(state.deposited, 100);
+    assert_eq!(state.own_deposited, 100);
+    assert_eq!(state.counterparty_deposited, 0);
     let state = backend.fund(&channel, 50).await.expect("fund");
-    assert_eq!(state.deposited, 150);
+    assert_eq!(state.own_deposited, 150);
+    assert_eq!(state.counterparty_deposited, 0);
+
+    // ...and that self-deposit is durable, not merely whatever the
+    // funding call happened to return.
+    let state = backend
+        .channel_state(&channel)
+        .await
+        .expect("channel_state");
+    assert_eq!(state.own_deposited, 150);
+    assert_eq!(state.counterparty_deposited, 0);
+
+    // The counterparty, depositing on their own side, is what puts value
+    // behind the claims *this* backend redeems -- and it leaves this
+    // backend's own collateral exactly where `fund` left it.
+    fund_counterparty(&channel, 150).await;
+    let state = backend
+        .channel_state(&channel)
+        .await
+        .expect("channel_state");
+    assert_eq!(state.counterparty_deposited, 150);
+    assert_eq!(state.own_deposited, 150);
 
     // Redeeming a valid claim moves the redeemed total to the claim's
     // cumulative amount. The deposit is untouched -- it is the channel's
@@ -142,7 +197,8 @@ where
         .await
         .expect("redeem");
     assert_eq!(state.redeemed, 60);
-    assert_eq!(state.deposited, 150);
+    assert_eq!(state.counterparty_deposited, 150);
+    assert_eq!(state.own_deposited, 150);
 
     // A later claim supersedes an earlier one: redeeming again for a
     // higher cumulative amount succeeds and moves the total further.
@@ -209,6 +265,31 @@ where
         }
     );
 
+    // The bound is the *counterparty's* deposit and nothing else: this
+    // backend's own 150 of collateral is not spare change a claim against
+    // it may draw on. Raising only the self-deposit leaves the identical
+    // claim refused with the identical number.
+    backend.fund(&channel, 900).await.expect("fund");
+    let err = backend
+        .redeem(
+            &channel,
+            Claim {
+                nonce: 3,
+                cumulative_amount: 1_000,
+                signature: sign(&channel, 3, 1_000),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        SettlementError::InsufficientChannelBalance {
+            requested: 1_000,
+            deposited: 150,
+        },
+        "a self-deposit must not raise the ceiling on claims this backend redeems"
+    );
+
     // ...and that rejection is retryable, not terminal (issue #662). The
     // refusal must leave the channel exactly as it found it -- in
     // particular the nonce the refused claim was signed for must still be
@@ -220,8 +301,12 @@ where
     // writing `nonce_x`. If either consumed the nonce on refusal, bounding
     // a claim by the deposit would burn an honest, already-signed proof
     // rather than merely deferring it.
-    let state = backend.fund(&channel, 900).await.expect("fund");
-    assert_eq!(state.deposited, 1_050);
+    fund_counterparty(&channel, 900).await;
+    let state = backend
+        .channel_state(&channel)
+        .await
+        .expect("channel_state");
+    assert_eq!(state.counterparty_deposited, 1_050);
     let state = backend
         .redeem(
             &channel,
@@ -298,7 +383,8 @@ where
         .open(instant_counterparty.clone(), instant_settlement_timeout)
         .await
         .expect("open the instant-settlement-proof channel");
-    backend.fund(&immediate, 200).await.expect("fund");
+    let state = backend.fund(&immediate, 200).await.expect("fund");
+    assert_eq!(state.own_deposited, 200);
     backend.close(&immediate).await.expect("close");
     advance_past_instant_settlement_timeout().await;
     let state = backend.settle(&immediate).await.expect("settle");
@@ -330,7 +416,8 @@ where
     assert_ne!(other, channel);
     let other_state = backend.channel_state(&other).await.expect("channel_state");
     assert_eq!(other_state.status, ChannelStatus::Open);
-    assert_eq!(other_state.deposited, 0);
+    assert_eq!(other_state.counterparty_deposited, 0);
+    assert_eq!(other_state.own_deposited, 0);
 
     // Operating on an id nothing ever opened is reported, not panicked.
     let missing = ChannelId("does-not-exist".to_string());
@@ -352,8 +439,9 @@ mod tests {
     #[tokio::test]
     async fn in_memory_settlement_backend_upholds_the_contract() {
         assert_upholds_the_contract(|| async {
+            let backend = Arc::new(InMemorySettlementBackend::new());
             ContractFixture {
-                backend: Arc::new(InMemorySettlementBackend::new()) as Arc<dyn SettlementBackend>,
+                backend: Arc::clone(&backend) as Arc<dyn SettlementBackend>,
                 counterparty: b"counterparty-a".to_vec(),
                 other_counterparty: b"counterparty-b".to_vec(),
                 instant_counterparty: b"counterparty-c".to_vec(),
@@ -362,6 +450,19 @@ mod tests {
                 sign: Box::new(
                     |_channel: &ChannelId, _nonce: u64, _cumulative_amount: u128| vec![0u8],
                 ),
+                fund_counterparty: {
+                    let backend = Arc::clone(&backend);
+                    Box::new(move |channel: &ChannelId, amount: u128| {
+                        let backend = Arc::clone(&backend);
+                        let channel = channel.clone();
+                        Box::pin(async move {
+                            backend
+                                .fund_counterparty(&channel, amount)
+                                .await
+                                .expect("the counterparty deposits");
+                        })
+                    })
+                },
                 // No real minimum, so a zero-length challenge period is
                 // already due the instant the channel closes -- no
                 // advancing needed.

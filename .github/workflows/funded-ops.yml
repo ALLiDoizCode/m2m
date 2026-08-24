@@ -67,13 +67,19 @@
 # (`TokenNetwork.sol:348`). So a payer must fund its OWN slot; funding the
 # counterparty produces a channel that holds tokens and cannot pay.
 #
-# This is a real trap: the connector's own `SettlementBackend::fund` credits
-# `counterparty` (`crates/connector-settlement-evm/src/lib.rs:710`), which is
-# correct for its receiver-side reading of `deposited` but is the opposite of
-# what "fund my channel" suggests. toon-meta#312 lost 1 USDC to exactly this.
-# `participant` is therefore a REQUIRED, explicit input here — never defaulted,
-# never inferred from the signer — and `channel-status` prints both sides so
-# the operator can see which slot moved.
+# This used to be a real trap: the connector's own `SettlementBackend::fund`
+# credited `counterparty`, which was the opposite of what "fund my channel"
+# suggests, and toon-meta#312 lost 1 USDC to exactly this. connector#1118
+# removed it — `fund` is now a SELF-deposit on both backends, so the endpoint
+# and this workflow finally agree on which slot "funding" means, and the Solana
+# backend (whose `Deposit` credits strictly by signer and could never delegate)
+# works through the same call.
+#
+# `participant` stays a REQUIRED, explicit input here — never defaulted, never
+# inferred from the signer — because this workflow reaches `setTotalDeposit`
+# directly rather than through a connector, where the parameter is still there
+# to be got wrong. `channel-status` prints both sides so the operator can see
+# which slot moved.
 #
 # ── `deploy-rolling-swap-channel` (connector#973) ───────────────────────────
 # `RollingSwapChannel` (`packages/contracts/src/RollingSwapChannel.sol`) is

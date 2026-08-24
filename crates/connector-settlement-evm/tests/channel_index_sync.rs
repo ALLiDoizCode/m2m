@@ -88,7 +88,13 @@ async fn a_channel_opened_and_funded_on_chain_is_indexed_once_confirmed() {
         )
         .await
         .expect("open a channel");
-    backend.fund(&channel, 750).await.expect("fund the channel");
+    // The index reports the *counterparty's* deposit for a lookup made
+    // under this backend's own address, so that is the side funded here
+    // (issue #1118).
+    backend
+        .fund_counterparty(&channel, 750)
+        .await
+        .expect("fund the counterparty's side of the channel");
 
     // One confirmation, and mine a couple more blocks so the open/fund logs
     // are comfortably behind head.

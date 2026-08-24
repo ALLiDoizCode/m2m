@@ -1938,7 +1938,13 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK);
             let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
             let funded: ChannelView = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(funded.deposited, 1_000);
+            // `POST /channels/:id/fund` is a SELF-deposit (issue #1118):
+            // it puts this node's own collateral behind its own claims. It
+            // does not, and on Solana never could, credit the
+            // counterparty's side -- that deposit is the counterparty's
+            // own transaction from their own wallet.
+            assert_eq!(funded.own_deposited, 1_000);
+            assert_eq!(funded.deposited, 0);
 
             // The freshly opened, freshly funded channel is visible over
             // the read surface too, reported fresh from the real chain.
@@ -2021,6 +2027,7 @@ mod tests {
             // configuring the claim verification key and domain against it.
             let peer_signer = LocalSigner::generate("peer-claim-key");
             let peer_address = derive_evm_address(&peer_signer.public_key().unwrap());
+            let settlement = Arc::new(settlement);
             let channel_id = settlement
                 .open(peer_address.to_vec(), chrono::Duration::seconds(3600))
                 .await
@@ -2036,7 +2043,10 @@ mod tests {
                     Arc::new(InProcessPeerTransport::new()),
                     clock,
                 )
-                .with_settlement(SettlementChain::Evm, Arc::new(settlement))
+                .with_settlement(
+                    SettlementChain::Evm,
+                    Arc::clone(&settlement) as Arc<dyn connector_settlement::SettlementBackend>,
+                )
                 .with_channel_verification_key(channel_id.0.clone(), peer_address)
                 .with_channel_domain(channel_id.0.clone(), peer_channel_domain)
                 .unwrap(),
@@ -2052,7 +2062,9 @@ mod tests {
 
             // Fund, through the operator surface, exactly like the
             // lifecycle test above -- the channel itself was already opened
-            // directly against the backend above.
+            // directly against the backend above. This is the node's own
+            // collateral (issue #1118), so it is not what the peer's claim
+            // below is redeemed out of.
             let fund_body = serde_json::to_vec(&serde_json::json!({ "amount": 1_000 })).unwrap();
             let fund_path = format!("/channels/{}/fund", channel_id.0);
             let response = app
@@ -2061,6 +2073,15 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
+
+            // The peer's own deposit -- the side a claim signed by the peer
+            // is drawn from, and the one no operator write on this node can
+            // make. On a real deployment the peer submits it themselves;
+            // here the fixture-only delegate deposit stands in.
+            settlement
+                .fund_counterparty(&channel_id, 1_000)
+                .await
+                .expect("the peer deposits on their own side");
 
             // A genuine claim from the channel's counterparty, accepted
             // exactly as an inbound PREPARE's piggybacked claim would be.

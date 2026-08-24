@@ -22,7 +22,7 @@ base64 = "0.22"
 
 [dev-dependencies]
 connector-config = { path = "../connector-config" }
-connector-settlement-evm = { path = "../connector-settlement-evm" }
+connector-settlement-evm = { path = "../connector-settlement-evm", features = ["test-util"] }
 ethers = { version = "2", default-features = false, features = ["rustls"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tower = { version = "0.4", features = ["util"] }

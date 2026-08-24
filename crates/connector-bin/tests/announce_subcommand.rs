@@ -707,11 +707,15 @@ async fn the_default_path_pays_the_through_url_as_a_client_with_no_route_and_no_
         .open(announcer_address.to_vec(), ChronoDuration::hours(1))
         .await
         .expect("open a real channel");
+    // The announcing node is the one that signs, so the collateral goes on
+    // its side of the channel -- which on a real deployment it deposits
+    // itself, and which the fixture-only delegate deposit stands in for
+    // here (issue #1118).
     let funded = backend
-        .fund(&channel, 10 * u128::from(RELAY_PRICE))
+        .fund_counterparty(&channel, 10 * u128::from(RELAY_PRICE))
         .await
         .expect("fund it with real ERC-20 value");
-    assert_eq!(funded.deposited, 10 * u128::from(RELAY_PRICE));
+    assert_eq!(funded.counterparty_deposited, 10 * u128::from(RELAY_PRICE));
 
     // The TARGET: a connector fronting a relay write ingress, with a real
     // settlement section against the same deployment -- so it can resolve

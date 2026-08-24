@@ -15,10 +15,11 @@
 > `POST /channels` with `"chain":"solana"` reaches `SolanaSettlementBackend::open`, which submits
 > the `InitializeChannel`
 > ([ADR 0008](adr/0008-operator-surface-splits-read-from-write.md)'s third write, issue #459), and
-> [`local/mixed-chain`](../local/README.md) opens its peering's channel that way on every run. What
-> it does **not** do is deposit a node's own collateral: `packages/solana-program`'s `Deposit`
-> requires the depositing participant to sign for their own side, so `fund` refuses on the Solana
-> backend and that transfer is made from the participant's own wallet against the deployed program.
+> [`local/mixed-chain`](../local/README.md) opens its peering's channel that way on every run. It
+> **also** deposits a node's own collateral, as of issue #1118: `POST /channels/:id/fund` submits a
+> `Deposit` signed by the node's own `[settlement.solana]` identity. What no node can do -- here or
+> on any other chain -- is deposit on its _counterparty's_ behalf: `Deposit` credits strictly by
+> signer, so the other side's collateral is always their own transaction from their own wallet.
 
 This guide covers deploying the Solana payment channel program to devnet, configuring the `SolanaPaymentChannelProvider` in the connector, and operating payment channels in a test environment.
 
@@ -341,13 +342,38 @@ Participants are sorted lexicographically to ensure deterministic PDA derivation
 
 ### Funding a Channel Vault
 
-After opening a channel, fund the associated token vault:
+A channel's vault is funded **per side**, by that side, because `Deposit` credits strictly by
+signer (`processor.rs:309-311`, `:356-360`): the depositor account must sign, and the instruction
+carries no participant field naming anyone else. Whoever signs the balance proofs is who has to
+deposit.
+
+**From a running Rust connector** (issue #1118) -- this is the current procedure:
+
+```sh
+curl -X POST https://<node>/channels/<CHANNEL_PDA>/fund \
+  -H 'Content-Type: application/json' \
+  -d '{"amount": <base units>}'
+```
+
+signed as an operator write (RFC 9421, [ADR 0008](adr/0008-operator-surface-splits-read-from-write.md)
+-- a bearer token is never sufficient to move value). The node signs the `Deposit` with its
+`[settlement.solana] key` identity and moves the tokens from that identity's associated token
+account, which it creates at boot but does not fill: **the settlement address needs the SPL token
+itself, not just SOL for fees.** The response's `own_deposited` is the node's own side read back
+from the chain; `deposited` is the counterparty's and this write never touches it.
+
+**From a counterparty that is not a connector** -- `rig`, `toon-client`, a wallet -- the deposit is
+submitted directly against the deployed program under that participant's own key. There is no
+operation on any node, on either settlement backend, or on the settlement port that does it for
+them, and adding one is not possible without changing the program.
+
+The retired TypeScript path below is kept for the record only:
 
 1. **Identify the channel PDA** -- derived from the two participants' public keys and the token mint
 2. **Transfer tokens** -- use the `deposit()` method on the SDK or provider:
 
    ```typescript
-   // Using the SolanaPaymentChannelProvider
+   // RETIRED (ADR 0017): the TypeScript SolanaPaymentChannelProvider
    await provider.deposit(channelId, amount.toString());
    ```
 

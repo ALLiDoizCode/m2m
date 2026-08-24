@@ -19,7 +19,10 @@ use axum::http::{Request, StatusCode};
 
 use connector_operator::test_support::sign_request;
 use connector_runtime::{ChannelView, ChannelViewStatus};
-use connector_settlement_evm::test_support::{anvil_available, Anvil, DEPLOYER_PRIVATE_KEY};
+use connector_settlement::SettlementBackend;
+use connector_settlement_evm::test_support::{
+    anvil_available, Anvil, COUNTERPARTY_PRIVATE_KEY, DEPLOYER_PRIVATE_KEY,
+};
 use connector_settlement_evm::EvmSettlementBackend;
 use connector_signer::{derive_evm_address, evm_balance_proof_digest, to_hex, EvmBalanceProof};
 
@@ -42,6 +45,14 @@ fn sign_evm(secret: &SecretKey, digest: &[u8; 32]) -> Vec<u8> {
     let recovery_byte: u8 = recovery_id.into();
     bytes.push(recovery_byte);
     bytes
+}
+
+/// The raw bytes of a `0x`-optional hex private key.
+fn hex_bytes(hex: &str) -> Vec<u8> {
+    let hex = hex.trim_start_matches("0x");
+    (0..hex.len() / 2)
+        .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).expect("key is hex"))
+        .collect()
 }
 
 fn channel_id_bytes(id: &str) -> [u8; 32] {
@@ -100,15 +111,27 @@ async fn a_channel_lifecycle_reaches_a_real_chain_through_a_config_driven_node()
         .expect("deploy a TokenNetwork through a fresh registry");
     let registry_address = backend.registry_address();
     let token_network_address = backend.address();
-    drop(backend);
 
     // The channel's counterparty must be a real address able to sign a
     // balance proof `TokenNetwork.claimFromChannel` recovers (issue #576)
-    // -- generated here rather than a placeholder, since the redeem step
-    // below signs a genuine claim with its key.
-    let counterparty_secret = SecretKey::parse(&[7u8; 32]).unwrap();
+    // -- and, as of issue #1118, one that can also make its own on-chain
+    // deposit, since no node can make it for them. So it is anvil's second
+    // genesis account: genesis-funded with ETH for its own gas, and a
+    // different address from the node's, which two `EvmSettlementBackend`s
+    // over one nonce sequence could not be.
+    let counterparty_secret = SecretKey::parse_slice(&hex_bytes(COUNTERPARTY_PRIVATE_KEY))
+        .expect("anvil's second dev key is a valid secp256k1 secret");
     let counterparty_public = PublicKey::from_secret_key(&counterparty_secret);
     let counterparty_address = derive_evm_address(&counterparty_public.serialize());
+
+    // Mock USDC for the counterparty to deposit, minted before the node
+    // starts: this write signs as the deployer, and once the node is
+    // serving the deployer's nonce sequence belongs to the node alone.
+    backend
+        .mint_mock_tokens_to(counterparty_address.into(), 1_000_000)
+        .await
+        .expect("mint the counterparty something of its own to deposit");
+    drop(backend);
 
     let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
     key_file
@@ -190,7 +213,39 @@ key_file = "{key_path}"
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let funded: ChannelView = body_channel_view(response).await;
-    assert_eq!(funded.deposited, 1_000);
+    // `POST /channels/:id/fund` is a SELF-deposit (issue #1118): it raises
+    // this node's own collateral and leaves the counterparty's side alone.
+    // Before #1118 it credited the counterparty instead -- a delegate
+    // deposit only `TokenNetwork` permits, which made the identical
+    // endpoint an unconditional error on Solana. This assertion is the
+    // behaviour change, stated at the surface an operator actually calls.
+    assert_eq!(funded.own_deposited, 1_000);
+    assert_eq!(funded.deposited, 0);
+
+    // The counterparty's own deposit -- the side a claim they sign is
+    // redeemed out of, and the one no write on this node can make. This is
+    // the production shape, not a fixture shortcut: a second connector
+    // bound to the same `TokenNetwork` under the *counterparty's* own key,
+    // calling the same `fund` the node just called, which credits whichever
+    // side is calling. Both sides of this channel are now collateralised by
+    // the same port method, each for itself.
+    let counterparty_backend = EvmSettlementBackend::connect(
+        &anvil.rpc_url,
+        COUNTERPARTY_PRIVATE_KEY,
+        registry_address,
+        token,
+        6,
+    )
+    .await
+    .expect("bind the counterparty's own identity to the same TokenNetwork");
+    let counterparty_funded = counterparty_backend
+        .fund(&connector_settlement::ChannelId(opened.id.clone()), 1_000)
+        .await
+        .expect("the counterparty deposits on their own side");
+    // Read from the counterparty's point of view, so `own_deposited` is
+    // theirs -- the mirror image of what the node saw a moment ago.
+    assert_eq!(counterparty_funded.own_deposited, 1_000);
+    assert_eq!(counterparty_funded.counterparty_deposited, 1_000);
 
     // Redeem: `TokenNetwork.claimFromChannel` verifies a real EIP-712
     // signature over the balance proof (issue #576), recovered against the
@@ -230,6 +285,7 @@ key_file = "{key_path}"
     let redeemed: ChannelView = body_channel_view(response).await;
     assert_eq!(redeemed.redeemed, 400);
     assert_eq!(redeemed.deposited, 1_000);
+    assert_eq!(redeemed.own_deposited, 1_000);
 
     // Close.
     let close_path = format!("/channels/{}/close", opened.id);

@@ -21,6 +21,20 @@ use ethers::providers::{Http, Middleware, Provider};
 pub const DEPLOYER_PRIVATE_KEY: &str =
     "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
+/// Anvil's *second* well-known dev account (`0x7099…79C8`), genesis-funded
+/// with ETH exactly like [`DEPLOYER_PRIVATE_KEY`].
+///
+/// Needed once `SettlementBackend::fund` became a self-deposit (issue
+/// #1118): a test that wants collateral on **both** sides of a channel now
+/// needs two identities that can each sign for themselves, and they cannot
+/// be the same address. Two `EvmSettlementBackend`s built for one address
+/// hold two independent `NonceManagerMiddleware`s over one nonce sequence,
+/// so the second one to write gets `nonce too low` -- which is not a
+/// hazard a test should route around, since on a real chain the
+/// counterparty is a different party with a different key anyway.
+pub const COUNTERPARTY_PRIVATE_KEY: &str =
+    "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+
 /// True if `anvil --version` runs successfully.
 pub fn anvil_available() -> bool {
     Command::new("anvil")
@@ -82,8 +96,13 @@ impl Anvil {
             .args([
                 "--chain-id",
                 "31337",
+                // Two genesis accounts, not one: `DEPLOYER_PRIVATE_KEY` and
+                // `COUNTERPARTY_PRIVATE_KEY`. A channel is two-sided and
+                // `fund` is a self-deposit (issue #1118), so a test that
+                // wants collateral on both sides needs both identities to
+                // hold ETH for their own gas.
                 "--accounts",
-                "1",
+                "2",
                 "--balance",
                 "10000",
             ])

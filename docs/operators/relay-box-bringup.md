@@ -138,16 +138,21 @@ every other infra-touching ticket in this repo's history records when it applies
    ```
 
    (`"chain":"solana"` for the Solana leg — a node settling on more than one chain refuses an
-   omitted `chain` as ambiguous.) **On EVM**, fund it with `POST /channels/:id/fund`; that write
-   deposits into the _counterparty's_ on-chain balance, which `TokenNetwork.setTotalDeposit`
-   permits because it names the participant being credited and pulls the tokens from
-   `_msgSender()` — the caller, or its forwarded signer under ERC-2771. **On Solana it will not
-   work**, and the failure is by design rather than a gap in the runbook:
-   `packages/solana-program`'s `Deposit` requires the depositing participant to sign for their own
-   side, so `SolanaSettlementBackend::fund` refuses outright on a `connect`-built backend. The
-   Solana leg's collateral therefore comes from each participant's own wallet, submitted directly
-   against the deployed program — there is no operation for it on the settlement port, on either
-   backend, or on the operator surface.
+   omitted `chain` as ambiguous.)
+
+   **Collateral, on both chains.** `POST /channels/:id/fund` is a **self-deposit** (issue #1118):
+   run it on the box that will _sign_ claims on this channel, and it puts that box's own collateral
+   behind them, raising `own_deposited` on `GET /channels`. It works identically on EVM and Solana.
+   Each participant funds their own side; neither box can fund the other's, and the endpoint no
+   longer tries — `packages/solana-program`'s `Deposit` credits strictly by signer, and
+   `TokenNetwork.setTotalDeposit`'s ability to credit an arbitrary participant from the caller's
+   balance is deliberately not exposed. So: the apex funds the apex's side, the relay funds the
+   relay's, and the direction debt actually flows decides which of the two matters (§6.4 — debt
+   flows the way packets do).
+
+   Before the Solana leg can be funded, the box's `[settlement.solana]` address needs the SPL token
+   itself, not just SOL for fees: the deposit moves real tokens out of that identity's associated
+   token account, which the node creates at boot but nothing fills.
 
    Record the resulting
    `channel_id`/`channel_account`, the relay's `counterparty_key`, and (EVM) `chain_id` +

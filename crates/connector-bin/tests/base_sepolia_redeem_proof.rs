@@ -308,11 +308,18 @@ async fn a_production_signed_claim_redeems_on_the_deployed_token_network_and_a_w
         .await
         .expect("open a real channel on the deployed TokenNetwork");
     println!("channel opened: {channel}");
+    // The payer's slot, not this backend's own: the claim redeemed below
+    // is signed by the payer and drawn from the payer's deposit. On the
+    // real network the payer deposits it; this proof run stands in for
+    // them with the fixture-only delegate deposit (issue #1118).
     let funded = backend
-        .fund(&channel, DEPOSIT)
+        .fund_counterparty(&channel, DEPOSIT)
         .await
         .expect("fund the payer's slot with real deposited value");
-    assert_eq!(funded.deposited, DEPOSIT, "a real transaction moved this");
+    assert_eq!(
+        funded.counterparty_deposited, DEPOSIT,
+        "a real transaction moved this"
+    );
     println!("payer's slot funded: {DEPOSIT} base units");
 
     let channel_id_bytes = parse_channel_id(&channel.0);
