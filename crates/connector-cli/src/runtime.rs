@@ -1097,6 +1097,19 @@ pub struct Runtime {
     /// The Solana twin of [`Self::client_channel_source_evm`] (issue #631)
     /// -- `Some` exactly when `[settlement.solana]` is configured.
     pub client_channel_source_solana: Option<Arc<dyn ClientChannelSource>>,
+    /// Which Solana cluster this node actually settles on, as the chain
+    /// itself reported when the backend connected -- its genesis hash
+    /// (`SolanaSettlementBackend::cluster`, issue #1131). `None` when there
+    /// is no `[settlement.solana]` table, or when the chain is one no
+    /// public cluster's published genesis hash matches (a
+    /// `solana-test-validator`).
+    ///
+    /// Carried on the runtime for the same reason every other field here is
+    /// (this struct's own doc): it is a fact the chain connection proved,
+    /// and reconstructing it would mean connecting twice. [`router`] hands
+    /// it to the client edge, where a claim's self-declared `cluster` is
+    /// compared against it (issue #975).
+    pub solana_cluster: Option<&'static str>,
     /// The channel-opening facts the x402 greeting carries (issue #617) --
     /// `Some` exactly when `[settlement.evm]` (or the legacy flat
     /// `[settlement]`) is configured, composed here in `build` because that
@@ -1242,6 +1255,7 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     connector = wire_outbound_client_hops(connector, config, claim_signer)?;
     let mut client_channel_source_evm: Option<Arc<dyn ClientChannelSource>> = None;
     let mut client_channel_source_solana: Option<Arc<dyn ClientChannelSource>> = None;
+    let mut solana_cluster: Option<&'static str> = None;
     let mut settlement_terms: Option<connector_client_edge::X402SettlementTerms> = None;
     let mut settlements: Vec<connector_client_edge::X402ChainSettlementTerms> = Vec::new();
     for settlement in config.settlements() {
@@ -1315,6 +1329,10 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
                 // composed here as well (issue #632) -- epic #627's
                 // remaining children, together.
                 let backend = build_solana_settlement_backend(solana).await?;
+                // Which chain that connection actually reached, from the
+                // chain's own genesis hash rather than from the shape of
+                // the URL used to reach it (issue #1131).
+                solana_cluster = backend.cluster();
                 client_channel_source_solana = Some(Arc::new(SolanaChannelSource {
                     backend: backend.clone(),
                 }));
@@ -1372,6 +1390,7 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
         signer,
         client_channel_source_evm,
         client_channel_source_solana,
+        solana_cluster,
         settlement_terms,
         settlements,
     })
@@ -1430,10 +1449,16 @@ async fn reap_unresolvable_client_channels_periodically(gate: Arc<ClientClaimGat
 /// claim -- deliberately, since the only alternative to "no record of this
 /// channel" is trusting what the claim says about its own signer, which is
 /// exactly the hole #558 closes.
+///
+/// `solana_cluster` is the cluster the Solana chain itself named at connect
+/// (`SolanaSettlementBackend::cluster`, issue #1131), or `None` when this
+/// node has no Solana backend to have asked -- see the cluster comment in
+/// the body for how it composes with the configured `rpc_url`'s hint.
 fn client_channels(
     config: &Config,
     evm_source: Option<Arc<dyn ClientChannelSource>>,
     solana_source: Option<Arc<dyn ClientChannelSource>>,
+    solana_cluster: Option<&'static str>,
 ) -> ClientChannelRegistry {
     let mut channels = ClientChannelRegistry::new();
     // The one Solana settlement program this node runs under. A configured
@@ -1456,10 +1481,36 @@ fn client_channels(
     // no signature can ever bind (a Solana program cannot know its own
     // cluster, ADR 0053), and that nothing compared before this.
     //
-    // `cluster_hint` answers `None` for an `rpc_url` naming no cluster this
-    // connector recognises, and that `None` travels: a node that does not
-    // know where it is compares nothing rather than guessing.
-    if let Some(cluster) = solana_settlement.and_then(|solana| solana.cluster_hint()) {
+    // Two answers, in that order (issue #1131). `solana_cluster` is what
+    // the chain said about itself when this node connected -- its genesis
+    // hash, the one identity a Solana chain states rather than is named by
+    // -- and it holds however the node reached the chain, including behind
+    // a paid RPC provider. `cluster_hint` is a hostname allowlist over the
+    // configured `rpc_url` and answers `None` for every such provider, so
+    // it is the fallback rather than the source: it covers only the one
+    // case the chain cannot, a `solana-test-validator`, whose fresh genesis
+    // matches no published cluster hash but whose loopback URL still says
+    // `localnet`.
+    //
+    // `None` from both still travels: a node that does not know where it
+    // is compares nothing rather than guessing.
+    let cluster_hint = solana_settlement.and_then(|solana| solana.cluster_hint());
+    if let (Some(chain), Some(hint)) = (solana_cluster, cluster_hint) {
+        if chain != hint {
+            // Not a refusal. The chain is authoritative and is taken; the
+            // hint being wrong is a fact about a hostname guess, and
+            // refusing to boot over a guess this node has already
+            // superseded would be an outage caused by the weaker source.
+            tracing::warn!(
+                chain_cluster = chain,
+                rpc_url_hint = hint,
+                "[settlement.solana] rpc_url's hostname names one cluster but the chain it \
+                 reaches reports another; the chain's own genesis hash is authoritative and is \
+                 what a claim's declared cluster is checked against"
+            );
+        }
+    }
+    if let Some(cluster) = solana_cluster.or(cluster_hint) {
         channels = channels.with_solana_cluster(cluster);
     }
     for channel in config.client_channels() {
@@ -1590,6 +1641,7 @@ fn client_claim_gate(
     signer: Arc<dyn Signer>,
     evm_source: Option<Arc<dyn ClientChannelSource>>,
     solana_source: Option<Arc<dyn ClientChannelSource>>,
+    solana_cluster: Option<&'static str>,
 ) -> Result<ClientClaimGate, RuntimeError> {
     let (journal, path) = match config.state_dir() {
         Some(state_dir) => (
@@ -1601,9 +1653,11 @@ fn client_claim_gate(
             PathBuf::from(CLIENT_EDGE_JOURNAL),
         ),
     };
-    let gate =
-        ClientClaimGate::restore(client_channels(config, evm_source, solana_source), journal)
-            .map_err(|source| RuntimeError::JournalUnreplayable { path, source })?;
+    let gate = ClientClaimGate::restore(
+        client_channels(config, evm_source, solana_source, solana_cluster),
+        journal,
+    )
+    .map_err(|source| RuntimeError::JournalUnreplayable { path, source })?;
     Ok(gate.with_payout_ledger(client_payout_ledger(config, signer)))
 }
 
@@ -1669,6 +1723,7 @@ pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError
         signer.clone(),
         runtime.client_channel_source_evm.clone(),
         runtime.client_channel_source_solana.clone(),
+        runtime.solana_cluster,
     )?);
     // Issue #977: a channel's deterministic on-chain address means a
     // reopened channel reuses its settled predecessor's watermark key, and
@@ -2397,7 +2452,7 @@ key_file = "{}"
             )
         });
 
-        assert!(client_channels(&config, None, None).is_empty());
+        assert!(client_channels(&config, None, None, None).is_empty());
     }
 
     /// The liveness knobs reach the registry rather than stopping at the
@@ -2451,7 +2506,7 @@ key_file = "{}"
         });
 
         let source = Arc::new(CountingSource::default());
-        let channels = client_channels(&config, Some(source.clone()), None);
+        let channels = client_channels(&config, Some(source.clone()), None, None);
         let gate = ClientClaimGate::restore(channels, Arc::new(InMemoryJournal::new()))
             .expect("a fresh in-memory journal has nothing to replay");
 
@@ -2535,7 +2590,7 @@ key_file = "{}"
         });
 
         let source = Arc::new(EmptyCountingSource::default());
-        let channels = client_channels(&config, Some(source.clone()), None);
+        let channels = client_channels(&config, Some(source.clone()), None, None);
         let gate = ClientClaimGate::restore(channels, Arc::new(InMemoryJournal::new()))
             .expect("a fresh in-memory journal has nothing to replay");
 
@@ -2685,7 +2740,7 @@ token_network_address = "0x00000000000000000000000000000000000000bb"
             )
         });
 
-        let channels = client_channels(&config, None, None);
+        let channels = client_channels(&config, None, None, None);
         assert!(!channels.is_empty());
         let ClientChannelConfig::Evm(evm) = &config.client_channels()[0] else {
             panic!("expected an EVM client channel");
@@ -2725,7 +2780,7 @@ counterparty = "{counterparty}"
         // no `[settlement.solana]` block has nothing to verify against and is
         // not recorded. The config still parses -- this is a wiring decision,
         // not a parse error -- and the skip is logged.
-        let channels = client_channels(&config, None, None);
+        let channels = client_channels(&config, None, None, None);
         assert!(
             channels.is_empty(),
             "a Solana client channel with no settlement backend has no program id to verify \
@@ -2736,6 +2791,124 @@ counterparty = "{counterparty}"
         };
         assert_eq!(solana.channel_account(), account);
         assert_eq!(solana.counterparty(), counterparty);
+    }
+
+    /// Issue #1131: the same defect as the test below, on the node shape
+    /// `cluster_hint` cannot see -- one behind a paid RPC provider, whose
+    /// URL names no cluster at all. Before this, `cluster_hint` answered
+    /// `None` for such a URL, the registry recorded no cluster, and the
+    /// #975 check silently did nothing; the claim below was accepted in
+    /// full. Now the cluster comes from the chain's own genesis hash, read
+    /// at connect, so the check runs however the node reached the chain.
+    ///
+    /// The Helius-shaped URL is the point of the test and must stay
+    /// unrecognised by `cluster_hint`: if it ever became a recognised host,
+    /// this test would pass through the fallback and stop covering the
+    /// genesis path -- so it asserts the hint is `None` first.
+    ///
+    /// `Some("devnet")` stands in for what
+    /// `SolanaSettlementBackend::connect` reads off the chain; that read
+    /// itself is proved against a real validator in
+    /// `connector-settlement-solana`'s `connect_identity` suite, which is
+    /// where a chain fact belongs (ADR 0007, tier 3).
+    #[tokio::test]
+    async fn a_node_behind_a_paid_rpc_provider_still_checks_the_declared_cluster() {
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine;
+        use ed25519_dalek::Signer as Ed25519Signer;
+        use rand::SeedableRng;
+
+        const PROGRAM_ID: [u8; 32] = [0xab; 32];
+        const CHANNEL_ACCOUNT: [u8; 32] = [4u8; 32];
+        const PAID_PROVIDER_RPC_URL: &str = "https://mainnet.helius-rpc.com/?api-key=redacted";
+
+        let payer =
+            ed25519_dalek::Keypair::generate(&mut rand::rngs::StdRng::from_seed([17u8; 32]));
+        let program_id = Pubkey::new_from_array(PROGRAM_ID).to_string();
+        let channel_account = Pubkey::new_from_array(CHANNEL_ACCOUNT).to_string();
+        let counterparty = Pubkey::new_from_array(payer.public.to_bytes()).to_string();
+
+        let state_dir = tempfile::tempdir().expect("temp state dir");
+        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_path}"
+
+[settlement.solana]
+rpc_url = "{PAID_PROVIDER_RPC_URL}"
+program_id = "{program_id}"
+token_address = "So11111111111111111111111111111111111111112"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "{key_path}"
+
+[[client_channels]]
+channel_account = "{channel_account}"
+counterparty = "{counterparty}"
+"#,
+                key_path = key_path.display(),
+                state_dir = state_dir.path().display(),
+            )
+        });
+
+        let connector_config::SettlementConfig::Solana(solana) = &config.settlements()[0] else {
+            panic!("expected a Solana settlement table");
+        };
+        assert_eq!(
+            solana.cluster_hint(),
+            None,
+            "the whole premise of this test is a URL whose hostname names no cluster"
+        );
+
+        // What the chain answered at connect. The URL says "mainnet" and
+        // the chain says devnet -- deliberately, so a test that passed by
+        // reading the URL's own substring would fail here.
+        let channels = client_channels(&config, None, None, Some("devnet"));
+        let gate = ClientClaimGate::restore(channels, Arc::new(InMemoryJournal::new()))
+            .expect("a fresh in-memory journal has nothing to replay");
+
+        let message =
+            connector_signer::solana_balance_proof_message(&PROGRAM_ID, &CHANNEL_ACCOUNT, 1, 100);
+        let signature = BASE64.encode(payer.sign(&message).to_bytes());
+        let signed = |cluster: &str| {
+            format!(
+                r#"{{
+                    "version": "1.0",
+                    "blockchain": "solana",
+                    "messageId": "msg-1",
+                    "timestamp": "2026-02-02T12:00:00.000Z",
+                    "senderId": "peer-carol",
+                    "programId": "{program_id}",
+                    "channelAccount": "{channel_account}",
+                    "nonce": 1,
+                    "transferredAmount": "100",
+                    "signature": "{signature}",
+                    "signerPublicKey": "{counterparty}",
+                    "cluster": "{cluster}"
+                }}"#
+            )
+        };
+
+        assert_eq!(
+            gate.ingest(&signed("mainnet-beta"), 0).await,
+            Err(
+                connector_client_edge::ClaimIngestRejection::SolanaClusterMismatch {
+                    declared: "mainnet-beta".to_string(),
+                    configured: "devnet",
+                }
+            ),
+            "a node whose chain reports devnet must not endorse a claim labelled mainnet-beta, \
+             even though its rpc_url's hostname names no cluster"
+        );
+        assert!(
+            gate.ingest(&signed("devnet"), 0).await.is_ok(),
+            "a correctly labelled claim on the same channel and nonce must still be accepted"
+        );
     }
 
     /// Issue #975's wiring, end to end from a config file: the cluster a
@@ -2795,7 +2968,7 @@ counterparty = "{counterparty}"
             )
         });
 
-        let channels = client_channels(&config, None, None);
+        let channels = client_channels(&config, None, None, None);
         let gate = ClientClaimGate::restore(channels, Arc::new(InMemoryJournal::new()))
             .expect("a fresh in-memory journal has nothing to replay");
 
@@ -2869,7 +3042,7 @@ key_file = "{key_path}"
             )
         });
 
-        client_claim_gate(&config, test_signer(), None, None)
+        client_claim_gate(&config, test_signer(), None, None, None)
             .expect("a writable state_dir produces a gate");
         assert!(
             state_dir.path().join(CLIENT_EDGE_JOURNAL).exists(),
@@ -2901,7 +3074,7 @@ key_file = "{key_path}"
             )
         });
 
-        let Err(error) = client_claim_gate(&config, test_signer(), None, None) else {
+        let Err(error) = client_claim_gate(&config, test_signer(), None, None, None) else {
             panic!("an unusable state_dir must not produce a gate");
         };
         assert!(matches!(error, RuntimeError::StateDirUnusable { .. }));
@@ -2937,7 +3110,7 @@ key_file = "{key_path}"
             )
         });
 
-        let Err(error) = client_claim_gate(&config, test_signer(), None, None) else {
+        let Err(error) = client_claim_gate(&config, test_signer(), None, None, None) else {
             panic!("a corrupt journal must not produce a gate");
         };
         assert!(matches!(error, RuntimeError::JournalUnreplayable { .. }));
@@ -4647,6 +4820,7 @@ key_file = "{key_path}"
                 Some(Arc::new(SolanaChannelSource {
                     backend: Arc::new(node_backend),
                 })),
+                None,
             )
             .expect("a config with no state_dir produces an in-memory gate");
             let rejection = gate
@@ -4680,6 +4854,7 @@ key_file = "{key_path}"
                 Some(Arc::new(SolanaChannelSource {
                     backend: Arc::new(matching_backend),
                 })),
+                None,
             )
             .expect("a config with no state_dir produces an in-memory gate");
             gate.ingest(&claim_json, 100)
@@ -4791,6 +4966,7 @@ key_file = "{key_path}"
                 Some(Arc::new(SettlementChannelSource {
                     backend: backend.clone(),
                 })),
+                None,
                 None,
             )
             .expect("a config with no state_dir produces an in-memory gate");
@@ -4957,6 +5133,7 @@ key_file = "{key_path}"
                 Some(Arc::new(SolanaChannelSource {
                     backend: Arc::new(node_backend),
                 })),
+                None,
             )
             .expect("a config with no state_dir produces an in-memory gate");
 

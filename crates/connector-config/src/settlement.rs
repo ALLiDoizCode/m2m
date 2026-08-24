@@ -312,6 +312,18 @@ impl SolanaSettlementConfig {
     /// Alchemy, QuickNode, ...) whose URL names no cluster at all (issue
     /// #975). Guessing wrong from a substring match would be worse than not
     /// checking, so this only recognises an exact, canonical hostname.
+    ///
+    /// A **hint**, and since issue #1131 the *fallback* rather than the
+    /// source: a running node takes its cluster from the chain's own
+    /// genesis hash, read once when the Solana backend connects
+    /// (`SolanaSettlementBackend::cluster`), which holds however the node
+    /// reached the chain and so covers every host this list does not. What
+    /// this still answers, and the genesis hash cannot, is the loopback
+    /// case: `solana-test-validator` mints a fresh genesis on every run and
+    /// therefore matches no published cluster hash, while its URL still
+    /// says `localnet`. Nothing consults this before a backend exists, so
+    /// there is no ordering problem -- the two are read together, in
+    /// `connector-cli`'s `client_channels`.
     pub fn cluster_hint(&self) -> Option<&'static str> {
         cluster_hint_for_rpc_url(&self.rpc_url)
     }
