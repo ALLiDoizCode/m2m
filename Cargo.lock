@@ -1114,6 +1114,7 @@ dependencies = [
  "serde_json",
  "solana-rpc-client",
  "solana-sdk",
+ "spl-associated-token-account",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
