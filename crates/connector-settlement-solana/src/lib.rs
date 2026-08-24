@@ -37,6 +37,8 @@ use chrono::Duration;
 
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::commitment_config::CommitmentConfig;
+use solana_sdk::genesis_config::ClusterType;
+use solana_sdk::hash::Hash;
 use solana_sdk::instruction::Instruction;
 use solana_sdk::program_pack::Pack;
 use solana_sdk::pubkey::Pubkey;
@@ -94,6 +96,52 @@ pub struct SolanaSettlementBackend {
     /// struct's own top-of-file doc for why the chain alone cannot answer
     /// "was this settled, or did it never exist" once that has happened.
     settled: Mutex<HashSet<Pubkey>>,
+    /// Which Solana cluster the endpoint this backend connected to is
+    /// actually on, read from the chain itself at
+    /// [`connect`](Self::connect) -- see [`Self::cluster`] and
+    /// [`cluster_for_genesis_hash`] (issue #1131).
+    cluster: Option<&'static str>,
+}
+
+/// The public Solana cluster whose genesis block hashes to `genesis_hash`
+/// -- `"mainnet-beta"`, `"devnet"` or `"testnet"` -- and `None` for a chain
+/// that is none of the three (issue #1131).
+///
+/// A cluster's genesis hash is the one identity a Solana chain states about
+/// itself. It is not a naming convention, so it holds however the node
+/// reached the chain: `api.devnet.solana.com`, a Helius or Triton URL, an
+/// SSH tunnel, a caching proxy, an IP literal. That is the whole reason this
+/// exists next to `SolanaSettlementConfig::cluster_hint`, which can only
+/// recognise a hostname it was told about in advance and answers `None` for
+/// every paid RPC provider.
+///
+/// The three hashes are **not** written down here. They come from
+/// [`ClusterType::get_genesis_hash`], `solana-sdk`'s own table, so the
+/// values track the pinned SDK rather than this repository's memory of
+/// them; `cluster_names_match_the_published_genesis_hashes` in this
+/// module's tests pins that table to the base58 the public RPC endpoints
+/// answer with, so an SDK bump that moved a value would fail the gate
+/// rather than silently relabel a chain.
+///
+/// # `None` is a chain this connector cannot name, not an error
+///
+/// `ClusterType::Development` -- a `solana-test-validator`, which mints a
+/// fresh genesis on every run, and therefore every `local/` topology and
+/// every tier-3 test in this workspace -- has no published hash and can
+/// never have one. It answers `None`, which is exactly what `cluster_hint`
+/// already answers for an unrecognised host, and means the same thing: this
+/// node cannot say which cluster it is on, so it compares nothing rather
+/// than guessing. Refusing here would refuse to boot on every local
+/// topology.
+pub fn cluster_for_genesis_hash(genesis_hash: &Hash) -> Option<&'static str> {
+    [
+        (ClusterType::MainnetBeta, "mainnet-beta"),
+        (ClusterType::Devnet, "devnet"),
+        (ClusterType::Testnet, "testnet"),
+    ]
+    .into_iter()
+    .find(|(cluster, _)| cluster.get_genesis_hash().as_ref() == Some(genesis_hash))
+    .map(|(_, name)| name)
 }
 
 impl SolanaSettlementBackend {
@@ -124,6 +172,13 @@ impl SolanaSettlementBackend {
     /// refuses, naming both values, when they disagree (issue #630, ADR
     /// 0009): the fuller "does the fleet's own identity match what's
     /// deployed" check issue #567 deferred here.
+    ///
+    /// It also asks the endpoint which chain it is on
+    /// ([`Self::cluster`], issue #1131) -- one `getGenesisHash` read
+    /// beside the identity reads already here. Unlike them it never
+    /// refuses: a chain this connector cannot name is recorded as
+    /// unnamed, never rejected, because `solana-test-validator` is
+    /// unnameable by construction and every `local/` topology runs on one.
     pub async fn connect(
         rpc_url: &str,
         payer_seed: &[u8; 32],
@@ -157,6 +212,18 @@ impl SolanaSettlementBackend {
             )));
         }
 
+        // The chain's own answer to "which cluster am I", read once here
+        // rather than guessed from `rpc_url` forever after (issue #1131).
+        // Ordered with the other identity reads and, like them, a failed
+        // read refuses the connection -- which costs nothing this
+        // `connect` did not already cost, since the three reads above have
+        // already failed by now if the endpoint is unreachable.
+        let cluster = cluster_for_genesis_hash(&rpc.get_genesis_hash().await.map_err(|error| {
+            SettlementError::Backend(format!(
+                "could not read the cluster's genesis hash: {error}"
+            ))
+        })?);
+
         let backend = Self {
             rpc,
             program_id,
@@ -164,6 +231,7 @@ impl SolanaSettlementBackend {
             token_mint,
             counterparty_signers: Vec::new(),
             settled: Mutex::new(HashSet::new()),
+            cluster,
         };
         // Ordered after `ensure_own_ata_exists`, which already proves the
         // payer holds real lamports by submitting a transaction -- so a
@@ -302,6 +370,11 @@ impl SolanaSettlementBackend {
             token_mint: mint.pubkey(),
             counterparty_signers: counterparties.into(),
             settled: Mutex::new(HashSet::new()),
+            // A `deploy`-built backend only ever runs against this
+            // workspace's own `solana-test-validator`, whose fresh genesis
+            // no published hash can match -- so the read is skipped rather
+            // than spent to learn `None` (issue #1131).
+            cluster: None,
         };
         backend.ensure_own_ata_exists().await?;
         backend
@@ -319,6 +392,22 @@ impl SolanaSettlementBackend {
         }
 
         Ok(backend)
+    }
+
+    /// Which Solana cluster this backend is settling on, as the chain
+    /// itself stated at [`connect`](Self::connect) -- and `None` for a
+    /// chain none of the three public clusters' genesis hashes match, which
+    /// is every `solana-test-validator` (issue #1131,
+    /// [`cluster_for_genesis_hash`]).
+    ///
+    /// This is the authoritative answer to a question
+    /// `SolanaSettlementConfig::cluster_hint` can only guess at from the
+    /// configured URL's hostname, and it is what a Solana claim's
+    /// self-declared `cluster` is compared against (issue #975): a node
+    /// behind a paid RPC provider gets a real cluster here where the hint
+    /// gets nothing.
+    pub fn cluster(&self) -> Option<&'static str> {
+        self.cluster
     }
 
     /// This backend's own signing address -- the on-chain identity every
@@ -1220,5 +1309,52 @@ mod tests {
             ),
             None,
         );
+    }
+}
+
+#[cfg(test)]
+mod cluster_identity_tests {
+    use super::*;
+
+    /// Issue #1131. [`cluster_for_genesis_hash`] reads its hashes from
+    /// `solana-sdk`'s own [`ClusterType::get_genesis_hash`] table rather
+    /// than writing them down, so this test writes them down *once*, here,
+    /// and pins the table to them.
+    ///
+    /// The three literals are what the public endpoints themselves answer
+    /// to `{"jsonrpc":"2.0","id":1,"method":"getGenesisHash"}` -- verified
+    /// against `api.mainnet-beta.solana.com`, `api.devnet.solana.com` and
+    /// `api.testnet.solana.com` on 2026-08-24, agreeing exactly with the
+    /// pinned `solana-sdk =2.1.0`. Without this, a future SDK bump that
+    /// moved a hash would silently relabel a chain -- the very failure
+    /// issue #975 exists to stop -- instead of failing the gate.
+    #[test]
+    fn cluster_names_match_the_published_genesis_hashes() {
+        for (genesis_hash, expected) in [
+            (
+                "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+                "mainnet-beta",
+            ),
+            ("EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG", "devnet"),
+            ("4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY", "testnet"),
+        ] {
+            let hash = Hash::from_str(genesis_hash).expect("a published genesis hash is base58");
+            assert_eq!(
+                cluster_for_genesis_hash(&hash),
+                Some(expected),
+                "{genesis_hash} is {expected}'s published genesis hash"
+            );
+        }
+    }
+
+    /// The `solana-test-validator` case, stated without needing one: a
+    /// genesis hash no public cluster published names no cluster, rather
+    /// than being forced into the nearest one. Every `local/` topology and
+    /// every tier-3 test in this workspace lands here, so this is the
+    /// branch that keeps `make local-verify` booting.
+    #[test]
+    fn a_genesis_hash_no_public_cluster_published_names_no_cluster() {
+        assert_eq!(cluster_for_genesis_hash(&Hash::new_unique()), None);
+        assert_eq!(cluster_for_genesis_hash(&Hash::default()), None);
     }
 }
