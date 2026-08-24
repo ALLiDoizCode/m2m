@@ -141,8 +141,8 @@ Every address a committed config names is then **checked against the chain**:
 `TokenNetwork`, opens the EVM peering's channel and reads back its id, and
 computes the Solana channel PDA — and refuses to provision, naming the value it
 computed, if a committed file disagrees. Its `solana-channels` stage then opens
-the Solana channel once the nodes are serving and reads _that_ account back
-too. Those checks are what make committed-not-generated safe here.
+and funds the Solana channel once the nodes are serving and reads _that_
+account back too. Those checks are what make committed-not-generated safe here.
 
 Funding involves **no faucet on either chain** — the faucet is an app-layer
 service and is not part of the connector:
@@ -151,10 +151,15 @@ service and is not part of the connector:
   `DeployLocal.s.sol` runs as, so it owns the settlement topology. ETH is a
   plain transfer from it and USDC is a `mint` — `MockERC20` is mintable, so
   nobody's balance runs down.
-- **Solana.** `solana airdrop` from the validator's genesis. The mock USDC mint
-  is seeded by `make solana-mint-usdc`, which **fails** rather than warns when
-  it cannot: a validator without that mint cannot satisfy the committed
-  `token_address`, and the node will refuse to start.
+- **Solana.** `solana airdrop` from the validator's genesis, and then mock USDC
+  on top of it — SOL pays fees, it is not the asset a channel settles in. The
+  mint is seeded by `make solana-mint-usdc`, which **fails** rather than warns
+  when it cannot: a validator without that mint cannot satisfy the committed
+  `token_address`, and the node will refuse to start. Unlike anvil's mintable
+  `MockERC20`, an SPL mint has one authority, so each node's tokens are a
+  `spl-token transfer` out of the treasury that script seeds — with
+  `--fund-recipient`, because this runs before any node boots and the
+  associated token account it lands in does not exist yet.
 
 Devnet funds completely differently — the faucet box and its treasuries, on
 public chains. Do not carry an assumption from here to there.
@@ -306,46 +311,69 @@ which was tried. They are opened and funded anyway, for the reason
 nobody could redeem is not a payment, and the difference does not show up until
 somebody tries.
 
-The Solana peering's channel is opened too, and by a different route, because
-nothing in this repository can submit an `InitializeChannel` from a shell: it
-is a positional account list under an 8-byte discriminator, `spl-token` knows
-only SPL Token, and the Solana CLI cannot build an arbitrary program
-instruction. The only submitter is a **running node's `POST /channels`** — ADR
-0008's third write — which reaches `SolanaSettlementBackend::open` and signs
-with that node's own `[settlement.solana]` key. That is the right party as well
-as the only available one: the channel's on-chain participant _is_ that
-settlement identity, and it is the identity that will sign every claim on the
-channel.
+The Solana peering's channel is opened **and funded** too, and by a different
+route on both counts, because nothing in this repository can submit either
+instruction from a shell. `InitializeChannel` is a positional account list
+under an 8-byte discriminator, `spl-token` knows only SPL Token, and the Solana
+CLI cannot build an arbitrary program instruction. `Deposit` is worse than
+inconvenient to build by hand — it credits strictly **by signer**, with no
+participant parameter, so only the depositing node can submit its own
+collateral at all. The submitter for both is therefore a **running node's
+operator surface** — `POST /channels` and `POST /channels/:id/fund`, ADR 0008's
+writes — reaching `SolanaSettlementBackend::open` and `::fund` under that
+node's own `[settlement.solana]` key. That is the right party as well as the
+only available one: the channel's on-chain participant _is_ that settlement
+identity, and it is the identity that will sign every claim on the channel.
 
 Which is why `keys.sh` runs twice. `local/keys.sh <topology>` is everything
-that has to exist before a node starts; `local/keys.sh <topology>
-solana-channels` runs after `--wait`, and `make local-up` calls both with the
-containers started in between. The second stage delegates to
-`local/open-solana-channel.py`, which makes the signed write and then reads the
-account back off the validator, refusing to report success unless the deployed
-program's own layout agrees with the committed config — the discriminator, both
-participants, the mint, and `Opened` status. It is idempotent: a channel
-already at the expected address is left alone and still asserted.
+that has to exist before a node starts — including the mock USDC in each node's
+own settlement account, which is what it later has to collateralise _with_;
+`local/keys.sh <topology> solana-channels` runs after `--wait`, and `make
+local-up` calls both with the containers started in between. The second stage
+delegates to `local/open-solana-channel.py`, which makes both signed writes and
+then reads the account back off the validator, refusing to report success
+unless the deployed program's own layout agrees with the committed config — the
+discriminator, both participants, the mint, `Opened` status, and the payer's
+own deposit.
+
+It is idempotent on both writes, and the two are idempotent differently. A
+channel already at the expected address is left alone and still asserted. The
+deposit is a **top-up**: `POST /channels/:id/fund` takes an increment, unlike
+the EVM leg's absolute `setTotalDeposit`, so the script reads the payer's own
+on-chain deposit first and deposits only the shortfall — nothing at all on a
+second `make local-up`. That asymmetry is the one thing about this stage worth
+remembering: the same figure reached by an absolute write on one chain and a
+relative one on the other.
 
 Neither journal can corroborate any of that, which is why the rehearsal asks the
 chain rather than the payee. An accepted claim is a signature check against a
 configured key and nothing more, so a journal stays exactly as green against an
 address nobody ever created — which is what this topology used to settle
 against. `mixed-chain`'s sender therefore reads the channel account off the
-validator itself and checks that the payment-channel program owns it. That runs
-before anything is sent, so a failure names the missing channel rather than a
-puzzling claim further down.
+validator itself: that the payment-channel program owns it, and that it still
+holds the payer's collateral. That runs before anything is sent, so a failure
+names the missing channel or the missing deposit rather than a puzzling claim
+further down.
 
-**Opened is not funded, and that is where the two chains still differ.** The
-settlement port's `fund` deposits into the _counterparty's_ on-chain balance,
-which the EVM `TokenNetwork` permits (`setTotalDeposit` names the participant
-being credited and pulls the tokens from `_msgSender()` — this contract is
-ERC-2771-aware, so the payer is the forwarded signer, which for the connector's
-own direct call is itself) and `packages/solana-program` does not — its
-`Deposit` requires the depositing participant to sign for their own side, so
-`SolanaSettlementBackend::fund` refuses outright on a `connect`-built backend.
-No surface anywhere puts a node's own collateral behind its own Solana claims:
-`POST /channels/:id/fund` is the counterparty deposit just described, not this
-one, and there is no other — not on the port, not on either backend, not on the
-operator API. So none is faked here. The honest summary is now: a peering's
-channel is real on both chains, and its collateral is real on EVM only.
+**Opened is not funded, and both chains now do both.** They arrive there by
+different routes, and the difference is worth keeping straight because it is
+about who may submit, not about what the channel ends up holding. The EVM
+`TokenNetwork`'s `setTotalDeposit` names the participant being credited
+separately from the caller whose tokens are pulled, so `cast` can deposit for
+the payer before any node exists — which is what the first stage does. The
+Solana program's `Deposit` credits by signer, so only the payer's own node can,
+and only after it is serving. Issue #1118 settled which of the two the port
+means: `SettlementBackend::fund` is a **self-deposit** on both chains, backing
+the claims that node _signs_ (`own_deposited`), never the counterparty's side
+(`counterparty_deposited`, which is what bounds a claim this node could
+_redeem_). So the honest summary is now: a peering's channel is real on both
+chains, its collateral is real on both chains, and on Solana the deposit is
+read back out of the program's own account twice — once by the script that
+makes it and once by the rehearsal, before it sends.
+
+What is still true is the sentence at the top of this section: none of it is
+what makes a crossing verify. A claim is a signature check against a configured
+key. The collateral is what makes the claim worth something to whoever holds
+it, and `packages/solana-program`'s `ClaimFromChannel` bounds a claim by the
+claimer's own deposit — which is precisely why the payer's side is the one
+funded here.

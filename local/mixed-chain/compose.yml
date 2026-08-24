@@ -179,12 +179,32 @@ services:
         # This is the one check that can tell them apart, and it runs first so
         # the failure names the missing channel rather than a puzzling claim.
         #
-        # Existence plus owner is the whole assertion: the address is a PDA
+        # Existence and owner establish the address is a real account of the
+        # payment-channel program: it is a PDA
         # `find_program_address(["channel", min, max, mint])` produces, and only
         # the program itself can create an account at its own derived address.
         # `local/keys.sh <topology> solana-channels` opens it and checks the
         # participants, mint and status; this checks that the thing it opened
         # is still there when the packet flies.
+        #
+        # And that it still holds B's COLLATERAL, which is the second half and
+        # the newer one. An open channel with a zero deposit is a channel whose
+        # claims are cryptographically perfect and worth nothing, and it looks
+        # identical from the peer path and from both journals -- the Solana leg
+        # of this topology shipped exactly that until `fund` became a
+        # self-deposit (issue #1118) and `local/keys.sh` started using it. The
+        # figure comes off the program's own account rather than out of a log
+        # line, for the same reason the owner does.
+        #
+        # `deposit_b` (offset 112, `packages/solana-program/src/state.rs`) and
+        # not `deposit_a`, because a channel is two-sided: `ClaimFromChannel`
+        # bounds a claim by the CLAIMER's own deposit, and B is the payer here
+        # -- B signs the claims, so B's own side is the one that has to be
+        # funded. Which slot B holds is decided by the 32-byte sort the PDA is
+        # derived from, and B's key sorts after C's, so B is participant_b.
+        # That constant cannot pass by accident if the topology's Solana
+        # indices ever change the order: it would read C's side, which nothing
+        # here funds, and report zero.
         #
         # `commitment: confirmed`, named rather than defaulted, and load-bearing:
         # getAccountInfo defaults to FINALIZED, which a channel opened seconds
@@ -200,14 +220,33 @@ services:
         channel_open() {
           if ! wget -q -O - --header 'content-type: application/json' \
               --post-data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getAccountInfo\",\"params\":[\"$$1\",{\"encoding\":\"base64\",\"commitment\":\"confirmed\"}]}" \
-              http://solana-validator:8899 | grep -q "\"owner\":\"$$2\""; then
+              http://solana-validator:8899 >/tmp/channel.json; then
+            echo "NO CHANNEL: getAccountInfo for $$1 failed against the local validator." >&2
+            exit 1
+          fi
+          if ! grep -q "\"owner\":\"$$2\"" /tmp/channel.json; then
             echo "NO CHANNEL: $$1 is not an account of the payment-channel program $$2 on the local validator." >&2
             echo "            The Solana peering's claims would name a channel nobody could redeem." >&2
             exit 1
           fi
           echo "--- the Solana peering's channel $$1 is live on chain, owned by $$2"
+
+          # The account's own bytes: base64 out of the JSON, then the u64 at
+          # $$3. busybox `od -tu8` reads it little-endian, which is the layout
+          # a Solana account is written in.
+          sed 's/.*"data":\["\([^"]*\)".*/\1/' /tmp/channel.json | base64 -d >/tmp/channel.bin
+          held=$$(od -An -tu8 -j"$$3" -N8 /tmp/channel.bin | tr -d ' ')
+          if [ -z "$$held" ] || [ "$$held" -lt "$$4" ]; then
+            echo "NO COLLATERAL: $$1 holds $$held base units at deposit offset $$3, not the $$4 the payer deposited." >&2
+            echo "               A claim against an unfunded channel is a signature, not a payment: the" >&2
+            echo "               program's ClaimFromChannel bounds a claim by the claimer's OWN deposit," >&2
+            echo "               so every claim this peering signs would be refused on redemption." >&2
+            echo "               'local/keys.sh mixed-chain solana-channels' is what deposits it." >&2
+            exit 1
+          fi
+          echo "--- it holds $$held base units of B's own collateral, at least the $$4 provisioning deposited"
         }
-        channel_open G5mXQzfZb4tXWX7cQvXP9ZJnDBcUo6irWTmGGtX3xpzL HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR
+        channel_open G5mXQzfZb4tXWX7cQvXP9ZJnDBcUo6irWTmGGtX3xpzL HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR 112 100000000
 
         send() {
           /usr/local/bin/connector send \

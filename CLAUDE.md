@@ -163,6 +163,12 @@ local-up` calls it after the containers are serving. That ordering is forced: a
 Solana channel is created by an `InitializeChannel`, no chain CLI here can build
 one, and the only submitter is a running node's `POST /channels`. Opening it is
 therefore an operator write after boot, not something the config does at boot.
+Funding it is too, and for a stronger reason — the program's `Deposit` credits
+strictly by signer, so only the payer's own node can put the payer's collateral
+behind the payer's claims (`POST /channels/:id/fund`, a self-deposit on both
+chains since #1118). That endpoint takes an **increment**, unlike the EVM leg's
+absolute `setTotalDeposit`, so the stage reads the deposit back off the chain
+first and tops up the shortfall rather than depositing again.
 
 In a container, `state_dir` must be a mounted volume: the image runs as uid 10001
 and creates `/app/state` owned by that uid precisely so a fresh named volume
