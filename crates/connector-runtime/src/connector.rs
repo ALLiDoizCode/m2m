@@ -5659,7 +5659,12 @@ mod tests {
                 .open(b"peer".to_vec(), Duration::seconds(3600))
                 .await
                 .unwrap();
-            settlement.fund(&channel_id, 1_000).await.unwrap();
+            // The peer signs the claims redeemed below, so it is the peer's
+            // own deposit that backs them (issue #1118).
+            settlement
+                .fund_counterparty(&channel_id, 1_000)
+                .await
+                .unwrap();
             let peer_signer = LocalSigner::generate("peer-key");
             let connector =
                 connector_with_settlement(settlement.clone(), &peer_signer, &channel_id.0);
@@ -5686,7 +5691,12 @@ mod tests {
                 .open(b"peer".to_vec(), Duration::seconds(3600))
                 .await
                 .unwrap();
-            settlement.fund(&channel_id, 100).await.unwrap();
+            // The peer signs the claims redeemed below, so it is the peer's
+            // own deposit that backs them (issue #1118).
+            settlement
+                .fund_counterparty(&channel_id, 100)
+                .await
+                .unwrap();
             let peer_signer = LocalSigner::generate("peer-key");
             let connector =
                 connector_with_settlement(settlement.clone(), &peer_signer, &channel_id.0);
@@ -5731,7 +5741,12 @@ mod tests {
                 .open(b"peer".to_vec(), Duration::seconds(3600))
                 .await
                 .unwrap();
-            settlement.fund(&channel_id, 1_000).await.unwrap();
+            // The peer signs the claims redeemed below, so it is the peer's
+            // own deposit that backs them (issue #1118).
+            settlement
+                .fund_counterparty(&channel_id, 1_000)
+                .await
+                .unwrap();
             let peer_signer = LocalSigner::generate("peer-key");
             let connector =
                 connector_with_settlement(settlement.clone(), &peer_signer, &channel_id.0);
@@ -5750,7 +5765,12 @@ mod tests {
                 .open(b"peer".to_vec(), Duration::seconds(3600))
                 .await
                 .unwrap();
-            settlement.fund(&channel_id, 1_000).await.unwrap();
+            // The peer signs the claims redeemed below, so it is the peer's
+            // own deposit that backs them (issue #1118).
+            settlement
+                .fund_counterparty(&channel_id, 1_000)
+                .await
+                .unwrap();
             let peer_signer = LocalSigner::generate("peer-key");
             let connector =
                 connector_with_settlement(settlement.clone(), &peer_signer, &channel_id.0);
@@ -5771,7 +5791,12 @@ mod tests {
                 .open(b"peer".to_vec(), Duration::seconds(3600))
                 .await
                 .unwrap();
-            settlement.fund(&channel_id, 100).await.unwrap();
+            // The peer signs the claims redeemed below, so it is the peer's
+            // own deposit that backs them (issue #1118).
+            settlement
+                .fund_counterparty(&channel_id, 100)
+                .await
+                .unwrap();
             let peer_signer = LocalSigner::generate("peer-key");
             let connector =
                 connector_with_settlement(settlement.clone(), &peer_signer, &channel_id.0);

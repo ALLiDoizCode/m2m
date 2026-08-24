@@ -328,12 +328,14 @@ no second port. The split is read from write
   under the channel they act on — `/channels/:id/fund`, `/channels/:id/redeem`,
   `/channels/:id/redeem-latest`, `/channels/:id/close`, `/channels/:id/cooperative-close` — plus
   `DELETE /peers/:id` and `DELETE /routes/peers/:prefix` (issue #884). Channel operations answer
-  `503` when no `[settlement]` backend is configured. `/channels/:id/fund` reaches EVM only, and
-  not because Solana is unfinished: it deposits into the _counterparty's_ balance, which
-  `TokenNetwork.setTotalDeposit` permits and `packages/solana-program`'s `Deposit` refuses — that
-  instruction requires the depositing participant to sign for their own side, so a Solana channel's
-  collateral is deposited from each participant's own wallet against the deployed program, and no
-  operation here, on either backend, or on the settlement port does it for them.
+  `503` when no `[settlement]` backend is configured. `/channels/:id/fund` works on **both**
+  backends and is a **self-deposit**: it puts this node's own collateral behind the claims this
+  node signs, raising `own_deposited` on `GET /channels` (issue #1118). It does not, and on Solana
+  never could, credit the _counterparty's_ side — `packages/solana-program`'s `Deposit` credits
+  strictly by signer, so a counterparty's collateral is always their own transaction from their own
+  wallet. Until #1118 this endpoint meant the delegate deposit only `TokenNetwork.setTotalDeposit`
+  supports, which is why it was EVM-only; the Solana rule is the correct one, and a node paying for
+  its counterparty's collateral is not a shape production should ever have.
 
 `POST`/`DELETE /peers*` and `/routes/peers*` (issue #884) are the runtime-mutable, durable
 peer/route table: unlike `/routes/leased` (a TTL-bound push that lapses on its own and never

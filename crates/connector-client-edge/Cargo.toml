@@ -48,7 +48,7 @@ tracing = "0.1"
 
 [dev-dependencies]
 connector-settlement = { path = "../connector-settlement" }
-connector-settlement-evm = { path = "../connector-settlement-evm" }
+connector-settlement-evm = { path = "../connector-settlement-evm", features = ["test-util"] }
 ethers = { version = "2", default-features = false, features = ["rustls"] }
 ed25519-dalek = "1"
 # `test-util` for `#[tokio::test(start_paused = true)]`: the shaper of issue

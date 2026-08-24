@@ -3595,7 +3595,10 @@ key_file = "{key_path}"
                 )
                 .await
                 .expect("open a channel");
-            backend.fund(&channel, 750).await.expect("fund the channel");
+            backend
+                .fund_counterparty(&channel, 750)
+                .await
+                .expect("fund the counterparty's side of the channel");
 
             let channel_id = channel_id_bytes(&channel.0);
             let index = Arc::new(EvmChannelIndex::open(None).expect("open in-memory index"));
@@ -3684,7 +3687,10 @@ key_file = "{key_path}"
                 )
                 .await
                 .expect("open a channel");
-            backend.fund(&channel, 750).await.expect("fund the channel");
+            backend
+                .fund_counterparty(&channel, 750)
+                .await
+                .expect("fund the counterparty's side of the channel");
 
             // The index has seen the open but not the deposit -- the
             // "confirmed `ChannelOpened`, unconfirmed `ChannelNewDeposit`"
@@ -4452,7 +4458,7 @@ key_file = "{key_path}"
                 .await
                 .expect("open a channel on the junk mint");
             opener
-                .fund(&channel, 1_000)
+                .test_fund_counterparty(&channel, 1_000)
                 .await
                 .expect("fund the junk-mint channel with a real on-chain deposit");
 
@@ -4603,10 +4609,10 @@ key_file = "{key_path}"
                 .await
                 .expect("open a real channel");
             let state = backend
-                .fund(&channel, 1_000)
+                .fund_counterparty(&channel, 1_000)
                 .await
                 .expect("fund the channel with real ERC-20 value");
-            assert_eq!(state.deposited, 1_000);
+            assert_eq!(state.counterparty_deposited, 1_000);
 
             let claim_json = |nonce: u64, transferred_amount: u64| {
                 let channel_id = channel_id_bytes(&channel.0);
@@ -4681,10 +4687,10 @@ key_file = "{key_path}"
             );
 
             let topped_up = backend
-                .fund(&channel, 1)
+                .fund_counterparty(&channel, 1)
                 .await
                 .expect("a real second setTotalDeposit");
-            assert_eq!(topped_up.deposited, 1_001);
+            assert_eq!(topped_up.counterparty_deposited, 1_001);
 
             // The identical claim, at the identical nonce, once the chain
             // says it can be redeemed.
@@ -4850,10 +4856,10 @@ key_file = "{key_path}"
             // A real deposit, from the counterparty's own key, into the
             // channel's own vault.
             let funded = opener
-                .fund(&channel, 6_000)
+                .test_fund_counterparty(&channel, 6_000)
                 .await
                 .expect("deposit real SPL value into the channel vault");
-            assert_eq!(funded.deposited, 6_000);
+            assert_eq!(funded.counterparty_deposited, 6_000);
 
             // The byte-identical claim redeems now, so the gate accepts it
             // now: the memoised floor was a lower bound and the breach
@@ -4896,7 +4902,7 @@ key_file = "{key_path}"
                 .await
                 .expect("open an instantly-settleable channel");
             opener
-                .fund(&channel, 1_000)
+                .test_fund_counterparty(&channel, 1_000)
                 .await
                 .expect("a real on-chain deposit, so the claim below is genuinely collateralized");
 

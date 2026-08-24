@@ -89,7 +89,18 @@ pub struct ChannelView {
     pub id: String,
     pub counterparty: String,
     pub status: ChannelViewStatus,
+    /// What the counterparty has deposited on their own side -- the
+    /// collateral backing claims this node can redeem. Keeps its name and
+    /// its meaning across issue #1118; what changed is that
+    /// `POST /channels/:id/fund` no longer moves it.
     pub deposited: u128,
+    /// What this node has deposited on its own side -- the collateral
+    /// backing claims this node signs, and what
+    /// `POST /channels/:id/fund` raises (issue #1118). Added rather than
+    /// replacing `deposited`, so a reader of `GET /channels` sees both
+    /// halves of a two-sided channel instead of one number whose side
+    /// depended on who was asking.
+    pub own_deposited: u128,
     pub redeemed: u128,
 }
 
@@ -118,7 +129,8 @@ impl From<ChannelState> for ChannelView {
                 ChannelStatus::Closed => ChannelViewStatus::Closed,
                 ChannelStatus::Settled => ChannelViewStatus::Settled,
             },
-            deposited: state.deposited,
+            deposited: state.counterparty_deposited,
+            own_deposited: state.own_deposited,
             redeemed: state.redeemed,
         }
     }

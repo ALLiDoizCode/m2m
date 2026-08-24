@@ -302,17 +302,21 @@ async fn a_paid_write_lands_on_the_app_with_the_claim_advanced_by_the_routes_pri
     let buyer_address = derive_evm_address(&buyer_public.serialize());
 
     // A funded channel with real, on-chain-deposited value -- read back from
-    // the chain's own receipt, never invented by this test.
+    // the chain's own receipt, never invented by this test. The value goes
+    // on the *buyer's* side, because the buyer is who signs the claims this
+    // node redeems; on a real deployment the buyer deposits it from their
+    // own wallet (as the Solana half of this file has them do below), and
+    // here the fixture-only delegate deposit stands in (issue #1118).
     let paid_channel = backend
         .open(buyer_address.to_vec(), ChronoDuration::hours(1))
         .await
         .expect("open a real channel");
     let paid_state = backend
-        .fund(&paid_channel, 10 * ROUTE_PRICE)
+        .fund_counterparty(&paid_channel, 10 * ROUTE_PRICE)
         .await
         .expect("fund the channel with real ERC-20 value");
     assert_eq!(
-        paid_state.deposited,
+        paid_state.counterparty_deposited,
         10 * ROUTE_PRICE,
         "a real transaction genuinely moved this value on chain"
     );
@@ -325,10 +329,10 @@ async fn a_paid_write_lands_on_the_app_with_the_claim_advanced_by_the_routes_pri
         .await
         .expect("open a second real channel");
     let underpaid_state = backend
-        .fund(&underpaid_channel, ROUTE_PRICE / 2)
+        .fund_counterparty(&underpaid_channel, ROUTE_PRICE / 2)
         .await
         .expect("fund the second channel with real ERC-20 value, less than the route's price");
-    assert_eq!(underpaid_state.deposited, ROUTE_PRICE / 2);
+    assert_eq!(underpaid_state.counterparty_deposited, ROUTE_PRICE / 2);
 
     // A real app: its own socket, its own process-independent record of
     // what it received.
@@ -518,7 +522,7 @@ token_network_address = "{token_network}"
         &buyer_secret,
         &underpaid_channel.0,
         1,
-        underpaid_state.deposited,
+        underpaid_state.counterparty_deposited,
         token_network_address,
     );
     let body = post_ilp_packet(
@@ -633,10 +637,10 @@ price = {ROUTE_PRICE}
         .await
         .expect("the buyer opens a channel with this connector");
     let state = backend
-        .fund(&channel, 10 * ROUTE_PRICE)
+        .fund_counterparty(&channel, 10 * ROUTE_PRICE)
         .await
         .expect("fund it with real ERC-20 value");
-    assert_eq!(state.deposited, 10 * ROUTE_PRICE);
+    assert_eq!(state.counterparty_deposited, 10 * ROUTE_PRICE);
 
     let client = reqwest::Client::new();
     let (data, shared_secret) = sealed_prepare_data(b"unaffiliated write", &connector_identity);
@@ -884,7 +888,7 @@ async fn an_unaffiliated_solana_buyer_pays_for_a_write_with_no_client_channels_c
         .await
         .expect("read the funded channel back from the chain");
     assert_eq!(
-        state.deposited,
+        state.counterparty_deposited,
         u128::from(deposit_amount),
         "a real transaction genuinely moved this value on chain"
     );

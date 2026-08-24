@@ -50,7 +50,7 @@ async fn a_funded_channel_on_a_different_mint_resolves_as_unknown() {
         .await
         .expect("open a channel on the junk mint");
     opener
-        .fund(&channel, 1_000)
+        .test_fund_counterparty(&channel, 1_000)
         .await
         .expect("fund the junk-mint channel with a real on-chain deposit");
     // A validly-signed claim on that channel genuinely exists -- the

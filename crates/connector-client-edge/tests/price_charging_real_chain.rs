@@ -293,21 +293,29 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
         .expect("deploy a TokenNetwork through a fresh registry");
 
     // A channel genuinely opened and funded with real (anvil-minted mock
-    // USDC) value -- `deposited` below is read back from the chain's own
-    // receipt, never a number this test invents. The counterparty must be
-    // a real 20-byte EVM address (issue #576): `TokenNetwork` requires one
-    // able to sign balance proofs, not an arbitrary peer name.
+    // USDC) value -- `counterparty_deposited` below is read back from the
+    // chain's own receipt, never a number this test invents. The
+    // counterparty must be a real 20-byte EVM address (issue #576):
+    // `TokenNetwork` requires one able to sign balance proofs, not an
+    // arbitrary peer name.
+    //
+    // It is the *counterparty's* side that is funded here, and only that
+    // side: a claim this node redeems is drawn from the payer's
+    // collateral, never the node's own. `fund_counterparty` is the
+    // fixture-only delegate deposit standing in for the payer's own
+    // wallet (issue #1118) -- `fund` itself would credit the node's side
+    // and buy nothing.
     let counterparty = counterparty_address().to_vec();
     let paid_channel = backend
         .open(counterparty.clone(), Duration::hours(1))
         .await
         .expect("open a real channel");
     let paid_state = backend
-        .fund(&paid_channel, 1_000)
+        .fund_counterparty(&paid_channel, 1_000)
         .await
         .expect("fund the channel with real ERC-20 value");
     assert_eq!(
-        paid_state.deposited, 1_000,
+        paid_state.counterparty_deposited, 1_000,
         "a real transaction genuinely moved this value on chain"
     );
 
@@ -316,10 +324,10 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
         .await
         .expect("open a second real channel");
     let underpaid_state = backend
-        .fund(&underpaid_channel, 40)
+        .fund_counterparty(&underpaid_channel, 40)
         .await
         .expect("fund the second channel with real ERC-20 value, less than the route's price");
-    assert_eq!(underpaid_state.deposited, 40);
+    assert_eq!(underpaid_state.counterparty_deposited, 40);
 
     let route = StaticRoute::new_priced("g.example.app", HANDLER_URL, 100).unwrap();
 
@@ -331,7 +339,7 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
     let (status, bytes) = post_claim(
         connector,
         signer,
-        &evm_claim_json(&paid_channel.0, 1, paid_state.deposited),
+        &evm_claim_json(&paid_channel.0, 1, paid_state.counterparty_deposited),
         channels_recording(&paid_channel.0, &paid_state.counterparty),
     )
     .await;
@@ -374,7 +382,11 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
     let (status_two, bytes_two) = post_claim(
         connector_two,
         signer_two,
-        &evm_claim_json(&underpaid_channel.0, 1, underpaid_state.deposited),
+        &evm_claim_json(
+            &underpaid_channel.0,
+            1,
+            underpaid_state.counterparty_deposited,
+        ),
         channels_recording(&underpaid_channel.0, &underpaid_state.counterparty),
     )
     .await;
@@ -420,10 +432,10 @@ async fn a_claim_above_the_real_on_chain_deposit_is_refused_until_a_real_deposit
         .await
         .expect("open a real channel");
     let state = backend
-        .fund(&channel, 1_000)
+        .fund_counterparty(&channel, 1_000)
         .await
         .expect("fund the channel with real ERC-20 value");
-    assert_eq!(state.deposited, 1_000);
+    assert_eq!(state.counterparty_deposited, 1_000);
 
     // The claim is signed under the chain's *own* EIP-712 domain, since
     // that is what the resolution reports -- a synthetic domain would fail
@@ -471,10 +483,10 @@ async fn a_claim_above_the_real_on_chain_deposit_is_refused_until_a_real_deposit
     // resubmission because the breach provokes a re-read rather than a
     // permanent refusal.
     let topped_up = backend
-        .fund(&channel, 1)
+        .fund_counterparty(&channel, 1)
         .await
         .expect("a real second setTotalDeposit");
-    assert_eq!(topped_up.deposited, 1_001);
+    assert_eq!(topped_up.counterparty_deposited, 1_001);
 
     // Under the policy a production node actually runs, and deliberately:
     // the re-read that notices the deposit is rate-limited per channel, so

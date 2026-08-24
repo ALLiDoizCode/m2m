@@ -51,8 +51,20 @@ async fn every_channel_operation_estimates_its_own_gas_and_succeeds() {
         .open(counterparty, Duration::seconds(3600))
         .await
         .expect("open");
+    // `fund` is a self-deposit (issue #1118): it credits this backend's
+    // own participant slot, not the counterparty's.
     let state = backend.fund(&channel, 1_000).await.expect("fund");
-    assert_eq!(state.deposited, 1_000);
+    assert_eq!(state.own_deposited, 1_000);
+    assert_eq!(state.counterparty_deposited, 0);
+
+    // What the claim below is drawn from is the counterparty's own
+    // deposit, which the fixture-only delegate deposit stands in for here
+    // -- on a real deployment the counterparty makes it themselves.
+    let state = backend
+        .fund_counterparty(&channel, 1_000)
+        .await
+        .expect("fund the counterparty's side");
+    assert_eq!(state.counterparty_deposited, 1_000);
 
     let proof = EvmBalanceProof {
         channel_id: channel_id_bytes(&channel.0),
@@ -138,13 +150,13 @@ async fn concurrent_calls_from_the_same_signer_do_not_conflict_on_nonce() {
 
     let state_a = result_a.expect("concurrent fund of the first channel");
     let state_b = result_b.expect("concurrent fund of the second channel");
-    assert_eq!(state_a.deposited, 111);
-    assert_eq!(state_b.deposited, 222);
+    assert_eq!(state_a.own_deposited, 111);
+    assert_eq!(state_b.own_deposited, 222);
 
     // A third, immediately-following call proves the nonce sequence is
     // still consistent afterward too -- a manager that had desynced from
     // the two concurrent sends above would misfire here, not just during
     // the race itself.
     let state_a_again = backend.fund(&first, 50).await.expect("fund again");
-    assert_eq!(state_a_again.deposited, 161);
+    assert_eq!(state_a_again.own_deposited, 161);
 }

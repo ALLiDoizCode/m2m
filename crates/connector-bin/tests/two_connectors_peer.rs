@@ -399,9 +399,12 @@ impl PeerFixture {
         .expect("connect the payee's settlement identity to the same TokenNetwork");
         let payee_address = payee_backend.own_address().to_fixed_bytes();
 
-        // The payer opens the peering's channel naming the payee, and funds
-        // it with real on-chain value -- read back from the chain's own
-        // receipt, never invented here.
+        // The payer opens the peering's channel naming the payee, and puts
+        // its OWN collateral behind it -- read back from the chain's own
+        // receipt, never invented here. The payer is the side that signs
+        // claims here, so the payer's own deposit is what backs them:
+        // `fund` is a self-deposit (issue #1118), and this is the shape it
+        // exists for.
         let channel = payer_backend
             .open(payee_address.to_vec(), ChronoDuration::hours(1))
             .await
@@ -411,7 +414,7 @@ impl PeerFixture {
             .await
             .expect("fund the peering channel with real ERC-20 value");
         assert_eq!(
-            state.deposited,
+            state.own_deposited,
             u128::from(100 * PEER_FEE),
             "a real transaction genuinely moved this value on chain"
         );
@@ -429,8 +432,12 @@ impl PeerFixture {
             .open(client_address.to_vec(), ChronoDuration::hours(1))
             .await
             .expect("the payer opens a client channel");
+        // The other direction: on the client leg the *client* signs and
+        // the payer redeems, so the collateral has to sit on the client's
+        // side. On a real deployment the client deposits it themselves;
+        // here the fixture-only delegate deposit stands in (issue #1118).
         payer_backend
-            .fund(&client_channel, u128::from(100 * CLIENT_PRICE))
+            .fund_counterparty(&client_channel, u128::from(100 * CLIENT_PRICE))
             .await
             .expect("fund the client channel with real ERC-20 value");
 
