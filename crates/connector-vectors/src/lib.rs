@@ -54,7 +54,18 @@ use serde::Serialize;
 /// The vector-set schema version. Bump when a field's meaning changes in a
 /// way an existing SDK's replay code would misread -- a purely additive
 /// field does not require a bump.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// **2** (issue #1127): a Solana claim's `programId` acquired a meaning. It
+/// had none before -- `client-edge-spec.md` §1.3 called it decorative, this
+/// file's own `claim_solana` fixture declared the system program, and any
+/// base58 32-byte value conformed. It now MUST name the settlement program
+/// the claim's `channelAccount` lives under, the same 32 bytes ADR 0053 binds
+/// into the signed balance proof. An SDK carrying the version-1 reading of
+/// that field into a real claim builder is emitting a non-conforming claim,
+/// which is exactly what this number exists to announce -- the connector
+/// still accepts such a claim on the strength of its signature, and refusing
+/// on it waits on this adoption (§1.3, issue #1127 step 4).
+pub const SCHEMA_VERSION: u32 = 2;
 
 fn seq_bytes<const N: usize>(start: u8) -> [u8; N] {
     let mut out = [0u8; N];
@@ -895,12 +906,6 @@ fn generate_peer_claim_evm_case(fixture: &ClaimFixture) -> PeerClaimCase {
     }
 }
 
-/// §10.2 item 4: marked **aspirational**, exactly as `peer-semantics-pre-868.md`
-/// §3.5 marks the Solana claim row -- pinning the shape before an emitting
-/// implementation exists on this connector (outbound peer claims are
-/// EVM-only, `claim_json::encode`'s own doc). What *does* exist and is
-/// exercised here for real is the inbound half: `claim_json::parse`
-/// already accepts a Solana claim (issue #732).
 /// Decode a base58 32-byte fixture, panicking on a bad literal -- these are
 /// hardcoded in this file, so a failure here is a typo, not input.
 fn bs58_32(value: &str) -> [u8; 32] {
@@ -911,9 +916,33 @@ fn bs58_32(value: &str) -> [u8; 32] {
     out
 }
 
+/// The settlement program the `claim_solana` fixture's channel lives under.
+///
+/// This is the deployed public-devnet payment-channel program
+/// (`packages/solana-program/deployments/devnet-public.md`) -- an example
+/// settlement program, not the only one a channel can live under, exactly as
+/// `generate_claim_vectors`'s `chain_id` is Base Sepolia's real id rather than
+/// a made-up one. A claim fixture's *domain* half carries a real deployment's
+/// value for that reason; its account and key halves stay fixture bytes.
+///
+/// It deliberately replaces the system program
+/// (`11111111111111111111111111111111`) this fixture carried until issue
+/// #1127. A Solana claim's `programId` MUST name the settlement program its
+/// `channelAccount` lives under (`client-edge-spec.md` §1.3) -- the same 32
+/// bytes ADR 0053 binds into the signed balance proof at offset 16 -- and a
+/// normative fixture declaring the system program taught every payer reading
+/// it that any value would do.
+const SOLANA_SETTLEMENT_PROGRAM_ID: &str = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip";
+
+/// §10.2 item 4: marked **aspirational**, exactly as `peer-semantics-pre-868.md`
+/// §3.5 marks the Solana claim row -- pinning the shape before an emitting
+/// implementation exists on this connector (outbound peer claims are
+/// EVM-only, `claim_json::encode`'s own doc). What *does* exist and is
+/// exercised here for real is the inbound half: `claim_json::parse`
+/// already accepts a Solana claim (issue #732).
 fn generate_peer_claim_solana_case() -> PeerClaimCase {
     let channel_account = "GDDMwNyyx8uB6zrqwBFHjLLG3TBYk2F1Mh6usnNPUsqk";
-    let program_id = "11111111111111111111111111111111";
+    let program_id = SOLANA_SETTLEMENT_PROGRAM_ID;
     let signer_public_key = "11111111111111111111111111111113";
     let signature_bytes = seq_bytes::<64>(0xe1);
     let json = serde_json::json!({
@@ -922,7 +951,11 @@ fn generate_peer_claim_solana_case() -> PeerClaimCase {
         "messageId": "vector-fixture:solana:1",
         "timestamp": "2030-01-01T00:00:00.000Z",
         "senderId": signer_public_key,
-        "programId": "11111111111111111111111111111111",
+        // One literal, read twice: the declared label here and the signed
+        // domain at offset 16 of `signed_message_hex` below are the same
+        // `program_id`, so this fixture cannot drift into declaring one
+        // program while signing under another (issue #1127).
+        "programId": program_id,
         "channelAccount": channel_account,
         "nonce": 1,
         "transferredAmount": "250000",

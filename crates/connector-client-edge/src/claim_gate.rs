@@ -1747,10 +1747,13 @@ async fn verify_evm_claim_signature(
 /// `programId` is **signed over** since ADR 0053. The verifier rebuilds the
 /// balance-proof message from the *resolved channel's* program id, never
 /// from the claim, so a claim whose signature verifies is a claim its payer
-/// signed for this node's program whatever its `programId` field says. The
-/// declared field is therefore decorative, and is handled as a warning at
+/// signed for this node's program whatever its `programId` field says. What
+/// the payer must write there is pinned (`client-edge-spec.md` §1.3: the
+/// settlement program the `channelAccount` lives under), but the field grants
+/// nothing and gates nothing, so a disagreement is handled as a warning at
 /// the point where the authoritative value is in scope -- see
-/// [`verify_solana_claim_signature`].
+/// [`verify_solana_claim_signature`], which also records why it is not yet a
+/// refusal.
 ///
 /// `cluster` can never be signed over. A Solana program knows its own id
 /// but has no way to learn which cluster it is running on, so it could not
@@ -1830,24 +1833,34 @@ async fn verify_solana_claim_signature(
     // lives under (issue #975). Said out loud, and deliberately *not* a
     // refusal.
     //
-    // Not a refusal because it cannot be one that matters: the signature
-    // below is verified against `channel.program_id`, so a claim that
-    // survives this function is one whose payer signed for this node's
-    // program whatever they wrote in this field. Rejecting on it would
-    // refuse claims that are cryptographically correct and fully
-    // redeemable, on the strength of a decorative label -- and this field
-    // has been decorative for its whole life, so nothing establishes that
-    // paying clients populate it correctly. The committed wire vector
-    // (`peer_carriage.claim_solana`) declares the system program here, not
-    // a settlement program, and this repository's own end-to-end fixture
-    // declares the payer's public key.
+    // What the field must carry is now pinned: the settlement program the
+    // `channelAccount` lives under (`client-edge-spec.md` §1.3), which is
+    // the same 32 bytes ADR 0053 binds into the signed balance proof, and
+    // the committed wire vector `peer_carriage.claim_solana` demonstrates it
+    // (issue #1127, `schema_version` 2).
+    //
+    // Still not a refusal, and the reason has moved. It is no longer "the
+    // contract does not say"; it is that the contract said something else
+    // until now. The vector declared the *system program* here for its whole
+    // life, so a payer that conformed to the published contract is sending a
+    // value this comparison rejects, and a connector cannot see which payers
+    // those are -- the client edge is where buyers it has never heard of
+    // arrive. Refusing would also refuse money it can actually collect: the
+    // signature below is verified against `channel.program_id`, so a claim
+    // that survives this function is one whose payer signed for this node's
+    // program whatever they wrote in this field.
+    //
+    // Promotion is therefore gated on adoption, not on this repository:
+    // issue #1127 step 4, once payers are known to emit the pinned value.
+    // Landing it before then is the ADR 0041 failure shape -- one change
+    // taking the whole devnet Solana paid-write path dark at the moment the
+    // tag moves.
     //
     // Warned about because issue #975's real complaint is that a
     // disagreement between a claim's label and the chain it was paid on is
     // invisible to both parties -- "the payer sees a FULFILL, the operator
-    // sees nothing at all". This is the operator seeing something.
-    // Promoting it to a refusal is issue #1127, which has to fix the wire
-    // contract and the fixtures first.
+    // sees nothing at all". This is the operator seeing something, and it is
+    // also how an operator learns whether their own payers have adopted.
     if decode_base58_bytes::<32>(&claim.program_id) != Some(channel.program_id) {
         tracing::warn!(
             channel_account = %claim.channel_account,
@@ -2706,8 +2719,41 @@ mod tests {
         bs58::encode(bytes).into_string()
     }
 
+    /// A Solana claim on [`test_channels`]'s channel, declaring the program
+    /// that channel really lives under -- what a conforming payer sends
+    /// (`client-edge-spec.md` §1.3: `programId` names the settlement program
+    /// the `channelAccount` lives under).
+    ///
+    /// It declared the **system program** until issue #1127, matching the
+    /// committed wire vector, so every test built on it quietly exercised a
+    /// mismatch. The mismatch is worth exercising -- it is
+    /// [`a_solana_claim_declaring_a_foreign_program_is_accepted_on_its_signature`]
+    /// -- but a test that means to exercise something else should not be
+    /// carrying it by accident, and a fixture is the closest thing this crate
+    /// has to a statement of what a real payer's claim looks like.
     fn solana_claim_json_with(
         channel_account: &str,
+        nonce: u64,
+        transferred_amount: u64,
+        signature_base64: &str,
+        signer_public_key: &str,
+    ) -> String {
+        solana_claim_json_declaring(
+            channel_account,
+            &base58_encode(&SOLANA_CHANNEL_PROGRAM_ID),
+            nonce,
+            transferred_amount,
+            signature_base64,
+            signer_public_key,
+        )
+    }
+
+    /// [`solana_claim_json_with`] with the declared `programId` spelled out
+    /// by the caller -- for the one test whose subject *is* a claim declaring
+    /// a program its channel does not live under.
+    fn solana_claim_json_declaring(
+        channel_account: &str,
+        program_id: &str,
         nonce: u64,
         transferred_amount: u64,
         signature_base64: &str,
@@ -2720,7 +2766,7 @@ mod tests {
                 "messageId": "msg-{nonce}",
                 "timestamp": "2026-02-02T12:00:00.000Z",
                 "senderId": "peer-carol",
-                "programId": "11111111111111111111111111111111",
+                "programId": "{program_id}",
                 "channelAccount": "{channel_account}",
                 "nonce": {nonce},
                 "transferredAmount": "{transferred_amount}",
@@ -3031,23 +3077,87 @@ mod tests {
     /// the one its channel lives under, and it is accepted -- because its
     /// signature is verified against the channel's program (ADR 0053), so
     /// the claim is cryptographically correct and fully redeemable however
-    /// its decorative label reads.
+    /// its label reads. Refusing it would refuse money this node can collect.
     ///
-    /// `genuine_solana_claim_json`'s own fixed body declares
-    /// `11111111111111111111111111111111`, the system program, exactly as
-    /// the committed wire vector does -- while [`test_channels`] records the
-    /// channel under [`SOLANA_CHANNEL_PROGRAM_ID`]. That disagreement is
-    /// this repository's status quo, and refusing on it would refuse the
-    /// vector.
+    /// The mismatch is built here on purpose. It used to be inherited from
+    /// `genuine_solana_claim_json`'s own body, which declared the system
+    /// program exactly as the committed wire vector did -- so every Solana
+    /// test in this file was silently a mismatch test, and this one proved
+    /// nothing the others did not. Issue #1127 pinned what `programId` must
+    /// carry and fixed both fixtures; what survives is this, the deliberate
+    /// case, with the divergence written down where a reader can see it.
+    ///
+    /// Note what is *not* asserted: that the claim goes through **silently**.
+    /// It does not -- `verify_solana_claim_signature` logs a `warn` naming
+    /// the channel and the declared value, which is the whole of issue #975's
+    /// "the operator sees nothing at all".
     #[tokio::test]
     async fn a_solana_claim_declaring_a_foreign_program_is_accepted_on_its_signature() {
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine;
+        use ed25519_dalek::Signer as Ed25519Signer;
+
+        // The system program: 32 zero bytes, owning no channel anywhere, and
+        // the value this repository's own contract fixture declared until
+        // issue #1127 -- so it is the value a payer built against that
+        // contract is most likely to still be sending.
+        const SYSTEM_PROGRAM: &str = "11111111111111111111111111111111";
         assert_ne!(
-            decode_base58_bytes::<32>("11111111111111111111111111111111"),
+            decode_base58_bytes::<32>(SYSTEM_PROGRAM),
             Some(SOLANA_CHANNEL_PROGRAM_ID),
             "this test is vacuous unless the declared and actual programs really differ"
         );
+
+        // Signed under the channel's *real* program, as ADR 0053 requires --
+        // only the declared label is wrong. A claim signed under the foreign
+        // program would be refused as `SignatureInvalid`, which is a
+        // different fact and already has its own test.
+        let keypair = solana_signer();
+        let signature = keypair.sign(&connector_signer::solana_balance_proof_message(
+            &SOLANA_CHANNEL_PROGRAM_ID,
+            &SOLANA_CHANNEL_ACCOUNT,
+            1,
+            100,
+        ));
+        let claim = solana_claim_json_declaring(
+            &base58_encode(&SOLANA_CHANNEL_ACCOUNT),
+            SYSTEM_PROGRAM,
+            1,
+            100,
+            &BASE64.encode(signature.to_bytes()),
+            &base58_encode(&keypair.public.to_bytes()),
+        );
+
         let gate = gate();
+        assert!(gate.ingest(&claim, 0).await.is_ok());
+    }
+
+    /// The conforming case, which nothing pinned before issue #1127: a claim
+    /// declaring the program its channel really lives under is accepted, and
+    /// [`solana_claim_json_with`] -- the fixture behind most of the Solana
+    /// tests in this file -- is that claim.
+    ///
+    /// This is not a duplicate of `a_genuine_solana_signature_is_accepted`.
+    /// That test would pass with any `programId` at all; this one fails if
+    /// the fixture ever drifts back to declaring something the channel does
+    /// not live under, which is what makes the fixture a statement about the
+    /// wire rather than an accident.
+    #[tokio::test]
+    async fn the_solana_fixture_declares_the_program_its_channel_lives_under() {
         let claim = genuine_solana_claim_json(&SOLANA_CHANNEL_ACCOUNT, 1, 100);
+        let declared = serde_json::from_str::<serde_json::Value>(&claim)
+            .expect("the fixture is valid JSON")["programId"]
+            .as_str()
+            .expect("a Solana claim declares a programId")
+            .to_string();
+        assert_eq!(
+            decode_base58_bytes::<32>(&declared),
+            Some(SOLANA_CHANNEL_PROGRAM_ID),
+            "a conforming claim declares the settlement program its channelAccount lives under \
+             (client-edge-spec.md §1.3)"
+        );
+
+        let gate = gate();
         assert!(gate.ingest(&claim, 0).await.is_ok());
     }
 

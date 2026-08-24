@@ -163,8 +163,17 @@ fn evm_claim_json(
 /// `signer_public_key_base58` are supplied rather than derived here, since
 /// a genuine claim and a forged one differ only in which key signs, not in
 /// how the JSON is shaped.
+///
+/// `program_id_base58` is the settlement program the channel lives under
+/// (`client-edge-spec.md` §1.3), which is the same program id the balance
+/// proof the caller signed binds at offset 16 (ADR 0053). It is a parameter
+/// rather than a literal because this fixture used to write the payer's own
+/// public key there -- a value no channel could ever live under -- and a
+/// conforming payer is what these tests are supposed to be modelling
+/// (issue #1127).
 fn solana_claim_json(
     channel_account_base58: &str,
+    program_id_base58: &str,
     nonce: u64,
     transferred_amount: u64,
     signature_base64: &str,
@@ -177,7 +186,7 @@ fn solana_claim_json(
             "messageId": "msg-{nonce}",
             "timestamp": "2026-02-02T12:00:00.000Z",
             "senderId": "buyer",
-            "programId": "{signer_public_key_base58}",
+            "programId": "{program_id_base58}",
             "channelAccount": "{channel_account_base58}",
             "nonce": {nonce},
             "transferredAmount": "{transferred_amount}",
@@ -955,6 +964,7 @@ price = {SOLANA_ROUTE_PRICE}
     let genuine_signature = buyer.sign_message(&genuine_message);
     let claim = solana_claim_json(
         &channel.0,
+        LOCAL_TEST_PROGRAM_ID,
         genuine_nonce,
         SOLANA_ROUTE_PRICE,
         &base64_encode(genuine_signature.as_ref()),
@@ -1019,6 +1029,7 @@ price = {SOLANA_ROUTE_PRICE}
     let forged_signature = forger.sign_message(&forged_message);
     let forged_claim = solana_claim_json(
         &channel.0,
+        LOCAL_TEST_PROGRAM_ID,
         forged_nonce,
         forged_amount,
         &base64_encode(forged_signature.as_ref()),
