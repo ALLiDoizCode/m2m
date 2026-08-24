@@ -648,7 +648,78 @@ differences that were already true and are unchanged by carriage:
   MUST be applied before a watermark is read or written. A connector that keyed a peer watermark by
   literal text would grant a fresh watermark per spelling, and one signed claim would buy carriage
   once per casing it was retyped in;
-- the four refusal reasons are `peer-semantics-pre-868.md` §3.4's four, unchanged (§5.2).
+- the four refusal reasons are `peer-semantics-pre-868.md` §3.4's four, unchanged (§5.2);
+- a Solana claim's declared `programId` is validated structurally and then **discarded**, and a
+  disagreement with the program the channel lives under is **not reported**. This is the one place
+  a peer claim is judged by a different rule from the client claim it is byte-for-byte the same
+  object as, and the next heading says why.
+
+#### The declared `programId` is not reported on this edge — and why that differs from the client edge
+
+**Normatively.** A peer claim's `programId` MUST carry exactly what `client-edge-spec.md` §1.3 pins
+— the settlement program its `channelAccount` lives under, byte-for-byte the program id the payer
+put into the balance proof its `signature` covers (ADR 0053, offset 16). §4 imports that field list
+verbatim and there is no peer spelling of it. A connector **MUST NOT refuse** a peer claim on a
+disagreement, for the same reason it must not on the client edge: the signature is verified against
+the channel's own program either way, so a claim that reaches the verifier is one whose payer signed
+for this node's program whatever they wrote in the field, and refusing it would refuse money the
+node can collect. Unlike the client edge, a connector is **not required to report** one. This
+connector does not: `connector_peer_btp::claim_json::parse` drops the field before the claim becomes
+a `WireClaim`, and both carriages share that one codec (I4).
+
+So the two edges pin the same value and take different action on a disagreement. **That difference
+is deliberate**, it is the only one of its kind in this document, and it turns on what the
+comparison could find and who could act on it — not on peers being trusted more in the abstract.
+
+Since [issue #1128](https://github.com/toon-protocol/connector/issues/1128) a Solana peering has
+exactly one program it can be judged under, `[settlement.solana] program_id` (§11 — a
+`[[peer_channels]]` row that restates it is a named load-time refusal). That single value both
+renders the `programId` this connector puts on an **outbound** peer claim and keys the
+`SolanaChannel` its `ClaimBook` verifies an **inbound** one against. A disagreement therefore means
+one of exactly two things:
+
+1. **The peer signed under the program it declared, and that is not this node's.** The signature
+   then fails, the claim is refused `SignatureInvalid`, that verdict rides back in the claim ack
+   (§6), and under §1's **P3** the PREPARE it covered is not admitted as peer traffic at all — it
+   gets the 402 greeting. The peering moves nothing, from its first packet, visibly at both ends. A
+   report would annotate a failure that is already total and already loud, in a relation where each
+   operator configured the other deliberately and knows them by name. It would not surface anything
+   hidden.
+2. **The peer declared one program and signed under another.** This is the silent case, and it is
+   the one the client edge's report exists to catch. It is also the one a peering cannot produce
+   from this connector: a payer would have to read two different sources for one value, and this
+   connector reads one.
+
+A **client** claim differs on both counts, and that is the whole of the asymmetry. Its payer is by
+construction someone the operator has never heard of
+([ADR 0052](../adr/0052-permissionless-payment-is-guaranteed-and-a-claim-is-what-authorises.md)),
+running software the operator did not configure and cannot reach, so the connector's own log is the
+only channel by which a mislabelled artifact can become known to anybody — which is exactly
+[issue #975](https://github.com/toon-protocol/connector/issues/975)'s complaint, restated for a
+field a signature does bind. It is also the adoption signal
+[issue #1127](https://github.com/toon-protocol/connector/issues/1127)'s step 4 is gated on, and
+adoption is only an open question for payers an operator did not configure. **Issue #1127's
+readiness condition on that warning is therefore a client-edge condition; the peer edge's silence is
+not a hole in it.** A peering's conformance is settled by the peering agreement, and failing that by
+case 1 above.
+
+What this rule **rejects** is retaining the field so the peer edge can report a disagreement the way
+the client edge does. The cost was the deciding half: it would put an unauthenticated, authority-free
+value on `WireClaim`, the in-process type whose whole discipline is that what a claim is checked
+against comes from this connector's own per-channel record and never from the claim — bought for a
+log line that, per the two cases above, either restates an outage or reports a bug the far end of a
+peering cannot have.
+
+None of the above is a licence to promote the field to a refusal on the client edge either. That is
+`client-edge-spec.md` §1.3 step 4's rule, it is dated, and it is gated on payers deployed against
+the pre-#1133 contract, not on this document.
+
+_Held to by:_ `crates/connector-peer-btp/tests/a_peer_claims_declared_program_is_not_consulted.rs`,
+which states the policy by name (a peer claim declaring a foreign program is accepted on its
+signature, silently) and holds both halves of the argument above — that a claim signed under a
+program this node does not settle with is already refused, and that a claim this connector renders
+declares the program its own signature is bound to. `a_solana_claim_flushed_from_a_loaded_config_declares_the_settlement_tables_program`,
+on **both** carriages, closes the hop from `[settlement.solana] program_id` to the wire.
 
 ### 4.2 Recovery id
 

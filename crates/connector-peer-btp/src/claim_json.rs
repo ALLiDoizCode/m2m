@@ -274,6 +274,33 @@ pub fn parse(raw: &[u8]) -> Result<WireClaim, ClaimDecodeError> {
         // drops `signerAddress`: whose signature a claim is checked
         // against comes from `ClaimBook`'s own per-channel record
         // (`set_solana_channel`), never from the claim.
+        //
+        // For `signerPublicKey` that is the whole story -- it rides the
+        // wire and carries no authority, and no value is pinned for it.
+        // `programId` is no longer the same case and the analogy above
+        // must not be read that far (issue #1127): since PR #1133 what a
+        // payer MUST write there is pinned -- the settlement program the
+        // `channelAccount` lives under -- and the client edge **reports**
+        // a claim that writes something else (`connector_client_edge`'s
+        // `claim_gate`, at `warn`). Dropping it here means the peer edge
+        // does not, and that difference is a decision rather than an
+        // oversight: `peer-carriage-spec.md` §4.1 states it and argues it,
+        // and `client-edge-spec.md` §1.3 step 4 records that the reporting
+        // duty is the client edge's alone.
+        //
+        // The short of it. Since issue #1128 a Solana peering has exactly
+        // one program it can be judged under, `[settlement.solana]
+        // program_id`, and that one value both renders `programId` on an
+        // outbound peer claim (`encode` above, from
+        // `PeerRelation::solana_program_ids`) and keys the `SolanaChannel`
+        // an inbound one is verified against. A peer that declares a
+        // program it did not sign under is a disagreement this connector
+        // cannot produce; a peer that signs under a program this node does
+        // not settle with already fails `SignatureInvalid` and moves no
+        // traffic at all. Neither leaves a report anyone could act on, and
+        // the price of one would be an authority-free field on `WireClaim`.
+        // `tests/a_peer_claims_declared_program_is_not_consulted.rs` holds
+        // both halves of that.
         ClientClaim::Solana(claim) => Ok(WireClaim {
             channel_id: claim.channel_account,
             nonce: claim.nonce,
@@ -340,6 +367,13 @@ mod tests {
     /// another.
     const CHANNEL_ACCOUNT: &str = "GDDMwNyyx8uB6zrqwBFHjLLG3TBYk2F1Mh6usnNPUsqk";
 
+    /// A conforming inbound fixture: `programId` is the settlement program
+    /// `CHANNEL_ACCOUNT` lives under, which is what a payer MUST write
+    /// there (`client-edge-spec.md` §1.3, issue #1127). It used to be the
+    /// **system program** -- no channel lives under that, so the fixture
+    /// was an example of the one value the pinned rule excludes, sitting in
+    /// the codec both edges share. Nothing here consults the field, so this
+    /// changes no assertion; it stops the file teaching the wrong shape.
     fn solana_claim_json(signature: &str) -> String {
         serde_json::json!({
             "version": "1.0",
@@ -347,7 +381,7 @@ mod tests {
             "messageId": "m",
             "timestamp": "2030-01-01T00:00:00Z",
             "senderId": "s",
-            "programId": "11111111111111111111111111111111",
+            "programId": SOLANA_PROGRAM_ID,
             "channelAccount": CHANNEL_ACCOUNT,
             "nonce": 1,
             "transferredAmount": "10",
