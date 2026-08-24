@@ -149,6 +149,16 @@ Required fields on every claim, regardless of chain: `version` (`'1.0'`), `block
   per-channel record instead.
 - **solana**: `programId`, `channelAccount` (both base58), `nonce`, `transferredAmount` (lamports,
   decimal string), `signature` (base64 Ed25519), `signerPublicKey` (base58); optional `cluster`.
+  `programId` MUST be the **settlement program the `channelAccount` lives under** — the program
+  that owns that account and that would redeem this claim on chain, which is byte-for-byte the
+  program id the payer put into the balance proof `signature` covers
+  ([ADR 0053](../adr/0053-a-solana-claim-binds-its-domain-the-way-an-evm-claim-does.md) puts it at
+  offset 16 of that message). It is not a free-form label and it is not the payer's own key: a
+  claim naming any other program names a program no channel of the payer's lives under. The
+  normative statement of this is `peer_carriage.claim_solana` in `vectors/wire-vectors.json`, whose
+  declared `programId` and whose `signed_message_hex` carry the same 32 bytes
+  ([ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md) — prose is not).
+  `signerPublicKey`, like an EVM claim's `signerAddress`, rides the wire but carries no authority.
 
 A present claim is validated by the same gate the peer role uses (the inbound claim validator)
 before the PREPARE is routed, in this order — deliberately freshness-and-value before
@@ -206,11 +216,27 @@ never reaches the terminating app:
    replay is closed by the bytes. A Solana program cannot learn which cluster it is running
    on, so it could never rebuild a message containing one; the cluster stayed out of the
    signed bytes for that reason, and this off-chain comparison is the only check it can get.
-   A claim's declared `programId`, by contrast, is decorative: the signature is checked
-   against the channel's program either way. A connector SHOULD report a disagreement there,
-   and — until the wire contract pins the field
-   ([issue #1127](https://github.com/toon-protocol/connector/issues/1127)) — MUST NOT refuse
-   on it, since a claim whose signature verifies is redeemable whatever that field says.
+   A claim's declared `programId` is a different case again, and the two halves of it should
+   not be confused. **What a payer must write there is pinned** — the settlement program the
+   `channelAccount` lives under, as the field list above and
+   `peer_carriage.claim_solana` now both say. **What a connector does with a disagreement is
+   still only to report it.** A connector MUST report one (this connector logs it at `warn`,
+   naming the channel and the declared value) and MUST NOT refuse on it, because the signature
+   is checked against the channel's own program either way: a claim that reaches this point is
+   one whose payer signed for this node's program whatever they wrote in that field, so it is
+   cryptographically correct and fully redeemable, and refusing it would refuse money the node
+   can actually collect.
+
+   That asymmetry is deliberate and dated. Until
+   [issue #1127](https://github.com/toon-protocol/connector/issues/1127) the field had no
+   pinned meaning at all: this document called it decorative and the one cross-repo statement
+   of it — `peer_carriage.claim_solana` — declared the **system program**, which is not a
+   settlement program and which no channel lives under. A payer built against that contract is
+   conforming to what it said. Refusing on the field is therefore gated on adoption, not on
+   this text: it becomes permissible once the payers on a connector's client edge are known to
+   emit the pinned value, and that is a fleet-by-fleet fact rather than a protocol one, since
+   the client edge is where buyers a connector has never heard of arrive. The vector's
+   `schema_version` bump to `2` is the signal that the reading changed.
 
    The cluster check is skipped where there is nothing to compare: a claim that omits
    `cluster` declares none, and a connector with no `[settlement.solana]` table — or one
