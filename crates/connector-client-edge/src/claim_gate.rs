@@ -137,7 +137,7 @@ use connector_signer::{verify_evm_balance_proof, verify_solana_balance_proof, Ev
 
 use crate::channels::{
     decode_base58_bytes, decode_hex_bytes, ChannelResolutionError, ClientChannelRegistry,
-    DepositFloor, SolanaSettlementIdentity,
+    DepositFloor,
 };
 use crate::lookup_budget::LookupBudgetBound;
 use crate::outbound_ledger::ClientPayoutLedger;
@@ -262,16 +262,32 @@ pub enum ClaimIngestRejection {
     NotDurable,
     WrapUnsupported,
     WrapFailed(String),
-    /// A Solana claim's self-declared `programId` or `cluster` disagrees
-    /// with this node's own `[settlement.solana]` identity (issue #975).
-    /// Checked before the claim's channel is even resolved -- like
+    /// A Solana claim declares a `cluster` this node is not on (issue
+    /// #975). Checked before the claim's channel is resolved -- like
     /// [`ClaimIngestRejection::UnknownChannel`], it is a fact this
-    /// connector already knows without spending a chain read. Refused
-    /// rather than silently accepted and recorded under the claim's own
-    /// unverified label: a claim is the payer's signed statement of what
-    /// they paid and where, and the balance proof it carries verifying
-    /// against the resolved channel does not make that statement true.
-    SolanaIdentityMismatch(String),
+    /// connector already knows without spending a chain read.
+    ///
+    /// This is a refusal about the **record**, not about the money, and
+    /// that distinction is the whole of why it exists. ADR 0053 already
+    /// closed the money half: a Solana balance proof signs the settlement
+    /// program, taken from the resolved channel and never from the claim,
+    /// so a signature made for one deployment cannot be replayed against
+    /// another. What no signature can close is `cluster`, because a Solana
+    /// program cannot know which cluster it runs on and so could never
+    /// rebuild a message containing one. The field is therefore
+    /// unsignable-by-construction, declared by the payer, and -- until this
+    /// refusal -- never read. A node that accepts a claim labelled with a
+    /// chain it is not on has endorsed that label, and the payer keeps the
+    /// endorsed artifact.
+    ///
+    /// A struct variant rather than a formatted string so the two sides are
+    /// separately countable: "which cluster am I being told I am on" is a
+    /// dimension an operator wants to group by, and a metric derived from a
+    /// string is a metric derived from prose.
+    SolanaClusterMismatch {
+        declared: String,
+        configured: &'static str,
+    },
 }
 
 impl ClaimIngestRejection {
@@ -342,9 +358,14 @@ impl ClaimIngestRejection {
             ClaimIngestRejection::WrapFailed(reason) => {
                 format!("claim rejected: failed to unwrap claim: {reason}")
             }
-            ClaimIngestRejection::SolanaIdentityMismatch(reason) => {
-                format!("claim rejected: {reason}")
-            }
+            ClaimIngestRejection::SolanaClusterMismatch {
+                declared,
+                configured,
+            } => format!(
+                "claim rejected: it declares cluster '{declared}', but this connector settles \
+                 on '{configured}' -- a claim naming a chain this connector is not on is wrong, \
+                 not merely unverifiable"
+            ),
         }
     }
 }
@@ -1714,41 +1735,52 @@ async fn verify_evm_claim_signature(
     }
 }
 
-/// Cross-check a Solana claim's own declared chain identity -- `programId`
-/// and `cluster` -- against this node's configured `[settlement.solana]`
-/// (issue #975). A claim naming a different program or cluster than this
-/// node actually runs is wrong, not merely unverifiable, and no signature
-/// check on its balance proof can make it right: the proof binds the amount
-/// to the channel account alone, never to which program or cluster that
-/// account lives on.
+/// Cross-check a Solana claim's self-declared `cluster` against the cluster
+/// this node actually settles on (issue #975).
 ///
-/// `Ok(())` when there is nothing to disagree with, which is two cases and
-/// not one: a node with no `[settlement.solana]` table has no configured
-/// identity at all (`identity` is `None`), and a claim that omits the
-/// optional `cluster` declares no cluster to compare -- as does a node
-/// whose `rpc_url` names no cluster this connector recognises
-/// (`SolanaSettlementConfig::cluster_hint`).
-fn check_solana_chain_identity(
-    identity: Option<SolanaSettlementIdentity>,
+/// # Why this field, and only this field
+///
+/// A Solana claim declares two things about where it lives: `programId` and
+/// `cluster`. They are not the same kind of fact, and only one of them
+/// needs checking here.
+///
+/// `programId` is **signed over** since ADR 0053. The verifier rebuilds the
+/// balance-proof message from the *resolved channel's* program id, never
+/// from the claim, so a claim whose signature verifies is a claim its payer
+/// signed for this node's program whatever its `programId` field says. The
+/// declared field is therefore decorative, and is handled as a warning at
+/// the point where the authoritative value is in scope -- see
+/// [`verify_solana_claim_signature`].
+///
+/// `cluster` can never be signed over. A Solana program knows its own id
+/// but has no way to learn which cluster it is running on, so it could not
+/// rebuild a message containing one -- ADR 0053 says exactly this, and it
+/// is why the cluster stayed out of the signed bytes. The field is
+/// unsignable by construction, supplied by the payer, and this off-chain
+/// comparison against the node's own configuration is the only check it can
+/// ever get.
+///
+/// # When it passes without comparing
+///
+/// `Ok(())` when there is nothing to disagree with, which is two cases:
+/// the claim omits the optional `cluster` and so declares nothing, or
+/// `configured` is `None` because this node cannot tell which cluster it is
+/// on (no `[settlement.solana]` table, or an `rpc_url` naming no cluster
+/// this connector recognises -- a third-party RPC provider's, say). Passing
+/// in the second case is deliberate: the alternative is guessing, and a
+/// wrong guess refuses every genuine claim the node ever receives.
+fn check_solana_cluster(
+    configured: Option<&'static str>,
     claim: &SolanaClientClaim,
 ) -> Result<(), ClaimIngestRejection> {
-    let Some(identity) = identity else {
+    let (Some(declared), Some(configured)) = (&claim.cluster, configured) else {
         return Ok(());
     };
-    if decode_base58_bytes::<32>(&claim.program_id) != Some(identity.program_id) {
-        return Err(ClaimIngestRejection::SolanaIdentityMismatch(format!(
-            "claim declares programId '{}', which is not this node's configured \
-             [settlement.solana] program",
-            claim.program_id
-        )));
-    }
-    if let (Some(declared_cluster), Some(configured_cluster)) = (&claim.cluster, identity.cluster) {
-        if declared_cluster != configured_cluster {
-            return Err(ClaimIngestRejection::SolanaIdentityMismatch(format!(
-                "claim declares cluster '{declared_cluster}', but this node's \
-                 [settlement.solana] rpc_url names cluster '{configured_cluster}'"
-            )));
-        }
+    if declared != configured {
+        return Err(ClaimIngestRejection::SolanaClusterMismatch {
+            declared: declared.clone(),
+            configured,
+        });
     }
     Ok(())
 }
@@ -1769,7 +1801,7 @@ async fn verify_solana_claim_signature(
     // Before spending a lookup on the claim's channel (issue #975): like
     // the decode above, a disagreement here is a fact this connector
     // already knows without a chain read.
-    check_solana_chain_identity(channels.solana_identity(), claim)?;
+    check_solana_cluster(channels.solana_cluster(), claim)?;
 
     // Declared, or -- for a channel nothing declared -- resolved from the
     // chain via a registered `ClaimChain::Solana` source (issue #631).
@@ -1793,6 +1825,38 @@ async fn verify_solana_claim_signature(
             return Err(resolution_refusal(error));
         }
     };
+
+    // The claim's own `programId`, against the program its channel actually
+    // lives under (issue #975). Said out loud, and deliberately *not* a
+    // refusal.
+    //
+    // Not a refusal because it cannot be one that matters: the signature
+    // below is verified against `channel.program_id`, so a claim that
+    // survives this function is one whose payer signed for this node's
+    // program whatever they wrote in this field. Rejecting on it would
+    // refuse claims that are cryptographically correct and fully
+    // redeemable, on the strength of a decorative label -- and this field
+    // has been decorative for its whole life, so nothing establishes that
+    // paying clients populate it correctly. The committed wire vector
+    // (`peer_carriage.claim_solana`) declares the system program here, not
+    // a settlement program, and this repository's own end-to-end fixture
+    // declares the payer's public key.
+    //
+    // Warned about because issue #975's real complaint is that a
+    // disagreement between a claim's label and the chain it was paid on is
+    // invisible to both parties -- "the payer sees a FULFILL, the operator
+    // sees nothing at all". This is the operator seeing something.
+    // Promoting it to a refusal is issue #1127, which has to fix the wire
+    // contract and the fixtures first.
+    if decode_base58_bytes::<32>(&claim.program_id) != Some(channel.program_id) {
+        tracing::warn!(
+            channel_account = %claim.channel_account,
+            declared_program_id = %claim.program_id,
+            "a client claim declares a programId that is not the program its channel lives \
+             under; accepting it on the strength of its signature, which is checked against \
+             the channel's own program (ADR 0053)"
+        );
+    }
 
     use base64::engine::general_purpose::STANDARD as BASE64;
     use base64::Engine;
@@ -1831,6 +1895,10 @@ mod tests {
     const EVM_CHAIN_ID: u64 = 8453;
     const EVM_TOKEN_NETWORK_ADDRESS: [u8; 20] = [0x42; 20];
     const SOLANA_CHANNEL_ACCOUNT: [u8; 32] = [3u8; 32];
+    /// The settlement program [`test_channels`]'s Solana channel lives
+    /// under, and therefore the program every genuine claim below signs
+    /// (ADR 0053). Base58 `US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx`.
+    const SOLANA_CHANNEL_PROGRAM_ID: [u8; 32] = [7u8; 32];
 
     fn hex_encode(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -1861,7 +1929,7 @@ mod tests {
             .record_solana(
                 &base58_encode(&SOLANA_CHANNEL_ACCOUNT),
                 &base58_encode(&solana_signer().public.to_bytes()),
-                "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+                &base58_encode(&SOLANA_CHANNEL_PROGRAM_ID),
             )
             .expect("a 32-byte base58 channel account");
         channels
@@ -2688,15 +2756,17 @@ mod tests {
         )
     }
 
-    /// [`genuine_solana_claim_json`], with `programId`/`cluster` set
-    /// explicitly instead of the fixed default -- issue #975's cross-check
-    /// covers neither field in the signed balance-proof message, so a
-    /// genuine signature stays genuine however either is declared.
-    fn genuine_solana_claim_json_with_identity(
+    /// [`genuine_solana_claim_json`], carrying an explicit `cluster` -- the
+    /// field issue #975 is about. The signature is produced exactly as the
+    /// genuine helper produces it, over
+    /// [`SOLANA_CHANNEL_PROGRAM_ID`]/account/nonce/amount, because
+    /// `cluster` is not in the signed bytes and cannot be: a claim declaring
+    /// the wrong cluster is a *genuine* claim wearing a wrong label, which
+    /// is the only case worth testing.
+    fn genuine_solana_claim_json_with_cluster(
         channel_account_bytes: &[u8; 32],
         nonce: u64,
         transferred_amount: u64,
-        program_id: &str,
         cluster: Option<&str>,
     ) -> String {
         use base64::engine::general_purpose::STANDARD as BASE64;
@@ -2705,6 +2775,7 @@ mod tests {
 
         let keypair = solana_signer();
         let message = connector_signer::solana_balance_proof_message(
+            &SOLANA_CHANNEL_PROGRAM_ID,
             channel_account_bytes,
             nonce,
             transferred_amount,
@@ -2721,7 +2792,7 @@ mod tests {
                 "messageId": "msg-{nonce}",
                 "timestamp": "2026-02-02T12:00:00.000Z",
                 "senderId": "peer-carol",
-                "programId": "{program_id}",
+                "programId": "{}",
                 "channelAccount": "{}",
                 "nonce": {nonce},
                 "transferredAmount": "{transferred_amount}",
@@ -2729,6 +2800,7 @@ mod tests {
                 "signerPublicKey": "{}"
                 {cluster_field}
             }}"#,
+            base58_encode(&SOLANA_CHANNEL_PROGRAM_ID),
             base58_encode(channel_account_bytes),
             BASE64.encode(signature.to_bytes()),
             base58_encode(&keypair.public.to_bytes()),
@@ -2856,117 +2928,126 @@ mod tests {
         assert_eq!(result, Err(ClaimIngestRejection::SignatureInvalid));
     }
 
-    // -- Chain identity: a claim's `programId`/`cluster` vs. this node's own
-    // -- `[settlement.solana]` (issue #975) --
+    // -- Declared cluster: a claim's `cluster` vs. the one this node
+    // -- actually settles on (issue #975) --
 
-    const CONFIGURED_SOLANA_PROGRAM_ID: [u8; 32] = [0xab; 32];
-    const ANOTHER_SOLANA_PROGRAM_ID: [u8; 32] = [0xcd; 32];
-
-    /// A gate with a record of [`test_channels`] whose registry also
-    /// carries a configured `[settlement.solana]` identity -- the shape
-    /// `connector-cli` builds when the config file names one.
-    fn gate_with_solana_identity(
-        program_id: [u8; 32],
-        cluster: Option<&'static str>,
-    ) -> ClientClaimGate {
-        gate_over(test_channels().with_solana_identity(program_id, cluster))
+    /// A gate over [`test_channels`] that also knows which cluster it is on
+    /// -- the shape `connector-cli` builds when `[settlement.solana]
+    /// rpc_url` names a cluster it recognises.
+    fn gate_on_cluster(cluster: &'static str) -> ClientClaimGate {
+        gate_over(test_channels().with_solana_cluster(cluster))
     }
 
-    /// The live defect issue #975 reports: a claim naming a program this
-    /// node does not run must be refused, however genuine its signature is
-    /// -- the balance proof only binds the amount to the channel account,
-    /// never to which program or cluster that account lives on.
+    /// Issue #975's defect, at the layer that can see it: a genuinely
+    /// signed claim, on a channel this node vouches for, whose body
+    /// declares a cluster this node is not on. Before this check the node
+    /// accepted it in full and advanced the watermark -- "the payer sees a
+    /// FULFILL, the operator sees nothing at all".
+    ///
+    /// The signature is genuine and stays genuine: `cluster` is not in the
+    /// signed bytes and cannot be (a Solana program cannot know its own
+    /// cluster), which is exactly why an off-chain comparison is the only
+    /// check this field can ever get.
     #[tokio::test]
-    async fn a_solana_claim_naming_a_different_program_than_this_nodes_settlement_is_rejected() {
-        let gate = gate_with_solana_identity(CONFIGURED_SOLANA_PROGRAM_ID, None);
-        let claim = genuine_solana_claim_json_with_identity(
+    async fn a_solana_claim_declaring_a_cluster_this_node_is_not_on_is_refused() {
+        let gate = gate_on_cluster("devnet");
+        let claim = genuine_solana_claim_json_with_cluster(
             &SOLANA_CHANNEL_ACCOUNT,
             1,
             100,
-            &base58_encode(&ANOTHER_SOLANA_PROGRAM_ID),
-            None,
+            Some("mainnet-beta"),
         );
         assert_eq!(
             gate.ingest(&claim, 0).await,
-            Err(ClaimIngestRejection::SolanaIdentityMismatch(format!(
-                "claim declares programId '{}', which is not this node's configured \
-                 [settlement.solana] program",
-                base58_encode(&ANOTHER_SOLANA_PROGRAM_ID)
-            )))
+            Err(ClaimIngestRejection::SolanaClusterMismatch {
+                declared: "mainnet-beta".to_string(),
+                configured: "devnet",
+            })
         );
     }
 
-    /// The issue's own live repro: a claim whose `cluster` disagrees with
-    /// this node's configured cluster is refused even though its program
-    /// matches and its signature is genuine -- a mainnet payment can no
-    /// longer record itself as devnet.
+    /// Refusing changes nothing that outlives the request: the watermark
+    /// does not move, so the payer who fixes their label is good again at
+    /// the same nonce. Asserted because a refusal that silently consumed a
+    /// nonce would turn a mislabelled claim into a lost one.
     #[tokio::test]
-    async fn a_solana_claim_declaring_a_different_cluster_than_this_node_runs_is_rejected() {
-        let gate = gate_with_solana_identity(CONFIGURED_SOLANA_PROGRAM_ID, Some("mainnet-beta"));
-        let claim = genuine_solana_claim_json_with_identity(
+    async fn a_cluster_mismatch_consumes_no_nonce() {
+        let gate = gate_on_cluster("devnet");
+        let mislabelled = genuine_solana_claim_json_with_cluster(
             &SOLANA_CHANNEL_ACCOUNT,
             1,
             100,
-            &base58_encode(&CONFIGURED_SOLANA_PROGRAM_ID),
-            Some("devnet"),
+            Some("testnet"),
         );
-        assert_eq!(
-            gate.ingest(&claim, 0).await,
-            Err(ClaimIngestRejection::SolanaIdentityMismatch(
-                "claim declares cluster 'devnet', but this node's [settlement.solana] rpc_url \
-                 names cluster 'mainnet-beta'"
-                    .to_string()
-            ))
+        assert!(gate.ingest(&mislabelled, 0).await.is_err());
+
+        let corrected =
+            genuine_solana_claim_json_with_cluster(&SOLANA_CHANNEL_ACCOUNT, 1, 100, Some("devnet"));
+        assert!(
+            gate.ingest(&corrected, 0).await.is_ok(),
+            "the same nonce must still be good once the label is corrected"
         );
     }
 
-    /// A claim whose `programId` and `cluster` both agree with this node's
-    /// configured identity is accepted, same as before issue #975.
+    /// The agreeing case: same cluster, accepted exactly as before.
     #[tokio::test]
-    async fn a_solana_claim_agreeing_with_this_nodes_settlement_identity_is_accepted() {
-        let gate = gate_with_solana_identity(CONFIGURED_SOLANA_PROGRAM_ID, Some("mainnet-beta"));
-        let claim = genuine_solana_claim_json_with_identity(
+    async fn a_solana_claim_declaring_the_cluster_this_node_is_on_is_accepted() {
+        let gate = gate_on_cluster("devnet");
+        let claim =
+            genuine_solana_claim_json_with_cluster(&SOLANA_CHANNEL_ACCOUNT, 1, 100, Some("devnet"));
+        assert!(gate.ingest(&claim, 0).await.is_ok());
+    }
+
+    /// `cluster` is optional (client-edge-spec.md §1.3), and the committed
+    /// wire vector `peer_carriage.claim_solana` omits it. A claim that
+    /// declares nothing disagrees with nothing, so a spec-conformant client
+    /// is untouched by this check.
+    #[tokio::test]
+    async fn a_solana_claim_that_declares_no_cluster_is_accepted() {
+        let gate = gate_on_cluster("devnet");
+        let claim = genuine_solana_claim_json_with_cluster(&SOLANA_CHANNEL_ACCOUNT, 1, 100, None);
+        assert!(gate.ingest(&claim, 0).await.is_ok());
+    }
+
+    /// A node that cannot tell which cluster it is on -- no
+    /// `[settlement.solana]`, or an `rpc_url` naming no cluster this
+    /// connector recognises -- compares nothing and accepts whatever is
+    /// declared. Deliberate: the alternative is guessing, and a wrong guess
+    /// refuses every genuine claim the node ever receives.
+    #[tokio::test]
+    async fn a_node_that_does_not_know_its_cluster_checks_nothing() {
+        let gate = gate();
+        let claim = genuine_solana_claim_json_with_cluster(
             &SOLANA_CHANNEL_ACCOUNT,
             1,
             100,
-            &base58_encode(&CONFIGURED_SOLANA_PROGRAM_ID),
             Some("mainnet-beta"),
         );
         assert!(gate.ingest(&claim, 0).await.is_ok());
     }
 
-    /// A claim that omits `cluster` entirely -- always legal, the field is
-    /// optional (client-edge-spec.md §1.3) -- is accepted against a node
-    /// with a configured cluster identity as long as `programId` agrees:
-    /// there is nothing declared to disagree with.
+    /// The `programId` half of issue #975, and the reason it is a warning
+    /// rather than a refusal: this claim declares a program that is *not*
+    /// the one its channel lives under, and it is accepted -- because its
+    /// signature is verified against the channel's program (ADR 0053), so
+    /// the claim is cryptographically correct and fully redeemable however
+    /// its decorative label reads.
+    ///
+    /// `genuine_solana_claim_json`'s own fixed body declares
+    /// `11111111111111111111111111111111`, the system program, exactly as
+    /// the committed wire vector does -- while [`test_channels`] records the
+    /// channel under [`SOLANA_CHANNEL_PROGRAM_ID`]. That disagreement is
+    /// this repository's status quo, and refusing on it would refuse the
+    /// vector.
     #[tokio::test]
-    async fn a_solana_claim_with_no_declared_cluster_is_accepted_when_the_program_agrees() {
-        let gate = gate_with_solana_identity(CONFIGURED_SOLANA_PROGRAM_ID, Some("mainnet-beta"));
-        let claim = genuine_solana_claim_json_with_identity(
-            &SOLANA_CHANNEL_ACCOUNT,
-            1,
-            100,
-            &base58_encode(&CONFIGURED_SOLANA_PROGRAM_ID),
-            None,
+    async fn a_solana_claim_declaring_a_foreign_program_is_accepted_on_its_signature() {
+        assert_ne!(
+            decode_base58_bytes::<32>("11111111111111111111111111111111"),
+            Some(SOLANA_CHANNEL_PROGRAM_ID),
+            "this test is vacuous unless the declared and actual programs really differ"
         );
-        assert!(gate.ingest(&claim, 0).await.is_ok());
-    }
-
-    /// A node with no `[settlement.solana]` configured -- [`test_channels`]'s
-    /// own default, a declared-only Solana channel -- has no chain identity
-    /// to cross-check against, so a claim's `programId`/`cluster` are
-    /// accepted however they are declared, unchanged from before issue
-    /// #975.
-    #[tokio::test]
-    async fn a_solana_claim_is_unchecked_when_no_settlement_identity_is_configured() {
         let gate = gate();
-        let claim = genuine_solana_claim_json_with_identity(
-            &SOLANA_CHANNEL_ACCOUNT,
-            1,
-            100,
-            &base58_encode(&ANOTHER_SOLANA_PROGRAM_ID),
-            Some("devnet"),
-        );
+        let claim = genuine_solana_claim_json(&SOLANA_CHANNEL_ACCOUNT, 1, 100);
         assert!(gate.ingest(&claim, 0).await.is_ok());
     }
 

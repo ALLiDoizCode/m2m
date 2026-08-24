@@ -188,22 +188,35 @@ never reaches the terminating app:
    correctly with a key of their own and declares themselves the payer is refused here, because
    that key is not the channel's counterparty.
 
-   A `solana` claim's self-declared **chain identity is cross-checked** before its channel is
-   resolved ([issue #975](https://github.com/toon-protocol/connector/issues/975)). A connector
-   running a `[settlement.solana]` table of its own MUST refuse, under its own reason, a claim
-   whose `programId` is not the program that table names, and one whose optional `cluster` — when
-   present — names a different cluster than the table's `rpc_url` does. Neither field is an
-   authority the check reads _from_; both are assertions the claim makes, and a claim naming a
-   different program or a different chain than the connector runs is **wrong, not merely
-   unverifiable** — the balance proof binds the amount to the channel account alone, never to
-   which program or cluster that account lives on, so no signature check can make such a claim
-   right. Silently normalising instead would leave a settlement on one chain permanently recorded
-   under another's label, invisible to both parties: the claim is the artifact each side keeps.
-   The check is skipped where there is nothing to disagree with — a connector with no
-   `[settlement.solana]` table has no chain identity of its own, a claim that omits `cluster`
-   declares none, and an `rpc_url` naming no recognisable cluster (a third-party RPC provider's,
-   say) implies none. A connector MUST NOT guess a cluster from such a URL: a wrong guess refuses
-   every genuine claim it ever receives.
+   A `solana` claim's self-declared **`cluster` is cross-checked** against the cluster the
+   connector settles on, before its channel is resolved
+   ([issue #975](https://github.com/toon-protocol/connector/issues/975)). Where a connector
+   can tell which cluster it is on, it MUST refuse — under its own reason — a claim whose
+   optional `cluster` names a different one. The field is not an authority the check reads
+   _from_; it is an assertion the claim makes, and a claim naming a chain the connector is
+   not on is **wrong, not merely unverifiable**. Silently accepting it would leave a
+   settlement on one chain permanently labelled with another's name, invisible to both
+   parties — the payer sees a FULFILL, the operator sees nothing — and the claim is the
+   artifact each side keeps.
+
+   `cluster` gets this treatment because it is the one field naming a chain that **no
+   signature can ever bind**. Since [ADR 0053](../adr/0053-a-solana-claim-binds-its-domain-the-way-an-evm-claim-does.md)
+   a Solana balance proof signs the settlement program, and the verifier rebuilds that
+   message from the channel's own program id rather than the claim's — so cross-cluster
+   replay is closed by the bytes. A Solana program cannot learn which cluster it is running
+   on, so it could never rebuild a message containing one; the cluster stayed out of the
+   signed bytes for that reason, and this off-chain comparison is the only check it can get.
+   A claim's declared `programId`, by contrast, is decorative: the signature is checked
+   against the channel's program either way. A connector SHOULD report a disagreement there,
+   and — until the wire contract pins the field
+   ([issue #1127](https://github.com/toon-protocol/connector/issues/1127)) — MUST NOT refuse
+   on it, since a claim whose signature verifies is redeemable whatever that field says.
+
+   The cluster check is skipped where there is nothing to compare: a claim that omits
+   `cluster` declares none, and a connector with no `[settlement.solana]` table — or one
+   whose `rpc_url` names no cluster it recognises, a third-party RPC provider's say — knows
+   of none. A connector MUST NOT guess a cluster from such a URL: a wrong guess refuses every
+   genuine claim it ever receives.
 
    A claim naming a channel the connector has **no record of** is refused with its own reason,
    distinguishable from a bad signature and from an underpayment — there is nothing to verify it

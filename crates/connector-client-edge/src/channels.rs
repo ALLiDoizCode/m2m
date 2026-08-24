@@ -590,12 +590,12 @@ pub trait ClientChannelSource: Send + Sync + std::fmt::Debug {
     /// The Solana twin of [`evm_channel`](Self::evm_channel) (issue #631):
     /// the counterparty's raw Ed25519 public key for the channel at
     /// `channel_account`, and their on-chain deposit, or `Ok(None)`/`Err`
-    /// under exactly the same rules. There is no domain to report alongside
-    /// it -- a Solana balance proof is signed over the channel account,
-    /// nonce and amount alone
-    /// (`connector_signer::solana_balance_proof_message`), with no
-    /// EIP-712-style verifying-contract concept to carry. The mint is not
-    /// in the signed bytes either: binding a channel to the mint this node
+    /// under exactly the same rules. The domain it reports alongside them
+    /// is the settlement program: since ADR 0053 a Solana balance proof is
+    /// signed over the program id as well as the channel account, nonce and
+    /// amount (`connector_signer::solana_balance_proof_message`), which is
+    /// this chain's answer to EIP-712's verifying contract. The mint is
+    /// still not in the signed bytes: binding a channel to the mint this node
     /// settles in is the resolving backend's job (a chain-resolved channel
     /// on any other mint must come back `Ok(None)`), not the signature's.
     async fn solana_channel(
@@ -637,8 +637,9 @@ pub struct EvmChannel {
 /// with the counterparty through the same seam on both chains, instead of
 /// being parsed out of the chain's own bytes and then thrown away.
 ///
-/// There is no signing-domain field: a Solana balance proof is signed over
-/// the channel account, nonce and amount alone.
+/// The signing domain is `program_id` below: since ADR 0053 a Solana
+/// balance proof is signed over the settlement program as well as the
+/// channel account, nonce and amount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SolanaChannel {
     /// The settlement program this channel lives under, raw 32 bytes.
@@ -722,20 +723,24 @@ pub struct ClientChannelRegistry {
     /// the one it replaced -- it names a real outage that has nothing to do
     /// with the claim being refused.
     last_failure: RwLock<HashMap<ClaimChain, ChannelLookupFailed>>,
-    /// This connector's own `[settlement.solana]` identity, when configured
-    /// (issue #975) -- what a Solana claim's self-declared `programId`/
-    /// `cluster` are cross-checked against before its channel is even
-    /// resolved. `None` for a node with no `[settlement.solana]` table (a
-    /// declared-only Solana channel has no chain identity to check a claim
-    /// against).
-    solana_identity: Option<SolanaSettlementIdentity>,
-}
-
-/// See [`ClientChannelRegistry::solana_identity`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SolanaSettlementIdentity {
-    pub(crate) program_id: [u8; 32],
-    pub(crate) cluster: Option<&'static str>,
+    /// The Solana cluster this node's own `[settlement.solana] rpc_url`
+    /// names, when that URL names one this connector recognises (issue
+    /// #975) -- what a Solana claim's self-declared `cluster` is
+    /// cross-checked against.
+    ///
+    /// `None` covers two different nodes and refuses to distinguish them,
+    /// because neither can perform the check: one with no
+    /// `[settlement.solana]` table at all, and one whose `rpc_url` names no
+    /// cluster this connector can recognise (a third-party RPC provider's).
+    /// See [`Self::with_solana_cluster`].
+    ///
+    /// Only the cluster lives here, and deliberately. The **program id** is
+    /// not a node-wide fact a claim is checked against -- it is a
+    /// *per-channel* fact, carried on [`SolanaChannel::program_id`], and it
+    /// is what a claim's signature is actually verified under (ADR 0053).
+    /// Keeping a second, node-wide copy of it here would be a second source
+    /// of truth for a value the resolved channel already holds.
+    solana_cluster: Option<&'static str>,
 }
 
 /// A memoised resolution, when the chain last *confirmed* it, and when this
@@ -896,7 +901,7 @@ impl Default for ClientChannelRegistry {
             // channel at all, i.e. #611 switched off.
             lookup_budget: UnresolvableLookupBudget::default(),
             last_failure: RwLock::new(HashMap::new()),
-            solana_identity: None,
+            solana_cluster: None,
         }
     }
 }
@@ -989,28 +994,24 @@ impl ClientChannelRegistry {
         self
     }
 
-    /// Record this node's own `[settlement.solana]` identity (issue #975):
-    /// the program it drives, and -- when known -- the cluster its `rpc_url`
-    /// names. A node with no `[settlement.solana]` table never calls this,
-    /// leaving [`Self::solana_identity`] at `None`, so a claim naming a
-    /// declared-only channel is verified exactly as before this issue --
-    /// there is no configured chain identity to disagree with.
-    pub fn with_solana_identity(
-        mut self,
-        program_id: [u8; 32],
-        cluster: Option<&'static str>,
-    ) -> ClientChannelRegistry {
-        self.solana_identity = Some(SolanaSettlementIdentity {
-            program_id,
-            cluster,
-        });
+    /// Record the Solana cluster this node settles on (issue #975), so that
+    /// a claim declaring a *different* one is refused rather than endorsed.
+    ///
+    /// Called only when `[settlement.solana] rpc_url` names a cluster this
+    /// connector recognises -- `SolanaSettlementConfig::cluster_hint`. A
+    /// node that never calls it leaves [`Self::solana_cluster`] at `None`
+    /// and checks nothing, which is the honest answer for a node that
+    /// genuinely does not know which cluster it is on: a guess would refuse
+    /// every genuine claim it ever received.
+    pub fn with_solana_cluster(mut self, cluster: &'static str) -> ClientChannelRegistry {
+        self.solana_cluster = Some(cluster);
         self
     }
 
-    /// This registry's configured Solana settlement identity, if any -- see
-    /// [`Self::with_solana_identity`].
-    pub(crate) fn solana_identity(&self) -> Option<SolanaSettlementIdentity> {
-        self.solana_identity
+    /// The cluster this registry knows it is on, if it knows -- see
+    /// [`Self::with_solana_cluster`].
+    pub(crate) fn solana_cluster(&self) -> Option<&'static str> {
+        self.solana_cluster
     }
 
     /// Record `channel_id`'s counterparty and EIP-712 domain. `channel_id`
