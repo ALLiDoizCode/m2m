@@ -47,6 +47,21 @@ unchanged by this issue.
   with none configured produces or accepts no claim at all, exactly like a node with no signer
   configured never emits one. This is what lets this change land, and be reviewed, independently of
   #576's settlement backend retarget.
+
+  > **Amended by #1136, decision unchanged.** The domain is still a configured input, per channel,
+  > and is still not _read_ from a settlement backend. It is now **corroborated** against one:
+  > `connector_cli::runtime`'s `check_evm_channel_domains` holds every declared
+  > `[[peer_channels]]`, `[[pay_channels]]` and `[[client_channels]]` domain against the
+  > `TokenNetwork` `EvmSettlementBackend::connect` resolved, and a disagreement refuses the boot.
+  > Until then nothing compared the two at all, so a row left stale after a redeploy produced a
+  > node that accepted claims under one `TokenNetwork` while redeeming through another — silent,
+  > and in the paying direction. Deriving the value instead was rejected: it would contradict this
+  > clause, and it would leave one source with no cross-check, so a mistyped `[settlement.evm]
+token_address` would silently re-domain every channel rather than being caught. The model is
+  > `[settlement.evm] decimals` (#564), which is likewise declared in config and refused at connect
+  > when the chain disagrees — not the Solana `program_id` removals (#981/#1082/#1128), which
+  > deleted a copy of a value the same file already stated.
+
 - **The channel id a claim signs over must already be the on-chain `bytes32`.**
   `ClaimBook::set_channel_domain` parses the configured channel id as either `0x`-prefixed (or
   bare) 64-character hex -- `TokenNetwork.sol`'s own `channelId` shape -- or a plain decimal

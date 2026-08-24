@@ -226,6 +226,16 @@ peer_id = "store"
 fee = 3
 ```
 
+**`chain_id`/`token_network` must be the deployment this node settles through.** They are the
+EIP-712 domain every claim on the channel is signed and verified under (ADR 0024), and since issue
+#1136 the node holds them against the `TokenNetwork` its own `[settlement.evm]` registry resolves
+at connect: a disagreement is a refusal to start naming both contracts, not a warning. There is
+nothing to copy them from -- `[settlement.evm]` names the _registry_ -- so read the resolved
+address off the node's own x402 greeting (`extra.settlement.tokenNetwork`) or off the registry
+with `cast call <contract_address> "getTokenNetwork(address)(address)" <token_address>`, and write
+that. A row left behind after a `TokenNetwork` redeploy used to load happily and render carriage
+for claims it could never redeem; it now stops the node instead.
+
 `[[peer_channels]]` also accepts a Solana-shaped row (issue #759) -- `channel_account` and
 `counterparty_key` instead of `channel_id`, and no `chain_id`/`token_network` (a Solana channel has
 neither):

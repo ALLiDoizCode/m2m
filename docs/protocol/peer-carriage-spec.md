@@ -1188,6 +1188,17 @@ Required surface:
   `program_id` is a named load-time refusal, and a Solana row on a node with no
   `[settlement.solana]` is another. This is the same "no second declaration" rule
   `[[client_channels]]` took in #981/#1082.
+  The EVM shape keeps its own `chain_id`/`token_network`, and does so deliberately: ADR 0024
+  makes the EIP-712 domain a configured input per channel, and `[settlement.evm]` names a
+  `TokenNetworkRegistry` rather than a `TokenNetwork`, so unlike the Solana program id there is
+  no second copy in the file to read it from. It MUST NOT go unchecked, though (issue #1136): a
+  node holds the declared pair against the `TokenNetwork` its own
+  `TokenNetworkRegistry.getTokenNetwork(token_address)` resolves at connect, and **refuses to
+  start** when they disagree — the same posture `[settlement.evm] decimals` has taken against the
+  token's own `decimals()` since #564. The failure it closes is the EVM twin of the Solana one
+  above, and just as silent: a row left stale after a redeploy verifies peer claims under one
+  `TokenNetwork` while redeeming through another. A node with no `[settlement.evm]` table has no
+  resolved contract to be held against, so nothing is compared there.
   The EVM shape is the surface whose absence makes ADR
   0024 inert (#620 gap 3); it MUST actually wire `ClaimBook`'s signer, verification key and
   EIP-712 domain, with **no code-only setters left on the config path**. The Solana shape's

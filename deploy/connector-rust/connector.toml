@@ -189,6 +189,20 @@ write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STE
 # # A channel id here must NOT also appear in [[client_channels]]: peer and
 # # client claim watermarks are separate records, and one channel in both
 # # namespaces would let the same money be counted as credit twice.
+# #
+# # chain_id/token_network are the channel's EIP-712 domain (ADR 0024): what
+# # an inbound peer claim's signature is recovered against, and what an
+# # outbound one is signed under. They are declared here because
+# # [settlement.evm] names a TokenNetworkRegistry, not a TokenNetwork -- the
+# # verifying contract is whatever getTokenNetwork(token_address) resolves to
+# # on that registry, and no line in this file states it.
+# #
+# # They are CHECKED against that answer at startup (issue #1136), the same
+# # way [settlement.evm] decimals is checked against the token's own
+# # decimals() (#564): a row naming a different TokenNetwork, or a different
+# # chain id, is a refusal to start that names both contracts. Get the value
+# # from the deployment, not from memory -- `cast call <contract_address>
+# # "getTokenNetwork(address)(address)" <token_address>`.
 # [[peer_channels]]
 # peer_id = "store"
 # channel_id = "0x0000000000000000000000000000000000000000000000000000000000000000"
@@ -250,7 +264,11 @@ write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STE
 # # chain_id/token_network are the channel's EIP-712 domain -- the same two
 # # facts its [[peer_channels]] row carries, because both roles sign against
 # # the very same on-chain channel. The signing key is [settlement.evm]'s;
-# # there is no second key and none is invented (ADR 0030).
+# # there is no second key and none is invented (ADR 0030). They are held
+# # against the resolved TokenNetwork at startup exactly as that row's are
+# # (issue #1136), and the failure here is the loud one: a covering claim
+# # signed under a contract the channel does not live in is one the next hop
+# # refuses, with the PREPARE already sent.
 # [[pay_channels]]
 # peer_id = "store"
 # channel_id = "0x0000000000000000000000000000000000000000000000000000000000000000"

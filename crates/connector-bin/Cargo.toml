@@ -67,3 +67,10 @@ sha2 = "0.10"
 tokio-tungstenite = "0.20"
 futures-util = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
+# `evm_channel_domain_is_the_deployment.rs` (issue #1136): the committed
+# configs are read as raw TOML rather than through `Config::load`, because
+# that gate is over what the FILES say -- it needs none of the key material
+# and container paths a real load demands, and it keeps working if the typed
+# shape of those channel tables changes.
+toml = "0.8"
+

@@ -40,6 +40,45 @@ use crate::peer_transport;
 use ethers::types::U256;
 use solana_sdk::pubkey::Pubkey;
 
+/// The two EIP-712 domains a startup refusal names when a declared channel
+/// domain and this node's own deployment disagree (issue #1136).
+///
+/// `declared` is what the config file writes on the row -- ADR 0024's
+/// *"configured input, per channel"*. `settled` is what
+/// [`EvmSettlementBackend::connect`] resolved from `[settlement.evm]`'s
+/// `TokenNetworkRegistry`: the `TokenNetwork` this node actually submits a
+/// redemption to, and therefore the only `verifyingContract` whose
+/// signatures it can ever collect on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvmDomainMismatch {
+    /// The channel the disagreeing row names -- an EVM `channel_id`, in the
+    /// canonical lowercase `0x`-hex spelling `Config::load` produced.
+    pub channel_id: String,
+    /// The domain the row declares, and therefore the one every claim on
+    /// this channel is signed and verified under.
+    pub declared: EvmDomain,
+    /// The domain the chain answered with when this node connected.
+    pub settled: EvmDomain,
+}
+
+impl fmt::Display for EvmDomainMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "channel '{channel}' declares chain id {declared_chain} and TokenNetwork \
+             {declared_network:#x}, but this node settles on chain id {settled_chain} through \
+             TokenNetwork {settled_network:#x} -- the contract \
+             TokenNetworkRegistry.getTokenNetwork(token_address) resolved for [settlement.evm]'s \
+             own contract_address and token_address",
+            channel = self.channel_id,
+            declared_chain = self.declared.chain_id,
+            declared_network = ethers::types::Address::from(self.declared.token_network),
+            settled_chain = self.settled.chain_id,
+            settled_network = ethers::types::Address::from(self.settled.token_network),
+        )
+    }
+}
+
 /// Everything that can stop a validated [`Config`] from producing a live
 /// [`Connector`]. Distinct from [`connector_config::ConfigError`]: the
 /// config file itself was already valid TOML with well-formed fields --
@@ -169,6 +208,40 @@ pub enum RuntimeError {
         peer_id: String,
         source: reqwest::Error,
     },
+    /// A `[[peer_channels]]` EVM row declares an EIP-712 domain that is not
+    /// the one `[settlement.evm]` resolves to on chain (issue #1136).
+    ///
+    /// The paying direction, and silent until this refusal existed: a peer
+    /// claim recovers correctly under the declared domain, so `ClaimBook`
+    /// credits it and this node renders carriage for it -- and the very
+    /// same claim recovers to a different address at
+    /// `TokenNetwork.claimFromChannel`, so it can never be collected. A
+    /// refusal to start rather than a warning, for the reason ADR 0009
+    /// gives everywhere else: the alternative is a node that serves happily
+    /// and works for nothing.
+    PeerChannelDomainDisagreesWithSettlement(EvmDomainMismatch),
+    /// A `[[pay_channels]]` row declares an EIP-712 domain that is not the
+    /// one `[settlement.evm]` resolves to on chain (issue #1136).
+    ///
+    /// The outbound twin of
+    /// [`RuntimeError::PeerChannelDomainDisagreesWithSettlement`]: this
+    /// node signs a covering claim under the declared domain and hands it
+    /// to the next hop with the PREPARE, and a claim signed under a
+    /// `TokenNetwork` the channel does not live in recovers to a stranger's
+    /// address at the far gate. Every forward to that hop fails -- or, if
+    /// the hop's own config is stale in the same way, succeeds into a claim
+    /// neither side can redeem.
+    PayChannelDomainDisagreesWithSettlement(EvmDomainMismatch),
+    /// A `[[client_channels]]` EVM row declares an EIP-712 domain that is
+    /// not the one `[settlement.evm]` resolves to on chain (issue #1136).
+    ///
+    /// Same shape as the peer case, at the client edge: a buyer's claim
+    /// verifies, the write is served, and the claim is worthless. **Not**
+    /// covered by that table's `DepositFloor::Unknown` exemption -- see
+    /// [`check_evm_channel_domains`], which says why a hand-declared
+    /// channel is exempt from a chain-derived *policy* but not from a
+    /// chain-stated *fact*.
+    ClientChannelDomainDisagreesWithSettlement(EvmDomainMismatch),
     /// `[announce] identity_key_file`'s path exists (config load already
     /// checked that) but could not be read.
     AnnounceIdentityKeyFileUnreadable {
@@ -288,6 +361,30 @@ impl fmt::Display for RuntimeError {
                  Since this index is rebuildable from chain, removing the file lets the node \
                  start and re-backfill from channel_index_from_block instead",
                 path.display()
+            ),
+            RuntimeError::PeerChannelDomainDisagreesWithSettlement(mismatch) => write!(
+                f,
+                "a [[peer_channels]] row disagrees with this node's own settlement contract: \
+                 {mismatch}. Every peer claim on that channel would verify here and recover to \
+                 a different address on redemption, so this node would render carriage for \
+                 money it could never collect (ADR 0024, issue #1136). Fix the row, or point \
+                 [settlement.evm] at the deployment the channel actually lives in"
+            ),
+            RuntimeError::PayChannelDomainDisagreesWithSettlement(mismatch) => write!(
+                f,
+                "a [[pay_channels]] row disagrees with this node's own settlement contract: \
+                 {mismatch}. Every covering claim this node signed for that hop would be one \
+                 the hop cannot redeem, handed over with the PREPARE already sent (ADR 0042, \
+                 issue #1136). Fix the row, or point [settlement.evm] at the deployment the \
+                 channel actually lives in"
+            ),
+            RuntimeError::ClientChannelDomainDisagreesWithSettlement(mismatch) => write!(
+                f,
+                "a [[client_channels]] row disagrees with this node's own settlement contract: \
+                 {mismatch}. Every client claim on that channel would verify here and recover \
+                 to a different address on redemption, so this node would serve paid writes it \
+                 could never collect on (ADR 0024, issue #1136). Fix the row, or point \
+                 [settlement.evm] at the deployment the channel actually lives in"
             ),
             RuntimeError::AnnounceIdentityKeyFileUnreadable { path, source } => write!(
                 f,
@@ -475,6 +572,152 @@ async fn build_evm_settlement_backend(
     Ok(Arc::new(backend))
 }
 
+/// Hold every declared EVM channel domain against the `TokenNetwork` this
+/// node actually redeems through (issue #1136).
+///
+/// # What was wrong
+///
+/// `[[peer_channels]]`, `[[pay_channels]]` and `[[client_channels]]` each
+/// declare a `chain_id` and a `TokenNetwork`. Together those are the
+/// EIP-712 domain (ADR 0024) an inbound claim's signature is recovered
+/// against and an outbound claim's signature is produced under. Nothing
+/// compared either to the contract this node settles through, so a row left
+/// stale after a redeploy -- or simply mistyped -- produced a node that
+/// **accepts** claims under domain X while **redeeming** through the
+/// `TokenNetwork` `[settlement.evm]` resolves, which is Y. Silent, and in
+/// the paying direction: the carriage is rendered, the claim is worthless.
+///
+/// [`IndexedEvmChannelSource`] already asserted this invariant in prose
+/// -- *"every channel this index ever indexes belongs to the one
+/// `TokenNetwork` this node's `[settlement.evm]` names"* -- while config
+/// let an operator write a per-channel fact contradicting it. This function
+/// is what makes that sentence true.
+///
+/// # Why refuse rather than derive
+///
+/// The Solana twin (#1128/#1134) deleted its per-row `program_id` and read
+/// it from `[settlement.solana]`, and #981/#1082 did the same for the
+/// client edge. That is not available here, and would be wrong here even if
+/// it were:
+///
+/// * **ADR 0024 decided the other way, and stands.** *"The EIP-712 domain
+///   (`chainId`, `verifyingContract`) is a configured input, per channel
+///   ... and it is deliberately **not** read from a settlement backend."*
+///   An ADR beats a habit; superseding that clause is a separate decision
+///   with its own record, not a side effect of closing this hole.
+/// * **The governing precedent is `decimals`, not `program_id`.** A removed
+///   `program_id` was config-vs-config redundancy: the authoritative value
+///   was already in the same file, so the copy carried no information.
+///   `[settlement.evm]` does not name a `TokenNetwork` at all -- it names a
+///   `TokenNetworkRegistry` plus a `token_address`, and the verifying
+///   contract exists only as the answer
+///   `TokenNetworkRegistry.getTokenNetwork(token_address)` gives. That is
+///   the same shape as `[settlement.evm] decimals`, which this repo
+///   declares in config and **refuses the boot over** when the token's own
+///   `decimals()` disagrees (#564, `EvmSettlementBackend::connect`).
+/// * **Two witnesses beat one.** Deriving the domain would leave exactly
+///   one source and no cross-check, so a mistyped `token_address` -- which
+///   resolves to a different *real* `TokenNetwork` -- would silently
+///   re-domain every channel this node holds, moving the failure rather
+///   than removing it. Declared-and-corroborated catches that too, because
+///   the two sources are independent.
+/// * **It keeps the file checkable without a chain.** `local_topologies_load`
+///   asserts that two peered nodes write the same domain; a domain that
+///   exists only after an RPC dial cannot be gate-checked at all.
+///
+/// # Why here, and not where every sibling rule lives
+///
+/// `ChannelInBothNamespaces` and `PayChannelWithoutEvmSettlement` are
+/// `Config::load` refusals because both sides of those comparisons are in
+/// the file. This one has a side that is only knowable after a network
+/// dial, so it cannot be a load refusal and this is not an oversight:
+/// `Config::load` stays total and offline.
+///
+/// It runs the moment [`EvmSettlementBackend::connect`] answers, before
+/// anything else uses that backend -- exactly where `connect` itself checks
+/// `decimals`. That the peer, pay and client tables were already wired into
+/// the half-built `Connector` by then does not matter and is deliberately
+/// not worked around: [`build`] returns `Err`, the half-built connector is
+/// dropped, and nothing is ever served. Rewiring the domain after the fact
+/// would be *deriving* it, which is the option rejected above; hoisting the
+/// whole settlement loop above `Connector::new` would reorder every chain
+/// dial relative to the key reads and journal opens for no gain here.
+///
+/// # The `DepositFloor::Unknown` question
+///
+/// `[[client_channels]]` records a declared channel with
+/// `DepositFloor::Unknown` on purpose: hand-declaring a channel is the
+/// operator's own policy decision, so it is exempt from the chain-derived
+/// collateral cap (#646). The domain is **not** in that category. A deposit
+/// floor is a policy -- how much risk to take on a channel nothing can be
+/// asked about -- and an operator is entitled to set it. A domain is a fact
+/// about which contract verifies a signature, and there is exactly one
+/// right answer whenever this node has a backend at all. The exemption is
+/// untouched: this check only runs when there is a chain to have asked.
+///
+/// # What it does not cover
+///
+/// A node with EVM channel rows and **no** `[settlement.evm]` table. There
+/// is no resolved `TokenNetwork` to compare against, so there is nothing
+/// here to check -- such a node cannot redeem an EVM claim at all, which is
+/// a wider gap than this one and is filed separately rather than smuggled
+/// in as a behaviour change to the client edge's declared-channel path.
+fn check_evm_channel_domains(config: &Config, settled: EvmDomain) -> Result<(), RuntimeError> {
+    for channel in config.peer_channels() {
+        // A Solana row carries no EVM domain to disagree with: its whole
+        // signed message is the channel account and the program id, and
+        // #1134 already made that program the settlement table's own.
+        if let PeerChannelConfig::Evm(evm) = channel {
+            let declared = EvmDomain {
+                chain_id: evm.chain_id(),
+                token_network: evm.token_network(),
+            };
+            if declared != settled {
+                return Err(RuntimeError::PeerChannelDomainDisagreesWithSettlement(
+                    EvmDomainMismatch {
+                        channel_id: evm.channel_id().to_string(),
+                        declared,
+                        settled,
+                    },
+                ));
+            }
+        }
+    }
+    for pay_channel in config.pay_channels() {
+        let declared = EvmDomain {
+            chain_id: pay_channel.chain_id(),
+            token_network: pay_channel.token_network(),
+        };
+        if declared != settled {
+            return Err(RuntimeError::PayChannelDomainDisagreesWithSettlement(
+                EvmDomainMismatch {
+                    channel_id: pay_channel.channel_id().to_string(),
+                    declared,
+                    settled,
+                },
+            ));
+        }
+    }
+    for channel in config.client_channels() {
+        if let ClientChannelConfig::Evm(evm) = channel {
+            let declared = EvmDomain {
+                chain_id: evm.chain_id(),
+                token_network: evm.token_network_address(),
+            };
+            if declared != settled {
+                return Err(RuntimeError::ClientChannelDomainDisagreesWithSettlement(
+                    EvmDomainMismatch {
+                        channel_id: evm.channel_id().to_string(),
+                        declared,
+                        settled,
+                    },
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Construct the settlement backend a `[settlement.solana]` table
 /// describes, binding to the already-deployed `payment-channel` program it
 /// names (`program_id`) and settling in the SPL mint it names
@@ -586,6 +829,15 @@ impl ClientChannelSource for SettlementChannelSource {
 /// one constant for the whole index, not a per-channel fact -- storing it
 /// once on the backend this source already holds is the same information,
 /// without repeating an invariant on every record.
+///
+/// That sentence was true of this index and false of the node around it
+/// until issue #1136. This source only ever answers for a channel it
+/// resolved *from chain*, so its own domain was never in doubt -- but
+/// `[[client_channels]]`, `[[peer_channels]]` and `[[pay_channels]]` could
+/// each declare a domain naming some other `TokenNetwork`, and nothing
+/// compared them. [`check_evm_channel_domains`] is what closed that, so the
+/// invariant this comment asserts now holds for every channel the node
+/// judges, not only for the ones this index found.
 struct IndexedEvmChannelSource {
     index: Arc<EvmChannelIndex>,
     fallback: SettlementChannelSource,
@@ -1270,6 +1522,19 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
         match settlement {
             SettlementConfig::Evm(evm) => {
                 let backend = build_evm_settlement_backend(evm).await?;
+                // The file, held against the chain, before a single fact
+                // this backend resolved is used for anything else (issue
+                // #1136). Same posture and same moment as `connect`'s own
+                // `decimals` check (#564): the first thing to do with a
+                // chain's answer is find out whether the config file agrees
+                // with it.
+                check_evm_channel_domains(
+                    config,
+                    EvmDomain {
+                        chain_id: backend.chain_id(),
+                        token_network: backend.address().to_fixed_bytes(),
+                    },
+                )?;
                 // The greeting's channel-opening facts (issue #617).
                 // Addresses the chain connection proved (`own_address`, the
                 // resolved `TokenNetwork`, the live chain id) come from the
@@ -3259,6 +3524,325 @@ write_keys = ["{key}"]
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Issue #1136: a declared EIP-712 domain (ADR 0024) is held against
+    /// the `TokenNetwork` this node actually redeems through, and a node
+    /// whose file and chain disagree refuses to start.
+    ///
+    /// The subject really is chain behaviour, so the refusals are driven
+    /// against a real `anvil` with two real registry deployments rather
+    /// than a hand-built domain: the whole point is that
+    /// `[settlement.evm]` names a `TokenNetworkRegistry` and the verifying
+    /// contract is whatever `getTokenNetwork(token_address)` answers, which
+    /// only a chain can say. The two offline tests below cover the two
+    /// questions that are *not* about a chain -- which rows are compared at
+    /// all.
+    mod evm_channel_domains {
+        use super::*;
+
+        use connector_settlement_evm::test_support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
+
+        /// Shares [`super::settlement_construction`]'s base: `Anvil::spawn`
+        /// adds a process-global atomic offset, so two modules in one test
+        /// binary asking for the same base still get different ports.
+        const ANVIL_BASE_PORT: u16 = 18_700;
+
+        const PEER_CHANNEL: &str =
+            "0x1111111111111111111111111111111111111111111111111111111111111111";
+        const PAY_CHANNEL: &str =
+            "0x2222222222222222222222222222222222222222222222222222222222222222";
+        const CLIENT_CHANNEL: &str =
+            "0x3333333333333333333333333333333333333333333333333333333333333333";
+        const COUNTERPARTY: &str = "0x4444444444444444444444444444444444444444";
+
+        /// A key file holding `contents`, deleted when the returned handle
+        /// drops. A local twin of `settlement_construction`'s own, which is
+        /// private to that module.
+        fn key_file_with(contents: &str) -> tempfile::TempPath {
+            let mut file = tempfile::NamedTempFile::new().expect("temp key file");
+            file.write_all(contents.as_bytes()).expect("write key file");
+            file.into_temp_path()
+        }
+
+        /// A `[settlement.evm]` table naming `registry`/`token`, plus one
+        /// row in each of the three tables that declares a domain. Each
+        /// table's domain is given separately so exactly one can be made
+        /// stale at a time.
+        #[allow(clippy::too_many_arguments)]
+        fn config_text(
+            key_path: &Path,
+            state_dir: &Path,
+            rpc_url: &str,
+            registry: ethers::types::Address,
+            token: ethers::types::Address,
+            peer_domain: (u64, ethers::types::Address),
+            pay_domain: (u64, ethers::types::Address),
+            client_domain: (u64, ethers::types::Address),
+        ) -> String {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+peer_expose = "btp"
+peer_allow_plaintext_endpoints = true
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_path}"
+
+[settlement.evm]
+rpc_url = "{rpc_url}"
+contract_address = "{registry:?}"
+token_address = "{token:?}"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "{key_path}"
+
+[[peers]]
+id = "store"
+endpoint = "wss://store.example:443/btp"
+credential = {{ secret = "a-shared-peering-secret" }}
+
+[[peer_channels]]
+peer_id = "store"
+channel_id = "{PEER_CHANNEL}"
+counterparty_key = "{COUNTERPARTY}"
+chain_id = {peer_chain}
+token_network = "{peer_network:?}"
+
+[[pay_channels]]
+peer_id = "store"
+channel_id = "{PAY_CHANNEL}"
+chain_id = {pay_chain}
+token_network = "{pay_network:?}"
+client_edge_url = "http://127.0.0.1:1/ilp"
+
+[[client_channels]]
+channel_id = "{CLIENT_CHANNEL}"
+counterparty = "{COUNTERPARTY}"
+chain_id = {client_chain}
+token_network_address = "{client_network:?}"
+"#,
+                state_dir = state_dir.display(),
+                key_path = key_path.display(),
+                peer_chain = peer_domain.0,
+                peer_network = peer_domain.1,
+                pay_chain = pay_domain.0,
+                pay_network = pay_domain.1,
+                client_chain = client_domain.0,
+                client_network = client_domain.1,
+            )
+        }
+
+        /// A config with every table declaring the deployment's own domain
+        /// boots, and each of the three tables in turn refuses to when its
+        /// row names a `TokenNetwork` -- or a chain id -- the chain does not
+        /// agree with.
+        ///
+        /// One `anvil`, two real `TokenNetworkRegistry` deployments: the
+        /// second is what a redeploy leaves behind, and its `TokenNetwork`
+        /// is a real contract at a real address that simply is not the one
+        /// `[settlement.evm]` resolves. That is exactly the row an operator
+        /// is left holding, and it is why this cannot be checked without a
+        /// chain: nothing in the file names either `TokenNetwork`.
+        #[tokio::test]
+        async fn a_declared_domain_that_is_not_the_deployments_refuses_to_start() {
+            if !require_anvil() {
+                return;
+            }
+            let anvil = Anvil::spawn(ANVIL_BASE_PORT).await;
+            let token =
+                EvmSettlementBackend::deploy_mock_token(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, 1)
+                    .await
+                    .expect("deploy mock USDC");
+            let deployed =
+                EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
+                    .await
+                    .expect("deploy a TokenNetwork through a fresh registry");
+            let registry = deployed.registry_address();
+            let live_domain = (deployed.chain_id(), deployed.address());
+
+            // The deployment the stale row is left pointing at: a second,
+            // genuinely deployed `TokenNetwork` for a second token.
+            let other_token =
+                EvmSettlementBackend::deploy_mock_token(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, 1)
+                    .await
+                    .expect("deploy a second mock token");
+            let superseded =
+                EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, other_token)
+                    .await
+                    .expect("deploy a second TokenNetwork through its own registry");
+            let stale_domain = (superseded.chain_id(), superseded.address());
+            assert_ne!(
+                live_domain.1, stale_domain.1,
+                "two registries must resolve two different TokenNetworks, or this test asserts \
+                 nothing"
+            );
+            drop(deployed);
+            drop(superseded);
+
+            let key_path = key_file_with(DEPLOYER_PRIVATE_KEY);
+            let state_dir = tempfile::tempdir().expect("temp state dir");
+            let load = |peer, pay, client| {
+                load_config(&config_text(
+                    &key_path,
+                    state_dir.path(),
+                    &anvil.rpc_url,
+                    registry,
+                    token,
+                    peer,
+                    pay,
+                    client,
+                ))
+            };
+
+            // The control, first: every row agreeing with the chain boots.
+            // Without it a broken comparison that refused everything would
+            // pass every case below.
+            let agreeing = load(live_domain, live_domain, live_domain);
+            build(&agreeing)
+                .await
+                .expect("a config whose declared domains are the deployment's own must boot");
+
+            let peer_stale = load(stale_domain, live_domain, live_domain);
+            let error = build(&peer_stale)
+                .await
+                .err()
+                .expect("a [[peer_channels]] row naming another TokenNetwork must refuse to boot");
+            let RuntimeError::PeerChannelDomainDisagreesWithSettlement(mismatch) = &error else {
+                panic!("expected the peer-channel refusal, got: {error}");
+            };
+            assert_eq!(mismatch.channel_id, PEER_CHANNEL);
+            assert_eq!(
+                mismatch.declared.token_network,
+                stale_domain.1.to_fixed_bytes()
+            );
+            assert_eq!(
+                mismatch.settled.token_network,
+                live_domain.1.to_fixed_bytes()
+            );
+            // The message names BOTH contracts: an operator holding a stale
+            // row cannot fix it from a refusal that names only one.
+            let said = error.to_string();
+            assert!(
+                said.contains(&format!("{:#x}", stale_domain.1))
+                    && said.contains(&format!("{:#x}", live_domain.1)),
+                "{said}"
+            );
+
+            let pay_stale = load(live_domain, stale_domain, live_domain);
+            let error = build(&pay_stale)
+                .await
+                .err()
+                .expect("a [[pay_channels]] row naming another TokenNetwork must refuse to boot");
+            let RuntimeError::PayChannelDomainDisagreesWithSettlement(mismatch) = &error else {
+                panic!("expected the pay-channel refusal, got: {error}");
+            };
+            assert_eq!(mismatch.channel_id, PAY_CHANNEL);
+
+            let client_stale = load(live_domain, live_domain, stale_domain);
+            let error = build(&client_stale).await.err().expect(
+                "a [[client_channels]] row naming another TokenNetwork must refuse to boot",
+            );
+            let RuntimeError::ClientChannelDomainDisagreesWithSettlement(mismatch) = &error else {
+                panic!("expected the client-channel refusal, got: {error}");
+            };
+            assert_eq!(mismatch.channel_id, CLIENT_CHANNEL);
+
+            // The other half of the domain. `chain_id` is the easier one --
+            // the backend has always known its live chain id -- and it was
+            // just as uncompared.
+            let wrong_chain = load((live_domain.0 + 1, live_domain.1), live_domain, live_domain);
+            let error = build(&wrong_chain)
+                .await
+                .err()
+                .expect("a row naming another chain id must refuse to boot too");
+            let RuntimeError::PeerChannelDomainDisagreesWithSettlement(mismatch) = &error else {
+                panic!("expected the peer-channel refusal, got: {error}");
+            };
+            assert_eq!(mismatch.declared.chain_id, live_domain.0 + 1);
+            assert_eq!(mismatch.settled.chain_id, live_domain.0);
+        }
+
+        /// A Solana `[[peer_channels]]` row carries no EVM domain to
+        /// disagree with -- its signed message is the channel account and
+        /// the settlement program (ADR 0053, #1134) -- so a node holding
+        /// one alongside an EVM settlement table is untouched by this
+        /// check. No chain needed: the question is which rows are compared,
+        /// not what the chain says.
+        #[test]
+        fn a_solana_peer_channel_is_not_held_against_an_evm_domain() {
+            let key_file =
+                key_file_with("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+            let state_dir = tempfile::tempdir().expect("temp state dir");
+            let config = load_config(&format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+peer_expose = "btp"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_file}"
+
+[settlement.solana]
+rpc_url = "http://127.0.0.1:8899"
+program_id = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
+token_address = "xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "{key_file}"
+
+[[peers]]
+id = "store"
+endpoint = "wss://store.example:443/btp"
+credential = {{ secret = "a-shared-peering-secret" }}
+
+[[peer_channels]]
+peer_id = "store"
+channel_account = "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+counterparty_key = "8pM1DN3RiT8vbom5u1sNryaNT1nyL8CTTW3b5PwWXRBH"
+"#,
+                state_dir = state_dir.path().display(),
+                key_file = key_file.display(),
+            ));
+
+            check_evm_channel_domains(
+                &config,
+                EvmDomain {
+                    chain_id: 8453,
+                    token_network: [0xab; 20],
+                },
+            )
+            .expect("a Solana row has no EVM domain to disagree with");
+        }
+
+        /// And the empty case, so the check cannot be the reason a node
+        /// with no channel tables at all stops booting.
+        #[test]
+        fn a_node_that_declares_no_channel_at_all_is_unaffected() {
+            let key_file =
+                key_file_with("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+            let config = load_config(&format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{key_file}"
+"#,
+                key_file = key_file.display(),
+            ));
+
+            check_evm_channel_domains(
+                &config,
+                EvmDomain {
+                    chain_id: 8453,
+                    token_network: [0xab; 20],
+                },
+            )
+            .expect("nothing declared, nothing to disagree");
+        }
     }
 
     /// `[[pay_channels]]` reaching `Connector::with_outbound_client_hop`
