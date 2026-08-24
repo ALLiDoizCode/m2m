@@ -578,6 +578,13 @@ mod tests {
         )
     }
 
+    /// A conforming fixture: `programId` is a settlement program a channel
+    /// could live under, which is what a payer MUST write there
+    /// (`client-edge-spec.md` §1.3, issue #1127). It was the **system
+    /// program** until now -- no channel lives under that, so this shared
+    /// structural validator's own example was the one value the pinned rule
+    /// excludes. Nothing here consults the field (that is the caller's job,
+    /// and only the client edge does it), so no assertion moves.
     fn solana_claim_json() -> &'static str {
         r#"{
             "version": "1.0",
@@ -585,7 +592,7 @@ mod tests {
             "messageId": "claim-2",
             "timestamp": "2026-02-02T12:00:00Z",
             "senderId": "peer-carol",
-            "programId": "11111111111111111111111111111111",
+            "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
             "channelAccount": "So11111111111111111111111111111111111111112",
             "nonce": 3,
             "transferredAmount": "42",
@@ -842,8 +849,10 @@ mod tests {
     /// this field rested on `required_str`'s implementation alone.
     #[test]
     fn a_solana_claim_with_no_program_id_is_malformed() {
-        let without =
-            solana_claim_json().replace(r#""programId": "11111111111111111111111111111111","#, "");
+        let without = solana_claim_json().replace(
+            r#""programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA","#,
+            "",
+        );
         assert!(
             !without.contains("programId"),
             "the field really was removed"

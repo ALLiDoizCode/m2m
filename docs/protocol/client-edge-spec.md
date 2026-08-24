@@ -238,6 +238,28 @@ never reaches the terminating app:
    the client edge is where buyers a connector has never heard of arrive. The vector's
    `schema_version` bump to `2` is the signal that the reading changed.
 
+   **The duty to report is this edge's alone.** `peer-carriage-spec.md` §4 carries this whole
+   field list onto the peer edge unchanged — a peer claim is the same JSON object, and what a
+   payer MUST write in `programId` is the same there — but §4.1 deliberately does **not** carry
+   the reporting duty with it: a peer claim's declared `programId` is validated structurally and
+   then discarded, and this connector's shared claim codec drops it before the claim is judged.
+   Neither edge may refuse on the field. The difference is in what a report could find and who
+   could act on it, not in peers being trusted more. Since
+   [issue #1128](https://github.com/toon-protocol/connector/issues/1128) a Solana peering has
+   exactly one program it can be judged under — `[settlement.solana] program_id` — and that one
+   value both renders the field on an outbound peer claim and keys the channel an inbound one is
+   verified against, so a peer that declares a program it did not sign under is a disagreement
+   this connector cannot produce, and a peer that signs under a program this node does not settle
+   with already fails verification outright and carries no traffic at all. Here neither holds: the
+   payer is someone the operator has never heard of, running software the operator did not
+   configure and cannot reach, so this log line is the only channel by which the mislabelling can
+   become known to anyone — and it is the adoption signal a future refusal is gated on, for the
+   only population whose adoption is an open question. **Read issue #1127's "wait until the
+   warning stops firing" accordingly: it is a statement about client-edge payers, and the peer
+   edge's silence is not a gap in it.** §4.1 of that document states this difference and argues
+   it from the same two cases; the two texts are meant to be read as a pair, and neither should be
+   changed alone.
+
    The cluster check is skipped where there is nothing to compare: a claim that omits
    `cluster` declares none, and a connector with no `[settlement.solana]` table — or one
    whose `rpc_url` names no cluster it recognises, a third-party RPC provider's say — knows
