@@ -898,6 +898,14 @@ fn peer_claim_identity_solana(
 /// claim or sign an outbound one. `ClaimBook::set_solana_channel` (issue
 /// #742/#757) closed the other half of that gap; this closes the
 /// config-to-runtime wiring.
+///
+/// Issue #1128: `solana.program_id()` is `[settlement.solana] program_id`,
+/// not a fact the row declares -- `Config::load` copies it in, and refuses
+/// a row that tries to name its own. So the program `ClaimBook` verifies a
+/// peer claim under is by construction the program the settlement backend
+/// built below would redeem it through; there is no pair here that can
+/// drift apart, and therefore nothing for this function to compare. The
+/// same shape `client_channels` uses for `[[client_channels]]` since #1082.
 fn wire_peer_channels(
     mut connector: Connector,
     config: &Config,
@@ -1933,19 +1941,13 @@ token_network = "0x00000000000000000000000000000000000000bb"
         );
     }
 
-    /// The Solana twin of [`peer_channels_reach_the_claim_ledger`] (issue
-    /// #998): before this, `wire_peer_channels` skipped every
-    /// `PeerChannelConfig::Solana` row outright, so a Solana-settled
-    /// peering loaded and validated but could never verify an inbound
-    /// claim -- `recognizes_solana_channel` is the observable end of that
-    /// wiring, the Solana counterpart of `recognizes_channel`.
-    #[tokio::test]
-    async fn solana_peer_channels_reach_the_claim_ledger() {
-        let state_dir = tempfile::tempdir().expect("temp state dir");
-        let channel_account = "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi";
-        let counterparty_key = "8pM1DN3RiT8vbom5u1sNryaNT1nyL8CTTW3b5PwWXRBH";
-        let program_id = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-        let (config, _key_path) = config_with_raw_key_file(|key_path| {
+    /// A config with one Solana `[[peer_channels]]` row and a
+    /// `[settlement.solana]` naming `program_id`. Since issue #1128 the two
+    /// are inseparable -- the row has no program of its own and load
+    /// refuses it without the table -- so the fixture writes both or
+    /// neither.
+    fn solana_peering_config(state_dir: &Path, program_id: &str) -> (Config, tempfile::TempPath) {
+        config_with_raw_key_file(|key_path| {
             format!(
                 r#"
 client_edge_addr = "127.0.0.1:0"
@@ -1964,32 +1966,98 @@ secret = "a-real-peering-secret"
 
 [[peer_channels]]
 peer_id = "store"
-channel_account = "{channel_account}"
-counterparty_key = "{counterparty_key}"
+channel_account = "{SOLANA_PEER_CHANNEL_ACCOUNT}"
+counterparty_key = "{SOLANA_PEER_COUNTERPARTY_KEY}"
+
+[settlement.solana]
+rpc_url = "https://api.devnet.solana.com"
 program_id = "{program_id}"
+token_address = "{SOLANA_PEER_COUNTERPARTY_KEY}"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "{key_file}"
 "#,
-                state_dir = state_dir.path().display(),
+                state_dir = state_dir.display(),
                 key_file = key_path.display(),
             )
-        });
+        })
+    }
 
-        let runtime = build(&config).await.expect("build");
+    const SOLANA_PEER_CHANNEL_ACCOUNT: &str = "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi";
+    const SOLANA_PEER_COUNTERPARTY_KEY: &str = "8pM1DN3RiT8vbom5u1sNryaNT1nyL8CTTW3b5PwWXRBH";
+    const SOLANA_PEER_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+
+    /// The production wiring under test here, called in the production
+    /// order but without `build`'s settlement leg -- which dials a chain,
+    /// and this is a question about config reaching `ClaimBook`, not about
+    /// chain behaviour. `peer_channels_reach_the_claim_ledger` covers the
+    /// `build`-calls-`wire_peer_channels` link on the EVM side.
+    fn wire(config: &Config) -> Connector {
+        let connector = Connector::new(
+            config.routes().to_vec(),
+            Vec::new(),
+            Arc::new(connector_runtime::FakeAppClient::new()),
+            Arc::new(connector_runtime::InProcessPeerTransport::new()),
+            Arc::new(SystemClock),
+        );
+        wire_peer_channels(connector, config).expect("wire [[peer_channels]]")
+    }
+
+    /// The Solana twin of [`peer_channels_reach_the_claim_ledger`] (issue
+    /// #998): before this, `wire_peer_channels` skipped every
+    /// `PeerChannelConfig::Solana` row outright, so a Solana-settled
+    /// peering loaded and validated but could never verify an inbound
+    /// claim -- `recognizes_solana_channel` is the observable end of that
+    /// wiring, the Solana counterpart of `recognizes_channel`.
+    #[test]
+    fn solana_peer_channels_reach_the_claim_ledger() {
+        let state_dir = tempfile::tempdir().expect("temp state dir");
+        let (config, _key_path) = solana_peering_config(state_dir.path(), SOLANA_PEER_PROGRAM_ID);
+
+        let connector = wire(&config);
 
         assert!(
-            runtime.connector.recognizes_solana_channel(channel_account),
+            connector.recognizes_solana_channel(SOLANA_PEER_CHANNEL_ACCOUNT),
             "the [[peer_channels]] Solana row must reach ClaimBook's Solana verification key, \
              or every peer claim on it is refused `unknown_channel` however correctly it was \
              signed"
         );
         assert!(
-            !runtime
-                .connector
+            !connector
                 // A real 32-byte account (the system program's), so what
                 // this asserts is "nobody configured it", not "it was never
                 // a well-formed account in the first place".
                 .recognizes_solana_channel("11111111111111111111111111111111"),
             "and only that row -- an account nobody configured is still unknown"
         );
+    }
+
+    /// Issue #1128, at the end of the wire: the program `ClaimBook` judges
+    /// a peer claim under is the program `[settlement.solana]` names, and
+    /// there is no longer a per-row value that could name a different one.
+    /// A peer claim signed under any other program does not verify here --
+    /// which is the whole point, because any other program is one this node
+    /// could never redeem the claim through.
+    #[test]
+    fn a_solana_peer_channel_is_judged_under_the_settlement_program() {
+        let state_dir = tempfile::tempdir().expect("temp state dir");
+        let other_program = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
+        let (config, _key_path) = solana_peering_config(state_dir.path(), other_program);
+
+        let PeerChannelConfig::Solana(row) = &config.peer_channels()[0] else {
+            panic!("expected a Solana peer channel");
+        };
+        assert_eq!(
+            row.program_id(),
+            other_program,
+            "moving [settlement.solana] program_id moves the peer channel's with it -- the two \
+             cannot be made to disagree, which is what stops a node accepting peer claims it \
+             settles under a different program and can never redeem"
+        );
+
+        let connector = wire(&config);
+        assert!(connector.recognizes_solana_channel(SOLANA_PEER_CHANNEL_ACCOUNT));
     }
 
     #[tokio::test]

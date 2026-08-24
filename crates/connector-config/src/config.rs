@@ -314,7 +314,22 @@ impl Config {
         let peer_expose = parse_peer_exposure(raw.peer_expose)?;
         let peer_allow_plaintext_endpoints = raw.peer_allow_plaintext_endpoints.unwrap_or(false);
         let peers = resolve_peers(raw.peers, peer_expose, peer_allow_plaintext_endpoints)?;
-        let peer_channels = resolve_peer_channels(raw.peer_channels)?;
+        // Resolved before `[[peer_channels]]` rather than beside the other
+        // money tables below, because a Solana peer channel's settlement
+        // program is no longer a fact of its own row -- it is read from
+        // here (issue #1128), the same way `[[client_channels]]`'s Solana
+        // shape has read it since #1082. One program is the only program a
+        // node can submit a redemption to, so it is the only program a peer
+        // channel can be judged under; a row that named its own could
+        // disagree, and a node whose row and table disagreed accepted peer
+        // claims it could never redeem.
+        let settlements = resolve_settlement(raw.settlement)?;
+        let solana_settlement_program_id =
+            settlements.iter().find_map(|settlement| match settlement {
+                SettlementConfig::Solana(solana) => Some(solana.program_id()),
+                SettlementConfig::Evm(_) => None,
+            });
+        let peer_channels = resolve_peer_channels(raw.peer_channels, solana_settlement_program_id)?;
         for peer_route in &peer_routes {
             let Some(peer) = peers.iter().find(|peer| peer.id() == peer_route.peer_id()) else {
                 return Err(ConfigError::UnknownPeerId {
@@ -367,7 +382,6 @@ impl Config {
         }
         let operator = resolve_operator(raw.operator)?;
         let announce = resolve_announce(raw.announce)?;
-        let settlements = resolve_settlement(raw.settlement)?;
         let client_channels = resolve_client_channels(raw.client_channels)?;
         let client_identities = resolve_client_identities(raw.client_identities)?;
         // Namespace disjointness (`peer-carriage-spec.md` §1.8). Peer and
@@ -1539,7 +1553,32 @@ price = 1000
 
     /// A `[[peers]]`/Solana-shaped `[[peer_channels]]` pair, the Solana
     /// counterpart of `peering_config` (issue #759).
-    fn solana_peering_config(key_path: &Path, state_dir: &Path, program_id_line: &str) -> String {
+    ///
+    /// `program_id_line` is what a file that still writes the key removed by
+    /// issue #1128 looks like; `settlement_program_id` is the
+    /// `[settlement.solana]` table the row now takes its program from, and
+    /// `None` omits the table entirely.
+    fn solana_peering_config(
+        key_path: &Path,
+        state_dir: &Path,
+        program_id_line: &str,
+        settlement_program_id: Option<&str>,
+    ) -> String {
+        let settlement = settlement_program_id.map_or_else(String::new, |program_id| {
+            format!(
+                r#"
+[settlement.solana]
+rpc_url = "https://api.devnet.solana.com"
+program_id = "{program_id}"
+token_address = "{SOLANA_COUNTERPARTY_KEY}"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "{key_file}"
+"#,
+                key_file = key_path.display(),
+            )
+        });
         format!(
             r#"
 client_edge_addr = "127.0.0.1:3000"
@@ -1559,28 +1598,44 @@ peer_id = "store"
 channel_account = "{SOLANA_CHANNEL_ACCOUNT}"
 counterparty_key = "{SOLANA_COUNTERPARTY_KEY}"
 {program_id_line}
+{settlement}
 "#,
             state_dir = state_dir.display(),
             key_file = key_path.display(),
         )
     }
 
+    /// The ordinary case: no per-row `program_id`, and a
+    /// `[settlement.solana]` naming [`SOLANA_PROGRAM_ID`].
     fn load_solana_peering(program_id_line: &str) -> Result<Config, ConfigError> {
+        load_solana_peering_settling_under(program_id_line, Some(SOLANA_PROGRAM_ID))
+    }
+
+    fn load_solana_peering_settling_under(
+        program_id_line: &str,
+        settlement_program_id: Option<&str>,
+    ) -> Result<Config, ConfigError> {
         let state_dir = tempfile::tempdir().expect("temp state dir");
         let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
         key_file
             .write_all(b"not a real key")
             .expect("write key file");
-        let text = solana_peering_config(key_file.path(), state_dir.path(), program_id_line);
+        let text = solana_peering_config(
+            key_file.path(),
+            state_dir.path(),
+            program_id_line,
+            settlement_program_id,
+        );
         Config::from_toml_str(&text, Path::new("test.toml"))
     }
 
-    /// Issue #759's AC: a Solana `[[peer_channels]]` row loads and typed
-    /// distinctly from an EVM one, program id included.
+    /// Issue #759's AC as issue #1128 leaves it: a Solana
+    /// `[[peer_channels]]` row loads, is typed distinctly from an EVM one,
+    /// and carries the program id `[settlement.solana]` names -- at the
+    /// full `Config::load` level, which is where the two tables meet.
     #[test]
-    fn loads_a_solana_peer_channel_with_its_program_id() {
-        let config =
-            load_solana_peering(&format!(r#"program_id = "{SOLANA_PROGRAM_ID}""#)).expect("load");
+    fn loads_a_solana_peer_channel_with_the_settlement_tables_program_id() {
+        let config = load_solana_peering("").expect("load");
 
         assert_eq!(config.peer_channels().len(), 1);
         let PeerChannelConfig::Solana(solana) = &config.peer_channels()[0] else {
@@ -1593,23 +1648,43 @@ counterparty_key = "{SOLANA_COUNTERPARTY_KEY}"
         assert_eq!(config.peer_channels()[0].chain(), SettlementChain::Solana);
     }
 
-    /// Issue #759's AC, at the full `Config::load` level (not just
-    /// `resolve_peer_channels`'s own unit test): a Solana row with no
-    /// `program_id` fails load with the named, actionable error rather than
-    /// the generic untagged-enum mismatch `#[serde(untagged)]` would
-    /// otherwise surface.
+    /// Issue #1128, at the level an operator meets it: the config file that
+    /// used to produce a node verifying peer claims under one program while
+    /// settling under another does not load at all, and the message names
+    /// the key to delete.
     #[test]
-    fn rejects_a_solana_peer_channel_with_no_program_id() {
-        let result = load_solana_peering("");
+    fn rejects_a_solana_peer_channel_that_still_declares_its_own_program_id() {
+        let result = load_solana_peering_settling_under(
+            r#"program_id = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM""#,
+            Some(SOLANA_PROGRAM_ID),
+        );
 
         let message = expect_error(
             result,
-            |error| matches!(error, ConfigError::PeerChannelMissingSolanaProgramId { peer_id } if peer_id == "store"),
+            |error| matches!(error, ConfigError::PeerChannelProgramIdRemoved { peer_id } if peer_id == "store"),
         );
         assert!(
-            message.contains("program_id") && message.contains("required wire field"),
+            message.contains("program_id")
+                && message.contains("[settlement.solana] program_id")
+                && message.contains("never settle"),
             "got: {message}"
         );
+    }
+
+    /// The other half of #1128's refusal: no `[settlement.solana]` at all
+    /// means there is no program id anywhere, so the row cannot be bound --
+    /// and is refused rather than skipped, because `PeerChannelUnbound`
+    /// already guarantees every peering has a row and a skipped one would
+    /// leave the peering bound on paper only.
+    #[test]
+    fn rejects_a_solana_peer_channel_on_a_node_that_does_not_settle_on_solana() {
+        let result = load_solana_peering_settling_under("", None);
+
+        let message = expect_error(
+            result,
+            |error| matches!(error, ConfigError::PeerChannelWithoutSolanaSettlement { peer_id } if peer_id == "store"),
+        );
+        assert!(message.contains("[settlement.solana]"), "got: {message}");
     }
 
     /// The Solana counterpart of `rejects_one_channel_configured_in_both_namespaces`:
@@ -1627,7 +1702,8 @@ counterparty_key = "{SOLANA_COUNTERPARTY_KEY}"
             solana_peering_config(
                 key_file.path(),
                 state_dir.path(),
-                &format!(r#"program_id = "{SOLANA_PROGRAM_ID}""#),
+                "",
+                Some(SOLANA_PROGRAM_ID),
             ),
         );
         let result = Config::from_toml_str(&text, Path::new("test.toml"));

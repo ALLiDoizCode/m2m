@@ -501,15 +501,67 @@ pub enum ConfigError {
     )]
     PeerChannelInvalidSolanaAccount { field: &'static str, value: String },
 
+    /// The removed-key rejection for `[[peer_channels]] program_id` (issue
+    /// #1128), in the shape [`ConfigError::PeerCeilingRemoved`] and
+    /// [`ConfigError::PeerSaleRemoved`] already take: the key is still
+    /// parsed, purely so it can be refused **by name** rather than silently
+    /// ignored or lost in `#[serde(untagged)]`'s "matched no variant".
+    ///
+    /// It was a second declaration of a fact `[settlement.solana]` already
+    /// states, and since ADR 0053 bound the settlement program into a
+    /// Solana claim's signed message the two disagreeing is not a typo with
+    /// a cosmetic symptom: the node verifies inbound peer claims under the
+    /// row's program while its settlement backend redeems under
+    /// `[settlement.solana]`'s, so it renders carriage for claims it can
+    /// never cash. Removing the key is what makes that state unwritable --
+    /// the same "no second declaration" rule #981/#1082 applied to
+    /// `[[client_channels]]`.
     #[error(
-        "peer '{peer_id}' names a Solana '[[peer_channels]]' row with no 'program_id': a \
-         rendered outbound Solana claim's 'programId' is a required wire field \
-         (client-edge-spec.md §1.3), not an optional domain the way an EVM claim's 'chainId' \
-         is, so there is no configuration this connector could fall back to render without one \
-         (issue #759). Set 'program_id' to the base58 address of the deployed payment-channel \
-         program this channel was opened under"
+        "peer '{peer_id}' sets 'program_id' on a Solana '[[peer_channels]]' row, which was \
+         removed (issue #1128): a peer channel's settlement program is read from \
+         '[settlement.solana] program_id', the one program this node can actually redeem a \
+         claim under. Since ADR 0053 that program id is bound into a Solana claim's signed \
+         message, so a row naming a different one made this node accept peer claims it could \
+         never settle. Delete the key rather than replace it -- the value it should have held \
+         is already in '[settlement.solana]'"
     )]
-    PeerChannelMissingSolanaProgramId { peer_id: String },
+    PeerChannelProgramIdRemoved { peer_id: String },
+
+    /// A Solana `[[peer_channels]]` row on a node with no
+    /// `[settlement.solana]` table (issue #1128). The sibling of
+    /// [`ConfigError::PayChannelWithoutEvmSettlement`], and refused for the
+    /// same reason: with the per-row `program_id` gone there is no other
+    /// place a program id could come from, and a node that cannot settle on
+    /// Solana at all cannot redeem a Solana peer claim however correctly it
+    /// was signed.
+    ///
+    /// Refused rather than skipped-with-a-warning (which is what the client
+    /// edge does for the same shape today): `Config::load` already requires
+    /// every peering to carry a `[[peer_channels]]` row
+    /// ([`ConfigError::PeerChannelUnbound`]), so skipping this one would
+    /// leave the peering bound on paper and unverifiable in fact.
+    #[error(
+        "peer '{peer_id}' names a Solana '[[peer_channels]]' row but this node has no \
+         '[settlement.solana]' table: a peer claim on that channel is signed against the \
+         settlement program's id (ADR 0053) and redeemed through that same program, and \
+         without the table there is neither. Add '[settlement.solana]', or delete the row and \
+         peer over a chain this node settles on"
+    )]
+    PeerChannelWithoutSolanaSettlement { peer_id: String },
+
+    /// `[settlement.solana] program_id` is checked only for non-emptiness
+    /// where it is resolved; a Solana `[[peer_channels]]` row now takes its
+    /// program id from there, so the value has to be a real 32-byte address
+    /// before any claim can be judged against it (issue #1128). Named
+    /// against the row that needs it *and* the table that holds it, because
+    /// the fix is in the table and the symptom is on the row.
+    #[error(
+        "peer '{peer_id}' names a Solana '[[peer_channels]]' row, whose settlement program is \
+         read from '[settlement.solana] program_id' -- but that is '{value}', which is not \
+         base58 encoding a 32-byte Solana program address. Since ADR 0053 a claim on this \
+         channel signs that program id, so it must name a real deployed program"
+    )]
+    PeerChannelSolanaSettlementProgramIdInvalid { peer_id: String, value: String },
 
     #[error(
         "[[peer_channels]] is configured but 'state_dir' is not: this node would accept peer \

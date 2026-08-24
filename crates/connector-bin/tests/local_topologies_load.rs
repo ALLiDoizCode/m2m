@@ -275,6 +275,74 @@ fn every_config_that_settles_on_solana_names_the_program_id_the_local_validator_
     }
 }
 
+/// Issue #1128: no `[[peer_channels]]` row may declare a `program_id`. The
+/// key is removed, and writing it now refuses the boot by name -- so a
+/// committed config that regrows it takes the whole mixed-chain rehearsal
+/// down rather than quietly settling under a program it does not verify
+/// under. Asserted on the raw text, because a config that no longer loads
+/// cannot be inspected through `Config`.
+///
+/// A `program_id` under `[settlement.solana]` is exactly where it belongs;
+/// the check is that no row *after* a `[[peer_channels]]` header and before
+/// the next header carries one.
+#[test]
+fn no_committed_peer_channels_row_declares_a_program_id() {
+    for (name, raw) in [
+        ("local/solo/connector.toml", SOLO_CONFIG),
+        ("local/two-hop/connector-a.toml", TWO_HOP_A),
+        ("local/two-hop/connector-b.toml", TWO_HOP_B),
+        ("local/mixed-chain/connector-a.toml", MIXED_A),
+        ("local/mixed-chain/connector-b.toml", MIXED_B),
+        ("local/mixed-chain/connector-c.toml", MIXED_C),
+    ] {
+        let mut in_peer_channel_row = false;
+        for line in raw.lines() {
+            let line = line.trim();
+            if line.starts_with('[') {
+                in_peer_channel_row = line == "[[peer_channels]]";
+                continue;
+            }
+            assert!(
+                !(in_peer_channel_row && line.starts_with("program_id")),
+                "{name} declares 'program_id' on a [[peer_channels]] row. The key was removed \
+                 (issue #1128): a peer channel's settlement program is read from \
+                 '[settlement.solana]', the only program this node can redeem a claim through, \
+                 and a row naming its own could disagree with it. This config would refuse to \
+                 boot"
+            );
+        }
+    }
+}
+
+/// The other half of #1128, through the loader: B's and C's Solana peer
+/// channel takes its program from each node's own `[settlement.solana]`, so
+/// the two sides of the peering still agree -- not because both files spell
+/// the same address into a row, but because both settle under it.
+#[test]
+fn the_mixed_chain_solana_peer_channels_inherit_their_settlement_program() {
+    for (name, raw) in [
+        ("local/mixed-chain/connector-b.toml", MIXED_B),
+        ("local/mixed-chain/connector-c.toml", MIXED_C),
+    ] {
+        let config = load(name, raw);
+        let settlement_program = config
+            .settlements()
+            .iter()
+            .find_map(|settlement| match settlement {
+                connector_config::SettlementConfig::Solana(solana) => Some(solana.program_id()),
+                connector_config::SettlementConfig::Evm(_) => None,
+            })
+            .expect("this node settles on Solana");
+        assert_eq!(
+            solana_channel(&config, "b-c").program_id(),
+            settlement_program,
+            "{name}'s Solana peer channel must be judged under the program it settles with, or \
+             it renders carriage for claims it can never redeem (ADR 0053, issue #1128)"
+        );
+        assert_eq!(settlement_program, LOCAL_TEST_PROGRAM_ID);
+    }
+}
+
 /// Names that live in two files at once. A compose service rename or a moved
 /// mount is invisible to the TOML, and shows up as a connector that refuses to
 /// start or a route that cannot reach its app.
