@@ -29,9 +29,20 @@
 //! 1. **Declared** -- [`ClientChannelRegistry::record_evm`] /
 //!    [`record_solana`](ClientChannelRegistry::record_solana), which
 //!    `connector-cli` fills from the `[[client_channels]]` config section.
-//!    A node with no settlement backend at all still declares its channels
-//!    this way, and a declared channel is authoritative: it is answered
-//!    from memory and never resolved.
+//!    A declared channel is authoritative: it is answered from memory,
+//!    never resolved, and needs **no chain connection** -- this registry
+//!    holds no reference to a settlement backend and never asks one
+//!    anything about a declared row.
+//!
+//!    That is a fact about this registry, not a licence for the node
+//!    around it. Since issue #1138 a `[[client_channels]]` row is refused
+//!    at config load unless this node declares the `[settlement.<chain>]`
+//!    table of the row's own chain -- because that table is where the
+//!    node's on-chain identity comes from, and without it the node is not
+//!    a participant of the channel and could never redeem a claim on it,
+//!    however correctly declared. See
+//!    `connector_config`'s `SettlementTables` and
+//!    `docs/protocol/peer-carriage-spec.md` §11.1.
 //! 2. **Resolved from chain** -- a [`ClientChannelSource`] registered per
 //!    chain ([`ClientChannelRegistry::with_source`] for EVM,
 //!    [`ClientChannelRegistry::with_solana_source`] for Solana), asked only
@@ -82,6 +93,14 @@
 //! operator hand-declaring a channel *is* the policy decision, correctly
 //! located in config and theirs to make. An anonymous buyer resolved from
 //! chain never made any such deal, and gets the mechanism.
+//!
+//! **What that exemption is latitude over** (issue #1138, and #1136 for
+//! the domain half): how much a counterparty may spend on a channel this
+//! node *is* a participant of. It presupposes redeemability rather than
+//! conferring it, so it does not extend to the EIP-712 domain -- a fact
+//! about which contract verifies a signature -- nor to whether this node
+//! has an address on the chain at all. Both of those have exactly one
+//! right answer and are checked; only the amount is the operator's.
 //!
 //! # Caching, and how it is refreshed
 //!
@@ -689,7 +708,10 @@ pub struct ClientChannelRegistry {
     /// [`ClaimChain`] so each chain's source answers for that chain alone --
     /// never, say, an EVM source consulted for a Solana lookup. Empty is a
     /// node with no settlement backend: it accepts claims on exactly what
-    /// its config file declares, and on nothing else.
+    /// its config file declares, and on nothing else -- which since issue
+    /// #1138 is nothing at all, because a declared row needs its own
+    /// chain's `[settlement.<chain>]` table to load. A node with one
+    /// backend and not the other still lands here for the missing chain.
     sources: HashMap<ClaimChain, Arc<dyn ClientChannelSource>>,
     /// Memoised answers from [`Self::sources`], each stamped with when the
     /// chain last confirmed it -- see this module's doc for which of the
