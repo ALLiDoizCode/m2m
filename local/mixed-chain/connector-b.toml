@@ -91,10 +91,15 @@ token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
 # `chain_id` because Solana has no numeric chain id, and there is no
 # `token_network` because there is no per-token verifying contract -- the
 # channel account IS the whole of a Solana claim's signed message.
-# `program_id` is required rather than optional (a Solana claim's `programId`
-# is not an optional wire field), and since ADR 0053 it is BOUND INTO the
-# signed message, so a claim rendered under a different program does not verify
-# here.
+#
+# There is no `program_id` here either, and that is the point of issue #1128:
+# since ADR 0053 the settlement program is BOUND INTO a Solana claim's signed
+# message, so the program this node verifies a peer claim under has to be the
+# program it redeems that claim through -- `[settlement.solana] program_id`
+# below, and nothing else. This row used to name its own, nothing compared the
+# two, and a stale row after a program redeploy bought carriage with claims
+# this node could never cash. Writing the key here now refuses the boot by
+# name. Same "no second declaration" rule `[[client_channels]]` got in #1082.
 #
 # `counterparty_key` is C's Solana settlement public key, and this node signs
 # its own outbound claims on this channel with `[settlement.solana]`'s key --
@@ -113,7 +118,6 @@ token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
 peer_id = "b-c"
 channel_account = "G5mXQzfZb4tXWX7cQvXP9ZJnDBcUo6irWTmGGtX3xpzL"
 counterparty_key = "93mxPHokL6EhVxzVicSyouEhvTVGUcKXKtHH1uTmw2Aw"
-program_id = "HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR"
 
 # ── The operator surface, and the one job it has here ────────────────────────
 # C has none, deliberately (CF-31): an absent table means the surface is not

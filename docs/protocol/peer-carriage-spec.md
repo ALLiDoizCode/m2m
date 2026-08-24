@@ -1175,14 +1175,23 @@ Required surface:
   this document's §3.1 gate depends on is complete and confirmed.
 - The accepting mirror: configured credentials map to peer ids and thence to their channels.
 - `[[peer_channels]]` — EVM shape: `peer_id`, `channel_id`, `counterparty_key`, `chain_id`,
-  `token_network`. Solana shape (issue #759): `peer_id`, `channel_account`, `counterparty_key`,
-  `program_id` — no `chain_id`/`token_network`, since a Solana channel has neither an EVM-style
-  numeric chain id nor a per-token verifying contract, and `program_id` is required (§4's claim
-  shape makes a Solana claim's `programId` a required field, `client-edge-spec.md` §1.3, unlike an
-  EVM claim's optional `chainId`/`tokenNetworkAddress`). The EVM shape is the surface whose absence makes ADR
+  `token_network`. Solana shape (issue #759): `peer_id`, `channel_account`, `counterparty_key` —
+  no `chain_id`/`token_network`, since a Solana channel has neither an EVM-style numeric chain id
+  nor a per-token verifying contract, and (issue #1128) **no `program_id` either**. A Solana
+  claim's `programId` is still a required field of §4's claim shape, but it is not a fact this
+  row declares: it is read from `[settlement.solana] program_id`, and the row MUST NOT restate it.
+  Since ADR 0053 binds the settlement program into a Solana claim's signed message, a row naming
+  its own program could disagree with the table, and a node in that state accepts peer claims
+  signed under one program while redeeming under another — carriage rendered for money it can
+  never collect, silently and in the paying direction. So there is exactly one program a Solana
+  peer channel can be judged under, and it is the one this node settles with; a row still writing
+  `program_id` is a named load-time refusal, and a Solana row on a node with no
+  `[settlement.solana]` is another. This is the same "no second declaration" rule
+  `[[client_channels]]` took in #981/#1082.
+  The EVM shape is the surface whose absence makes ADR
   0024 inert (#620 gap 3); it MUST actually wire `ClaimBook`'s signer, verification key and
   EIP-712 domain, with **no code-only setters left on the config path**. The Solana shape's
-  `program_id` reaches claim rendering the same way, and (issue #998) `channel_account`/
+  program id reaches claim rendering the same way, and (issue #998) `channel_account`/
   `counterparty_key` reach `ClaimBook`'s Solana verification key and signer through the same
   no-code-only-setters rule -- `Connector::with_solana_channel`/`with_solana_signer`, wired from
   `[[peer_channels]]` and `[settlement.solana]` respectively, so a Solana row can both
@@ -1190,21 +1199,23 @@ Required surface:
 
 Named load-time errors this specification requires (spelling #677's, identity ours):
 
-| Error                               | Condition                                                                                                                                                                                                                                                           | Source             |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
-| `PeerUndialable`                    | `expose` is empty **and** a configured peer has no `endpoint` — a peering that can never establish                                                                                                                                                                  | §2.2               |
-| `PeerEndpointScheme`                | an `endpoint` whose scheme is neither `wss://` nor `https://`                                                                                                                                                                                                       | §2.1               |
-| `PeerCredentialMissing`             | a `[[peers]]` entry with no credential — it could never satisfy P1                                                                                                                                                                                                  | §1.2               |
-| `PeerChannelUnbound`                | a `[[peers]]` entry with no `[[peer_channels]]` row — it could never satisfy P2                                                                                                                                                                                     | §1.2               |
-| `PeerChannelOrphaned`               | a `[[peer_channels]]` row naming an unknown `peer_id`                                                                                                                                                                                                               | §1.2               |
-| `ChannelInBothNamespaces`           | a channel id present in both `[[peer_channels]]` and `[[client_channels]]`                                                                                                                                                                                          | §1.8               |
-| `PeerChannelMissingSolanaProgramId` | a Solana `[[peer_channels]]` row with no `program_id`                                                                                                                                                                                                               | #759               |
-| `PeerChannelInvalidSolanaAccount`   | a Solana `[[peer_channels]]` row's `channel_account`/`counterparty_key`/`program_id` is not base58 of a 32-byte value                                                                                                                                               | #759               |
-| `PeerRouteUndeliverable`            | a route naming as next hop a peer this connector can never originate to                                                                                                                                                                                             | §2.2, §6.4         |
-| `DuplicatePeerId`                   | two `[[peers]]` entries with the same `id`                                                                                                                                                                                                                          | —                  |
-| `InvalidClaimEnforcement`           | `claim_enforcement` set to anything other than `"enforce"` or `"observe"` — a typo must not silently read as either                                                                                                                                                 | issue #883         |
-| `PeerMaxPacketAmountZero`           | `max_packet_amount = 0` — a cap of zero refuses every packet the peering could carry, and there is no "disable the cap" spelling                                                                                                                                    | ADR 0042           |
-| removed-field errors                | `peer_wire_addr`, `addr` in its old `SocketAddr` shape, or `ceiling`/`flush_interval_ms` (ADR 0033, issue #882) — a **hard, named** error pointing at the bring-up doc, never a silent ignore, because the devnet boxes run bind-mounted configs that lead the repo | ADR 0027, ADR 0033 |
+| Error                                         | Condition                                                                                                                                                                                                                                                           | Source             |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| `PeerUndialable`                              | `expose` is empty **and** a configured peer has no `endpoint` — a peering that can never establish                                                                                                                                                                  | §2.2               |
+| `PeerEndpointScheme`                          | an `endpoint` whose scheme is neither `wss://` nor `https://`                                                                                                                                                                                                       | §2.1               |
+| `PeerCredentialMissing`                       | a `[[peers]]` entry with no credential — it could never satisfy P1                                                                                                                                                                                                  | §1.2               |
+| `PeerChannelUnbound`                          | a `[[peers]]` entry with no `[[peer_channels]]` row — it could never satisfy P2                                                                                                                                                                                     | §1.2               |
+| `PeerChannelOrphaned`                         | a `[[peer_channels]]` row naming an unknown `peer_id`                                                                                                                                                                                                               | §1.2               |
+| `ChannelInBothNamespaces`                     | a channel id present in both `[[peer_channels]]` and `[[client_channels]]`                                                                                                                                                                                          | §1.8               |
+| `PeerChannelProgramIdRemoved`                 | a Solana `[[peer_channels]]` row still setting `program_id` — the key is removed; the program is read from `[settlement.solana]`, the only one this node can redeem under                                                                                           | #1128              |
+| `PeerChannelWithoutSolanaSettlement`          | a Solana `[[peer_channels]]` row on a node with no `[settlement.solana]` table — nothing to read the program id from, and nothing to redeem a claim through                                                                                                         | #1128              |
+| `PeerChannelSolanaSettlementProgramIdInvalid` | a Solana `[[peer_channels]]` row whose `[settlement.solana] program_id` is not base58 of a 32-byte value                                                                                                                                                            | #1128              |
+| `PeerChannelInvalidSolanaAccount`             | a Solana `[[peer_channels]]` row's `channel_account`/`counterparty_key` is not base58 of a 32-byte value                                                                                                                                                            | #759               |
+| `PeerRouteUndeliverable`                      | a route naming as next hop a peer this connector can never originate to                                                                                                                                                                                             | §2.2, §6.4         |
+| `DuplicatePeerId`                             | two `[[peers]]` entries with the same `id`                                                                                                                                                                                                                          | —                  |
+| `InvalidClaimEnforcement`                     | `claim_enforcement` set to anything other than `"enforce"` or `"observe"` — a typo must not silently read as either                                                                                                                                                 | issue #883         |
+| `PeerMaxPacketAmountZero`                     | `max_packet_amount = 0` — a cap of zero refuses every packet the peering could carry, and there is no "disable the cap" spelling                                                                                                                                    | ADR 0042           |
+| removed-field errors                          | `peer_wire_addr`, `addr` in its old `SocketAddr` shape, or `ceiling`/`flush_interval_ms` (ADR 0033, issue #882) — a **hard, named** error pointing at the bring-up doc, never a silent ignore, because the devnet boxes run bind-mounted configs that lead the repo | ADR 0027, ADR 0033 |
 
 `AcceptOnlyPeerWithoutCeiling` and the `claim_ack_timeout_ms > flush_interval_ms` load-time warning
 (§6.3) are retired along with `ceiling`/`flush_interval_ms` (ADR 0033, issue #882).

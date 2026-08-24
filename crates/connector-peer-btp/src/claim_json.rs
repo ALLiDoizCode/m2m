@@ -192,8 +192,8 @@ pub fn encode(
                 panic!(
                     "a Solana claim on channel '{}' was handed to the dial side with no \
                      solana_program_id -- render it only for a channel with a Solana \
-                     '[[peer_channels]]' row, whose 'program_id' is required at config load \
-                     (issue #759)",
+                     '[[peer_channels]]' row, which config load gives a program id from \
+                     '[settlement.solana]' (issues #759, #1128)",
                     claim.channel_id
                 )
             });

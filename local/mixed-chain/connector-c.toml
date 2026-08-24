@@ -72,14 +72,17 @@ secret_file = "/app/data/peer-b-c-secret"
 # The other half of B's Solana row. `counterparty_key` is B's Solana
 # SETTLEMENT public key -- the identity a claim on this channel must be signed
 # by, and the one thing this node checks a signature against (CF-23).
-# `program_id` is bound into the signed message since ADR 0053, so a claim
-# rendered against another deployment of the same program does not verify here
-# even though every other field matches.
+#
+# The settlement program is bound into the signed message since ADR 0053, so a
+# claim rendered against another deployment of the same program does not verify
+# here even though every other field matches. The row does not name it: it is
+# read from `[settlement.solana] program_id` below, the only program this node
+# could redeem such a claim through (issue #1128). A `program_id` key here is
+# refused at boot by name rather than allowed to disagree with it.
 [[peer_channels]]
 peer_id = "b-c"
 channel_account = "G5mXQzfZb4tXWX7cQvXP9ZJnDBcUo6irWTmGGtX3xpzL"
 counterparty_key = "BCXtFg3PtZwxVDBDGmknPzxHUtweYxb4YygrchiQKk7y"
-program_id = "HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR"
 
 # No `[operator]` section, deliberately (CF-31): an absent table means the
 # surface is not started at all, rather than started unauthenticated. The

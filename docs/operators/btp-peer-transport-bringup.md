@@ -227,26 +227,37 @@ fee = 3
 ```
 
 `[[peer_channels]]` also accepts a Solana-shaped row (issue #759) -- `channel_account` and
-`counterparty_key` instead of `channel_id`, no `chain_id`/`token_network` (a Solana channel has
-neither), and a required `program_id`:
+`counterparty_key` instead of `channel_id`, and no `chain_id`/`token_network` (a Solana channel has
+neither):
 
 ```toml
 [[peer_channels]]
 peer_id = "store"
 channel_account = "…"       # the base58 channel PDA
 counterparty_key = "…"      # the base58 ed25519 key whose signature is accepted
-program_id = "…"            # the base58 program id this channel was opened under
 ```
 
-A Solana row with no `program_id` fails load: unlike an EVM claim's `chainId`/`tokenNetworkAddress`,
-a Solana claim's `programId` is a required wire field, so there is no "render without it" fallback.
-This row's `program_id` reaches claim rendering, and (issue #998) `channel_account`/`counterparty_key`
-reach `ClaimBook`'s Solana verification key the same way an EVM row's `channel_id`/`counterparty_key`
-do -- a Solana row is wired into `accept_inbound` and outbound signing exactly like an EVM one, under
-the `[settlement.solana]` key as its outbound identity (the Solana counterpart of the EVM peer-claim
-signer, ADR 0024). A node with a Solana row but no `[settlement.solana]` table therefore still
-verifies an inbound claim on that channel and signs none outbound -- it has no channel-participant
-identity to sign as -- which is exactly what an EVM row without `[settlement.evm]` does.
+**Do not write `program_id` here.** The key was removed in issue #1128, and a row that still sets
+it fails load by name (`PeerChannelProgramIdRemoved`). The program this channel is judged and
+settled under is `[settlement.solana] program_id` -- the only program this node can submit a
+redemption to, so the only one a peer channel can live under. It was a second declaration of the
+same fact, nothing compared the two, and since ADR 0053 bound the settlement program into a Solana
+claim's signed message the consequence of them disagreeing was not cosmetic: the node verified
+inbound peer claims under the row's program while redeeming under the table's, carrying traffic for
+claims it could never cash. Typo it, or leave it stale after a program redeploy, and nothing said
+so. **If you are recovering an old config, delete the line -- do not copy its value anywhere.**
+
+For the same reason, a Solana row on a node with **no** `[settlement.solana]` table now fails load
+(`PeerChannelWithoutSolanaSettlement`) rather than half-working: there is no program id to read and
+no backend to redeem through. This is a change from the previous behaviour, where such a node
+verified inbound claims on the channel and signed none outbound. An EVM row without
+`[settlement.evm]` still behaves the old way -- an EVM channel's domain is entirely in its own row.
+
+Otherwise a Solana row is wired exactly like an EVM one (issue #998): `channel_account`/
+`counterparty_key` reach `ClaimBook`'s Solana verification key the way an EVM row's
+`channel_id`/`counterparty_key` reach its own, it is wired into `accept_inbound` and outbound
+signing, and its outbound identity is the `[settlement.solana]` key (the Solana counterpart of the
+EVM peer-claim signer, ADR 0024).
 
 ### `credential` — `secret_file` on a deployed node, `secret` only when the config is private
 
@@ -417,26 +428,28 @@ watermark held only in memory is not a replay defence.
 Every one of these stops the node before it serves anything (ADR 0009), and every message names
 this document.
 
-| Error                               | What it means                                                                           | Fix                                                          |
-| ----------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| `PeerUndialable`                    | `peer_expose = "neither"` and a peer has no `endpoint` — nothing dials, nothing accepts | give the peer an endpoint, or expose a carriage              |
-| `PeerEndpointScheme`                | an `endpoint` whose scheme selects no carriage (`ws://`, `http://`, `tcp://`, …)        | use `wss://` for BTP or `https://` for ILP-over-HTTP         |
-| `PeerCredentialMissing`             | a `[[peers]]` entry with no credential, or an empty secret                              | add `credential = { secret_file = "…" }` (or `secret`)       |
-| `PeerCredentialAmbiguous`           | a `credential` setting both `secret` and `secret_file`                                  | keep `secret_file`, delete the literal                       |
-| `PeerSecretFileNotFound`            | a `secret_file` path that does not exist, or is not a file                              | absolute path, inside the container, on a mounted volume     |
-| `PeerSecretFileUnreadable`          | a `secret_file` that could not be read as text                                          | check mode/ownership for the uid the connector runs as       |
-| `PeerSecretFileEmpty`               | a `secret_file` that is empty once trimmed                                              | regenerate it: `openssl rand -hex 32 > …`                    |
-| `PeerChannelUnbound`                | a `[[peers]]` entry with no `[[peer_channels]]` row                                     | add the channel binding, or remove the peering               |
-| `PeerChannelOrphaned`               | a `[[peer_channels]]` row naming a `peer_id` no `[[peers]]` entry configures            | fix the `peer_id` typo, or add the peer                      |
-| `ChannelInBothNamespaces`           | one channel id in both `[[peer_channels]]` and `[[client_channels]]`                    | keep the namespaces disjoint — pick one                      |
-| `PeerRouteUndeliverable`            | a route whose next hop is a peer this node can never originate to                       | give the peer an endpoint, or include `btp` in `peer_expose` |
-| `DuplicatePeerId`                   | two `[[peers]]` entries with the same `id`                                              | rename one                                                   |
-| `PeerAddrRemoved`                   | a `[[peers]]` entry still setting `addr`                                                | replace it with `endpoint`                                   |
-| `PeerWireAddrRemoved`               | a config still setting `peer_wire_addr`                                                 | delete the line and set `peer_expose` instead                |
-| `PeerCeilingRemoved`                | a `[[peers]]` entry still setting `ceiling` (ADR 0033, issue #882)                      | delete the line; no replacement is needed                    |
-| `PeerFlushIntervalRemoved`          | a `[[peers]]` entry still setting `flush_interval_ms` (ADR 0033, issue #882)            | delete the line; no replacement is needed                    |
-| `PeerChannelMissingSolanaProgramId` | a Solana `[[peer_channels]]` row with no `program_id`                                   | set `program_id` to the base58 deployed program address      |
-| `PeerChannelInvalidSolanaAccount`   | a Solana `[[peer_channels]]` row's account/key is not base58 of a 32-byte value         | fix the base58 value                                         |
+| Error                                         | What it means                                                                           | Fix                                                           |
+| --------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `PeerUndialable`                              | `peer_expose = "neither"` and a peer has no `endpoint` — nothing dials, nothing accepts | give the peer an endpoint, or expose a carriage               |
+| `PeerEndpointScheme`                          | an `endpoint` whose scheme selects no carriage (`ws://`, `http://`, `tcp://`, …)        | use `wss://` for BTP or `https://` for ILP-over-HTTP          |
+| `PeerCredentialMissing`                       | a `[[peers]]` entry with no credential, or an empty secret                              | add `credential = { secret_file = "…" }` (or `secret`)        |
+| `PeerCredentialAmbiguous`                     | a `credential` setting both `secret` and `secret_file`                                  | keep `secret_file`, delete the literal                        |
+| `PeerSecretFileNotFound`                      | a `secret_file` path that does not exist, or is not a file                              | absolute path, inside the container, on a mounted volume      |
+| `PeerSecretFileUnreadable`                    | a `secret_file` that could not be read as text                                          | check mode/ownership for the uid the connector runs as        |
+| `PeerSecretFileEmpty`                         | a `secret_file` that is empty once trimmed                                              | regenerate it: `openssl rand -hex 32 > …`                     |
+| `PeerChannelUnbound`                          | a `[[peers]]` entry with no `[[peer_channels]]` row                                     | add the channel binding, or remove the peering                |
+| `PeerChannelOrphaned`                         | a `[[peer_channels]]` row naming a `peer_id` no `[[peers]]` entry configures            | fix the `peer_id` typo, or add the peer                       |
+| `ChannelInBothNamespaces`                     | one channel id in both `[[peer_channels]]` and `[[client_channels]]`                    | keep the namespaces disjoint — pick one                       |
+| `PeerRouteUndeliverable`                      | a route whose next hop is a peer this node can never originate to                       | give the peer an endpoint, or include `btp` in `peer_expose`  |
+| `DuplicatePeerId`                             | two `[[peers]]` entries with the same `id`                                              | rename one                                                    |
+| `PeerAddrRemoved`                             | a `[[peers]]` entry still setting `addr`                                                | replace it with `endpoint`                                    |
+| `PeerWireAddrRemoved`                         | a config still setting `peer_wire_addr`                                                 | delete the line and set `peer_expose` instead                 |
+| `PeerCeilingRemoved`                          | a `[[peers]]` entry still setting `ceiling` (ADR 0033, issue #882)                      | delete the line; no replacement is needed                     |
+| `PeerFlushIntervalRemoved`                    | a `[[peers]]` entry still setting `flush_interval_ms` (ADR 0033, issue #882)            | delete the line; no replacement is needed                     |
+| `PeerChannelProgramIdRemoved`                 | a Solana `[[peer_channels]]` row still setting `program_id` (issue #1128)               | delete the line; the value lives in `[settlement.solana]`     |
+| `PeerChannelWithoutSolanaSettlement`          | a Solana `[[peer_channels]]` row on a node with no `[settlement.solana]` (issue #1128)  | add the table, or drop the row and peer on a chain you settle |
+| `PeerChannelSolanaSettlementProgramIdInvalid` | a Solana row whose `[settlement.solana] program_id` is not base58 of 32 bytes           | fix `[settlement.solana] program_id`                          |
+| `PeerChannelInvalidSolanaAccount`             | a Solana `[[peer_channels]]` row's account/key is not base58 of a 32-byte value         | fix the base58 value                                          |
 
 `AcceptOnlyPeerWithoutCeiling` no longer exists: it required an accept-only peering to carry an
 explicit `ceiling`, and both the requirement and the field are retired together (ADR 0033).
