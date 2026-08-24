@@ -1159,3 +1159,89 @@ fn every_local_peering_is_bound_to_a_channel() {
         }
     }
 }
+
+/// The value of a bare `NAME=value` assignment in `local/keys.sh`, as an
+/// integer. The script's topology facts are shell constants, and the ones that
+/// also appear in a compose file have to be held to one figure the same way a
+/// price or a channel id is.
+fn keys_script_constant(name: &str) -> u128 {
+    let needle = format!("\n{name}=");
+    let value = KEYS_SCRIPT
+        .split_once(&needle)
+        .unwrap_or_else(|| {
+            panic!("local/keys.sh no longer defines `{name}` at the start of a line")
+        })
+        .1
+        .lines()
+        .next()
+        .expect("an assignment has a line")
+        .trim();
+    value
+        .parse()
+        .unwrap_or_else(|_| panic!("local/keys.sh's {name} is `{value}`, not an integer"))
+}
+
+/// The Solana peering's channel is FUNDED, and the rehearsal reads the deposit
+/// back off the chain before it sends anything.
+///
+/// Opened is not funded. A channel with a zero deposit accepts every claim the
+/// peer path can check -- `ClaimBook` verifies a signature against a configured
+/// key and reads no chain (CF-23) -- and `packages/solana-program`'s
+/// `ClaimFromChannel` then bounds a claim by the claimer's OWN deposit, so
+/// every one of those claims is worthless on redemption. That was this
+/// topology's actual state until `SettlementBackend::fund` became a
+/// self-deposit (issue #1118): real cryptography over an empty channel, green
+/// in both journals and in `--expect-fulfill`.
+///
+/// So the figure lives in two files, and this is where they are held together:
+/// `local/keys.sh` deposits it through B's own operator surface, and the
+/// sender re-reads it out of the program's account.
+#[test]
+fn the_mixed_chain_solana_channel_is_funded_and_the_rehearsal_reads_it_off_the_chain() {
+    let deposit = keys_script_constant("CHANNEL_DEPOSIT");
+    let b = load("local/mixed-chain/connector-b.toml", MIXED_B);
+    let channel_account = solana_channel(&b, "b-c").channel_account().to_string();
+
+    assert!(
+        KEYS_SCRIPT.contains("--deposit-base-units \"$CHANNEL_DEPOSIT\""),
+        "local/keys.sh's solana-channels stage must tell open-solana-channel.py how much \
+         collateral the channel needs. Without it the stage opens a channel and funds nothing, \
+         which is the state this topology shipped in before issue #1118."
+    );
+    assert!(
+        MIXED_COMPOSE.contains(&format!("channel_open {channel_account} {LOCAL_TEST_PROGRAM_ID} 112 {deposit}")),
+        "local/mixed-chain/compose.yml's sender must check the peering's channel ({channel_account}) \
+         still holds the {deposit} base units local/keys.sh deposited, at deposit_b's offset \
+         (112, packages/solana-program/src/state.rs). B is the payer and its key sorts after C's, \
+         so B is participant_b and deposit_b is the side backing the claims B signs. A deposit \
+         lowered in one file and not the other is a rehearsal asserting a figure nobody \
+         deposited."
+    );
+
+    // A node cannot deposit collateral it was never given. The EVM leg mints
+    // to the settlement address; the Solana leg transfers from the mock mint's
+    // treasury, in UI amounts rather than base units, because that is what
+    // `spl-token` takes.
+    let node_usdc = keys_script_constant("NODE_USDC");
+    let node_base_units = node_usdc * 1_000_000;
+    assert!(
+        node_base_units >= deposit,
+        "local/keys.sh gives each node {node_usdc} USDC ({node_base_units} base units) but asks \
+         the Solana peering's payer to deposit {deposit}. The deposit comes out of that balance, \
+         so the transfer has to cover it."
+    );
+    assert!(
+        KEYS_SCRIPT.contains("spl-token transfer --config \"$SOLANA_SPL_CONFIG\" --fund-recipient"),
+        "local/keys.sh must transfer mock USDC to each node's Solana settlement account with \
+         `--fund-recipient`: this stage runs before any node boots, so the associated token \
+         account the transfer lands in does not exist yet and `spl-token transfer` will not \
+         create one unasked. Without the transfer the node's ATA is created empty at boot and \
+         there is nothing to deposit."
+    );
+    assert!(
+        KEYS_SCRIPT.contains("need spl-token "),
+        "local/keys.sh must refuse to run without `spl-token` rather than skipping the token \
+         transfer -- ADR 0007's rule for a missing chain binary. A provisioning run that reports \
+         success having funded nothing is worse than one that fails."
+    );
+}

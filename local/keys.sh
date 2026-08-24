@@ -29,6 +29,14 @@
 # chains wipe their state on every start, so the accounts survive in this
 # directory while their balances do not.
 #
+# Idempotent about the channel COLLATERAL too, and that one took work rather
+# than coming for free. The EVM leg's `setTotalDeposit` takes an absolute
+# total; the operator surface's `POST /channels/:id/fund` takes an increment,
+# so the Solana leg reads the payer's own on-chain deposit first and tops up
+# the shortfall. A second `make local-up` deposits nothing, which is the
+# difference between a setup script and a setup script that quietly doubles
+# a number every time somebody runs it.
+#
 # ── Why some keys are RANDOM and some are DERIVED ────────────────────────────
 #
 # A multi-node topology has to write one node's address into another node's
@@ -63,12 +71,14 @@ set -euo pipefail
 TOPOLOGY="${1:-}"
 # Two stages, because they cannot run at the same moment. `keys` is everything
 # that has to exist BEFORE a node starts -- the key files it mounts, their
-# funding, and the EVM peering channels. `solana-channels` is the one thing
-# that can only happen AFTER: a Solana channel is opened by submitting an
-# `InitializeChannel` instruction, and the only thing in this repository that
-# can submit one is a RUNNING connector's `POST /channels`
-# (`local/open-solana-channel.py` has the long version). `make local-up` calls
-# both, in that order, with the connectors started in between.
+# funding on both chains, and the EVM peering channels. `solana-channels` is
+# the pair of things that can only happen AFTER: a Solana channel is opened by
+# submitting an `InitializeChannel` and collateralised by submitting a
+# `Deposit` signed by the depositing participant, and the only thing in this
+# repository that can submit either is a RUNNING connector's `POST /channels`
+# and `POST /channels/:id/fund` (`local/open-solana-channel.py` has the long
+# version). `make local-up` calls both stages, in that order, with the
+# connectors started in between.
 STAGE="${2:-keys}"
 if [[ -z "$TOPOLOGY" ]]; then
   echo "usage: local/keys.sh <topology> [stage]" >&2
@@ -107,12 +117,35 @@ TOKEN_NETWORK_REGISTRY=0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512
 SOLANA_USDC_MINT=H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H
 SOLANA_PROGRAM_ID=HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR
 
+# The mock mint's authority, and the only holder of any of its supply until
+# this script hands some out: `infra/solana/create-usdc-mint.sh` mints 100M to
+# this keypair's own associated token account and distributes none of it. It is
+# a real, spendable key committed to this repository on purpose -- it signs for
+# a token that exists only on a disposable local validator, that script refuses
+# any RPC URL naming mainnet, and `tools/ci/check-tracked-secrets.sh`
+# allowlists exactly this path with that reason. Referenced here; never copied,
+# never printed.
+SOLANA_USDC_AUTHORITY="$ROOT/infra/solana/usdc-authority.json"
+
 # What a peering's payer deposits into its channel, in 6-decimal USDC base
 # units: 100 USDC against a 1000 µUSDC crossing, so a topology can be
 # rehearsed a hundred thousand times before the collateral is the reason
-# something fails. `setTotalDeposit` takes a TOTAL rather than an increment,
-# so re-running this script re-asserts the figure instead of adding to it.
+# something fails. One figure for both chains.
+#
+# The two legs reach it differently, and the difference is the whole of the
+# idempotence question here. `setTotalDeposit` takes a TOTAL, so re-running the
+# EVM leg re-asserts the figure. `POST /channels/:id/fund` takes an INCREMENT
+# (`FundChannelRequest`), so the Solana leg would add another 100 USDC on every
+# run -- `open-solana-channel.py` reads the payer's own on-chain deposit first
+# and deposits only the shortfall, which is what makes the two behave alike.
 CHANNEL_DEPOSIT=100000000
+
+# What each node's Solana settlement account is given of the mock mint, as a UI
+# amount (`spl-token` takes UI amounts, not base units) -- 1000 USDC, the same
+# figure the EVM leg mints as 1000000000 at 6 decimal places. Ten times
+# CHANNEL_DEPOSIT, so a node can collateralise its channel and still be visibly
+# holding tokens afterwards.
+NODE_USDC=1000
 
 # ── The topology table ───────────────────────────────────────────────────────
 # `node:evm_index:solana_index` per node, and `id:chain:payer:payee` per
@@ -163,6 +196,15 @@ need() {
 need cast "Install Foundry: https://getfoundry.sh"
 need solana "Install the Solana CLI: https://solana.com/docs/intro/installation"
 need solana-keygen "Ships with the Solana CLI."
+# Ships in the same bundle as `solana` and `solana-keygen` -- the Solana CLI
+# install the local-topologies workflow runs puts `spl-token` on PATH beside
+# them, and `make solana-mint-usdc` (which `make local-up` runs before this
+# script) already refuses to proceed without it. Named here too because this
+# script is runnable on its own: a missing SPL CLI must stop it and say so,
+# never leave the Solana settlement accounts silently tokenless (ADR 0007's
+# rule for a missing chain binary -- a step that skips and reports success is
+# worse than a missing step, because it claims one).
+need spl-token "Ships with the Solana CLI; otherwise 'cargo install spl-token-cli'."
 need openssl "openssl generates the key material."
 need python3 "python3 does the two encodings this script cannot ask a chain tool for."
 
@@ -280,10 +322,19 @@ solana_channel_account() {
 # ADR 0009's config is read once and creates nothing, and `[[peer_channels]]`
 # says which claims a node accepts, not what to go and build on a chain.
 #
-# `local/open-solana-channel.py` does the write and then reads the account back
-# off the validator, refusing to report success unless the deployed program's
-# own account layout agrees with the committed config. That assertion is the
-# point: nothing on the peer path reads a chain (CF-23), so an unopened channel
+# FUNDING it is the operator's job for the same reason and by the same route.
+# `packages/solana-program`'s `Deposit` credits strictly by signer, so the only
+# party that can put the payer's collateral behind the payer's claims is the
+# payer's own node -- `POST /channels/:id/fund`, which issue #1118 made a
+# self-deposit on both chains. This mirrors the EVM leg's
+# `setTotalDeposit(channel_id, payer_address, ...)`; what differs is that no
+# chain CLI can stand in for the node here.
+#
+# `local/open-solana-channel.py` does both writes and then reads the account
+# back off the validator, refusing to report success unless the deployed
+# program's own account layout agrees with the committed config and the payer's
+# own deposit is really there. That assertion is the point: nothing on the peer
+# path reads a chain (CF-23), so an unopened -- or opened-but-empty -- channel
 # rehearses exactly as green as a real one unless something looks.
 open_solana_channels() {
   local found=0
@@ -308,7 +359,7 @@ open_solana_channels() {
     config_must_name "$channel_account" "$(node_config "$payee")" \
       "the '$id' peering's channel account"
 
-    echo "'$id': opening $channel_account through $payer's operator surface"
+    echo "'$id': opening and funding $channel_account through $payer's operator surface"
     "$HERE/open-solana-channel.py" \
       --rpc-url "$SOLANA_RPC" \
       --operator-url "http://127.0.0.1:$port" \
@@ -318,7 +369,8 @@ open_solana_channels() {
       --channel-account "$channel_account" \
       --payer "$payer_account" \
       --payee "$payee_account" \
-      --settlement-timeout-seconds 3600
+      --settlement-timeout-seconds 3600 \
+      --deposit-base-units "$CHANNEL_DEPOSIT"
   done
 
   if [[ "$found" == "0" ]]; then
@@ -461,6 +513,39 @@ if [[ "$(cast code "$MOCK_USDC" --rpc-url "$ANVIL_RPC" 2>/dev/null)" == "0x" ]];
   exit 1
 fi
 
+# The Solana half of the same check, and the signer for it. A throwaway
+# `solana` config pointed at the mock mint's authority, so that authority is
+# the default signer AND the fee payer of every `spl-token` call below --
+# `infra/solana/create-usdc-mint.sh` does the same thing for the same reason
+# (spl-token wants its signer flags after the subcommand, and the global config
+# sidesteps the placement question entirely). It never touches the developer's
+# own `~/.config/solana`.
+SOLANA_SPL_CONFIG="$(mktemp)"
+trap 'rm -f "$SOLANA_SPL_CONFIG"' EXIT
+solana -C "$SOLANA_SPL_CONFIG" config set \
+  --keypair "$SOLANA_USDC_AUTHORITY" --url "$SOLANA_RPC" >/dev/null
+
+# The treasury has to actually hold the supply before anything is handed out,
+# and the failure mode without this check reads as a shrug: `spl-token
+# transfer` against a mint that does not exist reports "Account not found",
+# which names neither the mint nor the step that was skipped. The validator
+# wipes its state on every start (`infra/solana/entrypoint.sh` passes
+# `--reset`), so re-seeding is `make solana-mint-usdc` -- which `make local-up`
+# runs before this script, and which fails rather than warns for the same
+# reason this does.
+if ! treasury_usdc="$(spl-token balance --config "$SOLANA_SPL_CONFIG" \
+  "$SOLANA_USDC_MINT" 2>&1)"; then
+  echo "ERROR: the mock USDC treasury on $SOLANA_RPC holds nothing spendable." >&2
+  echo "       spl-token said: $treasury_usdc" >&2
+  echo "       Mint $SOLANA_USDC_MINT is created and seeded by" >&2
+  echo "       infra/solana/create-usdc-mint.sh -- run 'make solana-mint-usdc' against a" >&2
+  echo "       running validator and re-run this script. Every local connector.toml names" >&2
+  echo "       that mint as its [settlement.solana] token_address, so a validator without" >&2
+  echo "       it cannot settle at all." >&2
+  exit 1
+fi
+echo "mock USDC treasury holds $treasury_usdc USDC; $NODE_USDC goes to each node"
+
 for entry in $NODES; do
   IFS=':' read -r node _evm_index _solana_index <<<"$entry"
   dir="$(node_dir "$node")"
@@ -478,7 +563,31 @@ for entry in $NODES; do
   solana_address="$(solana address --keypair "$dir/settlement-solana-cli.json")"
   echo "$node: funding Solana settlement account $solana_address"
   solana airdrop 100 "$solana_address" --url "$SOLANA_RPC" >/dev/null
-  echo "  100 SOL"
+  # SOL pays fees; it is not the asset a channel settles in. Without the mock
+  # USDC below a node can sign and submit every settlement transaction it likes
+  # and still have nothing to put behind its own claims -- which is exactly the
+  # state every local node was in until this line existed: the ATA created at
+  # boot (`SolanaSettlementBackend::connect` -> `ensure_own_ata_exists`) held
+  # zero.
+  #
+  # A TRANSFER, not a mint: unlike anvil's `MockERC20`, an SPL mint has one
+  # authority and this script is not holding it in the loop -- the supply
+  # already exists in the treasury `infra/solana/create-usdc-mint.sh` seeded.
+  #
+  # `--fund-recipient` is required and not belt-and-braces: this stage runs
+  # BEFORE any node boots, so the associated token account the transfer lands
+  # in does not exist yet, and `spl-token transfer` refuses to create one
+  # unless asked. The node's own idempotent create at boot is what would
+  # otherwise make this a race rather than a failure.
+  #
+  # AFTER the airdrop, and that order is load-bearing rather than tidy:
+  # `--fund-recipient` still refuses a recipient wallet holding no SOL ("Add
+  # `--allow-unfunded-recipient` to complete the transfer"). That flag is
+  # deliberately NOT passed -- with the airdrop above it is unnecessary, and
+  # without it this line doubles as the confirmation that the airdrop landed.
+  spl-token transfer --config "$SOLANA_SPL_CONFIG" --fund-recipient \
+    "$SOLANA_USDC_MINT" "$NODE_USDC" "$solana_address" >/dev/null
+  echo "  100 SOL + $NODE_USDC USDC (6dp)"
 done
 
 # ── The peering channels ─────────────────────────────────────────────────────
@@ -569,21 +678,22 @@ for peering in $PEERINGS; do
       config_must_name "$channel_account" "$payee_config" "the '$id' peering's channel account"
       echo "'$id': channel account $channel_account"
 
-      # OPENED, but not here: the `solana-channels` stage does it once the
-      # payer's node is serving, because `POST /channels` is the only submitter
-      # of an `InitializeChannel` this repository has (see that stage's own
-      # comment). What this stage can do is make the address falsifiable, which
-      # is the two `config_must_name` calls above.
+      # OPENED AND FUNDED, but not here: the `solana-channels` stage does both
+      # once the payer's node is serving, because `POST /channels` is the only
+      # submitter of an `InitializeChannel` this repository has, and
+      # `POST /channels/:id/fund` is the only submitter of a `Deposit` signed by
+      # the participant being credited (see that stage's own comment). What
+      # THIS stage can do is make the address falsifiable -- the two
+      # `config_must_name` calls above -- and put the mock USDC in the payer's
+      # settlement account for it to collateralise with, which the funding loop
+      # above did.
       #
-      # It is opened and NOT funded, and that is the one place the two chains
-      # still differ. `packages/solana-program`'s `Deposit` requires the
-      # depositing participant to sign for their OWN side, while the settlement
-      # port's `fund` deposits into the COUNTERPARTY's -- which the EVM
-      # `TokenNetwork` permits and this program does not. So there is no
-      # operation on any surface that puts this node's own collateral behind
-      # its own claims on Solana, and none is invented here. A claim on this
-      # channel is real cryptography against a real, open channel; its
-      # collateral is real on EVM only.
+      # The EVM leg deposits here instead only because it can: `setTotalDeposit`
+      # names the participant to credit and `cast` can call it, so no running
+      # node is needed. Both legs end at the same place, $CHANNEL_DEPOSIT of the
+      # payer's own collateral behind the payer's own claims (issue #1118 made
+      # `fund` a self-deposit on both chains); they differ in what can submit
+      # the transaction, not in what the channel ends up holding.
       ;;
   esac
 done
