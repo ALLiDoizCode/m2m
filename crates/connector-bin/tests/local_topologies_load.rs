@@ -29,7 +29,8 @@
 
 use std::collections::BTreeSet;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use connector_config::{Config, PeerChannelConfig, SettlementChain};
 use connector_settlement_solana::test_support::LOCAL_TEST_PROGRAM_ID;
@@ -63,6 +64,11 @@ const KEYS_SCRIPT: &str = include_str!("../../../local/keys.sh");
 /// `the_anvil_service_never_writes_the_source_tree_as_root`).
 const ROOT_COMPOSE: &str = include_str!("../../../docker-compose.yml");
 const MAKEFILE: &str = include_str!("../../../Makefile");
+
+/// The revisions `packages/contracts/lib` is pinned to, as `forge` itself
+/// records them. Committed, and the file the container's last-resort install
+/// and `tools/contracts/init-libs.sh` are both held against (issue #1121).
+const FOUNDRY_LOCK: &str = include_str!("../../../packages/contracts/foundry.lock");
 
 /// Every committed config under `local/`, with the path a failure should name.
 /// Written out rather than globbed so a new topology that forgets its own test
@@ -889,6 +895,214 @@ fn the_anvil_service_never_writes_the_source_tree_as_root() {
             "the Makefile must `{export}` -- without it every `make local-*`, `make anvil-up` \
              and `make infra-up` falls back to the compose default, which is right only for a \
              uid-1000 developer and wrong for a CI runner"
+        );
+    }
+}
+
+/// Every revision `packages/contracts/lib` is put at, wherever it is put there
+/// from, is the one `packages/contracts/foundry.lock` names.
+///
+/// `forge install <org>/<repo>` with no ref takes that repository's DEFAULT
+/// BRANCH. The compose `anvil` service ran exactly that as its self-heal, and
+/// on a checkout whose submodules were not initialized it installed
+/// OpenZeppelin 5.7.0 into a tree pinned at fcbae539 (5.5.0) -- measured, and
+/// then reported by the next host-side `forge build` as `Warning: Dependency
+/// 'lib/openzeppelin-contracts' revision mismatch` (issue #1121). That build is
+/// not only the container's: `abi_provenance` runs one, and diffs the committed
+/// ABI against it, so an upstream release touching anything the ABI depends on
+/// turns the Rust gate red on a machine that changed nothing.
+///
+/// The pin now lives in three places, because three different callers reach
+/// `lib/` -- the submodule (a `git submodule update --init`, which is what
+/// `tools/contracts/init-libs.sh` runs), the lockfile, and the `@rev=` on the
+/// container's last-resort install. This is the assertion that the three are
+/// one figure. It is text-only on purpose: the third copy is inside a shell
+/// command inside a YAML block, where nothing else would notice it going stale.
+#[test]
+fn the_contract_libs_this_chain_installs_are_pinned_to_the_lockfile() {
+    for (lib, repo) in [
+        ("lib/forge-std", "foundry-rs/forge-std"),
+        (
+            "lib/openzeppelin-contracts",
+            "OpenZeppelin/openzeppelin-contracts",
+        ),
+    ] {
+        let locked = locked_revision(lib);
+        let pinned = format!("{repo}@rev={locked}");
+        assert!(
+            ROOT_COMPOSE.contains(&pinned),
+            "docker-compose.yml's anvil service must install {lib} as `{pinned}` -- \
+             packages/contracts/foundry.lock is what names that revision, and an install \
+             without it takes {repo}'s default branch instead (issue #1121)"
+        );
+    }
+
+    // The pin is only worth anything if nothing else in the file installs the
+    // same libraries without one. `forge install` appears once, in
+    // `install_lib`, and every caller of it passes a `@rev=`.
+    for line in ROOT_COMPOSE.lines() {
+        let line = line.trim();
+        if !line.starts_with("install_lib ") {
+            continue;
+        }
+        assert!(
+            line.ends_with('\\') || line.contains("@rev="),
+            "docker-compose.yml installs a foundry lib without pinning it: `{line}`"
+        );
+    }
+}
+
+/// ... and `foundry.lock`'s revisions are the committed submodules'.
+///
+/// The previous test holds two committed files to one figure without needing
+/// anything outside them. This one closes the loop the other end: a submodule
+/// bumped with plain git does not touch `foundry.lock`, so the lockfile -- and
+/// with it the container's pin -- would go on naming the revision the tree no
+/// longer has, and the drift would resurface as the same ABI mismatch by a
+/// different route.
+///
+/// The shas are read from the repository rather than written out here, because
+/// writing them out would be a fourth copy of the thing being checked.
+#[test]
+fn the_lockfile_names_the_committed_submodule_revisions() {
+    let Some(root) = git_checkout_root() else {
+        return;
+    };
+
+    for lib in ["lib/forge-std", "lib/openzeppelin-contracts"] {
+        let path = format!("packages/contracts/{lib}");
+        let listed = Command::new("git")
+            .args(["ls-tree", "HEAD", "--", &path])
+            .current_dir(&root)
+            .output()
+            .expect("run git ls-tree");
+        let listed = String::from_utf8(listed.stdout).expect("git ls-tree output is utf-8");
+        // `<mode> commit <sha>\t<path>` -- gitlink mode 160000.
+        let committed = listed
+            .split_whitespace()
+            .nth(2)
+            .unwrap_or_else(|| panic!("git ls-tree names no submodule at {path}: {listed:?}"))
+            .to_owned();
+
+        assert_eq!(
+            committed,
+            locked_revision(lib),
+            "packages/contracts/foundry.lock's revision for {lib} is not the submodule sha the \
+             repository commits. The lockfile is what docker-compose.yml's pinned install \
+             follows, so the two disagreeing means a hand-run chain compiles against a \
+             different {lib} than a `git submodule update --init` produces (issue #1121)."
+        );
+    }
+}
+
+/// The revision `packages/contracts/foundry.lock` records for one lib.
+fn locked_revision(lib: &str) -> String {
+    let lock: serde_json::Value =
+        serde_json::from_str(FOUNDRY_LOCK).expect("packages/contracts/foundry.lock is JSON");
+    lock[lib]["tag"]["rev"]
+        .as_str()
+        .unwrap_or_else(|| panic!("packages/contracts/foundry.lock records no revision for {lib}"))
+        .to_owned()
+}
+
+/// The repository root, when this is a git checkout with git on PATH.
+///
+/// Mirrors `connector-settlement-evm`'s `support::require_forge`, and for the
+/// same reason: in CI the tool is guaranteed (`actions/checkout` is a clone),
+/// so its absence there is a gate that would silently stop asserting, and this
+/// panics rather than reporting a pass. Locally, a source tree with no `.git`
+/// has no submodule shas to read and nothing this test could compare against.
+fn git_checkout_root() -> Option<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let toplevel = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&root)
+        .output();
+
+    match toplevel {
+        Ok(output) if output.status.success() => Some(root),
+        _ => {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "this is not a git checkout (or git is not on PATH), but CI is set -- the \
+                 workspace gate must run against a clone, and refusing to silently skip is \
+                 the same policy support::require_forge applies"
+            );
+            eprintln!(
+                "skipping: not a git checkout, so the committed submodule revisions cannot be \
+                 read -- this test only skips because this is not a CI run"
+            );
+            None
+        }
+    }
+}
+
+// ─── one stack per machine ───────────────────────────────────────────────────
+
+/// Every target here works in ONE compose project, named in the compose file
+/// rather than inherited from the directory.
+///
+/// Compose defaults the project name to the basename of the directory holding
+/// the file, so the same repository produced mutually invisible stacks: a
+/// worktree's `agent-a00677d430ef-anvil-1` and its main checkout's
+/// `connector-anvil-1`. `make local-down` removes the project it is standing
+/// in, so neither could tear the other down -- and a `connector_solo-state`
+/// volume outlived every `make local-down` on this machine for two days
+/// (issue #1122). A state volume outliving a run is exactly what
+/// `local/README.md` says must not happen: the payee's journal is what a
+/// peered rehearsal reads to prove it paid, and last run's journal answers
+/// that read for free.
+///
+/// The name is asserted in both files it appears in, and so is the teardown's
+/// reach: `down` alone would still leave another topology's containers and
+/// volumes, since they are not in the files this invocation loaded.
+#[test]
+fn every_local_target_names_one_compose_project() {
+    assert!(
+        ROOT_COMPOSE.contains("\nname: connector\n"),
+        "docker-compose.yml must declare `name: connector` at the top level, or the compose \
+         project follows the directory and a stack started from a git worktree is invisible \
+         to `make local-down` in the main checkout (issue #1122)"
+    );
+    assert!(
+        MAKEFILE.contains("LOCAL_PROJECT := connector"),
+        "the Makefile's LOCAL_PROJECT must be the same project docker-compose.yml names, or \
+         `local-down`'s label sweep addresses a project nothing creates"
+    );
+    assert!(
+        MAKEFILE.contains("$(LOCAL_COMPOSE) down -v --remove-orphans"),
+        "`make local-down` must pass --remove-orphans: with one project for every topology, \
+         the containers of the topology that is actually up are orphans to the files a \
+         `LOCAL_TOPOLOGY=<other>` teardown loads, and are left running without it"
+    );
+    assert!(
+        MAKEFILE.contains(
+            "docker volume ls -q --filter label=com.docker.compose.project=$(LOCAL_PROJECT)"
+        ),
+        "`make local-down` must remove the project's state volumes BY LABEL, not only the \
+         ones the loaded compose files declare -- otherwise a `two-hop-b-state` survives a \
+         `LOCAL_TOPOLOGY=solo` teardown, which is the stale-journal hazard the -v is for"
+    );
+    for guarded in ["local-up: local-preflight", "local-verify: local-preflight"] {
+        assert!(
+            MAKEFILE.contains(guarded),
+            "`{guarded}` must hold: one project name means a second bring-up would ADOPT the \
+             first stack's containers, and local/stack-guard.sh is what refuses instead. On \
+             local-verify it must be a prerequisite rather than a recipe line, because that \
+             recipe's failure path ends in `local-down` -- which would tear down the stack \
+             the guard just declined to disturb"
+        );
+    }
+    for healed in [
+        "anvil-up: contracts-libs",
+        "infra-up: contracts-libs",
+        "local-up: local-preflight contracts-libs",
+    ] {
+        assert!(
+            MAKEFILE.contains(healed),
+            "`{healed}` must hold: every target that starts the anvil service has to put \
+             packages/contracts/lib at the committed revisions first, or the container \
+             installs them itself and the pin is only as good as its own fallback (#1121)"
         );
     }
 }

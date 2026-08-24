@@ -8,8 +8,13 @@ make local-up        # build the image, start the chains, provision keys and
                      #   channels, run it
 make local-rehearse  # send real packets; non-zero unless they fulfil AND, on a
                      #   peered topology, the payee's journal says it was paid
-make local-down
+make local-down      # and remove the state volumes with it — see below for why
 ```
+
+All of them work in one compose project, `connector`, named in
+`docker-compose.yml` rather than taken from the directory. So there is one
+stack per machine and `make local-down` reaches it from any checkout of this
+repository; `make local-preflight` says whether it is free.
 
 Or `make local-verify` for all three, which is what CI runs
 (`.github/workflows/local-topologies.yml`).
@@ -241,6 +246,31 @@ wipe their own state on every start, so keeping a claim journal across a
 down/up pairs a live watermark with a chain that no longer has the history
 behind it — and, concretely, a journal left by the last run satisfies this
 run's money check without this run having paid anything.
+
+For a while it did not actually manage that, and the reason is worth knowing
+because it is invisible from inside one checkout. The compose project name used
+to follow the directory, so a stack started from a git worktree was a
+_different_ project from the same repository's main checkout: `make local-down`
+in one could not see the other's containers, network or state volumes, and a
+`connector_solo-state` outlived every teardown on one machine for two days
+(issue #1122). `docker-compose.yml` now names the project `connector` outright,
+so the teardown reaches whatever the bring-up created, from wherever either is
+run — and it removes the project's state volumes **by label**, so a
+`two-hop-b-state` left behind by another topology goes with it rather than
+waiting for someone to run the matching `LOCAL_TOPOLOGY`.
+
+One name means one stack per machine. That is not a capability being taken
+away: every topology publishes 8545, 8899 and its connectors' client edges, so
+a second stack was never going to run anyway — it would half-start, fail on a
+port bind, and leave residue the other checkout could not reach. What changed
+is that the collision is now **reported**. `make local-up` and `make
+local-verify` run `local/stack-guard.sh` first (`make local-preflight` asks the
+same question by hand), which refuses and names the directory and topology
+already holding the stack, rather than letting this run adopt the other's
+containers — an `anvil` with another checkout's `packages/contracts` mounted
+into it, say. It also refuses a start over state volumes left by a run that was
+killed rather than torn down, for the reason in the paragraph above: those
+volumes are the journals the money assertion reads.
 
 Two consequences worth knowing before editing a config here:
 

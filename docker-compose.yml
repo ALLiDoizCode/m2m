@@ -11,6 +11,33 @@
 #   make infra-up      Start every chain the connector settles on (EVM + Solana)
 #   make infra-down    Stop them (preserves volumes)
 
+# ── One project name, wherever this file is run from ──
+# Compose defaults the project name to the basename of the directory holding
+# this file, and prefixes every container, network and named volume with it.
+# That made the same repository produce different, mutually invisible stacks:
+# `connector-anvil-1` from the main checkout, `agent-a00677d430ef-anvil-1` from
+# a git worktree of it. `make local-down` only removes the project it is
+# standing in, so a stack started from a worktree survived a `make local-down`
+# in the main checkout while still holding 8545/8899 — and, worse, its named
+# state volumes survived with it. `local/README.md` is explicit that those must
+# NOT outlive a run: a claim journal left behind satisfies the next run's money
+# assertion without that run having paid anything. This machine carried a
+# `connector_solo-state` volume for two days that way (issue #1122).
+#
+# Naming the project here rather than exporting COMPOSE_PROJECT_NAME from the
+# Makefile is deliberate: `local/README.md` and the headers under `local/`
+# document a hand-run `docker compose -f docker-compose.yml -f local/<t>/compose.yml`,
+# and that path has to land in the same project as `make local-up` or the two
+# would go back to being invisible to each other.
+#
+# One name means one stack per machine, which is what the machine can actually
+# hold: every topology publishes 8545, 8899 and the connectors' client edges,
+# so a second stack could never have run anyway — it would have failed on a
+# port bind, half-started, and been unreachable from the other checkout's
+# `make local-down`. `local/stack-guard.sh` turns that into a refusal that
+# names the directory and topology already holding the stack.
+name: connector
+
 # ── Shared json-file log rotation for the long-running dev-chain services ──
 # Incident 2026-06-26: on the self-hosted devnet box the solana-validator wrote
 # a 121 MB UNROTATED Docker json log (it prints a status line ~30x/sec) on top
@@ -94,10 +121,37 @@ services:
 
         # DeployLocal.s.sol imports forge-std + openzeppelin-contracts from
         # lib/ (git submodules). In CI the checkout fetches them via
-        # `submodules: recursive`; for local dev / git worktrees where the
-        # submodules may not be initialized, install them here so the deploy is
-        # self-healing and the stack never comes up without the USDC token +
-        # TokenNetworkRegistry. See issue #104.
+        # `submodules: recursive`, and every `make anvil-up` / `make infra-up` /
+        # `make local-up` runs tools/contracts/init-libs.sh on the HOST first,
+        # which is the same thing done from the checkout that owns the pin. This
+        # is the LAST RESORT for the one caller neither covers: a hand-run
+        # `docker compose up` on a clone made without `--recursive`, which the
+        # headers under local/ document. Without it the stack comes up with no
+        # USDC token and no TokenNetworkRegistry. See issue #104.
+        #
+        # PINNED TO A REVISION, and that is the whole of issue #1121. `forge
+        # install <repo>` with no ref takes that repository's default branch:
+        # this installed OpenZeppelin 5.7.0 into a tree whose submodule names
+        # fcbae539 (5.5.0), and the next host-side `forge build` said so —
+        # `Warning: Dependency 'lib/openzeppelin-contracts' revision mismatch`,
+        # from inside abi_provenance's own passing test output. Two consumers
+        # then compile against a version nobody chose: this deploy, and
+        # `crates/connector-settlement-evm/tests/abi_provenance.rs`, which
+        # diffs the committed ABI against a fresh build. An upstream release
+        # that touched anything the ABI depends on would turn that gate red on
+        # a machine that changed nothing, days after the container ran, and it
+        # would read as "someone edited a contract".
+        #
+        # This installs only what is MISSING, so a tree an OLDER unpinned run
+        # already polluted is repaired by tools/contracts/init-libs.sh rather
+        # than here: it can tell an unregistered lib/ from a submodule, and this
+        # sentinel check cannot.
+        #
+        # The revisions below are `packages/contracts/foundry.lock`'s, which are
+        # the committed submodule shas.
+        # `local_topologies_load.rs::the_contract_libs_this_chain_installs_are_pinned_to_the_lockfile`
+        # holds these three copies to one figure, so the pin cannot rot in
+        # silence the way an unpinned install did.
         #
         # ONE LIB AT A TIME, and each one repaired rather than topped up. A
         # single `forge install a b` fails as a unit, so a half-installed lib/
@@ -115,9 +169,11 @@ services:
           rm -rf "$$1"
           forge install "$$2" --no-git
         }
-        install_lib lib/forge-std foundry-rs/forge-std \
+        install_lib lib/forge-std \
+          foundry-rs/forge-std@rev=1801b0541f4fda118a10798fd3486bb7051c5dd6 \
           lib/forge-std/src/Script.sol
-        install_lib lib/openzeppelin-contracts OpenZeppelin/openzeppelin-contracts \
+        install_lib lib/openzeppelin-contracts \
+          OpenZeppelin/openzeppelin-contracts@rev=fcbae5394ae8ad52d8e580a3477db99814b9d565 \
           lib/openzeppelin-contracts/contracts/access/Ownable.sol
 
         # Deploy must succeed: the faucet and the EVM settlement tests depend on
