@@ -504,6 +504,111 @@ async fn a_flushed_solana_claim_carries_its_configured_program_id_on_the_wire() 
     assert_eq!(parsed, claim);
 }
 
+/// The same wire assertion, but with the relation built by
+/// [`BtpPeerTransport::add_peers_from_config`] from a **loaded config**
+/// rather than by hand -- because the value under test is precisely the one
+/// this carriage must not choose for itself. The HTTP twin is
+/// `a_solana_claim_flushed_from_a_loaded_config_declares_the_settlement_tables_program`
+/// in `connector-peer-http` (§9: a behaviour on one carriage and not the
+/// other is a defect, and the two relations are built by duplicated code).
+///
+/// Since issue #1128 a Solana `[[peer_channels]]` row MUST NOT restate a
+/// `program_id`; it resolves it from `[settlement.solana] program_id`, the
+/// only program this node can redeem a claim through. This closes the hop
+/// between that table and the `programId` a peer claim carries, and it is
+/// half of what `peer-carriage-spec.md` §4.1 relies on when it says a
+/// peer-edge check of the declared field would have nothing to find: one
+/// configured value renders the label here and keys the `SolanaChannel` an
+/// inbound claim is verified against. The other half is
+/// `tests/a_peer_claims_declared_program_is_not_consulted.rs`.
+#[tokio::test]
+async fn a_solana_claim_flushed_from_a_loaded_config_declares_the_settlement_tables_program() {
+    use std::io::Write;
+
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
+    key_file.write_all(b"not a real key").expect("write key");
+    let toml = format!(
+        r#"
+client_edge_addr = "127.0.0.1:3000"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_file}"
+
+[[peers]]
+id = "{PEER_ID}"
+endpoint = "wss://peer.example:443/btp"
+credential = {{ secret = "{SECRET}" }}
+
+[[peer_channels]]
+peer_id = "{PEER_ID}"
+channel_account = "{channel_account}"
+counterparty_key = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"
+
+[settlement.solana]
+rpc_url = "https://api.devnet.solana.com"
+program_id = "{SOLANA_PROGRAM_ID}"
+token_address = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "{key_file}"
+"#,
+        state_dir = state_dir.path().display(),
+        key_file = key_file.path().display(),
+        channel_account = solana_channel_account(),
+    );
+    let mut config_file = tempfile::Builder::new()
+        .suffix(".toml")
+        .tempfile()
+        .expect("temp config file");
+    config_file
+        .write_all(toml.as_bytes())
+        .expect("write config");
+    let config = connector_config::Config::load(config_file.path()).expect("load");
+
+    let payer_signer = LocalSigner::generate("payer");
+    let state = carriage(payee(&payer_signer), bound_policy());
+    let dialer = LoopbackDialer::new(state);
+    let mut transport = BtpPeerTransport::new(
+        Arc::clone(&dialer) as Arc<dyn PeerDialer>,
+        derive_evm_address(&payer_signer.public_key().unwrap()),
+        clock() as Arc<dyn Clock>,
+    );
+    transport.add_peers_from_config(config.peers(), config.peer_channels());
+    transport.set_solana_signer_public_key([0x77; 32]);
+
+    let _ = transport
+        .flush(
+            PEER_ID,
+            WireClaim {
+                channel_id: solana_channel_account(),
+                nonce: 1,
+                cumulative_amount: 500,
+                signature: ClaimSignature::Solana([0x5a; 64]),
+            },
+        )
+        .await;
+
+    let sent = dialer.sent.lock().expect("sent frames lock").clone();
+    let entry = sent
+        .iter()
+        .find(|frame| frame.frame_type == BTP_TRANSFER)
+        .expect("the flush rode a TRANSFER")
+        .protocol_data
+        .iter()
+        .find(|pd| pd.name == CLAIM_PROTOCOL)
+        .expect("the claim rode as protocolData")
+        .clone();
+    let claim_json: serde_json::Value =
+        serde_json::from_slice(&entry.data).expect("raw UTF-8 JSON");
+    assert_eq!(
+        claim_json["programId"], SOLANA_PROGRAM_ID,
+        "the declared program is `[settlement.solana] program_id` and nothing else (#1128)"
+    );
+}
+
 // ─── §6.3: the idempotent re-ack ───
 
 /// §6.3, the rule that stands between a lost ack and a permanently wedged
