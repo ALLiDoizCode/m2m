@@ -203,6 +203,14 @@ write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STE
 # # chain id, is a refusal to start that names both contracts. Get the value
 # # from the deployment, not from memory -- `cast call <contract_address>
 # # "getTokenNetwork(address)(address)" <token_address>`.
+# #
+# # An EVM row here REQUIRES [settlement.evm], and a Solana row requires
+# # [settlement.solana] (issue #1138). That table is where this node's
+# # address on the chain comes from, and a claim is redeemed by the
+# # channel's on-chain participant -- so without it there is no address to
+# # be that participant, and the peering would verify inbound claims it
+# # could never collect and sign no covering claim outbound. Refused by
+# # name at load, per chain: a Solana-only node still loads its Solana rows.
 # [[peer_channels]]
 # peer_id = "store"
 # channel_id = "0x0000000000000000000000000000000000000000000000000000000000000000"

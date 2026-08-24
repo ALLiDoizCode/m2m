@@ -495,6 +495,40 @@ pub enum ConfigError {
     #[error("[[peer_channels]] names channel '{value}' more than once")]
     PeerChannelDuplicate { value: String },
 
+    /// An EVM `[[peer_channels]]` row on a node with no `[settlement.evm]`
+    /// table (issue #1138) -- the EVM twin of
+    /// [`ConfigError::PeerChannelWithoutSolanaSettlement`], under the one
+    /// rule `crate::settlement::SettlementTables` states for all four
+    /// channel tables.
+    ///
+    /// Not the same missing input the Solana row has: an EVM row declares
+    /// its own EIP-712 domain, so the config is *complete* and the node
+    /// happily verified inbound peer claims on it. What is missing is the
+    /// node's EVM identity. `[settlement.evm.key]` is the address a
+    /// channel names as this node's participant, and
+    /// `TokenNetwork.claimFromChannel` refuses any caller that is not one
+    /// -- so without the table there is no address this node could ever
+    /// redeem the claim as, from this process or any other. It also signs
+    /// no outbound covering claim (ADR 0024's peer claim identity is that
+    /// same key), so the peering could only ever take and never pay.
+    ///
+    /// Refused rather than left loading, for the reason #1134 gave:
+    /// `Config::load` already requires every peering to carry a row
+    /// ([`ConfigError::PeerChannelUnbound`]), so a row that binds nothing
+    /// leaves the peering bound on paper and unredeemable in fact.
+    #[error(
+        "peer '{peer_id}' names an EVM '[[peer_channels]]' row but this node has no \
+         '[settlement.evm]' table: that table is where this node's EVM address comes from, and \
+         a channel's claims are redeemed by its on-chain participant \
+         ('TokenNetwork.claimFromChannel' reverts 'InvalidParticipant' for anyone else). With \
+         no table there is no address to be that participant, so this node would verify the \
+         peer's inbound claims, render carriage for them and never be able to collect -- and it \
+         would sign no covering claim outbound either, since ADR 0024's peer claim is signed by \
+         that same settlement key. Add '[settlement.evm]', or delete the row and peer over a \
+         chain this node settles on"
+    )]
+    PeerChannelWithoutEvmSettlement { peer_id: String },
+
     #[error(
         "invalid [[peer_channels]] {field} '{value}': must be base58 encoding a 32-byte \
          Solana account"
@@ -708,6 +742,92 @@ pub enum ConfigError {
          Solana account"
     )]
     ClientChannelInvalidSolanaAccount { field: &'static str, value: String },
+
+    /// An EVM `[[client_channels]]` row on a node with no
+    /// `[settlement.evm]` table (issue #1138). The client-edge case of the
+    /// one rule `crate::settlement::SettlementTables` states, and the one
+    /// the issue called the hard half -- so, explicitly: **the declared
+    /// channel path's latitude does not reach this.**
+    ///
+    /// `connector_client_edge::DepositFloor::Unknown` exempts a declared
+    /// channel from the collateral cap (issue #646) because how much
+    /// unverified exposure to take on a channel is a *policy*, and an
+    /// operator hand-declaring a channel is making it. That latitude is
+    /// over how much may be spent on a channel this node is a participant
+    /// of. It is not latitude over whether such a channel exists at all: a
+    /// claim is redeemed by the channel's on-chain participant and this
+    /// node's EVM participant address IS `[settlement.evm.key]`
+    /// (ADR 0030's "no second key ... and none is invented", the same
+    /// sentence [`ConfigError::PayChannelWithoutEvmSettlement`] makes).
+    /// With no table there is no such address, so the row names a channel
+    /// this node is not in and every write it buys is given away. That is
+    /// a fact about the chain with exactly one answer -- the category
+    /// issue #1136 put the EIP-712 domain in -- not a policy.
+    ///
+    /// The wire already agreed before this refusal existed: a
+    /// settlement-less node's x402 greeting carries no `settlement` or
+    /// `settlements` key at all, so no conforming client can even discover
+    /// the domain to sign under, and this connector's own announce path
+    /// refuses to pay such a node by name ("a node with no settlement
+    /// backend cannot be paid by channel claim",
+    /// `connector_cli::announce`'s `NoSettlementTerms`).
+    #[error(
+        "'[[client_channels]]' names EVM channel '{channel_id}' but this node has no \
+         '[settlement.evm]' table: a client claim is an EIP-712 balance proof redeemed by the \
+         channel's on-chain participant, which IS this node's settlement address -- there is no \
+         second key to configure and none is invented (ADR 0030). With no table there is no \
+         address to be that participant, so this node would accept the claim, serve the paid \
+         write and never be able to collect. Declaring a channel is an operator's own credit \
+         decision (issue #646) and stays one; being able to redeem it at all is not a policy \
+         but a fact about the chain (issue #1136). Add '[settlement.evm]', or delete the row"
+    )]
+    ClientChannelWithoutEvmSettlement { channel_id: String },
+
+    /// A Solana `[[client_channels]]` row on a node with no
+    /// `[settlement.solana]` table (issue #1138), the twin of
+    /// [`ConfigError::ClientChannelWithoutEvmSettlement`] and of
+    /// [`ConfigError::PeerChannelWithoutSolanaSettlement`].
+    ///
+    /// Over-determined here, as it is on the peer table: besides having no
+    /// Solana identity to be the channel's participant, the node has no
+    /// program id to read, and since ADR 0053 that program id is part of
+    /// what every Solana claim signs -- so the row could not even be given
+    /// a verification domain.
+    ///
+    /// This replaces `connector-cli`'s warn-and-skip, which its own
+    /// comment already called the worse answer: a skipped row is a
+    /// configured channel that silently refuses every claim as unknown.
+    #[error(
+        "'[[client_channels]]' names Solana channel '{channel_account}' but this node has no \
+         '[settlement.solana]' table: a claim on that channel signs the settlement program's id \
+         (ADR 0053), which is read from that table, and is redeemed by the channel's on-chain \
+         participant, which is that table's key. Without it there is neither a program to judge \
+         the claim under nor an address to collect it at. Previously this row was skipped with \
+         a warning and every claim on it refused as an unknown channel; it is refused by name \
+         at load instead (issue #1138). Add '[settlement.solana]', or delete the row"
+    )]
+    ClientChannelWithoutSolanaSettlement { channel_account: String },
+
+    /// `[settlement.solana] program_id` is checked only for non-emptiness
+    /// where it is resolved, and a Solana `[[client_channels]]` row now
+    /// carries it (issue #1138) exactly as the peer table has since #1128
+    /// -- so the value has to be a real 32-byte address before any claim
+    /// can be judged against it. The client-edge twin of
+    /// [`ConfigError::PeerChannelSolanaSettlementProgramIdInvalid`], and
+    /// it closes a real crash: `ClientChannelRegistry::record_solana`
+    /// base58-decodes the program id and `connector-cli` `expect`s that
+    /// decode, so a malformed one used to panic the boot with a message
+    /// blaming the row's own fields.
+    #[error(
+        "'[[client_channels]]' names Solana channel '{channel_account}', whose settlement \
+         program is read from '[settlement.solana] program_id' -- but that is '{value}', which \
+         is not base58 encoding a 32-byte Solana program address. Since ADR 0053 a claim on \
+         this channel signs that program id, so it must name a real deployed program"
+    )]
+    ClientChannelSolanaSettlementProgramIdInvalid {
+        channel_account: String,
+        value: String,
+    },
 
     #[error("[[client_identities]] entry has an empty 'id'")]
     ClientIdentityIdEmpty,

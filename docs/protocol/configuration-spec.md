@@ -138,6 +138,16 @@ demonstrated good behaviour is a trust mechanism, and trust is policy.
 **CF-22** `[connector]` — These books MUST NOT share ids. A channel in two roles is a namespace
 collision and MUST be refused at load.
 
+**CF-36** `[connector]` — A row in **any** of the three books MUST be refused at load, by name, if
+the connector configures no settlement for that row's own chain. The settlement configuration is
+where the connector's on-chain identity on that chain comes from (CF-24, and there is no second key
+— ADR 0030), so without it the connector is not a participant of the channel: it could verify the
+claims and never redeem one, rendering carriage for money it cannot collect. The rule is per chain
+and no wider, and it does not depend on which book the row is in — see
+[`peer-carriage-spec.md` §11.1](peer-carriage-spec.md) for the per-book consequences and why the
+client book's declared-channel latitude (CF-23's "a configured row", and the deposit-cap exemption)
+does not reach it. ([issue #1138](https://github.com/toon-protocol/connector/issues/1138))
+
 **CF-23** `[connector]` — A claim's signature MUST be verified against **this connector's own record
 of the channel** — a configured row, or a channel resolved from chain — and never against anything the
 claim declares about itself.
@@ -261,7 +271,7 @@ This document uses exactly the vocabulary of [`CONTEXT.md`](../../CONTEXT.md) an
 [ADR 0034](../adr/0034-a-runtime-peer-route-table-never-shadows-the-config-file.md) and
 [ADR 0047](../adr/0047-the-configuration-schema-is-implementation-detail-capabilities-are-law.md).
 
-**Coverage:** none of CF-01 – CF-35 is vectored, and none ever will be. Configuration is not a wire
+**Coverage:** none of CF-01 – CF-36 is vectored, and none ever will be. Configuration is not a wire
 surface — you cannot express "this key is refused by name" as a byte fixture — so per
 [ADR 0045](../adr/0045-a-behavioural-rule-is-normative-prose-until-its-vector-lands.md) these rules are
 prose-normative **permanently**, not provisionally, and do not enter the debt ledger. What _is_

@@ -657,11 +657,15 @@ async fn build_evm_settlement_backend(
 ///
 /// # What it does not cover
 ///
-/// A node with EVM channel rows and **no** `[settlement.evm]` table. There
-/// is no resolved `TokenNetwork` to compare against, so there is nothing
-/// here to check -- such a node cannot redeem an EVM claim at all, which is
-/// a wider gap than this one and is filed separately rather than smuggled
-/// in as a behaviour change to the client edge's declared-channel path.
+/// A node with EVM channel rows and **no** `[settlement.evm]` table never
+/// reaches here: there is no resolved `TokenNetwork` to compare against
+/// because there is no backend, and since issue #1138 such a file does not
+/// load at all (`PeerChannelWithoutEvmSettlement`,
+/// `ClientChannelWithoutEvmSettlement`, `PayChannelWithoutEvmSettlement`).
+/// The two rules are complementary and neither subsumes the other: that one
+/// asks whether this node has an identity on the chain at all, which the
+/// file answers offline; this one asks whether the contract it declares is
+/// the one it settles through, which only the chain can answer.
 fn check_evm_channel_domains(config: &Config, settled: EvmDomain) -> Result<(), RuntimeError> {
     for channel in config.peer_channels() {
         // A Solana row carries no EVM domain to disagree with: its whole
@@ -1734,12 +1738,11 @@ fn client_channels(
     solana_cluster: Option<&'static str>,
 ) -> ClientChannelRegistry {
     let mut channels = ClientChannelRegistry::new();
-    // The one Solana settlement program this node runs under. A configured
-    // Solana client channel lives beneath it, and a claim on that channel
-    // signs its id (ADR 0053, issue #1082) -- so it is read from
-    // `[settlement.solana]` rather than declared a second time per channel.
-    // A node with no Solana backend records no Solana client channels: it
-    // could not verify a claim on one anyway.
+    // This node's `[settlement.solana]` table, for the cluster question
+    // below. The settlement *program* is no longer read here: a configured
+    // Solana client channel carries it, filled in from this same table by
+    // `Config::load` (ADR 0053, issues #1082 and #1138), and a row on a
+    // node with no such table does not load at all.
     let solana_settlement = config
         .settlements()
         .iter()
@@ -1747,7 +1750,6 @@ fn client_channels(
             connector_config::SettlementConfig::Solana(solana) => Some(solana),
             connector_config::SettlementConfig::Evm(_) => None,
         });
-    let solana_program_id = solana_settlement.map(|solana| solana.program_id());
     // Which cluster this node settles on, when its `rpc_url` says (issue
     // #975). A claim declaring a *different* cluster is refused rather than
     // endorsed -- the one field in a Solana claim that names a chain, that
@@ -1817,29 +1819,24 @@ fn client_channels(
                 // program id comes from `[settlement.solana]` rather than
                 // being declared a second time per channel -- ADR 0053, and
                 // the same "no second declaration" rule that closed #981.
-                let Some(program_id) = solana_program_id else {
-                    // A claim on this channel signs the settlement program's
-                    // id (ADR 0053), and without a `[settlement.solana]`
-                    // block there is none to sign against -- so this node
-                    // could not verify a claim on it even if it recorded it.
-                    // Skipped rather than recorded-and-always-refused, and
-                    // said out loud rather than dropped: a silent skip is the
-                    // failure mode this repo refuses everywhere else.
-                    //
-                    // Hardening this into a config-load refusal is the better
-                    // answer and is deliberately not done here -- it is a
-                    // `connector-config` change with its own error variant.
-                    tracing::warn!(
-                        channel_account = %solana.channel_account(),
-                        "a Solana client channel is configured with no [settlement.solana] \
-                         block, so this node has no settlement program to verify its claims \
-                         against and will not record it (ADR 0053)"
-                    );
-                    continue;
-                };
+                //
+                // Read off the row, which `Config::load` filled in from
+                // `[settlement.solana]` (issue #1138). This arm used to
+                // look the table up again here and warn-and-skip a row it
+                // could not back -- a configured channel that silently
+                // refused every claim as unknown. It is refused by name at
+                // load now (`ClientChannelWithoutSolanaSettlement`), so
+                // there is nothing left here to skip.
                 channels
-                    .record_solana(solana.channel_account(), solana.counterparty(), program_id)
-                    .expect("config load already validated both fields as base58 32-byte accounts");
+                    .record_solana(
+                        solana.channel_account(),
+                        solana.counterparty(),
+                        solana.program_id(),
+                    )
+                    .expect(
+                        "config load already validated the account, the counterparty and the \
+                         settlement program id as base58 32-byte values",
+                    );
             }
         }
     }
@@ -2158,8 +2155,14 @@ key_file = "{}"
     /// it is true exactly when a counterparty address has been recorded
     /// for the channel, which is the record a peer claim's signature is
     /// recovered against.
-    #[tokio::test]
-    async fn peer_channels_reach_the_claim_ledger() {
+    ///
+    /// On [`wire`] rather than `build`, for the reason its Solana twin
+    /// already is: since issue #1138 an EVM `[[peer_channels]]` row needs
+    /// a `[settlement.evm]` table to load at all, and `build` dials the
+    /// chain from one -- so keeping this on `build` would turn a question
+    /// about config reaching `ClaimBook` into an anvil test.
+    #[test]
+    fn peer_channels_reach_the_claim_ledger() {
         let state_dir = tempfile::tempdir().expect("temp state dir");
         let channel = format!("0x{}", "cd".repeat(32));
         let (config, _key_path) = config_with_raw_key_file(|key_path| {
@@ -2185,25 +2188,44 @@ channel_id = "{channel}"
 counterparty_key = "0x00000000000000000000000000000000000000aa"
 chain_id = 31337
 token_network = "0x00000000000000000000000000000000000000bb"
-"#,
+{settlement}"#,
                 state_dir = state_dir.path().display(),
                 key_file = key_path.display(),
+                settlement = evm_settlement(key_path),
             )
         });
 
-        let runtime = build(&config).await.expect("build");
+        let connector = wire(&config);
 
         assert!(
-            runtime.connector.recognizes_channel(&channel),
+            connector.recognizes_channel(&channel),
             "the [[peer_channels]] row must reach ClaimBook's verification key, or every \
              peer claim on it is refused `unknown_channel` however correctly it was signed"
         );
         assert!(
-            !runtime
-                .connector
-                .recognizes_channel(&format!("0x{}", "ee".repeat(32))),
+            !connector.recognizes_channel(&format!("0x{}", "ee".repeat(32))),
             "and only that row -- a channel nobody configured is still unknown"
         );
+    }
+
+    /// The `[settlement.evm]` table every EVM channel row needs since issue
+    /// #1138 -- that table is where this node's EVM address comes from, and
+    /// a claim is redeemed by the channel's on-chain participant. Written
+    /// once here because no test that uses it is *about* settlement.
+    fn evm_settlement(key_path: &Path) -> String {
+        format!(
+            r#"
+[settlement.evm]
+rpc_url = "http://127.0.0.1:8545"
+contract_address = "0x1234567890123456789012345678901234567890"
+token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "{key_file}"
+"#,
+            key_file = key_path.display(),
+        )
     }
 
     /// A config with one Solana `[[peer_channels]]` row and a
@@ -3066,10 +3088,11 @@ channel_id = "0x{channel}"
 counterparty = "0x00000000000000000000000000000000000000aa"
 chain_id = 8453
 token_network_address = "0x00000000000000000000000000000000000000bb"
-"#,
+{settlement}"#,
                 key_path = key_path.display(),
                 state_dir = state_dir.path().display(),
                 channel = "ab".repeat(32),
+                settlement = evm_settlement(key_path),
             )
         });
 
@@ -3084,7 +3107,16 @@ token_network_address = "0x00000000000000000000000000000000000000bb"
 
     /// The Solana twin of the above (issue #630): a declared Solana channel
     /// reaches the client edge's registry the same way a declared EVM one
-    /// does, through [`ClientChannelRegistry::record_solana`].
+    /// does, through [`ClientChannelRegistry::record_solana`] -- under the
+    /// program `[settlement.solana]` names, which is the one this node
+    /// could redeem the claim through (ADR 0053, issues #1082 and #1138).
+    ///
+    /// This test used to assert the opposite half: that a Solana row on a
+    /// node with **no** `[settlement.solana]` was *not* recorded, because
+    /// this arm warn-and-skipped it. It is refused at load now
+    /// (`ClientChannelWithoutSolanaSettlement`), so the skip has no
+    /// reachable state left to test and the refusal is
+    /// `connector-config`'s.
     #[test]
     fn every_configured_solana_client_channel_is_recorded() {
         let state_dir = tempfile::tempdir().expect("temp state dir");
@@ -3102,28 +3134,38 @@ key_file = "{key_path}"
 [[client_channels]]
 channel_account = "{account}"
 counterparty = "{counterparty}"
+
+[settlement.solana]
+rpc_url = "https://api.devnet.solana.com"
+program_id = "{SOLANA_PEER_PROGRAM_ID}"
+token_address = "{counterparty}"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "{key_path}"
 "#,
                 key_path = key_path.display(),
                 state_dir = state_dir.path().display(),
             )
         });
 
-        // ADR 0053 / issue #1082: a claim on a Solana channel signs the
-        // settlement program's id, so a Solana client channel configured with
-        // no `[settlement.solana]` block has nothing to verify against and is
-        // not recorded. The config still parses -- this is a wiring decision,
-        // not a parse error -- and the skip is logged.
         let channels = client_channels(&config, None, None, None);
         assert!(
-            channels.is_empty(),
-            "a Solana client channel with no settlement backend has no program id to verify \
-             claims against, so it must not be recorded"
+            !channels.is_empty(),
+            "a declared Solana client channel must reach the registry, or every claim on it is \
+             refused as an unknown channel"
         );
         let ClientChannelConfig::Solana(solana) = &config.client_channels()[0] else {
             panic!("expected a Solana client channel");
         };
         assert_eq!(solana.channel_account(), account);
         assert_eq!(solana.counterparty(), counterparty);
+        assert_eq!(
+            solana.program_id(),
+            SOLANA_PEER_PROGRAM_ID,
+            "the row is judged under the program this node settles with, never a second \
+             declaration of one"
+        );
     }
 
     /// Issue #1131: the same defect as the test below, on the node shape
