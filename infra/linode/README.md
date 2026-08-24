@@ -57,6 +57,20 @@ Nothing generates it any more — `devnet.sh endpoints`, which used to, is gone
 with the box. **Edit it by hand** when a devnet address changes; a new Mina USDC
 deploy prints the values to pin (`tools/mina/deploy-usdc-token.mts`).
 
+A second copy of that generator outlived the first, and this paragraph did not
+know about it: `infra/devnet-manage.sh` kept an `endpoints` verb until issue
+#1135, printing a JSON document frozen at 2026-06-23. It queried three box
+labels that no longer resolve, named the deleted self-hosted chains and their
+mock tokens, the retired `proxy.store.` edge, and — the reason it was finally
+found — a **Solana payment-channel program id that has never been deployed to
+public devnet**, disagreeing with the `solana.programId` above and with both
+box configs. It is deleted, and
+`crates/connector-settlement-solana/tests/solana_program_ids.rs` now fails the
+build if any committed file names a Solana program id that is neither the
+public-devnet deploy nor the disposable local validator's. Since ADR 0053 binds
+the program id into a claim's signed message, a stale one here is not a
+mislabelling for long.
+
 ## Where the live devnet is documented
 
 | Thing                                          | Where                                                                         |
