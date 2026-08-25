@@ -1,6 +1,6 @@
 # A hop charges a flat per-packet fee, and packets declare a minimum delivery
 
-**Status:** Accepted, amended by [0042](0042-a-packet-carries-its-claim.md): a fee is earned when the packet is paid for, not on fulfilment. Flat-per-packet and minimum delivery are unchanged.
+**Status:** Accepted in part. Amended by [0042](0042-a-packet-carries-its-claim.md): a fee is earned when the packet is paid for, not on fulfilment. **The minimum-delivery half is retired by [0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)** — a claim bounds erosion, not a declared floor — which also moots the #1072 update's peer-versus-client asymmetry below. **Flat-per-packet, the earnings rule and cost discoverability are unchanged**, and are what this record is now for.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
@@ -100,3 +100,50 @@ it conclusive: the client-side guarantee already exists and is not this field.
 
 **Everything else in this record stands:** flat per-packet fees, and a hop that cannot meet a declared
 minimum delivery after its fee rejecting (`R01`) rather than forwarding less.
+
+## Update (issue #1143) — the minimum-delivery half is deleted, in code and on both wires
+
+[0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md) is built. What that record
+retires is gone from the binary and from both carriages: the `minimumDelivery` field, its
+`toon-minimum-delivery` protocolData entry, its `Toon-Minimum-Delivery` header, its two vectors and
+the `R01` reject it produced. `amount_after_fee(amount, fee)` no longer takes a floor.
+
+**Dead in this record**, as of that deletion:
+
+- The title's second clause and the opening paragraph's _"Every packet declares the amount that must
+  reach its destination"_. No packet declares one.
+- **"Why minimum delivery rather than quoting"** in full. The argument was sound under
+  [0004](0004-value-moves-on-fulfilment.md)'s postpay, where a rejecting hop earned nothing;
+  [0042](0042-a-packet-carries-its-claim.md) inverted that premise, so the reject the section prizes
+  now costs the sender exactly what silent under-delivery would have. 0057 is the long form.
+- The **#1072 update** above in full — its peer-versus-client asymmetry, its "a client role MUST
+  ignore it" rule and its closing line about `R01`. Neither role declares a floor now, so there is
+  no asymmetry left to state and nothing for a client to ignore. Its actual finding survives
+  elsewhere and unchanged: **a client's guarantee is the price**
+  ([0028](0028-a-forwarded-route-is-priced-at-the-client-edge.md)), which is now every sender's.
+
+**Alive and untouched:** the flat per-packet fee and why it is flat rather than proportional; the
+earnings rule (a hop earns the difference between the cumulative it receives and the cumulative it
+sends); and cost discoverability in one shot, which [0011](0011-rejects-accumulate-fees-and-probes-discover-cost.md)'s
+probe now carries alone rather than as one of two mechanisms.
+
+One residual case kept a code: a packet that does not cover **this hop's own fee** cannot be
+forwarded at all, and is refused **`F03`** — the amount is wrong for what this hop charges and the
+sender's move is to pay it, which is [0051](0051-a-reject-code-binds-where-a-sender-must-act-differently.md)'s
+`F03` row rather than a floor to lower. `R01` is not reused for it.
+
+## Update (issue #1143, corrected) — that residual case is `R01`, not `F03`
+
+The last paragraph above is wrong and is replaced by this one.
+[0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)'s corrected Update establishes
+why: `R01` carried both this record's minimum-delivery meaning **and** RFC 0027's own — _"the amount
+received by a connector in the path was too little to forward (zero or less)"_ — and only the first
+dies with the field.
+
+So a packet that does not cover **this hop's own fee** is refused **`R01`**, naming the fee and the
+amount it carried. `F03` does not gain the case: that row is an amount wrong against a _price_ a
+sender can pay, and here the fee consumed everything with no price in question. The code is reused
+for exactly the situation RFC 0027 defines it for, which is not "reuse" at all.
+
+This changes nothing else in the update above. The floor, its two carriage bindings, its two vectors
+and `amount_after_fee`'s third parameter are gone and stay gone.

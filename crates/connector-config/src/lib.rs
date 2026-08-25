@@ -37,7 +37,7 @@ pub use identity::ClientIdentityConfig;
 pub use operator::OperatorConfig;
 pub use pay_channel::PayChannelConfig;
 pub use peer::{
-    ClaimEnforcement, PeerCarriage, PeerConfig, PeerCredential, PeerExposure,
+    ForwardedClaimEnforcement, PeerCarriage, PeerConfig, PeerCredential, PeerExposure,
     DEFAULT_MAX_PACKET_AMOUNT,
 };
 pub use peer_channel::{EvmPeerChannelConfig, PeerChannelConfig, SolanaPeerChannelConfig};

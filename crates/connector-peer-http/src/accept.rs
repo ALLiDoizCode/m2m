@@ -73,7 +73,7 @@ use connector_peer_auth::{
 };
 use connector_peer_btp::claim_json::{self};
 use connector_peer_btp::price_gate::{self, ClaimEnforcementPolicy, PaymentRequired};
-use connector_peer_btp::{fields, AcceptedClaims};
+use connector_peer_btp::AcceptedClaims;
 use connector_runtime::{ClaimAckOutcome, Connector, WireClaim};
 
 use crate::headers::{self, PeerRequest, PeerResponse};
@@ -298,32 +298,18 @@ impl PeerHttpState {
             }
         };
 
-        let minimum_delivery = match headers::minimum_delivery(&role, &request.headers) {
-            Ok(minimum_delivery) => minimum_delivery,
-            // §5.1: never silently zero. The claim's verdict rides this
-            // REJECT anyway -- the two answers are independent (§6.2).
-            Err(error) => {
-                return self.finish(
-                    &role,
-                    packet_response(PacketResponse::Reject(
-                        fields::malformed_minimum_delivery_reject(&error),
-                    )),
-                    ack,
-                )
-            }
-        };
-
-        // Issue #880 (owner decision #868): a peer PREPARE to a route this
-        // connector terminates and prices carries a covering claim, or it
-        // is refused with the client edge's own x402 greeting. The decision
-        // is `connector_peer_btp::price_gate`'s, shared with the BTP
-        // carriage so §0.1's one pipeline cannot admit over one carriage
+        // Issue #880 (owner decision #868) and ADR 0042: a peer PREPARE
+        // carries a covering claim -- the route's `price` where this
+        // connector terminates, the packet's own `amount` where it forwards
+        // -- or it is refused with the client edge's own x402 greeting. The
+        // decision is `connector_peer_btp::price_gate`'s, shared with the
+        // BTP carriage so §0.1's one pipeline cannot admit over one carriage
         // what it refuses over the other; what is this carriage's is only
         // the response the refusal is shaped into.
         if let Some(refusal) = price_gate::payment_required(
             &self.connector,
             &peer_id,
-            &prepare.destination,
+            &prepare,
             ack,
             claim.as_ref(),
             prior_watermark,
@@ -336,10 +322,7 @@ impl PeerHttpState {
         // arrived over HTTP is indistinguishable here from one that arrived
         // over BTP. `handle_peer_prepare` is handed no claim -- this
         // request's was judged above, before anything was routed.
-        let (response, _) = self
-            .connector
-            .handle_peer_prepare(prepare, minimum_delivery, None)
-            .await;
+        let (response, _) = self.connector.handle_peer_prepare(prepare, None).await;
         self.finish(&role, packet_response(response), ack)
     }
 

@@ -41,7 +41,8 @@ fn test_signer() -> Arc<dyn Signer> {
 fn prepare(destination: &str) -> Prepare {
     Prepare {
         // Enough to cover a hop's fee, so a reject below is the one the
-        // path decided on rather than `R01` raised for want of value.
+        // path decided on rather than the `R01` a packet too small to pay
+        // for its own carriage gets (RFC 0027; ADR 0057 as corrected).
         amount: 100,
         expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
         execution_condition: [9u8; 32],

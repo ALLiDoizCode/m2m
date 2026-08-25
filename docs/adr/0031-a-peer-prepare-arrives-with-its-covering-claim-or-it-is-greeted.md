@@ -7,7 +7,9 @@
 > **Superseded entirely by [ADR 0042](0042-a-packet-carries-its-claim.md).** Every clause of the
 > Decision below was false of the shipped binary: an uncovered arrival was refused only at a
 > _priced_ termination, no connector has ever covered a PREPARE it sends (issue #881 was never
-> wired), `ClaimEnforcement::Observe` is an escape hatch this record says does not exist, and the
+> wired), `ClaimEnforcement::Observe` was an escape hatch this record says does not exist (it has
+> since been deleted — ADR 0042 item 4, issue #1077 — but it existed for the whole time this record
+> claimed it did not), and the
 > credit window it declares retired is the only mode that runs. Its claim that ADR 0004's
 > argument against prepay "remains sound and is not disturbed here" is also wrong — that argument
 > _is_ disturbed, deliberately, and ADR 0042 states the trade instead of leaving it silent. Read
@@ -149,8 +151,9 @@ receivers (the B2 refusal behaviour) roll to any — a receiver that refuses bef
 can cover is a hard outage, and the safe order is stated and justified, not assumed. A temporary
 per-peering `claim_enforcement` config knob (`connector-config::peer::ClaimEnforcement`, default
 `Enforce`) lets a receiver `Observe` — admit and log an uncovered PREPARE rather than refuse it — as
-a canary step before a box is flipped to enforce; it is dated for removal once the fleet-wide
-rollout is confirmed. The three-box fleet runbook, its config dry-run recipe and its positive-evidence
+a canary step before a box is flipped to enforce; it was dated for removal once the fleet-wide
+rollout is confirmed, and **has since been removed** (ADR 0042 item 4, issue #1077) — the key is now
+parsed only to be rejected by name, and a terminated arrival is refused unconditionally. The three-box fleet runbook, its config dry-run recipe and its positive-evidence
 checks are `docs/operators/claim-policy-rollout.md`.
 
 **The exposure machinery's remaining purpose is undecided here.** `record_inbound_delivery`

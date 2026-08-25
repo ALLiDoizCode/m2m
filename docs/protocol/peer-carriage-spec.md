@@ -32,11 +32,11 @@ SHOULD, SHOULD NOT and MAY are per RFC 2119.
 
 ADR 0027 split one document into two layers.
 
-| Layer                                                                                                                                                             | Where it is specified                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Semantics** — what a peer interaction _means_: claim exchange, claim acknowledgement, claim contents, fees and minimum delivery, reject codes, accumulated cost | **the records**, not a prose spec. [`peer-semantics-pre-868.md`](peer-semantics-pre-868.md) is **frozen history** (issue #1065): it claimed normative status over §3.2's trailing claim, §3.3's flush, §5.3's ceiling and §5.4's greeting gate, all retired or superseded. Its three live sections — §3.1, §4, §5.2 — migrate to the payment and packet-flow specifications. Authority meanwhile: [ADR 0010](../adr/0010-flat-per-packet-fee-and-minimum-delivery.md), [0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md), [0042](../adr/0042-a-packet-carries-its-claim.md), [0049](../adr/0049-the-cap-bounds-one-packet-is-discovered-by-t04-and-is-set-from-outside.md), [0051](../adr/0051-a-reject-code-binds-where-a-sender-must-act-differently.md) |
-| **Carriage** — _where the bytes ride_ for each of those concepts, on each of the two wires a connector already serves                                             | **this document**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| **Framing** — the deleted raw-TCP stream and its six frame types                                                                                                  | gone: `peer-semantics-pre-868.md` §1–§2, superseded by ADR 0027, implementation removed by issue #679                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Layer                                                                                                                                        | Where it is specified                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| -------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Semantics** — what a peer interaction _means_: claim exchange, claim acknowledgement, claim contents, fees, reject codes, accumulated cost | **the records**, not a prose spec. [`peer-semantics-pre-868.md`](peer-semantics-pre-868.md) is **frozen history** (issue #1065): it claimed normative status over §3.2's trailing claim, §3.3's flush, §5.3's ceiling and §5.4's greeting gate, all retired or superseded. Its three live sections — §3.1, §4, §5.2 — migrate to the payment and packet-flow specifications. Authority meanwhile: [ADR 0010](../adr/0010-flat-per-packet-fee-and-minimum-delivery.md), [0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md), [0042](../adr/0042-a-packet-carries-its-claim.md), [0049](../adr/0049-the-cap-bounds-one-packet-is-discovered-by-t04-and-is-set-from-outside.md), [0051](../adr/0051-a-reject-code-binds-where-a-sender-must-act-differently.md), [0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md) |
+| **Carriage** — _where the bytes ride_ for each of those concepts, on each of the two wires a connector already serves                        | **this document**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| **Framing** — the deleted raw-TCP stream and its six frame types                                                                             | gone: `peer-semantics-pre-868.md` §1–§2, superseded by ADR 0027, implementation removed by issue #679                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 **This document sits beside `peer-semantics-pre-868.md` §3–§6. It supersedes nothing in them.** It does
 not restate them and MUST NOT be read as replacing them: every existing citation of §3.2, §3.3,
@@ -148,7 +148,8 @@ stands today: `connector_peer_auth::decide_role` still implements the P1/P2 bran
 verified claim the way §1.2 describes -- that remains open work, not scoped to #880.
 `Connector::handle_peer_prepare` itself is unchanged and still accepts a `None` claim
 (`crates/connector-runtime/src/connector.rs:667-676`): issue #880 lands the _price-coverage_ half of
-this section (a `Terminated` route's own `price`, §3.1) one layer up, in the accept pipelines
+this section (a `Terminated` route's own `price`, §3.1 — since joined by ADR 0042's
+forwarded-arrival rule in the same gate) one layer up, in the accept pipelines
 (`connector-peer-http`'s `PeerHttpState::handle` and `connector-peer-btp`'s
 `PeerSession::handle_message`) -- before `handle_peer_prepare` is ever called, using the claim each
 carriage already judges inline. Both call one decision,
@@ -162,9 +163,11 @@ configured via `Connector::with_outbound_client_hop` is covered proactively, fro
 client ledger (#873), for this node's own forwarded value -- before the first attempt is ever sent,
 not merely recovered by #875's retry arm after a refusal teaches this node it must pay. A hop with
 no such config keeps riding the peer ledger's `pending_claim` (ADR 0004's postpay convention),
-untouched: bilateral peer-to-peer forwarding is not what #868/#881 changed, per §3.1 below — "a
-**peer-role** PREPARE reaching this node's `Forwarded` routes is still priced by the claim exchange
-of §4 and `peer-semantics-pre-868.md` §3 alone".
+untouched: bilateral peer-to-peer forwarding is not what #868/#881 changed. ADR 0042's item 3 has
+since extended the same shared gate to a `Forwarded` arrival, judged against the PREPARE's own
+`amount` and defaulting to observe rather than refuse — §3.1 below states both rules and the one
+per-peer knob that is left to select between them (the terminated rule's own `claim_enforcement`
+knob was deleted by ADR 0042 item 4, issue #1077).
 
 **What "configured via `with_outbound_client_hop`" means in a config file**, since for a while it
 meant nothing an operator could write and the covering therefore never ran on a deployed node: it is
@@ -278,7 +281,7 @@ A connector MUST NOT infer, weight or override role from any of:
 - the source address, the TLS SNI name, or the presence of a TLS client certificate;
 - whether the `btp` websocket subprotocol was offered or selected;
 - a hostname or endpoint appearing in `[[peers]]`;
-- the shape of what the interaction sent — an inbound TRANSFER, or a `toon-minimum-delivery` entry;
+- the shape of what the interaction sent — an inbound TRANSFER, or any carriage-layer entry;
 - anything the interaction did earlier, or that another interaction from the same address did.
 
 Role is decided by P2 and a verified claim, or it is `client`.
@@ -385,7 +388,6 @@ undefined trust is what leaks.
   and appended to the peer claim ledger;
 - being a next hop: packets from this interaction may be forwarded per the routing table, and this
   peering relation may be a route's next hop;
-- `minimumDelivery` honoured as a sender declaration (§5, `peer-semantics-pre-868.md` §4);
 - `accumulatedCost` relayed with this hop's own fee added (`peer-semantics-pre-868.md` §5.2);
 - FLUSH accepted (§6).
 
@@ -397,8 +399,6 @@ a route's price; nor the ability to open the payload of a packet it forwards.
 it presents bytes that look like them:**
 
 - advancing a `[[peer_channels]]` watermark or writing to the peer claim ledger;
-- a `toon-minimum-delivery` / `Toon-Minimum-Delivery` field being honoured — a client
-  interaction's minimum-delivery field MUST be **ignored**, not rejected and not applied;
 - a `claim-ack` / `Toon-Claim-Ack` on a client response — a connector MUST NOT emit one on a
   client interaction;
 - being treated as a peering relation for flush purposes (§6.4).
@@ -540,7 +540,6 @@ ride on each carriage.
 | piggybacked claim (§3.2)              | `payment-channel-claim` protocolData entry, **raw UTF-8 JSON** (§4)                                                                        | `ILP-Payment-Channel-Claim` request header, `base64(JSON)` (§4)                                                     |
 | **FLUSH** (§3.3)                      | **TRANSFER** (type 7): `amount` = the claim's new cumulative, claim in `payment-channel-claim`, no `ilpPacket`                             | **POST with an empty body** plus the claim header — the standalone-claim shape of `client-edge-spec.md` §1.9 step 5 |
 | **CLAIM_ACK** (§3.4)                  | `claim-ack` protocolData entry on the RESPONSE that already answers the claim-bearing frame (§5)                                           | `Toon-Claim-Ack` response header on the response that already answers the claim-bearing request (§5)                |
-| `minimumDelivery` (§4)                | `toon-minimum-delivery` protocolData entry on the MESSAGE, decimal-uint64 UTF-8 (§5.1)                                                     | `Toon-Minimum-Delivery` request header, decimal-uint64 ASCII (§5.1)                                                 |
 | `accumulatedCost` (§5.2)              | `toon-accumulated-cost` entry on the REJECT's RESPONSE, decimal-uint64 UTF-8 — **already implemented on the client edge, reused verbatim** | `Toon-Accumulated-Cost` response header — **already implemented on the client edge, reused verbatim**               |
 | peer credential (§1.4)                | `auth` protocolData entry, raw UTF-8 JSON                                                                                                  | `Toon-Peer-Auth` request header, `base64(JSON)`                                                                     |
 | flush prompt (§6.4)                   | _(none — the payee can originate on BTP)_                                                                                                  | `Toon-Flush-Requested` response header, optional (§6.4)                                                             |
@@ -589,20 +588,41 @@ additively extensible) and MUST NOT be emitted.
   does not catch this on its own: such a claim's nonce and amount both genuinely advance, so it is
   `accepted`; only the baseline was wrong.
 
-  **Every other peer PREPARE is still answered by nothing of the sort.** Peer fees are bilateral
-  configuration (`peer-semantics-pre-868.md` §4), not a negotiation, and `requiredTransport` (issue #701) is
-  a client-edge route policy with no peer analogue. This survives [ADR
-  0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md) unchanged, and the
-  distinction is worth stating because that ADR looks at first like it contradicts this rule. A
-  `[[routes]]` entry naming a `peer_id` now carries a `price`, and a **client-role** PREPARE to
-  it is greeted, claim-gated and journaled exactly as one to a terminated route is (issue #620).
-  That is the client-facing direction of the same node. A **peer-role** PREPARE reaching this
-  node's `Forwarded` routes is still priced by the claim exchange of §4 and `peer-semantics-pre-868.md` §3
-  alone -- greeting it would invent a negotiation where a bilateral agreement already exists. The
-  route's `price` is a fact about this node's client edge; its `fee` is the fact its peers agreed
-  to. The gate above binds only where the client edge's `price` and this node's own termination
-  coincide -- a `Terminated` route -- which is exactly where ADR 0028 says a fact about the client
-  edge, not a peering, is being charged.
+  **A `Forwarded` arrival must cover its own `amount`** ([ADR
+  0042](../adr/0042-a-packet-carries-its-claim.md) item 3, correcting what this bullet said while
+  only the `Terminated` rule existed). A peer-role PREPARE this node will forward onward MUST carry
+  a claim whose advance over that channel's watermark is at least the PREPARE's own `amount`, or it
+  is refused `F06` with the same x402 greeting, quoting that amount. The figure is the packet's
+  `amount` and nothing else:
+  - **Not the route's `price`.** A `[[routes]]` entry naming a `peer_id` carries a `price`, and a
+    **client-role** PREPARE to it is greeted, claim-gated and journaled exactly as one to a
+    terminated route is (issue #620, [ADR
+    0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md)). That is the
+    client-facing direction of the same node: the `price` is a fact about this node's client edge,
+    and it is not what a peer owes.
+  - **Not the `fee`, and not the post-fee amount this hop passes on.** The send half covers the next
+    hop for `amount_after_fee(amount, fee)` (`Connector::forward_via_peer_route`), so a peer
+    covering the amount that _arrives_ leaves this
+    node exactly its bilaterally agreed flat fee. Peer fees stay bilateral configuration
+    (`peer-semantics-pre-868.md` §4) and are not negotiated by this greeting; `requiredTransport`
+    (issue #701) remains a client-edge route policy with no peer analogue.
+
+  **This rule ships defaulting to observe.** Its per-peer knob is `forwarded_claim_enforcement`,
+  and `"observe"` is its default: an uncovered forwarded arrival is admitted, forwarded, and logged
+  exactly as a refusal would be logged, until an operator writes `"enforce"` on that peering. ADR
+  0042 records why -- no box on this fleet covers its forwards yet, and each forwards to the other,
+  so enforcing by default would stop forwarding fleet-wide.
+
+  **The `Terminated` rule above has no such knob and never gets one.** It once had a mirror,
+  `claim_enforcement`, whose `"observe"` was issue #883's canary step for the issue #880 rollout;
+  it is **deleted** (ADR 0042 item 4, issue #1077) and the key is now parsed only to be rejected by
+  name. An uncovered arrival to a priced termination is refused under every setting a peering can
+  carry. Keeping the two knobs as separate fields rather than one is what let that deletion happen
+  without taking the forwarded rule's opposite default with it.
+
+  **A destination that resolves to no configured route is still gated by nothing**, and that
+  includes a **leased** route: `Connector::client_route` excludes leases by construction (ADR 0028),
+  so neither rule here reaches one. That is ADR 0028's own gap, unchanged by ADR 0042.
 
 ### 3.2 The `WireClaim` binary encoding is not used on either carriage
 
@@ -734,28 +754,21 @@ unchanged, and the vectors pin it (§10).
 
 ### 5.1 `minimumDelivery`
 
-`minimumDelivery` is a sender declaration, set once by the original sender and unchanged by every
-hop (`peer-semantics-pre-868.md` §4). RFC-0027 has no field for it, so it rides the carriage:
+**Retired 2026-08-24 by [ADR 0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)
+(issue #1143).** No packet declares a minimum delivery. The `toon-minimum-delivery` protocolData
+entry and the `Toon-Minimum-Delivery` header are gone from both carriages — deleted together,
+because a field on one carriage and not the other is the drift §9 exists to prevent — along with
+absent-means-zero, malformed-is-`F01`, the propagate-unchanged rule, the client-role ignore rule and
+the `R01` reject the inequality produced. **`R01` itself stays in the reject vocabulary**, narrowed to
+RFC 0027's own meaning — _"the amount received by a connector in the path was too little to
+forward"_ — which no floor was ever needed to state
+([ADR 0051](../adr/0051-a-reject-code-binds-where-a-sender-must-act-differently.md) as corrected).
 
-| Carriage | Field                          | Encoding                                              |
-| -------- | ------------------------------ | ----------------------------------------------------- |
-| BTP      | `toon-minimum-delivery` entry  | decimal uint64 as UTF-8 text, no sign, no leading `+` |
-| HTTP     | `Toon-Minimum-Delivery` header | decimal uint64 as ASCII, one value, no list form      |
-
-Normative handling:
-
-- **Absent means zero.** A claim-free floor is the correct default and the one the deleted wire's
-  fixed-width field expressed as `0`.
-- A **malformed** value — not decimal digits, empty, or exceeding `u64::MAX` — MUST reject the
-  PREPARE with `F01` (`peer-semantics-pre-868.md` §5.1). It MUST NOT be silently treated as zero: zero is
-  the weakest possible floor, and quietly substituting it for an unparseable one converts a
-  framing bug into an under-delivery.
-- A forwarding hop MUST re-emit the value **unchanged** on its outbound PREPARE, on whichever
-  carriage that outbound hop uses. Crossing carriages MUST NOT alter it. This is the one
-  carriage-layer field that propagates; §8.3 states the general rule.
-- The inequality of `peer-semantics-pre-868.md` §4 (`A' = A − fee`, reject `R01` if `A' < M`) is computed
-  identically on both carriages by the existing `connector_domain::fee::amount_after_fee`.
-- On a **client**-role interaction the field MUST be ignored (§1.7).
+What bounds erosion instead is the claim covering each crossing: `cover_forward` mints for the
+packet's own forwarded value, so every hop holds a claim for at least what it passes on and its fee
+is the difference — which chains, without any hop being handed a figure and trusted to check it.
+`connector_domain::fee::amount_after_fee(amount, fee)` takes no floor; a packet that does not cover
+this hop's own fee is refused **`R01`** naming both numbers and the figure to clear.
 
 ### 5.2 `accumulatedCost`
 
@@ -1041,16 +1054,16 @@ forwarded to it adds its own fee on the way back.
 
 > **Carriage-layer fields are never sealed, and sealed payloads are never carriage-layer fields.**
 
-The claim, the claim ack, `minimumDelivery`, `accumulatedCost` and the peer credential ride the
+The claim, the claim ack, `accumulatedCost` and the peer credential ride the
 carriage — protocolData entries or headers — precisely so a hop can read and judge them without
 opening a payload it has no key for. Nothing in this document ever asks a connector to look inside
 `data`, and nothing in ADR 0018's wrap is ever promoted to a protocolData entry or a header.
 
-Corollary on propagation: **a carriage-layer field is re-derived by each hop, not copied**, with
-exactly one exception. `accumulatedCost` is recomputed (`+ thisHopFee`); the claim is this hop's own
-claim on its own channel; the credential is this hop's own; the claim ack answers this hop's own
-inbound claim. Only `minimumDelivery` propagates unchanged (§5.1), because it is a declaration by
-the original sender and every hop enforces the same inequality against the same value.
+Corollary on propagation: **a carriage-layer field is re-derived by each hop, not copied**, with no
+exceptions. `accumulatedCost` is recomputed (`+ thisHopFee`); the claim is this hop's own claim on
+its own channel; the credential is this hop's own; the claim ack answers this hop's own inbound
+claim. The one field that used to propagate unchanged was `minimumDelivery`, and it is retired
+(§5.1) — the rule is now universal rather than universal-with-an-exception.
 
 ---
 
@@ -1154,8 +1167,8 @@ fixture.
 **Claim-bearing PREPARE**
 
 5. `peer_prepare` _(pair)_ — BTP: a complete MESSAGE frame's bytes (type, `requestId`, protocolData
-   list containing `payment-channel-claim` and `toon-minimum-delivery`, the OER PREPARE in
-   `ilpPacket`). HTTP: method, path, the full header set and the OER body.
+   list containing `payment-channel-claim`, the OER PREPARE in `ilpPacket`). HTTP: method, path, the
+   full header set and the OER body.
 6. `peer_prepare_no_claim` _(pair)_ — the same PREPARE with no claim entry/header, so "claimless is
    legal" is pinned rather than assumed.
 
@@ -1195,10 +1208,11 @@ fixture.
 
 **Minimum delivery**
 
-18. `peer_minimum_delivery_absent` _(pair)_ — a PREPARE with the field omitted, pinning "absent
-    means zero".
-19. `peer_minimum_delivery_malformed` _(pair)_ — a non-decimal value and the `F01` it provokes,
-    pinning that it is not silently zero.
+18–19. ~~`peer_minimum_delivery_absent`, `peer_minimum_delivery_malformed`~~ **Retired 2026-08-24 by
+[ADR 0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md) (issue #1143)**, and
+deleted from `vectors/wire-vectors.json`. The item numbers are not reused. This was a cross-repo
+wire change ([ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md)): `toon-client`, `rig`
+and `swap` replay this set.
 
 **Sealing**
 
@@ -1238,12 +1252,16 @@ Required surface:
   1 USDC), so a peering that writes nothing is still bounded; there is deliberately no spelling
   that disables it, and `0` is a named load error rather than "off". This bounds one packet, not
   an accumulation — it is not `ceiling` returning (ADR 0033, retired above).
-- Per peer, **temporary** (issue #883, child B6 — see
-  [`docs/operators/claim-policy-rollout.md`](../operators/claim-policy-rollout.md)):
-  `claim_enforcement`, one of `"enforce"` (default) or `"observe"`. `"observe"` admits and logs an
-  uncovered peer PREPARE instead of refusing it with `F06_UNEXPECTED_PAYMENT` — the rollout's
-  canary step, not a permanent policy surface. Slated for deletion once the fleet-wide rollout
-  this document's §3.1 gate depends on is complete and confirmed.
+- Per peer, **temporary** (ADR 0042 item 3): `forwarded_claim_enforcement`, one of `"observe"`
+  (**default**) or `"enforce"`. Governs §3.1's forwarded-arrival rule only: omitted, an uncovered
+  forwarded arrival is admitted and logged rather than refused, because no box on this fleet covers
+  its forwards yet. An operator writes `"enforce"` per peering once that peering's counterparty is
+  covering. Its sibling `claim_enforcement` — issue #883's canary knob for §3.1's **terminated**
+  rule, one of `"enforce"` (default) or `"observe"` — is **removed** (ADR 0042 item 4, issue
+  #1077); it is a removed-field trap below, and the terminated rule now enforces unconditionally.
+  Two fields rather than one is what made that possible: the two migrations defaulted in opposite
+  directions and ended on different days, so deleting `claim_enforcement`'s `"observe"` would
+  otherwise have deleted this field's default with it.
 - The accepting mirror: configured credentials map to peer ids and thence to their channels.
 - `[[peer_channels]]` — EVM shape: `peer_id`, `channel_id`, `counterparty_key`, `chain_id`,
   `token_network`. Solana shape (issue #759): `peer_id`, `channel_account`, `counterparty_key` —
@@ -1329,27 +1347,28 @@ does settle on while paying over one it does not.
 
 Named load-time errors this specification requires (spelling #677's, identity ours):
 
-| Error                                           | Condition                                                                                                                                                                                                                                                           | Source             |
-| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
-| `PeerUndialable`                                | `expose` is empty **and** a configured peer has no `endpoint` — a peering that can never establish                                                                                                                                                                  | §2.2               |
-| `PeerEndpointScheme`                            | an `endpoint` whose scheme is neither `wss://` nor `https://`                                                                                                                                                                                                       | §2.1               |
-| `PeerCredentialMissing`                         | a `[[peers]]` entry with no credential — it could never satisfy P1                                                                                                                                                                                                  | §1.2               |
-| `PeerChannelUnbound`                            | a `[[peers]]` entry with no `[[peer_channels]]` row — it could never satisfy P2                                                                                                                                                                                     | §1.2               |
-| `PeerChannelOrphaned`                           | a `[[peer_channels]]` row naming an unknown `peer_id`                                                                                                                                                                                                               | §1.2               |
-| `ChannelInBothNamespaces`                       | a channel id present in both `[[peer_channels]]` and `[[client_channels]]`                                                                                                                                                                                          | §1.8               |
-| `PeerChannelProgramIdRemoved`                   | a Solana `[[peer_channels]]` row still setting `program_id` — the key is removed; the program is read from `[settlement.solana]`, the only one this node can redeem under                                                                                           | #1128              |
-| `PeerChannelWithoutSolanaSettlement`            | a Solana `[[peer_channels]]` row on a node with no `[settlement.solana]` table — nothing to read the program id from, and nothing to redeem a claim through                                                                                                         | #1128              |
-| `PeerChannelWithoutEvmSettlement`               | an EVM `[[peer_channels]]` row on a node with no `[settlement.evm]` table — no address to be the channel's on-chain participant, so nothing to redeem an inbound claim at and no key to sign an outbound one with                                                   | §11.1, #1138       |
-| `ClientChannelWithoutEvmSettlement`             | an EVM `[[client_channels]]` row on a node with no `[settlement.evm]` table — the client-edge case of §11.1; the declared-channel exemption is a credit policy and does not reach redeemability                                                                     | §11.1, #1138       |
-| `ClientChannelWithoutSolanaSettlement`          | a Solana `[[client_channels]]` row on a node with no `[settlement.solana]` table — no program to judge the claim under and no address to collect it at. Was a warn-and-skip that left the row configured and every claim on it refused as unknown                   | §11.1, #1138       |
-| `ClientChannelSolanaSettlementProgramIdInvalid` | a Solana `[[client_channels]]` row whose `[settlement.solana] program_id` is not base58 of a 32-byte value — the twin of the peer row's, and it replaces a boot panic                                                                                               | §11.1, #1138       |
-| `PeerChannelSolanaSettlementProgramIdInvalid`   | a Solana `[[peer_channels]]` row whose `[settlement.solana] program_id` is not base58 of a 32-byte value                                                                                                                                                            | #1128              |
-| `PeerChannelInvalidSolanaAccount`               | a Solana `[[peer_channels]]` row's `channel_account`/`counterparty_key` is not base58 of a 32-byte value                                                                                                                                                            | #759               |
-| `PeerRouteUndeliverable`                        | a route naming as next hop a peer this connector can never originate to                                                                                                                                                                                             | §2.2, §6.4         |
-| `DuplicatePeerId`                               | two `[[peers]]` entries with the same `id`                                                                                                                                                                                                                          | —                  |
-| `InvalidClaimEnforcement`                       | `claim_enforcement` set to anything other than `"enforce"` or `"observe"` — a typo must not silently read as either                                                                                                                                                 | issue #883         |
-| `PeerMaxPacketAmountZero`                       | `max_packet_amount = 0` — a cap of zero refuses every packet the peering could carry, and there is no "disable the cap" spelling                                                                                                                                    | ADR 0042           |
-| removed-field errors                            | `peer_wire_addr`, `addr` in its old `SocketAddr` shape, or `ceiling`/`flush_interval_ms` (ADR 0033, issue #882) — a **hard, named** error pointing at the bring-up doc, never a silent ignore, because the devnet boxes run bind-mounted configs that lead the repo | ADR 0027, ADR 0033 |
+| Error                                           | Condition                                                                                                                                                                                                                                                                                                                   | Source             |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| `PeerUndialable`                                | `expose` is empty **and** a configured peer has no `endpoint` — a peering that can never establish                                                                                                                                                                                                                          | §2.2               |
+| `PeerEndpointScheme`                            | an `endpoint` whose scheme is neither `wss://` nor `https://`                                                                                                                                                                                                                                                               | §2.1               |
+| `PeerCredentialMissing`                         | a `[[peers]]` entry with no credential — it could never satisfy P1                                                                                                                                                                                                                                                          | §1.2               |
+| `PeerChannelUnbound`                            | a `[[peers]]` entry with no `[[peer_channels]]` row — it could never satisfy P2                                                                                                                                                                                                                                             | §1.2               |
+| `PeerChannelOrphaned`                           | a `[[peer_channels]]` row naming an unknown `peer_id`                                                                                                                                                                                                                                                                       | §1.2               |
+| `ChannelInBothNamespaces`                       | a channel id present in both `[[peer_channels]]` and `[[client_channels]]`                                                                                                                                                                                                                                                  | §1.8               |
+| `PeerChannelProgramIdRemoved`                   | a Solana `[[peer_channels]]` row still setting `program_id` — the key is removed; the program is read from `[settlement.solana]`, the only one this node can redeem under                                                                                                                                                   | #1128              |
+| `PeerChannelWithoutSolanaSettlement`            | a Solana `[[peer_channels]]` row on a node with no `[settlement.solana]` table — nothing to read the program id from, and nothing to redeem a claim through                                                                                                                                                                 | #1128              |
+| `PeerChannelWithoutEvmSettlement`               | an EVM `[[peer_channels]]` row on a node with no `[settlement.evm]` table — no address to be the channel's on-chain participant, so nothing to redeem an inbound claim at and no key to sign an outbound one with                                                                                                           | §11.1, #1138       |
+| `ClientChannelWithoutEvmSettlement`             | an EVM `[[client_channels]]` row on a node with no `[settlement.evm]` table — the client-edge case of §11.1; the declared-channel exemption is a credit policy and does not reach redeemability                                                                                                                             | §11.1, #1138       |
+| `ClientChannelWithoutSolanaSettlement`          | a Solana `[[client_channels]]` row on a node with no `[settlement.solana]` table — no program to judge the claim under and no address to collect it at. Was a warn-and-skip that left the row configured and every claim on it refused as unknown                                                                           | §11.1, #1138       |
+| `ClientChannelSolanaSettlementProgramIdInvalid` | a Solana `[[client_channels]]` row whose `[settlement.solana] program_id` is not base58 of a 32-byte value — the twin of the peer row's, and it replaces a boot panic                                                                                                                                                       | §11.1, #1138       |
+| `PeerChannelSolanaSettlementProgramIdInvalid`   | a Solana `[[peer_channels]]` row whose `[settlement.solana] program_id` is not base58 of a 32-byte value                                                                                                                                                                                                                    | #1128              |
+| `PeerChannelInvalidSolanaAccount`               | a Solana `[[peer_channels]]` row's `channel_account`/`counterparty_key` is not base58 of a 32-byte value                                                                                                                                                                                                                    | #759               |
+| `PeerRouteUndeliverable`                        | a route naming as next hop a peer this connector can never originate to                                                                                                                                                                                                                                                     | §2.2, §6.4         |
+| `DuplicatePeerId`                               | two `[[peers]]` entries with the same `id`                                                                                                                                                                                                                                                                                  | —                  |
+| `InvalidForwardedClaimEnforcement`              | `forwarded_claim_enforcement` set to anything other than `"observe"` or `"enforce"` — here a typo meant as `"enforce"` falls through to the permissive default and carries forwards for free                                                                                                                                | ADR 0042           |
+| `PeerMaxPacketAmountZero`                       | `max_packet_amount = 0` — a cap of zero refuses every packet the peering could carry, and there is no "disable the cap" spelling                                                                                                                                                                                            | ADR 0042           |
+| `PeerClaimEnforcementRemoved`                   | `claim_enforcement` set at all — issue #883's canary knob is gone and the terminated rule enforces unconditionally, so `"observe"` names no mode and `"enforce"` names the only behaviour there is. The message also disambiguates the still-live `forwarded_claim_enforcement`, since the two spellings differ by one word | ADR 0042, #1077    |
+| removed-field errors                            | `peer_wire_addr`, `addr` in its old `SocketAddr` shape, or `ceiling`/`flush_interval_ms` (ADR 0033, issue #882) — a **hard, named** error pointing at the bring-up doc, never a silent ignore, because the devnet boxes run bind-mounted configs that lead the repo                                                         | ADR 0027, ADR 0033 |
 
 `AcceptOnlyPeerWithoutCeiling` and the `claim_ack_timeout_ms > flush_interval_ms` load-time warning
 (§6.3) are retired along with `ceiling`/`flush_interval_ms` (ADR 0033, issue #882).
@@ -1433,9 +1452,10 @@ not the claim ack as a field, not role-by-auth, not the deletion of the raw-TCP 
 
 This specification uses exactly the vocabulary of `CONTEXT.md` (connector, app, packet, route,
 client edge, claim, nonce, watermark, exposure, ceiling, flush, in flight, projection, settlement,
-fee, minimum delivery, probe — of which _exposure_, _ceiling_ and _flush_ are retired terms per
-[ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md) and appear above only in
-clauses marked retired or historical), adding **carriage**, **expose**, **dial** and **peering
+fee, probe — of which _exposure_, _ceiling_ and _flush_ are retired terms per
+[ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md), and _minimum delivery_
+per [ADR 0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md); all four appear
+above only in clauses marked retired or historical), adding **carriage**, **expose**, **dial** and **peering
 relation** as defined in §0.1 and §2 — the first three from ADR 0027, the fourth already implicit in
 `peer-semantics-pre-868.md` §3.3's "per peering relation".
 

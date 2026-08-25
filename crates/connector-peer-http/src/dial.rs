@@ -50,7 +50,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use connector_btp::{CLAIM_HEADER, MINIMUM_DELIVERY_HEADER};
+use connector_btp::CLAIM_HEADER;
 use connector_config::{PeerCarriage, PeerChannelConfig, PeerConfig};
 use connector_domain::{Fulfill, PacketResponse, Prepare, Reject, RejectCode};
 use connector_peer_auth::{encode_base64, PresentedCredential, PEER_AUTH_HEADER};
@@ -541,7 +541,6 @@ impl PeerTransport for HttpPeerTransport {
         &self,
         peer_id: &str,
         prepare: Prepare,
-        minimum_delivery: u64,
         claim: Option<WireClaim>,
     ) -> PeerForward {
         let Some(state) = self.relations.get(peer_id) else {
@@ -560,14 +559,6 @@ impl PeerTransport for HttpPeerTransport {
             // no key for.
             body: prepare.encode(),
         };
-        // §5.1: the sender's declaration, re-emitted **unchanged** on this
-        // outbound hop. It is the one carriage-layer field that propagates
-        // rather than being re-derived (§8.3), and crossing carriages must
-        // not alter it.
-        if let Some(value) = headers::minimum_delivery_header_value(minimum_delivery) {
-            request.headers.push(MINIMUM_DELIVERY_HEADER, value);
-        }
-
         // A hinted retransmission rides only a request that carries no claim
         // of its own, and only ever as the *same bytes* already emitted
         // (§6.3, §6.4). It is this connector's own housekeeping, not the

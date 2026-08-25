@@ -11,10 +11,13 @@
 > termination_ — so for **forwarding**, the trailing-claim model described below was still what the
 > binary did. **Corrected again 2026-08-20 (issue #1056): #881 has landed** — `[[pay_channels]]`
 > populates `outbound_client_hops` and a connector covers the PREPAREs it sends
-> (`connector-cli/src/runtime.rs`'s `wire_outbound_client_hops`). What remains unbuilt is the other
-> half: **requiring** a covering claim on _forwarded arrivals_, and the resolution of
-> `ClaimEnforcement::Observe`. Read ADR 0042's "What must be true for this record to be true" for the
-> current gap; that record, not this banner, is the authority. There is no exposure tracking and no
+> (`connector-cli/src/runtime.rs`'s `wire_outbound_client_hops`). **Corrected again 2026-08-24
+> (issue #1077):** the two items this banner last listed as unbuilt are both resolved —
+> **requiring** a covering claim on _forwarded arrivals_ shipped in #1142 (per-peer
+> `forwarded_claim_enforcement`, defaulting to `"observe"`, so it binds no deployed box until an
+> operator flips a peering), and `ClaimEnforcement::Observe` is **deleted**, `claim_enforcement`
+> now being a config key parsed only to be rejected by name. Read ADR 0042's "What must be true for
+> this record to be true" for what is left; that record, not this banner, is the authority. There is no exposure tracking and no
 > `flush_interval_ms` (ADR 0033); those really are gone.
 >
 > **Superseded by [`payment-spec.md`](payment-spec.md)**, which describes what money does now. This

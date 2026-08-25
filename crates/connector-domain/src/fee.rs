@@ -1,24 +1,30 @@
-//! Flat per-packet fee and minimum-delivery arithmetic
+//! Flat per-packet fee arithmetic
 //! ([ADR 0010](../../../docs/adr/0010-flat-per-packet-fee-and-minimum-delivery.md)):
-//! what a hop earns forwarding one packet, and the sender's guarantee about
-//! what reaches the destination. The fee is a flat amount subtracted once
-//! per packet, never a share of `amount` -- there is no percentage or
-//! basis-point arithmetic anywhere in this module, which is what keeps a
-//! packet of any size charged rather than rounding to zero.
+//! what a hop earns forwarding one packet. The fee is a flat amount
+//! subtracted once per packet, never a share of `amount` -- there is no
+//! percentage or basis-point arithmetic anywhere in this module, which is
+//! what keeps a packet of any size charged rather than rounding to zero.
+//!
+//! What bounds erosion across a path is not arithmetic here but the claim
+//! covering each crossing: `cover_forward` mints for the packet's forwarded
+//! value, so every hop holds a claim for at least what it passes on (ADR
+//! 0057, issue #1143). There is no declared floor for this module to check.
+//! What survives is the plain "was there anything left at all" question,
+//! whose answer a hop reports as RFC 0027's `R01`.
 
 /// The amount this hop forwards downstream once its own flat `fee` (agreed
 /// bilaterally for the peering relation, per ADR 0010) is taken from
-/// `amount`, or `None` if that would forward less than `minimum_delivery`
-/// -- the amount the original sender declared must reach the destination.
+/// `amount`, or `None` if the fee alone exceeds what arrived.
 ///
 /// A hop that gets `None` here must reject
-/// ([`crate::RejectCode::r01_insufficient_source_amount`]) rather than
-/// forward a smaller amount and hope a downstream hop makes up the
-/// difference: no downstream hop ever increases an amount, so the
-/// shortfall would only grow.
-pub fn amount_after_fee(amount: u64, fee: u64, minimum_delivery: u64) -> Option<u64> {
-    let forwarded = amount.checked_sub(fee)?;
-    (forwarded >= minimum_delivery).then_some(forwarded)
+/// ([`crate::RejectCode::r01_insufficient_source_amount`], RFC 0027's
+/// "too little to forward") rather than forward a smaller amount and hope a
+/// downstream hop makes up the difference: no downstream hop ever increases
+/// an amount, so the shortfall would only grow. That reject is unaffected by
+/// ADR 0057, which retired the *declared floor* this function used to check
+/// and not the arithmetic below.
+pub fn amount_after_fee(amount: u64, fee: u64) -> Option<u64> {
+    amount.checked_sub(fee)
 }
 
 #[cfg(test)]
@@ -28,22 +34,12 @@ mod tests {
 
     #[test]
     fn subtracts_the_flat_fee() {
-        assert_eq!(amount_after_fee(100, 5, 0), Some(95));
+        assert_eq!(amount_after_fee(100, 5), Some(95));
     }
 
     #[test]
     fn rejects_when_the_fee_alone_exceeds_the_amount() {
-        assert_eq!(amount_after_fee(3, 5, 0), None);
-    }
-
-    #[test]
-    fn rejects_when_forwarding_would_fall_below_the_minimum() {
-        assert_eq!(amount_after_fee(100, 10, 95), None);
-    }
-
-    #[test]
-    fn forwards_exactly_at_the_declared_minimum() {
-        assert_eq!(amount_after_fee(100, 10, 90), Some(90));
+        assert_eq!(amount_after_fee(3, 5), None);
     }
 
     #[test]
@@ -51,34 +47,22 @@ mod tests {
         // Regression for the basis-point model this replaces (ADR 0010),
         // where a packet under 1000 units at the default rate was carried
         // for free because amount / 1000 rounded down to zero.
-        assert_eq!(amount_after_fee(1, 1, 0), Some(0));
-        assert_eq!(amount_after_fee(1, 2, 0), None);
+        assert_eq!(amount_after_fee(1, 1), Some(0));
+        assert_eq!(amount_after_fee(1, 2), None);
     }
 
     #[test]
     fn zero_fee_forwards_the_full_amount() {
-        assert_eq!(amount_after_fee(42, 0, 42), Some(42));
+        assert_eq!(amount_after_fee(42, 0), Some(42));
     }
 
     proptest! {
         #[test]
-        fn never_forwards_below_the_declared_minimum(
-            amount in any::<u64>(),
-            fee in any::<u64>(),
-            minimum_delivery in any::<u64>(),
-        ) {
-            if let Some(forwarded) = amount_after_fee(amount, fee, minimum_delivery) {
-                prop_assert!(forwarded >= minimum_delivery);
-            }
-        }
-
-        #[test]
         fn never_forwards_more_than_was_received(
             amount in any::<u64>(),
             fee in any::<u64>(),
-            minimum_delivery in any::<u64>(),
         ) {
-            if let Some(forwarded) = amount_after_fee(amount, fee, minimum_delivery) {
+            if let Some(forwarded) = amount_after_fee(amount, fee) {
                 prop_assert!(forwarded <= amount);
             }
         }
@@ -90,7 +74,7 @@ mod tests {
         ) {
             // No rounding, no percentage: whenever a fee can be taken at
             // all, it is taken in full.
-            if let Some(forwarded) = amount_after_fee(amount, fee, 0) {
+            if let Some(forwarded) = amount_after_fee(amount, fee) {
                 prop_assert_eq!(amount - forwarded, fee);
             }
         }

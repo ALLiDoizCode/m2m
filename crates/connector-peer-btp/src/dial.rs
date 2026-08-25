@@ -465,7 +465,6 @@ impl PeerTransport for BtpPeerTransport {
         &self,
         peer_id: &str,
         prepare: Prepare,
-        minimum_delivery: u64,
         claim: Option<WireClaim>,
     ) -> PeerForward {
         let Some(state) = self.relations.get(peer_id) else {
@@ -483,12 +482,6 @@ impl PeerTransport for BtpPeerTransport {
         if let Some(claim) = claim.as_ref() {
             entries.push(self.claim_entry(state, claim));
         }
-        // §5.1: the sender's declaration, re-emitted **unchanged** on this
-        // outbound hop. It is the one carriage-layer field that propagates
-        // rather than being re-derived (§8.3), and crossing carriages must
-        // not alter it.
-        entries.extend(fields::minimum_delivery_protocol_data(minimum_delivery));
-
         // §8.1: `data` rides byte-for-byte unchanged. `Prepare::encode` is
         // the same OER encoding every other carriage puts on a wire, and
         // nothing here re-wraps, pads or truncates a payload it holds no

@@ -330,7 +330,7 @@ async fn main() {
             }
         }
         let started = Instant::now();
-        let (response, _ack) = box_1.handle_peer_prepare(prepare, 0, claim).await;
+        let (response, _ack) = box_1.handle_peer_prepare(prepare, claim).await;
         latencies.push(started.elapsed());
         if matches!(response, PacketResponse::Fulfill(_)) {
             fulfilled += 1;

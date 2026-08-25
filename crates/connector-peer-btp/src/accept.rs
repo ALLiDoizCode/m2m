@@ -605,33 +605,18 @@ impl PeerSession {
             }
         };
 
-        let minimum_delivery = match fields::minimum_delivery(self.binding.role(), protocol_data) {
-            Ok(minimum_delivery) => minimum_delivery,
-            Err(error) => {
-                // §5.1: never silently zero. The claim's verdict rides
-                // this REJECT anyway -- the two answers are independent
-                // (§6.2).
-                return self
-                    .send(self.reject_response(
-                        request_id,
-                        fields::malformed_minimum_delivery_reject(&error),
-                        ack,
-                    ))
-                    .await;
-            }
-        };
-
-        // Issue #880 (owner decision #868): a peer PREPARE to a route this
-        // connector terminates and prices carries a covering claim, or it
-        // is refused with the client edge's own x402 greeting. The decision
-        // is `price_gate`'s, shared with the HTTP carriage so §0.1's one
-        // pipeline cannot admit over one carriage what it refuses over the
-        // other; what is this carriage's is only the frame the refusal is
-        // shaped into.
+        // Issue #880 (owner decision #868) and ADR 0042: a peer PREPARE
+        // carries a covering claim -- the route's `price` where this
+        // connector terminates, the packet's own `amount` where it forwards
+        // -- or it is refused with the client edge's own x402 greeting. The
+        // decision is `price_gate`'s, shared with the HTTP carriage so
+        // §0.1's one pipeline cannot admit over one carriage what it
+        // refuses over the other; what is this carriage's is only the frame
+        // the refusal is shaped into.
         if let Some(refusal) = price_gate::payment_required(
             &self.state.connector,
             &peer_id,
-            &prepare.destination,
+            &prepare,
             ack,
             judged.as_ref().and_then(|judged| judged.claim.as_ref()),
             prior_watermark,
@@ -652,10 +637,7 @@ impl PeerSession {
             // (§7.1): routing and the downstream round trip.
             // `handle_peer_prepare` is handed no claim -- this frame's was
             // judged inline above, in order.
-            let (response, _) = state
-                .connector
-                .handle_peer_prepare(prepare, minimum_delivery, None)
-                .await;
+            let (response, _) = state.connector.handle_peer_prepare(prepare, None).await;
             let frame = encode_packet_response(&role, request_id, response, ack);
             let _ = reply(&replies, frame).await;
         });

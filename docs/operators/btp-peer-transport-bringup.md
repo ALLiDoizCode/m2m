@@ -58,8 +58,8 @@ proven, because they are the default client edge and both ends of the only inter
 - The raw-TCP transport is deleted; `PeerTransport` and `InProcessPeerTransport` remain.
 - Both carriages' peer entries/headers and role-by-auth are specified, with **shared** canonical
   vectors (ADR 0021): `payment-channel-claim` / `Payment-Channel-Claim`, `claim-ack` /
-  `Toon-Claim-Ack`, `toon-minimum-delivery` / `Toon-Minimum-Delivery`, `toon-accumulated-cost` /
-  `Toon-Accumulated-Cost`.
+  `Toon-Claim-Ack`, `toon-accumulated-cost` / `Toon-Accumulated-Cost`. (`toon-minimum-delivery` /
+  `Toon-Minimum-Delivery` was a fourth pair; it is retired with the field, ADR 0057.)
 - `[peers].expose` selects the listeners; each `[[peers]]` entry has an `endpoint` URL whose scheme
   selects the dialed carriage, plus a credential; `[[peer_channels]]` exists and wires `ClaimBook`'s
   channel id, counterparty verification key and EIP-712 domain. A peering with no dialable

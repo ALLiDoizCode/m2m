@@ -1133,8 +1133,7 @@ async fn send_over_btp(
 
 // ── the arithmetic ───────────────────────────────────────────────────────────
 
-/// What this node must put on the PREPARE, and the minimum that must still
-/// be delivered after every hop takes its cut.
+/// What this node must put on the PREPARE.
 ///
 /// ADR 0028's arithmetic, from the originating side. This node forwards
 /// `amount - fee` over a peering, and since #754 the terminating side
@@ -1147,9 +1146,9 @@ async fn send_over_btp(
 /// A destination this node TERMINATES has no fee and no arrival charge --
 /// it is this node's own app -- so the amount is simply the price, which is
 /// what its own edge would have quoted anyway.
-pub fn amount_to_pay(config: &Config, destination: &str, terminus_price: u64) -> (u64, u64) {
+pub fn amount_to_pay(config: &Config, destination: &str, terminus_price: u64) -> u64 {
     let fee = forwarding_fee(config, destination).unwrap_or(0);
-    (terminus_price.saturating_add(fee), terminus_price)
+    terminus_price.saturating_add(fee)
 }
 
 /// The `fee` of the `[[routes]]` entry that would FORWARD `destination` over
@@ -1385,10 +1384,10 @@ pub async fn announce(
     // Originating through its OWN routing, it is the first hop: it forwards
     // `amount - fee`, and since #754 the terminating side charges its own
     // price on arrival -- so the amount must cover both.
-    let (amount, minimum_delivery) = if options.via_own_routing {
+    let amount = if options.via_own_routing {
         amount_to_pay(config, &destination, terms.price)
     } else {
-        (terms.price, terms.price)
+        terms.price
     };
 
     // A dry run negotiates -- an operator asking "what will this say and
@@ -1419,17 +1418,12 @@ pub async fn announce(
             destination = %destination,
             through = %options.through_url,
             amount,
-            minimum_delivery,
             event_id = %event.id,
             "originating the announce through this node's own routing"
         );
         // The same call `POST /packets` makes, with no operator surface in
         // front of it (issue #753) and no second process holding a key.
-        match runtime
-            .connector
-            .handle_prepare(prepare, minimum_delivery)
-            .await
-        {
+        match runtime.connector.handle_prepare(prepare).await {
             PacketResponse::Fulfill(fulfill) => fulfill,
             PacketResponse::Reject(reject) => return Err(reject_error(&reject)),
         }

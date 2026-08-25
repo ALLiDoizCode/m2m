@@ -248,6 +248,15 @@ services:
         }
         channel_open G5mXQzfZb4tXWX7cQvXP9ZJnDBcUo6irWTmGGtX3xpzL HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR 112 100000000
 
+        # 1200 is this path's COST (`CONTEXT.md`), and equals A's own
+        # client-edge `price`: A's fee of 100 plus B's fee of 50 plus the 1000
+        # that reaches C's unpriced termination (issue #1144). Each hop takes a
+        # FLAT number of base units and forwards the rest, so 1200 leaves the
+        # sender, 1100 crosses the chain boundary and 1000 is delivered.
+        # `local_topologies_load.rs` holds this figure and the three committed
+        # configs to that one arithmetic -- nothing in this container can see a
+        # fee quietly dropped back to zero, because both journals below stay
+        # exactly as green when it is.
         send() {
           /usr/local/bin/connector send \
             --operator     http://connector-a:3000 \
@@ -255,7 +264,7 @@ services:
             --to           g.local.mixed.b.c.app \
             --seal-to      http://connector-c:3000 \
             --target       / \
-            --amount       1000 \
+            --amount       1200 \
             --body         /app/data/payload.json \
             --expect-fulfill
         }

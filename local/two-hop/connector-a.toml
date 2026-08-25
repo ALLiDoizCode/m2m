@@ -50,22 +50,49 @@ key_file = "/app/data/signer.key"
 # precisely why a forwarded route was a free gateway that also paid its own
 # peer (issue #620).
 #
-# `fee = 0` IS THE ONLY VALUE THAT WORKS FOR A PACKET THIS TOPOLOGY SENDS, and
-# that is a property of the operator surface rather than of peering. `POST
-# /packets` passes `minimum_delivery = prepare.amount` (ADR 0010 --
-# "this hop authorized exactly `amount` to reach the destination"), and
-# `amount_after_fee` refuses when `amount - fee` falls below it. So an
-# operator-originated packet cannot pay any hop a fee: a non-zero `fee` here
-# makes `connector send` see `R01` rather than a delivery. The peering is still
-# genuinely paid -- see the `[[peer_channels]]` and `[[pay_channels]]` rows
-# below: this node covers the whole forwarded amount with a claim before the
-# packet leaves. The payer of record on the client leg is simply the operator,
-# who is the sender.
+# `fee = 0` used to be THE ONLY VALUE THAT WORKED for a packet this topology
+# sends, and that was a property of the operator surface rather than of
+# peering: `POST /packets` passed `minimum_delivery = prepare.amount`, and
+# `amount_after_fee` refused when `amount - fee` fell below it, so an
+# operator-originated packet could not pay any hop a fee. Minimum delivery is
+# retired (ADR 0057, issue #1143), no packet declares a floor, and this hop now
+# keeps its fee like any other (issue #1144) -- so the flat per-packet fee that
+# is ADR 0010's whole revenue model is finally exercised by a shipped image
+# rather than by `cargo test` alone.
+#
+# THE ARITHMETIC, WRITTEN OUT, BECAUSE NOTHING IN THE CODE CHECKS IT. ADR 0028:
+# this hop collects `price`, forwards `price - fee`, and so earns exactly
+# `fee`. That composes across a path only while every hop keeps
+#
+#     price - fee >= the next hop's price
+#
+# and NO CODE ANYWHERE ENFORCES THAT -- a connector cannot know what the next
+# hop charges (ADR 0028, "Consequences"), so it is kept true by the operator
+# choosing the numbers, which here means by these two figures and B's one:
+#
+#     A collects 1100, retains 100, forwards 1000
+#     B terminates at 1000, and 1100 - 100 == 1000 exactly, with no slack
+#
+# The 1000 is B's committed `price`; the 100 is what carriage over this one
+# peering relation costs (ADR 0010 -- flat per packet, never a share of the
+# amount). The rehearsal sends 1100 because that is the path's COST
+# (`CONTEXT.md`): the fees of every hop that carries the packet plus the price
+# of the route that terminates it. This node's own fee is in that sum without
+# the operator paying anything for it -- it is value that never leaves a node
+# the operator owns, which is why an operator still does not pay their own
+# connector. `local_topologies_load.rs` holds these two figures, B's `price`
+# and the rehearsal's `AMOUNT`/`PRICE`/`FEE` to one arithmetic; no container
+# can notice a price or a fee quietly dropped to zero.
+#
+# The peering is genuinely paid either way -- see the `[[peer_channels]]` and
+# `[[pay_channels]]` rows below: this node covers the whole FORWARDED amount
+# (1000, post-fee) with a claim before the packet leaves. The payer of record
+# on the client leg is simply the operator, who is the sender.
 [[routes]]
 prefix = "g.local.two-hop.b"
 peer_id = "a-b"
-fee = 0
-price = 1000
+fee = 100
+price = 1100
 
 # ── The peering ──────────────────────────────────────────────────────────────
 # ONE id, written identically in both files. `[[peers]].id` names the

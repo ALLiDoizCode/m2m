@@ -236,17 +236,18 @@ pub enum ConfigError {
     )]
     InvalidPeerExposure { value: String },
 
-    /// Issue #883 (B6): the migration knob, spelled wrong. A mistyped value
-    /// must not silently read as the default -- see
-    /// [`crate::peer::ClaimEnforcement`]'s own documentation for why the
-    /// field is temporary.
+    /// ADR 0042 (item 3): the forwarded-arrival migration knob, spelled
+    /// wrong. Refused by name rather than falling through to the default,
+    /// because the default here is the permissive one -- a typo meant as
+    /// "enforce" would leave this peering carrying forwards for free.
     #[error(
-        "invalid claim_enforcement value '{value}' for peer '{id}': a peer sets 'enforce' \
-         (refuse an uncovered peer PREPARE, the default) or 'observe' (admit and log it -- the \
-         rollout's own migration-only canary step, issue #883). Omit the field for the default \
-         ('enforce'); see docs/operators/claim-policy-rollout.md"
+        "invalid forwarded_claim_enforcement value '{value}' for peer '{id}': a peer sets \
+         'observe' (admit an uncovered forwarded arrival and log it -- the default, because the \
+         fleet's send halves are not live yet) or 'enforce' (refuse it with the x402 greeting, \
+         ADR 0042's permanent rule). Omit the field for the default ('observe'); see \
+         docs/operators/claim-policy-rollout.md"
     )]
-    InvalidClaimEnforcement { id: String, value: String },
+    InvalidForwardedClaimEnforcement { id: String, value: String },
 
     /// ADR 0042's cap, written as `0`. A cap of zero refuses every packet
     /// this peering could carry, so it is a peering that silently does
@@ -637,6 +638,26 @@ pub enum ConfigError {
          docs/operators/btp-peer-transport-bringup.md"
     )]
     PeerFlushIntervalRemoved { id: String },
+
+    /// §11's removed-field row, `claim_enforcement` (ADR 0042 item 4, issue
+    /// #1077): the issue #883 migration ramp is gone, so `"observe"` names
+    /// no mode and `"enforce"` names the only behaviour there is. Refused by
+    /// name rather than ignored, because a config still writing `"observe"`
+    /// was written by an operator who believes uncovered arrivals to a
+    /// priced termination are admitted here, and none are.
+    ///
+    /// Not to be confused with `forwarded_claim_enforcement`, which is a
+    /// live field and defaults the other way
+    /// ([`ConfigError::InvalidForwardedClaimEnforcement`]).
+    #[error(
+        "peer '{id}' sets 'claim_enforcement', which was removed with the issue #883 migration \
+         ramp (ADR 0042 item 4, issue #1077): an uncovered peer PREPARE to a priced termination \
+         is now always refused, so 'observe' names a mode this build does not have and \
+         'enforce' names the only behaviour there is. Delete the key rather than replace it -- \
+         and note that 'forwarded_claim_enforcement', which governs forwarded arrivals, is a \
+         different and still-live field; see docs/operators/claim-policy-rollout.md"
+    )]
+    PeerClaimEnforcementRemoved { id: String },
 
     /// The other half of §11's removed-field row, spelled and worded
     /// exactly as PR #718 (`feat/delete-peer-role`) spells it.

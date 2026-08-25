@@ -146,20 +146,11 @@ impl PeerTransport for ConfiguredPeerTransport {
         &self,
         peer_id: &str,
         prepare: Prepare,
-        minimum_delivery: u64,
         claim: Option<WireClaim>,
     ) -> PeerForward {
         match self.transport_for(peer_id) {
-            Some(transport) => {
-                transport
-                    .forward(peer_id, prepare, minimum_delivery, claim)
-                    .await
-            }
-            None => {
-                self.unreachable
-                    .forward(peer_id, prepare, minimum_delivery, claim)
-                    .await
-            }
+            Some(transport) => transport.forward(peer_id, prepare, claim).await,
+            None => self.unreachable.forward(peer_id, prepare, claim).await,
         }
     }
 
@@ -285,7 +276,7 @@ token_network = "0x00000000000000000000000000000000000000bb"
                 reached_peer: reached,
                 ..
             } = transport
-                .forward(peer_id, prepare("g.example.app"), 0, None)
+                .forward(peer_id, prepare("g.example.app"), None)
                 .await;
             assert!(t01(&response), "{peer_id}: {response:?}");
             assert_eq!(ack, ClaimAckOutcome::NotSent);
@@ -308,7 +299,7 @@ token_network = "0x00000000000000000000000000000000000000bb"
             reached_peer: reached,
             ..
         } = transport
-            .forward("never-configured", prepare("g.example.app"), 0, None)
+            .forward("never-configured", prepare("g.example.app"), None)
             .await;
 
         match response {
@@ -354,7 +345,7 @@ token_network = "0x00000000000000000000000000000000000000bb"
             reached_peer: reached,
             ..
         } = transport
-            .forward("dials-in", prepare("g.example.app"), 0, None)
+            .forward("dials-in", prepare("g.example.app"), None)
             .await;
 
         assert!(t01(&response), "{response:?}");

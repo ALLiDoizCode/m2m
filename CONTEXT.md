@@ -152,7 +152,10 @@ _Avoid_: data plane, hot path
 
 **Operator surface**:
 The part of a connector that runs at human frequency — configuration, inspection,
-lifecycle. Never on a packet's path.
+lifecycle. Never on the path of a packet it did not originate. The exception is the whole of
+it: `POST /packets` puts a packet on the path, because originating one is an operator act and
+not carriage. What makes that safe is authentication rather than payment — an operator does not
+pay their own connector, so the credential is a **write key** and never a **covering claim**.
 _Avoid_: control plane, admin
 
 ### Protocol surfaces
@@ -164,7 +167,7 @@ operator surface — and by nothing else. It cannot be bought, learned, earned o
 existence.
 
 **Peer semantics**:
-What a peer interaction _means_ — claim exchange, fees and minimum delivery, reject codes,
+What a peer interaction _means_ — claim exchange, fees, reject codes,
 accumulated cost. Both ends are operator-controlled. Says nothing about where the bytes ride:
 that is carriage, below.
 _Avoid_: peer wire (it named a deleted transport and this layer at once; see ADR 0027)
@@ -311,9 +314,20 @@ which is how a probe discovers it. The sum only — never the per-hop breakdown,
 split between fees and price.
 _Avoid_: total fee, quote
 
-**Minimum delivery**:
-The amount a packet declares must reach its destination. A hop that cannot meet it after its
-fee rejects the packet rather than delivering less.
+**Minimum delivery** _(retired term, [ADR 0057](docs/adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md), issue #1143)_:
+The amount a packet declared must reach its destination, checked by every hop after its own fee
+and answered with `R01` when it could not be met. Retired: once a packet carries the claim that
+pays for it (ADR 0042), the covering claim is already banked when a hop evaluates the floor, so
+rejecting on it returns the sender nothing and only moves where the packet dies. What bounds
+erosion is the claim itself — a hop mints one for the packet's **forwarded** value, so it holds a
+claim for at least what it passes on, and that chains. The field, both its carriage bindings and its
+two vectors are all deleted. `R01` is **not**: only its floor meaning went, and the code still
+answers RFC 0027's own case — a hop's fee alone exceeding the arriving amount, so nothing would be
+forwarded (ADR 0057 as corrected, ADR 0051). Kept here because the term still appears in historical prose
+(`docs/protocol/peer-semantics-pre-868.md` §4, §5.1;
+[`docs/protocol/money-model-pre-868.md`](docs/protocol/money-model-pre-868.md)) and in clauses
+marked retired.
+_Avoid_: floor, guaranteed delivery, minimum amount
 
 **Probe**:
 A packet sent in the expectation that it will be rejected, in order to learn from the reject

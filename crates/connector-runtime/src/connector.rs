@@ -1191,21 +1191,24 @@ impl Connector {
     /// forward it to the matching peer -- and translate whatever comes back
     /// into the ILP-level response a client receives.
     ///
-    /// `minimum_delivery` is the amount the original sender declared must
-    /// reach the destination (ADR 0010). Forwarding to a peer subtracts
-    /// that peering relation's flat fee from `prepare.amount`; if the
-    /// result would fall below `minimum_delivery`, this hop rejects
-    /// (`R01_INSUFFICIENT_SOURCE_AMOUNT`) instead of forwarding a smaller
-    /// amount than declared. Delivering to this connector's own app takes
-    /// no fee -- a fee is earned per peering relation, not for terminating
-    /// traffic at your own destination.
+    /// Forwarding to a peer subtracts that peering relation's flat fee
+    /// from `prepare.amount` (ADR 0010); a packet that does not even cover
+    /// that fee is refused `R01` -- RFC 0027's Insufficient Source Amount,
+    /// the standard meaning that survives ADR 0057's retirement of the
+    /// minimum-delivery one -- rather than forwarded at zero. Nothing
+    /// here checks a declared floor: the packet carries none since ADR
+    /// 0057 (issue #1143), and what bounds erosion is the claim covering
+    /// each crossing -- `cover_forward` mints for the forwarded value, so
+    /// every hop holds a claim for at least what it passes on. Delivering
+    /// to this connector's own app takes no fee -- a fee is earned per
+    /// peering relation, not for terminating traffic at your own
+    /// destination.
     ///
     /// Carries no client channel id in its `"packet"` span -- see
     /// [`Self::handle_prepare_with_client_channel`] for the client edge's
     /// entry point, which does.
-    pub async fn handle_prepare(&self, prepare: Prepare, minimum_delivery: u64) -> PacketResponse {
-        self.handle_prepare_with_client_channel(prepare, minimum_delivery, None)
-            .await
+    pub async fn handle_prepare(&self, prepare: Prepare) -> PacketResponse {
+        self.handle_prepare_with_client_channel(prepare, None).await
     }
 
     /// Same as [`Self::handle_prepare`], but additionally records
@@ -1227,7 +1230,6 @@ impl Connector {
     pub async fn handle_prepare_with_client_channel(
         &self,
         prepare: Prepare,
-        minimum_delivery: u64,
         client_channel_id: Option<&str>,
     ) -> PacketResponse {
         let span = tracing::info_span!(
@@ -1239,7 +1241,7 @@ impl Connector {
         if let Some(channel_id) = client_channel_id {
             span.record("client_channel_id", channel_id);
         }
-        self.handle_prepare_traced(prepare, minimum_delivery, client_channel_id)
+        self.handle_prepare_traced(prepare, client_channel_id)
             .instrument(span)
             .await
     }
@@ -1271,7 +1273,6 @@ impl Connector {
     pub async fn handle_peer_prepare(
         &self,
         prepare: Prepare,
-        minimum_delivery: u64,
         claim: Option<WireClaim>,
     ) -> (PacketResponse, ClaimAckOutcome) {
         let ack = claim.map_or(ClaimAckOutcome::NotSent, |claim| {
@@ -1297,7 +1298,7 @@ impl Connector {
             }
         }
 
-        let response = self.handle_prepare(prepare, minimum_delivery).await;
+        let response = self.handle_prepare(prepare).await;
         (response, ack)
     }
 
@@ -1439,7 +1440,6 @@ impl Connector {
         &self,
         channel_id: &str,
         prepare: Prepare,
-        minimum_delivery: u64,
     ) -> Result<PacketResponse, ProbeDenied> {
         if !self.recognizes_channel(channel_id) {
             return Err(ProbeDenied::NoOpenChannel);
@@ -1470,7 +1470,7 @@ impl Connector {
                 }));
             }
         }
-        Ok(self.handle_prepare(prepare, minimum_delivery).await)
+        Ok(self.handle_prepare(prepare).await)
     }
 
     /// Verify and, if valid, accept a claim received over the peer semantics --
@@ -1500,7 +1500,6 @@ impl Connector {
     async fn handle_prepare_traced(
         &self,
         prepare: Prepare,
-        minimum_delivery: u64,
         client_channel_id: Option<&str>,
     ) -> PacketResponse {
         // Per-packet lines are debug, not info (issue #690): at huddle rates
@@ -1578,9 +1577,7 @@ impl Connector {
             RouteTarget::RuntimePeer(route) => Cow::Owned(route),
         };
         tracing::debug!(peer_id = %peer_route.peer_id(), "routed to peer");
-        let response = self
-            .forward_via_peer_route(&peer_route, prepare, minimum_delivery)
-            .await;
+        let response = self.forward_via_peer_route(&peer_route, prepare).await;
         if matches!(response, PacketResponse::Fulfill(_)) {
             self.metrics.record_fee_earned(peer_route.fee());
         }
@@ -1675,18 +1672,35 @@ impl Connector {
         &self,
         peer_route: &PeerRoute,
         prepare: Prepare,
-        minimum_delivery: u64,
     ) -> PacketResponse {
         let condition = prepare.execution_condition;
-        let Some(forwarded_amount) =
-            amount_after_fee(prepare.amount, peer_route.fee(), minimum_delivery)
-        else {
+        // A packet that does not cover this hop's own flat fee is refused
+        // rather than forwarded at whatever is left. `R01` -- RFC 0027's
+        // "the amount received by a connector in the path was too little to
+        // forward (zero or less)", which is this case verbatim. ADR 0057's
+        // first sweep retired the code outright and ADR 0051's #1143 update
+        // rehomed this case to `F03`; both were wrong, and 0057's corrected
+        // update says so: only R01's *minimum-delivery* meaning dies with
+        // the field. `F03` is for an amount wrong against a price the
+        // sender can pay; here nothing survives the fee at all, the class
+        // letter is relative rather than final, and the move is "send
+        // more".
+        let Some(forwarded_amount) = amount_after_fee(prepare.amount, peer_route.fee()) else {
             return PacketResponse::Reject(Reject {
                 code: RejectCode::r01_insufficient_source_amount(),
                 triggered_by: String::new(),
+                // The message is the sender's only way to learn its next
+                // move, and for a relative code that move is "send more" --
+                // so both figures are named and so is the threshold to
+                // clear (ADR 0051, "what a reject carries besides its
+                // code").
                 message: format!(
-                    "cannot meet minimum delivery {minimum_delivery} after this hop's fee for peer '{}'",
-                    peer_route.peer_id()
+                    "peer '{}' charges a fee of {} and this packet carried only {}: nothing \
+                     would be left to forward. Send more than {}",
+                    peer_route.peer_id(),
+                    peer_route.fee(),
+                    prepare.amount,
+                    peer_route.fee()
                 ),
                 data: Vec::new(),
                 accumulated_cost: 0,
@@ -1764,7 +1778,7 @@ impl Connector {
             };
         let mut answer = self
             .peer_transport
-            .forward(peer_id, outgoing.clone(), minimum_delivery, riding_claim)
+            .forward(peer_id, outgoing.clone(), riding_claim)
             .await;
         if let Some(claim) = pending_claim {
             self.claims
@@ -1783,7 +1797,7 @@ impl Connector {
                 covered = true;
                 answer = self
                     .peer_transport
-                    .forward(peer_id, outgoing, minimum_delivery, Some(covering))
+                    .forward(peer_id, outgoing, Some(covering))
                     .await;
                 // Bounded: whatever the retry answered is the answer. A
                 // second greeting is logged with its terms and relayed, not
@@ -2824,7 +2838,7 @@ mod tests {
         let connector = connector_with(vec![route], app_client.clone(), clock);
         let (sealed, shared_secret) = sealed_prepare(b"hello app");
 
-        let response = connector.handle_prepare(sealed, 0).await;
+        let response = connector.handle_prepare(sealed).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -2895,7 +2909,7 @@ mod tests {
             };
 
             let response = connector
-                .handle_prepare_with_client_channel(prepare, 0, client_channel_id)
+                .handle_prepare_with_client_channel(prepare, client_channel_id)
                 .await;
             assert!(
                 matches!(response, PacketResponse::Fulfill(_)),
@@ -3035,7 +3049,7 @@ mod tests {
         let connector = connector_with(vec![], app_client.clone(), clock);
 
         let response = connector
-            .handle_prepare(prepare("g.nowhere", b"hello"), 0)
+            .handle_prepare(prepare("g.nowhere", b"hello"))
             .await;
 
         match response {
@@ -3135,9 +3149,7 @@ mod tests {
         let mut attempts = 0u32;
         loop {
             tracing::callsite::rebuild_interest_cache();
-            let _ = probe
-                .handle_prepare(prepare("g.nowhere", b"probe"), 0)
-                .await;
+            let _ = probe.handle_prepare(prepare("g.nowhere", b"probe")).await;
             if fields.lock().unwrap().contains_key("correlation_id") {
                 // The probe's own fields must not leak into `work`'s
                 // assertions.
@@ -3170,7 +3182,6 @@ mod tests {
             let _ = connector
                 .handle_prepare_with_client_channel(
                     prepare("g.nowhere", b"hello"),
-                    0,
                     Some("evm:0xdeadbeef"),
                 )
                 .await;
@@ -3195,7 +3206,7 @@ mod tests {
             // client channel available at all, exactly the peer-role and
             // unclaimed-request shapes.
             let _ = connector
-                .handle_prepare(prepare("g.nowhere", b"hello"), 0)
+                .handle_prepare(prepare("g.nowhere", b"hello"))
                 .await;
         })
         .await;
@@ -3219,7 +3230,7 @@ mod tests {
 
         let mut without_condition = prepare("g.example.app", b"hello");
         without_condition.execution_condition = [0u8; 32];
-        let response = connector.handle_prepare(without_condition, 0).await;
+        let response = connector.handle_prepare(without_condition).await;
 
         match response {
             PacketResponse::Reject(reject) => {
@@ -3255,7 +3266,7 @@ mod tests {
         let already_expired =
             prepare_expiring_at("g.example.app", b"hello", now - Duration::seconds(1));
 
-        let response = connector.handle_prepare(already_expired, 0).await;
+        let response = connector.handle_prepare(already_expired).await;
 
         match response {
             PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "R00"),
@@ -3277,19 +3288,13 @@ mod tests {
         let expires_at = start + Duration::seconds(30);
 
         let response = connector
-            .handle_prepare(
-                prepare_expiring_at("g.example.app", b"hello", expires_at),
-                0,
-            )
+            .handle_prepare(prepare_expiring_at("g.example.app", b"hello", expires_at))
             .await;
         assert!(matches!(response, PacketResponse::Fulfill(_)));
 
         clock.advance(Duration::seconds(30));
         let response = connector
-            .handle_prepare(
-                prepare_expiring_at("g.example.app", b"hello", expires_at),
-                0,
-            )
+            .handle_prepare(prepare_expiring_at("g.example.app", b"hello", expires_at))
             .await;
         match response {
             PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "R00"),
@@ -3315,7 +3320,7 @@ mod tests {
         let connector = connector_with(vec![route], app_client.clone(), clock);
         let (data, _shared_secret) = sealed_envelope_request_data(b"hello");
 
-        let response = connector.handle_prepare(prepare_with_data(data), 0).await;
+        let response = connector.handle_prepare(prepare_with_data(data)).await;
 
         match response {
             PacketResponse::Reject(reject) => {
@@ -3345,7 +3350,7 @@ mod tests {
         let connector = connector_with(vec![route], app_client, clock);
         let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-        let response = connector.handle_prepare(sealed, 0).await;
+        let response = connector.handle_prepare(sealed).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -3374,7 +3379,7 @@ mod tests {
         let connector = connector_with(vec![route], app_client.clone(), clock);
         let (data, _shared_secret) = sealed_envelope_request_data(b"hello");
 
-        let response = connector.handle_prepare(prepare_with_data(data), 0).await;
+        let response = connector.handle_prepare(prepare_with_data(data)).await;
 
         match response {
             PacketResponse::Reject(reject) => {
@@ -3395,7 +3400,7 @@ mod tests {
         let connector = connector_with(vec![route], app_client, clock);
 
         let response = connector
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .handle_prepare(prepare("g.example.app", b"hello"))
             .await;
 
         match response {
@@ -3423,7 +3428,7 @@ mod tests {
         let connector = connector_with(vec![general, specific.clone()], app_client.clone(), clock);
 
         let response = connector
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .handle_prepare(prepare("g.example.app", b"hello"))
             .await;
 
         assert!(matches!(response, PacketResponse::Fulfill(_)));
@@ -3462,7 +3467,7 @@ mod tests {
         );
         let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-        let response = first_hop.handle_prepare(sealed, 0).await;
+        let response = first_hop.handle_prepare(sealed).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -3516,7 +3521,7 @@ mod tests {
         .unwrap();
 
         let response = first_hop
-            .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+            .handle_prepare(prepare_with_amount("g.example.app", 100))
             .await;
 
         assert!(matches!(response, PacketResponse::Fulfill(_)));
@@ -3594,11 +3599,11 @@ mod tests {
         .expect("a real base58 32-byte account and public key");
 
         let first = first_hop
-            .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+            .handle_prepare(prepare_with_amount("g.example.app", 100))
             .await;
         assert!(matches!(first, PacketResponse::Fulfill(_)));
         let second = first_hop
-            .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+            .handle_prepare(prepare_with_amount("g.example.app", 100))
             .await;
         assert!(matches!(second, PacketResponse::Fulfill(_)));
 
@@ -3624,9 +3629,11 @@ mod tests {
         assert_eq!(inbound[0].cumulative_amount, 93);
     }
 
+    /// ADR 0057, issue #1143: no floor rides beside the packet any more,
+    /// so the only arithmetic left is this hop's own fee -- and a packet
+    /// that cannot even pay it is refused rather than forwarded at nothing.
     #[tokio::test]
-    async fn a_hop_that_cannot_meet_the_minimum_delivery_after_its_fee_rejects_without_forwarding()
-    {
+    async fn a_hop_whose_fee_exceeds_the_packet_rejects_without_forwarding() {
         let second_hop_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let second_hop_app_client = Arc::new(FakeAppClient::new());
         second_hop_app_client.respond(second_hop_route.handler_url(), answered(b""));
@@ -3647,17 +3654,21 @@ mod tests {
             test_clock(),
         );
 
-        // amount 100, fee 10 -> would forward 90, but the sender declared
-        // a minimum delivery of 95: this hop must reject rather than
-        // forward the smaller amount.
+        // amount 4, fee 10: nothing is left to forward, so this hop
+        // refuses rather than carrying a packet it is not paid for.
         let response = first_hop
-            .handle_prepare(prepare_with_amount("g.example.app", 100), 95)
+            .handle_prepare(prepare_with_amount("g.example.app", 4))
             .await;
 
         match response {
             PacketResponse::Reject(reject) => {
+                // RFC 0027's `R01`, "too little to forward (zero or less)",
+                // and not `F03`: the class letter is itself the sender's
+                // instruction, and this one is relative -- send more --
+                // rather than final (ADR 0051, ADR 0057 as corrected).
                 assert_eq!(reject.code.as_str(), "R01");
-                assert!(reject.message.contains("95"));
+                assert!(reject.message.contains("10"), "{}", reject.message);
+                assert!(reject.message.contains('4'), "{}", reject.message);
             }
             other => panic!("expected a reject, got {other:?}"),
         }
@@ -3711,7 +3722,7 @@ mod tests {
             capped_hop_pair(0, vec![("second-hop".to_string(), 100)]);
 
         let response = first_hop
-            .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+            .handle_prepare(prepare_with_amount("g.example.app", 100))
             .await;
 
         assert!(
@@ -3727,7 +3738,7 @@ mod tests {
             capped_hop_pair(0, vec![("second-hop".to_string(), 100)]);
 
         let response = first_hop
-            .handle_prepare(prepare_with_amount("g.example.app", 101), 0)
+            .handle_prepare(prepare_with_amount("g.example.app", 101))
             .await;
 
         match response {
@@ -3747,7 +3758,7 @@ mod tests {
         let (first_hop, _) = capped_hop_pair(0, vec![("second-hop".to_string(), 250)]);
 
         let response = first_hop
-            .handle_prepare(prepare_with_amount("g.example.app", 900), 0)
+            .handle_prepare(prepare_with_amount("g.example.app", 900))
             .await;
 
         match response {
@@ -3769,10 +3780,10 @@ mod tests {
         let (first_hop, second_hop_app_client) = capped_hop_pair(0, vec![]);
 
         let at_the_default = first_hop
-            .handle_prepare(
-                prepare_with_amount("g.example.app", DEFAULT_MAX_PACKET_AMOUNT),
-                0,
-            )
+            .handle_prepare(prepare_with_amount(
+                "g.example.app",
+                DEFAULT_MAX_PACKET_AMOUNT,
+            ))
             .await;
         assert!(
             matches!(at_the_default, PacketResponse::Fulfill(_)),
@@ -3780,10 +3791,10 @@ mod tests {
         );
 
         let over_the_default = first_hop
-            .handle_prepare(
-                prepare_with_amount("g.example.app", DEFAULT_MAX_PACKET_AMOUNT + 1),
-                0,
-            )
+            .handle_prepare(prepare_with_amount(
+                "g.example.app",
+                DEFAULT_MAX_PACKET_AMOUNT + 1,
+            ))
             .await;
         match over_the_default {
             PacketResponse::Reject(reject) => {
@@ -3812,7 +3823,7 @@ mod tests {
             capped_hop_pair(10, vec![("second-hop".to_string(), 100)]);
 
         let response = first_hop
-            .handle_prepare(prepare_with_amount("g.example.app", 105), 0)
+            .handle_prepare(prepare_with_amount("g.example.app", 105))
             .await;
 
         assert!(
@@ -3834,7 +3845,7 @@ mod tests {
 
         for _ in 0..3 {
             let response = first_hop
-                .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+                .handle_prepare(prepare_with_amount("g.example.app", 100))
                 .await;
             assert!(
                 matches!(response, PacketResponse::Fulfill(_)),
@@ -3853,7 +3864,7 @@ mod tests {
             capped_hop_pair(0, vec![("some-other-peer".to_string(), 1)]);
 
         let response = first_hop
-            .handle_prepare(prepare_with_amount("g.example.app", 5_000), 0)
+            .handle_prepare(prepare_with_amount("g.example.app", 5_000))
             .await;
 
         assert!(
@@ -3883,7 +3894,7 @@ mod tests {
         );
 
         let response = first_hop
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .handle_prepare(prepare("g.example.app", b"hello"))
             .await;
 
         match response {
@@ -3911,7 +3922,7 @@ mod tests {
         .with_identity_signer(identity_signer());
         let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-        let response = connector.handle_prepare(sealed, 0).await;
+        let response = connector.handle_prepare(sealed).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -3956,7 +3967,7 @@ mod tests {
         );
         let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-        let response = first_hop.handle_prepare(sealed, 0).await;
+        let response = first_hop.handle_prepare(sealed).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -4109,7 +4120,7 @@ mod tests {
         let connector = connector_with(vec![route], app_client, test_clock());
 
         connector
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .handle_prepare(prepare("g.example.app", b"hello"))
             .await;
 
         let metrics = connector.metrics().encode();
@@ -4122,7 +4133,7 @@ mod tests {
         let connector = connector_with(vec![], app_client, test_clock());
 
         connector
-            .handle_prepare(prepare("g.nowhere", b"hello"), 0)
+            .handle_prepare(prepare("g.nowhere", b"hello"))
             .await;
 
         let metrics = connector.metrics().encode();
@@ -4156,7 +4167,7 @@ mod tests {
         );
 
         first_hop
-            .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+            .handle_prepare(prepare_with_amount("g.example.app", 100))
             .await;
 
         let metrics = first_hop.metrics().encode();
@@ -4199,7 +4210,7 @@ mod tests {
             .unwrap();
         let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-        let response = first_hop.handle_prepare(sealed, 0).await;
+        let response = first_hop.handle_prepare(sealed).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -4234,7 +4245,7 @@ mod tests {
         // Still active a moment before its limit.
         clock.advance(Duration::seconds(59));
         let response = first_hop
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .handle_prepare(prepare("g.example.app", b"hello"))
             .await;
         match response {
             PacketResponse::Reject(reject) => {
@@ -4250,7 +4261,7 @@ mod tests {
         // One second later, the lease has lapsed -- selected no longer.
         clock.advance(Duration::seconds(1));
         let response = first_hop
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .handle_prepare(prepare("g.example.app", b"hello"))
             .await;
         match response {
             PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "F02"),
@@ -4285,7 +4296,7 @@ mod tests {
         // within the renewed one (60s from the 30s renewal).
         clock.advance(Duration::seconds(40));
         let response = first_hop
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .handle_prepare(prepare("g.example.app", b"hello"))
             .await;
         match response {
             PacketResponse::Reject(reject) => assert_ne!(reject.code.as_str(), "F02"),
@@ -4315,7 +4326,7 @@ mod tests {
             .unwrap();
         let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-        let response = connector.handle_prepare(sealed, 0).await;
+        let response = connector.handle_prepare(sealed).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -4432,7 +4443,6 @@ mod tests {
             &self,
             _peer_id: &str,
             _prepare: Prepare,
-            _minimum_delivery: u64,
             _claim: Option<WireClaim>,
         ) -> PeerForward {
             PeerForward::answered(self.0.clone(), ClaimAckOutcome::NotSent)
@@ -4459,7 +4469,7 @@ mod tests {
         );
 
         let response = connector
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .handle_prepare(prepare("g.example.app", b"hello"))
             .await;
 
         match response {
@@ -4521,7 +4531,7 @@ mod tests {
             let (first_hop, second_hop, _app, _handler_url) = two_hop_setup();
 
             let first = first_hop
-                .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+                .handle_prepare(prepare_with_amount("g.example.app", 100))
                 .await;
             assert!(matches!(first, PacketResponse::Fulfill(_)));
 
@@ -4537,7 +4547,7 @@ mod tests {
             assert!(second_hop.claims().is_empty());
 
             let second = first_hop
-                .handle_prepare(prepare_with_amount("g.example.app", 50), 0)
+                .handle_prepare(prepare_with_amount("g.example.app", 50))
                 .await;
             assert!(matches!(second, PacketResponse::Fulfill(_)));
 
@@ -4572,7 +4582,7 @@ mod tests {
                 ..prepare_with_data(data)
             };
 
-            let response = first_hop.handle_prepare(mismatched, 0).await;
+            let response = first_hop.handle_prepare(mismatched).await;
 
             assert!(matches!(response, PacketResponse::Reject(_)));
             assert!(first_hop.claims().is_empty());
@@ -4587,7 +4597,7 @@ mod tests {
                 Utc.with_ymd_and_hms(2029, 1, 1, 0, 0, 0).unwrap(),
             );
 
-            let response = first_hop.handle_prepare(already_expired, 0).await;
+            let response = first_hop.handle_prepare(already_expired).await;
 
             match response {
                 PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "R00"),
@@ -4603,7 +4613,7 @@ mod tests {
         async fn sweep_flush_sends_a_claim_that_has_no_packet_to_ride() {
             let (first_hop, second_hop, _app, _handler_url) = two_hop_setup();
             first_hop
-                .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+                .handle_prepare(prepare_with_amount("g.example.app", 100))
                 .await;
             assert!(first_hop.claims()[0].pending);
             assert!(second_hop.claims().is_empty());
@@ -4620,7 +4630,7 @@ mod tests {
         async fn sweep_flush_does_nothing_before_the_flush_interval_elapses() {
             let (first_hop, second_hop, _app, _handler_url) = two_hop_setup();
             first_hop
-                .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+                .handle_prepare(prepare_with_amount("g.example.app", 100))
                 .await;
 
             first_hop.sweep_flush(Duration::seconds(60)).await;
@@ -4738,7 +4748,6 @@ mod tests {
                 &self,
                 _peer_id: &str,
                 _prepare: Prepare,
-                _minimum_delivery: u64,
                 claim: Option<WireClaim>,
             ) -> PeerForward {
                 let covered = claim
@@ -4888,13 +4897,10 @@ mod tests {
             const N: u64 = 3;
             for _ in 0..N {
                 let response = connector
-                    .handle_prepare(
-                        Prepare {
-                            amount: PACKET_AMOUNT,
-                            ..sealed.clone()
-                        },
-                        0,
-                    )
+                    .handle_prepare(Prepare {
+                        amount: PACKET_AMOUNT,
+                        ..sealed.clone()
+                    })
                     .await;
                 assert!(
                     matches!(response, PacketResponse::Fulfill(_)),
@@ -4949,13 +4955,10 @@ mod tests {
                 let peer = GreetingPeer::new(expected_fulfillment(&shared_secret));
                 let connector = first_hop(peer.clone(), receiver.clone(), ledger.clone());
                 let response = connector
-                    .handle_prepare(
-                        Prepare {
-                            amount: PACKET_AMOUNT,
-                            ..sealed.clone()
-                        },
-                        0,
-                    )
+                    .handle_prepare(Prepare {
+                        amount: PACKET_AMOUNT,
+                        ..sealed.clone()
+                    })
                     .await;
                 assert!(matches!(response, PacketResponse::Fulfill(_)));
                 assert_eq!(ledger.issued_nonce("second-hop"), 6);
@@ -4967,13 +4970,10 @@ mod tests {
             let peer = GreetingPeer::new(expected_fulfillment(&shared_secret));
             let connector = first_hop(peer.clone(), receiver, ledger);
             let response = connector
-                .handle_prepare(
-                    Prepare {
-                        amount: PACKET_AMOUNT,
-                        ..sealed
-                    },
-                    0,
-                )
+                .handle_prepare(Prepare {
+                    amount: PACKET_AMOUNT,
+                    ..sealed
+                })
                 .await;
 
             assert!(
@@ -5008,13 +5008,10 @@ mod tests {
             let connector = first_hop(peer.clone(), receiver, ledger.clone());
 
             let response = connector
-                .handle_prepare(
-                    Prepare {
-                        amount: PACKET_AMOUNT,
-                        ..sealed
-                    },
-                    0,
-                )
+                .handle_prepare(Prepare {
+                    amount: PACKET_AMOUNT,
+                    ..sealed
+                })
                 .await;
 
             match response {
@@ -5045,13 +5042,10 @@ mod tests {
             let connector = first_hop(peer.clone(), receiver.clone(), ledger.clone());
 
             let response = connector
-                .handle_prepare(
-                    Prepare {
-                        amount: PACKET_AMOUNT,
-                        ..sealed
-                    },
-                    0,
-                )
+                .handle_prepare(Prepare {
+                    amount: PACKET_AMOUNT,
+                    ..sealed
+                })
                 .await;
 
             assert!(matches!(response, PacketResponse::Fulfill(_)));
@@ -5088,13 +5082,10 @@ mod tests {
             let refusing = first_hop(peer.clone(), receiver.clone(), ledger.clone());
 
             let refused = refusing
-                .handle_prepare(
-                    Prepare {
-                        amount: PACKET_AMOUNT,
-                        ..sealed.clone()
-                    },
-                    0,
-                )
+                .handle_prepare(Prepare {
+                    amount: PACKET_AMOUNT,
+                    ..sealed.clone()
+                })
                 .await;
             assert!(matches!(refused, PacketResponse::Reject(_)));
             let seen = peer.seen();
@@ -5119,13 +5110,10 @@ mod tests {
             let peer = GreetingPeer::new(expected_fulfillment(&shared_secret));
             let connector = first_hop(peer.clone(), receiver.clone(), ledger.clone());
             let response = connector
-                .handle_prepare(
-                    Prepare {
-                        amount: PACKET_AMOUNT,
-                        ..sealed
-                    },
-                    0,
-                )
+                .handle_prepare(Prepare {
+                    amount: PACKET_AMOUNT,
+                    ..sealed
+                })
                 .await;
 
             assert!(matches!(response, PacketResponse::Fulfill(_)));
@@ -5169,13 +5157,10 @@ mod tests {
             let connector = first_hop(peer.clone(), receiver.clone(), ledger.clone());
 
             let response = connector
-                .handle_prepare(
-                    Prepare {
-                        amount: PACKET_AMOUNT,
-                        ..sealed
-                    },
-                    0,
-                )
+                .handle_prepare(Prepare {
+                    amount: PACKET_AMOUNT,
+                    ..sealed
+                })
                 .await;
 
             assert!(matches!(response, PacketResponse::Fulfill(_)));
@@ -5220,13 +5205,10 @@ mod tests {
             // `with_outbound_client_hop`.
 
             let response = connector
-                .handle_prepare(
-                    Prepare {
-                        amount: PACKET_AMOUNT,
-                        ..sealed
-                    },
-                    0,
-                )
+                .handle_prepare(Prepare {
+                    amount: PACKET_AMOUNT,
+                    ..sealed
+                })
                 .await;
 
             assert!(matches!(response, PacketResponse::Fulfill(_)));
@@ -5259,13 +5241,10 @@ mod tests {
             );
 
             let response = connector
-                .handle_prepare(
-                    Prepare {
-                        amount: PACKET_AMOUNT,
-                        ..sealed
-                    },
-                    0,
-                )
+                .handle_prepare(Prepare {
+                    amount: PACKET_AMOUNT,
+                    ..sealed
+                })
                 .await;
 
             match response {
@@ -5289,13 +5268,10 @@ mod tests {
             let connector = first_hop(peer.clone(), receiver, ledger.clone());
 
             let response = connector
-                .handle_prepare(
-                    Prepare {
-                        amount: PACKET_AMOUNT,
-                        ..sealed
-                    },
-                    0,
-                )
+                .handle_prepare(Prepare {
+                    amount: PACKET_AMOUNT,
+                    ..sealed
+                })
                 .await;
 
             match response {
@@ -5907,7 +5883,7 @@ mod tests {
             let connector = connector_with(vec![], Arc::new(FakeAppClient::new()), test_clock());
 
             let response = connector
-                .handle_prepare(prepare("g.nowhere", b"hello"), 0)
+                .handle_prepare(prepare("g.nowhere", b"hello"))
                 .await;
 
             match response {
@@ -5924,7 +5900,7 @@ mod tests {
             let entry = chain_of(&[7]);
 
             let response = entry
-                .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+                .handle_prepare(prepare_with_amount("g.example.app", 100))
                 .await;
 
             match response {
@@ -5941,7 +5917,7 @@ mod tests {
             let entry = chain_of(&[7, 3, 11]);
 
             let response = entry
-                .handle_prepare(prepare_with_amount("g.example.app", 1_000), 0)
+                .handle_prepare(prepare_with_amount("g.example.app", 1_000))
                 .await;
 
             match response {
@@ -5981,7 +5957,7 @@ mod tests {
             );
 
             let response = hop0
-                .handle_prepare(prepare_with_amount("g.example.app", 1_000), 0)
+                .handle_prepare(prepare_with_amount("g.example.app", 1_000))
                 .await;
 
             match response {
@@ -6010,7 +5986,7 @@ mod tests {
                     let entry = chain_of(&fees);
 
                     let response = entry
-                        .handle_prepare(prepare_with_amount("g.example.app", 1_000_000), 0)
+                        .handle_prepare(prepare_with_amount("g.example.app", 1_000_000))
                         .await;
 
                     match response {
@@ -6059,7 +6035,7 @@ mod tests {
             // Sealed to `identity_signer()`, not `wrong_identity` above.
             let (sealed, _shared_secret) = sealed_prepare(b"hello");
 
-            let response = connector.handle_prepare(sealed, 0).await;
+            let response = connector.handle_prepare(sealed).await;
 
             match response {
                 PacketResponse::Reject(reject) => {
@@ -6088,7 +6064,7 @@ mod tests {
             // Garbage bytes: not shaped like a gift wrap at all, so it never
             // opens.
             let unopenable = connector
-                .handle_prepare(prepare_with_data(vec![0xff; 40]), 0)
+                .handle_prepare(prepare_with_data(vec![0xff; 40]))
                 .await;
             match unopenable {
                 PacketResponse::Reject(reject) => {
@@ -6106,7 +6082,7 @@ mod tests {
             )
             .unwrap();
             let malformed = connector
-                .handle_prepare(prepare_with_data(malformed_envelope), 0)
+                .handle_prepare(prepare_with_data(malformed_envelope))
                 .await;
             match malformed {
                 PacketResponse::Reject(reject) => {
@@ -6133,7 +6109,7 @@ mod tests {
             let connector = connector_with(vec![route], app_client, test_clock());
             let (data, shared_secret) = sealed_envelope_request_data(b"hello");
 
-            let response = connector.handle_prepare(prepare_with_data(data), 0).await;
+            let response = connector.handle_prepare(prepare_with_data(data)).await;
 
             match response {
                 PacketResponse::Reject(reject) => {
@@ -6165,7 +6141,7 @@ mod tests {
             let connector = connector_with(vec![], Arc::new(FakeAppClient::new()), test_clock());
 
             let response = connector
-                .handle_prepare(prepare("g.nowhere", b"hello"), 0)
+                .handle_prepare(prepare("g.nowhere", b"hello"))
                 .await;
 
             match response {
@@ -6190,7 +6166,7 @@ mod tests {
             let connector = connector_with(vec![route], app_client, test_clock());
             let (data, _shared_secret) = sealed_envelope_request_data(b"hello");
 
-            let response = connector.handle_prepare(prepare_with_data(data), 0).await;
+            let response = connector.handle_prepare(prepare_with_data(data)).await;
 
             match response {
                 PacketResponse::Reject(reject) => {
@@ -6231,7 +6207,7 @@ mod tests {
             let connector = connector_with(vec![route], app_client, test_clock());
             let (data, _shared_secret) = sealed_envelope_request_data(b"hello");
 
-            let response = connector.handle_prepare(prepare_with_data(data), 0).await;
+            let response = connector.handle_prepare(prepare_with_data(data)).await;
 
             match response {
                 PacketResponse::Reject(reject) => {
@@ -6261,7 +6237,7 @@ mod tests {
             .unwrap();
 
             let response = connector
-                .handle_prepare(prepare_with_data(malformed_envelope), 0)
+                .handle_prepare(prepare_with_data(malformed_envelope))
                 .await;
 
             match response {
@@ -6288,7 +6264,7 @@ mod tests {
             // Garbage bytes: not shaped like a gift wrap at all, so it never
             // opens.
             let response = connector
-                .handle_prepare(prepare_with_data(vec![0xff; 40]), 0)
+                .handle_prepare(prepare_with_data(vec![0xff; 40]))
                 .await;
 
             match response {
@@ -6315,7 +6291,7 @@ mod tests {
             let connector = connector_with(vec![route], app_client, test_clock());
             let (sealed, _shared_secret) = sealed_prepare(b"hello");
 
-            let response = connector.handle_prepare(sealed, 0).await;
+            let response = connector.handle_prepare(sealed).await;
 
             match response {
                 PacketResponse::Reject(reject) => {
@@ -6341,7 +6317,7 @@ mod tests {
             let (data, _shared_secret) =
                 sealed_envelope_request_data_with_target("/admin", b"hello");
 
-            let response = connector.handle_prepare(prepare_with_data(data), 0).await;
+            let response = connector.handle_prepare(prepare_with_data(data)).await;
 
             match response {
                 PacketResponse::Reject(reject) => {
@@ -6437,7 +6413,7 @@ mod tests {
                 ..prepare_with_data(mismatched_data)
             };
 
-            let response = first_hop.handle_prepare(packet, 0).await;
+            let response = first_hop.handle_prepare(packet).await;
 
             match response {
                 PacketResponse::Reject(reject) => {
@@ -6473,7 +6449,7 @@ mod tests {
             let connector = connector_with(vec![route], app_client.clone(), test_clock());
 
             let (response, ack) = connector
-                .handle_peer_prepare(prepare_with_amount("g.example.app", 10), 0, None)
+                .handle_peer_prepare(prepare_with_amount("g.example.app", 10), None)
                 .await;
 
             match response {
@@ -6498,7 +6474,7 @@ mod tests {
             let connector = connector_with(vec![route], app_client.clone(), test_clock());
 
             let (response, _ack) = connector
-                .handle_peer_prepare(prepare_with_amount("g.example.app", 25), 0, None)
+                .handle_peer_prepare(prepare_with_amount("g.example.app", 25), None)
                 .await;
 
             assert!(matches!(response, PacketResponse::Fulfill(_)));
@@ -6518,7 +6494,7 @@ mod tests {
             let connector = connector_with(vec![route], app_client.clone(), test_clock());
 
             let (response, _ack) = connector
-                .handle_peer_prepare(prepare_with_amount("g.example.app", 100), 0, None)
+                .handle_peer_prepare(prepare_with_amount("g.example.app", 100), None)
                 .await;
 
             assert!(matches!(response, PacketResponse::Fulfill(_)));
@@ -6537,7 +6513,7 @@ mod tests {
             let connector = connector_with(vec![route], app_client.clone(), test_clock());
 
             let (response, _ack) = connector
-                .handle_peer_prepare(prepare_with_amount("g.example.app", 0), 0, None)
+                .handle_peer_prepare(prepare_with_amount("g.example.app", 0), None)
                 .await;
 
             assert!(matches!(response, PacketResponse::Fulfill(_)));
@@ -6558,7 +6534,7 @@ mod tests {
             let connector = connector_with(vec![route], app_client.clone(), test_clock());
 
             let response = connector
-                .handle_prepare(prepare_with_amount("g.example.app", 10), 0)
+                .handle_prepare(prepare_with_amount("g.example.app", 10))
                 .await;
 
             assert!(matches!(response, PacketResponse::Fulfill(_)));
@@ -6584,13 +6560,13 @@ mod tests {
             let connector = connector_with(vec![], Arc::new(FakeAppClient::new()), test_clock());
 
             let denied = connector
-                .handle_probe(CHANNEL, prepare("g.somewhere.else", b"hello"), 0)
+                .handle_probe(CHANNEL, prepare("g.somewhere.else", b"hello"))
                 .await;
             assert_eq!(denied, Err(ProbeDenied::NoOpenChannel));
 
             connector.recognize_channel(CHANNEL);
             let admitted = connector
-                .handle_probe(CHANNEL, prepare("g.somewhere.else", b"hello"), 0)
+                .handle_probe(CHANNEL, prepare("g.somewhere.else", b"hello"))
                 .await;
             assert!(matches!(admitted, Ok(PacketResponse::Reject(_))));
         }
@@ -6604,12 +6580,12 @@ mod tests {
             connector.recognize_channel(CHANNEL);
 
             let first = connector
-                .handle_probe(CHANNEL, prepare("g.somewhere.else", b"hello"), 0)
+                .handle_probe(CHANNEL, prepare("g.somewhere.else", b"hello"))
                 .await;
             assert!(first.is_ok());
 
             let second = connector
-                .handle_probe(CHANNEL, prepare("g.somewhere.else", b"hello"), 0)
+                .handle_probe(CHANNEL, prepare("g.somewhere.else", b"hello"))
                 .await;
             assert_eq!(second, Err(ProbeDenied::RateLimited));
         }
@@ -6632,7 +6608,7 @@ mod tests {
             connector.recognize_channel(CHANNEL);
             let (probe, _shared_secret) = sealed_prepare(b"hello");
 
-            let response = connector.handle_probe(CHANNEL, probe, 0).await;
+            let response = connector.handle_probe(CHANNEL, probe).await;
 
             match response {
                 Ok(PacketResponse::Reject(reject)) => {
@@ -6657,7 +6633,7 @@ mod tests {
             let connector = connector_with(vec![route], app_client.clone(), test_clock());
             let (packet, _shared_secret) = sealed_prepare(b"hello");
 
-            let response = connector.handle_prepare(packet, 0).await;
+            let response = connector.handle_prepare(packet).await;
 
             assert!(matches!(response, PacketResponse::Fulfill(_)));
             assert_eq!(app_client.deliveries().len(), 1);
@@ -6678,7 +6654,7 @@ mod tests {
             connector.recognize_channel(CHANNEL);
 
             let response = connector
-                .handle_probe(CHANNEL, prepare("g.example.remote", b"hello"), 0)
+                .handle_probe(CHANNEL, prepare("g.example.remote", b"hello"))
                 .await;
 
             match response {
@@ -6756,7 +6732,7 @@ mod tests {
                 rt.block_on(async {
                     for _ in 0..ITERATIONS {
                         let response = connector
-                            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+                            .handle_prepare(prepare("g.example.app", b"hello"))
                             .await;
                         assert!(matches!(response, PacketResponse::Fulfill(_)));
                     }
@@ -6816,7 +6792,7 @@ mod tests {
                 .unwrap();
             let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-            let response = first_hop.handle_prepare(sealed, 0).await;
+            let response = first_hop.handle_prepare(sealed).await;
 
             match response {
                 PacketResponse::Fulfill(fulfill) => {
@@ -7044,7 +7020,7 @@ mod tests {
                 .unwrap();
             let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-            let response = connector.handle_prepare(sealed, 0).await;
+            let response = connector.handle_prepare(sealed).await;
 
             match response {
                 PacketResponse::Fulfill(fulfill) => assert_eq!(

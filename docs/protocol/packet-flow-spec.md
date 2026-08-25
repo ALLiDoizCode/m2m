@@ -1,9 +1,11 @@
 # Packet flow
 
-**Status:** **Normative for its numbered rules.** Absorbs `peer-semantics-pre-868.md` §4 (fee and
-minimum delivery) and §3.1 (a real execution condition), which were the live remnants of a document
-frozen as history by issue #1065, and states the routing and reject rules that had never been written
-in one place.
+**Status:** **Normative for its numbered rules.** Absorbs `peer-semantics-pre-868.md` §4 (fee) and
+§3.1 (a real execution condition), which were the live remnants of a document frozen as history by
+issue #1065, and states the routing and reject rules that had never been written in one place.
+PF-14 – PF-17 are amended or retired by
+[ADR 0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md) (issue #1143); the
+rule numbers are kept and never reused.
 
 **Coverage:** none of PF-01 – PF-24 is vectored. This is a wire surface, so these rules enter
 [ADR 0045](../adr/0045-a-behavioural-rule-is-normative-prose-until-its-vector-lands.md)'s debt ledger;
@@ -87,23 +89,34 @@ realised as the difference between the amount received and the amount forwarded.
 
 **PF-13** `[connector]` — A hop MUST NOT increase an amount while forwarding.
 
-**PF-14** `[connector]` — Given an inbound amount `A`, a declared minimum delivery `M`, and this
-hop's fee `f`: the outgoing amount is `A' = A − f`. If `A' < M` the hop MUST reject `R01` rather than
-forward a packet it already knows cannot meet the declared minimum. Otherwise it forwards `A'` with
-`M` **unchanged**.
+**PF-14** `[connector]` — Given an inbound amount `A` and this hop's fee `f`, the outgoing amount is
+`A' = A − f`. A hop whose fee alone exceeds `A` MUST reject **`R01`** (RFC 0027, Insufficient Source
+Amount: _"the amount received by a connector in the path was too little to forward"_), stating both
+figures, rather than forwarding what is left. **The declared floor this rule used to check is
+retired**: there is no `M`, and `R01` no longer answers an unmet floor — only this, its RFC 0027
+meaning.
+([ADR 0010](../adr/0010-flat-per-packet-fee-and-minimum-delivery.md),
+[ADR 0051](../adr/0051-a-reject-code-binds-where-a-sender-must-act-differently.md),
+[ADR 0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md))
 
-**PF-15** `[connector]` — Because every hop enforces the same inequality against the same unchanged
-`M`, a packet that survives every hop delivers at least `M`. That is the guarantee, and it is
-checkable at every hop rather than trusted end to end.
+**PF-15** `[connector]` — **Retired**, and replaced by the claim rather than restated. What bounds
+erosion across a path is that each crossing is covered: a hop mints its covering claim for the
+packet's own **forwarded** value, so it holds a claim for at least what it passes on and its fee is
+the difference. That property chains, which is the end-to-end guarantee the retired inequality was
+reaching for — enforced with money rather than with a field every hop is trusted to honour.
+([ADR 0042](../adr/0042-a-packet-carries-its-claim.md),
+[ADR 0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md))
 
-**PF-16** `[client]` — **Minimum delivery is a peer-path field.** A client-originated packet declares
-none, and a client's guarantee is the **price** it paid, not a floor
-([ADR 0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md)).
+**PF-16** `[client]` — **Retired.** No packet declares a minimum delivery, so there is no peer-path
+field for a client to be excluded from. A sender's protection is now uniform whatever it is: the
+**price** it paid ([ADR 0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md)) and
+the claim covering each crossing.
+([ADR 0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md))
 
-**PF-17** `[connector]` — On a **client-role** interaction the minimum-delivery field MUST be
-**ignored** — not rejected, and not applied — so that a client SDK setting an unrecognised entry is not
-broken by a peer feature. Rejecting is the trap: it turns a harmless extra header into a refused
-packet, which is the breakage this rule exists to prevent.
+**PF-17** `[connector]` — **Retired.** There is no minimum-delivery field, on either carriage, for
+any role to honour or ignore. Nothing replaces this rule: it existed only to say what a client's
+copy of a peer field bought, and the field is gone.
+([ADR 0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md))
 
 **PF-18** `[connector]` — A packet exceeding the peering's **cap** MUST be refused `T04`, **never
 carried and never split**, and the reject's message MUST state the current cap. The cap bounds one
@@ -152,8 +165,12 @@ Which code answers which situation, and how much of it binds, is
 where a sender can act differently on it than on its class alone, and only there.**
 
 **Binding** — `F00` fix your envelope's target · `F02` this path is wrong · `F03` pay the stated
-amount · `F06` attach a claim · `F99` stop trusting that counterparty · `R01` lower the floor or take
-a cheaper path · `T04` send smaller.
+amount (the route's price, or a priced termination's) · `F06` attach a claim · `F99` stop trusting
+that counterparty · `R01` send more — this hop's fee alone exceeded the amount, so nothing would be
+forwarded (PF-14) · `T04` send smaller. **`R01` no longer answers an unmet floor**
+([ADR 0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md) as corrected): with
+no floor to declare, "lower the floor" is not a move a sender has, but RFC 0027's own meaning for the
+code is untouched and is the only one this connector emits.
 
 **Class-only** — `F01` (malformed packet) · `R00` (expired) · `T00` (this connector's own
 configuration error) · `T01` (app or peer unreachable) · `T05` (rate limited).
@@ -177,8 +194,9 @@ Uses exactly the vocabulary of [`CONTEXT.md`](../../CONTEXT.md) and implements
 [0032](../adr/0032-a-client-destination-is-never-a-route-termination.md),
 [0048](../adr/0048-routing-precedence-is-length-then-rank-and-a-lease-cannot-capture-a-termination.md),
 [0049](../adr/0049-the-cap-bounds-one-packet-is-discovered-by-t04-and-is-set-from-outside.md),
-[0051](../adr/0051-a-reject-code-binds-where-a-sender-must-act-differently.md) and
-[0054](../adr/0054-an-unsealed-termination-reject-answers-where-to-ask.md).
+[0051](../adr/0051-a-reject-code-binds-where-a-sender-must-act-differently.md),
+[0054](../adr/0054-an-unsealed-termination-reject-answers-where-to-ask.md) and
+[0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md).
 
 **Not yet built:** PF-06's terminated-subtree protection (#1078) and PF-24's URL (#1083). PF-18's cap
 is live; its runtime settability is #1079.

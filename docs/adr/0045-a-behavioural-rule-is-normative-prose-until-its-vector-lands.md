@@ -148,3 +148,16 @@ and collapsing them hides one of the two from whoever needs it.
 worked case is a rule about what a reader may _conclude_ rather than what it must do — an unsealed
 reject identifies nobody, which binds a client and a forwarding connector in exactly the same way.
 Where the obligation differs at all, the asymmetry rule above applies instead.
+
+## Update (issue #1143) — two of the named vectors are deleted
+
+[0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md) retires minimum delivery, and
+issue #1143 deletes it. `minimum_delivery_absent` and `minimum_delivery_malformed` — cited here as
+vectors that had landed — are gone from `vectors/wire-vectors.json`, along with the
+`minimum_delivery` field on the two `peer_prepare` cases and the `toon-minimum-delivery` entry and
+header their pinned frames carried. **This is a cross-repo wire change** ([0021](0021-vectors-are-the-normative-cross-repo-contract.md)):
+`toon-client`, `rig` and `swap` replay these.
+
+The rest of the list, and this record's rule, are untouched — a rule with no vector is normative
+prose, and deleting a rule deletes its vector rather than leaving one pinning behaviour nothing
+implements.

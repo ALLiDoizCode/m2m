@@ -54,7 +54,12 @@ key_file = "/app/data/signer.key"
 # one node holding a settlement backend on each of two chains.
 #
 # So what B owes this node is the forwarded amount, and `[[peer_channels]]`
-# below is what that claim is written against.
+# below is what that claim is written against. Since issue #1144 that figure
+# is what is left after two hops have taken their fees: the rehearsal sends
+# 1200, A keeps 100, B keeps 50, and 1000 arrives here -- unpriced, so nothing
+# is required of it, but paid for all the same by the claim B signs on the
+# Solana channel. `connector-a.toml` writes the whole path's arithmetic out in
+# one block.
 [[routes]]
 prefix = "g.local.mixed.b.c.app"
 handler_url = "http://stub-app:3100/"

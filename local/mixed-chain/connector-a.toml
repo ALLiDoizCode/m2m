@@ -11,8 +11,11 @@
 # It is NOT a conversion. The connector has no exchange rate -- ADR 0010
 # replaced the spread with a flat per-packet fee, and value conversion is the
 # `swap` repository's job. Every amount on this path is the same 6-decimal
-# USDC-shaped integer from end to end; what differs is which chain each
-# peering's claims are written against.
+# USDC-shaped integer, and the only thing that ever changes it between hops is
+# a hop subtracting its own FLAT fee (issue #1144): 1200 in, 1100 across the
+# boundary, 1000 delivered -- each step a fixed number of base units, never a
+# rate applied to what arrived. What differs between the legs is which chain
+# each peering's claims are written against.
 #
 # A's role in that is to be the ordinary end: one chain, one peering, no idea
 # that the hop after B is on a different one. Routing does not carry chain, and
@@ -39,16 +42,39 @@ key_file = "/app/data/signer.key"
 # the rest, and each hop's route is a prefix of the next hop's -- which is what
 # makes the address itself say where the packet went.
 #
-# `fee = 0` is forced by how the packet is originated, not by the peering:
-# `POST /packets` passes `minimum_delivery = prepare.amount`, so
-# `amount_after_fee` refuses any hop that would discount it (ADR 0010). See
-# `local/two-hop/connector-a.toml` for the longer note; it applies to every
-# forwarded route in this directory.
+# `fee = 0` was forced by how the packet is originated, not by the peering:
+# `POST /packets` passed `minimum_delivery = prepare.amount`, so
+# `amount_after_fee` refused any hop that would discount it. That lockout is
+# retired (ADR 0057, issue #1143) and every forwarding hop here now charges
+# (issue #1144). See `local/two-hop/connector-a.toml` for the longer note on
+# ADR 0028's two numbers; what is specific to this path is the arithmetic:
+#
+#     A collects 1200, retains 100, forwards 1100   <- this file
+#     B collects 1100, retains  50, forwards 1000   <- connector-b.toml
+#     C terminates the 1000, unpriced               <- connector-c.toml
+#
+# The two fees DIFFER on purpose. A fee is bilateral configuration for one
+# peering relation (ADR 0010), not a network-wide constant, and two identical
+# figures on a three-node path cannot tell a hop charging its own fee from a
+# hop charging the one it was handed.
+#
+# The invariant that makes a path add up -- every hop's `price - fee` is at
+# least the next hop's `price` -- is documented (ADR 0028, "Consequences") and
+# ENFORCED BY NOTHING: a connector cannot know what the next hop charges. So
+# it is true here by construction, 1200 - 100 == 1100 and 1100 - 50 >= 0, and
+# `local_topologies_load.rs` is what holds it that way.
+#
+# 1200 is also what the rehearsal sends, which is this path's COST
+# (`CONTEXT.md`): the fees of every hop that carries the packet plus what the
+# route terminating it is paid. C's route is `price = 0` -- its peering is
+# postpay and a priced termination there would deadlock, see that file -- so
+# what the last leg is actually paid is the 1000 forwarded to it, and that is
+# the figure this path has always delivered.
 [[routes]]
 prefix = "g.local.mixed.b"
 peer_id = "a-b"
-fee = 0
-price = 1000
+fee = 100
+price = 1200
 
 [[peers]]
 id = "a-b"

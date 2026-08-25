@@ -870,9 +870,10 @@ binding; anything else is a client session, with no fallthrough, and everything 
 describes client sessions exactly as before. That credential admits nothing on its own: opening this
 transport is permissionless, a session presenting no credential at all is accepted and stays a
 client, and the credential only ever _upgrades_ an already-admitted session to peer role (see step 1
-below for what a client's `auth` entry is and is not). The peer sub-protocol entries — `claim-ack` and
-`toon-minimum-delivery` beside the `payment-channel-claim` and `toon-accumulated-cost` entries this
-section already defines — are specified for the peer direction, not here.
+below for what a client's `auth` entry is and is not). The peer sub-protocol entries — `claim-ack`
+beside the `payment-channel-claim` and `toon-accumulated-cost` entries this section already defines —
+are specified for the peer direction, not here. (`toon-minimum-delivery` was named here too; it is
+retired with the field, [ADR 0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md).)
 
 > **Superseded** by [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md):
 > the raw-TCP transport is deleted (issue #679) and peers ride this same carriage, or

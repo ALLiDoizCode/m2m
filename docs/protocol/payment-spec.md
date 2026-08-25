@@ -131,9 +131,11 @@ only**, never the per-hop breakdown and never the fee/price split. That is what 
 ([ADR 0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md))
 
 **PM-20** `[connector]` — A **forwarded** route is priced at the client edge, and carries no more than
-it was paid. The invariant `price − fee >= next hop price` is what protects a client across a path,
-and is why a client needs no minimum-delivery floor of its own.
-([ADR 0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md))
+it was paid. The invariant `price − fee >= next hop price` is what protects a client across a path.
+No sender declares a floor of its own — minimum delivery is retired, and what bounds erosion is the
+claim covering each crossing.
+([ADR 0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md),
+[ADR 0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md))
 
 ---
 
@@ -194,8 +196,9 @@ Uses exactly the vocabulary of [`CONTEXT.md`](../../CONTEXT.md) and implements
 [0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md),
 [0040](../adr/0040-a-verified-payment-is-stated-to-the-app.md),
 [0042](../adr/0042-a-packet-carries-its-claim.md),
-[0052](../adr/0052-permissionless-payment-is-guaranteed-and-a-claim-is-what-authorises.md) and
-[0053](../adr/0053-a-solana-claim-binds-its-domain-the-way-an-evm-claim-does.md).
+[0052](../adr/0052-permissionless-payment-is-guaranteed-and-a-claim-is-what-authorises.md),
+[0053](../adr/0053-a-solana-claim-binds-its-domain-the-way-an-evm-claim-does.md) and
+[0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md).
 
 **Not yet built:** PM-10's Solana domain binding (#1082), PM-12's forwarded half (#1031), and the
 lock (#1031, #1035–#1037). Each says so above rather than being written in the present tense.

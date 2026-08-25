@@ -6,7 +6,7 @@
 //! # What this crate is, and what it deliberately is not
 //!
 //! It is the **carriage**: where the bytes ride. It is not the semantics.
-//! Claim exchange, flush, fees, minimum delivery and the refusal taxonomy
+//! Claim exchange, flush, fees and the refusal taxonomy
 //! are `peer-semantics-pre-868.md` §3--§6's and live above the
 //! [`connector_runtime::PeerTransport`] port, unchanged by which wire carried
 //! them. This crate maps §3's table onto requests and responses, and nothing
@@ -19,7 +19,6 @@
 //! | piggybacked claim | `ILP-Payment-Channel-Claim` request header, `base64(JSON)` |
 //! | **FLUSH** | **POST with an empty ILP body** plus the claim header -- the standalone-claim shape of `client-edge-spec.md` §1.9 step 5 |
 //! | CLAIM_ACK | `Toon-Claim-Ack` response header on the response that already answers the claim-bearing request |
-//! | `minimumDelivery` | `Toon-Minimum-Delivery` request header |
 //! | `accumulatedCost` | `Toon-Accumulated-Cost` response header, on a REJECT only |
 //! | peer credential | `Toon-Peer-Auth` request header, `base64(JSON)`, on **every** request |
 //! | flush prompt | `Toon-Flush-Requested` response header -- HTTP only, and only a hint (§6.4) |

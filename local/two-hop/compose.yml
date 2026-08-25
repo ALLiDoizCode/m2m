@@ -156,6 +156,15 @@ services:
   # accepted claims than crossings, or any one of them advancing less than the
   # price, fails the run. A claim that merely EXISTS proves nothing here --
   # that is what a `nonce 2 -> 1000` repeat is.
+  #
+  # And since #1144 the same journal answers the other half of the money
+  # question: WHAT A KEPT. A collects the packet's `AMOUNT` and its claim to B
+  # advances by what it forwarded, so `AMOUNT - advance` is this hop's earnings
+  # -- ADR 0010's rule ("the difference between the cumulative it receives from
+  # upstream and the cumulative it sends downstream") measured on a running
+  # image rather than restated from A's config. It must equal A's `fee`
+  # exactly, in both directions: keeping less than it charges is a hop working
+  # for free, keeping more is a hop eroding what it passes on.
   sender:
     image: connector-rust:local
     profiles: [sender]
@@ -163,11 +172,21 @@ services:
     command:
       - |
         set -e
-        # The four figures this rehearsal is written around. AMOUNT and PRICE
-        # are one number on purpose (see connector-b.toml): the price is the
-        # whole of what A forwards, so the coverage gate has no slack.
-        AMOUNT=1000
+        # The five figures this rehearsal is written around, and the arithmetic
+        # that relates them (ADR 0028, ADR 0010, issue #1144):
+        #
+        #   AMOUNT = FEE + PRICE -- the path's COST (`CONTEXT.md`): A's fee for
+        #     carrying the packet plus the price of the route B terminates. It
+        #     is also exactly A's own client-edge `price`, which is ADR 0028's
+        #     intended `amount == price`.
+        #   PRICE  -- B's committed price, and therefore the whole of what A
+        #     forwards, so the coverage gate has no slack.
+        #   FEE    -- A's committed fee, and what A must be left holding: the
+        #     difference between what it collected and what it forwarded is
+        #     ADR 0010's earnings rule, measured below rather than assumed.
+        AMOUNT=1100
         PRICE=1000
+        FEE=100
         CROSSINGS=2
         CHANNEL=0x57c5462d40a3c60fa89b8fe4f3f24cf560947a413df9a691499e58abea1d63f8
         JOURNAL=/app/payee-state/peer-claims.log
@@ -196,14 +215,30 @@ services:
         # One line per accepted claim on this channel, in the order ClaimBook
         # wrote them: `inbound_claim_accepted <channel> <nonce> <cumulative>
         # <signature>`, tab separated (`connector_runtime::journal`).
-        if ! awk -F '\t' -v channel="$$CHANNEL" -v price="$$PRICE" -v crossings="$$CROSSINGS" '
+        if ! awk -F '\t' -v channel="$$CHANNEL" -v price="$$PRICE" -v crossings="$$CROSSINGS" \
+                 -v amount="$$AMOUNT" -v fee="$$FEE" '
               $$1 == "inbound_claim_accepted" && $$2 == channel {
                 accepted = accepted + 1
                 advance = $$4 - cumulative
-                printf "    claim %d: nonce %s, cumulative %s, advance %d\n", accepted, $$3, $$4, advance
+                retained = amount - advance
+                printf "    claim %d: nonce %s, cumulative %s, advance %d, A retained %d\n", accepted, $$3, $$4, advance, retained
                 if (advance < price) {
                   printf "    ^^ that advance does not cover the %d this route costs\n", price
                   short = 1
+                }
+                # ADR 0010 stated as a measurement rather than as a
+                # restatement of the config: a hops earnings are the
+                # difference between what it collected upstream and what it
+                # sent downstream, and that difference must be its fee
+                # EXACTLY. Two figures from two places -- what the sender
+                # actually put on the wire, and what B wrote in its own
+                # journal -- so a fee silently dropped, doubled, or turned
+                # into a share of the amount all land here. Not implied by
+                # the advance check above: an advance of price + 1 satisfies
+                # that one and means A retained a unit less than it charges.
+                if (retained != fee) {
+                  printf "    ^^ A collected %d and forwarded %d, so it kept %d -- not the %d fee it charges\n", amount, advance, retained, fee
+                  earnings = 1
                 }
                 cumulative = $$4
               }
@@ -212,12 +247,12 @@ services:
                   printf "B accepted %d claims on this channel, but %d crossings were sent and every one of them had to be paid for\n", accepted, crossings
                   exit 1
                 }
-                if (short) { exit 1 }
+                if (short || earnings) { exit 1 }
                 if (cumulative < crossings * price) {
                   printf "the watermark on this channel stands at %d, and %d crossings at %d each is %d\n", cumulative, crossings, price, crossings * price
                   exit 1
                 }
-                printf "    watermark %d = %d crossings x %d\n", cumulative, crossings, price
+                printf "    watermark %d = %d crossings x %d, and A kept %d x %d = %d of the %d it collected\n", cumulative, crossings, price, crossings, fee, crossings * fee, crossings * amount
               }
             ' "$$JOURNAL"; then
           echo 'the priced peer termination was NOT paid for -- see the claim lines above.' >&2

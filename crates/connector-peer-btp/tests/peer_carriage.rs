@@ -34,8 +34,8 @@ use connector_peer_btp::{
 };
 use connector_runtime::{
     ChannelDomain, ClaimAckOutcome, ClaimRejectReason, ClaimSignature, Clock, Connector,
-    FakeAppClient, InMemoryJournal, InProcessPeerTransport, Journal, PeerForward, PeerTransport,
-    TestClock, WireClaim,
+    FakeAppClient, InMemoryJournal, InProcessPeerTransport, Journal, PeerForward, PeerRoute,
+    PeerTransport, TestClock, WireClaim,
 };
 use connector_signer::{
     derive_evm_address, evm_balance_proof_digest, EvmBalanceProof, LocalSigner, Signature, Signer,
@@ -196,10 +196,11 @@ fn carriage(connector: Arc<Connector>, policy: Arc<PeerAuthPolicy>) -> Arc<PeerC
     )
 }
 
-/// [`carriage`], with an explicit [`ClaimEnforcementPolicy`] (issue #883,
-/// child B6) rather than the default (empty, so every peer reads
-/// `ClaimEnforcement::Enforce` -- the same hard-refuse behaviour issue #880
-/// shipped, unaffected by the migration knob existing).
+/// [`carriage`], with an explicit [`ClaimEnforcementPolicy`] rather than the
+/// default (empty, so every peer reads
+/// `ForwardedClaimEnforcement::Observe`). Only ADR 0042's forwarded rule
+/// answers to this policy: the terminated rule's own knob was deleted with
+/// its escape hatch (issue #1077) and refuses unconditionally.
 fn carriage_with_enforcement(
     connector: Arc<Connector>,
     policy: Arc<PeerAuthPolicy>,
@@ -212,6 +213,118 @@ fn carriage_with_enforcement(
         enforcement,
         PeerAcceptPolicy::default(),
     ))
+}
+
+/// The next hop a forwarded arrival is carried to (ADR 0042's item 3), and
+/// the destination that resolves to it.
+const NEXT_HOP_ID: &str = "next-hop";
+const FORWARDED_DESTINATION: &str = "g.example.onward";
+
+/// This peering's flat fee, and the client-edge `price` its forwarded route
+/// carries. Both are deliberately non-zero and deliberately *not* what a
+/// forwarded arrival must cover -- ADR 0042 requires the packet's own
+/// `amount`, so a claim advancing either of these figures is short.
+const FORWARD_FEE: u64 = 3;
+const FORWARD_ROUTE_PRICE: u64 = 5;
+
+/// The amount every forwarded-arrival test sends, matching [`prepare`].
+const ARRIVING_AMOUNT: u64 = 100;
+
+/// As [`payee`], but **forwarding**: one `peer_id` route over which
+/// [`FORWARDED_DESTINATION`] reaches a real second connector that terminates
+/// it. The fixture ADR 0042's item 3 needs, since neither `payee` (no
+/// routes) nor `payee_with_route` (a termination) ever reaches a
+/// `ClientRouteKind::Forwarded` arrival.
+///
+/// Returns the next hop's own app client and identity signer too, so a test
+/// can seal a packet the far end can actually fulfil and then prove the
+/// packet really was carried rather than merely not refused.
+fn forwarding_payee(payer: &dyn Signer) -> (Arc<Connector>, Arc<FakeAppClient>, Arc<dyn Signer>) {
+    let next_hop_route = StaticRoute::new(FORWARDED_DESTINATION, "http://localhost:4100").unwrap();
+    let app_client = Arc::new(FakeAppClient::new());
+    app_client.respond(
+        next_hop_route.handler_url(),
+        connector_runtime::AppOutcome::Answered {
+            response: EnvelopeResponse {
+                status: 200,
+                headers: vec![],
+                body: b"delivered by the next hop".to_vec(),
+            },
+        },
+    );
+    let identity: Arc<dyn Signer> = Arc::new(LocalSigner::generate("next-hop-identity"));
+    let next_hop = Arc::new(
+        Connector::new(
+            vec![next_hop_route],
+            vec![],
+            app_client.clone(),
+            Arc::new(InProcessPeerTransport::new()),
+            clock(),
+        )
+        .with_identity_signer(Arc::clone(&identity)),
+    );
+    let mut onward = InProcessPeerTransport::new();
+    onward.add_peer(NEXT_HOP_ID, next_hop);
+
+    let counterparty = derive_evm_address(&payer.public_key().unwrap());
+    let connector = Arc::new(
+        Connector::new(
+            vec![],
+            vec![PeerRoute::new_priced(
+                FORWARDED_DESTINATION,
+                NEXT_HOP_ID,
+                FORWARD_FEE,
+                FORWARD_ROUTE_PRICE,
+            )],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(onward),
+            clock(),
+        )
+        .with_channel_verification_key(channel_id(), counterparty)
+        .with_channel_domain(channel_id(), domain())
+        .expect("a bytes32 channel id"),
+    );
+    (connector, app_client, identity)
+}
+
+/// A PREPARE sealed to `identity`'s public key (ADR 0018/0019) so the hop
+/// that finally terminates it can fulfil, plus the shared secret needed to
+/// open the answer. Sealing is orthogonal to every gate here and is what
+/// makes "the packet was carried" provable rather than inferred.
+fn sealed_prepare_to(identity: &dyn Signer, destination: &str, amount: u64) -> (Prepare, [u8; 32]) {
+    let envelope = EnvelopeRequest {
+        method: "POST".to_string(),
+        target: "/".to_string(),
+        headers: vec![],
+        body: b"hello".to_vec(),
+    };
+    let identity_public = identity.public_key().expect("identity public key");
+    let (data, shared_secret) =
+        connector_signer::giftwrap::seal_request(&envelope.encode(), &identity_public)
+            .expect("seal");
+    let condition = derive_condition(&connector_signer::giftwrap::derive_fulfillment(
+        &shared_secret,
+    ));
+    (
+        Prepare {
+            amount,
+            expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
+            execution_condition: condition,
+            destination: destination.to_string(),
+            data,
+        },
+        shared_secret,
+    )
+}
+
+/// A policy in which `PEER_ID` enforces ADR 0042's forwarded rule. There is
+/// no terminated setting to leave alone: ADR 0029's rule always enforces
+/// (issue #1077 deleted `claim_enforcement`).
+fn forwarded_enforcing() -> Arc<ClaimEnforcementPolicy> {
+    Arc::new(ClaimEnforcementPolicy::of(vec![(
+        PEER_ID,
+        connector_config::ForwardedClaimEnforcement::Enforce,
+    )]))
 }
 
 fn prepare(destination: &str) -> Prepare {
@@ -363,7 +476,7 @@ async fn a_claim_riding_a_prepare_is_judged_independently_of_the_packet() {
         reached_peer: reached,
         ..
     } = transport
-        .forward(PEER_ID, prepare("g.nowhere"), 0, Some(claim))
+        .forward(PEER_ID, prepare("g.nowhere"), Some(claim))
         .await;
 
     match response {
@@ -388,7 +501,6 @@ async fn the_frames_a_dialed_peering_puts_on_the_wire_are_the_ones_section_3_nam
         .forward(
             PEER_ID,
             prepare("g.nowhere"),
-            1_250,
             Some(sign_claim(&payer_signer, 1, 500)),
         )
         .await;
@@ -419,12 +531,6 @@ async fn the_frames_a_dialed_peering_puts_on_the_wire_are_the_ones_section_3_nam
         serde_json::from_slice(&claim.data).expect("raw UTF-8 JSON, no base64 layer");
     assert_eq!(claim_json["blockchain"], "evm");
     assert_eq!(claim_json["nonce"], 1);
-    let minimum_delivery = message
-        .protocol_data
-        .iter()
-        .find(|pd| pd.name == connector_btp::MINIMUM_DELIVERY_PROTOCOL)
-        .expect("the sender's floor rode unchanged");
-    assert_eq!(minimum_delivery.data, b"1250".to_vec());
 }
 
 // ─── §3, §6: FLUSH is a TRANSFER ───
@@ -765,7 +871,7 @@ async fn a_peer_that_cannot_be_dialed_rejects_t01_and_was_never_reached() {
         reached_peer: reached,
         ..
     } = transport
-        .forward(PEER_ID, prepare("g.somewhere"), 0, None)
+        .forward(PEER_ID, prepare("g.somewhere"), None)
         .await;
 
     match response {
@@ -789,7 +895,7 @@ async fn a_peer_id_this_connector_does_not_dial_rejects_t01() {
         reached_peer: reached,
         ..
     } = transport
-        .forward("nowhere", prepare("g.somewhere"), 0, None)
+        .forward("nowhere", prepare("g.somewhere"), None)
         .await;
 
     match response {
@@ -1064,51 +1170,6 @@ async fn a_dedicated_peer_listener_refuses_rather_than_downgrades() {
     );
 }
 
-// ─── §5.1: minimum delivery ───
-
-/// §5.1: a malformed `toon-minimum-delivery` rejects the PREPARE `F01`
-/// and is **never** silently treated as zero -- zero is the weakest
-/// possible floor, and substituting it turns a framing bug into an
-/// under-delivery. The claim that rode the same frame is still
-/// acknowledged (§6.2).
-#[tokio::test]
-async fn a_malformed_minimum_delivery_rejects_f01_and_is_never_silently_zero() {
-    let payer_signer = LocalSigner::generate("payer");
-    let state = carriage(payee(&payer_signer), bound_policy());
-    let mut session = accepting(state);
-    session.send(auth_frame(1, PEER_ID, SECRET)).await;
-    let _ = session.answer().await;
-
-    let json = claim_as_json(&sign_claim(&payer_signer, 1, 500), &payer_signer);
-    session
-        .send(encode_message(
-            2,
-            &[
-                ProtocolData {
-                    name: CLAIM_PROTOCOL.to_string(),
-                    content_type: CONTENT_TYPE_TEXT,
-                    data: json.into_bytes(),
-                },
-                ProtocolData {
-                    name: connector_btp::MINIMUM_DELIVERY_PROTOCOL.to_string(),
-                    content_type: CONTENT_TYPE_TEXT,
-                    data: b"twelve".to_vec(),
-                },
-            ],
-            &prepare("g.nowhere").encode(),
-        ))
-        .await;
-    let answer = session.answer().await;
-
-    let reject = connector_domain::Reject::decode(&answer.ilp_packet).expect("a REJECT");
-    assert_eq!(reject.code.as_str(), "F01");
-    assert_eq!(
-        ack::from_protocol_data(&answer.protocol_data),
-        Some(ClaimAckOutcome::Accepted),
-        "the claim's verdict is independent of the packet's (§6.2)"
-    );
-}
-
 // ─── issue #880 (owner decision #868): every peer PREPARE to a priced
 // terminated route carries a covering claim, or is refused with the client
 // edge's own x402 greeting ───
@@ -1129,7 +1190,7 @@ async fn a_claimless_peer_prepare_to_a_priced_route_is_refused_with_the_x402_gre
         payment_required,
         ..
     } = transport
-        .forward(PEER_ID, prepare("g.example.app"), 0, None)
+        .forward(PEER_ID, prepare("g.example.app"), None)
         .await;
 
     match response {
@@ -1160,7 +1221,7 @@ async fn a_claim_that_does_not_cover_the_routes_price_is_refused_the_same_way() 
         payment_required,
         ..
     } = transport
-        .forward(PEER_ID, prepare("g.example.app"), 0, Some(claim))
+        .forward(PEER_ID, prepare("g.example.app"), Some(claim))
         .await;
 
     assert_eq!(ack, ClaimAckOutcome::Accepted);
@@ -1240,7 +1301,7 @@ async fn a_covering_claim_is_admitted_exactly_as_today() {
         payment_required,
         ..
     } = transport
-        .forward(PEER_ID, sealed_prepare, 0, Some(claim))
+        .forward(PEER_ID, sealed_prepare, Some(claim))
         .await;
 
     assert_eq!(ack, ClaimAckOutcome::Accepted);
@@ -1257,135 +1318,6 @@ async fn a_covering_claim_is_admitted_exactly_as_today() {
     let opened = EnvelopeResponse::decode(&opened).expect("decode envelope");
     assert_eq!(opened.body, response_body);
     assert_eq!(app_client.deliveries().len(), 1);
-}
-
-// ─── issue #883 (child B6): the `claim_enforcement = "observe"` migration
-// knob admits and logs an uncovered peer PREPARE instead of refusing it ───
-
-/// The migration's whole point: a peering flipped to `Observe` admits a
-/// claimless PREPARE to a priced route -- delivered to the app, no `F06`,
-/// no x402 greeting -- where issue #880's default (`Enforce`, proven by
-/// [`a_claimless_peer_prepare_to_a_priced_route_is_refused_with_the_x402_greeting`])
-/// would have refused it.
-#[tokio::test]
-async fn observe_admits_a_claimless_peer_prepare_the_default_would_refuse() {
-    let payer_signer = LocalSigner::generate("payer");
-    let identity_signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("payee-identity"));
-    let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
-    let app_client = Arc::new(FakeAppClient::new());
-    let response_body = b"irrelevant".to_vec();
-    app_client.respond(
-        route.handler_url(),
-        connector_runtime::AppOutcome::Answered {
-            response: EnvelopeResponse {
-                status: 200,
-                headers: vec![],
-                body: response_body.clone(),
-            },
-        },
-    );
-    let counterparty = derive_evm_address(&payer_signer.public_key().unwrap());
-    let connector = Arc::new(
-        Connector::new(
-            vec![route],
-            vec![],
-            app_client.clone(),
-            Arc::new(InProcessPeerTransport::new()),
-            clock(),
-        )
-        .with_channel_verification_key(channel_id(), counterparty)
-        .with_channel_domain(channel_id(), domain())
-        .expect("a bytes32 channel id")
-        .with_identity_signer(Arc::clone(&identity_signer)),
-    );
-    let enforcement = Arc::new(ClaimEnforcementPolicy::new(vec![(
-        PEER_ID,
-        connector_config::ClaimEnforcement::Observe,
-    )]));
-    let state = carriage_with_enforcement(connector, bound_policy(), enforcement);
-    let dialer = LoopbackDialer::new(state);
-    let transport = transport(Arc::clone(&dialer) as Arc<dyn PeerDialer>, &payer_signer);
-
-    // A genuinely sealed envelope, so a route this gate lets through can
-    // actually fulfil -- proving delivery reached the app, not merely that
-    // no reject fired.
-    let envelope = EnvelopeRequest {
-        method: "POST".to_string(),
-        target: "/".to_string(),
-        headers: vec![],
-        body: b"hello".to_vec(),
-    };
-    let identity_public = identity_signer.public_key().expect("identity public key");
-    let (data, shared_secret) =
-        connector_signer::giftwrap::seal_request(&envelope.encode(), &identity_public)
-            .expect("seal");
-    let condition = derive_condition(&connector_signer::giftwrap::derive_fulfillment(
-        &shared_secret,
-    ));
-    let sealed_prepare = Prepare {
-        amount: 25,
-        expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
-        execution_condition: condition,
-        destination: "g.example.app".to_string(),
-        data,
-    };
-
-    let PeerForward {
-        response,
-        payment_required,
-        ..
-    } = transport
-        // No claim at all -- the shape `Enforce` refuses.
-        .forward(PEER_ID, sealed_prepare, 0, None)
-        .await;
-
-    assert!(
-        payment_required.is_none(),
-        "an admitted packet carries no greeting"
-    );
-    let fulfill = match response {
-        PacketResponse::Fulfill(fulfill) => fulfill,
-        other => panic!("expected a fulfil, got {other:?}"),
-    };
-    let opened = connector_signer::giftwrap::open_response(&shared_secret, &fulfill.data)
-        .expect("open the sealed fulfil");
-    let opened = EnvelopeResponse::decode(&opened).expect("decode envelope");
-    assert_eq!(opened.body, response_body);
-    assert_eq!(app_client.deliveries().len(), 1);
-}
-
-/// A migration is per peering, not global: a second peer id this policy has
-/// no `Observe` entry for still reads `Enforce` -- the safe default -- even
-/// though `ClaimEnforcementPolicy` is non-empty.
-#[tokio::test]
-async fn observe_for_one_peer_does_not_widen_to_a_peer_with_no_entry() {
-    let payer_signer = LocalSigner::generate("payer");
-    let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
-    let enforcement = Arc::new(ClaimEnforcementPolicy::new(vec![(
-        "some-other-peer",
-        connector_config::ClaimEnforcement::Observe,
-    )]));
-    let state = carriage_with_enforcement(
-        payee_with_route(&payer_signer, route),
-        bound_policy(),
-        enforcement,
-    );
-    let dialer = LoopbackDialer::new(state);
-    let transport = transport(Arc::clone(&dialer) as Arc<dyn PeerDialer>, &payer_signer);
-
-    let PeerForward {
-        response,
-        payment_required,
-        ..
-    } = transport
-        .forward(PEER_ID, prepare("g.example.app"), 0, None)
-        .await;
-
-    match response {
-        PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "F06"),
-        other => panic!("expected an F06 reject, got {other:?}"),
-    }
-    assert!(payment_required.is_some());
 }
 
 /// PR #913 review finding: a claim signed by a non-counterparty key still
@@ -1426,7 +1358,7 @@ async fn a_forged_claim_declaring_a_large_amount_does_not_buy_coverage() {
         payment_required,
         ..
     } = transport
-        .forward(PEER_ID, prepare("g.example.app"), 0, Some(claim))
+        .forward(PEER_ID, prepare("g.example.app"), Some(claim))
         .await;
 
     assert_eq!(
@@ -1496,7 +1428,7 @@ async fn a_claim_replayed_at_a_used_nonce_never_buys_coverage() {
             payment_required,
             ..
         } = transport
-            .forward(PEER_ID, prepare("g.example.app"), 0, Some(replayed.clone()))
+            .forward(PEER_ID, prepare("g.example.app"), Some(replayed.clone()))
             .await;
 
         assert_eq!(
@@ -1533,31 +1465,10 @@ async fn a_claim_replayed_at_a_used_nonce_never_buys_coverage() {
 /// the shared secret its answer can be opened with. Orthogonal to the price
 /// gate, but what lets an admitted packet actually fulfil rather than be
 /// refused for want of sealing -- so "admitted" can be proved by the app
-/// having been reached.
+/// having been reached. [`sealed_prepare_to`] at this node's own priced
+/// termination.
 fn sealed_prepare(amount: u64) -> (Prepare, [u8; 32]) {
-    let envelope = EnvelopeRequest {
-        method: "POST".to_string(),
-        target: "/".to_string(),
-        headers: vec![],
-        body: b"hello".to_vec(),
-    };
-    let identity_public = payee_identity().public_key().expect("identity public key");
-    let (data, shared_secret) =
-        connector_signer::giftwrap::seal_request(&envelope.encode(), &identity_public)
-            .expect("seal");
-    let condition = derive_condition(&connector_signer::giftwrap::derive_fulfillment(
-        &shared_secret,
-    ));
-    (
-        Prepare {
-            amount,
-            expires_at: Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
-            execution_condition: condition,
-            destination: "g.example.app".to_string(),
-            data,
-        },
-        shared_secret,
-    )
+    sealed_prepare_to(payee_identity().as_ref(), "g.example.app", amount)
 }
 
 /// An app that actually answers `route`'s handler, so a packet the gate
@@ -1634,7 +1545,7 @@ async fn a_restart_does_not_credit_a_claim_with_the_amount_it_already_paid() {
         ack,
         payment_required,
         ..
-    } = transport.forward(PEER_ID, prepare, 0, Some(claim)).await;
+    } = transport.forward(PEER_ID, prepare, Some(claim)).await;
 
     assert_eq!(
         ack,
@@ -1684,7 +1595,7 @@ async fn a_restart_still_admits_a_claim_that_genuinely_advances_by_the_price() {
         ack,
         payment_required,
         ..
-    } = transport.forward(PEER_ID, prepare, 0, Some(claim)).await;
+    } = transport.forward(PEER_ID, prepare, Some(claim)).await;
 
     assert_eq!(ack, ClaimAckOutcome::Accepted);
     assert!(
@@ -1700,6 +1611,251 @@ async fn a_restart_still_admits_a_claim_that_genuinely_advances_by_the_price() {
     let opened = EnvelopeResponse::decode(&opened).expect("decode envelope");
     assert_eq!(opened.body, response_body);
     assert_eq!(app_client.deliveries().len(), 1);
+}
+
+// ─── ADR 0042 item 3: a forwarded arrival must cover its own `amount`,
+// behind a per-peer knob that defaults to observing ───
+
+/// **The fleet-safety regression guard.** Neither devnet box covers a
+/// forward yet and each forwards to the other, so a peering that configured
+/// nothing must still carry an uncovered forwarded arrival -- admitted,
+/// logged, and actually forwarded to the next hop. If this test ever starts
+/// failing because the default flipped, forwarding stops across the fleet.
+#[tokio::test]
+async fn a_forwarded_arrival_with_no_claim_is_admitted_by_default() {
+    let payer_signer = LocalSigner::generate("payer");
+    let (connector, next_hop_app, next_hop_identity) = forwarding_payee(&payer_signer);
+    // The default policy: no entry for this peering at all, exactly as an
+    // unconfigured `[[peers]]` row resolves.
+    let state = carriage(connector, bound_policy());
+    let dialer = LoopbackDialer::new(state);
+    let transport = transport(Arc::clone(&dialer) as Arc<dyn PeerDialer>, &payer_signer);
+    let (sealed, shared_secret) = sealed_prepare_to(
+        next_hop_identity.as_ref(),
+        FORWARDED_DESTINATION,
+        ARRIVING_AMOUNT,
+    );
+
+    let PeerForward {
+        response,
+        payment_required,
+        ..
+    } = transport.forward(PEER_ID, sealed, None).await;
+
+    assert!(
+        payment_required.is_none(),
+        "an admitted packet carries no greeting"
+    );
+    let fulfill = match response {
+        PacketResponse::Fulfill(fulfill) => fulfill,
+        other => panic!("expected a fulfil from the next hop, got {other:?}"),
+    };
+    let opened = connector_signer::giftwrap::open_response(&shared_secret, &fulfill.data)
+        .expect("open the sealed fulfil");
+    let opened = EnvelopeResponse::decode(&opened).expect("decode envelope");
+    assert_eq!(opened.body, b"delivered by the next hop");
+    assert_eq!(
+        next_hop_app.deliveries().len(),
+        1,
+        "the packet was really carried, not merely not refused"
+    );
+}
+
+/// The same arrival on a peering an operator has flipped: refused `F06`
+/// with the x402 greeting, quoting the packet's own `amount` -- and never
+/// carried, so the next hop does no work this connector was not paid for.
+#[tokio::test]
+async fn a_forwarded_arrival_with_no_claim_is_refused_once_this_peering_enforces() {
+    let payer_signer = LocalSigner::generate("payer");
+    let (connector, next_hop_app, next_hop_identity) = forwarding_payee(&payer_signer);
+    let state = carriage_with_enforcement(connector, bound_policy(), forwarded_enforcing());
+    let dialer = LoopbackDialer::new(state);
+    let transport = transport(Arc::clone(&dialer) as Arc<dyn PeerDialer>, &payer_signer);
+    let (sealed, _) = sealed_prepare_to(
+        next_hop_identity.as_ref(),
+        FORWARDED_DESTINATION,
+        ARRIVING_AMOUNT,
+    );
+
+    let PeerForward {
+        response,
+        payment_required,
+        ..
+    } = transport.forward(PEER_ID, sealed, None).await;
+
+    match response {
+        PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "F06"),
+        other => panic!("expected an F06 reject, got {other:?}"),
+    }
+    let terms = payment_required.expect("the x402 greeting rode the reject");
+    assert_eq!(
+        terms.price(),
+        Some(ARRIVING_AMOUNT),
+        "a forwarded arrival is quoted the packet's own amount, not the route's price"
+    );
+    assert_eq!(terms.pay_to(), Some(FORWARDED_DESTINATION));
+    assert!(
+        next_hop_app.deliveries().is_empty(),
+        "a refused arrival is never carried"
+    );
+}
+
+/// A claim advancing the full arriving `amount` is admitted under **either**
+/// setting: enforcing changes what an uncovered packet gets, never what a
+/// covered one gets.
+#[tokio::test]
+async fn a_claim_covering_the_arriving_amount_is_admitted_under_either_setting() {
+    for enforcement in [
+        Arc::new(ClaimEnforcementPolicy::default()),
+        forwarded_enforcing(),
+    ] {
+        let payer_signer = LocalSigner::generate("payer");
+        let (connector, next_hop_app, next_hop_identity) = forwarding_payee(&payer_signer);
+        let state = carriage_with_enforcement(connector, bound_policy(), enforcement);
+        let dialer = LoopbackDialer::new(state);
+        let transport = transport(Arc::clone(&dialer) as Arc<dyn PeerDialer>, &payer_signer);
+        let (sealed, shared_secret) = sealed_prepare_to(
+            next_hop_identity.as_ref(),
+            FORWARDED_DESTINATION,
+            ARRIVING_AMOUNT,
+        );
+        let claim = sign_claim(&payer_signer, 1, ARRIVING_AMOUNT);
+
+        let PeerForward {
+            response,
+            ack,
+            payment_required,
+            ..
+        } = transport.forward(PEER_ID, sealed, Some(claim)).await;
+
+        assert_eq!(ack, ClaimAckOutcome::Accepted);
+        assert!(
+            payment_required.is_none(),
+            "an admitted packet carries no greeting"
+        );
+        let fulfill = match response {
+            PacketResponse::Fulfill(fulfill) => fulfill,
+            other => panic!("expected a fulfil from the next hop, got {other:?}"),
+        };
+        let opened = connector_signer::giftwrap::open_response(&shared_secret, &fulfill.data)
+            .expect("open the sealed fulfil");
+        let opened = EnvelopeResponse::decode(&opened).expect("decode envelope");
+        assert_eq!(opened.body, b"delivered by the next hop");
+        assert_eq!(next_hop_app.deliveries().len(), 1);
+    }
+}
+
+/// **Which figure must be covered**, stated as the three near misses: not
+/// the forwarded route's client-edge `price` (ADR 0028 says that is a fact
+/// about this node's *client* edge), not the post-fee amount this hop passes
+/// on (that is what this hop covers to the next hop, and the difference it
+/// keeps is its fee, ADR 0010), and not one unit short. Only the arriving
+/// `amount` covers an arriving packet.
+#[tokio::test]
+async fn a_claim_advancing_less_than_the_arriving_amount_never_covers_it() {
+    for advance in [
+        FORWARD_ROUTE_PRICE,
+        ARRIVING_AMOUNT - FORWARD_FEE,
+        ARRIVING_AMOUNT - 1,
+    ] {
+        let payer_signer = LocalSigner::generate("payer");
+        let (connector, next_hop_app, next_hop_identity) = forwarding_payee(&payer_signer);
+        let state = carriage_with_enforcement(connector, bound_policy(), forwarded_enforcing());
+        let dialer = LoopbackDialer::new(state);
+        let transport = transport(Arc::clone(&dialer) as Arc<dyn PeerDialer>, &payer_signer);
+        let (sealed, _) = sealed_prepare_to(
+            next_hop_identity.as_ref(),
+            FORWARDED_DESTINATION,
+            ARRIVING_AMOUNT,
+        );
+        let claim = sign_claim(&payer_signer, 1, advance);
+
+        let PeerForward {
+            response,
+            ack,
+            payment_required,
+            ..
+        } = transport.forward(PEER_ID, sealed, Some(claim)).await;
+
+        // The claim is perfectly valid and is still acknowledged: the two
+        // verdicts stay independent (§6.2).
+        assert_eq!(ack, ClaimAckOutcome::Accepted, "advance {advance}");
+        match response {
+            PacketResponse::Reject(reject) => {
+                assert_eq!(reject.code.as_str(), "F06", "advance {advance}");
+            }
+            other => panic!("expected an F06 reject for advance {advance}, got {other:?}"),
+        }
+        assert!(payment_required.is_some(), "advance {advance}");
+        assert!(
+            next_hop_app.deliveries().is_empty(),
+            "advance {advance} was never carried"
+        );
+    }
+}
+
+/// ADR 0029's rule is **untouched** by ADR 0042, and since issue #1077 it
+/// has no escape hatch at all: a claimless arrival at a priced termination
+/// is refused under **every** setting a peering can carry. The forwarded
+/// knob is the only one left, and neither of its values admits one.
+#[tokio::test]
+async fn no_peering_setting_admits_a_claimless_arrival_at_a_priced_termination() {
+    for forwarded in [
+        connector_config::ForwardedClaimEnforcement::Observe,
+        connector_config::ForwardedClaimEnforcement::Enforce,
+    ] {
+        let payer_signer = LocalSigner::generate("payer");
+        let identity: Arc<dyn Signer> = Arc::new(LocalSigner::generate("payee-identity"));
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
+        let app_client = Arc::new(FakeAppClient::new());
+        app_client.respond(
+            route.handler_url(),
+            connector_runtime::AppOutcome::Answered {
+                response: EnvelopeResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: b"terminated here".to_vec(),
+                },
+            },
+        );
+        let counterparty = derive_evm_address(&payer_signer.public_key().unwrap());
+        let connector = Arc::new(
+            Connector::new(
+                vec![route],
+                vec![],
+                app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                clock(),
+            )
+            .with_channel_verification_key(channel_id(), counterparty)
+            .with_channel_domain(channel_id(), domain())
+            .expect("a bytes32 channel id")
+            .with_identity_signer(Arc::clone(&identity)),
+        );
+        let state = carriage_with_enforcement(
+            connector,
+            bound_policy(),
+            Arc::new(ClaimEnforcementPolicy::of(vec![(PEER_ID, forwarded)])),
+        );
+        let dialer = LoopbackDialer::new(state);
+        let transport = transport(Arc::clone(&dialer) as Arc<dyn PeerDialer>, &payer_signer);
+        let (sealed, _) = sealed_prepare_to(identity.as_ref(), "g.example.app", 25);
+
+        let PeerForward {
+            response,
+            payment_required,
+            ..
+        } = transport.forward(PEER_ID, sealed, None).await;
+
+        assert!(
+            matches!(&response, PacketResponse::Reject(reject) if reject.code.as_str() == "F06"),
+            "forwarded_claim_enforcement = {forwarded}"
+        );
+        assert!(
+            payment_required.is_some(),
+            "forwarded_claim_enforcement = {forwarded}"
+        );
+    }
 }
 
 // ─── §6.1: the four reasons reach the wire ───
@@ -1787,41 +1943,6 @@ async fn claims_sent_in_order_on_one_session_never_race_each_other() {
     }
 }
 
-// ─── §1.7: a client's peer-shaped bytes ───
-
-/// §1.7/§12(5): a client interaction's `toon-minimum-delivery` is
-/// **ignored** -- not rejected and not applied -- so a client SDK that
-/// sets an unrecognised entry is not broken by a peer feature and no error
-/// message discloses the peer surface. A malformed one on a client frame
-/// is therefore not an `F01` either.
-#[tokio::test]
-async fn a_client_interactions_peer_shaped_bytes_are_ignored_not_refused() {
-    let payer_signer = LocalSigner::generate("payer");
-    let state = carriage(payee(&payer_signer), bound_policy());
-    let mut session = accepting(state);
-
-    session
-        .send(encode_message(
-            1,
-            &[ProtocolData {
-                name: connector_btp::MINIMUM_DELIVERY_PROTOCOL.to_string(),
-                content_type: CONTENT_TYPE_TEXT,
-                data: b"twelve".to_vec(),
-            }],
-            &prepare("g.nowhere").encode(),
-        ))
-        .await;
-    let answer = session.answer().await;
-
-    let reject = connector_domain::Reject::decode(&answer.ilp_packet).expect("a REJECT");
-    assert_ne!(
-        reject.code.as_str(),
-        "F01",
-        "a client's minimum-delivery is ignored, never refused"
-    );
-    assert!(ack::from_protocol_data(&answer.protocol_data).is_none());
-}
-
 // ─── §2.3: BTP is symmetric once established ───
 
 /// §2.3: after auth either side may originate on the one session -- the
@@ -1877,7 +1998,7 @@ async fn the_btp_carriage_upholds_the_peer_transport_contract() {
         reached_peer: reached,
         ..
     } = transport
-        .forward(PEER_ID, prepare("g.nowhere-on-the-peer"), 0, None)
+        .forward(PEER_ID, prepare("g.nowhere-on-the-peer"), None)
         .await;
     match response {
         PacketResponse::Reject(reject) => {
@@ -1894,7 +2015,7 @@ async fn the_btp_carriage_upholds_the_peer_transport_contract() {
         reached_peer: reached,
         ..
     } = transport
-        .forward("unregistered", prepare("g.anything"), 0, None)
+        .forward("unregistered", prepare("g.anything"), None)
         .await;
     match response {
         PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "T01"),
@@ -1920,9 +2041,7 @@ async fn concurrent_forwards_share_one_dialed_session() {
     for _ in 0..8 {
         let transport = Arc::clone(&transport);
         handles.push(tokio::spawn(async move {
-            transport
-                .forward(PEER_ID, prepare("g.nowhere"), 0, None)
-                .await
+            transport.forward(PEER_ID, prepare("g.nowhere"), None).await
         }));
     }
     for handle in handles {
