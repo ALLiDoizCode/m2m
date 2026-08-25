@@ -833,6 +833,14 @@ impl ClientChannelSource for SettlementChannelSource {
 /// node whose sync has never once succeeded behaves byte-identically to a
 /// node built before this issue landed.
 ///
+/// Since issue #1151 one more answer falls through: an indexed channel
+/// whose counterparty deposit is **zero**, which is what this index reports
+/// both for a channel that holds nothing and for one whose
+/// `ChannelNewDeposit` is younger than the confirmation depth. See
+/// [`ClientChannelSource::evm_channel`]'s implementation below for why that
+/// zero is asked of the chain rather than reported as a floor -- and why it
+/// is not reported as [`DepositFloor::Unknown`] either.
+///
 /// `EvmChannel::chain_id`/`token_network_address` (the EIP-712 domain) come
 /// from `self.fallback.backend` rather than from a field the index itself
 /// stores per channel: every channel this index ever indexes belongs to the
@@ -881,6 +889,46 @@ impl ClientChannelSource for IndexedEvmChannelSource {
         channel_id: &[u8; 32],
     ) -> Result<Option<EvmChannel>, ChannelLookupFailed> {
         match self.lookup(channel_id) {
+            // Issue #1151. A deposit of zero out of this index is not a
+            // reading, it is the absence of one: `EvmChannelIndex::lookup`
+            // answers `Active` for any channel whose `ChannelOpened` it has
+            // applied and reports `unwrap_or_default()` -- zero -- for a
+            // counterparty it has applied no `ChannelNewDeposit` for. That
+            // is the same value whether the channel holds nothing or the
+            // deposit is simply younger than the index's confirmation
+            // depth, and the index can never tell those apart: it is
+            // permanently `channel_index_confirmations` blocks behind head,
+            // so a deposit made in that window is invisible to it no matter
+            // how long the channel has existed. So the zero is passed to the
+            // chain rather than reported as fact.
+            //
+            // **Not** answered `DepositFloor::Unknown` (the shape issue
+            // #1151 floats first), because `Unknown` *exempts* a claim from
+            // the collateral check entirely -- `DepositFloor::covers` is
+            // unconditionally true, and `POST /ilp/claim-state` reports
+            // `depositTotal: null`, which `OutboundClientLedger::next_claim`
+            // reads as unbounded headroom. `openChannel` costs gas and no
+            // tokens, and emits no deposit event, so "opened and never
+            // funded" is exactly the case that reaches this branch: mapping
+            // it to `Unknown` would let anyone open a channel naming this
+            // node, deposit nothing, and spend claims this connector could
+            // never redeem (`TokenNetwork.sol`'s
+            // `InsufficientChannelBalance`) -- precisely the giveaway issue
+            // #646 exists to prevent. The chain read below refuses that
+            // channel with `AtLeast(0)` and admits a genuinely funded one,
+            // which is the whole property.
+            //
+            // The cost is bounded by machinery that already exists:
+            // `ClientChannelRegistry` memoises whatever comes back (so a
+            // channel that really holds nothing costs one read per
+            // `refresh_after`, not one per packet), and a claim that
+            // breaches the memoised floor is rate-limited by
+            // `min_reattempt_interval`. Forcing even the first read costs an
+            // attacker a real `openChannel` transaction, which is dearer
+            // than the two `eth_call`s it buys.
+            ChannelIndexLookup::Active { deposit, .. } if deposit.is_zero() => {
+                self.fallback.evm_channel(channel_id).await
+            }
             ChannelIndexLookup::Active {
                 counterparty,
                 deposit,
@@ -954,6 +1002,19 @@ struct SolanaChannelSource {
 
 /// Hand-written for the same reason [`SettlementChannelSource`]'s is:
 /// [`SolanaSettlementBackend`] holds an RPC client that is not `Debug`.
+///
+/// # Not affected by issue #1151
+///
+/// There is no Solana twin of [`IndexedEvmChannelSource`] and there is not
+/// going to be one -- `connector_settlement_evm::channel_index`'s own doc
+/// settles that as a decision, since `packages/solana-program` emits
+/// free-text `msg!` lines rather than structured events, so there is nothing
+/// to index. This source's `deposit_floor` is therefore decoded out of the
+/// channel account on the very `getAccountInfo` the lookup already performs,
+/// with no confirmation window between the read and the answer: a zero here
+/// is the account's own balance and not the absence of an event, so it means
+/// exactly what it says and is reported as a floor rather than asked about
+/// again.
 impl fmt::Debug for SolanaChannelSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SolanaChannelSource")
@@ -4683,7 +4744,7 @@ key_file = "{key_file}"
         use super::*;
         use chrono::Duration;
         use connector_settlement_evm::test_support::{
-            anvil_available, Anvil, DEPLOYER_PRIVATE_KEY,
+            anvil_available, require_anvil, Anvil, DEPLOYER_PRIVATE_KEY,
         };
         use connector_settlement_evm::{ChannelIndexEvent, OrderedChannelIndexEvent};
         use connector_settlement_solana::test_support::{
@@ -4969,13 +5030,17 @@ key_file = "{key_path}"
                 },
             };
 
-            // The ordinary read answers from the index: floor zero.
+            // The ordinary read used to answer from the index with a floor
+            // of zero; since issue #1151 the index's zero is a cue to read
+            // the chain, so this one finds the real 750 too. Kept here as
+            // the assertion that the two reads now agree in this window --
+            // the disagreement was the bug.
             let cached = source
                 .evm_channel(&channel_id)
                 .await
                 .expect("index lookup")
                 .expect("active in the index");
-            assert_eq!(cached.deposit_floor, DepositFloor::AtLeast(0));
+            assert_eq!(cached.deposit_floor, DepositFloor::AtLeast(750));
 
             // The breach read reaches the chain and finds the real 750.
             let fresh = source
@@ -5007,6 +5072,136 @@ key_file = "{key_path}"
                     .await
                     .expect("the terminal answer needs no chain"),
                 None
+            );
+        }
+
+        /// Issue #1151, both halves of it in one test because either half
+        /// alone is satisfiable by a wrong fix.
+        ///
+        /// Two channels, identical as far as this node's index is
+        /// concerned: it has applied the `ChannelOpened` of each and the
+        /// `ChannelNewDeposit` of neither. One is funded on chain, the other
+        /// has never held anything. The index reports a deposit of zero for
+        /// both, because that value is what it reports for every
+        /// counterparty it has applied no deposit event for -- so the fix
+        /// cannot be "believe the index" (the funded channel is then
+        /// refused for headroom it has, which is the bug) and it cannot be
+        /// "call the index's zero [`DepositFloor::Unknown`]" either, since
+        /// `Unknown` covers every claim and the unfunded channel would
+        /// become an unlimited line of credit this connector could never
+        /// redeem. Only asking the chain separates them.
+        #[tokio::test]
+        async fn a_channel_funded_inside_the_index_window_is_spendable_and_an_unfunded_one_is_not()
+        {
+            if !require_anvil() {
+                return;
+            }
+
+            let anvil = Anvil::spawn(ANVIL_BASE_PORT).await;
+            let token = EvmSettlementBackend::deploy_mock_token(
+                &anvil.rpc_url,
+                DEPLOYER_PRIVATE_KEY,
+                1_000_000,
+            )
+            .await
+            .expect("deploy mock USDC");
+            let backend = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
+                .await
+                .expect("deploy a TokenNetwork through a fresh registry");
+
+            let funded_counterparty =
+                ethers::signers::LocalWallet::new(&mut ethers::core::rand::thread_rng()).address();
+            let funded = backend
+                .open(
+                    funded_counterparty.as_bytes().to_vec(),
+                    Duration::seconds(3601),
+                )
+                .await
+                .expect("open the funded channel");
+            backend
+                .fund_counterparty(&funded, 750)
+                .await
+                .expect("real ERC-20 value moves on chain for the funded channel");
+
+            let empty_counterparty =
+                ethers::signers::LocalWallet::new(&mut ethers::core::rand::thread_rng()).address();
+            // Opened and deliberately never funded: `openChannel` costs gas
+            // and no tokens, and emits no `ChannelNewDeposit` at all, so
+            // this is the shape an attacker gets for free.
+            let empty = backend
+                .open(
+                    empty_counterparty.as_bytes().to_vec(),
+                    Duration::seconds(3601),
+                )
+                .await
+                .expect("open the never-funded channel");
+
+            let funded_id = channel_id_bytes(&funded.0);
+            let empty_id = channel_id_bytes(&empty.0);
+            let index = Arc::new(EvmChannelIndex::open(None).expect("open in-memory index"));
+            index
+                .apply(
+                    vec![
+                        OrderedChannelIndexEvent {
+                            block_number: 1,
+                            log_index: 0,
+                            event: ChannelIndexEvent::Opened {
+                                channel_id: funded_id,
+                                participant1: backend.own_address(),
+                                participant2: funded_counterparty,
+                            },
+                        },
+                        OrderedChannelIndexEvent {
+                            block_number: 1,
+                            log_index: 1,
+                            event: ChannelIndexEvent::Opened {
+                                channel_id: empty_id,
+                                participant1: backend.own_address(),
+                                participant2: empty_counterparty,
+                            },
+                        },
+                    ],
+                    1,
+                )
+                .expect("apply both opens and neither deposit");
+
+            let source = IndexedEvmChannelSource {
+                index,
+                fallback: SettlementChannelSource {
+                    backend: Arc::new(backend),
+                },
+            };
+
+            let funded = source
+                .evm_channel(&funded_id)
+                .await
+                .expect("the funded channel resolves")
+                .expect("the funded channel is active");
+            assert_eq!(
+                funded.deposit_floor,
+                DepositFloor::AtLeast(750),
+                "the index's zero for a deposit it has not applied yet must not become the \
+                 collateral ceiling -- the chain holds 750"
+            );
+            assert!(
+                funded.deposit_floor.covers(500),
+                "a claim well inside the real deposit is spendable"
+            );
+
+            let empty = source
+                .evm_channel(&empty_id)
+                .await
+                .expect("the never-funded channel resolves")
+                .expect("the never-funded channel is active");
+            assert_eq!(
+                empty.deposit_floor,
+                DepositFloor::AtLeast(0),
+                "a channel that genuinely holds nothing reports a floor of zero, never \
+                 DepositFloor::Unknown -- Unknown exempts, and nothing here earns the exemption"
+            );
+            assert!(
+                !empty.deposit_floor.covers(1),
+                "a claim of one unit against a channel holding nothing is refused"
             );
         }
 

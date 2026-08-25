@@ -501,7 +501,15 @@ signer is the best that can be done:
   window, or the index's own sync lagging or down) falls through to exactly the RPC-reading,
   budget-shaped resolution this section describes, unchanged — so a connector whose index has never
   once caught up behaves exactly as one with no index at all, and the rates and wait above remain the
-  bound for every lookup this index cannot yet answer.
+  bound for every lookup this index cannot yet answer. Since issue #1151 one further answer falls
+  through: an indexed, open channel whose counterparty **deposit reads zero**. The index reports zero
+  both for a channel that holds nothing and for one whose `ChannelNewDeposit` is younger than the
+  confirmation depth, and it can never separate the two — it is permanently that many blocks behind
+  head — so "for how much?" is asked of the chain in that case rather than answered from the map. It
+  is deliberately **not** answered with the declared-channel exemption (`DepositFloor::Unknown`,
+  `depositTotal: null`): that exemption covers every claim, and a channel opened and never funded
+  would become an unlimited line of credit no `claimFromChannel` could ever redeem. A resolved
+  channel still always reports a number; the number is now the chain's.
 
 The rates and the wait are a **deployment** choice for the same reason the three durations above are
 — what a connector can afford to spend discovering channels that do not exist depends on the

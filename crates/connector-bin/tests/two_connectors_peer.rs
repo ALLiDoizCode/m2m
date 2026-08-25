@@ -101,7 +101,6 @@ use connector_btp::{
     decode_frame, encode_message, ProtocolData, AUTH_PROTOCOL, BTP_RESPONSE, CLAIM_ACK_PROTOCOL,
     CLAIM_PROTOCOL, CONTENT_TYPE_TEXT,
 };
-use connector_config::DEFAULT_CHANNEL_INDEX_CONFIRMATIONS;
 use connector_domain::{Prepare, Reject};
 use connector_settlement::SettlementBackend;
 use connector_settlement_evm::test_support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
@@ -356,30 +355,6 @@ struct PeerFixture {
     client_channel_id: String,
 }
 
-/// Mine one empty block on the disposable anvil this fixture spawned.
-///
-/// `anvil_mine` rather than a throwaway transaction: the point is a block
-/// with nothing in it, and a transaction would also move value nobody in
-/// this fixture accounts for.
-async fn mine_one_block(rpc_url: &str) {
-    let response = reqwest::Client::new()
-        .post(rpc_url)
-        .json(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "anvil_mine",
-            "params": [1],
-        }))
-        .send()
-        .await
-        .expect("anvil answers anvil_mine");
-    assert!(
-        response.status().is_success(),
-        "anvil_mine failed: {}",
-        response.status()
-    );
-}
-
 impl PeerFixture {
     /// Spawn the chain and fund the peering's channel. `None` when `anvil`
     /// is unavailable, so callers report the same skip
@@ -465,28 +440,6 @@ impl PeerFixture {
             .fund_counterparty(&client_channel, u128::from(100 * CLIENT_PRICE))
             .await
             .expect("fund the client channel with real ERC-20 value");
-
-        // Both deposits are now real on chain, and both must also be
-        // VISIBLE to a node that starts next -- which is a different
-        // question (issue #661). A node's local channel index applies a
-        // `ChannelNewDeposit` only once it is
-        // `DEFAULT_CHANNEL_INDEX_CONFIRMATIONS` blocks behind head, and
-        // answers `Active { deposit }` for any channel whose `ChannelOpened`
-        // it HAS applied -- so a payee whose index has seen the open and
-        // not yet the deposit reports a `depositTotal` of 0 over
-        // `POST /ilp/claim-state`, and a payer covering a forward against
-        // that answer refuses its own packet for want of headroom it
-        // actually has.
-        //
-        // anvil mines only on a transaction, so nothing here would ever
-        // advance past that window on its own. Six empty blocks put both
-        // deposits behind it, which is the state a chain with any traffic
-        // on it is in permanently. Needed since issue #1145, because the
-        // payer now covers every crossing rather than owing for it
-        // afterwards, and covering is what reads this figure.
-        for _ in 0..(DEFAULT_CHANNEL_INDEX_CONFIRMATIONS + 1) {
-            mine_one_block(&anvil.rpc_url).await;
-        }
 
         Some(PeerFixture {
             rpc_url: anvil.rpc_url.clone(),
