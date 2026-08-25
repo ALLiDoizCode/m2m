@@ -74,6 +74,14 @@
 //! case the delay could hurt -- is a [`ChannelIndexLookup::Miss`] here,
 //! which falls through to the direct `eth_call` read and is served exactly
 //! as fast as it is today.
+//!
+//! A channel *funded* inside the window is the case that sentence missed
+//! (issue #1151): its `ChannelOpened` is applied and its
+//! `ChannelNewDeposit` is not, so it is an
+//! [`Active`](ChannelIndexLookup::Active) with a deposit of zero rather
+//! than a `Miss`, and reading that zero as a collateral ceiling refuses a
+//! claim the chain would honour. The zero is therefore the caller's cue to
+//! read the chain -- see that variant's own doc.
 
 use std::collections::HashMap;
 use std::fs;
@@ -131,6 +139,17 @@ pub enum ChannelIndexLookup {
     Miss,
     /// A channel `own_address` is a participant of and that has not
     /// settled, and what its counterparty has deposited in total.
+    ///
+    /// A `deposit` of **zero** is the one value here that is not a fact
+    /// (issue #1151): it is what this index reports both for a channel
+    /// whose counterparty has genuinely put nothing in and for one whose
+    /// `ChannelNewDeposit` this index has not applied yet, and no amount of
+    /// waiting separates the two -- this index is permanently
+    /// `channel_index_confirmations` blocks behind head, so a deposit made
+    /// inside that window is invisible to it however old the channel is. A
+    /// caller turning this into a collateral ceiling must ask the chain
+    /// instead of believing the zero; see `connector-cli`'s
+    /// `runtime::IndexedEvmChannelSource`, which does exactly that.
     Active {
         counterparty: Address,
         deposit: U256,
