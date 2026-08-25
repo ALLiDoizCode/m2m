@@ -75,3 +75,33 @@ is now simply gone.
 `lockedAmount` and `locksRoot` stay dead and are removed from the balance proof and the
 on-chain contract. In-flight exposure is bounded by packet expiry rather than collateralised
 and arbitrated on-chain.
+
+## Update (issue #1145) — this record's model no longer runs anywhere
+
+The banners above say the headline is retired and the peer path inverted. Both were true of the
+_record_ and only partly true of the tree: until issue #1145 the mechanism this ADR describes was
+still what actually paid for a forward whenever a peering had no `[[pay_channels]]` row —
+`Connector::cover_forward` answered `NotConfigured`, `ClaimBook::record_fulfillment` signed a claim
+once the forward fulfilled, and `pending_claim` put it on the next PREPARE to that peer.
+[ADR 0042](0042-a-packet-carries-its-claim.md) said so plainly ("Until those land, forwarding runs
+0004's model end to end"), and no committed config anywhere wrote such a row except
+`local/two-hop`'s payer.
+
+**That code is deleted.** A forward is covered before it is sent or it is not sent: `cover_forward`
+has no not-configured arm, nothing arms a peer-role pending claim, and `Config::load` refuses a
+peering a `[[routes]]` entry forwards to with no `[[pay_channels]]` row
+(`ConfigError::PayChannelUnbound`). `Connector::sweep_flush` and `ClaimBook::due_for_flush` — the
+FLUSH sweep this record's Consequences call "the real bound on trailing exposure" — go with it:
+nothing can arm a claim for them to sweep, and there is no trailing exposure to bound, because
+nothing is ever owed between packets.
+
+**What survives here is exactly what the Status line already said survives**, and it survives
+untouched: **one claim per packet, never batched**, and `lockedAmount`/`locksRoot` stay dead. The
+"Why not batched" section is unaffected by any of this — under 0042 a packet carries its own claim,
+which is the same one-claim-per-packet rule reached from the other side.
+
+`ClaimBook::record_fulfillment` itself is still in the tree, and its survival is not a survival of
+this model. It is wrapped by `ClientPayoutLedger` for an unrelated live feature — this connector
+paying a **client** back for work it did ([ADR 0026](0026-client-btp-rides-the-client-edge-peers-stay-on-the-peer-wire.md),
+issues #699/#770/#779) — where "sign a fresh cumulative claim and arm it pending" is the right
+shape and no packet is being forwarded at all. The peer role no longer calls it.

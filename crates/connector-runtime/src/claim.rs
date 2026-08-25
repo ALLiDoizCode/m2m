@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{mpsc, Arc, RwLock};
 use std::thread;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 
 use connector_domain::{
     advance_watermark, validate_claim, ClaimError, JournalEntry, Projection, Watermark,
@@ -1114,32 +1114,6 @@ impl ClaimBook {
             .unwrap_or(0)
     }
 
-    /// Every peer whose pending claim has waited at least `flush_interval`
-    /// since it armed, as of `now` -- what a flush sweep should send
-    /// (peer-semantics-pre-868.md §3.3). Checked fresh against the injected clock,
-    /// like `Connector`'s leased-route expiry, rather than driven by a
-    /// stored deadline.
-    pub fn due_for_flush(
-        &self,
-        now: DateTime<Utc>,
-        flush_interval: Duration,
-    ) -> Vec<(String, WireClaim)> {
-        self.outbound
-            .read()
-            .expect("outbound claims lock poisoned")
-            .iter()
-            .filter_map(|(peer_id, ledger)| {
-                let since = ledger.pending_since?;
-                let claim = ledger.pending.clone()?;
-                if now - since >= flush_interval {
-                    Some((peer_id.clone(), claim))
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
     /// Record the outcome of a claim of `nonce` sent to `peer_id`. On
     /// acceptance the pending mark clears -- but only if `nonce` still
     /// names the claim actually pending: a fresher fulfilment may already
@@ -2011,40 +1985,6 @@ mod tests {
         // "credited" being distinct from "pending".
         assert_eq!(book.pending_claim("peer-b"), None);
         assert_eq!(book.outbound_cumulative_amount("peer-b"), 100);
-    }
-
-    #[test]
-    fn a_claim_not_yet_waiting_the_full_flush_interval_is_not_due() {
-        let key = derive_evm_address(&LocalSigner::generate("k").public_key().unwrap());
-        let book = book_with_peer("peer-b", &channel_id(1), key);
-        book.record_fulfillment("peer-b", 100, now()).unwrap();
-
-        let due = book.due_for_flush(now() + Duration::seconds(5), Duration::seconds(10));
-
-        assert!(due.is_empty());
-    }
-
-    #[test]
-    fn a_claim_waiting_the_full_flush_interval_is_due() {
-        let key = derive_evm_address(&LocalSigner::generate("k").public_key().unwrap());
-        let book = book_with_peer("peer-b", &channel_id(1), key);
-        let claim = book.record_fulfillment("peer-b", 100, now()).unwrap();
-
-        let due = book.due_for_flush(now() + Duration::seconds(10), Duration::seconds(10));
-
-        assert_eq!(due, vec![("peer-b".to_string(), claim)]);
-    }
-
-    #[test]
-    fn an_acknowledged_claim_is_never_due_for_flush() {
-        let key = derive_evm_address(&LocalSigner::generate("k").public_key().unwrap());
-        let book = book_with_peer("peer-b", &channel_id(1), key);
-        let claim = book.record_fulfillment("peer-b", 100, now()).unwrap();
-        book.acknowledge_outbound("peer-b", claim.nonce, ClaimAckOutcome::Accepted);
-
-        let due = book.due_for_flush(now() + Duration::days(1), Duration::seconds(10));
-
-        assert!(due.is_empty());
     }
 
     #[test]

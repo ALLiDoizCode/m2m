@@ -738,16 +738,22 @@ mod tests {
     /// unchanged by #902.
     #[tokio::test]
     async fn a_configured_peer_route_still_outranks_an_overlapping_session() {
-        let connector = Arc::new(Connector::new(
-            vec![],
-            vec![connector_runtime::PeerRoute::new(
-                "g.example.peer",
-                "peer-a",
-                0,
-            )],
-            Arc::new(FakeAppClient::new()),
-            Arc::new(InProcessPeerTransport::new()),
-            test_clock(),
+        // ADR 0042: a peering with nothing to pay it from is refused
+        // before the transport is ever reached (issue #1145), so the hop
+        // has to be covered for this test to be about routing at all.
+        let connector = Arc::new(crate::tests::covering(
+            Connector::new(
+                vec![],
+                vec![connector_runtime::PeerRoute::new(
+                    "g.example.peer",
+                    "peer-a",
+                    0,
+                )],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ),
+            "peer-a",
         ));
 
         let registry = SessionRegistry::new();

@@ -66,11 +66,11 @@ nothing left to forward.
 
 ## Topologies
 
-| Topology                       | Nodes | What it proves                                                                                                                                                                               |
-| ------------------------------ | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`solo/`](solo/)               | 1     | The image boots on a mounted config with **both** settlement backends live at once, and a real packet reaches the app behind its one route.                                                  |
-| [`two-hop/`](two-hop/)         | 2     | Two images peered over ILP-over-HTTP. B **prices** the route it terminates; A covers each crossing before sending it, with a real EIP-712 claim on a real funded channel on the local anvil. |
-| [`mixed-chain/`](mixed-chain/) | 3     | A↔B settles on EVM, B↔C on Solana, and B holds **both** backends. A packet originated at A reaches C's app, crossing a chain boundary in the middle.                                         |
+| Topology                       | Nodes | What it proves                                                                                                                                                                                                                                                    |
+| ------------------------------ | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`solo/`](solo/)               | 1     | The image boots on a mounted config with **both** settlement backends live at once, and a real packet reaches the app behind its one route.                                                                                                                       |
+| [`two-hop/`](two-hop/)         | 2     | Two images peered over ILP-over-HTTP. B **prices** the route it terminates; A covers each crossing before sending it, with a real EIP-712 claim on a real funded channel on the local anvil.                                                                      |
+| [`mixed-chain/`](mixed-chain/) | 3     | A↔B settles on EVM, B↔C on Solana, and B holds **both** backends. A packet originated at A reaches C's app, crossing a chain boundary in the middle — and B **enforces** on the arrival it forwards, the only place ADR 0042 item 3's enforcing path runs at all. |
 
 `two_ledgers_never_merge.rs` is named for the both-chains concern and proves it
 in-process; `solo` is the only place a node is actually stood up with an EVM and
@@ -84,10 +84,11 @@ over a network. Its own header is the reference for what a peering has to
 assert; this is that path with the containers left in.
 
 They diverge in exactly one place, and it is deliberate. `two_connectors_peer.rs`
-terminates at `price = 0`; `two-hop`'s payee charges for the route it terminates,
-which is only payable because its payer holds a `[[pay_channels]]` row the
-in-process fixture does not (#1107). So the fixture is still the reference for
-what a peering must assert, and this is the only place a **priced** peer
+terminates at `price = 0`; `two-hop`'s payee charges for the route it terminates.
+Both payers now hold a `[[pay_channels]]` row — the fixture's was added when the
+row became required (issue #1145), and until then it had none (#1107) — so what
+is left of the divergence is only the price. The fixture is still the reference
+for what a peering must assert, and this is the only place a **priced** peer
 termination is stood up and paid at all.
 
 `mixed-chain` is the shape with **no coverage anywhere else in the repository**.
@@ -95,7 +96,7 @@ It is not a conversion: the connector has no exchange rate (ADR 0010 replaced
 the spread with a flat per-packet fee, and value conversion is the `swap`
 repo's job). It is one node settling with different peers on different chains,
 and the only thing that changes an amount between two hops is a hop subtracting
-its own flat fee — 1200 sent, 1100 across the boundary, 1000 delivered.
+its own flat fee — 1200 sent, 1100 across the boundary, 1050 delivered.
 
 ## Keys and money
 
@@ -205,24 +206,30 @@ that only checked the exit status would go green over a peering carrying
 traffic for free — the same nothing-asserted success ADR 0007 bans elsewhere.
 
 So `two-hop` and `mixed-chain` cross **twice** and then read the payee's own
-claim journal. They cross twice for two different reasons, and the difference
-is the whole of what a `[[pay_channels]]` row changes.
+claim journal. **Both now cross twice for the same reason**, and that reason is
+issue #1102: a covering payer asks the payee where its claims stand on every
+packet, and a payee answering out of the wrong book reports nonce 0 forever — so
+crossing 2 re-signs crossing 1's cumulative amount at a fresh nonce and advances
+nothing, accepted every time and buying nothing. One crossing cannot see that.
+Two can, and did.
 
-`mixed-chain` owes after the fact. Value moves on fulfilment (ADR 0004), so its
-payer owes nothing until the first crossing has fulfilled: the claim covering
-crossing _n_ is signed after it and rides crossing _n + 1_. One packet proves
-delivery and can say nothing about payment, which is why there is a second one.
-`two_connectors_peer.rs` crosses twice for exactly that reason.
+**`mixed-chain` used to cross twice for a different reason, and that reason has
+stopped existing** (issue #1145). It was postpay: value moved on fulfilment (ADR
+0004), so its payer owed nothing until the first crossing had fulfilled and the
+claim covering crossing _n_ rode crossing _n + 1_ — one packet proved delivery
+and could say nothing at all about payment. That model is deleted from the tree,
+not relocated: `cover_forward` has no uncovered arm, no fulfilment arms a peer
+claim, and `Config::load` refuses a peering a route forwards to with no
+`[[pay_channels]]` row. **The coverage the second crossing used to provide does
+not move somewhere else. It stops being needed, because the thing it covered
+stops existing.** What the second crossing is worth here now is exactly what it
+is worth on `two-hop`, and no more.
 
-`two-hop` does not owe after the fact. A holds a `[[pay_channels]]` row (ADR
-0042 item 2), so `cover_forward` mints the claim **before** the packet is sent
-and crossing 1 arrives already paid for — which is precisely what lets B price
-the route it terminates, since a priced peer termination refuses an uncovered
-arrival. Its second crossing is a different assertion: a covering payer asks the
-payee where its claims stand on every packet, and a payee answering out of the
-wrong book reports nonce 0 forever, so crossing 2 re-signs crossing 1's
-cumulative amount at a fresh nonce and advances nothing. That is issue #1102,
-and one crossing cannot see it. Two can, and did.
+Both topologies' payers hold `[[pay_channels]]` rows (ADR 0042 item 2), so
+`cover_forward` mints the claim **before** the packet is sent and crossing 1
+arrives already paid for. On `two-hop` that is what lets B price the route it
+terminates, since a priced peer termination refuses an uncovered arrival. On
+`mixed-chain` it is what lets B **enforce** on the arrival from A — see below.
 
 **What reading the journal proves, and what it does not.** `two-hop`'s sender
 walks B's journal line by line and fails unless there are at least as many
@@ -253,12 +260,21 @@ about whether any of it could be **redeemed on chain**, for the reason the next
 section gives: nothing on the peer path reads a chain. And it says nothing about
 the BTP carriage, which no topology here runs.
 
-`mixed-chain`'s money check is the weaker one, and deliberately so: it greps
-each payee's journal for an accepted claim on its own channel and stops there.
-That is enough for the question that topology asks — did a packet cross a chain
-boundary and did each leg get paid at all — and it could not ask more, because
-its terminations are unpriced and there is no price for an advance to be
-measured against.
+`mixed-chain`'s money check used to be the weaker one, and could not have been
+anything else: it greps each payee's journal for an accepted claim on its own
+channel, and while the legs were postpay there was no figure to hold that claim
+to — after N crossings a journal legitimately held N − 1 claims, because the
+last crossing was unpaid by construction. Both legs cover before they send now
+(issue #1145), so N crossings owe exactly N advances, and each payee's journal
+is checked against **its own** figure: 1100 accepted at B per crossing, 1050 at
+C. That difference is B's flat fee, measured on a running image, and it is the
+one thing a grep could never see — a fee back at zero, or doubled, leaves both
+journals as green as ever while moving one of those two numbers.
+
+It gained a second thing on the other side of the same crossing: B's `a-b`
+peering **enforces**, so an arrival from A that carried no covering claim is
+refused `F06` and never reaches C at all. A regression that stopped A covering
+fails `--expect-fulfill` on the first crossing rather than passing quietly.
 
 This is also why `make local-down` removes the state volumes. Both local chains
 wipe their own state on every start, so keeping a claim journal across a
@@ -293,22 +309,28 @@ volumes are the journals the money assertion reads.
 
 Two consequences worth knowing before editing a config here:
 
-- **A postpay peer termination cannot be priced, and the way out is on the
-  payer.** A route a node both terminates and prices refuses a peer PREPARE that
-  arrives without a covering claim (`F06`, issue #880) — and a postpay peering's
-  first crossing carries none, so it is refused, never fulfils, leaves nothing
-  owed, and the second carries none either. The peering deadlocks rather than
-  charging. ADR 0042's `[[pay_channels]]` breaks that circle by covering the
-  PREPARE before it is sent instead of owing for it after it fulfils.
-  **`two-hop` configures one**, which is why its payee can price the route it
-  terminates; `mixed-chain` does not, so its termination stays `price = 0` and
-  what a hop there is actually paid is the forwarded amount. Pricing a
-  termination is therefore a property of the pair, not of the payee: adding a
-  price without the payer's row is the deadlock above.
+- **Every payer here holds a `[[pay_channels]]` row, and none of them has a
+  choice about it** (issue #1145). A peering a `[[routes]]` entry forwards to
+  with no row is refused at load by name (`ConfigError::PayChannelUnbound`):
+  ADR 0042 has a connector cover every PREPARE it sends, and there is no longer
+  an uncovered path for a forward to take. A peering a node only _receives_ on
+  needs nothing — `mixed-chain`'s B holds one of those (`a-b`), and `two-hop`'s
+  B and `mixed-chain`'s C are entirely accept-only.
+
+  What that row buys, beyond paying: **a peer termination can be priced.** A
+  route a node both terminates and prices refuses a peer PREPARE that arrives
+  without a covering claim (`F06`, issue #880), and under the deleted postpay
+  convention the first crossing carried none — so it was refused, never
+  fulfilled, left nothing owed, and the second carried none either. The peering
+  deadlocked rather than charging. `two-hop`'s payee prices its termination for
+  exactly that reason. `mixed-chain`'s C still terminates at `price = 0`, and
+  now only because that is not what that topology is about: what a hop there is
+  paid is the forwarded amount, on a real Solana claim.
   `local/two-hop/connector-a.toml` and `connector-b.toml` carry the two halves
   of the long version, including the defect the row found the first time it was
   tried here (issue #1102, fixed by #1103, and the reason the rehearsal counts
   what each claim **advanced** rather than that a claim exists).
+
 - **Every forwarding hop charges, and the numbers are kept true by hand.** Each
   forwarded route here has a real `fee` (issue #1144), so the flat per-packet
   fee that is ADR 0010's whole revenue model is finally exercised by a shipped
@@ -330,7 +352,7 @@ Two consequences worth knowing before editing a config here:
   | --------------- | -------- | ----- | ------------------------------------------- |
   | `two-hop` A     | 1100     | 100   | 1000, which is B's price exactly            |
   | `mixed-chain` A | 1200     | 100   | 1100, which is B's price exactly            |
-  | `mixed-chain` B | 1100     | 50    | 1000, delivered to C's unpriced termination |
+  | `mixed-chain` B | 1100     | 50    | 1050, delivered to C's unpriced termination |
 
   The two `mixed-chain` fees differ deliberately: a fee is one peering
   relation's bilateral price for carriage, never a network-wide constant, and
@@ -340,17 +362,22 @@ Two consequences worth knowing before editing a config here:
   hop's own fee sits in that sum without the operator paying anybody: it is
   value that never leaves a node the operator owns.
 
-- **No peering here enforces on a _forwarded_ arrival, and only one could even
-  try.** ADR 0042 item 3 (issue #1142) requires a forwarded arrival to carry a
-  claim covering the arriving amount, behind a per-peer
-  `forwarded_claim_enforcement` that defaults to `observe`.
-  `mixed-chain`'s B is the only node in this repository that forwards a packet
-  which arrived from a peer, so its `a-b` row is the only row the setting would
-  do anything on — and that peering is postpay, so its first crossing is
-  uncovered by construction and enforcing would deadlock it exactly as a priced
-  postpay termination deadlocks. The way out is the same one `two-hop` takes: a
-  `[[pay_channels]]` row on the payer. Until A has one, the rule observes and
-  logs, which is the migration shape ADR 0042 asks for.
+- **One peering here enforces on a _forwarded_ arrival, and it is the only one
+  that could.** ADR 0042 item 3 (issue #1142) requires a forwarded arrival to
+  carry a claim covering the arriving amount, behind a per-peer
+  `forwarded_claim_enforcement` that defaults to `observe`. `mixed-chain`'s B is
+  the only node in this repository that forwards a packet which arrived from a
+  peer, so its `a-b` row is the only row the setting can bind on — and it now
+  reads `"enforce"`, which is the first and only time that path runs against a
+  running image anywhere.
+
+  It could not be turned on before issue #1145. That peering was postpay, so its
+  first crossing was uncovered by construction and enforcing would have
+  deadlocked it exactly as a priced postpay termination deadlocked. A now holds
+  a `[[pay_channels]]` row and covers `amount_after_fee(1200, 100)` — exactly
+  the 1100 that arrives at B, which is the symmetric figure ADR 0042 item 3
+  names. Observing is still the default everywhere else, and `two-hop`'s B never
+  forwards anything, so the setting would do nothing there.
 
 ## What a peer claim does and does not check
 

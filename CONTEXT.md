@@ -232,8 +232,11 @@ _Avoid_: receipt, voucher, payment, balance proof
 The claim that pays for one particular packet, carried **with** it rather than trailing behind it.
 A packet arriving without one is greeted, not carried. This is what removes accumulation from the
 model: nothing is ever owed between packets, so there is no window for a counterparty to walk away
-inside. Enforced today at the client edge and at a priced termination; the forwarded case is decided
-and not yet enforced (ADR 0042).
+inside. **Every PREPARE a connector sends now carries one** (ADR 0042, issue #1145): a peering this
+node forwards to must name the channel it pays from (`[[pay_channels]]`, refused at load without
+one), and a forward it cannot cover is refused rather than carried. On **arrival** it is enforced at
+the client edge and at a priced termination unconditionally; on a _forwarded_ arrival it is enforced
+per peering, behind `forwarded_claim_enforcement` (issue #1142), which still defaults to observing.
 
 **Nonce**:
 The counter that orders claims within a channel. A payee accepts a claim only if its nonce
@@ -246,10 +249,11 @@ The highest nonce a payee has accepted on a channel.
 Value a payee had delivered but did not yet hold a claim for, under the pre-#868 credit window.
 One packet under normal flow; more only when a payer had fulfilled packets and stopped claiming.
 Retired by ADR 0033: nothing tracks it, and no projection produces it. The reasoning was that a packet
-would carry its own claim (ADR 0042) and so leave nothing trailing — **true today at a priced
-termination, and not yet built for a forwarded arrival**, which is why the retirement is stated on ADR
-0033's own terms rather than on that one's. Kept here because the term still appears in historical
-prose (`docs/protocol/peer-semantics-pre-868.md` §3.2–§3.4, §5.3; [`docs/protocol/money-model-pre-868.md`](docs/protocol/money-model-pre-868.md)).
+would carry its own claim (ADR 0042) and so leave nothing trailing — **true of every PREPARE this
+connector sends since issue #1145**, and, on a forwarded _arrival_, true of a peering an operator has
+set `forwarded_claim_enforcement = "enforce"` on. The retirement is still stated on ADR 0033's own
+terms rather than on that one's, because it was decided before either was built. Kept here because
+the term still appears in historical prose (`docs/protocol/peer-semantics-pre-868.md` §3.2–§3.4, §5.3; [`docs/protocol/money-model-pre-868.md`](docs/protocol/money-model-pre-868.md)).
 
 **Ceiling** _(retired term, ADR 0033, issue #882)_:
 The exposure a peering relation tolerated before the connector stopped forwarding for that

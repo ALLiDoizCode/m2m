@@ -45,5 +45,5 @@ pub use route::{PeerRouteConfig, StaticRoute, TransportPolicy};
 pub use secret::SecretLocation;
 pub use settlement::{
     EvmSettlementConfig, SettlementChain, SettlementConfig, SolanaSettlementConfig,
-    UnknownSettlementChain,
+    UnknownSettlementChain, DEFAULT_CHANNEL_INDEX_CONFIRMATIONS,
 };

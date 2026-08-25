@@ -814,17 +814,155 @@ fn the_mixed_chain_path_is_one_prefix_per_hop_and_one_flat_fee_per_hop() {
         "ADR 0028's path invariant, which no code enforces because a connector cannot know what \
          the next hop charges: every hop's `price - fee` must be at least the next hop's price. \
          Here the slack is deliberate and is the value delivered to C's unpriced termination -- \
-         what a hop at the end of a postpay peering is actually paid is the forwarded amount."
+         what a hop at the end of an unpriced peer termination is actually paid is the \
+         forwarded amount."
     );
     assert_eq!(
         app.price(),
         0,
-        "C terminates under a POSTPAY peering: a priced peer termination refuses an uncovered \
-         arrival (F06, issue #880) and a postpay peering's first crossing is uncovered by \
-         construction (ADR 0004), so a price here deadlocks the b-c leg rather than charging \
-         for it. two-hop's payee IS priced, and the difference is a `[[pay_channels]]` row on \
-         its payer -- covering before the send instead of owing after the fulfil. Nothing \
-         forbids the same here; it is simply not what this topology is about."
+        "C's termination is unpriced BY CHOICE since issue #1145, not by constraint. It used to \
+         be forced: the b-c peering was postpay, a priced peer termination refuses an uncovered \
+         arrival (F06, issue #880), and a postpay peering's first crossing is uncovered by \
+         construction (ADR 0004) -- so a price here deadlocked the leg rather than charging for \
+         it. B holds a `[[pay_channels]]` row now and covers before it sends, so a price would \
+         be payable. Pricing a peer termination is what two-hop is for; this topology is about \
+         one node holding a backend on each of two chains."
+    );
+}
+
+/// **Both legs are prepay, and neither has a choice about it** (ADR 0042,
+/// issue #1145).
+///
+/// A peering a `[[routes]]` entry forwards to must name the channel it pays
+/// that hop from -- `ConfigError::PayChannelUnbound` refuses the file
+/// otherwise -- so the two rows below are not decoration a future edit could
+/// drop. What this test adds beyond "it loaded" is that each row names the
+/// channel its own peering already binds, on the chain that peering settles
+/// on: one on-chain channel in two roles with one hop, which is the shape
+/// `local/keys.sh` opens and funds exactly one of per peering.
+///
+/// It is also what makes B's `forwarded_claim_enforcement` safe, which is
+/// asserted in `the_mixed_chain_forwarded_arrival_is_enforced` below.
+#[test]
+fn the_mixed_chain_covers_both_legs_before_it_sends_them() {
+    let a = load("local/mixed-chain/connector-a.toml", MIXED_A);
+    let b = load("local/mixed-chain/connector-b.toml", MIXED_B);
+    let c = load("local/mixed-chain/connector-c.toml", MIXED_C);
+
+    // A -> B, on anvil.
+    assert_eq!(a.pay_channels().len(), 1);
+    let PayChannelConfig::Evm(a_pays) = &a.pay_channels()[0] else {
+        panic!("the a-b leg settles on anvil, so A's row is EVM-shaped");
+    };
+    let a_peer = evm_channel(&a, "a-b");
+    assert_eq!(a_pays.peer_id(), "a-b");
+    assert_eq!(
+        a_pays.channel_id(),
+        a_peer.channel_id(),
+        "one on-chain channel in both roles with one hop -- and `local/keys.sh` opens and funds \
+         exactly one channel for this peering, so a second id here would be a channel nobody \
+         collateralised"
+    );
+    assert_eq!(a_pays.chain_id(), a_peer.chain_id());
+    assert_eq!(
+        a_pays.token_network(),
+        a_peer.token_network(),
+        "both roles sign against the same on-chain channel, so the EIP-712 domain cannot differ \
+         -- a claim under the wrong `verifyingContract` recovers to another address entirely"
+    );
+    assert_eq!(
+        Some(a_pays.client_edge_url()),
+        a.peers()[0].endpoint(),
+        "the claim-state ask goes to B's own `POST /ilp`"
+    );
+
+    // B -> C, on the Solana validator. A different SHAPE, not a different
+    // spelling: this row could not be written at all before issue #1146.
+    assert_eq!(b.pay_channels().len(), 1);
+    let PayChannelConfig::Solana(b_pays) = &b.pay_channels()[0] else {
+        panic!("the b-c leg settles on Solana, so B's row is Solana-shaped");
+    };
+    let b_peer = solana_channel(&b, "b-c");
+    assert_eq!(b_pays.peer_id(), "b-c");
+    assert_eq!(
+        b_pays.channel_account(),
+        b_peer.channel_account(),
+        "`ConfigError::PayChannelSolanaWithoutPeerChannel` requires this and it is not a \
+         formality: `programId` is a REQUIRED field of the Solana claim wire, rendered from the \
+         peer-channel row, so a pay row without one mints claims that cannot be put on the wire"
+    );
+    let b_to_c = b
+        .peers()
+        .iter()
+        .find(|peer| peer.id() == "b-c")
+        .expect("B dials C");
+    assert_eq!(
+        Some(b_pays.client_edge_url()),
+        b_to_c.endpoint(),
+        "the claim-state ask goes to C's own `POST /ilp`, where C answers out of the PEER book \
+         that holds this channel (issue #1102)"
+    );
+
+    assert!(
+        c.pay_channels().is_empty(),
+        "C forwards nothing -- it terminates -- so it pays nobody and needs no row. The \
+         requirement is keyed on the route, not on the peering."
+    );
+}
+
+/// **ADR 0042 item 3, enforcing, on the one peering where it can be** (issue
+/// #1142 built it; issue #1145 made it safe to turn on).
+///
+/// `mixed-chain`'s B is the only node in this repository that forwards a
+/// packet which arrived from a peer, so its `a-b` row is the only row this
+/// setting binds on anywhere -- and therefore the only place the enforcing
+/// path is exercised against a running image at all.
+///
+/// The arithmetic is what makes it survivable, and it is held here because no
+/// container can see it: the rule charges against the packet's **own amount**
+/// on arrival, A covers `amount_after_fee(A.price, A.fee)`, and those are the
+/// same number by construction. A fee edit on A that forgot this row would
+/// leave every crossing refused `F06`.
+#[test]
+fn the_mixed_chain_forwarded_arrival_is_enforced() {
+    let a = load("local/mixed-chain/connector-a.toml", MIXED_A);
+    let b = load("local/mixed-chain/connector-b.toml", MIXED_B);
+
+    let from_a = b
+        .peers()
+        .iter()
+        .find(|peer| peer.id() == "a-b")
+        .expect("B accepts the a-b peering");
+    assert_eq!(
+        from_a.forwarded_claim_enforcement(),
+        connector_config::ForwardedClaimEnforcement::Enforce,
+        "the one row in this repository where `forwarded_claim_enforcement` does anything. It \
+         defaults to `observe`, which admits-and-logs an uncovered forwarded arrival -- and an \
+         observing peering carrying traffic for free is indistinguishable from a paid one in \
+         the packet's own answer, which is exactly what this topology's money check exists to \
+         rule out."
+    );
+
+    let to_b = &a.peer_routes()[0];
+    let onward = &b.peer_routes()[0];
+    assert_eq!(
+        to_b.price() - to_b.fee(),
+        onward.price(),
+        "what A covers on the crossing is `amount_after_fee(price, fee)`, and what B charges the \
+         arrival against is the amount that arrives -- the same figure. Enforcing is only safe \
+         while those two agree, and nothing at runtime can notice when they stop."
+    );
+
+    let b_to_c = b
+        .peers()
+        .iter()
+        .find(|peer| peer.id() == "b-c")
+        .expect("B dials C");
+    assert_eq!(
+        b_to_c.forwarded_claim_enforcement(),
+        connector_config::ForwardedClaimEnforcement::Observe,
+        "left at the default, and it does nothing either way: C terminates, so no arrival from \
+         B is ever a forwarded one"
     );
 }
 

@@ -161,9 +161,12 @@ side: covering an outbound peer PREPARE with a claim in the first place. It land
 `Connector::forward_via_peer_route` (`crates/connector-runtime/src/connector.rs`): a next hop
 configured via `Connector::with_outbound_client_hop` is covered proactively, from the outbound
 client ledger (#873), for this node's own forwarded value -- before the first attempt is ever sent,
-not merely recovered by #875's retry arm after a refusal teaches this node it must pay. A hop with
-no such config keeps riding the peer ledger's `pending_claim` (ADR 0004's postpay convention),
-untouched: bilateral peer-to-peer forwarding is not what #868/#881 changed. ADR 0042's item 3 has
+not merely recovered by #875's retry arm after a refusal teaches this node it must pay. **A hop with
+no such config is refused, not carried** (issue #1145): `cover_forward` has no not-configured arm,
+the packet answers `T00` naming the hop, and `Config::load` refuses a route to such a peering by
+name before the node serves at all. Until #1145 that case fell through to the peer ledger's
+`pending_claim` — ADR 0004's postpay convention, the claim covering crossing _n_ signed after it
+fulfilled and riding crossing _n + 1_ — and nothing arms one any more. ADR 0042's item 3 has
 since extended the same shared gate to a `Forwarded` arrival, judged against the PREPARE's own
 `amount` and defaulting to observe rather than refuse — §3.1 below states both rules and the one
 per-peer knob that is left to select between them (the terminated rule's own `claim_enforcement`
@@ -176,8 +179,11 @@ the `channel_id` it pays from, that channel's `chain_id`/`token_network` (its EI
 same two facts its `[[peer_channels]]` row carries, because both roles sign against the very same
 on-chain channel), and `client_edge_url`: that hop's own `POST /ilp` endpoint, asked over
 `POST /ilp/claim-state` (#693) for where this node's claims stand, on every covered packet. The
-signing key is `[settlement.evm]`'s and no second key exists (ADR 0030). The table is additive: a
-peering with no row is the "no such config" case above, byte for byte.
+signing key is `[settlement.evm]`'s and no second key exists (ADR 0030). **The table is required of
+any peering a `[[routes]]` entry forwards to** (issue #1145): a route naming a peer with no row is
+`ConfigError::PayChannelUnbound`, refused at load naming the peer and the route. A peering this node
+only accepts on needs no row -- the requirement is keyed on the route, not on the peering. It was
+additive when it shipped, and stopped being so when the postpay path it fell back to was deleted.
 
 **The row has a Solana shape too** (issue #1146), a different shape rather than a different spelling
 of the same one, exactly as `[[peer_channels]]` and `[[client_channels]]` do: `channel_account` in

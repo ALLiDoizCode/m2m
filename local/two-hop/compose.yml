@@ -123,14 +123,14 @@ services:
   # Its own profile so `up` never starts it: a one-shot that exits 0 or 1, run
   # by `make local-rehearse` via `docker compose run --rm`.
   #
-  # TWO packets, and NOT for the reason a postpay peering needs two. Value
-  # moves on fulfilment (ADR 0004), so a peering that owes after the fact
-  # cannot pay for its own first crossing -- which is why a postpay rehearsal
-  # sends one packet to prove DELIVERY and a second to carry the claim covering
-  # it. This peering does not owe after the fact: A holds a `[[pay_channels]]`
-  # row (ADR 0042 item 2) and covers each PREPARE BEFORE it is sent, so
-  # crossing 1 arrives already paid for. That is exactly what lets B price the
-  # route it terminates, and pricing it is what this topology is for.
+  # TWO packets, and NOT for the reason a postpay peering needed two. Under the
+  # deleted postpay convention (ADR 0004, gone in issue #1145) a peering owed
+  # after the fact and could not pay for its own first crossing, so a rehearsal
+  # sent one packet to prove DELIVERY and a second to carry the claim covering
+  # it. Nothing owes after the fact now: A holds a `[[pay_channels]]` row (ADR
+  # 0042 item 2, required since #1145) and covers each PREPARE BEFORE it is
+  # sent, so crossing 1 arrives already paid for. That is exactly what lets B
+  # price the route it terminates, and pricing it is what this topology is for.
   #
   # The second crossing is what makes this a measurement rather than a
   # demonstration, because it is the one issue #1102 broke. A covering payer

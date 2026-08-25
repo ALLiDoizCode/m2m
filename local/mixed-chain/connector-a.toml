@@ -13,7 +13,7 @@
 # `swap` repository's job. Every amount on this path is the same 6-decimal
 # USDC-shaped integer, and the only thing that ever changes it between hops is
 # a hop subtracting its own FLAT fee (issue #1144): 1200 in, 1100 across the
-# boundary, 1000 delivered -- each step a fixed number of base units, never a
+# boundary, 1050 delivered -- each step a fixed number of base units, never a
 # rate applied to what arrived. What differs between the legs is which chain
 # each peering's claims are written against.
 #
@@ -50,8 +50,8 @@ key_file = "/app/data/signer.key"
 # ADR 0028's two numbers; what is specific to this path is the arithmetic:
 #
 #     A collects 1200, retains 100, forwards 1100   <- this file
-#     B collects 1100, retains  50, forwards 1000   <- connector-b.toml
-#     C terminates the 1000, unpriced               <- connector-c.toml
+#     B collects 1100, retains  50, forwards 1050   <- connector-b.toml
+#     C terminates the 1050, unpriced               <- connector-c.toml
 #
 # The two fees DIFFER on purpose. A fee is bilateral configuration for one
 # peering relation (ADR 0010), not a network-wide constant, and two identical
@@ -66,10 +66,10 @@ key_file = "/app/data/signer.key"
 #
 # 1200 is also what the rehearsal sends, which is this path's COST
 # (`CONTEXT.md`): the fees of every hop that carries the packet plus what the
-# route terminating it is paid. C's route is `price = 0` -- its peering is
-# postpay and a priced termination there would deadlock, see that file -- so
-# what the last leg is actually paid is the 1000 forwarded to it, and that is
-# the figure this path has always delivered.
+# route terminating it is paid. C's route is `price = 0` by choice rather than
+# by constraint -- pricing a peer termination is what `local/two-hop` exists to
+# prove, see that file -- so what the last leg is actually paid is the 1050
+# forwarded to it, and that is the figure this path delivers.
 [[routes]]
 prefix = "g.local.mixed.b"
 peer_id = "a-b"
@@ -93,6 +93,48 @@ channel_id = "0x221b5e73fba2099b690a94e668d575a75d136c249795f5b20146bf7d0403e423
 counterparty_key = "0x23618e81E3f5cdF7f54C3d65f7FBc0aBf5B21E8f"
 chain_id = 31337
 token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
+
+# ── Paying for the crossing, BEFORE it crosses (ADR 0042 item 2) ─────────────
+# `[[pay_channels]]` makes this node cover the forwarded PREPARE with a
+# client-role claim before it is sent. It is REQUIRED here, not optional: this
+# node has a `[[routes]]` entry forwarding to `a-b`, and since issue #1145 a
+# peering a node forwards to with no row is refused at load by name
+# (`ConfigError::PayChannelUnbound`). There is nothing left to fall back to --
+# ADR 0004's postpay convention, where the claim covering crossing n rode
+# crossing n + 1, is deleted from the tree.
+#
+# ONE CHANNEL, TWO ROLES, WITH ONE HOP. This names the same `channel_id` the
+# `[[peer_channels]]` row above does, which `Config::load` permits on purpose
+# (`pay_channel.rs` calls it "the deployed shape"): the peer role for what
+# arrives, the client role for what this node sends. `local/keys.sh` opens and
+# funds that one channel on anvil, with A as the depositing participant --
+# which is the side that has to be collateralised, because A is the side
+# signing claims on it.
+#
+# Only the facts nothing can derive are written (ADR 0030's table): the SIGNING
+# KEY is `[settlement.evm]`'s, because the channel's on-chain participant IS
+# this node's settlement address; the NONCE AND CUMULATIVE AMOUNT are B's,
+# asked over `POST /ilp/claim-state` at `client_edge_url` on every covered
+# packet and never remembered; the CHANNEL ID and EIP-712 DOMAIN are the peer
+# row's own, because both roles sign against the very same on-chain channel.
+#
+# `client_edge_url` is B's `POST /ilp` -- the same URL the peering dials, still
+# written out rather than derived from it (a `wss://` peering has no HTTP
+# client edge to derive one from). `http://` needs
+# `peer_allow_plaintext_endpoints` above, because the claim-state ask carries a
+# signed EIP-712 challenge -- a capability to read this channel's state -- in
+# the clear.
+#
+# What this row buys the topology beyond paying for the crossing: it is what
+# lets B ENFORCE on the arrival. B's `a-b` row reads
+# `forwarded_claim_enforcement = "enforce"`, and a claim minted here for
+# `amount_after_fee(1200, 100)` is exactly the 1100 that arrives there.
+[[pay_channels]]
+peer_id = "a-b"
+channel_id = "0x221b5e73fba2099b690a94e668d575a75d136c249795f5b20146bf7d0403e423"
+chain_id = 31337
+token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
+client_edge_url = "http://connector-b:3000/ilp"
 
 # ── Operator surface (ADR 0008) ──────────────────────────────────────────────
 # Only this node has one: `connector send` originates the rehearsal's packet

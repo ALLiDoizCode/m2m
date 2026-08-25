@@ -226,6 +226,19 @@ deleted the raw-TCP transport that preceded this (issue #679), along with
 `peer_wire_addr` and the `SocketAddr`-shaped `[[peers]].addr`; a config
 still setting either now fails config load by name.
 
+**A `[[routes]]` entry naming a peer also needs a `[[pay_channels]]` row for
+that peer** (issue #1145). A connector covers every PREPARE it sends (ADR
+0042), and there is no longer an uncovered path for a forward to take, so a
+route to a peering with no channel to pay it from is refused at config load
+by name — the node does not start. A peering this node only _accepts_ on
+needs no such row; the requirement is keyed on the route.
+
+That key became required rather than optional, which by ADR 0009 makes it a
+**breaking deploy**: land the config carrying the row first, then move the
+image tag. Neither box on this fleet forwards to a peering today (issue
+#872 removed both peerings), so nothing deployed is affected — but the
+ordering rule holds the moment one is added back.
+
 Write the credential as a **`secret_file`**, not a literal:
 
 ```toml

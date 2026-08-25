@@ -522,6 +522,37 @@ impl Config {
                 }
             }
         }
+        // ADR 0042, and the load-time half of issue #1145: **a connector
+        // covers every PREPARE it sends**, so a peering this node has a
+        // route to must name the channel it pays that hop from. This is the
+        // mirror of `PeerChannelUnbound` one table over -- that one refuses
+        // a peering with nothing to judge an ARRIVING claim against, this
+        // one refuses a peering with nothing to sign a DEPARTING claim
+        // from.
+        //
+        // It became a refusal rather than a default the moment the postpay
+        // path was deleted. Before that a peering with no row simply fell
+        // back to ADR 0004 (`cover_forward` answered `NotConfigured` and
+        // `pending_claim` rode the next packet); now `forward_via_peer_route`
+        // has nothing to fall back to and would reject every packet on the
+        // route with `T00`. ADR 0009 exists to turn exactly that kind of
+        // runtime surprise into a startup refusal.
+        //
+        // Keyed on ROUTES, not on peerings: a peering this node only ever
+        // receives from -- `local/mixed-chain`'s B holds one, and every
+        // accept-only peering is one -- owes nothing and needs no row. What
+        // is checked is the same `peer_id` a `[[routes]]` entry names.
+        for peer_route in &peer_routes {
+            if !pay_channels
+                .iter()
+                .any(|pay_channel| pay_channel.peer_id() == peer_route.peer_id())
+            {
+                return Err(ConfigError::PayChannelUnbound {
+                    prefix: peer_route.prefix().to_string(),
+                    peer_id: peer_route.peer_id().to_string(),
+                });
+            }
+        }
         let state_dir = raw.state_dir.map(PathBuf::from);
         let channel_liveness_ttl = match raw.channel_liveness_ttl_secs {
             Some(0) => return Err(ConfigError::ZeroChannelLivenessTtl),
@@ -1100,6 +1131,13 @@ key_file = "{key_file}"
     /// the channel's on-chain participant and that address is this table's
     /// key, so a peering bound to an EVM channel on a node with no EVM
     /// settlement is bound on paper only.
+    ///
+    /// And it carries `[[pay_channels]]` because since issue #1145 a
+    /// peering a `[[routes]]` entry FORWARDS to does not load without one:
+    /// a connector covers every PREPARE it sends (ADR 0042), and there is
+    /// no postpay path left for an uncovered forward to fall back to. One
+    /// channel in both roles with one hop is the deployed shape, so it is
+    /// the peer row's own channel.
     fn peering_config(key_path: &Path, state_dir: &Path, spoil: &str) -> String {
         let base = format!(
             r#"
@@ -1127,12 +1165,29 @@ prefix = "g.example.store"
 peer_id = "store"
 fee = 3
 price = 1000
+
+[[pay_channels]]
+peer_id = "store"
+channel_id = "{PEER_CHANNEL}"
+chain_id = 31337
+token_network = "{PEER_TOKEN_NETWORK}"
+client_edge_url = "https://store.example/ilp"
 "#,
             state_dir = state_dir.display(),
             key_file = key_path.display(),
             settlement = evm_settlement(key_path),
         );
         format!("{base}{spoil}")
+    }
+
+    /// [`peering_config`]'s text with its `[[pay_channels]]` row cut off:
+    /// what the file looked like before issue #1145 made the row required,
+    /// and the base a test writes its own row onto.
+    fn without_pay_channel(text: String) -> String {
+        text.split_once("\n[[pay_channels]]")
+            .expect("peering_config writes a pay-channel row")
+            .0
+            .to_string()
     }
 
     /// Load `peering_config` with `edit` applied to its text -- the
@@ -2003,7 +2058,12 @@ token_network_address = "{PEER_TOKEN_NETWORK}"
         // `peering_config` already carries `[settlement.evm]` -- the table
         // an EVM `[[peer_channels]]` row needs since issue #1138, and the
         // same one a covering claim is signed with.
-        let base = peering_config(key_file.path(), state_dir.path(), "");
+        // The fixture's own row is removed and this one written in its
+        // place: `peering_config` has carried a `[[pay_channels]]` row
+        // since issue #1145 made it required of a routed peering, and two
+        // rows for one peering is `PayChannelDuplicatePeer` -- a different
+        // error from any of the ones below.
+        let base = without_pay_channel(peering_config(key_file.path(), state_dir.path(), ""));
         let text = format!(
             r#"{base}
 [[pay_channels]]
@@ -2040,21 +2100,38 @@ client_edge_url = "https://store.example/ilp"
         assert_eq!(pay.client_edge_url().as_str(), "https://store.example/ilp");
     }
 
-    /// **The default-off property, at the config layer** (ADR 0042: "a
-    /// peering with nothing configured behaves exactly as it does now").
-    /// The same peering, with the table simply absent, loads to an empty
-    /// list -- there is no default row, and nothing else about the file
-    /// changes.
+    /// **The row became required, and this is where that is decided**
+    /// (issue #1145). ADR 0042 item 2 shipped `[[pay_channels]]` as
+    /// additive -- "a peering with nothing configured behaves exactly as it
+    /// does now" -- which meant ADR 0004's postpay convention. That
+    /// convention is deleted, so the same peering with the table removed no
+    /// longer loads: without a channel to pay the hop from,
+    /// `forward_via_peer_route` would refuse every packet on that route at
+    /// packet time, and turning a runtime surprise into a startup refusal
+    /// is what ADR 0009 exists for.
+    ///
+    /// Keyed on the ROUTE, so the message names both. A peering with no
+    /// route to it -- every accept-only peering is one -- owes nothing and
+    /// is untouched; `an_accept_only_peering_loads_with_no_ceiling` is that
+    /// case and carries no row.
     #[test]
-    fn a_peering_with_no_pay_channels_row_loads_with_none() {
-        let config = load_peering(|text| text).expect("load");
+    fn a_peering_this_node_forwards_to_with_no_pay_channels_row_is_refused() {
+        let error = load_peering(without_pay_channel)
+            .expect_err("a routed peering with nothing to pay it from must not load");
 
         assert!(
-            config.pay_channels().is_empty(),
-            "a file that writes no [[pay_channels]] must configure no client-role hop"
+            matches!(
+                &error,
+                ConfigError::PayChannelUnbound { prefix, peer_id }
+                    if prefix == "g.example.store" && peer_id == "store"
+            ),
+            "{error:?}"
         );
-        assert_eq!(config.peers().len(), 1);
-        assert_eq!(config.peer_channels().len(), 1);
+        let message = error.to_string();
+        assert!(
+            message.contains("[[pay_channels]]") && message.contains("breaking deploy"),
+            "the refusal must say what to add and that adding it is a breaking deploy: {message}"
+        );
     }
 
     /// **The collision, by name** (ADR 0030): `[[client_channels]]` is
@@ -3292,6 +3369,15 @@ prefix = "g.example.store"
 peer_id = "store"
 fee = 3
 price = 1000
+
+# Required of a peering this node forwards to since issue #1145: a
+# connector covers every PREPARE it sends (ADR 0042).
+[[pay_channels]]
+peer_id = "store"
+channel_id = "{PEER_CHANNEL}"
+chain_id = 31337
+token_network = "{PEER_TOKEN_NETWORK}"
+client_edge_url = "https://store.example/ilp"
 
 [[children]]
 name = "child"

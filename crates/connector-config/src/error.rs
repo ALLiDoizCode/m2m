@@ -507,6 +507,26 @@ pub enum ConfigError {
     PayChannelSolanaWithoutPeerChannel { peer_id: String, value: String },
 
     #[error(
+        "peer '{peer_id}' is the next hop of route '{prefix}' but has no '[[pay_channels]]' \
+         entry: a connector covers every PREPARE it sends (ADR 0042), so a peering this node \
+         FORWARDS to must name the channel it pays that hop from. There is no postpay \
+         fallback any more -- ADR 0004's 'the claim covering crossing n rides crossing n + 1' \
+         was deleted in issue #1145 -- so without this row every packet on that route would be \
+         refused at packet time. Add:\n\
+         \n\
+             [[pay_channels]]\n\
+             peer_id = \"{peer_id}\"\n\
+             # EVM:    channel_id / chain_id / token_network\n\
+             # Solana: channel_account (and a Solana '[[peer_channels]]' row for the same \
+         channel)\n\
+             client_edge_url = \"<that hop's own POST /ilp endpoint>\"\n\
+         \n\
+         This key is newly REQUIRED, which by ADR 0009 makes it a breaking deploy: land the \
+         config before moving the image tag, never the other way round"
+    )]
+    PayChannelUnbound { prefix: String, peer_id: String },
+
+    #[error(
         "'[[pay_channels]]' is configured but 'state_dir' is not: the outbound client ledger \
          keeps the highest nonce it has ever ISSUED to each next hop, and it has to outlive the \
          process -- a restart that reissued a nonce would fork this node's own outbound nonce \

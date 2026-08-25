@@ -33,9 +33,10 @@ use connector_peer_btp::{
     ack, AcceptedClaims, BtpPeerTransport, ClaimEnforcementPolicy, PeerCarriageState,
 };
 use connector_runtime::{
-    ChannelDomain, ClaimAckOutcome, ClaimRejectReason, ClaimSignature, Clock, Connector,
-    FakeAppClient, InMemoryJournal, InProcessPeerTransport, Journal, PeerForward, PeerRoute,
-    PeerTransport, TestClock, WireClaim,
+    ChannelDomain, ClaimAckOutcome, ClaimRejectReason, ClaimSignature, ClaimStateDomain,
+    ClaimStateSource, ClaimWatermark, Clock, Connector, EvmDomain, FakeAppClient, InMemoryJournal,
+    InProcessPeerTransport, Journal, OutboundClientError, OutboundClientLedger, PeerForward,
+    PeerRoute, PeerTransport, TestClock, WireClaim,
 };
 use connector_signer::{
     derive_evm_address, evm_balance_proof_digest, EvmBalanceProof, LocalSigner, Signature, Signer,
@@ -52,6 +53,55 @@ const SECRET: &str = "a-shared-secret";
 
 fn channel_id() -> String {
     format!("0x{:064x}", 7)
+}
+
+/// The channel a FORWARDING fixture pays its own next hop from -- a
+/// different channel from [`channel_id`], which is the one the arriving
+/// peering's claims are judged against.
+fn pay_channel_id() -> String {
+    format!("0x{:064x}", 8)
+}
+
+/// The next hop reporting where this node's claims on that channel stand.
+/// A fake upholding `ClaimStateSource`'s contract, not a stub with
+/// expectations (ADR 0007).
+struct ReportsAWatermark;
+
+#[async_trait::async_trait]
+impl ClaimStateSource for ReportsAWatermark {
+    async fn watermark(
+        &self,
+        _channel: &[u8; 32],
+        _domain: &ClaimStateDomain,
+    ) -> Result<ClaimWatermark, OutboundClientError> {
+        Ok(ClaimWatermark {
+            nonce: 0,
+            cumulative: 0,
+            available: Some(u128::MAX),
+        })
+    }
+}
+
+/// ADR 0042's send half, which issue #1145 made unavoidable: a connector
+/// covers every PREPARE it sends, and one it cannot cover it refuses `T00`
+/// before the transport is reached. Any fixture here that FORWARDS needs
+/// this -- `Config::load` refuses the file that would produce one without it
+/// (`ConfigError::PayChannelUnbound`), so a fixture lacking it is testing a
+/// node no operator could deploy.
+fn covering(connector: Connector, peer_id: &str) -> Connector {
+    connector
+        .with_signer(Arc::new(LocalSigner::generate("forwarding-settlement")))
+        .with_outbound_client_ledger(Arc::new(OutboundClientLedger::in_memory()))
+        .with_outbound_client_hop(
+            peer_id,
+            pay_channel_id(),
+            EvmDomain {
+                chain_id: domain().chain_id,
+                token_network: domain().token_network_address,
+            },
+            Arc::new(ReportsAWatermark),
+        )
+        .expect("a bytes32 channel id")
 }
 
 fn clock() -> Arc<TestClock> {
@@ -267,7 +317,7 @@ fn forwarding_payee(payer: &dyn Signer) -> (Arc<Connector>, Arc<FakeAppClient>, 
     onward.add_peer(NEXT_HOP_ID, next_hop);
 
     let counterparty = derive_evm_address(&payer.public_key().unwrap());
-    let connector = Arc::new(
+    let connector = Arc::new(covering(
         Connector::new(
             vec![],
             vec![PeerRoute::new_priced(
@@ -283,7 +333,8 @@ fn forwarding_payee(payer: &dyn Signer) -> (Arc<Connector>, Arc<FakeAppClient>, 
         .with_channel_verification_key(channel_id(), counterparty)
         .with_channel_domain(channel_id(), domain())
         .expect("a bytes32 channel id"),
-    );
+        NEXT_HOP_ID,
+    ));
     (connector, app_client, identity)
 }
 
@@ -1616,11 +1667,16 @@ async fn a_restart_still_admits_a_claim_that_genuinely_advances_by_the_price() {
 // ─── ADR 0042 item 3: a forwarded arrival must cover its own `amount`,
 // behind a per-peer knob that defaults to observing ───
 
-/// **The fleet-safety regression guard.** Neither devnet box covers a
-/// forward yet and each forwards to the other, so a peering that configured
-/// nothing must still carry an uncovered forwarded arrival -- admitted,
-/// logged, and actually forwarded to the next hop. If this test ever starts
-/// failing because the default flipped, forwarding stops across the fleet.
+/// **The default is still `observe`, and this is what that means.** A
+/// peering that configures nothing carries an uncovered forwarded arrival --
+/// admitted, logged, and actually forwarded to the next hop. It was written
+/// as a fleet-safety guard when both devnet boxes forwarded to each other;
+/// issue #872 removed both peerings, so what it guards now is the migration
+/// default itself, which ADR 0042 item 3 keeps for a counterparty on an
+/// older binary. Note what this fixture must ALSO have since issue #1145:
+/// its own `[[pay_channels]]` row (`covering`). Admitting an arrival for
+/// free says nothing about what this node then sends, and what it sends is
+/// covered unconditionally.
 #[tokio::test]
 async fn a_forwarded_arrival_with_no_claim_is_admitted_by_default() {
     let payer_signer = LocalSigner::generate("payer");

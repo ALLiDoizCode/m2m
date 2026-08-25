@@ -103,14 +103,15 @@ greeting that states the terms.
 > **defaulting to `"observe"`**, so an uncovered forwarded arrival is still admitted, forwarded and
 > logged until an operator writes `"enforce"` on a peering: the rule exists and binds no deployed
 > box. (This paragraph said "not yet built for a forwarded arrival" until issue #1146 corrected it.)
-> **The other side of the same hop is built too**: a node with a `[[pay_channels]]` row for a
-> peering covers every PREPARE it forwards to it, minted before the packet is sent and never
-> recovered after a refusal (issue #881) — on **both** settlement chains since issue #1146, EVM-only
-> before it, which is why a Solana peering could until then only be paid postpay. So "a claim trails
-> its fulfilment" is now true only of a peering nobody wrote that row for.
-> [ADR 0042](../adr/0042-a-packet-carries-its-claim.md) is a target record and says so; the lock
-> epic (#1031) is the vehicle, and that record's own item list — not this note — is the authority on
-> what is left.
+> **The other side of the same hop is not merely built but unavoidable** (issue #1145): a node
+> covers every PREPARE it forwards, minted before the packet is sent and never recovered after a
+> refusal (issue #881) — on **both** settlement chains since issue #1146, EVM-only before it, which
+> is why a Solana peering could until then only be paid postpay. The `[[pay_channels]]` row that
+> supplies the channel is now **required** of a peering a route forwards to, refused at load without
+> one, and a forward that cannot be covered is refused rather than carried. So "a claim trails its
+> fulfilment" is no longer true of anything: ADR 0004's model is deleted from the tree.
+> [ADR 0042](../adr/0042-a-packet-carries-its-claim.md) is no longer a target record on this point;
+> its issue #1145 Update is the authority on what landed.
 
 **PM-16** `[connector]` — **Exposure and its ceiling are retired**, not restated. Nothing tracks value
 delivered but unclaimed, and no configuration bounds it. A `ceiling` or `flush_interval_ms` key is

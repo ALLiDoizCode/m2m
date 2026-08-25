@@ -631,6 +631,22 @@ for peering in $PEERINGS; do
         echo "       table says '$payer' is the payer of the '$id' peering." >&2
         exit 1
       fi
+      # `head -1` above is only safe while every `channel_id` line in the file
+      # says the same thing. A payer names its channel TWICE since issue #1145
+      # -- once in `[[peer_channels]]` for what arrives and once in
+      # `[[pay_channels]]` for what it sends, one on-chain channel in both
+      # roles -- and if those two ever disagreed this loop would open and fund
+      # one of them while the node paid on the other. That is a peering whose
+      # claims are cryptographically perfect and worth nothing, which is
+      # exactly the class of failure this stage exists to make impossible.
+      distinct="$(sed -n 's/^channel_id = "\(0x[0-9a-f]\{64\}\)"$/\1/p' "$payer_config" | sort -u | wc -l)"
+      if [[ "$distinct" != "1" ]]; then
+        echo "ERROR: $payer_config names $distinct different channel_id values." >&2
+        echo "       The '$id' peering holds ONE on-chain channel in two roles: [[peer_channels]]" >&2
+        echo "       for the claims that arrive and [[pay_channels]] for the ones it signs. This" >&2
+        echo "       stage funds one channel, so two would leave the other's claims unbacked." >&2
+        exit 1
+      fi
       config_must_name "$channel_id" "$payee_config" "the '$id' peering's channel id"
 
       state="$(cast call "$token_network" "channels(bytes32)(uint256,uint8,uint256,uint256,address,address)" \

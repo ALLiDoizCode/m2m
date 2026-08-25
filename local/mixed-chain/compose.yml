@@ -146,10 +146,17 @@ services:
   # Its own profile so `up` never starts it: a one-shot that exits 0 or 1, run
   # by `make local-rehearse` via `docker compose run --rm`.
   #
-  # TWO packets, for the reason ADR 0004 gives: value moves on fulfilment, so
-  # the claim covering crossing n is signed after it and rides crossing n + 1.
-  # One packet proves delivery all the way to C's app and can say nothing about
-  # payment on either peering; the second is what pays both.
+  # TWO packets, and NOT for the reason they used to be. This topology was
+  # postpay: the claim covering crossing n was signed after it fulfilled and
+  # rode crossing n + 1, so one packet proved delivery and could say nothing at
+  # all about payment. That model is deleted (issue #1145) and both legs now
+  # cover each PREPARE before it is sent, so crossing 1 is already paid for.
+  #
+  # The second crossing still earns its place, for `local/two-hop`'s reason
+  # instead (issue #1102): a covering payer asks its payee where its claims
+  # stand on every packet, and a payee answering out of the wrong book reports
+  # nonce 0 forever -- accepted every time, advancing nothing. One crossing
+  # cannot see that. Two can.
   #
   # Then BOTH journals are read, and that pair is the whole topology in two
   # greps: an EVM `channel_id` accepted at B, and a base58 Solana
@@ -249,10 +256,10 @@ services:
         channel_open G5mXQzfZb4tXWX7cQvXP9ZJnDBcUo6irWTmGGtX3xpzL HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR 112 100000000
 
         # 1200 is this path's COST (`CONTEXT.md`), and equals A's own
-        # client-edge `price`: A's fee of 100 plus B's fee of 50 plus the 1000
+        # client-edge `price`: A's fee of 100 plus B's fee of 50 plus the 1050
         # that reaches C's unpriced termination (issue #1144). Each hop takes a
         # FLAT number of base units and forwards the rest, so 1200 leaves the
-        # sender, 1100 crosses the chain boundary and 1000 is delivered.
+        # sender, 1100 crosses the chain boundary and 1050 is delivered.
         # `local_topologies_load.rs` holds this figure and the three committed
         # configs to that one arithmetic -- nothing in this container can see a
         # fee quietly dropped back to zero, because both journals below stay
@@ -270,19 +277,56 @@ services:
         }
         echo '--- crossing 1: A -> B (EVM peering) -> C (Solana peering) -> the app'
         send
-        echo '--- crossing 2: carries the claim covering crossing 1, on BOTH peerings'
+        echo '--- crossing 2: a second covered crossing on BOTH peerings (issue #1102)'
         send
 
+        # $$1 state dir, $$2 channel, $$3 label, $$4 what ONE crossing must
+        # advance that channel by.
+        #
+        # The advance, not merely the existence of a claim, and that is new
+        # since issue #1145. This check could not ask for a figure while the
+        # legs were POSTPAY: the claim covering crossing n rode crossing
+        # n + 1, so after N crossings a journal legitimately held N - 1
+        # claims and the last crossing was unpaid by construction. Both legs
+        # cover before they send now, so N crossings owe exactly N advances
+        # and the arithmetic is checkable.
+        #
+        # What it catches that a grep cannot: a fee quietly changed on one
+        # hop. A hop covers `amount_after_fee(amount, fee)`, so B's fee is
+        # visibly the difference between the two figures below -- 1100
+        # accepted at B, 1050 accepted at C -- and a fee back at zero, or
+        # doubled, moves one of them while leaving both journals as green as
+        # ever. `local_topologies_load.rs` holds the committed configs to the
+        # same arithmetic from the other side; this is the running image's
+        # half of it.
+        #
+        # The last line for the channel is the highest cumulative: a claim
+        # book only ever advances, and only the highest-nonce claim is ever
+        # redeemable.
         paid() {
           if ! grep -q "$$2" "$$1/peer-claims.log" 2>/dev/null; then
             echo "NOT PAID: $$3 records no accepted claim on $$2." >&2
             cat "$$1/peer-claims.log" >&2 || echo '(the journal does not exist)' >&2
             exit 1
           fi
-          echo "--- $$3 accepted a claim on $$2"
+          accepted=$$(grep -c "$$2" "$$1/peer-claims.log")
+          cumulative=$$(grep "$$2" "$$1/peer-claims.log" | tail -1 | cut -f4)
+          expected=$$((accepted * $$4))
+          if [ "$$cumulative" != "$$expected" ]; then
+            echo "UNDERPAID: $$3 accepted $$accepted claims on $$2 totalling $$cumulative," >&2
+            echo "           not the $$expected that $$accepted crossings at $$4 each owe it." >&2
+            echo "           Every hop covers amount_after_fee(amount, fee) BEFORE it sends" >&2
+            echo "           (ADR 0042), so a mismatch here is a fee that moved on one hop" >&2
+            echo "           without the committed figures moving with it." >&2
+            grep "$$2" "$$1/peer-claims.log" >&2
+            exit 1
+          fi
+          echo "--- $$3 accepted $$accepted claims on $$2, cumulative $$cumulative ($$4 per crossing)"
         }
-        paid /app/b-state 0x221b5e73fba2099b690a94e668d575a75d136c249795f5b20146bf7d0403e423 "B (EVM)"
-        paid /app/c-state G5mXQzfZb4tXWX7cQvXP9ZJnDBcUo6irWTmGGtX3xpzL "C (Solana)"
+        # 1200 leaves the sender; A keeps 100 and covers B for 1100; B keeps
+        # 50 and covers C for 1050. Two hops, two flat fees, one packet.
+        paid /app/b-state 0x221b5e73fba2099b690a94e668d575a75d136c249795f5b20146bf7d0403e423 "B (EVM)" 1100
+        paid /app/c-state G5mXQzfZb4tXWX7cQvXP9ZJnDBcUo6irWTmGGtX3xpzL "C (Solana)" 1050
     volumes:
       # A's keys: the sender signs the operator write with A's allowlisted key
       # and posts the fixture body from the same directory.
