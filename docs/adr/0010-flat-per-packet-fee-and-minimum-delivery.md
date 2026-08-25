@@ -1,6 +1,6 @@
 # A hop charges a flat per-packet fee, and packets declare a minimum delivery
 
-**Status:** Accepted, amended by [0042](0042-a-packet-carries-its-claim.md): a fee is earned when the packet is paid for, not on fulfilment. Flat-per-packet and minimum delivery are unchanged.
+**Status:** Accepted in part. Amended by [0042](0042-a-packet-carries-its-claim.md): a fee is earned when the packet is paid for, not on fulfilment. **The minimum-delivery half is retired by [0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)** — a claim bounds erosion, not a declared floor — which also moots the #1072 update's peer-versus-client asymmetry below. **Flat-per-packet, the earnings rule and cost discoverability are unchanged**, and are what this record is now for.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 

@@ -170,3 +170,15 @@ beats carrying one for years against a hypothetical.
 
 `claim_enforcement` becomes a parsed-and-rejected key, the `ceiling` / `flush_interval_ms` /
 `[peer_sale]` convention.
+
+## Update — [ADR 0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md) completes an amendment this record declined to make
+
+This record amended [0011](0011-rejects-accumulate-fees-and-probes-discover-cost.md) because banking
+the claim made fee honesty bounded rather than self-enforcing, and left
+[0010](0010-flat-per-packet-fee-and-minimum-delivery.md)'s minimum delivery listed as "unchanged".
+**The same reasoning retires the floor**, and [0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)
+applies it: once the claim is banked before the check, rejecting on a declared floor returns nobody
+their value and only moves where the packet dies.
+
+0057 is **blocked on item 3 above** and says so. Until a forwarded arrival must carry a covering
+claim, the floor is the only bound on erosion on a forwarded path, and it stays.
