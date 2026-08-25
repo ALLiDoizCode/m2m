@@ -22,8 +22,7 @@ use tracing::Instrument;
 use crate::app_client::{AppClient, AppOutcome};
 use crate::attribution::{apply_payment_attribution, PaymentAttribution};
 use crate::claim::{
-    ChannelDomain, ClaimAckOutcome, ClaimBook, ClaimSignature, InvalidChannelId,
-    InvalidSolanaChannel, WireClaim,
+    ChannelDomain, ClaimAckOutcome, ClaimBook, InvalidChannelId, InvalidSolanaChannel, WireClaim,
 };
 use crate::clock::Clock;
 use crate::journal::{Journal, JournalError};
@@ -31,7 +30,9 @@ use crate::metrics::Metrics;
 use crate::operator_view::{
     ChannelView, ClaimView, LeasedRouteView, PeerRouteView, PeerView, RouteSource, RouteView,
 };
-use crate::outbound_client::{ClaimStateSource, EvmDomain, OutboundClientLedger};
+use crate::outbound_client::{
+    ClaimStateSource, EvmDomain, OutboundClaimBinding, OutboundClientLedger, SolanaDomain,
+};
 use crate::peer_route_store::{PeerRouteStore, PeerRouteStoreError, RuntimePeers};
 use crate::peer_transport::PeerTransport;
 use crate::route::{LeasedRoute, PeerRoute};
@@ -533,27 +534,46 @@ pub struct Connector {
     runtime_store: Option<PeerRouteStore>,
 }
 
+/// What a client-role hop's covering claims are signed under, by chain
+/// (issue #1146).
+///
+/// Operator config either way, the same way [`ClaimBook::set_channel_domain`]
+/// and [`ClaimBook::set_solana_channel`] are for the peer role on the very
+/// same channel: a node that opened this channel already knows which
+/// `TokenNetwork` -- or which settlement program -- it was deployed under,
+/// so this is a configured input, not a guess.
+enum OutboundClientDomain {
+    /// The channel's EIP-712 domain (issue #881). Used to COVER a forward
+    /// proactively, before any greeting exists to read a domain off of;
+    /// [`Connector::cover_greeted_packet`]'s reactive retry still reads the
+    /// domain from the peer's own greeting, deliberately.
+    Evm(EvmDomain),
+    /// The settlement program this channel lives under (ADR 0053), which is
+    /// `[settlement.solana] program_id` and nothing else -- since issue
+    /// #1128 there is exactly one program a node can redeem a Solana claim
+    /// through, so there is exactly one a channel can be signed under. That
+    /// is also why the greeting is not consulted on the retry arm: unlike an
+    /// EVM `TokenNetwork`, there is no second answer a receiver could give.
+    Solana(SolanaDomain),
+}
+
 /// One next hop this connector can pay as a client (issue #875).
 struct OutboundClientHop {
     /// The channel this node's settlement address holds with the hop, as
-    /// its on-chain `bytes32`...
+    /// its raw on-chain 32 bytes -- an EVM `bytes32` channel id or a Solana
+    /// channel account, whichever this hop's `domain` says...
     channel: [u8; 32],
-    /// ...and as the `0x`-prefixed lower-case hex a claim names it by on
-    /// the wire, kept beside it so the packet path never re-renders it.
+    /// ...and as the spelling a claim names it by on the wire -- `0x`
+    /// lower-case hex for EVM, base58 for Solana -- kept beside it so the
+    /// packet path never re-renders it.
     channel_id: String,
     /// The hop, asked where this node's claims on that channel stand. The
     /// RECEIVER is the authority on its own watermark (see
     /// `crate::outbound_client`'s header); nothing local substitutes.
     claim_state: Arc<dyn ClaimStateSource>,
-    /// This channel's EIP-712 signing domain (issue #881): operator
-    /// config, the same way [`ClaimBook::set_channel_domain`] is for the
-    /// peer role on the very same channel -- a node that opened this
-    /// channel already knows which `TokenNetwork` it was deployed under,
-    /// so this is a configured input, not a guess. Used only to COVER a
-    /// forward proactively, before any greeting exists to read a domain
-    /// off of; [`Connector::cover_greeted_packet`]'s reactive retry still
-    /// reads the domain from the peer's own greeting, deliberately.
-    domain: EvmDomain,
+    /// What this hop's covering claims are bound to, and which chain's arm
+    /// of the outbound client ledger signs them.
+    domain: OutboundClientDomain,
 }
 
 /// What [`Connector::cover_forward`] found when asked to cover a forward to
@@ -739,7 +759,54 @@ impl Connector {
                 // watermarks at the far gate.
                 channel_id: format!("0x{}", hex_lower(&channel)),
                 claim_state,
-                domain,
+                domain: OutboundClientDomain::Evm(domain),
+            },
+        );
+        Ok(self)
+    }
+
+    /// [`Connector::with_outbound_client_hop`] for a **Solana** next hop
+    /// (issue #1146): the channel account this node pays that hop from, and
+    /// the settlement program its claims are signed under.
+    ///
+    /// A second method rather than a chain parameter, exactly as
+    /// [`ClaimBook::set_solana_channel`] is a second method beside
+    /// [`ClaimBook::set_channel_domain`]: the two chains name a channel with
+    /// different kinds of identifier, and a shared entry point would have to
+    /// accept both spellings for both chains and sort them out afterwards.
+    ///
+    /// `program_id` is `[settlement.solana] program_id` -- ADR 0053 signs it
+    /// into every claim on this channel, and issue #1128 made it the single
+    /// source for the peer role on the very same channel. Both it and
+    /// `channel_account` must be base58 of exactly 32 bytes; anything else is
+    /// refused here rather than turned into a claim verified against the
+    /// wrong message.
+    ///
+    /// **Until this existed, a Solana peering could only be paid postpay**
+    /// -- `cover_forward` had no arm to mint under, so the claim covering
+    /// crossing n rode crossing n + 1, which is the model ADR 0042 exists to
+    /// retire.
+    pub fn with_solana_outbound_client_hop(
+        mut self,
+        peer_id: impl Into<String>,
+        channel_account: impl Into<String>,
+        program_id: &str,
+        claim_state: Arc<dyn ClaimStateSource>,
+    ) -> Result<Self, InvalidSolanaChannel> {
+        let channel_account = channel_account.into();
+        let channel = crate::claim::parse_base58_32("channel account", &channel_account)?;
+        let program_id = crate::claim::parse_base58_32("program id", program_id)?;
+        self.outbound_client_hops.insert(
+            peer_id.into(),
+            OutboundClientHop {
+                channel,
+                // Re-encoded from the bytes rather than kept as written, so
+                // the wire carries one spelling of the account however the
+                // operator's config spelled it -- the base58 counterpart of
+                // the EVM arm's lower-casing above.
+                channel_id: bs58::encode(channel).into_string(),
+                claim_state,
+                domain: OutboundClientDomain::Solana(SolanaDomain { program_id }),
             },
         );
         Ok(self)
@@ -1864,10 +1931,35 @@ impl Connector {
                     .to_string(),
             );
         };
-        let Some(signer) = self.claims.signer() else {
-            return CoverOutcome::Failed(
-                "this node has no settlement signer to sign a claim with".to_string(),
-            );
+        // The key is the settlement identity of the channel's on-chain
+        // participant, on the channel's own chain (issue #1146) -- the same
+        // key the PEER role on that channel signs with, because it is the
+        // same participant. Chosen by matching the hop's domain, so a
+        // secp256k1 key can never be paired with a Solana program id.
+        let binding = match &hop.domain {
+            OutboundClientDomain::Evm(domain) => {
+                let Some(signer) = self.claims.signer() else {
+                    return CoverOutcome::Failed(
+                        "this node has no EVM settlement signer to sign a claim with".to_string(),
+                    );
+                };
+                OutboundClaimBinding::Evm {
+                    domain: *domain,
+                    signer: signer.as_ref(),
+                }
+            }
+            OutboundClientDomain::Solana(domain) => {
+                let Some(signer) = self.claims.solana_signer() else {
+                    return CoverOutcome::Failed(
+                        "this node has no Solana settlement signer to sign a claim with"
+                            .to_string(),
+                    );
+                };
+                OutboundClaimBinding::Solana {
+                    program_id: domain.program_id,
+                    signer: signer.as_ref(),
+                }
+            }
         };
 
         let claim = match ledger
@@ -1875,8 +1967,7 @@ impl Connector {
                 peer_id,
                 hop.claim_state.as_ref(),
                 &hop.channel,
-                &hop.domain,
-                signer.as_ref(),
+                &binding,
                 amount,
             )
             .await
@@ -1897,7 +1988,10 @@ impl Connector {
             channel_id: hop.channel_id.clone(),
             nonce: claim.nonce,
             cumulative_amount,
-            signature: ClaimSignature::Evm(claim.signature),
+            // Already discriminated by the binding that produced it -- an
+            // ed25519 signature is never re-labelled as an EVM one on its
+            // way to the carriage (issue #732's rule, issue #1146's arm).
+            signature: claim.signature,
         })
     }
 
@@ -1906,18 +2000,27 @@ impl Connector {
     ///
     /// The claim is minted from the outbound CLIENT ledger (issue #873):
     /// its cumulative amount is the RECEIVER's own watermark advanced by the
-    /// quoted price, and its EIP-712 domain is the receiver's own, read off
-    /// the greeting rather than out of this node's settlement config -- a
-    /// claim signed under the payer's idea of the `TokenNetwork` recovers to
-    /// a different address and is refused at the far gate.
+    /// quoted price, and on EVM its EIP-712 domain is the receiver's own,
+    /// read off the greeting rather than out of this node's settlement
+    /// config -- a claim signed under the payer's idea of the `TokenNetwork`
+    /// recovers to a different address and is refused at the far gate.
+    ///
+    /// **A Solana hop reads no domain off the greeting** (issue #1146), and
+    /// that is not the same shortcut this method refuses for EVM. ADR 0053's
+    /// binding is the settlement program id, and since issue #1128 a node
+    /// has exactly one -- the program it can redeem through -- so a payer and
+    /// a payee that disagreed about it would have no channel in common to be
+    /// quoting each other prices about. The greeting supplies the price and
+    /// nothing else. The retry arm therefore works on both chains rather
+    /// than silently doing nothing on one.
     ///
     /// `None` -- with the reason logged, never silently -- for every way
     /// this node cannot pay: no ledger, no client-role channel configured
-    /// for this hop, no settlement signer, a greeting naming no EVM
-    /// settlement, or a receiver that would not report the watermark (which
-    /// includes refusing for want of headroom). The caller then relays the
-    /// peer's refusal as it stands; nothing is ever emitted claiming to have
-    /// paid when it has not.
+    /// for this hop, no settlement signer on that channel's chain, an EVM
+    /// hop whose greeting names no EVM settlement, or a receiver that would
+    /// not report the watermark (which includes refusing for want of
+    /// headroom). The caller then relays the peer's refusal as it stands;
+    /// nothing is ever emitted claiming to have paid when it has not.
     async fn cover_greeted_packet(
         &self,
         peer_id: &str,
@@ -1937,20 +2040,43 @@ impl Connector {
             );
             return None;
         };
-        let Some(signer) = self.claims.signer() else {
-            tracing::warn!(
-                peer_id,
-                "peer quoted x402 terms but this node has no settlement signer to sign a claim with"
-            );
-            return None;
-        };
-        let Some(domain) = EvmDomain::from_greeting(terms) else {
-            tracing::warn!(
-                peer_id,
-                resource = %terms.resource.url,
-                "peer quoted x402 terms naming no EVM settlement this node can sign under"
-            );
-            return None;
+        let binding = match &hop.domain {
+            OutboundClientDomain::Evm(_) => {
+                let Some(signer) = self.claims.signer() else {
+                    tracing::warn!(
+                        peer_id,
+                        "peer quoted x402 terms but this node has no EVM settlement signer to \
+                         sign a claim with"
+                    );
+                    return None;
+                };
+                let Some(domain) = EvmDomain::from_greeting(terms) else {
+                    tracing::warn!(
+                        peer_id,
+                        resource = %terms.resource.url,
+                        "peer quoted x402 terms naming no EVM settlement this node can sign under"
+                    );
+                    return None;
+                };
+                OutboundClaimBinding::Evm {
+                    domain,
+                    signer: signer.as_ref(),
+                }
+            }
+            OutboundClientDomain::Solana(domain) => {
+                let Some(signer) = self.claims.solana_signer() else {
+                    tracing::warn!(
+                        peer_id,
+                        "peer quoted x402 terms but this node has no Solana settlement signer to \
+                         sign a claim with"
+                    );
+                    return None;
+                };
+                OutboundClaimBinding::Solana {
+                    program_id: domain.program_id,
+                    signer: signer.as_ref(),
+                }
+            }
         };
         let Some(price) = terms.price() else {
             // Unreachable through a parsed greeting (`parse_greeting`
@@ -1965,8 +2091,7 @@ impl Connector {
                 peer_id,
                 hop.claim_state.as_ref(),
                 &hop.channel,
-                &domain,
-                signer.as_ref(),
+                &binding,
                 price,
             )
             .await
@@ -1997,7 +2122,7 @@ impl Connector {
             channel_id: hop.channel_id.clone(),
             nonce: claim.nonce,
             cumulative_amount,
-            signature: ClaimSignature::Evm(claim.signature),
+            signature: claim.signature,
         })
     }
 
@@ -4654,14 +4779,16 @@ mod tests {
     /// receiver in `outbound_client`'s own tests).
     mod covering_a_forward {
         use super::*;
+        use crate::claim::ClaimSignature;
         use crate::outbound_client::{
-            ClaimStateSource, ClaimWatermark, EvmDomain, OutboundClientError, OutboundClientLedger,
+            ClaimStateDomain, ClaimStateSource, ClaimWatermark, EvmDomain, OutboundClientError,
+            OutboundClientLedger,
         };
         use connector_domain::x402::{
             X402ChannelExtra, X402PaymentOption, X402PaymentRequired, X402Resource,
             X402SettlementTerms, X402_VERSION,
         };
-        use connector_signer::LocalSigner;
+        use connector_signer::{LocalEd25519Signer, LocalSigner};
         use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
         /// The price the far side quotes for carrying one packet.
@@ -4788,6 +4915,11 @@ mod tests {
             nonce: AtomicU64,
             cumulative: AtomicU64,
             asked: AtomicU64,
+            /// Which chain's ask each call made (issue #1146). A covering
+            /// payer that asked one chain and signed on the other would
+            /// still get an answer here, so the ask itself has to be
+            /// observable for a test to say the arm was chosen correctly.
+            asked_about: Mutex<Vec<ClaimStateDomain>>,
             /// The receiver that will not answer at all: there is then no
             /// watermark to advance, and nothing safe to sign.
             silent: AtomicBool,
@@ -4799,6 +4931,7 @@ mod tests {
                     nonce: AtomicU64::new(nonce),
                     cumulative: AtomicU64::new(cumulative),
                     asked: AtomicU64::new(0),
+                    asked_about: Mutex::new(Vec::new()),
                     silent: AtomicBool::new(false),
                 })
             }
@@ -4809,9 +4942,13 @@ mod tests {
             async fn watermark(
                 &self,
                 channel: &[u8; 32],
-                _domain: &EvmDomain,
+                domain: &ClaimStateDomain,
             ) -> Result<ClaimWatermark, OutboundClientError> {
                 self.asked.fetch_add(1, Ordering::SeqCst);
+                self.asked_about
+                    .lock()
+                    .expect("asked-about lock poisoned")
+                    .push(*domain);
                 if self.silent.load(Ordering::SeqCst) {
                     return Err(OutboundClientError::ClaimStateUnavailable {
                         channel: format!("0x{}", hex_lower(channel)),
@@ -5316,6 +5453,183 @@ mod tests {
             let mut settlement_less = quoted_terms();
             settlement_less.accepts[0].extra.settlement = None;
             assert_eq!(EvmDomain::from_greeting(&settlement_less), None);
+        }
+
+        // -----------------------------------------------------------
+        // Solana (issue #1146): the arm `cover_forward` did not have.
+        // -----------------------------------------------------------
+
+        /// The Solana channel account this node pays its next hop from.
+        const SOLANA_ACCOUNT: [u8; 32] = [0x6a; 32];
+        /// `[settlement.solana] program_id` -- what ADR 0053 signs into
+        /// every claim on that channel.
+        const SOLANA_PROGRAM: [u8; 32] = [0x2c; 32];
+
+        fn solana_base58(bytes: &[u8; 32]) -> String {
+            bs58::encode(bytes).into_string()
+        }
+
+        /// [`first_hop`]'s Solana twin: the same node, the same routes, the
+        /// same ledger -- with the client-role hop bound to a Solana channel
+        /// account instead of an EVM channel id, and an ed25519 settlement
+        /// key to sign under.
+        ///
+        /// Before #1146 this connector could not be built at all:
+        /// `with_outbound_client_hop` took an `EvmDomain` and nothing else,
+        /// so the b-c leg of `local/mixed-chain` had no way to be covered
+        /// and rode ADR 0004's postpay convention forever.
+        fn first_hop_on_solana(
+            peer: Arc<GreetingPeer>,
+            receiver: Arc<StandingWatermark>,
+            ledger: Arc<OutboundClientLedger>,
+            claim_signer: Arc<dyn Ed25519Signer>,
+        ) -> Connector {
+            let account = solana_base58(&SOLANA_ACCOUNT);
+            let program = solana_base58(&SOLANA_PROGRAM);
+            // The counterparty this node's PEER book would judge inbound
+            // claims on the same channel by -- the deployed shape, one
+            // channel in both roles.
+            let counterparty = solana_base58(
+                &LocalEd25519Signer::from_secret_bytes([44u8; 32])
+                    .unwrap()
+                    .public_key(),
+            );
+            Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
+                Arc::new(FakeAppClient::new()),
+                peer,
+                test_clock(),
+            )
+            .with_solana_signer(claim_signer)
+            .with_peer_claim_channel("second-hop", account.clone())
+            .with_solana_channel(account.clone(), &counterparty, &program)
+            .expect("a well-formed channel account")
+            .with_outbound_client_ledger(ledger)
+            .with_solana_outbound_client_hop("second-hop", account, &program, receiver)
+            .expect("a well-formed channel account")
+        }
+
+        /// The Solana half of
+        /// [`n_consecutive_forwards_over_a_healthy_link_each_carry_their_own_covering_claim`]:
+        /// a forward to a Solana peering is covered BEFORE it is sent, with
+        /// an ed25519 claim that verifies under the channel's own settlement
+        /// program.
+        ///
+        /// The three things this pins, each of which was impossible before
+        /// #1146: the claim exists at all on the first attempt; it is a
+        /// `ClaimSignature::Solana` rather than an EVM signature wearing a
+        /// Solana channel's name; and the watermark ask that priced it was
+        /// made as a Solana ask, not an EVM one that happened to be
+        /// answered.
+        #[tokio::test]
+        async fn a_forward_to_a_solana_peering_is_covered_before_it_is_sent() {
+            let (sealed, shared_secret) = sealed_prepare(b"hello");
+            let peer = GreetingPeer::new(expected_fulfillment(&shared_secret));
+            let receiver = StandingWatermark::at(7, 7_000);
+            let (_dir, ledger) = ledger();
+            let key = LocalEd25519Signer::from_secret_bytes([13u8; 32]).expect("a settlement key");
+            let public_key = key.public_key();
+            let connector = first_hop_on_solana(
+                peer.clone(),
+                Arc::clone(&receiver),
+                ledger.clone(),
+                Arc::new(key),
+            );
+
+            let response = connector
+                .handle_prepare(Prepare {
+                    amount: PACKET_AMOUNT,
+                    ..sealed
+                })
+                .await;
+            assert!(
+                matches!(response, PacketResponse::Fulfill(_)),
+                "a proactively covered Solana forward must fulfil, got {response:?}"
+            );
+
+            let seen = peer.seen();
+            assert_eq!(seen.len(), 1, "covered on the first attempt, so no retry");
+            let claim = seen[0]
+                .as_ref()
+                .expect("the packet must not have been emitted uncovered");
+            assert_eq!(claim.channel_id, solana_base58(&SOLANA_ACCOUNT));
+            assert_eq!(claim.nonce, 8);
+            assert_eq!(claim.cumulative_amount, 7_000 + PACKET_AMOUNT);
+
+            let ClaimSignature::Solana(signature) = claim.signature else {
+                panic!("a Solana hop must mint a Solana claim, not an EVM one");
+            };
+            assert!(
+                connector_signer::verify_solana_balance_proof(
+                    &SOLANA_PROGRAM,
+                    &SOLANA_ACCOUNT,
+                    claim.nonce,
+                    claim.cumulative_amount,
+                    &signature,
+                    &public_key,
+                ),
+                "the far gate must verify this claim under the channel's own settlement program"
+            );
+
+            assert_eq!(
+                *receiver
+                    .asked_about
+                    .lock()
+                    .expect("asked-about lock poisoned"),
+                vec![ClaimStateDomain::Solana],
+                "the watermark ask must be the Solana one -- an EVM challenge would be answered \
+                 `unverified` by a real payee, and this node would have signed nothing"
+            );
+        }
+
+        /// A Solana hop on a node with no ed25519 settlement key cannot sign,
+        /// and the packet FAILS naming the reason rather than going out
+        /// uncovered. The same rule the EVM arm holds, and the reason
+        /// `cover_forward` has no "send it anyway" branch on either chain.
+        #[tokio::test]
+        async fn a_solana_hop_with_no_solana_signer_fails_the_packet_rather_than_sending_it() {
+            let (sealed, shared_secret) = sealed_prepare(b"hello");
+            let peer = GreetingPeer::new(expected_fulfillment(&shared_secret));
+            let receiver = StandingWatermark::at(0, 0);
+            let (_dir, ledger) = ledger();
+            let account = solana_base58(&SOLANA_ACCOUNT);
+            let program = solana_base58(&SOLANA_PROGRAM);
+            let connector = Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
+                Arc::new(FakeAppClient::new()),
+                peer.clone(),
+                test_clock(),
+            )
+            // Deliberately `with_signer` and NOT `with_solana_signer`: an
+            // EVM key is no use to a Solana channel, and silently reaching
+            // for it would sign a claim on the wrong curve.
+            .with_signer(Arc::new(LocalSigner::generate("evm-only")))
+            .with_outbound_client_ledger(ledger.clone())
+            .with_solana_outbound_client_hop("second-hop", account, &program, receiver)
+            .expect("a well-formed channel account");
+
+            let response = connector
+                .handle_prepare(Prepare {
+                    amount: PACKET_AMOUNT,
+                    ..sealed
+                })
+                .await;
+            match response {
+                PacketResponse::Reject(reject) => assert!(
+                    reject.message.contains("Solana settlement signer"),
+                    "the reject must name what is missing, got: {}",
+                    reject.message
+                ),
+                other => panic!("expected a local refusal, got {other:?}"),
+            }
+            assert_eq!(
+                peer.seen().len(),
+                0,
+                "nothing may be sent when no claim could be signed"
+            );
+            assert_eq!(ledger.issued_nonce("second-hop"), 0);
         }
     }
 

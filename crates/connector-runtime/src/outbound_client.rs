@@ -65,13 +65,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use chrono::{SecondsFormat, Utc};
 use connector_domain::x402::X402PaymentRequired;
 use connector_signer::{
-    derive_evm_address, evm_balance_proof_digest, evm_claim_state_challenge_digest, to_hex,
-    EvmBalanceProof, EvmClaimStateChallenge, Signature, Signer,
+    derive_evm_address, evm_balance_proof_digest, evm_claim_state_challenge_digest,
+    solana_balance_proof_message, solana_claim_state_challenge_message, to_hex, Ed25519Signer,
+    EvmBalanceProof, EvmClaimStateChallenge, Signer,
 };
 use thiserror::Error;
+
+use crate::claim::ClaimSignature;
 
 /// How long a `POST /ilp/claim-state` challenge is valid for. Short: it is
 /// signed and used in the same round trip, and a challenge is a capability
@@ -127,6 +132,101 @@ fn decode_address(value: &str) -> Option<[u8; 20]> {
         *byte = u8::from_str_radix(value.get(index * 2..index * 2 + 2)?, 16).ok()?;
     }
     Some(out)
+}
+
+/// The settlement program a Solana channel lives under, raw 32 bytes
+/// (issue #1146).
+///
+/// The Solana counterpart of [`EvmDomain`], and deliberately not folded
+/// into it: ADR 0053 binds this program id into
+/// [`connector_signer::solana_balance_proof_message`] the way ADR 0024's
+/// EIP-712 domain separator binds `chain_id`/`token_network` -- so a claim
+/// signed under one deployment does not verify against another. Before ADR
+/// 0053 a Solana claim bound nothing about which chain it lived on, and the
+/// separation came from program ids happening to differ between
+/// deployments.
+///
+/// One field rather than two: there is no cluster here, and none is
+/// invented. A Solana program knows its own id and nothing about which
+/// cluster it runs on, so a cluster string could never be rebuilt on chain
+/// to compare against -- `claim_signature.rs` documents that at length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SolanaDomain {
+    pub program_id: [u8; 32],
+}
+
+/// Which chain a [`ClaimStateSource`] is being asked about, and the facts
+/// that ask is bound to (issue #1146).
+///
+/// The EVM variant carries the channel's own EIP-712 domain because the
+/// challenge digest is computed under it -- `claim_state.rs`'s `resolve_evm`
+/// rebuilds the same digest from the channel as **it** resolved it, so a
+/// challenge signed under a different domain recovers to a different address
+/// and is refused.
+///
+/// The Solana variant carries **nothing**, and that is not an omission.
+/// [`connector_signer::solana_claim_state_challenge_message`] covers a fixed
+/// domain tag, the channel account and the expiry, and the far side's
+/// `resolve_solana` verifies exactly those -- so there is no Solana domain
+/// for an ask to be bound to, and inventing one here would be a second thing
+/// to keep in step with a verifier that never reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimStateDomain {
+    Evm(EvmDomain),
+    Solana,
+}
+
+/// The key this node signs a `POST /ilp/claim-state` challenge with, in
+/// whichever scheme the channel's chain verifies (issue #1146).
+///
+/// Always the **settlement** key of the channel's on-chain participant, on
+/// either curve: the challenge is a proof of control over that participant,
+/// which is the only thing that entitles a caller to read the channel's
+/// state at all.
+#[derive(Clone)]
+pub enum ClaimStateChallengeSigner {
+    Evm(Arc<dyn Signer>),
+    Solana(Arc<dyn Ed25519Signer>),
+}
+
+/// What a covering claim's signature is bound to, and the key that produces
+/// it (issue #1146).
+///
+/// One enum carrying both halves rather than a domain and a signer passed
+/// side by side: pairing a secp256k1 key with a Solana program id (or the
+/// reverse) is not a thing this connector should be able to express. A claim
+/// signed under a binding nobody wrote recovers to a different key and is
+/// refused at the far gate with the packet already paid for -- the same
+/// property `deny_unknown_fields` holds on every money-shaped config table.
+pub enum OutboundClaimBinding<'a> {
+    Evm {
+        /// The RECEIVER's EIP-712 domain -- see [`EvmDomain`] for why it
+        /// cannot be this node's own.
+        domain: EvmDomain,
+        signer: &'a dyn Signer,
+    },
+    Solana {
+        /// `[settlement.solana] program_id`, base58-decoded. Unlike the EVM
+        /// domain this IS read from local config rather than from the
+        /// receiver: since issue #1128 there is exactly one program a node
+        /// can redeem a Solana claim under, so a payer and a payee that
+        /// disagreed about it would have no channel in common to begin with.
+        program_id: [u8; 32],
+        signer: &'a dyn Ed25519Signer,
+    },
+}
+
+impl OutboundClaimBinding<'_> {
+    /// The ask this binding implies -- what [`ClaimStateSource::watermark`]
+    /// is handed, derived from the binding rather than passed beside it so
+    /// the chain a claim is signed on and the chain its watermark was asked
+    /// about can never be two different answers.
+    pub fn claim_state_domain(&self) -> ClaimStateDomain {
+        match self {
+            OutboundClaimBinding::Evm { domain, .. } => ClaimStateDomain::Evm(*domain),
+            OutboundClaimBinding::Solana { .. } => ClaimStateDomain::Solana,
+        }
+    }
 }
 
 /// Where a channel's watermark stands, according to the node that judges it.
@@ -192,30 +292,33 @@ pub trait ClaimStateSource: Send + Sync {
     async fn watermark(
         &self,
         channel: &[u8; 32],
-        domain: &EvmDomain,
+        domain: &ClaimStateDomain,
     ) -> Result<ClaimWatermark, OutboundClientError>;
 }
 
 /// Ask a client edge's `POST /ilp/claim-state` (issue #693) where this
 /// node's own claims on a channel stand.
 ///
-/// Authenticated per channel by an EIP-712 challenge signed with the same
-/// settlement key the claim itself is signed with -- a *different* digest
-/// from a balance proof on purpose, so a captured challenge is not
-/// replayable as a payment.
+/// Authenticated per channel by a challenge signed with the same settlement
+/// key the claim itself is signed with -- an EIP-712 digest on EVM, an
+/// ed25519 message on Solana (issue #1146), and in both cases a *different*
+/// message from a balance proof on purpose, so a captured challenge is not
+/// replayable as a payment. The Solana pair are kept apart by domain tag
+/// rather than by length alone; `claim_state_challenge.rs` documents the
+/// choice.
 pub struct HttpClaimState<'a> {
     client: &'a reqwest::Client,
     /// The full `POST /ilp` endpoint of the receiver; `claim-state` hangs
     /// off it as a sub-path.
     edge_url: String,
-    signer: &'a dyn Signer,
+    signer: &'a ClaimStateChallengeSigner,
 }
 
 impl<'a> HttpClaimState<'a> {
     pub fn new(
         client: &'a reqwest::Client,
         edge_url: impl Into<String>,
-        signer: &'a dyn Signer,
+        signer: &'a ClaimStateChallengeSigner,
     ) -> HttpClaimState<'a> {
         HttpClaimState {
             client,
@@ -230,35 +333,74 @@ impl ClaimStateSource for HttpClaimState<'_> {
     async fn watermark(
         &self,
         channel: &[u8; 32],
-        domain: &EvmDomain,
+        domain: &ClaimStateDomain,
     ) -> Result<ClaimWatermark, OutboundClientError> {
-        let channel_hex = format!("0x{}", hex_encode(channel));
+        // How the channel is named in the ask and in every error out of
+        // it: `0x` hex for EVM, base58 for Solana -- the same disjoint
+        // spellings the two claim namespaces are already kept apart by.
+        let channel_named = match domain {
+            ClaimStateDomain::Evm(_) => format!("0x{}", hex_encode(channel)),
+            ClaimStateDomain::Solana => bs58::encode(channel).into_string(),
+        };
         let url = format!("{}/claim-state", self.edge_url.trim_end_matches('/'));
         let expires = now_secs() + CLAIM_STATE_CHALLENGE_TTL_SECS;
-        let digest = evm_claim_state_challenge_digest(&EvmClaimStateChallenge {
-            channel_id: *channel,
-            expires,
-            chain_id: domain.chain_id,
-            token_network_address: domain.token_network,
-        });
         let failed = |reason: String| OutboundClientError::ClaimStateUnavailable {
-            channel: channel_hex.clone(),
+            channel: channel_named.clone(),
             reason,
         };
-        let signature = self
-            .signer
-            .sign(&digest)
-            .map_err(|error| failed(error.to_string()))?
-            .to_bytes();
 
-        let request = serde_json::json!({
-            "channels": [{
-                "blockchain": "evm",
-                "channelId": channel_hex,
-                "expires": expires,
-                "signature": format!("0x{}", hex_encode(&signature)),
-            }]
-        });
+        // One ask per chain, each built to exactly what the far side's own
+        // verifier reads (`connector_client_edge::claim_state`): EVM sends
+        // `channelId` and a 65-byte `r ‖ s ‖ v` as `0x` hex, Solana sends
+        // `channelAccount` and a 64-byte ed25519 signature as base64.
+        let request = match (domain, self.signer) {
+            (ClaimStateDomain::Evm(domain), ClaimStateChallengeSigner::Evm(signer)) => {
+                let digest = evm_claim_state_challenge_digest(&EvmClaimStateChallenge {
+                    channel_id: *channel,
+                    expires,
+                    chain_id: domain.chain_id,
+                    token_network_address: domain.token_network,
+                });
+                let signature = signer
+                    .sign(&digest)
+                    .map_err(|error| failed(error.to_string()))?
+                    .to_bytes();
+                serde_json::json!({
+                    "channels": [{
+                        "blockchain": "evm",
+                        "channelId": channel_named,
+                        "expires": expires,
+                        "signature": format!("0x{}", hex_encode(&signature)),
+                    }]
+                })
+            }
+            (ClaimStateDomain::Solana, ClaimStateChallengeSigner::Solana(signer)) => {
+                let message = solana_claim_state_challenge_message(channel, expires);
+                let signature = signer.sign(&message);
+                serde_json::json!({
+                    "channels": [{
+                        "blockchain": "solana",
+                        "channelAccount": channel_named,
+                        "expires": expires,
+                        "signature": BASE64.encode(signature),
+                    }]
+                })
+            }
+            // Unreachable through any wired path -- a hop's domain and its
+            // challenge signer are chosen together, per `[[pay_channels]]`
+            // row, in `connector_cli::runtime`. Refused rather than
+            // defaulted anyway: signing a challenge on the wrong curve
+            // would be answered `unverified` by the far side, and "the
+            // receiver would not report" is a much worse description of
+            // this than naming it.
+            _ => {
+                return Err(failed(
+                    "this node's claim-state challenge signer is not on the same chain as the \
+                     channel it was asked about"
+                        .to_string(),
+                ))
+            }
+        };
         let body: serde_json::Value = self
             .client
             .post(&url)
@@ -313,18 +455,19 @@ impl ClaimStateSource for HttpClaimState<'_> {
 pub struct OwnedHttpClaimState {
     client: reqwest::Client,
     edge_url: String,
-    signer: Arc<dyn Signer>,
+    signer: ClaimStateChallengeSigner,
 }
 
 impl OwnedHttpClaimState {
     /// `edge_url` is the receiver's full `POST /ilp` endpoint --
     /// `claim-state` hangs off it as a sub-path -- and `signer` is the
-    /// settlement key the claim itself will be signed with, since the
-    /// challenge proves control of the channel's on-chain participant.
+    /// settlement key the claim itself will be signed with, on the
+    /// channel's own chain, since the challenge proves control of the
+    /// channel's on-chain participant.
     pub fn new(
         client: reqwest::Client,
         edge_url: impl Into<String>,
-        signer: Arc<dyn Signer>,
+        signer: ClaimStateChallengeSigner,
     ) -> OwnedHttpClaimState {
         OwnedHttpClaimState {
             client,
@@ -339,9 +482,9 @@ impl ClaimStateSource for OwnedHttpClaimState {
     async fn watermark(
         &self,
         channel: &[u8; 32],
-        domain: &EvmDomain,
+        domain: &ClaimStateDomain,
     ) -> Result<ClaimWatermark, OutboundClientError> {
-        HttpClaimState::new(&self.client, &self.edge_url, self.signer.as_ref())
+        HttpClaimState::new(&self.client, &self.edge_url, &self.signer)
             .watermark(channel, domain)
             .await
     }
@@ -361,12 +504,15 @@ pub struct OutboundClaim {
     /// The claim JSON, ready for the `ilp-payment-channel-claim` header or
     /// a BTP frame's protocol data.
     pub json: String,
-    /// The EIP-712 balance-proof signature the JSON above carries, kept in
-    /// its decoded form (issue #875) so a caller that has to put this claim
-    /// on a carriage taking `crate::WireClaim` -- the forwarding path's
+    /// The balance-proof signature the JSON above carries, kept in its
+    /// decoded form (issue #875) so a caller that has to put this claim on a
+    /// carriage taking `crate::WireClaim` -- the forwarding path's
     /// `PeerTransport` port -- does not have to parse back the JSON this
-    /// module just wrote.
-    pub signature: Signature,
+    /// module just wrote. Discriminated by scheme (issue #1146): a
+    /// secp256k1 `r ‖ s ‖ v` for an EVM channel, a 64-byte ed25519
+    /// signature for a Solana one, kept apart for the whole of their travel
+    /// exactly as [`ClaimSignature`]'s own doc requires.
+    pub signature: ClaimSignature,
 }
 
 /// This node's outbound claims, one nonce line per next hop.
@@ -476,23 +622,28 @@ impl OutboundClientLedger {
     ///      never reissue one;
     ///   4. **sign**.
     ///
-    /// `signer` is the settlement key of the channel's on-chain
-    /// participant, and `domain` is the RECEIVER's EIP-712 domain -- see
-    /// [`EvmDomain`] for why it cannot be this node's own.
+    /// `binding` carries both halves of the chain-specific question -- what
+    /// the signature is bound to and the key that produces it -- so they can
+    /// never disagree. On EVM that is the RECEIVER's EIP-712 domain (see
+    /// [`EvmDomain`] for why it cannot be this node's own) and the
+    /// settlement key of the channel's on-chain participant; on Solana
+    /// (issue #1146) it is `[settlement.solana] program_id`, which ADR 0053
+    /// signs into the message, and that table's ed25519 key.
     pub async fn next_claim(
         &self,
         next_hop: &str,
         receiver: &dyn ClaimStateSource,
         channel: &[u8; 32],
-        domain: &EvmDomain,
-        signer: &dyn Signer,
+        binding: &OutboundClaimBinding<'_>,
         amount: u64,
     ) -> Result<OutboundClaim, OutboundClientError> {
-        let watermark = receiver.watermark(channel, domain).await?;
+        let watermark = receiver
+            .watermark(channel, &binding.claim_state_domain())
+            .await?;
         if let Some(available) = watermark.available {
             if available < u128::from(amount) {
                 return Err(OutboundClientError::InsufficientHeadroom {
-                    channel: format!("0x{}", hex_encode(channel)),
+                    channel: name_channel(channel, binding),
                     available,
                     amount,
                 });
@@ -500,7 +651,7 @@ impl OutboundClientLedger {
         }
         let nonce = self.reserve_nonce(next_hop, watermark.nonce)?;
         let cumulative = watermark.cumulative + u128::from(amount);
-        let (json, signature) = claim_json(signer, channel, domain, nonce, cumulative)?;
+        let (json, signature) = claim_json(channel, binding, nonce, cumulative)?;
         Ok(OutboundClaim {
             nonce,
             cumulative,
@@ -576,59 +727,137 @@ fn append_durably(path: &Path, record: &IssuedNonce) -> Result<(), OutboundClien
     file.sync_all().map_err(|error| failed(error.to_string()))
 }
 
+/// How a channel is named in a message to an operator, in the spelling its
+/// own chain uses (`0x` hex for EVM, base58 for Solana). The two namespaces
+/// are already kept apart by exactly this difference in spelling.
+fn name_channel(channel: &[u8; 32], binding: &OutboundClaimBinding<'_>) -> String {
+    match binding {
+        OutboundClaimBinding::Evm { .. } => format!("0x{}", hex_encode(channel)),
+        OutboundClaimBinding::Solana { .. } => bs58::encode(channel).into_string(),
+    }
+}
+
 /// The client-edge claim JSON, signed through this workspace's PRODUCTION
-/// signing path (`Signer::sign` + `Signature::to_bytes`), whose byte 64 is
-/// libsecp256k1's raw recovery id in `{0,1}`. Deliberately no `+27`: issues
-/// #590/#591 moved that normalisation to the settlement boundary, and
-/// pre-shifting it here would be a second implementation of a rule that
-/// already has one.
+/// signing path -- `Signer::sign` + `Signature::to_bytes` on EVM (whose byte
+/// 64 is libsecp256k1's raw recovery id in `{0,1}`; deliberately no `+27`,
+/// since issues #590/#591 moved that normalisation to the settlement
+/// boundary and pre-shifting it here would be a second implementation of a
+/// rule that already has one), and `Ed25519Signer::sign` over
+/// [`connector_signer::solana_balance_proof_message`] on Solana.
+///
+/// One function with two arms rather than two functions: the fields that
+/// are not chain-specific -- the version, the message id, the `Z`-suffixed
+/// timestamp, the decimal `transferredAmount` -- are the same claim shape
+/// (`client-edge-spec.md` §1.3) on both chains, and a second copy of them
+/// is a second place for the far gate's structural validator to be drifted
+/// away from.
 fn claim_json(
-    signer: &dyn Signer,
     channel: &[u8; 32],
-    domain: &EvmDomain,
+    binding: &OutboundClaimBinding<'_>,
     nonce: u64,
     cumulative: u128,
-) -> Result<(String, Signature), OutboundClientError> {
-    let proof = EvmBalanceProof {
-        channel_id: *channel,
-        nonce,
-        transferred_amount: cumulative,
-        locked_amount: 0,
-        locks_root: [0u8; 32],
-        chain_id: domain.chain_id,
-        token_network_address: domain.token_network,
-    };
-    let signature = signer
-        .sign(&evm_balance_proof_digest(&proof))
-        .map_err(|error| OutboundClientError::Signing(error.to_string()))?;
-    let signature_bytes = signature.to_bytes();
-    let address = derive_evm_address(
-        &signer
-            .public_key()
-            .map_err(|error| OutboundClientError::Signing(error.to_string()))?,
-    );
-    Ok((
-        serde_json::json!({
+) -> Result<(String, ClaimSignature), OutboundClientError> {
+    let mut json = serde_json::json!({
         "version": "1.0",
-        "blockchain": "evm",
         "messageId": format!("connector-announce-{nonce}"),
         // `Z`, not `+00:00`. The claim gate refuses a `+00:00` offset by
         // name -- "'timestamp' must be ISO 8601 with a 'Z' timezone" -- and
         // `chrono`'s plain `to_rfc3339()` produces exactly the spelling it
         // rejects.
         "timestamp": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-        "senderId": to_hex(&address),
-        "channelId": format!("0x{}", hex_encode(channel)),
         "nonce": nonce,
         "transferredAmount": cumulative.to_string(),
-        "lockedAmount": "0",
-        "locksRoot": format!("0x{}", "0".repeat(64)),
-        "signature": format!("0x{}", hex_encode(&signature_bytes)),
-        "signerAddress": to_hex(&address),
-        "chainId": domain.chain_id,
-        "tokenNetworkAddress": to_hex(&domain.token_network),
-        })
-        .to_string(),
+    });
+    let object = json.as_object_mut().expect("a json! object");
+    let signature = match binding {
+        OutboundClaimBinding::Evm { domain, signer } => {
+            let proof = EvmBalanceProof {
+                channel_id: *channel,
+                nonce,
+                transferred_amount: cumulative,
+                locked_amount: 0,
+                locks_root: [0u8; 32],
+                chain_id: domain.chain_id,
+                token_network_address: domain.token_network,
+            };
+            let signature = signer
+                .sign(&evm_balance_proof_digest(&proof))
+                .map_err(|error| OutboundClientError::Signing(error.to_string()))?;
+            let address = derive_evm_address(
+                &signer
+                    .public_key()
+                    .map_err(|error| OutboundClientError::Signing(error.to_string()))?,
+            );
+            let address = to_hex(&address);
+            object.insert("blockchain".to_string(), "evm".into());
+            object.insert("senderId".to_string(), address.clone().into());
+            object.insert(
+                "channelId".to_string(),
+                format!("0x{}", hex_encode(channel)).into(),
+            );
+            object.insert("lockedAmount".to_string(), "0".into());
+            object.insert(
+                "locksRoot".to_string(),
+                format!("0x{}", "0".repeat(64)).into(),
+            );
+            object.insert(
+                "signature".to_string(),
+                format!("0x{}", hex_encode(&signature.to_bytes())).into(),
+            );
+            object.insert("signerAddress".to_string(), address.into());
+            object.insert("chainId".to_string(), domain.chain_id.into());
+            object.insert(
+                "tokenNetworkAddress".to_string(),
+                to_hex(&domain.token_network).into(),
+            );
+            ClaimSignature::Evm(signature)
+        }
+        OutboundClaimBinding::Solana { program_id, signer } => {
+            // ADR 0053's 96 bytes: the domain tag, the PROGRAM ID, the
+            // channel account, the nonce and the cumulative amount. The
+            // program id is what makes this signature specific to one
+            // deployment -- before it, a Solana claim was valid for its
+            // account on every cluster the account existed on.
+            let signature = signer.sign(&solana_balance_proof_message(
+                program_id,
+                channel,
+                nonce,
+                // A Solana balance proof signs a `u64`, and the whole wire
+                // carries `transferredAmount` as one (§4.2). Refused rather
+                // than truncated: a claim signed for a wrapped-around
+                // amount is a claim for less money than the packet cost,
+                // accepted and silently short.
+                u64::try_from(cumulative).map_err(|_| {
+                    OutboundClientError::Signing(format!(
+                        "the claim's cumulative amount {cumulative} does not fit the uint64 a \
+                         Solana balance proof signs over"
+                    ))
+                })?,
+            ));
+            let signer_public_key = bs58::encode(signer.public_key()).into_string();
+            object.insert("blockchain".to_string(), "solana".into());
+            object.insert("senderId".to_string(), signer_public_key.clone().into());
+            object.insert(
+                "programId".to_string(),
+                bs58::encode(program_id).into_string().into(),
+            );
+            object.insert(
+                "channelAccount".to_string(),
+                bs58::encode(channel).into_string().into(),
+            );
+            object.insert("signature".to_string(), BASE64.encode(signature).into());
+            object.insert("signerPublicKey".to_string(), signer_public_key.into());
+            // Deliberately no `cluster`: it is an optional routing hint the
+            // far gate compares against its own `[settlement.solana]
+            // rpc_url` (issue #975/#976), never a security boundary, and a
+            // covering payer that guessed one would have its claim refused
+            // for a mismatch it invented. ADR 0053 put the binding that
+            // matters -- the program id -- inside the signature instead.
+            ClaimSignature::Solana(signature)
+        }
+    };
+    Ok((
+        serde_json::to_string(&json).expect("a json! object always serializes"),
         signature,
     ))
 }
@@ -651,7 +880,10 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
-    use connector_signer::{verify_evm_balance_proof, LocalSigner};
+    use connector_signer::{
+        verify_evm_balance_proof, verify_solana_balance_proof, verify_solana_claim_state_challenge,
+        LocalEd25519Signer, LocalSigner,
+    };
     use hyper::service::{make_service_fn, service_fn};
     use hyper::{Body, Request, Response, Server};
 
@@ -662,6 +894,12 @@ mod tests {
         token_network: [0x1eu8; 20],
     };
     const CHANNEL: [u8; 32] = [0x5cu8; 32];
+    /// The Solana half of the pair: a channel ACCOUNT, deliberately a
+    /// different 32 bytes so a test that mixed the two would fail rather
+    /// than pass by coincidence.
+    const CHANNEL_ACCOUNT: [u8; 32] = [0x7au8; 32];
+    /// The settlement program a Solana claim is signed under (ADR 0053).
+    const PROGRAM_ID: [u8; 32] = [0x3bu8; 32];
     /// The peer id of the next hop under test. A real one from this fleet,
     /// so nothing here reads as a placeholder.
     const NEXT_HOP: &str = "apex-store";
@@ -670,15 +908,111 @@ mod tests {
         LocalSigner::from_secret_bytes("outbound-claim-test", [23u8; 32]).expect("signer")
     }
 
+    /// The Solana settlement key this node would sign a covering claim --
+    /// and the claim-state challenge for it -- with.
+    fn solana_claim_signer() -> LocalEd25519Signer {
+        LocalEd25519Signer::from_secret_bytes([29u8; 32]).expect("signer")
+    }
+
+    fn evm_challenge_signer() -> ClaimStateChallengeSigner {
+        ClaimStateChallengeSigner::Evm(Arc::new(claim_signer()))
+    }
+
+    fn solana_challenge_signer() -> ClaimStateChallengeSigner {
+        ClaimStateChallengeSigner::Solana(Arc::new(solana_claim_signer()))
+    }
+
+    fn evm_binding(signer: &LocalSigner) -> OutboundClaimBinding<'_> {
+        OutboundClaimBinding::Evm {
+            domain: DOMAIN,
+            signer,
+        }
+    }
+
+    fn solana_binding(signer: &LocalEd25519Signer) -> OutboundClaimBinding<'_> {
+        OutboundClaimBinding::Solana {
+            program_id: PROGRAM_ID,
+            signer,
+        }
+    }
+
     /// A real receiver: an HTTP server answering `POST /ilp/claim-state`
     /// exactly as a client edge does, from a watermark the test sets. Not a
     /// mock -- the code under test dials it, signs a real challenge, and
     /// parses a real answer.
+    ///
+    /// It **verifies the challenge** before answering, on either chain,
+    /// through the same `connector_signer` functions
+    /// `connector_client_edge::claim_state` calls (issue #1146). That is
+    /// what makes the ask itself under test rather than only the parse of
+    /// the answer: a challenge signed over the wrong message, or encoded
+    /// the wrong way, comes back `ok: false` here exactly as it would from
+    /// a deployed payee.
     struct Receiver {
         url: String,
         nonce: Arc<AtomicU64>,
         cumulative: Arc<AtomicU64>,
         shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    /// The far side's own verification of one asked-about channel, and the
+    /// answer it produces. Returns `None` for a request this receiver
+    /// cannot read at all, which is the same "answered nothing" a caller
+    /// must survive.
+    fn answer_claim_state(body: &[u8], nonce: u64, cumulative: u64) -> serde_json::Value {
+        let request: serde_json::Value = match serde_json::from_slice(body) {
+            Ok(request) => request,
+            Err(_) => return serde_json::json!({ "channels": [] }),
+        };
+        let entry = &request["channels"][0];
+        let expires = entry["expires"].as_u64().unwrap_or(0);
+        let verified = match entry["blockchain"].as_str() {
+            Some("evm") => {
+                let channel_id = entry["channelId"].as_str().unwrap_or_default();
+                let signature = entry["signature"].as_str().unwrap_or_default();
+                decode_hex_32(channel_id).is_some_and(|channel_id| {
+                    connector_signer::verify_evm_claim_state_challenge(
+                        &EvmClaimStateChallenge {
+                            channel_id,
+                            expires,
+                            chain_id: DOMAIN.chain_id,
+                            token_network_address: DOMAIN.token_network,
+                        },
+                        &decode_hex_65(signature),
+                        &derive_evm_address(&claim_signer().public_key().expect("public key")),
+                    )
+                })
+            }
+            Some("solana") => {
+                let account = entry["channelAccount"].as_str().unwrap_or_default();
+                let signature = BASE64
+                    .decode(entry["signature"].as_str().unwrap_or_default())
+                    .unwrap_or_default();
+                let account = bs58::decode(account).into_vec().unwrap_or_default();
+                <[u8; 32]>::try_from(account).is_ok_and(|account| {
+                    verify_solana_claim_state_challenge(
+                        &account,
+                        expires,
+                        &signature,
+                        &solana_claim_signer().public_key(),
+                    )
+                })
+            }
+            _ => false,
+        };
+        if !verified {
+            return serde_json::json!({
+                "channels": [{ "ok": false, "error": "unverified" }]
+            });
+        }
+        serde_json::json!({
+            "channels": [{
+                "ok": true,
+                "nonce": nonce,
+                "cumulativeClaimed": cumulative.to_string(),
+                "available": "1000000",
+            }]
+        })
     }
 
     impl Receiver {
@@ -690,20 +1024,15 @@ mod tests {
                 let nonce = Arc::clone(&state_nonce);
                 let cumulative = Arc::clone(&state_cumulative);
                 async move {
-                    Ok::<_, Infallible>(service_fn(move |_: Request<Body>| {
+                    Ok::<_, Infallible>(service_fn(move |request: Request<Body>| {
                         let nonce = nonce.load(Ordering::SeqCst);
                         let cumulative = cumulative.load(Ordering::SeqCst);
                         async move {
+                            let body = hyper::body::to_bytes(request.into_body())
+                                .await
+                                .expect("a request body");
                             Ok::<_, Infallible>(Response::new(Body::from(
-                                serde_json::json!({
-                                    "channels": [{
-                                        "ok": true,
-                                        "nonce": nonce,
-                                        "cumulativeClaimed": cumulative.to_string(),
-                                        "available": "1000000",
-                                    }]
-                                })
-                                .to_string(),
+                                answer_claim_state(&body, nonce, cumulative).to_string(),
                             )))
                         }
                     }))
@@ -748,14 +1077,15 @@ mod tests {
         let receiver = Receiver::start(41, 41_082).await;
         let client = reqwest::Client::new();
         let signer = claim_signer();
-        let state = HttpClaimState::new(&client, &receiver.url, &signer);
+        let challenge = evm_challenge_signer();
+        let state = HttpClaimState::new(&client, &receiver.url, &challenge);
 
         let ledger =
             OutboundClientLedger::open(dir.path().join("outbound-client.log")).expect("open");
         // This first claim is what a local book would remember: nonce 42,
         // cumulative 42_084.
         let first = ledger
-            .next_claim(NEXT_HOP, &state, &CHANNEL, &DOMAIN, &signer, 1_002)
+            .next_claim(NEXT_HOP, &state, &CHANNEL, &evm_binding(&signer), 1_002)
             .await
             .expect("first claim");
         assert_eq!((first.nonce, first.cumulative), (42, 42_084));
@@ -764,7 +1094,7 @@ mod tests {
         // at 41/41_082. The next claim must be priced off THAT, not off the
         // 42_084 this process last signed.
         let second = ledger
-            .next_claim(NEXT_HOP, &state, &CHANNEL, &DOMAIN, &signer, 1_002)
+            .next_claim(NEXT_HOP, &state, &CHANNEL, &evm_binding(&signer), 1_002)
             .await
             .expect("second claim");
         assert_eq!(
@@ -777,7 +1107,7 @@ mod tests {
         receiver.nonce.store(100, Ordering::SeqCst);
         receiver.cumulative.store(100_200, Ordering::SeqCst);
         let third = ledger
-            .next_claim(NEXT_HOP, &state, &CHANNEL, &DOMAIN, &signer, 1_002)
+            .next_claim(NEXT_HOP, &state, &CHANNEL, &evm_binding(&signer), 1_002)
             .await
             .expect("third claim");
         assert_eq!((third.nonce, third.cumulative), (101, 101_202));
@@ -794,14 +1124,15 @@ mod tests {
         let receiver = Receiver::start(41, 41_082).await;
         let client = reqwest::Client::new();
         let signer = claim_signer();
-        let state = HttpClaimState::new(&client, &receiver.url, &signer);
+        let challenge = evm_challenge_signer();
+        let state = HttpClaimState::new(&client, &receiver.url, &challenge);
 
         let before = OutboundClientLedger::open(&path).expect("open");
         let mut issued = Vec::new();
         for _ in 0..3 {
             issued.push(
                 before
-                    .next_claim(NEXT_HOP, &state, &CHANNEL, &DOMAIN, &signer, 7)
+                    .next_claim(NEXT_HOP, &state, &CHANNEL, &evm_binding(&signer), 7)
                     .await
                     .expect("claim")
                     .nonce,
@@ -815,7 +1146,7 @@ mod tests {
         let after = OutboundClientLedger::open(&path).expect("reopen");
         assert_eq!(after.issued_nonce(NEXT_HOP), 44);
         let resumed = after
-            .next_claim(NEXT_HOP, &state, &CHANNEL, &DOMAIN, &signer, 7)
+            .next_claim(NEXT_HOP, &state, &CHANNEL, &evm_binding(&signer), 7)
             .await
             .expect("claim after restart");
         assert_eq!(
@@ -837,13 +1168,14 @@ mod tests {
         let receiver = Receiver::start(0, 0).await;
         let client = reqwest::Client::new();
         let signer = claim_signer();
-        let state = HttpClaimState::new(&client, &receiver.url, &signer);
+        let challenge = evm_challenge_signer();
+        let state = HttpClaimState::new(&client, &receiver.url, &challenge);
         let ledger =
             OutboundClientLedger::open(dir.path().join("outbound-client.log")).expect("open");
 
         for _ in 0..3 {
             ledger
-                .next_claim("apex-store", &state, &CHANNEL, &DOMAIN, &signer, 1)
+                .next_claim("apex-store", &state, &CHANNEL, &evm_binding(&signer), 1)
                 .await
                 .expect("claim");
         }
@@ -859,11 +1191,12 @@ mod tests {
         let receiver = Receiver::start(0, 0).await;
         let client = reqwest::Client::new();
         let signer = claim_signer();
-        let state = HttpClaimState::new(&client, &receiver.url, &signer);
+        let challenge = evm_challenge_signer();
+        let state = HttpClaimState::new(&client, &receiver.url, &challenge);
         let ledger = OutboundClientLedger::in_memory();
 
         let error = ledger
-            .next_claim(NEXT_HOP, &state, &CHANNEL, &DOMAIN, &signer, 2_000_000)
+            .next_claim(NEXT_HOP, &state, &CHANNEL, &evm_binding(&signer), 2_000_000)
             .await
             .expect_err("a packet above the headroom must be refused");
         assert!(
@@ -892,7 +1225,8 @@ mod tests {
     #[test]
     fn the_claim_verifies_as_the_settlement_address_the_channel_is_opened_with() {
         let signer = claim_signer();
-        let (json, _) = claim_json(&signer, &CHANNEL, &DOMAIN, 7, 7_014).expect("sign a claim");
+        let (json, _) =
+            claim_json(&CHANNEL, &evm_binding(&signer), 7, 7_014).expect("sign a claim");
         let claim: serde_json::Value = serde_json::from_str(&json).expect("claim JSON");
 
         let expected = derive_evm_address(&signer.public_key().expect("public key"));
@@ -928,7 +1262,8 @@ mod tests {
     /// Cheap to hit, free to learn, and easy to reintroduce.
     #[test]
     fn the_claims_timestamp_ends_in_z_not_an_offset() {
-        let (json, _) = claim_json(&claim_signer(), &CHANNEL, &DOMAIN, 1, 1).expect("sign");
+        let signer = claim_signer();
+        let (json, _) = claim_json(&CHANNEL, &evm_binding(&signer), 1, 1).expect("sign");
         let claim: serde_json::Value = serde_json::from_str(&json).expect("claim JSON");
         let timestamp = claim["timestamp"].as_str().expect("timestamp");
 
@@ -1007,5 +1342,204 @@ mod tests {
             *byte = u8::from_str_radix(&value[i * 2..i * 2 + 2], 16).expect("hex");
         }
         out
+    }
+
+    fn decode_hex_32(value: &str) -> Option<[u8; 32]> {
+        let value = value.strip_prefix("0x").unwrap_or(value);
+        if value.len() != 64 {
+            return None;
+        }
+        let mut out = [0u8; 32];
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(value.get(i * 2..i * 2 + 2)?, 16).ok()?;
+        }
+        Some(out)
+    }
+
+    // ---------------------------------------------------------------
+    // Solana (issue #1146): the arm that made a Solana peering payable
+    // proactively rather than only postpay.
+    // ---------------------------------------------------------------
+
+    /// The whole round trip on Solana: a real ask the far side actually
+    /// verifies, a real ed25519 claim, and the receiver's own record as the
+    /// only authority on the cumulative amount. Exactly the property the
+    /// EVM twin above pins, on the other curve.
+    #[tokio::test]
+    async fn a_solana_hop_is_asked_and_paid_from_the_receivers_own_watermark() {
+        let receiver = Receiver::start(41, 41_082).await;
+        let client = reqwest::Client::new();
+        let signer = solana_claim_signer();
+        let challenge = solana_challenge_signer();
+        let state = HttpClaimState::new(&client, &receiver.url, &challenge);
+        let ledger = OutboundClientLedger::in_memory();
+
+        let claim = ledger
+            .next_claim(
+                NEXT_HOP,
+                &state,
+                &CHANNEL_ACCOUNT,
+                &solana_binding(&signer),
+                1_002,
+            )
+            .await
+            .expect("the receiver verifies the challenge and answers");
+
+        assert_eq!((claim.nonce, claim.cumulative), (42, 42_084));
+        // And the signature is the ed25519 one, not an EVM one wearing its
+        // label (issue #732's rule).
+        let ClaimSignature::Solana(signature) = claim.signature else {
+            panic!("a Solana binding must produce a Solana signature");
+        };
+        assert!(
+            verify_solana_balance_proof(
+                &PROGRAM_ID,
+                &CHANNEL_ACCOUNT,
+                42,
+                42_084,
+                &signature,
+                &signer.public_key(),
+            ),
+            "the far gate must verify this claim against this node's own settlement key"
+        );
+    }
+
+    /// The claim JSON is the shape `client-edge-spec.md` §1.3 defines for a
+    /// Solana claim, in the encodings the far gate decodes: base58 for every
+    /// 32-byte identifier, base64 for the signature, a decimal string for
+    /// the amount. Checked against the wire rather than against this
+    /// module's own idea of it.
+    #[test]
+    fn the_solana_claim_json_is_the_shape_the_far_gate_parses() {
+        let signer = solana_claim_signer();
+        let (json, _) =
+            claim_json(&CHANNEL_ACCOUNT, &solana_binding(&signer), 7, 7_014).expect("sign a claim");
+        let claim: serde_json::Value = serde_json::from_str(&json).expect("claim JSON");
+
+        let public_key = bs58::encode(signer.public_key()).into_string();
+        assert_eq!(claim["blockchain"], "solana");
+        assert_eq!(claim["version"], "1.0");
+        assert_eq!(claim["programId"], bs58::encode(PROGRAM_ID).into_string());
+        assert_eq!(
+            claim["channelAccount"],
+            bs58::encode(CHANNEL_ACCOUNT).into_string()
+        );
+        assert_eq!(claim["signerPublicKey"], public_key);
+        assert_eq!(claim["senderId"], public_key);
+        assert_eq!(claim["nonce"], 7);
+        assert_eq!(claim["transferredAmount"], "7014");
+        // No EVM fields leak across: a Solana claim carrying `chainId`
+        // would be a claim whose signed message and declared domain
+        // disagree.
+        assert!(claim.get("chainId").is_none());
+        assert!(claim.get("tokenNetworkAddress").is_none());
+        assert!(claim.get("locksRoot").is_none());
+        // `cluster` is optional and deliberately not written -- see
+        // `claim_json`'s own note.
+        assert!(claim.get("cluster").is_none());
+
+        let signature = BASE64
+            .decode(claim["signature"].as_str().expect("signature"))
+            .expect("base64");
+        assert_eq!(signature.len(), 64);
+        assert!(
+            verify_solana_balance_proof(
+                &PROGRAM_ID,
+                &CHANNEL_ACCOUNT,
+                7,
+                7_014,
+                &signature,
+                &signer.public_key(),
+            ),
+            "the receiving claim gate must verify this against this node's own settlement key"
+        );
+
+        // And the whole point of ADR 0053: the same claim under a different
+        // settlement program does NOT verify. Before it, a Solana claim
+        // bound nothing about which deployment it was for.
+        assert!(!verify_solana_balance_proof(
+            &[0x99u8; 32],
+            &CHANNEL_ACCOUNT,
+            7,
+            7_014,
+            &signature,
+            &signer.public_key(),
+        ));
+    }
+
+    /// A pairing this connector must not be able to express: the binding
+    /// carries the domain and the key together, so the ask and the claim
+    /// can never be on two different chains. Asserted through the one
+    /// place a mismatch is still representable -- a challenge signer
+    /// configured on the other curve from the channel -- which is refused
+    /// naming the reason rather than answered as "the receiver would not
+    /// report".
+    #[tokio::test]
+    async fn a_challenge_signer_on_the_wrong_chain_is_refused_naming_the_reason() {
+        let receiver = Receiver::start(0, 0).await;
+        let client = reqwest::Client::new();
+        // An EVM key asked to authenticate a Solana channel's ask.
+        let challenge = evm_challenge_signer();
+        let state = HttpClaimState::new(&client, &receiver.url, &challenge);
+
+        let error = state
+            .watermark(&CHANNEL_ACCOUNT, &ClaimStateDomain::Solana)
+            .await
+            .expect_err("a cross-chain pairing must be refused");
+        let message = error.to_string();
+        assert!(message.contains("not on the same chain"), "{message}");
+    }
+
+    /// A Solana claim-state challenge signed over the wrong message is
+    /// refused by the far side, not accepted. The receiver in these tests
+    /// runs the real verifier, so this is the property that keeps the ask
+    /// honest rather than merely well-formed.
+    #[tokio::test]
+    async fn a_solana_challenge_from_the_wrong_key_is_answered_unverified() {
+        let receiver = Receiver::start(5, 5_000).await;
+        let client = reqwest::Client::new();
+        let impostor: Arc<dyn Ed25519Signer> =
+            Arc::new(LocalEd25519Signer::from_secret_bytes([31u8; 32]).expect("signer"));
+        let challenge = ClaimStateChallengeSigner::Solana(impostor);
+        let state = HttpClaimState::new(&client, &receiver.url, &challenge);
+
+        let error = state
+            .watermark(&CHANNEL_ACCOUNT, &ClaimStateDomain::Solana)
+            .await
+            .expect_err("a challenge from a key the channel does not name is not answered");
+        assert!(matches!(
+            error,
+            OutboundClientError::ClaimStateUnavailable { .. }
+        ));
+    }
+
+    /// The channel is named in its own chain's spelling everywhere an
+    /// operator reads it -- base58 for Solana, never `0x` hex, which is how
+    /// the two claim namespaces are kept apart in the first place.
+    #[tokio::test]
+    async fn a_solana_refusal_names_the_channel_in_base58() {
+        let receiver = Receiver::start(0, 0).await;
+        let client = reqwest::Client::new();
+        let signer = solana_claim_signer();
+        let challenge = solana_challenge_signer();
+        let state = HttpClaimState::new(&client, &receiver.url, &challenge);
+        let ledger = OutboundClientLedger::in_memory();
+
+        let error = ledger
+            .next_claim(
+                NEXT_HOP,
+                &state,
+                &CHANNEL_ACCOUNT,
+                &solana_binding(&signer),
+                2_000_000,
+            )
+            .await
+            .expect_err("above the reported headroom");
+        let message = error.to_string();
+        assert!(
+            message.contains(&bs58::encode(CHANNEL_ACCOUNT).into_string()),
+            "{message}"
+        );
+        assert!(!message.contains("0x"), "{message}");
     }
 }

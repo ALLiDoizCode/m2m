@@ -275,3 +275,47 @@ folding the two settings together would have tied this default to the terminated
 deletion; that deletion has now happened, and the default survived it exactly as intended. The two
 error variants sit next to each other and the removed-key message says so, because the two spellings
 differ by one word.
+
+## Update (issue #1146): item 2's "Built." was true only on EVM
+
+**Item 2 above records the send half as flatly "Built."** It was built for **EVM only**, and had been
+since #881. A node could not cover a forward to a **Solana** peering at all, so such a peering could
+only ever be paid **postpay** — [ADR 0004](0004-value-moves-on-fulfilment.md)'s model, the one this
+record exists to retire, running on a leg this record claimed it had left behind.
+
+Four pieces were missing, and each was EVM-shaped rather than merely absent:
+
+- `[[pay_channels]]` had no `#[serde(untagged)]` Solana twin. `crates/connector-config/src/pay_channel.rs`
+  said so outright and gave a reason — an outbound client claim is an EIP-712 balance proof and the
+  outbound client ledger signs nothing else — so a Solana row was refused as an unknown field.
+- `OutboundClientLedger::next_claim` took an `EvmDomain` and a secp256k1 `&dyn Signer`.
+- `HttpClaimState` could sign only an EIP-712 claim-state challenge, so a covering payer had no way to
+  ask a Solana peer where its claims stood — even though the **receiving** half,
+  `verify_solana_claim_state_challenge`, already existed and was already wired into
+  `POST /ilp/claim-state`.
+- `cover_forward` minted `ClaimSignature::Evm` and nothing else.
+
+**Since issue #1146 the send half is built on both chains.** A Solana `[[pay_channels]]` row names a
+`channel_account` and a `client_edge_url`; its settlement program is
+`[settlement.solana] program_id`, never declared by the row, so the program
+[ADR 0053](0053-a-solana-claim-binds-its-domain-the-way-an-evm-claim-does.md) signs into every
+covering claim is by construction the one this node would redeem it through (issue #1128's rule).
+`next_claim` takes an `OutboundClaimBinding` carrying a domain and its signer together, so a
+secp256k1 key can never be paired with a Solana program id. The claim-state ask is the Solana
+challenge the existing verifier accepts — base58 `channelAccount`, base64 ed25519 signature — rather
+than a second design.
+
+**One thing a Solana row must have that an EVM row need not**, refused at load naming the peer
+(`ConfigError::PayChannelSolanaWithoutPeerChannel`): the same peering must also bind that channel as a
+Solana `[[peer_channels]]` row. `programId` is a **required** field of the Solana claim wire, where an
+EVM claim's EIP-712 domain fields are optional and simply ride absent; both peer carriages render it
+from that peer-channel row. Without one, every covering claim the row minted would reach
+`claim_json::encode` with nothing to write there — a caller bug it panics on, on the packet path, with
+the money already committed. Holding one channel in both roles with one hop is the deployed shape this
+record's own item 2 describes, so the requirement costs a real config nothing.
+
+**What is still true of every deployed box.** Nothing above changes a running node: a peering covers
+its forwards only once an operator writes `[[pay_channels]]` for it, and no committed config on this
+fleet or in `local/` writes a Solana one yet. `local/mixed-chain`'s b-c leg remains postpay, and
+converting it belongs with deleting the postpay path
+([issue #1145](https://github.com/toon-protocol/connector/issues/1145)), which this unblocks.

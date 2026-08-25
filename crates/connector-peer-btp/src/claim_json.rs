@@ -199,8 +199,9 @@ pub fn encode(
             });
             // Deliberately no `chainId`/`tokenNetworkAddress`-style domain
             // fields here: a Solana claim's signature covers
-            // `solana_balance_proof_message`'s 48 bytes, which carry no
-            // EIP-712 domain to render (`SolanaChannel`'s own doc,
+            // `solana_balance_proof_message`'s 96 bytes, which bind the
+            // settlement program id (ADR 0053) and carry no EIP-712 domain
+            // to render (`SolanaChannel`'s own doc,
             // `connector_runtime::claim`).
             let signer = bs58::encode(signer_public_key).into_string();
             let json = serde_json::json!({

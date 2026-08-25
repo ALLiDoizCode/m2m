@@ -32,7 +32,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use connector_config::{Config, PeerChannelConfig, SettlementChain};
+use connector_config::{Config, PayChannelConfig, PeerChannelConfig, SettlementChain};
 use connector_settlement_solana::test_support::LOCAL_TEST_PROGRAM_ID;
 
 const SOLO_CONFIG: &str = include_str!("../../../local/solo/connector.toml");
@@ -499,7 +499,9 @@ fn the_two_hop_payer_covers_every_crossing_before_it_is_sent() {
         "A pays exactly one hop from exactly one channel: the outbound client ledger keeps one \
          nonce line per next hop, so two rows for one hop would be two channels on one line"
     );
-    let pays_from = &payer.pay_channels()[0];
+    let PayChannelConfig::Evm(pays_from) = &payer.pay_channels()[0] else {
+        panic!("this topology settles the a-b leg on anvil, so the row is EVM-shaped");
+    };
     let peer_channel = evm_channel(&payer, "a-b");
     assert_eq!(pays_from.peer_id(), "a-b");
     assert_eq!(

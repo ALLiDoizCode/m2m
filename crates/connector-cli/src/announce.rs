@@ -80,6 +80,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -92,9 +93,12 @@ use connector_domain::{
 // The outbound client ledger (issue #873): the receiver-authoritative
 // watermark, the nonce line and the claim signing this path used to carry
 // itself, now shared with the forwarding path.
-use connector_runtime::{EvmDomain, HttpClaimState, OutboundClientError, OutboundClientLedger};
+use connector_runtime::{
+    ClaimStateChallengeSigner, EvmDomain, HttpClaimState, OutboundClaimBinding,
+    OutboundClientError, OutboundClientLedger,
+};
 use connector_signer::giftwrap::{derive_fulfillment, open_response, seal_request};
-use connector_signer::{sign_ilp_peer_info, LocalSigner, NostrEvent, PublicKeyBytes};
+use connector_signer::{sign_ilp_peer_info, LocalSigner, NostrEvent, PublicKeyBytes, Signer};
 use serde::Serialize;
 
 use crate::runtime::{
@@ -1514,9 +1518,15 @@ async fn pay_the_through_url(
             SettlementConfig::Solana(_) => None,
         })
         .ok_or(AnnounceError::NoSettlementIdentity)?;
-    let signer =
+    // An `Arc` because `ClaimStateChallengeSigner` holds one -- the enum a
+    // covering payer picks its curve with (issue #1146). `announce` is
+    // EVM-only and stays so: it pays a `[announce] pay_channel`, which is a
+    // 32-byte EVM channel id and has no Solana spelling.
+    let signer: Arc<dyn Signer> = Arc::new(
         LocalSigner::from_secret_bytes("announce-claim", read_settlement_key_bytes(evm.key())?)
-            .map_err(|error| AnnounceError::Signing(error.to_string()))?;
+            .map_err(|error| AnnounceError::Signing(error.to_string()))?,
+    );
+    let challenge_signer = ClaimStateChallengeSigner::Evm(Arc::clone(&signer));
 
     // In MEMORY, deliberately, and this is the one place the CLI's use of
     // the shared ledger differs from the serving node's.
@@ -1533,14 +1543,16 @@ async fn pay_the_through_url(
     // The next hop, for a payer arriving as an ordinary client, IS the
     // through-URL: that is the node whose watermark is being advanced and
     // whose nonce line this claim sits on.
-    let receiver = HttpClaimState::new(client, &options.through_url, &signer);
+    let receiver = HttpClaimState::new(client, &options.through_url, &challenge_signer);
     let claim = ledger
         .next_claim(
             &options.through_url,
             &receiver,
             &channel,
-            &domain,
-            &signer,
+            &OutboundClaimBinding::Evm {
+                domain,
+                signer: signer.as_ref(),
+            },
             amount,
         )
         .await?;

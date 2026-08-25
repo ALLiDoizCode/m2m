@@ -11,6 +11,10 @@ connector-settlement = { path = "../connector-settlement" }
 connector-signer = { path = "../connector-signer" }
 arc-swap = "1.9.2"
 async-trait = "0.1"
+# The encoding a Solana claim's ed25519 signature travels in, on both the
+# claim wire and the `POST /ilp/claim-state` challenge (issue #1146) --
+# the same one `connector_client_edge`'s gate decodes them from.
+base64 = "0.22"
 bs58 = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
 percent-encoding = "2"

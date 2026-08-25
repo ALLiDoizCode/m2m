@@ -33,6 +33,20 @@
 //! knowable, no settlement backend -- so the whole exchange is two real
 //! components and one TCP socket, and it runs in milliseconds with no
 //! `anvil` in sight.
+//!
+//! # Both chains (issue #1146)
+//!
+//! The same round trip runs on Solana, and it is the reason this file has a
+//! second half rather than a second file. Until #1146 the payer had no
+//! Solana arm at all: `[[pay_channels]]` was EVM-shaped,
+//! `OutboundClientLedger::next_claim` took an `EvmDomain` and a secp256k1
+//! signer, and `cover_forward` minted `ClaimSignature::Evm` and nothing
+//! else -- so a Solana peering could only ever be paid POSTPAY, the model
+//! ADR 0042 exists to retire. The Solana test below asserts the same two
+//! properties as the EVM one against the same real `POST /ilp/claim-state`
+//! handler, which is what says the challenge a covering payer signs is the
+//! one `verify_solana_claim_state_challenge` accepts rather than merely a
+//! plausible one.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -42,11 +56,14 @@ use connector_client_edge::{
     router_with_gate, ClientChannelRegistry, ClientClaimGate, DepositFloor, EvmChannel,
 };
 use connector_runtime::{
-    ChannelDomain, ClaimAckOutcome, ClaimSignature, ClaimStateSource, Connector, EvmDomain,
-    FakeAppClient, InMemoryJournal, InProcessPeerTransport, OutboundClientLedger,
-    OwnedHttpClaimState, TestClock, WireClaim,
+    ChannelDomain, ClaimAckOutcome, ClaimSignature, ClaimStateChallengeSigner, ClaimStateSource,
+    Connector, EvmDomain, FakeAppClient, InMemoryJournal, InProcessPeerTransport,
+    OutboundClaimBinding, OutboundClientLedger, OwnedHttpClaimState, TestClock, WireClaim,
 };
-use connector_signer::{derive_evm_address, LocalSigner, Signer};
+use connector_signer::{
+    derive_evm_address, verify_solana_balance_proof, Ed25519Signer, LocalEd25519Signer,
+    LocalSigner, Signer,
+};
 
 /// The one channel, held by the payee as a `[[peer_channels]]` row and by
 /// the payer as its `[[pay_channels]]` row -- one channel, both roles.
@@ -136,7 +153,7 @@ async fn successive_covered_packets_each_advance_the_payees_watermark() {
     let receiver = OwnedHttpClaimState::new(
         reqwest::Client::new(),
         format!("http://{addr}/ilp"),
-        Arc::clone(&signer),
+        ClaimStateChallengeSigner::Evm(Arc::clone(&signer)),
     );
     let state = tempfile::tempdir().expect("a temp dir");
     let ledger =
@@ -152,8 +169,10 @@ async fn successive_covered_packets_each_advance_the_payees_watermark() {
                 NEXT_HOP,
                 &receiver as &dyn ClaimStateSource,
                 &CHANNEL,
-                &domain(),
-                signer.as_ref(),
+                &OutboundClaimBinding::Evm {
+                    domain: domain(),
+                    signer: signer.as_ref(),
+                },
                 AMOUNT,
             )
             .await
@@ -166,7 +185,7 @@ async fn successive_covered_packets_each_advance_the_payees_watermark() {
                 channel_id: channel_hex(),
                 nonce: claim.nonce,
                 cumulative_amount: u64::try_from(claim.cumulative).expect("fits the wire"),
-                signature: ClaimSignature::Evm(claim.signature),
+                signature: claim.signature,
             }),
             ClaimAckOutcome::Accepted,
             "crossing {expected_nonce}'s claim must clear the payee's peer book"
@@ -185,6 +204,150 @@ async fn successive_covered_packets_each_advance_the_payees_watermark() {
     assert_eq!(
         payee
             .peer_channel_watermark(&channel_hex())
+            .map(|w| (w.nonce, w.cumulative_amount)),
+        Some((2, 2 * AMOUNT)),
+        "and the payee's own book must agree"
+    );
+}
+
+// ---------------------------------------------------------------------
+// The Solana half (issue #1146).
+// ---------------------------------------------------------------------
+
+/// The Solana channel, held by the payee as a `[[peer_channels]]` row and by
+/// the payer as its `[[pay_channels]]` row -- one channel account, both
+/// roles, exactly as [`CHANNEL`] is on EVM.
+const CHANNEL_ACCOUNT: [u8; 32] = [0xcd; 32];
+/// The settlement program the channel lives under. ADR 0053 signs this into
+/// every claim on it, and issue #1128 makes it `[settlement.solana]
+/// program_id` on both sides -- there is only one program a node can redeem
+/// through, so there is only one a channel can be judged under.
+const PROGRAM_ID: [u8; 32] = [0x5e; 32];
+const SOLANA_NEXT_HOP: &str = "b-c";
+
+fn base58(bytes: &[u8; 32]) -> String {
+    bs58::encode(bytes).into_string()
+}
+
+/// The Solana payee: the same node as [`spawn_payee`], holding
+/// `CHANNEL_ACCOUNT` as a peer channel and serving `POST /ilp/claim-state`
+/// over a real socket.
+async fn spawn_solana_payee(payer: &LocalEd25519Signer) -> (SocketAddr, Arc<Connector>) {
+    let payer_key = base58(&payer.public_key());
+
+    let mut channels = ClientChannelRegistry::new();
+    channels
+        .record_solana(&base58(&CHANNEL_ACCOUNT), &payer_key, &base58(&PROGRAM_ID))
+        .expect("a 32-byte base58 account");
+
+    let connector = Arc::new(
+        Connector::new(
+            vec![],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            Arc::new(TestClock::new(
+                Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+            )),
+        )
+        .with_solana_channel(base58(&CHANNEL_ACCOUNT), &payer_key, &base58(&PROGRAM_ID))
+        .expect("a well-formed channel account"),
+    );
+
+    let gate = ClientClaimGate::restore(channels, Arc::new(InMemoryJournal::new()))
+        .expect("a fresh in-memory journal has nothing to replay");
+    let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("payee-identity"));
+    let app = router_with_gate(Arc::clone(&connector), signer, None, gate);
+    let server = axum::Server::bind(&"127.0.0.1:0".parse().unwrap()).serve(app.into_make_service());
+    let addr = server.local_addr();
+    tokio::spawn(server);
+    (addr, connector)
+}
+
+/// The Solana twin of
+/// [`successive_covered_packets_each_advance_the_payees_watermark`]: two
+/// crossings, each asking the payee's real claim-state endpoint over a real
+/// socket and each signing an ed25519 claim the payee's real peer book then
+/// accepts.
+///
+/// What would fail here if the arm were wrong, and neither is hypothetical:
+/// a challenge signed over anything but
+/// `solana_claim_state_challenge_message`'s bytes comes back `ok: false`
+/// (the ask is refused, so nothing is signed at all), and a claim signed
+/// under a program id the payee does not judge by is refused by its book
+/// with the packet already paid for.
+#[tokio::test]
+async fn successive_covered_solana_packets_each_advance_the_payees_watermark() {
+    let payer_key = LocalEd25519Signer::from_secret_bytes([17u8; 32]).expect("a payer key");
+    let payer_public_key = payer_key.public_key();
+    let (addr, payee) = spawn_solana_payee(&payer_key).await;
+
+    let signer: Arc<dyn Ed25519Signer> = Arc::new(payer_key);
+    let receiver = OwnedHttpClaimState::new(
+        reqwest::Client::new(),
+        format!("http://{addr}/ilp"),
+        ClaimStateChallengeSigner::Solana(Arc::clone(&signer)),
+    );
+    let state = tempfile::tempdir().expect("a temp dir");
+    let ledger =
+        OutboundClientLedger::open(state.path().join("outbound-client.log")).expect("open");
+
+    let mut cumulatives = Vec::new();
+    for expected_nonce in 1..=2u64 {
+        let claim = ledger
+            .next_claim(
+                SOLANA_NEXT_HOP,
+                &receiver as &dyn ClaimStateSource,
+                &CHANNEL_ACCOUNT,
+                &OutboundClaimBinding::Solana {
+                    program_id: PROGRAM_ID,
+                    signer: signer.as_ref(),
+                },
+                AMOUNT,
+            )
+            .await
+            .expect("the payee answers a Solana challenge and the ledger signs");
+        assert_eq!(claim.nonce, expected_nonce);
+        cumulatives.push(claim.cumulative);
+
+        // The signature is the ed25519 one, and it verifies against the
+        // payer's own settlement key under the program the payee judges by
+        // -- the property ADR 0053 exists for.
+        let ClaimSignature::Solana(signature) = claim.signature else {
+            panic!("a Solana binding must produce a Solana signature");
+        };
+        assert!(
+            verify_solana_balance_proof(
+                &PROGRAM_ID,
+                &CHANNEL_ACCOUNT,
+                claim.nonce,
+                u64::try_from(claim.cumulative).expect("fits the wire"),
+                &signature,
+                &payer_public_key,
+            ),
+            "crossing {expected_nonce}'s claim must verify under the channel's own program"
+        );
+
+        assert_eq!(
+            payee.handle_peer_claim(WireClaim {
+                channel_id: base58(&CHANNEL_ACCOUNT),
+                nonce: claim.nonce,
+                cumulative_amount: u64::try_from(claim.cumulative).expect("fits the wire"),
+                signature: claim.signature,
+            }),
+            ClaimAckOutcome::Accepted,
+            "crossing {expected_nonce}'s claim must clear the payee's peer book"
+        );
+    }
+
+    assert_eq!(
+        cumulatives,
+        vec![u128::from(AMOUNT), u128::from(2 * AMOUNT)],
+        "each crossing must advance the payee's watermark by what it forwards"
+    );
+    assert_eq!(
+        payee
+            .peer_channel_watermark(&base58(&CHANNEL_ACCOUNT))
             .map(|w| (w.nonce, w.cumulative_amount)),
         Some((2, 2 * AMOUNT)),
         "and the payee's own book must agree"

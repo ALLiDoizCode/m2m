@@ -1,6 +1,6 @@
 # A Solana claim binds its domain, the way an EVM claim already does
 
-**Status:** Accepted, **not yet built — and a breaking wire change**. Extends [0024](0024-peer-wire-claims-sign-the-eip-712-balance-proof.md) to the second settlement chain [0002](0002-drop-mina-from-the-rust-connector.md) kept. Supersedes the reading under which issue #975 is a missing check.
+**Status:** Accepted and **built** (see the Update below; the wire change landed with issue #1082). Extends [0024](0024-peer-wire-claims-sign-the-eip-712-balance-proof.md) to the second settlement chain [0002](0002-drop-mina-from-the-rust-connector.md) kept. Supersedes the reading under which issue #975 is a missing check.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
@@ -79,3 +79,43 @@ vector set has carried `claim_solana` since.
 signature can be checked against this connector's own record of the channel. A claim that verifies but
 binds too little is a different failure, and this record is what closes it. The two should not be read
 as one rule.
+
+## Update (issue #1146): built — and this record's Status line was three issues stale
+
+**This record said "not yet built" for four months after the code landed.** It is built, and was
+already built when [issue #1146](https://github.com/toon-protocol/connector/issues/1146) was written
+against it — that issue's original "do not build this before ADR 0053" sequencing was derived from
+this line and has been retracted in its comments. `docs/adr/README.md`'s row agreed with the stale
+line and is corrected alongside it.
+
+What exists, as of issue #1082:
+
+`connector_signer::solana_balance_proof_message` is **96 bytes**, not the 48 described above:
+
+| bytes  | field                                   |
+| ------ | --------------------------------------- |
+| 0..16  | `TOON-BALPROOF-V2`, the domain tag      |
+| 16..48 | `program_id` — the settlement program   |
+| 48..80 | `channel_account`                       |
+| 80..88 | `nonce`, u64 little-endian              |
+| 88..96 | `transferred_amount`, u64 little-endian |
+
+`packages/solana-program/src/processor.rs` and `crates/connector-settlement-solana/src/wire.rs` each
+carry the same tag, each commented to stay byte-identical with the others, and
+`vectors/wire-vectors.json` carries the changed `peer_carriage.claim_solana` the Consequences section
+promised.
+
+**Two details of the Decision were settled differently, and deliberately.** The Decision asks for
+"the settlement program's id, **and the cluster**". The cluster is **not** in the message, because a
+Solana program knows its own id and nothing about which cluster it runs on — it could not rebuild the
+message to compare against, so a cluster in the signed bytes would be unverifiable exactly where it
+would need to be verified. A claim's declared `cluster` therefore stays what this record calls it
+throughout: a routing hint, never a security boundary, compared off chain against the node's own
+`[settlement.solana] rpc_url` (issues #975/#976). And the construction is **domain-separated rather
+than appended**: an appended field is silently truncatable by a verifier expecting the old length,
+whereas a 48-byte prefix of this message is not a valid message under either scheme.
+
+**What it enables, and why this Update is written now.** ADR 0042's send half could not be built for
+Solana while this was thought unbuilt: a covering payer proactively signing on the 48-byte format
+would have been minting claims valid on every cluster where the account existed — the deployment
+accident this record names. Issue #1146 built that send half on top of these bytes.
