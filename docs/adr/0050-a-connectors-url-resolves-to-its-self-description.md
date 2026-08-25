@@ -4,6 +4,8 @@
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
+**Falsifier:** `crates/connector-client-edge/src/**/*.rs` matching `\.route\("/ilp",.*\bget\(` — the address this record chose is `GET /ilp`, and today the edge registers `POST` there and nothing else, so a `GET` answers `405`. Registering a `GET` handler on that exact path is unavoidable for anything that implements this record.
+
 **`GET` on a connector's own URL returns its self-description**: the facts a stranger needs to
 transact with it, as one document, with no ILP packet, no encoder and no protocol knowledge required.
 The x402 greeting becomes a projection of it. It carries **facts only** and never accepts a `POST`.

@@ -4,6 +4,8 @@
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
+**Falsifier:** `crates/connector-runtime/src/connector.rs` matching `fn unsealed_termination_reject\([^)]*,` — `unsealed_termination_reject` takes a message and nothing else. This record requires the reject it builds to carry the terminating connector's URL, which the connector has to be handed; a second parameter is the narrowest tell that the URL arrived.
+
 **A reject raised at a termination is sealed — unless the termination never recovered the shared
 secret, in which case it is plaintext and identifies nobody.** That plaintext reject carries **where to
 ask** for the terminating connector's identity. It never carries the identity itself.

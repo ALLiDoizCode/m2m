@@ -4,6 +4,10 @@
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
+**Falsifier:** `crates/connector-config/src/route.rs` matching `\bdescription\b` — this record's Status line says no `description` field exists in the route schema. The field cannot be added under any other name, so its appearance here means the record is built and its Status line is stale.
+
+**Falsifier:** `crates/connector-domain/src/x402.rs` matching `\bdescription\b` — the other half of the same claim: nothing carries a description on a greeting. `x402.rs` holds the one wire shape the greeting is written from (issue #874), so a description reaching a client passes through this file.
+
 A probe already learns what a path costs
 ([ADR 0011](0011-rejects-accumulate-fees-and-probes-discover-cost.md)). It now also learns **what the
 addressed route does**: a short, operator-written description of the work behind that route, carried
