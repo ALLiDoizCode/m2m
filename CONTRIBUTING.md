@@ -312,6 +312,29 @@ All pull requests must pass:
 - ✅ `cargo clippy --workspace --exclude payment-channel --all-targets -- -D warnings`
 - ✅ ESLint + Prettier over the remaining npm workspaces (devnet tooling)
 
+These run on a PR against **any** base branch, not only `main` (issue #1152).
+That was not always true: `ci.yml` used to filter on `branches: [main]`, so a
+PR stacked on another PR's branch ran none of the Rust gate and still showed
+green checks from the workflows that had no branch filter. If you are looking
+at a PR with no `Rust Workspace Gate` check at all, that is a trigger bug, not
+a passing build — say so rather than merging it.
+
+### Merging, and Stacked PRs
+
+Prefer basing a PR on `main`. When you do stack one PR on another's branch,
+know the two hazards:
+
+1. **Merging the base PR with `--delete-branch` auto-closes everything stacked
+   on it**, and a PR whose base branch no longer exists **cannot be reopened**.
+   `gh pr merge --squash --delete-branch` on the base is enough to lose the
+   child outright — that is how #1149 was lost and had to be recreated by hand
+   as #1150. Retarget the child at `main` _first_
+   (`gh pr edit <child> --base main`), then merge and delete the base.
+
+2. **Rebase the child after the base lands.** A squash-merged base leaves the
+   child carrying the base's commits as duplicates until it is rebased onto
+   `main`, which makes the diff — and every review of it — wrong.
+
 ## Code Review Guidelines
 
 ### For Authors

@@ -4,9 +4,42 @@ on:
   push:
     branches:
       - main
+  # Every base branch, not just `main` (issue #1152). A `pull_request` trigger
+  # filters on the PR's BASE, so `branches: [main]` meant a stacked PR — one
+  # opened against another PR's branch — ran none of the jobs below. That did
+  # not surface as pending or skipped; it surfaced as nothing at all, while
+  # `local-topologies.yml` (which has no branch filter) went green beside it.
+  # #1149 sat at four green ticks carrying an 832-line Rust integration test
+  # on which `cargo fmt`, `cargo clippy -D warnings` and `cargo test
+  # --workspace` had never run once; it had to be recreated as #1150 against
+  # `main` to get a real signal.
+  #
+  # The cost is real and deliberately accepted: the Rust gate is ~8-12 minutes
+  # and every stacked PR now pays it (the `concurrency` group below is what
+  # keeps that bill down). The cheaper alternatives were both refused. A
+  # required status check cannot reach this case as configured: branch
+  # protection is a property of the BASE branch, `main` is the only protected
+  # branch (it requires `CI Status Summary`), and a stacked PR's base is an
+  # unprotected feature branch — so no rule applies, and even a repo-wide
+  # ruleset would only block the merge with "Expected", never make the gate
+  # run. And "just never stack" is a convention with nothing enforcing it,
+  # which is the class of problem #1150 was merged to fix.
+  #
+  # `push` stays on `main`: that is the post-merge signal and wants no
+  # widening. Every branch's pre-merge signal already arrives via the PR.
   pull_request:
     branches:
-      - main
+      - '**'
+
+# Widening the trigger above put every stacked PR on the full Rust gate, so
+# stop paying for runs that are already obsolete: a force-push or a new commit
+# cancels the run it supersedes instead of racing it. PR runs group by PR
+# number. `push` runs on `main` group by their own commit sha, so they can
+# never cancel one another — every merged commit keeps its own post-merge
+# signal, which is the one run nobody may lose.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
 
 jobs:
   # The connector itself is Rust (ADR 0017) — `rust-gate` below is this repo's
