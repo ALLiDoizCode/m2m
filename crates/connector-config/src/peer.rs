@@ -252,6 +252,78 @@ impl std::str::FromStr for ClaimEnforcement {
     }
 }
 
+/// Whether a peer PREPARE this connector would **forward** onward (ADR
+/// 0042's item 3) is refused when it arrives uncovered, or admitted and
+/// logged.
+///
+/// A separate setting from [`ClaimEnforcement`], which governs an arrival to
+/// a priced **termination** (ADR 0029) and is not changed by ADR 0042 in any
+/// way, because the two migrations default in opposite directions and end on
+/// different days:
+///
+/// - Terminated arrivals have been enforced since issue #880, so `Enforce`
+///   is [`ClaimEnforcement`]'s default and `Observe` is the escape hatch.
+/// - Forwarded arrivals have **never** been charged: neither box on the
+///   fleet covers a forward yet (`[[pay_channels]]` shipped but is opt-in
+///   per peering and no committed config writes one), so a default of
+///   `Enforce` would stop forwarding across the fleet the moment the binary
+///   rolled. [`ForwardedClaimEnforcement::Observe`] is therefore the
+///   **default**, and an operator flips a peering to
+///   [`ForwardedClaimEnforcement::Enforce`] once that peering's counterparty
+///   is covering its forwards.
+///
+/// Folding the two into one field would have made one of those defaults
+/// wrong, and folding them into one *variant set* would have tied ADR 0042's
+/// item 4 (resolve `ClaimEnforcement::Observe`, target 2026-11-01) to a
+/// migration that has not started -- deleting the terminated escape hatch
+/// would delete this field's default with it.
+///
+/// **Temporary, like its sibling.** Once every peering across the fleet
+/// covers its forwards and reads `Enforce`, this field and its `Observe`
+/// variant should be deleted so the ADR 0042 rule is simply the behaviour,
+/// using the same removed-field-trap convention `ceiling`/`flush_interval_ms`
+/// use (`ConfigError::PeerCeilingRemoved`, [`resolve_peers`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ForwardedClaimEnforcement {
+    /// Admit an uncovered forwarded arrival, logging it exactly the way a
+    /// refusal would be logged. **The default**, because enforcing by
+    /// default breaks a fleet whose send halves are not live yet.
+    #[default]
+    Observe,
+    /// Refuse an uncovered forwarded arrival (`F06_UNEXPECTED_PAYMENT` plus
+    /// the x402 greeting), the same refusal a priced termination's arrival
+    /// gets. ADR 0042's permanent rule, opted into per peering.
+    Enforce,
+}
+
+impl ForwardedClaimEnforcement {
+    /// The spelling an operator writes.
+    pub fn name(self) -> &'static str {
+        match self {
+            ForwardedClaimEnforcement::Observe => "observe",
+            ForwardedClaimEnforcement::Enforce => "enforce",
+        }
+    }
+}
+
+impl fmt::Display for ForwardedClaimEnforcement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl std::str::FromStr for ForwardedClaimEnforcement {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "observe" => Ok(ForwardedClaimEnforcement::Observe),
+            "enforce" => Ok(ForwardedClaimEnforcement::Enforce),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Parse the top-level `peer_expose` field, defaulting to
 /// [`PeerExposure::Neither`] when the operator wrote nothing -- and
 /// refusing a written-but-unrecognized spelling by name, the same way
@@ -502,6 +574,15 @@ pub(crate) struct RawPeer {
     /// why this field is temporary.
     #[serde(default)]
     claim_enforcement: Option<String>,
+    /// ADR 0042's item 3: `"enforce"` refuses a peer PREPARE this connector
+    /// would forward onward when it arrives without a claim covering the
+    /// packet's own `amount`. Omitted, or written `"observe"`, is
+    /// [`ForwardedClaimEnforcement::Observe`] -- admitted and logged, the
+    /// **default**, because the fleet's send halves are not live yet. See
+    /// [`ForwardedClaimEnforcement`] for why this defaults the opposite way
+    /// to `claim_enforcement`.
+    #[serde(default)]
+    forwarded_claim_enforcement: Option<String>,
     /// ADR 0042's cap: the largest amount this connector will forward to
     /// this peer in one packet. Omitted is [`DEFAULT_MAX_PACKET_AMOUNT`] --
     /// there is no "unbounded" spelling, deliberately.
@@ -528,6 +609,7 @@ pub struct PeerConfig {
     claim_ack_timeout_ms: u64,
     peer_answer_timeout_ms: u64,
     claim_enforcement: ClaimEnforcement,
+    forwarded_claim_enforcement: ForwardedClaimEnforcement,
     max_packet_amount: u64,
 }
 
@@ -586,6 +668,14 @@ impl PeerConfig {
     /// exists and is temporary (issue #883).
     pub fn claim_enforcement(&self) -> ClaimEnforcement {
         self.claim_enforcement
+    }
+
+    /// Whether an uncovered **forwarded** arrival from this peering is
+    /// refused or admitted-and-logged (ADR 0042's item 3). Defaults to
+    /// [`ForwardedClaimEnforcement::Observe`] -- the opposite way to
+    /// [`Self::claim_enforcement`], for the reason that type documents.
+    pub fn forwarded_claim_enforcement(&self) -> ForwardedClaimEnforcement {
+        self.forwarded_claim_enforcement
     }
 
     /// This peering's **cap** (ADR 0042): the largest amount this connector
@@ -696,6 +786,23 @@ pub(crate) fn resolve_peers(
                 })?,
         };
 
+        // ADR 0042 (item 3): a mistyped `forwarded_claim_enforcement` is
+        // refused by name for the same reason its sibling above is, and the
+        // stakes run the other way -- a typo meant as "enforce" that fell
+        // through to the default would leave this peering carrying forwards
+        // for free, silently, which is precisely the gap ADR 0042 closes.
+        let forwarded_claim_enforcement = match peer.forwarded_claim_enforcement {
+            None => ForwardedClaimEnforcement::default(),
+            Some(value) => {
+                value
+                    .parse()
+                    .map_err(|()| ConfigError::InvalidForwardedClaimEnforcement {
+                        id: peer.id.clone(),
+                        value,
+                    })?
+            }
+        };
+
         // ADR 0042's cap. `0` is refused by name rather than taken
         // literally: a cap of zero refuses every packet this peering could
         // ever carry, which is a peering that silently does nothing, and
@@ -728,6 +835,7 @@ pub(crate) fn resolve_peers(
                 .peer_answer_timeout_ms
                 .unwrap_or(DEFAULT_PEER_TIMEOUT_MS),
             claim_enforcement,
+            forwarded_claim_enforcement,
             max_packet_amount,
         });
     }
@@ -774,6 +882,7 @@ mod tests {
             claim_ack_timeout_ms: None,
             peer_answer_timeout_ms: None,
             claim_enforcement: None,
+            forwarded_claim_enforcement: None,
             max_packet_amount: None,
         }
     }
@@ -843,6 +952,82 @@ mod tests {
             resolve_peers(vec![entry], PeerExposure::Neither, false),
             Err(ConfigError::InvalidClaimEnforcement { ref id, ref value })
                 if id == "peer-b" && value == "log-only"
+        ));
+    }
+
+    /// ADR 0042 (item 3), the fleet-safety property: a peer that writes
+    /// nothing forwards exactly as it did before this knob existed --
+    /// uncovered forwarded arrivals admitted and logged, never refused.
+    /// Defaulting this the way `claim_enforcement` defaults would have
+    /// stopped forwarding across a fleet whose send halves are not live.
+    #[test]
+    fn forwarded_claim_enforcement_defaults_to_observe() {
+        let peers =
+            resolve_peers(vec![raw("peer-b")], PeerExposure::Neither, false).expect("resolve");
+
+        assert_eq!(
+            peers[0].forwarded_claim_enforcement(),
+            ForwardedClaimEnforcement::Observe
+        );
+    }
+
+    /// The two knobs are independent settings, not one: the terminated
+    /// rule's default (`Enforce`, ADR 0029) and the forwarded rule's
+    /// default (`Observe`, ADR 0042) hold simultaneously on a peering that
+    /// wrote neither field.
+    #[test]
+    fn the_two_enforcement_knobs_default_in_opposite_directions() {
+        let peers =
+            resolve_peers(vec![raw("peer-b")], PeerExposure::Neither, false).expect("resolve");
+
+        assert_eq!(peers[0].claim_enforcement(), ClaimEnforcement::Enforce);
+        assert_eq!(
+            peers[0].forwarded_claim_enforcement(),
+            ForwardedClaimEnforcement::Observe
+        );
+    }
+
+    /// The flip an operator makes once this peering's counterparty covers
+    /// its forwards.
+    #[test]
+    fn forwarded_claim_enforcement_enforce_is_parsed_by_name() {
+        let mut entry = raw("peer-b");
+        entry.forwarded_claim_enforcement = Some("enforce".to_string());
+
+        let peers = resolve_peers(vec![entry], PeerExposure::Neither, false).expect("resolve");
+
+        assert_eq!(
+            peers[0].forwarded_claim_enforcement(),
+            ForwardedClaimEnforcement::Enforce
+        );
+    }
+
+    /// Writing the default out explicitly is the same as omitting it.
+    #[test]
+    fn forwarded_claim_enforcement_observe_is_parsed_by_name() {
+        let mut entry = raw("peer-b");
+        entry.forwarded_claim_enforcement = Some("observe".to_string());
+
+        let peers = resolve_peers(vec![entry], PeerExposure::Neither, false).expect("resolve");
+
+        assert_eq!(
+            peers[0].forwarded_claim_enforcement(),
+            ForwardedClaimEnforcement::Observe
+        );
+    }
+
+    /// A mistyped value is refused by name. The stakes are the mirror image
+    /// of `claim_enforcement`'s: here a typo meant as "enforce" would fall
+    /// through to the permissive default and carry forwards for free.
+    #[test]
+    fn forwarded_claim_enforcement_refuses_an_unrecognized_spelling_by_name() {
+        let mut entry = raw("peer-b");
+        entry.forwarded_claim_enforcement = Some("enfroce".to_string());
+
+        assert!(matches!(
+            resolve_peers(vec![entry], PeerExposure::Neither, false),
+            Err(ConfigError::InvalidForwardedClaimEnforcement { ref id, ref value })
+                if id == "peer-b" && value == "enfroce"
         ));
     }
 

@@ -1,6 +1,6 @@
 # A packet carries its claim
 
-**Status:** Accepted — **a target record, partly built**. **Supersedes [0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md)**, retires [0004](0004-value-moves-on-fulfilment.md)'s headline, and amends [0010](0010-flat-per-packet-fee-and-minimum-delivery.md) and [0011](0011-rejects-accumulate-fees-and-probes-discover-cost.md). Built: the cap (`max_packet_amount`, with a default) and the send half (`[[pay_channels]]` populating `outbound_client_hops`, issue #881). Not built: requiring a covering claim on **forwarded** arrivals. (`ClaimEnforcement::Observe` was the _other_ item listed here; it is resolved — **deleted**, issue #1062 — and it never governed forwarded arrivals in the first place, since `payment_required` filters to `ClientRouteKind::Terminated`. The two debts were independent and this line used to read as though they were one.) Until those land, forwarding runs [0004](0004-value-moves-on-fulfilment.md)'s model end to end.
+**Status:** Accepted — **a target record, partly built**. **Supersedes [0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md)**, retires [0004](0004-value-moves-on-fulfilment.md)'s headline, and amends [0010](0010-flat-per-packet-fee-and-minimum-delivery.md) and [0011](0011-rejects-accumulate-fees-and-probes-discover-cost.md). Built: the cap (`max_packet_amount`, with a default), the send half (`[[pay_channels]]` populating `outbound_client_hops`, issue #881), and — issue #1142 — the rule that a **forwarded** arrival must carry a covering claim, which ships **defaulting to observe** per peering and so does not yet bind a deployed box. (`ClaimEnforcement::Observe` was the _other_ item listed here; it is resolved — **deleted**, issue #1062 — and it never governed forwarded arrivals in the first place, since `payment_required` filtered to `ClientRouteKind::Terminated`. The two debts were independent and this line used to read as though they were one.) Until an operator writes `forwarded_claim_enforcement = "enforce"`, forwarding still runs [0004](0004-value-moves-on-fulfilment.md)'s model end to end.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
@@ -96,12 +96,34 @@ reason only — the third item is the one that can break a running fleet:
    promised: a peering with no row behaves exactly as it did — `cover_forward` answers
    `NotConfigured`, the postpay `pending_claim` path runs, and no outbound client ledger file is
    opened at all.
-3. **Require a covering claim on forwarded arrivals.** The price gate filters on
-   `ClientRouteKind::Terminated`, so a packet this connector forwards onward is carried for free.
-   **This one is breaking.** Enforce it before every box's send half is live and forwarding stops
-   across the fleet, because the other end is not covering yet. It ships behind a per-peer knob that
-   observes and logs first, the same migration shape `ClaimEnforcement` already uses, and flips to
-   enforcing once (2) is deployed everywhere.
+3. **Require a covering claim on forwarded arrivals.** ~~The price gate filters on
+   `ClientRouteKind::Terminated`, so a packet this connector forwards onward is carried for free.~~
+   **Built, and defaulting to observing.** `price_gate::payment_required` now judges a
+   `ClientRouteKind::Forwarded` arrival too, against **the packet's own `amount`** — not a price and
+   not the fee. That is the symmetric figure: the send half covers the next hop for
+   `amount_after_fee(amount, fee, minimum_delivery)`, so an upstream peer covering the amount that
+   arrives here leaves this connector exactly its flat fee ([ADR
+   0010](0010-flat-per-packet-fee-and-minimum-delivery.md)). The advance is measured against the channel's prior
+   watermark by the same `validate_price` the terminated rule uses, and an unaccepted claim advances
+   nothing however much it declares.
+
+   **This one is breaking, so it is off by default.** It ships behind a **second** per-peer knob,
+   `forwarded_claim_enforcement` (`connector_config::ForwardedClaimEnforcement`), separate from
+   `claim_enforcement` and defaulting the other way: **`"observe"`** — the arrival is admitted and
+   forwarded, and logged exactly as a refusal would be logged. An operator flips one peering to
+   `"enforce"` once that peering's counterparty is covering its forwards. Two settings rather than
+   one restructured setting, because the two migrations default in opposite directions and end on
+   different days: the terminated migration's escape hatch is dated for deletion and has since been
+   deleted (the Update below, issue #1062), and folding the two together would have deleted this
+   item's default along with it. The terminated rule ([ADR
+   0029](0029-a-peer-wire-arrival-to-a-priced-termination-must-cover-its-price.md)) is unchanged
+   under every combination of the two.
+
+   **Not covered by this item:** a destination reached over a **leased** route. `Connector::client_route`
+   excludes leases by construction (ADR 0028, and ADR 0029's "leased routes are unaffected"), so a
+   leased arrival is neither priced nor gated here — it is the same hole ADR 0028 already names, not
+   the `Terminated` filter this item was about, and closing it is separate work.
+
 4. **Resolve `ClaimEnforcement::Observe`** — honour its 2026-11-01 sunset, or record that the escape
    hatch is permanent.
 
@@ -114,6 +136,12 @@ record does not become a fourth: it says plainly that it describes the target.
 its forwards **once an operator writes `[[pay_channels]]` for it**, and no committed config on this
 fleet writes one yet. So the sentence above still describes every deployed box, and stops describing
 one the moment its config names a channel to pay from.
+
+(3) has since landed too, and changes nothing about a deployed box until an operator writes
+`forwarded_claim_enforcement = "enforce"` on a peering. Until then a forwarded arrival is admitted
+and logged, which is what makes the order above survivable: the receive half can roll out fleet-wide
+while the send halves are still being configured, and each peering closes when its own counterparty
+is ready.
 
 ## Consequences
 
@@ -182,3 +210,9 @@ their value and only moves where the packet dies.
 
 0057 is **blocked on item 3 above** and says so. Until a forwarded arrival must carry a covering
 claim, the floor is the only bound on erosion on a forwarded path, and it stays.
+
+Item 3 has since been built (issue #1142), which is what 0057 was waiting on — but note what the
+observe default means for the sentence above: the mechanism that bounds erosion exists on every
+peering, and **binds** only on a peering an operator has written
+`forwarded_claim_enforcement = "enforce"` on. Retiring the floor is therefore no longer blocked on
+code, only on the rollout that flips the peerings that carry traffic.

@@ -248,6 +248,19 @@ pub enum ConfigError {
     )]
     InvalidClaimEnforcement { id: String, value: String },
 
+    /// ADR 0042 (item 3): the forwarded-arrival migration knob, spelled
+    /// wrong. Refused by name rather than falling through to the default,
+    /// because the default here is the permissive one -- a typo meant as
+    /// "enforce" would leave this peering carrying forwards for free.
+    #[error(
+        "invalid forwarded_claim_enforcement value '{value}' for peer '{id}': a peer sets \
+         'observe' (admit an uncovered forwarded arrival and log it -- the default, because the \
+         fleet's send halves are not live yet) or 'enforce' (refuse it with the x402 greeting, \
+         ADR 0042's permanent rule). Omit the field for the default ('observe'); see \
+         docs/operators/claim-policy-rollout.md"
+    )]
+    InvalidForwardedClaimEnforcement { id: String, value: String },
+
     /// ADR 0042's cap, written as `0`. A cap of zero refuses every packet
     /// this peering could carry, so it is a peering that silently does
     /// nothing -- and there is deliberately no spelling that turns the cap
