@@ -165,8 +165,9 @@ not merely recovered by #875's retry arm after a refusal teaches this node it mu
 no such config keeps riding the peer ledger's `pending_claim` (ADR 0004's postpay convention),
 untouched: bilateral peer-to-peer forwarding is not what #868/#881 changed. ADR 0042's item 3 has
 since extended the same shared gate to a `Forwarded` arrival, judged against the PREPARE's own
-`amount` and defaulting to observe rather than refuse — §3.1 below states both rules and the two
-per-peer knobs that select them.
+`amount` and defaulting to observe rather than refuse — §3.1 below states both rules and the one
+per-peer knob that is left to select between them (the terminated rule's own `claim_enforcement`
+knob was deleted by ADR 0042 item 4, issue #1077).
 
 **What "configured via `with_outbound_client_hop`" means in a config file**, since for a while it
 meant nothing an operator could write and the covering therefore never ran on a deployed node: it is
@@ -607,12 +608,17 @@ additively extensible) and MUST NOT be emitted.
     (issue #701) remains a client-edge route policy with no peer analogue.
 
   **This rule ships defaulting to observe.** Its per-peer knob is `forwarded_claim_enforcement`,
-  **separate** from `claim_enforcement` and defaulting the other way (`"observe"`): an uncovered
-  forwarded arrival is admitted, forwarded, and logged exactly as a refusal would be logged, until
-  an operator writes `"enforce"` on that peering. ADR 0042 records why -- no box on this fleet
-  covers its forwards yet, and each forwards to the other, so enforcing by default would stop
-  forwarding fleet-wide. The `Terminated` rule above is unchanged under every combination of the
-  two settings.
+  and `"observe"` is its default: an uncovered forwarded arrival is admitted, forwarded, and logged
+  exactly as a refusal would be logged, until an operator writes `"enforce"` on that peering. ADR
+  0042 records why -- no box on this fleet covers its forwards yet, and each forwards to the other,
+  so enforcing by default would stop forwarding fleet-wide.
+
+  **The `Terminated` rule above has no such knob and never gets one.** It once had a mirror,
+  `claim_enforcement`, whose `"observe"` was issue #883's canary step for the issue #880 rollout;
+  it is **deleted** (ADR 0042 item 4, issue #1077) and the key is now parsed only to be rejected by
+  name. An uncovered arrival to a priced termination is refused under every setting a peering can
+  carry. Keeping the two knobs as separate fields rather than one is what let that deletion happen
+  without taking the forwarded rule's opposite default with it.
 
   **A destination that resolves to no configured route is still gated by nothing**, and that
   includes a **leased** route: `Connector::client_route` excludes leases by construction (ADR 0028),
@@ -1246,19 +1252,16 @@ Required surface:
   1 USDC), so a peering that writes nothing is still bounded; there is deliberately no spelling
   that disables it, and `0` is a named load error rather than "off". This bounds one packet, not
   an accumulation — it is not `ceiling` returning (ADR 0033, retired above).
-- Per peer, **temporary** (issue #883, child B6 — see
-  [`docs/operators/claim-policy-rollout.md`](../operators/claim-policy-rollout.md)):
-  `claim_enforcement`, one of `"enforce"` (default) or `"observe"`. `"observe"` admits and logs an
-  uncovered peer PREPARE instead of refusing it with `F06_UNEXPECTED_PAYMENT` — the rollout's
-  canary step, not a permanent policy surface. Slated for deletion once the fleet-wide rollout
-  this document's §3.1 gate depends on is complete and confirmed.
 - Per peer, **temporary** (ADR 0042 item 3): `forwarded_claim_enforcement`, one of `"observe"`
-  (**default**) or `"enforce"`. Governs §3.1's forwarded-arrival rule only, and defaults the
-  opposite way to `claim_enforcement` above because no box on this fleet covers its forwards yet:
-  omitted, an uncovered forwarded arrival is admitted and logged rather than refused. An operator
-  writes `"enforce"` per peering once that peering's counterparty is covering. Two fields rather
-  than one, because the two migrations default in opposite directions and end on different days —
-  deleting `claim_enforcement`'s `"observe"` must not delete this field's default with it.
+  (**default**) or `"enforce"`. Governs §3.1's forwarded-arrival rule only: omitted, an uncovered
+  forwarded arrival is admitted and logged rather than refused, because no box on this fleet covers
+  its forwards yet. An operator writes `"enforce"` per peering once that peering's counterparty is
+  covering. Its sibling `claim_enforcement` — issue #883's canary knob for §3.1's **terminated**
+  rule, one of `"enforce"` (default) or `"observe"` — is **removed** (ADR 0042 item 4, issue
+  #1077); it is a removed-field trap below, and the terminated rule now enforces unconditionally.
+  Two fields rather than one is what made that possible: the two migrations defaulted in opposite
+  directions and ended on different days, so deleting `claim_enforcement`'s `"observe"` would
+  otherwise have deleted this field's default with it.
 - The accepting mirror: configured credentials map to peer ids and thence to their channels.
 - `[[peer_channels]]` — EVM shape: `peer_id`, `channel_id`, `counterparty_key`, `chain_id`,
   `token_network`. Solana shape (issue #759): `peer_id`, `channel_account`, `counterparty_key` —
@@ -1344,28 +1347,28 @@ does settle on while paying over one it does not.
 
 Named load-time errors this specification requires (spelling #677's, identity ours):
 
-| Error                                           | Condition                                                                                                                                                                                                                                                           | Source             |
-| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
-| `PeerUndialable`                                | `expose` is empty **and** a configured peer has no `endpoint` — a peering that can never establish                                                                                                                                                                  | §2.2               |
-| `PeerEndpointScheme`                            | an `endpoint` whose scheme is neither `wss://` nor `https://`                                                                                                                                                                                                       | §2.1               |
-| `PeerCredentialMissing`                         | a `[[peers]]` entry with no credential — it could never satisfy P1                                                                                                                                                                                                  | §1.2               |
-| `PeerChannelUnbound`                            | a `[[peers]]` entry with no `[[peer_channels]]` row — it could never satisfy P2                                                                                                                                                                                     | §1.2               |
-| `PeerChannelOrphaned`                           | a `[[peer_channels]]` row naming an unknown `peer_id`                                                                                                                                                                                                               | §1.2               |
-| `ChannelInBothNamespaces`                       | a channel id present in both `[[peer_channels]]` and `[[client_channels]]`                                                                                                                                                                                          | §1.8               |
-| `PeerChannelProgramIdRemoved`                   | a Solana `[[peer_channels]]` row still setting `program_id` — the key is removed; the program is read from `[settlement.solana]`, the only one this node can redeem under                                                                                           | #1128              |
-| `PeerChannelWithoutSolanaSettlement`            | a Solana `[[peer_channels]]` row on a node with no `[settlement.solana]` table — nothing to read the program id from, and nothing to redeem a claim through                                                                                                         | #1128              |
-| `PeerChannelWithoutEvmSettlement`               | an EVM `[[peer_channels]]` row on a node with no `[settlement.evm]` table — no address to be the channel's on-chain participant, so nothing to redeem an inbound claim at and no key to sign an outbound one with                                                   | §11.1, #1138       |
-| `ClientChannelWithoutEvmSettlement`             | an EVM `[[client_channels]]` row on a node with no `[settlement.evm]` table — the client-edge case of §11.1; the declared-channel exemption is a credit policy and does not reach redeemability                                                                     | §11.1, #1138       |
-| `ClientChannelWithoutSolanaSettlement`          | a Solana `[[client_channels]]` row on a node with no `[settlement.solana]` table — no program to judge the claim under and no address to collect it at. Was a warn-and-skip that left the row configured and every claim on it refused as unknown                   | §11.1, #1138       |
-| `ClientChannelSolanaSettlementProgramIdInvalid` | a Solana `[[client_channels]]` row whose `[settlement.solana] program_id` is not base58 of a 32-byte value — the twin of the peer row's, and it replaces a boot panic                                                                                               | §11.1, #1138       |
-| `PeerChannelSolanaSettlementProgramIdInvalid`   | a Solana `[[peer_channels]]` row whose `[settlement.solana] program_id` is not base58 of a 32-byte value                                                                                                                                                            | #1128              |
-| `PeerChannelInvalidSolanaAccount`               | a Solana `[[peer_channels]]` row's `channel_account`/`counterparty_key` is not base58 of a 32-byte value                                                                                                                                                            | #759               |
-| `PeerRouteUndeliverable`                        | a route naming as next hop a peer this connector can never originate to                                                                                                                                                                                             | §2.2, §6.4         |
-| `DuplicatePeerId`                               | two `[[peers]]` entries with the same `id`                                                                                                                                                                                                                          | —                  |
-| `InvalidClaimEnforcement`                       | `claim_enforcement` set to anything other than `"enforce"` or `"observe"` — a typo must not silently read as either                                                                                                                                                 | issue #883         |
-| `InvalidForwardedClaimEnforcement`              | `forwarded_claim_enforcement` set to anything other than `"observe"` or `"enforce"` — here a typo meant as `"enforce"` falls through to the permissive default and carries forwards for free                                                                        | ADR 0042           |
-| `PeerMaxPacketAmountZero`                       | `max_packet_amount = 0` — a cap of zero refuses every packet the peering could carry, and there is no "disable the cap" spelling                                                                                                                                    | ADR 0042           |
-| removed-field errors                            | `peer_wire_addr`, `addr` in its old `SocketAddr` shape, or `ceiling`/`flush_interval_ms` (ADR 0033, issue #882) — a **hard, named** error pointing at the bring-up doc, never a silent ignore, because the devnet boxes run bind-mounted configs that lead the repo | ADR 0027, ADR 0033 |
+| Error                                           | Condition                                                                                                                                                                                                                                                                                                                   | Source             |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| `PeerUndialable`                                | `expose` is empty **and** a configured peer has no `endpoint` — a peering that can never establish                                                                                                                                                                                                                          | §2.2               |
+| `PeerEndpointScheme`                            | an `endpoint` whose scheme is neither `wss://` nor `https://`                                                                                                                                                                                                                                                               | §2.1               |
+| `PeerCredentialMissing`                         | a `[[peers]]` entry with no credential — it could never satisfy P1                                                                                                                                                                                                                                                          | §1.2               |
+| `PeerChannelUnbound`                            | a `[[peers]]` entry with no `[[peer_channels]]` row — it could never satisfy P2                                                                                                                                                                                                                                             | §1.2               |
+| `PeerChannelOrphaned`                           | a `[[peer_channels]]` row naming an unknown `peer_id`                                                                                                                                                                                                                                                                       | §1.2               |
+| `ChannelInBothNamespaces`                       | a channel id present in both `[[peer_channels]]` and `[[client_channels]]`                                                                                                                                                                                                                                                  | §1.8               |
+| `PeerChannelProgramIdRemoved`                   | a Solana `[[peer_channels]]` row still setting `program_id` — the key is removed; the program is read from `[settlement.solana]`, the only one this node can redeem under                                                                                                                                                   | #1128              |
+| `PeerChannelWithoutSolanaSettlement`            | a Solana `[[peer_channels]]` row on a node with no `[settlement.solana]` table — nothing to read the program id from, and nothing to redeem a claim through                                                                                                                                                                 | #1128              |
+| `PeerChannelWithoutEvmSettlement`               | an EVM `[[peer_channels]]` row on a node with no `[settlement.evm]` table — no address to be the channel's on-chain participant, so nothing to redeem an inbound claim at and no key to sign an outbound one with                                                                                                           | §11.1, #1138       |
+| `ClientChannelWithoutEvmSettlement`             | an EVM `[[client_channels]]` row on a node with no `[settlement.evm]` table — the client-edge case of §11.1; the declared-channel exemption is a credit policy and does not reach redeemability                                                                                                                             | §11.1, #1138       |
+| `ClientChannelWithoutSolanaSettlement`          | a Solana `[[client_channels]]` row on a node with no `[settlement.solana]` table — no program to judge the claim under and no address to collect it at. Was a warn-and-skip that left the row configured and every claim on it refused as unknown                                                                           | §11.1, #1138       |
+| `ClientChannelSolanaSettlementProgramIdInvalid` | a Solana `[[client_channels]]` row whose `[settlement.solana] program_id` is not base58 of a 32-byte value — the twin of the peer row's, and it replaces a boot panic                                                                                                                                                       | §11.1, #1138       |
+| `PeerChannelSolanaSettlementProgramIdInvalid`   | a Solana `[[peer_channels]]` row whose `[settlement.solana] program_id` is not base58 of a 32-byte value                                                                                                                                                                                                                    | #1128              |
+| `PeerChannelInvalidSolanaAccount`               | a Solana `[[peer_channels]]` row's `channel_account`/`counterparty_key` is not base58 of a 32-byte value                                                                                                                                                                                                                    | #759               |
+| `PeerRouteUndeliverable`                        | a route naming as next hop a peer this connector can never originate to                                                                                                                                                                                                                                                     | §2.2, §6.4         |
+| `DuplicatePeerId`                               | two `[[peers]]` entries with the same `id`                                                                                                                                                                                                                                                                                  | —                  |
+| `InvalidForwardedClaimEnforcement`              | `forwarded_claim_enforcement` set to anything other than `"observe"` or `"enforce"` — here a typo meant as `"enforce"` falls through to the permissive default and carries forwards for free                                                                                                                                | ADR 0042           |
+| `PeerMaxPacketAmountZero`                       | `max_packet_amount = 0` — a cap of zero refuses every packet the peering could carry, and there is no "disable the cap" spelling                                                                                                                                                                                            | ADR 0042           |
+| `PeerClaimEnforcementRemoved`                   | `claim_enforcement` set at all — issue #883's canary knob is gone and the terminated rule enforces unconditionally, so `"observe"` names no mode and `"enforce"` names the only behaviour there is. The message also disambiguates the still-live `forwarded_claim_enforcement`, since the two spellings differ by one word | ADR 0042, #1077    |
+| removed-field errors                            | `peer_wire_addr`, `addr` in its old `SocketAddr` shape, or `ceiling`/`flush_interval_ms` (ADR 0033, issue #882) — a **hard, named** error pointing at the bring-up doc, never a silent ignore, because the devnet boxes run bind-mounted configs that lead the repo                                                         | ADR 0027, ADR 0033 |
 
 `AcceptOnlyPeerWithoutCeiling` and the `claim_ack_timeout_ms > flush_interval_ms` load-time warning
 (§6.3) are retired along with `ceiling`/`flush_interval_ms` (ADR 0033, issue #882).

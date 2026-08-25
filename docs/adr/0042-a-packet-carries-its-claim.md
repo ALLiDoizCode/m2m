@@ -1,6 +1,6 @@
 # A packet carries its claim
 
-**Status:** Accepted — **a target record, partly built**. **Supersedes [0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md)**, retires [0004](0004-value-moves-on-fulfilment.md)'s headline, and amends [0010](0010-flat-per-packet-fee-and-minimum-delivery.md) and [0011](0011-rejects-accumulate-fees-and-probes-discover-cost.md). Built: the cap (`max_packet_amount`, with a default), the send half (`[[pay_channels]]` populating `outbound_client_hops`, issue #881), and — issue #1142 — the rule that a **forwarded** arrival must carry a covering claim, which ships **defaulting to observe** per peering and so does not yet bind a deployed box. (`ClaimEnforcement::Observe` was the _other_ item listed here; it is resolved — **deleted**, issue #1062 — and it never governed forwarded arrivals in the first place, since `payment_required` filtered to `ClientRouteKind::Terminated`. The two debts were independent and this line used to read as though they were one.) Until an operator writes `forwarded_claim_enforcement = "enforce"`, forwarding still runs [0004](0004-value-moves-on-fulfilment.md)'s model end to end.
+**Status:** Accepted — **a target record, partly built**. **Supersedes [0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md)**, retires [0004](0004-value-moves-on-fulfilment.md)'s headline, and amends [0010](0010-flat-per-packet-fee-and-minimum-delivery.md) and [0011](0011-rejects-accumulate-fees-and-probes-discover-cost.md). Built: the cap (`max_packet_amount`, with a default), the send half (`[[pay_channels]]` populating `outbound_client_hops`, issue #881), and — issue #1142 — the rule that a **forwarded** arrival must carry a covering claim, which ships **defaulting to observe** per peering and so does not yet bind a deployed box. (`ClaimEnforcement::Observe` was the _other_ item listed here; it is resolved — **deleted**, decided in issue #1062 and deleted from the tree in issue #1077 — and it never governed forwarded arrivals in the first place, since `payment_required` filtered to `ClientRouteKind::Terminated`. The two debts were independent and this line used to read as though they were one.) Until an operator writes `forwarded_claim_enforcement = "enforce"`, forwarding still runs [0004](0004-value-moves-on-fulfilment.md)'s model end to end.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
@@ -124,8 +124,12 @@ reason only — the third item is the one that can break a running fleet:
    leased arrival is neither priced nor gated here — it is the same hole ADR 0028 already names, not
    the `Terminated` filter this item was about, and closing it is separate work.
 
-4. **Resolve `ClaimEnforcement::Observe`** — honour its 2026-11-01 sunset, or record that the escape
-   hatch is permanent.
+4. ~~**Resolve `ClaimEnforcement::Observe`** — honour its 2026-11-01 sunset, or record that the escape
+   hatch is permanent.~~ **Resolved: deleted** (issue #1077), and the sunset honoured **early** —
+   2026-08-24, not 2026-11-01. The date was a deadline, not a wait: its own two preconditions (no
+   `[[peers]]` row anywhere reading `Observe`, and the runbook confirming it) were already met, and
+   there is no `[[peers]]` row on the fleet at all. `claim_enforcement` is now a
+   parsed-and-rejected key.
 
 Until (2) lands the connector runs ADR 0004's model end to end for forwarding, which is coherent and
 RFC-shaped; it is simply not this record. **Three documents already assert otherwise** — ADR 0031's
@@ -156,7 +160,7 @@ accumulation back.
 cost is now permanent rather than provisional, and is what this record buys: no peering is ever owed
 anything between packets, so no peering can be left holding value a counterparty declines to cover.
 
-## Update (issue #1062) — `ClaimEnforcement::Observe` is deleted, and it was never the forwarded half
+## Update (issue #1062) — `ClaimEnforcement::Observe` is to be deleted, and it was never the forwarded half
 
 This record's Status line listed two unbuilt items together: requiring a covering claim on
 **forwarded** arrivals, and the resolution of `ClaimEnforcement::Observe`. **They are independent, and
@@ -165,6 +169,10 @@ listing them together was misleading.** `connector_peer_btp::price_gate::payment
 route. It never touched forwarding.
 
 ### `Observe` is deleted
+
+(**Corrected by the Update below, issue #1077.** This section recorded the decision, and was written
+in a tense that read as though the code change had already landed. It had not; it landed in issue
+#1077 on 2026-08-24. Everything the section argues is unchanged.)
 
 It was a migration ramp and said so — _"Migration-only (issue #883): the packet is admitted exactly as
 it was before issue #880, but logged so an operator can confirm real admissions before flipping this
@@ -231,3 +239,39 @@ received by a connector in the path was too little to forward"_, is what a hop a
 alone exceeds the arriving amount, and it is emitted at exactly the `amount_after_fee(amount, fee)`
 call site this paragraph names. See [0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)'s
 corrected Update. Nothing else here changes.
+
+## Update (issue #1077) — the deletion actually happened, and the record had run ahead of it
+
+The `## Update (issue #1062)` section above is written throughout in the past tense — "`Observe` is
+deleted", "`claim_enforcement` becomes a parsed-and-rejected key". **When it was written, neither was
+true of the tree.** Issue #1062 was the decision; issue #1077 was the code change, and until #1077
+landed this record described a binary that did not exist — the precise failure
+[`README.md`](README.md)'s conventions exist to prevent. Nothing in #1062's reasoning is retracted:
+only its tense was wrong, and the correction is recorded here rather than rewritten into it.
+
+**What landed (issue #1077, 2026-08-24).** `ClaimEnforcement` and its `Observe` variant are gone,
+with `PeerConfig::claim_enforcement`, `ConfigError::InvalidClaimEnforcement`, and the
+`if enforcement == Observe` branch of `connector_peer_btp::price_gate::payment_required`. An
+uncovered arrival to a priced termination is refused unconditionally; ADR 0029's refusal path — the
+`F06` plus the x402 greeting — is byte-for-byte what it always was. `claim_enforcement` is parsed
+solely so it can be **refused by name** (`ConfigError::PeerClaimEnforcementRemoved`), the
+`ceiling` / `flush_interval_ms` / `[peer_sale]` convention, and the commented-out example in
+`deploy/connector-rust/connector.toml` is deleted rather than left commented, because a commented
+example of a rejected key is a trap for whoever uncomments it.
+
+**The sunset was honoured early, not missed.** The date this record named was 2026-11-01; the
+deletion is dated 2026-08-24. The date was always the _outer_ bound — "no later than the two-node
+fleet epic closing, **or** 2026-11-01, whichever is first" — and the substantive precondition was
+already met and had been since issue #872 destroyed the two peerings the ramp existed for. No
+committed config sets the key: `infra/linode-relay/`, `infra/linode-store/` and every `local/`
+topology carry no `[[peers]]` row that writes it, and the sole occurrence anywhere was the
+commented-out example now deleted. Deleting it in November rather than August would have changed
+nothing except how long the escape hatch sat in the tree.
+
+**`forwarded_claim_enforcement` is untouched, which is the whole reason it was a second field.** ADR
+0042 item 3's knob still defaults to `"observe"`, still admits-and-logs an uncovered _forwarded_
+arrival, and is still the migration path for a rule no deployed box enforces. Item 3's own text says
+folding the two settings together would have tied this default to the terminated hatch's dated
+deletion; that deletion has now happened, and the default survived it exactly as intended. The two
+error variants sit next to each other and the removed-key message says so, because the two spellings
+differ by one word.

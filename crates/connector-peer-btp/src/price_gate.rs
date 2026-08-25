@@ -43,57 +43,44 @@
 //! item 3 names the `ClientRouteKind::Terminated` filter as the gap, and the
 //! lease path is not the gap it names.
 //!
-//! # Why the forwarded rule defaults to observing
+//! # Why the forwarded rule defaults to observing, and the terminated rule has no knob at all
 //!
 //! Because it is the one item ADR 0042 flags as breaking. Neither devnet box
 //! covers a forward today, and each forwards to the other, so a gate that
 //! enforced on arrival by default would stop forwarding across the fleet on
 //! the first rollout. [`connector_config::ForwardedClaimEnforcement`] is a
-//! **separate** per-peer setting from [`ClaimEnforcement`], defaulting the
-//! opposite way, and an operator flips one peering at a time once its
-//! counterparty's send half is live. The terminated rule's own default is
-//! untouched.
+//! per-peer setting defaulting to `Observe`, and an operator flips one
+//! peering at a time once its counterparty's send half is live.
+//!
+//! The terminated rule once had a mirror of it -- `claim_enforcement`, whose
+//! `"observe"` was issue #883's canary step for the issue #880 rollout. That
+//! ramp is **gone** (ADR 0042 item 4, issue #1077, ahead of its own
+//! 2026-11-01 sunset): a peer that gets service without a covering claim can
+//! tell, so under ADR 0047 an escape hatch from this rule was protocol law
+//! rather than local policy, and the specification would have had to document
+//! the protocol's own bypass. An uncovered arrival to a priced termination is
+//! now refused unconditionally, and `claim_enforcement` is a
+//! parsed-and-rejected key. Keeping the two settings apart rather than
+//! folding them into one is what let that deletion happen without taking the
+//! forwarded rule's opposite default with it.
 
 use std::collections::BTreeMap;
 
-use connector_config::{ClaimEnforcement, ForwardedClaimEnforcement, PeerConfig};
+use connector_config::{ForwardedClaimEnforcement, PeerConfig};
 use connector_domain::x402::GreetingTerms;
 use connector_domain::{validate_price, Prepare, Reject, RejectCode, Watermark};
 use connector_runtime::{ClaimAckOutcome, ClientRouteKind, Connector, WireClaim};
 
-/// One peering's two enforcement answers: what happens to an uncovered
-/// arrival at a priced **termination** (ADR 0029) and what happens to an
-/// uncovered arrival this connector would **forward** (ADR 0042).
-///
-/// Two fields rather than one because they default in opposite directions
-/// and always have -- see [`ForwardedClaimEnforcement`] for why. [`Default`]
-/// is therefore "the behaviour of a peering that configured neither":
-/// terminated arrivals refused, forwarded arrivals admitted and logged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct PeerClaimEnforcement {
-    /// ADR 0029's rule (issue #880), defaulting to
-    /// [`ClaimEnforcement::Enforce`].
-    pub terminated: ClaimEnforcement,
-    /// ADR 0042 item 3's rule, defaulting to
-    /// [`ForwardedClaimEnforcement::Observe`].
-    pub forwarded: ForwardedClaimEnforcement,
-}
-
-impl PeerClaimEnforcement {
-    /// Every configured peering's pair, as [`PeerConfig`] resolved them.
-    fn of(peer: &PeerConfig) -> Self {
-        PeerClaimEnforcement {
-            terminated: peer.claim_enforcement(),
-            forwarded: peer.forwarded_claim_enforcement(),
-        }
-    }
-}
-
-/// Each peering's [`PeerClaimEnforcement`], the rest reading as
-/// [`PeerClaimEnforcement::default`] -- including an id neither carriage's
-/// role decision could actually hand this function, since a policy built
-/// from every configured peer has an entry for every peer id
+/// Each peering's [`ForwardedClaimEnforcement`], the rest reading as
+/// [`ForwardedClaimEnforcement::default`] -- including an id neither
+/// carriage's role decision could actually hand this function, since a
+/// policy built from every configured peer has an entry for every peer id
 /// [`payment_required`] can ever be called with.
+///
+/// **One setting per peering, not two.** It carried the terminated rule's
+/// `claim_enforcement` alongside this until that escape hatch was deleted
+/// (ADR 0042 item 4, issue #1077); a terminated arrival is now enforced
+/// unconditionally and asks this type nothing.
 ///
 /// Deliberately as narrow as [`connector_peer_auth::PeerAuthPolicy`]: this
 /// is not the role decision and holds nothing that is (`peer.rs`'s own
@@ -101,57 +88,41 @@ impl PeerClaimEnforcement {
 /// built once from configuration and shared by every interaction.
 #[derive(Debug, Clone, Default)]
 pub struct ClaimEnforcementPolicy {
-    by_peer: BTreeMap<String, PeerClaimEnforcement>,
+    by_peer: BTreeMap<String, ForwardedClaimEnforcement>,
 }
 
 impl ClaimEnforcementPolicy {
-    /// A policy over every configured peering's own two settings.
+    /// A policy over every configured peering's own setting.
     #[must_use]
     pub fn from_peers(peers: &[PeerConfig]) -> Self {
         ClaimEnforcementPolicy {
             by_peer: peers
                 .iter()
-                .map(|peer| (peer.id().to_string(), PeerClaimEnforcement::of(peer)))
+                .map(|peer| (peer.id().to_string(), peer.forwarded_claim_enforcement()))
                 .collect(),
         }
     }
 
-    /// A policy over explicit `(peer id, terminated mode)` pairs, for a
+    /// A policy over explicit `(peer id, forwarded mode)` pairs, for a
     /// caller that has no [`PeerConfig`] to build from -- a test standing up
     /// a policy [`connector_config::Config::load`]'s validation would not
-    /// otherwise let it construct directly. Each named peering's forwarded
-    /// mode is the default, exactly as an unwritten field resolves.
+    /// otherwise let it construct directly.
     #[must_use]
-    pub fn new<'a>(entries: impl IntoIterator<Item = (&'a str, ClaimEnforcement)>) -> Self {
-        ClaimEnforcementPolicy::of(entries.into_iter().map(|(id, terminated)| {
-            (
-                id,
-                PeerClaimEnforcement {
-                    terminated,
-                    ..PeerClaimEnforcement::default()
-                },
-            )
-        }))
-    }
-
-    /// [`Self::new`], for a caller that wants to set both of a peering's
-    /// modes rather than only the terminated one.
-    #[must_use]
-    pub fn of<'a>(entries: impl IntoIterator<Item = (&'a str, PeerClaimEnforcement)>) -> Self {
+    pub fn of<'a>(entries: impl IntoIterator<Item = (&'a str, ForwardedClaimEnforcement)>) -> Self {
         ClaimEnforcementPolicy {
             by_peer: entries
                 .into_iter()
-                .map(|(id, modes)| (id.to_string(), modes))
+                .map(|(id, mode)| (id.to_string(), mode))
                 .collect(),
         }
     }
 
-    /// `peer_id`'s configured enforcement, or [`PeerClaimEnforcement::default`]
-    /// for an id this policy has no entry for -- each rule's own safe default
-    /// holds even if this is ever asked about a peer id no `[[peers]]` row
-    /// named.
+    /// `peer_id`'s configured enforcement, or
+    /// [`ForwardedClaimEnforcement::default`] for an id this policy has no
+    /// entry for -- the rule's own safe default holds even if this is ever
+    /// asked about a peer id no `[[peers]]` row named.
     #[must_use]
-    pub fn mode(&self, peer_id: &str) -> PeerClaimEnforcement {
+    pub fn mode(&self, peer_id: &str) -> ForwardedClaimEnforcement {
         self.by_peer.get(peer_id).copied().unwrap_or_default()
     }
 }
@@ -207,13 +178,16 @@ pub struct PaymentRequired {
 /// destination, what was required, the shortfall, and the claim's own
 /// verdict -- which is what distinguishes "paid too little" from "paid with
 /// a claim this connector would not accept". Admitting an uncovered packet
-/// under [`ClaimEnforcement::Observe`] or
-/// [`ForwardedClaimEnforcement::Observe`] is logged the same way, at the
-/// same level, so an operator grepping for shortfalls sees every one whether
-/// or not this peering has been flipped to enforce (issue #883, child B6).
-/// The two rules keep **separate** message text, because each rollout is
-/// watched separately and `docs/operators/claim-policy-rollout.md` greps the
-/// terminated one by name.
+/// under [`ForwardedClaimEnforcement::Observe`] is logged the same way, at
+/// the same level, so an operator grepping for shortfalls sees every one
+/// whether or not this peering has been flipped to enforce. That symmetry is
+/// what made deleting the terminated rule's own `"observe"` affordable (ADR
+/// 0042 item 4, issue #1077): an enforce-mode refusal is already as loud as
+/// an observed admission was, so a bring-up can watch shortfalls without
+/// admitting unpaid packets.
+///
+/// `enforcement` governs the **forwarded** rule alone. A terminated arrival
+/// is refused unconditionally; there is no setting that admits one.
 #[must_use]
 pub fn payment_required(
     connector: &Connector,
@@ -222,7 +196,7 @@ pub fn payment_required(
     ack: ClaimAckOutcome,
     claim: Option<&WireClaim>,
     prior_watermark: Option<Watermark>,
-    enforcement: PeerClaimEnforcement,
+    enforcement: ForwardedClaimEnforcement,
 ) -> Option<PaymentRequired> {
     // Both rules are answered from the PREPARE already in hand (ADR 0029),
     // never from the claim exchange: the destination decides *which* figure
@@ -233,13 +207,13 @@ pub fn payment_required(
     // leased -- is not this gate's business and never has been.
     let route = connector.client_route(destination)?;
     let (required, enforcing) = match route.kind {
-        ClientRouteKind::Terminated => (
-            route.price,
-            enforcement.terminated == ClaimEnforcement::Enforce,
-        ),
+        // ADR 0029's rule has no escape hatch: since issue #1077 deleted
+        // `claim_enforcement`, an uncovered arrival to a priced termination
+        // is always refused.
+        ClientRouteKind::Terminated => (route.price, true),
         ClientRouteKind::Forwarded => (
             prepare.amount,
-            enforcement.forwarded == ForwardedClaimEnforcement::Enforce,
+            enforcement == ForwardedClaimEnforcement::Enforce,
         ),
     };
     if required == 0 {
@@ -266,35 +240,21 @@ pub fn payment_required(
     let shortfall = required.saturating_sub(advanced);
 
     if !enforcing {
-        // Migration-only: the packet is admitted exactly as it was before
-        // this peering's rule started applying, but logged so an operator
-        // can confirm real admissions before flipping it to enforce.
-        match route.kind {
-            // Issue #883. The runbook greps this line's text by name --
-            // `docs/operators/claim-policy-rollout.md`, Order step 4 -- so
-            // it says `price` and reads verbatim as it did.
-            ClientRouteKind::Terminated => tracing::warn!(
-                peer_id,
-                destination,
-                price = required,
-                advanced,
-                shortfall,
-                claim_ack = ?ack,
-                "peer PREPARE admitted without a covering claim (claim_enforcement = observe; \
-                 issue #883 -- this peering is not yet enforcing)"
-            ),
-            ClientRouteKind::Forwarded => tracing::warn!(
-                peer_id,
-                destination,
-                amount = required,
-                advanced,
-                shortfall,
-                claim_ack = ?ack,
-                "peer PREPARE admitted without a covering claim \
-                 (forwarded_claim_enforcement = observe; ADR 0042 -- this peering is not yet \
-                 enforcing on forwarded arrivals)"
-            ),
-        }
+        // Reachable for a forwarded arrival only -- the terminated arm above
+        // is unconditionally enforcing. Migration-only: the packet is
+        // admitted exactly as it was before this peering's rule started
+        // applying, but logged so an operator can confirm real admissions
+        // before flipping it to enforce.
+        tracing::warn!(
+            peer_id,
+            destination,
+            amount = required,
+            advanced,
+            shortfall,
+            claim_ack = ?ack,
+            "peer PREPARE admitted without a covering claim (forwarded_claim_enforcement = \
+             observe; ADR 0042 -- this peering is not yet enforcing on forwarded arrivals)"
+        );
         return None;
     }
 

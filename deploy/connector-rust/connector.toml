@@ -171,22 +171,21 @@ write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STE
 # claim_ack_timeout_ms = 30000
 # peer_answer_timeout_ms = 30000
 #
-# # TEMPORARY migration knob (issue #883, child B6) -- do not set this on a
-# # config expected to outlive the fleet's own claim-policy rollout
-# # (docs/operators/claim-policy-rollout.md). Omit for the default,
-# # "enforce": an uncovered peer PREPARE is refused (F06_UNEXPECTED_PAYMENT
-# # + the x402 greeting). "observe" admits it instead and logs it the same
-# # way a refusal would be logged, so an operator can watch this peering's
-# # logs for admissions before flipping it to enforce. A mistyped value is a
-# # named load-time error, not a silent default.
-# # claim_enforcement = "observe"
+# # `claim_enforcement` used to be set here -- issue #883's migration ramp
+# # for the rule that an uncovered peer PREPARE to a priced TERMINATION is
+# # refused (F06_UNEXPECTED_PAYMENT + the x402 greeting). The ramp is gone
+# # (ADR 0042 item 4, issue #1077) and that rule is now unconditional, so
+# # setting the key is a named load-time error. No commented example is left
+# # here on purpose: a commented-out example of a rejected key is a trap for
+# # whoever uncomments it.
 #
-# # ADR 0042 item 3's sibling knob, for the OTHER half of the same rule: an
-# # arrival this node FORWARDS onward must carry a claim covering the
-# # packet's own amount. Omit for the default, "observe" -- admitted,
-# # forwarded, and logged exactly as a refusal would be logged -- which is
-# # deliberately the opposite default to claim_enforcement above: no box on
-# # this fleet covers its forwards yet, so enforcing by default would stop
+# # ADR 0042 item 3's knob, for the OTHER half of the same rule and the only
+# # claim-enforcement setting a peering still has: an arrival this node
+# # FORWARDS onward must carry a claim covering the packet's own amount.
+# # Omit for the default, "observe" -- admitted, forwarded, and logged
+# # exactly as a refusal would be logged -- which is deliberately the
+# # opposite default to the deleted claim_enforcement's: no box on this
+# # fleet covers its forwards yet, so enforcing by default would stop
 # # forwarding fleet-wide. Set "enforce" on a peering only once that
 # # peering's counterparty is covering its forwards ([[pay_channels]]).
 # # A mistyped value is a named load-time error, not a silent default.

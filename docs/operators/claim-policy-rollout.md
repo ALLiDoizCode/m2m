@@ -1,5 +1,29 @@
 # Rolling out the peer claim policy: order, the transition setting, and the 3-box fleet
 
+> **The transition setting no longer exists (issue #1077, 2026-08-24).** `claim_enforcement`, the
+> per-peering `"observe"` knob this runbook was written around, is **deleted** — ADR 0042 item 4,
+> honouring the 2026-11-01 sunset early because both of its preconditions had been met since #872.
+> An uncovered peer PREPARE to a priced termination is now refused unconditionally, and a config
+> that still writes the key is refused **at load, by name**
+> (`ConfigError::PeerClaimEnforcementRemoved`) rather than ignored. So:
+>
+> - **[§ The transition setting](#the-transition-setting-claim_enforcement) is history**, and is
+>   kept, marked as such, only so a reader who finds `claim_enforcement` in an old config or an old
+>   log line learns what it was. Do not write it into any config.
+> - **Order steps 3, 4, 5 and the per-peering rollback are history too**, wherever they say to set
+>   `"observe"` and flip to `"enforce"` later. There is no suppression step for the terminated rule
+>   any more.
+> - **What is NOT history: the rollout _order_, and why it matters** — senders safe to cover before
+>   receivers start refusing, one peering at a time, soak between steps, per-peering rollback. That
+>   is the guidance to reach for when this fleet grows a new peering, and it is exactly what
+>   [§ The sibling setting](#the-sibling-setting-forwarded_claim_enforcement-adr-0042-item-3)
+>   applies to `forwarded_claim_enforcement`, **which is a live field and still defaults to
+>   `"observe"`**. Read that section as the live one.
+>
+> Nothing was lost by the deletion that the order does not still give you: an enforce-mode refusal
+> is logged at the same level and with the same fields an observed admission was, deliberately, so
+> a new peering's shortfalls can be watched without admitting unpaid packets.
+
 > **Partially superseded by issue #872** (toon-meta#310 / toon-meta#313's live cutover): the apex
 > box ("box 1 / `g.toon`") is destroyed, and with it BOTH peerings this runbook was written to
 > migrate (`apex-store`, `apex-relay`) — neither is a `[[peers]]` row in any committed config any
@@ -53,7 +77,12 @@ separate.
 
 ## The transition setting: `claim_enforcement`
 
-A new, **per-peering**, **temporary** config field on `[[peers]]`
+> **HISTORY — this field is deleted (issue #1077).** Everything in this section describes a knob no
+> build has any more; setting it is a named load-time error. Kept for a reader decoding an old
+> config or an old log line. The live equivalent, for the forwarded rule only, is
+> [the next section](#the-sibling-setting-forwarded_claim_enforcement-adr-0042-item-3).
+
+It was a **per-peering**, **temporary** config field on `[[peers]]`
 (`connector_config::peer::ClaimEnforcement`, `crates/connector-config/src/peer.rs`):
 
 ```toml
@@ -83,15 +112,21 @@ claim_enforcement = "observe"   # default, if omitted: "enforce"
   wired once in `connector-client-edge/src/peer.rs::PeerCarriages::from_config`), so a peering is
   never `observe` on BTP and `enforce` on HTTP depending on which carriage a packet happened to
   arrive on.
-- **Dated for removal.** This field, `ClaimEnforcement::Observe`, and the config surface that
-  selects it should be deleted once every `[[peers]]` row across the fleet reads `"enforce"` (in
-  practice: once no committed or bind-mounted config sets `"observe"` anymore) and the Gates below
-  have held for a soak window — the same removed-field-trap convention `ceiling`/
-  `flush_interval_ms` now use (`ConfigError::PeerCeilingRemoved`,
-  `crates/connector-config/src/peer.rs::resolve_peers`). Target: no later than
+- **Dated for removal — and removed.** The condition was: once every `[[peers]]` row across the
+  fleet reads `"enforce"` (in practice, once no committed or bind-mounted config sets `"observe"`
+  anymore) and the Gates below have held for a soak window, delete the field using the
+  removed-field-trap convention `ceiling`/`flush_interval_ms` use. The target was no later than
   [toon-meta#316](https://github.com/toon-protocol/toon-meta/issues/316) closing, or
-  **2026-11-01**, whichever is first. File the removal as its own issue when the last `"observe"`
-  is flipped to `"enforce"`, referencing this document.
+  **2026-11-01**, whichever is first.
+
+  **Done on 2026-08-24, ahead of that date** ([issue
+  #1077](https://github.com/toon-protocol/connector/issues/1077), ADR 0042 item 4). The precondition
+  had been met since #872 destroyed both peerings the ramp existed for: no committed config set the
+  key, and the only occurrence anywhere was a commented-out example in
+  `deploy/connector-rust/connector.toml`, now deleted rather than left commented. The trap is
+  `ConfigError::PeerClaimEnforcementRemoved`
+  (`crates/connector-config/src/peer.rs::resolve_peers`), and it names
+  `forwarded_claim_enforcement` in its message because the two spellings differ by one word.
 
 ## The sibling setting: `forwarded_claim_enforcement` (ADR 0042 item 3)
 
@@ -108,7 +143,8 @@ id = "apex-store"
 forwarded_claim_enforcement = "enforce"   # default, if omitted: "observe"
 ```
 
-- **The default is `"observe"`, the opposite of `claim_enforcement`'s**, and deliberately so. No
+- **The default is `"observe"`, the opposite of the deleted `claim_enforcement`'s**, and
+  deliberately so. No
   box on this fleet covers its forwards yet — `[[pay_channels]]` (ADR 0042 item 2) is opt-in per
   peering and no committed config writes one — and the boxes forward to each other, so a binary
   that enforced this on upgrade would stop forwarding fleet-wide. Omitted, an uncovered forwarded
@@ -123,13 +159,14 @@ forwarded_claim_enforcement = "enforce"   # default, if omitted: "observe"
   first" step here), soak on the default `"observe"` until that peering's admissions stop, then
   write `"enforce"` on that one peering. Never fleet-wide in one edit.
 - A mistyped value is refused at config load by name
-  (`ConfigError::InvalidForwardedClaimEnforcement`). The stakes are the mirror image of
-  `claim_enforcement`'s: here a typo meant as `"enforce"` would fall through to the permissive
-  default and go on carrying forwards for free.
-- **Two fields, not one restructured field.** `claim_enforcement`'s `"observe"` is dated for
-  deletion (**2026-11-01**, above); this one's default cannot be deleted with it, since it is the
-  behaviour every unconfigured peering relies on. They are separate settings with separate end
-  dates, and the terminated rule's behaviour is unchanged under every combination of the two.
+  (`ConfigError::InvalidForwardedClaimEnforcement`). The stakes are the mirror image of the
+  deleted `claim_enforcement`'s: here a typo meant as `"enforce"` would fall through to the
+  permissive default and go on carrying forwards for free.
+- **Two fields, not one restructured field — and that is why this one survived.**
+  `claim_enforcement`'s `"observe"` was dated for deletion and has since been deleted (issue
+  #1077); this one's default could not go with it, since it is the behaviour every unconfigured
+  peering relies on. They were separate settings with separate end dates, and the terminated
+  rule's behaviour — now unconditional enforcement — is unchanged under either value of this one.
 
 ## Current risk, honestly stated
 
@@ -273,7 +310,7 @@ docker run --rm --network none \
 
 **Expected result: it fails, and it must fail at exactly one place.** `Config::load` is
 synchronous and runs first — every `deny_unknown_fields` check, every removed-field trap
-(`PeerCeilingRemoved`/`PeerFlushIntervalRemoved`), every `InvalidClaimEnforcement`, every
+(`PeerCeilingRemoved`/`PeerFlushIntervalRemoved`/`PeerClaimEnforcementRemoved`), every
 `PeerSecretFileNotFound`/`PeerCredentialMissing`, all of it, resolves before any network call is
 made. Only _after_ the config is fully valid does the process try to build the settlement
 backend, which calls `EvmSettlementBackend::connect` — reads the chain id over `rpc_url`
@@ -324,6 +361,12 @@ why before trusting it on any box.
    touching its live file. This is read-only against the live process — it runs a second,
    offline, `--network none` container beside the running one and touches nothing it depends on.
 
+> **HISTORY from here to Gate (d) (issue #1077):** steps 3, 4, 5, 7 and the Rollback lever below
+> are written around `claim_enforcement`, which no longer exists. The **shape** of the order —
+> upgrade, hold the receive side open, soak per peering, close one peering at a time, roll back one
+> peering at a time — is what to carry forward, and the sibling section above already applies it to
+> the live `forwarded_claim_enforcement`. Steps 1, 2 and 6 and the Gates are unaffected.
+
 3. **Roll the new binary to every box, with every peering set to `claim_enforcement = "observe"`.**
    This is the actual "senders first" step: every box's send side (B3) starts covering
    immediately on upgrade — safe unconditionally — while every box's receive side (B2) is held
@@ -349,9 +392,11 @@ connector-rust`. Order across boxes does not matter here — `"observe"` never r
 
 6. **Confirm the Gates below hold**, per peering just flipped.
 
-7. **Once every peering across the fleet is confirmed `enforce`** (or has the field omitted) **and
+7. ~~**Once every peering across the fleet is confirmed `enforce`** (or has the field omitted) **and
    the removal-target conditions above are met, delete the `claim_enforcement` config surface**
-   in a follow-up issue/PR referencing this document.
+   in a follow-up issue/PR referencing this document.~~ **Done** — that follow-up was
+   [issue #1077](https://github.com/toon-protocol/connector/issues/1077), landed 2026-08-24. It is
+   why steps 3-5 above are history.
 
 ## Gates — per peering, after Order step 5
 
@@ -385,8 +430,10 @@ peering's migration is complete.
 
 ## Rollback
 
-**Per peering, at any point before it is confirmed at Gate (d): set `claim_enforcement =
-"observe"` on that one row and restart the box.** This is a single-line edit, reversible in
+**(History, issue #1077: there is no such lever for the terminated rule any more — the
+`forwarded_claim_enforcement` equivalent is to set `"observe"` on the one row, which works exactly
+as described here.)** **Per peering, at any point before it is confirmed at Gate (d): set
+`claim_enforcement = "observe"` on that one row and restart the box.** This is a single-line edit, reversible in
 seconds, and it never requires touching the peering's counterparty — `"observe"` on this box's
 own receive side is entirely a local decision. Traffic that was being refused resumes immediately
 (admitted, and logged, exactly as during the soak window), so this is the "stop the outage" lever,

@@ -658,6 +658,84 @@ addr = "127.0.0.1:4001"
     );
 }
 
+/// ADR 0042 item 4 (issue #1077): `claim_enforcement` is gone, and a config
+/// that still writes it must stop the binary rather than boot a node that
+/// enforces something its operator believes it does not. `"observe"` is the
+/// value that matters -- the one an operator ran deliberately to admit
+/// uncovered arrivals -- and the error has to say the key by name and that
+/// the still-live `forwarded_claim_enforcement` is a different field, since
+/// the two spellings differ by one word.
+#[test]
+fn exits_non_zero_when_a_stale_peer_entry_sets_claim_enforcement() {
+    let key_file = write_raw_key_file();
+    let config_file = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+peer_expose = "btp"
+
+[signer]
+key_file = "{}"
+
+[[peers]]
+id = "store"
+endpoint = "wss://store.example/btp"
+credential = {{ secret = "shared" }}
+claim_enforcement = "observe"
+"#,
+        key_file.path().display()
+    ));
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("claim_enforcement")
+            && stderr.contains("store")
+            && stderr.contains("forwarded_claim_enforcement")
+            && stderr.contains("docs/operators/claim-policy-rollout.md"),
+        "expected a named removal error that also disambiguates the surviving \
+         forwarded_claim_enforcement, got: {stderr}"
+    );
+}
+
+/// The surviving half of the pair is still an accepted key: deleting one
+/// field must not have taken the other with it. This config is deliberately
+/// invalid for an unrelated reason (no `credential`), because a valid one
+/// would boot and serve forever -- and `deny_unknown_fields` rejects at
+/// *parse* time, before `resolve_peers` ever reaches the credential check,
+/// so reaching the credential error at all is the proof that
+/// `forwarded_claim_enforcement` parsed.
+#[test]
+fn forwarded_claim_enforcement_is_still_an_accepted_key() {
+    let key_file = write_raw_key_file();
+    let config_file = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+peer_expose = "btp"
+
+[signer]
+key_file = "{}"
+
+[[peers]]
+id = "store"
+endpoint = "wss://store.example/btp"
+forwarded_claim_enforcement = "enforce"
+"#,
+        key_file.path().display()
+    ));
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("credential") && !stderr.contains("forwarded_claim_enforcement"),
+        "expected forwarded_claim_enforcement to parse and the load to fail on the missing \
+         credential instead, got: {stderr}"
+    );
+}
+
 /// A peering that names no credential can never take the peer role, so it
 /// would come up looking configured and admit its counterparty as an
 /// ordinary client. The whole point of issue #677's load-time checks is

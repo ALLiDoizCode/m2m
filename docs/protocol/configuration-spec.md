@@ -259,7 +259,7 @@ finding a tombstone, not a live mechanism.
 | `ceiling`, `flush_interval_ms`      | [ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md)                        |
 | `[peer_sale]`                       | [ADR 0043](../adr/0043-purchasable-peering-is-removed.md)                                        |
 | `apex`, `[[children]]`              | [ADR 0009](../adr/0009-one-typed-config-file-no-environment-layer.md)'s update (#1057)           |
-| `claim_enforcement`                 | [ADR 0042](../adr/0042-a-packet-carries-its-claim.md)'s update (#1062)                           |
+| `claim_enforcement`                 | [ADR 0042](../adr/0042-a-packet-carries-its-claim.md) item 4 (#1062 decided, #1077 deleted)      |
 | the announce-only `[announce]` keys | [ADR 0046](../adr/0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md)         |
 
 ---
@@ -281,4 +281,5 @@ that belongs to the documents where those are specified.
 **Not yet built**, and marked so rather than described in the present tense: `[node]` (§2.1) is
 [ADR 0050](../adr/0050-a-connectors-url-resolves-to-its-self-description.md)'s rename of `[announce]`
 (#1080); CF-33's load-time reconciliation is #1076; CF-20's runtime-settable cap is #1079; the
-`apex`/`[[children]]` and `claim_enforcement` tombstones are #1075 and #1077.
+`apex`/`[[children]]` tombstone is #1075. (`claim_enforcement`'s tombstone was #1077 and has
+landed.)

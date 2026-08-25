@@ -194,75 +194,22 @@ impl std::str::FromStr for PeerExposure {
     }
 }
 
-/// Whether an uncovered peer PREPARE (issue #880, owner decision #868: every
-/// peer PREPARE carries a covering claim, or it is refused with the client
-/// edge's own x402 greeting) is actually refused, or admitted and logged.
-///
-/// **Temporary migration knob (issue #883, child B6).** `Enforce` is the
-/// permanent behaviour and the default -- omitting the field, or writing
-/// nothing, means refuse exactly as issue #880 shipped. `Observe` exists only
-/// for the fleet rollout's canary step: it logs the same
-/// `peer PREPARE ... no claim covers this packet's price` line but does not
-/// refuse the packet, so an operator can watch a box's logs for admissions
-/// before flipping it to enforce (`docs/operators/claim-policy-rollout.md`).
-///
-/// **Dated for removal.** Once every `[[peers]]` row across the fleet reads
-/// `Enforce` (the default, so in practice once no config sets `Observe`
-/// anymore) and the rollout's own runbook confirms it, this variant and the
-/// field that selects it should be deleted -- the same removed-field-trap
-/// convention `ceiling`/`flush_interval_ms` now use (`ConfigError::
-/// PeerCeilingRemoved`, `resolve_peers`). Target: no later than the two-node
-/// fleet epic (toon-meta#316) closing, or 2026-11-01, whichever is first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ClaimEnforcement {
-    /// Refuse an uncovered peer PREPARE (`F06_UNEXPECTED_PAYMENT` + the x402
-    /// greeting). The permanent, default behaviour.
-    #[default]
-    Enforce,
-    /// Admit an uncovered peer PREPARE, logging it the same way a refusal
-    /// would be logged. Migration-only; see the type's own documentation.
-    Observe,
-}
-
-impl ClaimEnforcement {
-    /// The spelling an operator writes.
-    pub fn name(self) -> &'static str {
-        match self {
-            ClaimEnforcement::Enforce => "enforce",
-            ClaimEnforcement::Observe => "observe",
-        }
-    }
-}
-
-impl fmt::Display for ClaimEnforcement {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
-    }
-}
-
-impl std::str::FromStr for ClaimEnforcement {
-    type Err = ();
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "enforce" => Ok(ClaimEnforcement::Enforce),
-            "observe" => Ok(ClaimEnforcement::Observe),
-            _ => Err(()),
-        }
-    }
-}
-
 /// Whether a peer PREPARE this connector would **forward** onward (ADR
 /// 0042's item 3) is refused when it arrives uncovered, or admitted and
 /// logged.
 ///
-/// A separate setting from [`ClaimEnforcement`], which governs an arrival to
-/// a priced **termination** (ADR 0029) and is not changed by ADR 0042 in any
-/// way, because the two migrations default in opposite directions and end on
-/// different days:
+/// **The only claim-enforcement knob a peering still has.** Its sibling
+/// `claim_enforcement` -- ADR 0029's rule for an arrival to a priced
+/// **termination** -- was deleted with its `"observe"` escape hatch (ADR
+/// 0042 item 4, issue #1077); a terminated arrival is now always enforced
+/// and the key is a parsed-and-rejected tombstone
+/// ([`ConfigError::PeerClaimEnforcementRemoved`]). This field survived that
+/// deletion because the two migrations default in opposite directions and
+/// end on different days:
 ///
-/// - Terminated arrivals have been enforced since issue #880, so `Enforce`
-///   is [`ClaimEnforcement`]'s default and `Observe` is the escape hatch.
+/// - Terminated arrivals had been enforced since issue #880, so `Enforce`
+///   was the default there and `"observe"` was the escape hatch, dated for
+///   removal from the day it shipped.
 /// - Forwarded arrivals have **never** been charged: neither box on the
 ///   fleet covers a forward yet (`[[pay_channels]]` shipped but is opt-in
 ///   per peering and no committed config writes one), so a default of
@@ -273,10 +220,9 @@ impl std::str::FromStr for ClaimEnforcement {
 ///   is covering its forwards.
 ///
 /// Folding the two into one field would have made one of those defaults
-/// wrong, and folding them into one *variant set* would have tied ADR 0042's
-/// item 4 (resolve `ClaimEnforcement::Observe`, target 2026-11-01) to a
-/// migration that has not started -- deleting the terminated escape hatch
-/// would delete this field's default with it.
+/// wrong, and folding them into one *variant set* would have tied this
+/// field's default to the terminated escape hatch's dated deletion --
+/// which has since happened, and would have taken this default with it.
 ///
 /// **Temporary, like its sibling.** Once every peering across the fleet
 /// covers its forwards and reads `Enforce`, this field and its `Observe`
@@ -567,20 +513,20 @@ pub(crate) struct RawPeer {
     claim_ack_timeout_ms: Option<u64>,
     #[serde(default)]
     peer_answer_timeout_ms: Option<u64>,
-    /// The B6 migration knob (issue #883): `"observe"` admits and logs an
-    /// uncovered peer PREPARE instead of refusing it. Omitted, or written
-    /// `"enforce"`, is [`ClaimEnforcement::Enforce`] -- the default and the
-    /// permanent behaviour. See [`ClaimEnforcement`]'s own documentation for
-    /// why this field is temporary.
+    /// Removed with the B6 migration ramp it selected (ADR 0042 item 4,
+    /// issue #1077): a terminated arrival is enforced unconditionally, so
+    /// there is no mode left for this key to pick. Parsed as an opaque
+    /// value only so it can be refused **by name**, the way `ceiling` and
+    /// `flush_interval_ms` are.
     #[serde(default)]
-    claim_enforcement: Option<String>,
+    claim_enforcement: Option<toml::Value>,
     /// ADR 0042's item 3: `"enforce"` refuses a peer PREPARE this connector
     /// would forward onward when it arrives without a claim covering the
     /// packet's own `amount`. Omitted, or written `"observe"`, is
     /// [`ForwardedClaimEnforcement::Observe`] -- admitted and logged, the
     /// **default**, because the fleet's send halves are not live yet. See
-    /// [`ForwardedClaimEnforcement`] for why this defaults the opposite way
-    /// to `claim_enforcement`.
+    /// [`ForwardedClaimEnforcement`] for why it outlived the
+    /// `claim_enforcement` knob it was deliberately kept separate from.
     #[serde(default)]
     forwarded_claim_enforcement: Option<String>,
     /// ADR 0042's cap: the largest amount this connector will forward to
@@ -608,7 +554,6 @@ pub struct PeerConfig {
     can_originate: bool,
     claim_ack_timeout_ms: u64,
     peer_answer_timeout_ms: u64,
-    claim_enforcement: ClaimEnforcement,
     forwarded_claim_enforcement: ForwardedClaimEnforcement,
     max_packet_amount: u64,
 }
@@ -662,18 +607,13 @@ impl PeerConfig {
         self.peer_answer_timeout_ms
     }
 
-    /// Whether an uncovered peer PREPARE from this peering is refused or
-    /// admitted-and-logged. Defaults to [`ClaimEnforcement::Enforce`]; see
-    /// that type for why the [`ClaimEnforcement::Observe`] alternative
-    /// exists and is temporary (issue #883).
-    pub fn claim_enforcement(&self) -> ClaimEnforcement {
-        self.claim_enforcement
-    }
-
     /// Whether an uncovered **forwarded** arrival from this peering is
     /// refused or admitted-and-logged (ADR 0042's item 3). Defaults to
-    /// [`ForwardedClaimEnforcement::Observe`] -- the opposite way to
-    /// [`Self::claim_enforcement`], for the reason that type documents.
+    /// [`ForwardedClaimEnforcement::Observe`], the permissive way, for the
+    /// reason that type documents. An uncovered arrival to a priced
+    /// **termination** has no such knob: it is always refused (ADR 0029,
+    /// issue #880; the `claim_enforcement` escape hatch was deleted by
+    /// issue #1077).
     pub fn forwarded_claim_enforcement(&self) -> ForwardedClaimEnforcement {
         self.forwarded_claim_enforcement
     }
@@ -728,6 +668,14 @@ pub(crate) fn resolve_peers(
         if peer.flush_interval_ms.is_some() {
             return Err(ConfigError::PeerFlushIntervalRemoved { id: peer.id });
         }
+        // ADR 0042 item 4 (issue #1077): the B6 ramp is gone, so `"observe"`
+        // no longer names a mode -- and `"enforce"` names the only behaviour
+        // there is. Refused by name rather than ignored, because a config
+        // still writing `"observe"` was written by an operator who believes
+        // this peering admits uncovered arrivals, and it does not.
+        if peer.claim_enforcement.is_some() {
+            return Err(ConfigError::PeerClaimEnforcementRemoved { id: peer.id });
+        }
         if !seen.insert(peer.id.clone()) {
             return Err(ConfigError::DuplicatePeerId { id: peer.id });
         }
@@ -768,22 +716,6 @@ pub(crate) fn resolve_peers(
         let credential = match peer.credential {
             Some(written) => written.resolve(&peer.id)?,
             None => return Err(ConfigError::PeerCredentialMissing { id: peer.id }),
-        };
-
-        // Issue #883 (B6): a mistyped `claim_enforcement` is refused by
-        // name, the same convention `peer_expose` uses -- a value this
-        // build does not recognize is not the same as the field being
-        // absent, and treating it as "enforce" by falling through would
-        // hide a typo that meant "observe" behind the strictest behaviour
-        // ever going unnoticed on a receiver that never actually observed.
-        let claim_enforcement = match peer.claim_enforcement {
-            None => ClaimEnforcement::default(),
-            Some(value) => value
-                .parse()
-                .map_err(|()| ConfigError::InvalidClaimEnforcement {
-                    id: peer.id.clone(),
-                    value,
-                })?,
         };
 
         // ADR 0042 (item 3): a mistyped `forwarded_claim_enforcement` is
@@ -834,7 +766,6 @@ pub(crate) fn resolve_peers(
             peer_answer_timeout_ms: peer
                 .peer_answer_timeout_ms
                 .unwrap_or(DEFAULT_PEER_TIMEOUT_MS),
-            claim_enforcement,
             forwarded_claim_enforcement,
             max_packet_amount,
         });
@@ -902,64 +833,45 @@ mod tests {
         assert!(peers[0].can_originate());
         assert_eq!(peers[0].claim_ack_timeout_ms(), 30_000);
         assert_eq!(peers[0].peer_answer_timeout_ms(), 30_000);
-        assert_eq!(peers[0].claim_enforcement(), ClaimEnforcement::Enforce);
     }
 
-    /// Issue #883 (B6): a peer that writes nothing gets the permanent
-    /// behaviour, not the migration-only one -- the same "omit for the
-    /// default" convention `peer_expose` uses.
+    /// ADR 0042 item 4 (issue #1077): the B6 ramp is gone, so a config that
+    /// still writes the key is refused **by name** rather than ignored. The
+    /// `"observe"` spelling is the one that matters -- an operator running
+    /// it believes this peering admits uncovered arrivals to a priced
+    /// termination, and no build does that any more.
     #[test]
-    fn claim_enforcement_defaults_to_enforce() {
-        let peers =
-            resolve_peers(vec![raw("peer-b")], PeerExposure::Neither, false).expect("resolve");
-
-        assert_eq!(peers[0].claim_enforcement(), ClaimEnforcement::Enforce);
-    }
-
-    /// The migration's whole point: a peer explicitly opted into the canary
-    /// step resolves to `Observe`.
-    #[test]
-    fn claim_enforcement_observe_is_parsed_by_name() {
+    fn claim_enforcement_observe_is_refused_as_a_removed_key() {
         let mut entry = raw("peer-b");
-        entry.claim_enforcement = Some("observe".to_string());
-
-        let peers = resolve_peers(vec![entry], PeerExposure::Neither, false).expect("resolve");
-
-        assert_eq!(peers[0].claim_enforcement(), ClaimEnforcement::Observe);
-    }
-
-    /// Writing the default out explicitly is the same as omitting it.
-    #[test]
-    fn claim_enforcement_enforce_is_parsed_by_name() {
-        let mut entry = raw("peer-b");
-        entry.claim_enforcement = Some("enforce".to_string());
-
-        let peers = resolve_peers(vec![entry], PeerExposure::Neither, false).expect("resolve");
-
-        assert_eq!(peers[0].claim_enforcement(), ClaimEnforcement::Enforce);
-    }
-
-    /// A mistyped value is refused by name, not silently read as the
-    /// default -- the same reasoning `exposure_refuses_an_unrecognized_spelling_by_name`
-    /// documents for `peer_expose`: a typo that meant "observe" must not
-    /// silently become the strictest behaviour there is.
-    #[test]
-    fn claim_enforcement_refuses_an_unrecognized_spelling_by_name() {
-        let mut entry = raw("peer-b");
-        entry.claim_enforcement = Some("log-only".to_string());
+        entry.claim_enforcement = Some(toml::Value::String("observe".to_string()));
 
         assert!(matches!(
             resolve_peers(vec![entry], PeerExposure::Neither, false),
-            Err(ConfigError::InvalidClaimEnforcement { ref id, ref value })
-                if id == "peer-b" && value == "log-only"
+            Err(ConfigError::PeerClaimEnforcementRemoved { ref id }) if id == "peer-b"
+        ));
+    }
+
+    /// The `"enforce"` spelling names what every build now does
+    /// unconditionally -- and is refused just the same, because a key that
+    /// is accepted for one value and rejected for another teaches an
+    /// operator that the key still selects something.
+    #[test]
+    fn claim_enforcement_enforce_is_refused_as_a_removed_key_too() {
+        let mut entry = raw("peer-b");
+        entry.claim_enforcement = Some(toml::Value::String("enforce".to_string()));
+
+        assert!(matches!(
+            resolve_peers(vec![entry], PeerExposure::Neither, false),
+            Err(ConfigError::PeerClaimEnforcementRemoved { ref id }) if id == "peer-b"
         ));
     }
 
     /// ADR 0042 (item 3), the fleet-safety property: a peer that writes
     /// nothing forwards exactly as it did before this knob existed --
     /// uncovered forwarded arrivals admitted and logged, never refused.
-    /// Defaulting this the way `claim_enforcement` defaults would have
-    /// stopped forwarding across a fleet whose send halves are not live.
+    /// Defaulting this the way the deleted `claim_enforcement` defaulted
+    /// would have stopped forwarding across a fleet whose send halves are
+    /// not live.
     #[test]
     fn forwarded_claim_enforcement_defaults_to_observe() {
         let peers =
@@ -971,16 +883,16 @@ mod tests {
         );
     }
 
-    /// The two knobs are independent settings, not one: the terminated
-    /// rule's default (`Enforce`, ADR 0029) and the forwarded rule's
-    /// default (`Observe`, ADR 0042) hold simultaneously on a peering that
-    /// wrote neither field.
+    /// Keeping the two knobs separate is what let one be deleted without
+    /// the other: a peering that writes neither field enforces the
+    /// terminated rule unconditionally (ADR 0029, no knob left) while still
+    /// only observing the forwarded one (ADR 0042). Had they been folded
+    /// into one field, issue #1077 would have taken this default with it.
     #[test]
-    fn the_two_enforcement_knobs_default_in_opposite_directions() {
+    fn deleting_the_terminated_knob_left_the_forwarded_default_permissive() {
         let peers =
             resolve_peers(vec![raw("peer-b")], PeerExposure::Neither, false).expect("resolve");
 
-        assert_eq!(peers[0].claim_enforcement(), ClaimEnforcement::Enforce);
         assert_eq!(
             peers[0].forwarded_claim_enforcement(),
             ForwardedClaimEnforcement::Observe
@@ -1017,8 +929,9 @@ mod tests {
     }
 
     /// A mistyped value is refused by name. The stakes are the mirror image
-    /// of `claim_enforcement`'s: here a typo meant as "enforce" would fall
-    /// through to the permissive default and carry forwards for free.
+    /// of the deleted `claim_enforcement`'s: here a typo meant as "enforce"
+    /// would fall through to the permissive default and carry forwards for
+    /// free.
     #[test]
     fn forwarded_claim_enforcement_refuses_an_unrecognized_spelling_by_name() {
         let mut entry = raw("peer-b");
