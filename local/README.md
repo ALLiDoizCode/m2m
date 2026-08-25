@@ -94,7 +94,8 @@ termination is stood up and paid at all.
 It is not a conversion: the connector has no exchange rate (ADR 0010 replaced
 the spread with a flat per-packet fee, and value conversion is the `swap`
 repo's job). It is one node settling with different peers on different chains,
-and every amount on the path is the same integer end to end.
+and the only thing that changes an amount between two hops is a hop subtracting
+its own flat fee — 1200 sent, 1100 across the boundary, 1000 delivered.
 
 ## Keys and money
 
@@ -229,10 +230,23 @@ accepted claims on the peering's channel as crossings sent, each advances the
 cumulative amount by at least the price, and the final watermark is at least
 crossings × price. That advance is the exact quantity `price_gate::payment_required`
 charges against, which is what makes it a measurement rather than a restatement.
-It is silent on four things. It does not prove the price is **enforced**: the
-gate returns early when a route's `price` is `0`, before any comparison runs, so
-a price quietly dropped to zero satisfies every one of those checks — holding
-B's committed `price`, the sender's `--amount` and `PRICE` to one figure is
+
+Since #1144 the same lines answer the other half of the money question: **what A
+kept**. A collected the packet's `AMOUNT` and its claim to B advanced by what it
+forwarded, so `AMOUNT - advance` is this hop's earnings, and the rehearsal fails
+unless that is A's `fee` exactly — keeping less than it charges is a hop working
+for free, keeping more is a hop eroding what it passes on. That is ADR 0010's
+earnings rule ("the difference between the cumulative it receives from upstream
+and the cumulative it sends downstream") measured on a running image, and it is
+not implied by the advance check: an advance of `price + 1` satisfies that one
+while leaving A a unit short.
+
+It is silent on four things. It does not prove the price or the fee is
+**enforced**: the gate returns early when a route's `price` is `0`, before any
+comparison runs, so a price quietly dropped to zero satisfies every one of those
+checks, and a `fee` back at zero would leave every claim advancing by the price
+and every packet fulfilling — holding B's committed `price`, A's committed `fee`
+and the sender's `AMOUNT`/`PRICE`/`FEE` to one arithmetic is
 `local_topologies_load.rs`'s job, and no container can do it. It does not say
 which claim paid for which packet, only that the totals line up. It says nothing
 about whether any of it could be **redeemed on chain**, for the reason the next
@@ -295,14 +309,47 @@ Two consequences worth knowing before editing a config here:
   of the long version, including the defect the row found the first time it was
   tried here (issue #1102, fixed by #1103, and the reason the rehearsal counts
   what each claim **advanced** rather than that a claim exists).
-- **No hop charges a fee yet.** Every forwarded route here is `fee = 0`. That
-  used to be forced: `POST /packets` declared `minimum_delivery = amount`, so
-  `amount_after_fee` refused any hop that would retain anything, and a non-zero
-  fee turned the rehearsal into `R01`. The lockout is retired (ADR 0057, issue
-  #1143) -- no packet declares a floor and `R01` is gone from the reject
-  vocabulary -- so the fees can be raised. Issue #1144 does that, raising each
-  node's `price` to match; until then the rehearsal still exercises the flat
-  per-packet fee nowhere.
+- **Every forwarding hop charges, and the numbers are kept true by hand.** Each
+  forwarded route here has a real `fee` (issue #1144), so the flat per-packet
+  fee that is ADR 0010's whole revenue model is finally exercised by a shipped
+  image and not by `cargo test` alone. It could not be until #1143: the operator
+  surface declared `minimum_delivery = amount` on every packet it originated, so
+  `amount_after_fee` refused any hop that would retain anything and a non-zero
+  fee turned the rehearsal into `R01`. That lockout is retired (ADR 0057) — no packet declares a floor,
+  `R01` is gone from the reject vocabulary, and a hop keeps its fee.
+
+  The arithmetic is ADR 0028's: a hop collects `price`, forwards `price - fee`,
+  earns exactly its `fee`, and a path adds up only while every hop's
+  `price - fee` is at least the next hop's `price`. **No code anywhere checks
+  that** — a connector cannot know what the next hop charges — so it holds here
+  because the committed files were written together, and `local_topologies_load.rs`
+  is what notices when they stop agreeing:
+
+  |                 | collects | keeps | forwards                                    |
+  | --------------- | -------- | ----- | ------------------------------------------- |
+  | `two-hop` A     | 1100     | 100   | 1000, which is B's price exactly            |
+  | `mixed-chain` A | 1200     | 100   | 1100, which is B's price exactly            |
+  | `mixed-chain` B | 1100     | 50    | 1000, delivered to C's unpriced termination |
+
+  The two `mixed-chain` fees differ deliberately: a fee is one peering
+  relation's bilateral price for carriage, never a network-wide constant, and
+  equal fees would let a hop charging the wrong one pass unnoticed. What the
+  operator sends is the path's **cost** (`CONTEXT.md`) — the fees of every hop
+  that carries the packet plus what the terminating leg is paid. The first
+  hop's own fee sits in that sum without the operator paying anybody: it is
+  value that never leaves a node the operator owns.
+
+- **No peering here enforces on a _forwarded_ arrival, and only one could even
+  try.** ADR 0042 item 3 (issue #1142) requires a forwarded arrival to carry a
+  claim covering the arriving amount, behind a per-peer
+  `forwarded_claim_enforcement` that defaults to `observe`.
+  `mixed-chain`'s B is the only node in this repository that forwards a packet
+  which arrived from a peer, so its `a-b` row is the only row the setting would
+  do anything on — and that peering is postpay, so its first crossing is
+  uncovered by construction and enforcing would deadlock it exactly as a priced
+  postpay termination deadlocks. The way out is the same one `two-hop` takes: a
+  `[[pay_channels]]` row on the payer. Until A has one, the rule observes and
+  logs, which is the migration shape ADR 0042 asks for.
 
 ## What a peer claim does and does not check
 

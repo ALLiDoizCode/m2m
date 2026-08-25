@@ -70,14 +70,19 @@ key_file = "/app/data/signer.key"
 # `advanced: 0, shortfall: 1000` (issue #1102). Measured on this topology
 # before the fix, not reasoned about.
 #
-# THE FIGURE IS THE WHOLE OF WHAT A FORWARDS -- the rehearsal sends 1000 and A
-# retains nothing (`fee = 0`) -- so the gate has no slack in either direction.
-# A claim advancing one unit less than the packet's own value is an `F06`
-# rather than a discount, and an arrival carrying less than this price is an
-# `F03` before the app is ever reached (`handle_peer_prepare`, ADR 0029).
-# `local_topologies_load.rs` holds this number and the rehearsal's `--amount`
-# and `PRICE` to one value; the rehearsal itself then reads this node's claim
-# journal and fails unless every crossing was covered.
+# THE FIGURE IS THE WHOLE OF WHAT A FORWARDS, AND A CHARGES A REAL FEE ON TOP
+# OF IT (issue #1144). The rehearsal sends 1100, A retains its `fee = 100` and
+# forwards 1000 -- exactly this price, so the gate still has no slack in either
+# direction. A claim advancing one unit less than the packet's own value is an
+# `F06` rather than a discount, and an arrival carrying less than this price is
+# an `F03` before the app is ever reached (`handle_peer_prepare`, ADR 0029).
+# The invariant that makes the two numbers fit -- A's `price - fee` is at least
+# this price -- is documented in `connector-a.toml` and enforced by nothing, so
+# it holds because these two files were written together.
+# `local_topologies_load.rs` holds this number, A's `price` and `fee`, and the
+# rehearsal's `--amount`/`PRICE`/`FEE` to one arithmetic; the rehearsal itself
+# then reads this node's claim journal and fails unless every crossing was
+# covered AND A retained exactly its fee.
 [[routes]]
 prefix = "g.local.two-hop.b.app"
 handler_url = "http://stub-app:3100/"

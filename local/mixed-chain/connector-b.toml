@@ -10,10 +10,12 @@
 # Solana validator -- so ONE node, ONE packet path, and the money changes chain
 # in the middle of it.
 #
-# Nothing in this file converts anything. The amount that arrives from A is the
-# amount that leaves for C (`fee = 0`, see below); there is no rate, and ADR
-# 0010 deleted the spread that would have implied one. What the two peerings
-# disagree about is only which ledger a claim is redeemable on.
+# Nothing in this file converts anything. The amount that leaves for C is the
+# amount that arrived from A minus this hop's FLAT fee (`fee = 50`, see below)
+# -- a fixed number of base units subtracted once, never a share of what
+# arrived. There is no rate, and ADR 0010 deleted the spread that would have
+# implied one. What the two peerings disagree about is only which ledger a
+# claim is redeemable on.
 #
 # The shape has no coverage anywhere else in this repository.
 # `two_ledgers_never_merge.rs` proves the two backends stay separate inside one
@@ -47,18 +49,49 @@ key_file = "/app/data/signer.key"
 # the destination `g.local.mixed.b.c.app` matches here and is forwarded, while
 # A's table matched the shorter `g.local.mixed.b` and forwarded to here.
 #
-# `fee = 0` for the same reason A's row carries it: the operator-surface
-# lockout that forced it is retired (ADR 0057, issue #1143) and raising every
-# hop's fee together is issue #1144's job.
+# THIS HOP CHARGES (issue #1144), and it is the one hop in the repository that
+# charges a fee on a PEER arrival rather than on a packet an operator handed
+# it. 1100 arrives from A, 50 stays here, 1000 goes on to C -- `price - fee`
+# (1100 - 50) comfortably clears C's own `price = 0`, which is the invariant
+# ADR 0028 documents and nothing enforces. `connector-a.toml` writes the whole
+# path's arithmetic out in one block; this is its middle line.
+#
+# 50 rather than A's 100 on purpose: a fee buys carriage over ONE peering
+# relation and is bilateral configuration (ADR 0010), so the two hops on this
+# path are deliberately not the same number.
+#
+# WHAT THIS NODE OWES C IS THE 1000 IT FORWARDS, not the 1100 it received:
+# `forward_via_peer_route` covers the next hop for `amount_after_fee`, and the
+# difference IS this fee. Under the b-c peering's postpay convention (ADR 0004)
+# that claim is signed after the crossing fulfils and rides the next one.
 [[routes]]
 prefix = "g.local.mixed.b.c"
 peer_id = "b-c"
-fee = 0
-price = 1000
+fee = 50
+price = 1100
 
 # ── The EVM peering: A dials in ──────────────────────────────────────────────
 # No `endpoint`: A dials us, which on ILP-over-HTTP makes this node the payee
 # of that peering (§6.4).
+#
+# NO `forwarded_claim_enforcement` HERE, AND IT IS THE ONE PLACE IN THIS
+# REPOSITORY WHERE THE QUESTION IS EVEN LIVE. ADR 0042 item 3 (issue #1142)
+# says a forwarded arrival must carry a claim covering the ARRIVING amount,
+# behind a per-peer knob that defaults to `observe`; this node is the only one
+# anywhere here that forwards a packet which arrived from a peer, so this row
+# is the only row `forwarded_claim_enforcement = "enforce"` would do anything
+# on. It stays defaulted anyway, and not out of caution: A has no
+# `[[pay_channels]]` row, so this peering is POSTPAY (ADR 0004) and the claim
+# covering crossing n rides crossing n + 1. Crossing 1 therefore arrives
+# uncovered BY CONSTRUCTION -- enforcing would refuse it `F06`, it would never
+# fulfil, nothing would ever be owed, and crossing 2 would arrive uncovered
+# too. That is the same deadlock `connector-c.toml` describes for a priced
+# postpay termination, and the way out is the same one `local/two-hop` takes:
+# a `[[pay_channels]]` row on the PAYER, covering each PREPARE before it is
+# sent. Adding one to A would make enforcing here safe; it would also make
+# this peering prepay, which is not what this topology is about (issue #1144).
+# So the rule runs in observe mode and logs every uncovered arrival, which is
+# exactly the migration shape ADR 0042 asks for.
 [[peers]]
 id = "a-b"
 
