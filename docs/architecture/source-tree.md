@@ -29,7 +29,7 @@ above it.
 connector-domain                 pure logic: no async, no I/O, no clock, no keys
   ├─ packet.rs, oer.rs           ILPv4 packets and their canonical OER encoding (ADR 0023)
   ├─ address.rs, route.rs        ILP addresses; longest-prefix selection
-  ├─ fee.rs                      flat per-packet fee and minimum-delivery arithmetic (ADR 0010)
+  ├─ fee.rs                      flat per-packet fee arithmetic (ADR 0010)
   ├─ condition.rs                condition/fulfilment/expiry rules
   ├─ claim.rs, client_claim.rs   nonce, watermark and value rules
   └─ envelope.rs                 the request/response envelope a terminated packet carries

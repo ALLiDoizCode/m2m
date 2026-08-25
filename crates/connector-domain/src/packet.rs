@@ -187,13 +187,6 @@ impl RejectCode {
         RejectCode("R00".to_string())
     }
 
-    /// R01: Insufficient Source Amount -- this hop cannot meet the
-    /// packet's declared minimum delivery once its own flat fee is taken
-    /// (ADR 0010, peer-semantics-pre-868.md §4-5.1).
-    pub fn r01_insufficient_source_amount() -> RejectCode {
-        RejectCode("R01".to_string())
-    }
-
     /// T00: Internal Error -- this connector could not do its own part of
     /// the work, through no fault of the packet. Retryable, and
     /// deliberately temporary rather than final (issue #605): a claim this
@@ -484,7 +477,6 @@ mod tests {
         assert_eq!(RejectCode::t04_insufficient_liquidity().as_str(), "T04");
         assert_eq!(RejectCode::t05_rate_limited().as_str(), "T05");
         assert_eq!(RejectCode::f00_bad_request().as_str(), "F00");
-        assert_eq!(RejectCode::r01_insufficient_source_amount().as_str(), "R01");
         assert_eq!(RejectCode::f01_invalid_packet().as_str(), "F01");
         assert_eq!(RejectCode::r00_transfer_timed_out().as_str(), "R00");
         assert_eq!(RejectCode::f03_invalid_amount().as_str(), "F03");

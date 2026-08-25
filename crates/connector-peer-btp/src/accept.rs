@@ -605,22 +605,6 @@ impl PeerSession {
             }
         };
 
-        let minimum_delivery = match fields::minimum_delivery(self.binding.role(), protocol_data) {
-            Ok(minimum_delivery) => minimum_delivery,
-            Err(error) => {
-                // §5.1: never silently zero. The claim's verdict rides
-                // this REJECT anyway -- the two answers are independent
-                // (§6.2).
-                return self
-                    .send(self.reject_response(
-                        request_id,
-                        fields::malformed_minimum_delivery_reject(&error),
-                        ack,
-                    ))
-                    .await;
-            }
-        };
-
         // Issue #880 (owner decision #868) and ADR 0042: a peer PREPARE
         // carries a covering claim -- the route's `price` where this
         // connector terminates, the packet's own `amount` where it forwards
@@ -653,10 +637,7 @@ impl PeerSession {
             // (§7.1): routing and the downstream round trip.
             // `handle_peer_prepare` is handed no claim -- this frame's was
             // judged inline above, in order.
-            let (response, _) = state
-                .connector
-                .handle_peer_prepare(prepare, minimum_delivery, None)
-                .await;
+            let (response, _) = state.connector.handle_peer_prepare(prepare, None).await;
             let frame = encode_packet_response(&role, request_id, response, ack);
             let _ = reply(&replies, frame).await;
         });

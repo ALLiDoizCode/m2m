@@ -691,12 +691,12 @@ fn peer_journal(state_dir: &std::path::Path) -> String {
 /// survive the hop's own fee.
 ///
 /// `support::sample_prepare` mints an `amount: 0` packet, which is right
-/// for a terminated route and wrong for a forwarding one: `peer-semantics-pre-868.md`
-/// §4 computes `A' = A - fee` and rejects **`R01`** when `A'` falls below
-/// the sender's `minimumDelivery` floor, so a zero-amount packet never
-/// reaches the peer transport at all -- it is refused one layer earlier, by
-/// arithmetic. A test that used a zero amount here would be asserting the
-/// fee check, not the peering.
+/// for a terminated route and wrong for a forwarding one: a hop forwards
+/// `A - fee` and refuses `F03` when its own fee alone exceeds `A` (ADR
+/// 0010, ADR 0057), so a zero-amount packet never reaches the peer
+/// transport at all -- it is refused one layer earlier, by arithmetic. A
+/// test that used a zero amount here would be asserting the fee check, not
+/// the peering.
 fn peer_bound_prepare(destination: &str, body: &'static [u8], payee: &PublicKeyBytes) -> Prepare {
     let (data, shared_secret) = sealed_prepare_data(body, payee);
     Prepare {

@@ -441,3 +441,17 @@ a wire. **There is no live traffic.** No box configures `[[peers]]`, no claim ha
   `fdatasync` is 72% of a paid packet's p50 and 99% of its p99, while the entire crypto layer costs
   0.23 ms. Framing is not where this budget goes, and any claim that it is needs numbers beside that
   file first.
+
+## Update (issue #1143) — the `minimumDelivery` row of the carriage table is deleted
+
+[0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md) retires the field, and issue
+#1143 deletes it. The carriage-binding table's `minimumDelivery` row goes with it: there is no
+`toon-minimum-delivery` protocolData entry and no `Toon-Minimum-Delivery` header on either
+carriage, and `connector_btp::CARRIAGE_NAMES` — the table this record's pairing invariant is
+enforced from — no longer declares the pair. The two shared vectors named in "the vectors are
+shared across carriages" are down to the claim and the accumulated cost.
+
+**This record's own finding is why the deletion had to land on both carriages in one change.** Peer
+semantics survive the transport; a field carried on one wire and not the other would be exactly the
+drift the revisit conditions below name as a stop-ship. Everything else in the table, and every
+other clause here, is untouched.

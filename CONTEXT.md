@@ -167,7 +167,7 @@ operator surface — and by nothing else. It cannot be bought, learned, earned o
 existence.
 
 **Peer semantics**:
-What a peer interaction _means_ — claim exchange, fees and minimum delivery, reject codes,
+What a peer interaction _means_ — claim exchange, fees, reject codes,
 accumulated cost. Both ends are operator-controlled. Says nothing about where the bytes ride:
 that is carriage, below.
 _Avoid_: peer wire (it named a deleted transport and this layer at once; see ADR 0027)
@@ -314,14 +314,18 @@ which is how a probe discovers it. The sum only — never the per-hop breakdown,
 split between fees and price.
 _Avoid_: total fee, quote
 
-**Minimum delivery** _(being retired — [ADR 0057](docs/adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md), blocked on ADR 0042 item 3)_:
-The amount a packet declares must reach its destination. A hop that cannot meet it after its
-fee rejects the packet rather than delivering less. A **peer** grant only: a client-role
-interaction MUST ignore the field — not reject it, not apply it — because a client's guarantee is
-the price it paid, never a floor. ADR 0057 retires it outright: once a packet carries the claim
-that pays for it, the covering claim bounds erosion with money, and a declared floor restates a
-property the claim amounts already enforce. Live until a forwarded arrival must carry a covering
-claim, because until then it is the only bound there is.
+**Minimum delivery** _(retired term, [ADR 0057](docs/adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md), issue #1143)_:
+The amount a packet declared must reach its destination, checked by every hop after its own fee
+and answered with `R01` when it could not be met. Retired: once a packet carries the claim that
+pays for it (ADR 0042), the covering claim is already banked when a hop evaluates the floor, so
+rejecting on it returns the sender nothing and only moves where the packet dies. What bounds
+erosion is the claim itself — a hop mints one for the packet's **forwarded** value, so it holds a
+claim for at least what it passes on, and that chains. The field, both its carriage bindings, its
+two vectors and `R01` are all deleted. Kept here because the term still appears in historical prose
+(`docs/protocol/peer-semantics-pre-868.md` §4, §5.1;
+[`docs/protocol/money-model-pre-868.md`](docs/protocol/money-model-pre-868.md)) and in clauses
+marked retired.
+_Avoid_: floor, guaranteed delivery, minimum amount
 
 **Probe**:
 A packet sent in the expectation that it will be rejected, in order to learn from the reject

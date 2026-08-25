@@ -225,7 +225,7 @@ wire_nonce, wire_cumulative_amount, wire_signature_hex }`: an EVM peer claim, th
   `signed_message_hex`, which `the_solana_claim_vector_declares_the_program_its_signature_is_bound_to`
   asserts rather than leaves to the reader. It is not a free-form label: a payer who writes anything
   else is declaring a program no channel of theirs lives under. This fixture used to declare the
-  **system program**, and that is why `schema_version` is now `2` (issue #1127) -- an SDK that
+  **system program**, and that is why `schema_version` reached `2` (issue #1127) -- an SDK that
   carried version 1's reading of this field into a real claim builder is emitting a non-conforming
   claim. The value here is the deployed public-devnet payment-channel program
   (`packages/solana-program/deployments/devnet-public.md`), an example settlement program in the
@@ -233,10 +233,10 @@ wire_nonce, wire_cumulative_amount, wire_signature_hex }`: an EVM peer claim, th
   names that deployment's program instead.
 
 - **`prepare`** / **`prepare_no_claim`** (items 5, 6) -- `{ name, prepare, claim_json,
-minimum_delivery, btp_message_hex, http_headers, http_body_hex }`: a claim-bearing PREPARE.
+btp_message_hex, http_headers, http_body_hex }`: a claim-bearing PREPARE.
   `prepare` is `{ amount, expires_at, execution_condition_hex, destination, data_hex }`, the OER
   `Prepare` both `btp_message_hex` (a complete BTP MESSAGE frame: type, `requestId`, the
-  `payment-channel-claim` and `toon-minimum-delivery` protocolData entries, then the OER PREPARE)
+  `payment-channel-claim` protocolData entry, then the OER PREPARE)
   and `http_body_hex` (the same OER bytes as a POST body) carry. `prepare_no_claim` is the same
   fixture with the claim entry/header removed -- "claimless is legal" pinned rather than assumed.
   `claim_json` is `null` there.
@@ -272,10 +272,11 @@ first_claim_json, second_claim_json, first_ack, second_ack, second_ack_reason }`
 - **`flush_requested`** (item 17) -- `{ name, channel_id, http_header_value, note }`. **HTTP
   only**: `note` records that BTP has no counterpart (§6.4) -- on BTP the payee can originate a
   request of its own, so the hint has nothing to ride.
-- **`minimum_delivery_absent`**, **`minimum_delivery_malformed`** (items 18, 19) -- `{ name,
-present, raw_value, decoded_minimum_delivery, reject_code }`. Absent decodes to
-  `decoded_minimum_delivery: 0`; a malformed value (here, non-decimal text) decodes to `null` and
-  `reject_code: "F01"` -- never silently zero.
+- ~~**`minimum_delivery_absent`**, **`minimum_delivery_malformed`** (items 18, 19)~~ -- **deleted**
+  in `schema_version` 3 (issue #1143). Minimum delivery is retired
+  ([ADR 0057](../docs/adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)): no packet
+  declares a floor, the `toon-minimum-delivery` entry and `Toon-Minimum-Delivery` header are gone
+  from both carriages, and `R01` has left the reject vocabulary. The item numbers are not reused.
 - **`forwarded_data_unchanged`** (item 20) -- `{ name, sealed_data_hex, btp_ilp_packet_prepare_hex,
 http_body_hex }`: one sealed request wrap from this file's own `giftwrap` section (§8.1), carried
   as a PREPARE's `data` on both carriages. `sealed_data_hex` must appear byte-for-byte inside both

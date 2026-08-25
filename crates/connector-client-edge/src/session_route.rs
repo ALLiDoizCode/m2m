@@ -88,7 +88,7 @@ pub(crate) async fn route_prepare(
         // stands unchanged.
         return state
             .connector
-            .handle_prepare_with_client_channel(prepare, 0, client_channel_id)
+            .handle_prepare_with_client_channel(prepare, client_channel_id)
             .await;
     };
 
@@ -113,7 +113,7 @@ pub(crate) async fn route_prepare(
     let encoded = prepare.encode();
     let response = state
         .connector
-        .handle_prepare_with_client_channel(prepare, 0, client_channel_id)
+        .handle_prepare_with_client_channel(prepare, client_channel_id)
         .await;
     if !is_unreachable(&response) {
         // A configured route decided this packet -- never silently

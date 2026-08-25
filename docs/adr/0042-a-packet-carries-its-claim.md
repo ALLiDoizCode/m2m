@@ -216,3 +216,11 @@ observe default means for the sentence above: the mechanism that bounds erosion 
 peering, and **binds** only on a peering an operator has written
 `forwarded_claim_enforcement = "enforce"` on. Retiring the floor is therefore no longer blocked on
 code, only on the rollout that flips the peerings that carry traffic.
+
+**0057 is now built too (issue #1143).** The floor is deleted — field, both carriage bindings, both
+vectors and the `R01` reject. Item 3's own text above still spells the send-side figure as
+`amount_after_fee(amount, fee, minimum_delivery)`; the signature is now
+`amount_after_fee(amount, fee)`, and the figure it names — the amount this hop forwards, which is
+what a peer must cover on arrival — is unchanged. Erosion is bounded by the covering claim alone,
+and on a peering still defaulting to observe it is bounded by the send half's own coverage until an
+operator flips it.

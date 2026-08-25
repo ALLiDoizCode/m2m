@@ -81,7 +81,6 @@ impl SessionRole {
             // Peer grants, "and only these" (§1.7).
             Capability::AdvancePeerWatermark
             | Capability::AppendToPeerClaimLedger
-            | Capability::HonourMinimumDelivery
             | Capability::EmitClaimAck
             | Capability::AcceptFlush
             | Capability::BeARouteNextHop
@@ -108,7 +107,7 @@ impl fmt::Display for SessionRole {
 /// §1.7's containment enumeration, spelled as values so it can be asserted
 /// rather than remembered.
 ///
-/// Two kinds of entry live here. The first seven are the peer role's
+/// Two kinds of entry live here. The first six are the peer role's
 /// grants: things a peer interaction may do and a client interaction MUST
 /// be refused **even when it presents bytes that look like them**. The
 /// last six are §1.7's "peer role does NOT grant" list — held by *neither*
@@ -136,12 +135,6 @@ pub enum Capability {
     AdvancePeerWatermark,
     /// Append to the peer claim ledger.
     AppendToPeerClaimLedger,
-    /// Honour a declared `minimumDelivery` as a sender declaration (§5,
-    /// `peer-semantics-pre-868.md` §4). A client's is **ignored** — not rejected
-    /// and not applied. Use [`honoured_minimum_delivery`] rather than
-    /// reading this directly, so the ignoring is done by a function
-    /// instead of remembered.
-    HonourMinimumDelivery,
     /// Emit a `claim-ack` / `Toon-Claim-Ack` on a response. A connector
     /// MUST NOT emit one on a client interaction. See
     /// [`claim_ack_to_emit`].
@@ -184,7 +177,6 @@ impl Capability {
     pub const ALL: &'static [Capability] = &[
         Capability::AdvancePeerWatermark,
         Capability::AppendToPeerClaimLedger,
-        Capability::HonourMinimumDelivery,
         Capability::EmitClaimAck,
         Capability::AcceptFlush,
         Capability::BeARouteNextHop,
@@ -196,27 +188,6 @@ impl Capability {
         Capability::SetRoutePrice,
         Capability::OpenForwardedPayload,
     ];
-}
-
-/// The minimum delivery this interaction's declaration actually buys.
-///
-/// `Some(declared)` for a peer, `None` for a client — whatever the client
-/// declared, and whatever type carries it. §1.7: a client interaction's
-/// minimum-delivery field MUST be **ignored**, not rejected and not
-/// applied. §12.5 records why ignoring was chosen over refusing: a client
-/// SDK that sets an unrecognised header must not be broken by a peer
-/// feature, and no error message may disclose the peer surface.
-///
-/// Generic over the value so the carriages can carry minimum delivery in
-/// whatever type they already have, and so this function cannot grow an
-/// opinion about the wire.
-#[must_use]
-pub fn honoured_minimum_delivery<T>(role: &SessionRole, declared: Option<T>) -> Option<T> {
-    if role.grants(Capability::HonourMinimumDelivery) {
-        declared
-    } else {
-        None
-    }
 }
 
 /// The claim acknowledgement this interaction's response may carry.
@@ -331,7 +302,6 @@ mod tests {
         for capability in [
             Capability::AdvancePeerWatermark,
             Capability::AppendToPeerClaimLedger,
-            Capability::HonourMinimumDelivery,
             Capability::EmitClaimAck,
             Capability::AcceptFlush,
             Capability::BeARouteNextHop,
@@ -373,7 +343,6 @@ mod tests {
         let covered = [
             Capability::AdvancePeerWatermark,
             Capability::AppendToPeerClaimLedger,
-            Capability::HonourMinimumDelivery,
             Capability::EmitClaimAck,
             Capability::AcceptFlush,
             Capability::BeARouteNextHop,
@@ -390,23 +359,6 @@ mod tests {
         for capability in Capability::ALL {
             assert!(covered.contains(capability), "uncovered: {capability:?}");
         }
-    }
-
-    /// §1.7: ignored, not rejected and not applied.
-    #[test]
-    fn a_clients_minimum_delivery_is_ignored_and_a_peers_is_honoured() {
-        assert_eq!(
-            honoured_minimum_delivery(&SessionRole::Client, Some(42_u64)),
-            None
-        );
-        assert_eq!(
-            honoured_minimum_delivery(&SessionRole::peer("store-box"), Some(42_u64)),
-            Some(42)
-        );
-        assert_eq!(
-            honoured_minimum_delivery::<u64>(&SessionRole::peer("store-box"), None),
-            None
-        );
     }
 
     #[test]

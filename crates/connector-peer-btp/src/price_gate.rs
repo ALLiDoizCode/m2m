@@ -26,7 +26,7 @@
 //! - A **`Forwarded`** route's own **packet `amount`** (ADR 0042's item 3).
 //!   Not a price and not the fee: on the send side
 //!   `Connector::forward_via_peer_route` covers the next hop for
-//!   `amount_after_fee(amount, fee, minimum_delivery)`, so the upstream peer
+//!   `amount_after_fee(amount, fee)`, so the upstream peer
 //!   must cover the amount arriving *here* and this connector keeps the
 //!   difference -- which is exactly its flat fee (ADR 0010). A route's
 //!   `price` is a client-edge fact (ADR 0028) and stays irrelevant on the

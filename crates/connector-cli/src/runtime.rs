@@ -4064,7 +4064,6 @@ key_file = "{key_file}"
                 &self,
                 peer_id: &str,
                 prepare: Prepare,
-                _minimum_delivery: u64,
                 claim: Option<WireClaim>,
             ) -> PeerForward {
                 self.forwards.lock().expect("forwards lock poisoned").push((
@@ -4242,7 +4241,7 @@ client_edge_url = "{url}"
             let connector = connector(&fixture, Arc::clone(&peer));
 
             let response = connector
-                .handle_prepare(peer_bound_prepare(&peer.fulfillment), 0)
+                .handle_prepare(peer_bound_prepare(&peer.fulfillment))
                 .await;
 
             assert!(
@@ -4349,7 +4348,7 @@ client_edge_url = "{url}"
 
             for _ in 0..2 {
                 let response = connector
-                    .handle_prepare(peer_bound_prepare(&peer.fulfillment), 0)
+                    .handle_prepare(peer_bound_prepare(&peer.fulfillment))
                     .await;
                 assert!(matches!(response, PacketResponse::Fulfill(_)));
             }

@@ -259,21 +259,15 @@ async fn originate_packet(
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     };
 
-    // The operator is the original sender of a packet it originates
-    // (ADR 0010) -- unlike the client edge, which has no wire field yet
-    // to carry a sender-declared minimum (client-edge-spec.md v1) and so
-    // passes 0, the operator already holds the full `Prepare` including
-    // its declared `amount`. The only minimum that is actually "declared"
-    // here, rather than an arbitrary placeholder, is that amount itself:
-    // this hop authorized exactly `amount` to reach the destination, so
-    // no further hop's fee may discount it below that.
-    let minimum_delivery = prepare.amount;
-
-    let encoded = match state
-        .connector
-        .handle_prepare(prepare, minimum_delivery)
-        .await
-    {
+    // An operator-originated packet is handed to the connector exactly as
+    // a client's is. It declares no floor of its own: the
+    // `minimum_delivery = prepare.amount` convention that used to live
+    // here was a third convention no record ever carried, and it made
+    // `amount - fee >= minimum_delivery` unsatisfiable for any non-zero
+    // fee, so a fee-charging peering could never carry an operator's
+    // packet at all (ADR 0057, issue #1143). What bounds erosion now is
+    // the claim covering each crossing.
+    let encoded = match state.connector.handle_prepare(prepare).await {
         PacketResponse::Fulfill(fulfill) => fulfill.encode(),
         PacketResponse::Reject(reject) => reject.encode(),
     };
@@ -1256,14 +1250,16 @@ mod tests {
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
 
-        /// The minimum delivery an originated packet carries must be the
-        /// packet's own declared `amount` (ADR 0010), not a placeholder
-        /// zero -- otherwise a peer's fee could silently discount a
-        /// payment the operator itself authorized in full. Routing this
-        /// packet to a fee-charging peer must reject (R01) rather than
-        /// forward a smaller amount than declared.
+        /// ADR 0057, issue #1143: an originated packet declares no floor,
+        /// so a fee-charging peering is one an operator's packet can
+        /// actually cross. The old `minimum_delivery = prepare.amount`
+        /// convention made `amount - fee >= minimum_delivery` unsatisfiable
+        /// for any non-zero fee and refused this packet here, without ever
+        /// reaching the peer. It now reaches the transport -- and the peer
+        /// is simply not registered, which is `T01` and not a verdict on
+        /// the amount.
         #[tokio::test]
-        async fn an_originated_packet_declares_its_own_amount_as_the_minimum_delivery() {
+        async fn an_originated_packet_crosses_a_fee_charging_peering() {
             use connector_runtime::PeerRoute;
 
             let keypair = keypair();
@@ -1303,7 +1299,8 @@ mod tests {
 
             let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
             let reject = connector_domain::Reject::decode(&bytes).expect("decode reject");
-            assert_eq!(reject.code, RejectCode::r01_insufficient_source_amount());
+            assert_eq!(reject.code, RejectCode::t01_peer_unreachable());
+            assert!(reject.message.contains("peer-1"), "{}", reject.message);
         }
     }
 

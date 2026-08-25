@@ -10,17 +10,16 @@
 //! | ----- | ----------------------- |
 //! | claim | [`connector_peer_btp::claim_json`] -- the client edge's own claim validator (I4) |
 //! | claim ack | [`connector_peer_btp::ack`] -- the one `ClaimRejectReason` → JSON function (I3) |
-//! | `minimumDelivery` | [`connector_peer_btp::fields::minimum_delivery`] -- including §5.1's "malformed is `F01`, never silently zero" |
 //! | `accumulatedCost` | [`connector_peer_btp::fields::accumulated_cost`] |
 //! | credential | [`connector_peer_auth::present_base64`] -- the same struct, the same JSON (§1.4) |
 //!
 //! Those functions take a `protocolData` entry, so this module builds one
 //! from the header value and hands it over. Doing it that way rather than
 //! writing "a small decimal parser, it is only four lines" is the whole
-//! point: a decimal parser written twice is a rule enforced once, and the
-//! rule in question converts a framing bug into an under-delivery when it is
-//! missed. The header/entry *names* are never spelled here either -- they
-//! come from [`connector_btp::CARRIAGE_NAMES`]'s declared pairs.
+//! point: a decoder written twice is a rule enforced once, and a rule
+//! enforced once is a rule the two carriages cannot disagree about. The
+//! header/entry *names* are never spelled here either -- they come from
+//! [`connector_btp::CARRIAGE_NAMES`]'s declared pairs.
 //!
 //! Base64 wraps the claim, the claim ack and the credential because base64
 //! is a header artifact and nothing else (§4). The value inside is the same
@@ -30,11 +29,8 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use connector_btp::{
     ProtocolData, ACCUMULATED_COST_HEADER, ACCUMULATED_COST_PROTOCOL, CLAIM_ACK_HEADER,
-    CLAIM_HEADER, CONTENT_TYPE_TEXT, FLUSH_REQUESTED_HEADER, MINIMUM_DELIVERY_HEADER,
-    MINIMUM_DELIVERY_PROTOCOL,
+    CLAIM_HEADER, CONTENT_TYPE_TEXT, FLUSH_REQUESTED_HEADER,
 };
-use connector_peer_auth::SessionRole;
-use connector_peer_btp::fields::MalformedMinimumDelivery;
 use connector_peer_btp::{ack, fields};
 use connector_runtime::ClaimAckOutcome;
 
@@ -235,40 +231,6 @@ pub fn claim_ack(headers: &Headers) -> Option<ClaimAckOutcome> {
     ack::decode(&json)
 }
 
-/// The sender's minimum-delivery declaration (§5.1), decimal uint64 ASCII,
-/// one value and no list form.
-///
-/// **Absent means zero.** Anything present but not decimal digits, empty, or
-/// over `u64::MAX` is [`MalformedMinimumDelivery`] and the caller answers
-/// `F01` -- never a silent zero, which is the weakest possible floor.
-///
-/// `role` is taken rather than assumed because §1.7 makes this a *peer*
-/// grant: on a client-role request it is **ignored**, not rejected and not
-/// applied.
-pub fn minimum_delivery(
-    role: &SessionRole,
-    headers: &Headers,
-) -> Result<u64, MalformedMinimumDelivery> {
-    let entries: Vec<ProtocolData> = headers
-        .get(MINIMUM_DELIVERY_HEADER)
-        .map(|value| entry(MINIMUM_DELIVERY_PROTOCOL, value.as_bytes()))
-        .into_iter()
-        .collect();
-    fields::minimum_delivery(role, &entries)
-}
-
-/// The `Toon-Minimum-Delivery` header a forwarding hop re-emits, or `None`
-/// for a zero floor (§5.1: absent *means* zero, so omitting it is
-/// value-preserving).
-///
-/// The value is re-emitted **unchanged**: it is the one carriage-layer field
-/// that propagates rather than being re-derived (§8.3), and crossing from
-/// BTP to HTTP must not alter it.
-#[must_use]
-pub fn minimum_delivery_header_value(minimum_delivery: u64) -> Option<String> {
-    (minimum_delivery > 0).then(|| minimum_delivery.to_string())
-}
-
 /// A REJECT's running cost (§5.2). **Absent means zero on receipt**, and a
 /// relaying hop still adds its own fee to that zero.
 #[must_use]
@@ -312,10 +274,6 @@ fn entry(name: &str, data: &[u8]) -> ProtocolData {
 mod tests {
     use super::*;
     use connector_runtime::ClaimRejectReason;
-
-    fn peer() -> SessionRole {
-        SessionRole::peer("peer-b")
-    }
 
     fn with(name: &str, value: &str) -> Headers {
         let mut headers = Headers::new();
@@ -422,50 +380,6 @@ mod tests {
                 &STANDARD.encode(r#"{"result":"rejected"}"#)
             )),
             None
-        );
-    }
-
-    /// §5.1, through the BTP carriage's own parser: absent is zero, present
-    /// and unreadable is refused rather than collapsed to zero.
-    #[test]
-    fn minimum_delivery_is_absent_zero_and_never_silently_zero_when_malformed() {
-        assert_eq!(minimum_delivery(&peer(), &Headers::new()), Ok(0));
-        assert_eq!(
-            minimum_delivery(&peer(), &with(MINIMUM_DELIVERY_HEADER, "1250")),
-            Ok(1250)
-        );
-        for malformed in ["", "+12", "-1", "12.5", " 12", "twelve", "1,2"] {
-            assert!(
-                minimum_delivery(&peer(), &with(MINIMUM_DELIVERY_HEADER, malformed)).is_err(),
-                "accepted {malformed:?}"
-            );
-        }
-    }
-
-    /// §1.7: on a client request the field is **ignored** -- not rejected
-    /// and not applied -- even when malformed.
-    #[test]
-    fn a_client_roles_minimum_delivery_header_is_ignored() {
-        let client = SessionRole::Client;
-
-        assert_eq!(
-            minimum_delivery(&client, &with(MINIMUM_DELIVERY_HEADER, "1250")),
-            Ok(0)
-        );
-        assert_eq!(
-            minimum_delivery(&client, &with(MINIMUM_DELIVERY_HEADER, "twelve")),
-            Ok(0)
-        );
-    }
-
-    #[test]
-    fn a_zero_floor_rides_as_an_absent_header_and_reads_back_as_zero() {
-        assert_eq!(minimum_delivery_header_value(0), None);
-
-        let value = minimum_delivery_header_value(1250).expect("a non-zero floor rides");
-        assert_eq!(
-            minimum_delivery(&peer(), &with(MINIMUM_DELIVERY_HEADER, &value)),
-            Ok(1250)
         );
     }
 

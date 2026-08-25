@@ -1217,11 +1217,6 @@ async fn handle_ilp(
         authenticated_peer.unwrap_or_else(|| anonymous_identity(plaintext_claim_signer.as_deref()));
     tracing::debug!(identity = %identity.id(), "client-edge request identity resolved");
 
-    // client-edge-spec.md v1 carries no minimum-delivery field (§4 of
-    // peer-semantics-pre-868.md scopes it to the peer semantics) -- a client-originated
-    // packet declares no guarantee yet, so this hop enforces none, exactly
-    // matching today's actual (unguaranteed) behavior.
-    //
     // Issue #736: routing is `Connector::handle_prepare`'s three configured
     // sources first, then whatever client session `state.session_registry`
     // has bound to this destination -- see `session_route::route_prepare`.
@@ -1332,7 +1327,7 @@ async fn handle_probe(
         Err(rejection) => return (StatusCode::FORBIDDEN, rejection.message()).into_response(),
     };
 
-    match state.connector.handle_probe(&channel_key, prepare, 0).await {
+    match state.connector.handle_probe(&channel_key, prepare).await {
         Ok(response) => packet_response(response),
         Err(ProbeDenied::NoOpenChannel) => (
             StatusCode::FORBIDDEN,

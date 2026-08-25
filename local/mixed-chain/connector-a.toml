@@ -39,11 +39,12 @@ key_file = "/app/data/signer.key"
 # the rest, and each hop's route is a prefix of the next hop's -- which is what
 # makes the address itself say where the packet went.
 #
-# `fee = 0` is forced by how the packet is originated, not by the peering:
-# `POST /packets` passes `minimum_delivery = prepare.amount`, so
-# `amount_after_fee` refuses any hop that would discount it (ADR 0010). See
-# `local/two-hop/connector-a.toml` for the longer note; it applies to every
-# forwarded route in this directory.
+# `fee = 0` was forced by how the packet is originated, not by the peering:
+# `POST /packets` passed `minimum_delivery = prepare.amount`, so
+# `amount_after_fee` refused any hop that would discount it. That lockout is
+# retired (ADR 0057, issue #1143) and raising the fee is issue #1144's job.
+# See `local/two-hop/connector-a.toml` for the longer note; it applies to
+# every forwarded route in this directory.
 [[routes]]
 prefix = "g.local.mixed.b"
 peer_id = "a-b"

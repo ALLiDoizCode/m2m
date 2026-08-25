@@ -478,7 +478,7 @@ async fn a_claim_riding_a_prepare_is_judged_independently_of_the_packet() {
         reached_peer: reached,
         ..
     } = transport
-        .forward(PEER_ID, prepare("g.nowhere"), 0, Some(claim))
+        .forward(PEER_ID, prepare("g.nowhere"), Some(claim))
         .await;
 
     match response {
@@ -503,7 +503,6 @@ async fn the_frames_a_dialed_peering_puts_on_the_wire_are_the_ones_section_3_nam
         .forward(
             PEER_ID,
             prepare("g.nowhere"),
-            1_250,
             Some(sign_claim(&payer_signer, 1, 500)),
         )
         .await;
@@ -534,12 +533,6 @@ async fn the_frames_a_dialed_peering_puts_on_the_wire_are_the_ones_section_3_nam
         serde_json::from_slice(&claim.data).expect("raw UTF-8 JSON, no base64 layer");
     assert_eq!(claim_json["blockchain"], "evm");
     assert_eq!(claim_json["nonce"], 1);
-    let minimum_delivery = message
-        .protocol_data
-        .iter()
-        .find(|pd| pd.name == connector_btp::MINIMUM_DELIVERY_PROTOCOL)
-        .expect("the sender's floor rode unchanged");
-    assert_eq!(minimum_delivery.data, b"1250".to_vec());
 }
 
 // ─── §3, §6: FLUSH is a TRANSFER ───
@@ -880,7 +873,7 @@ async fn a_peer_that_cannot_be_dialed_rejects_t01_and_was_never_reached() {
         reached_peer: reached,
         ..
     } = transport
-        .forward(PEER_ID, prepare("g.somewhere"), 0, None)
+        .forward(PEER_ID, prepare("g.somewhere"), None)
         .await;
 
     match response {
@@ -904,7 +897,7 @@ async fn a_peer_id_this_connector_does_not_dial_rejects_t01() {
         reached_peer: reached,
         ..
     } = transport
-        .forward("nowhere", prepare("g.somewhere"), 0, None)
+        .forward("nowhere", prepare("g.somewhere"), None)
         .await;
 
     match response {
@@ -1179,51 +1172,6 @@ async fn a_dedicated_peer_listener_refuses_rather_than_downgrades() {
     );
 }
 
-// ─── §5.1: minimum delivery ───
-
-/// §5.1: a malformed `toon-minimum-delivery` rejects the PREPARE `F01`
-/// and is **never** silently treated as zero -- zero is the weakest
-/// possible floor, and substituting it turns a framing bug into an
-/// under-delivery. The claim that rode the same frame is still
-/// acknowledged (§6.2).
-#[tokio::test]
-async fn a_malformed_minimum_delivery_rejects_f01_and_is_never_silently_zero() {
-    let payer_signer = LocalSigner::generate("payer");
-    let state = carriage(payee(&payer_signer), bound_policy());
-    let mut session = accepting(state);
-    session.send(auth_frame(1, PEER_ID, SECRET)).await;
-    let _ = session.answer().await;
-
-    let json = claim_as_json(&sign_claim(&payer_signer, 1, 500), &payer_signer);
-    session
-        .send(encode_message(
-            2,
-            &[
-                ProtocolData {
-                    name: CLAIM_PROTOCOL.to_string(),
-                    content_type: CONTENT_TYPE_TEXT,
-                    data: json.into_bytes(),
-                },
-                ProtocolData {
-                    name: connector_btp::MINIMUM_DELIVERY_PROTOCOL.to_string(),
-                    content_type: CONTENT_TYPE_TEXT,
-                    data: b"twelve".to_vec(),
-                },
-            ],
-            &prepare("g.nowhere").encode(),
-        ))
-        .await;
-    let answer = session.answer().await;
-
-    let reject = connector_domain::Reject::decode(&answer.ilp_packet).expect("a REJECT");
-    assert_eq!(reject.code.as_str(), "F01");
-    assert_eq!(
-        ack::from_protocol_data(&answer.protocol_data),
-        Some(ClaimAckOutcome::Accepted),
-        "the claim's verdict is independent of the packet's (§6.2)"
-    );
-}
-
 // ─── issue #880 (owner decision #868): every peer PREPARE to a priced
 // terminated route carries a covering claim, or is refused with the client
 // edge's own x402 greeting ───
@@ -1244,7 +1192,7 @@ async fn a_claimless_peer_prepare_to_a_priced_route_is_refused_with_the_x402_gre
         payment_required,
         ..
     } = transport
-        .forward(PEER_ID, prepare("g.example.app"), 0, None)
+        .forward(PEER_ID, prepare("g.example.app"), None)
         .await;
 
     match response {
@@ -1275,7 +1223,7 @@ async fn a_claim_that_does_not_cover_the_routes_price_is_refused_the_same_way() 
         payment_required,
         ..
     } = transport
-        .forward(PEER_ID, prepare("g.example.app"), 0, Some(claim))
+        .forward(PEER_ID, prepare("g.example.app"), Some(claim))
         .await;
 
     assert_eq!(ack, ClaimAckOutcome::Accepted);
@@ -1355,7 +1303,7 @@ async fn a_covering_claim_is_admitted_exactly_as_today() {
         payment_required,
         ..
     } = transport
-        .forward(PEER_ID, sealed_prepare, 0, Some(claim))
+        .forward(PEER_ID, sealed_prepare, Some(claim))
         .await;
 
     assert_eq!(ack, ClaimAckOutcome::Accepted);
@@ -1451,7 +1399,7 @@ async fn observe_admits_a_claimless_peer_prepare_the_default_would_refuse() {
         ..
     } = transport
         // No claim at all -- the shape `Enforce` refuses.
-        .forward(PEER_ID, sealed_prepare, 0, None)
+        .forward(PEER_ID, sealed_prepare, None)
         .await;
 
     assert!(
@@ -1493,7 +1441,7 @@ async fn observe_for_one_peer_does_not_widen_to_a_peer_with_no_entry() {
         payment_required,
         ..
     } = transport
-        .forward(PEER_ID, prepare("g.example.app"), 0, None)
+        .forward(PEER_ID, prepare("g.example.app"), None)
         .await;
 
     match response {
@@ -1541,7 +1489,7 @@ async fn a_forged_claim_declaring_a_large_amount_does_not_buy_coverage() {
         payment_required,
         ..
     } = transport
-        .forward(PEER_ID, prepare("g.example.app"), 0, Some(claim))
+        .forward(PEER_ID, prepare("g.example.app"), Some(claim))
         .await;
 
     assert_eq!(
@@ -1611,7 +1559,7 @@ async fn a_claim_replayed_at_a_used_nonce_never_buys_coverage() {
             payment_required,
             ..
         } = transport
-            .forward(PEER_ID, prepare("g.example.app"), 0, Some(replayed.clone()))
+            .forward(PEER_ID, prepare("g.example.app"), Some(replayed.clone()))
             .await;
 
         assert_eq!(
@@ -1728,7 +1676,7 @@ async fn a_restart_does_not_credit_a_claim_with_the_amount_it_already_paid() {
         ack,
         payment_required,
         ..
-    } = transport.forward(PEER_ID, prepare, 0, Some(claim)).await;
+    } = transport.forward(PEER_ID, prepare, Some(claim)).await;
 
     assert_eq!(
         ack,
@@ -1778,7 +1726,7 @@ async fn a_restart_still_admits_a_claim_that_genuinely_advances_by_the_price() {
         ack,
         payment_required,
         ..
-    } = transport.forward(PEER_ID, prepare, 0, Some(claim)).await;
+    } = transport.forward(PEER_ID, prepare, Some(claim)).await;
 
     assert_eq!(ack, ClaimAckOutcome::Accepted);
     assert!(
@@ -1823,7 +1771,7 @@ async fn a_forwarded_arrival_with_no_claim_is_admitted_by_default() {
         response,
         payment_required,
         ..
-    } = transport.forward(PEER_ID, sealed, 0, None).await;
+    } = transport.forward(PEER_ID, sealed, None).await;
 
     assert!(
         payment_required.is_none(),
@@ -1864,7 +1812,7 @@ async fn a_forwarded_arrival_with_no_claim_is_refused_once_this_peering_enforces
         response,
         payment_required,
         ..
-    } = transport.forward(PEER_ID, sealed, 0, None).await;
+    } = transport.forward(PEER_ID, sealed, None).await;
 
     match response {
         PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "F06"),
@@ -1909,7 +1857,7 @@ async fn a_claim_covering_the_arriving_amount_is_admitted_under_either_setting()
             ack,
             payment_required,
             ..
-        } = transport.forward(PEER_ID, sealed, 0, Some(claim)).await;
+        } = transport.forward(PEER_ID, sealed, Some(claim)).await;
 
         assert_eq!(ack, ClaimAckOutcome::Accepted);
         assert!(
@@ -1958,7 +1906,7 @@ async fn a_claim_advancing_less_than_the_arriving_amount_never_covers_it() {
             ack,
             payment_required,
             ..
-        } = transport.forward(PEER_ID, sealed, 0, Some(claim)).await;
+        } = transport.forward(PEER_ID, sealed, Some(claim)).await;
 
         // The claim is perfectly valid and is still acknowledged: the two
         // verdicts stay independent (§6.2).
@@ -2040,7 +1988,7 @@ async fn the_forwarded_knob_never_changes_what_a_priced_termination_does() {
                 response,
                 payment_required,
                 ..
-            } = transport.forward(PEER_ID, sealed, 0, None).await;
+            } = transport.forward(PEER_ID, sealed, None).await;
 
             let refused = matches!(&response, PacketResponse::Reject(reject) if reject.code.as_str() == "F06");
             assert_eq!(
@@ -2142,41 +2090,6 @@ async fn claims_sent_in_order_on_one_session_never_race_each_other() {
     }
 }
 
-// ─── §1.7: a client's peer-shaped bytes ───
-
-/// §1.7/§12(5): a client interaction's `toon-minimum-delivery` is
-/// **ignored** -- not rejected and not applied -- so a client SDK that
-/// sets an unrecognised entry is not broken by a peer feature and no error
-/// message discloses the peer surface. A malformed one on a client frame
-/// is therefore not an `F01` either.
-#[tokio::test]
-async fn a_client_interactions_peer_shaped_bytes_are_ignored_not_refused() {
-    let payer_signer = LocalSigner::generate("payer");
-    let state = carriage(payee(&payer_signer), bound_policy());
-    let mut session = accepting(state);
-
-    session
-        .send(encode_message(
-            1,
-            &[ProtocolData {
-                name: connector_btp::MINIMUM_DELIVERY_PROTOCOL.to_string(),
-                content_type: CONTENT_TYPE_TEXT,
-                data: b"twelve".to_vec(),
-            }],
-            &prepare("g.nowhere").encode(),
-        ))
-        .await;
-    let answer = session.answer().await;
-
-    let reject = connector_domain::Reject::decode(&answer.ilp_packet).expect("a REJECT");
-    assert_ne!(
-        reject.code.as_str(),
-        "F01",
-        "a client's minimum-delivery is ignored, never refused"
-    );
-    assert!(ack::from_protocol_data(&answer.protocol_data).is_none());
-}
-
 // ─── §2.3: BTP is symmetric once established ───
 
 /// §2.3: after auth either side may originate on the one session -- the
@@ -2232,7 +2145,7 @@ async fn the_btp_carriage_upholds_the_peer_transport_contract() {
         reached_peer: reached,
         ..
     } = transport
-        .forward(PEER_ID, prepare("g.nowhere-on-the-peer"), 0, None)
+        .forward(PEER_ID, prepare("g.nowhere-on-the-peer"), None)
         .await;
     match response {
         PacketResponse::Reject(reject) => {
@@ -2249,7 +2162,7 @@ async fn the_btp_carriage_upholds_the_peer_transport_contract() {
         reached_peer: reached,
         ..
     } = transport
-        .forward("unregistered", prepare("g.anything"), 0, None)
+        .forward("unregistered", prepare("g.anything"), None)
         .await;
     match response {
         PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "T01"),
@@ -2275,9 +2188,7 @@ async fn concurrent_forwards_share_one_dialed_session() {
     for _ in 0..8 {
         let transport = Arc::clone(&transport);
         handles.push(tokio::spawn(async move {
-            transport
-                .forward(PEER_ID, prepare("g.nowhere"), 0, None)
-                .await
+            transport.forward(PEER_ID, prepare("g.nowhere"), None).await
         }));
     }
     for handle in handles {

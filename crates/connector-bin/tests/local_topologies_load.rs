@@ -407,9 +407,9 @@ fn the_two_hop_topologys_committed_configs_load() {
     assert_eq!(
         forward.fee(),
         0,
-        "`POST /packets` passes `minimum_delivery = amount`, so `amount_after_fee` refuses any \
-         hop that retains anything -- a non-zero fee here makes the rehearsal see R01 instead of \
-         a delivery"
+        "The lockout that forced this to zero is gone (ADR 0057, issue #1143): `POST /packets` \
+         no longer declares a floor, so a hop may retain its fee. Raising it -- and each node's \
+         client-edge price with it -- is issue #1144's job, not this record's"
     );
 
     assert_eq!(payee.peer_routes().len(), 0, "B forwards nothing onward");

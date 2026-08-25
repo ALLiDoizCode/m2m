@@ -295,10 +295,14 @@ Two consequences worth knowing before editing a config here:
   of the long version, including the defect the row found the first time it was
   tried here (issue #1102, fixed by #1103, and the reason the rehearsal counts
   what each claim **advanced** rather than that a claim exists).
-- **No hop may charge a fee.** `POST /packets` declares
-  `minimum_delivery = amount` (ADR 0010), so `amount_after_fee` refuses any hop
-  that would retain anything. Every forwarded route here is `fee = 0`; a
-  non-zero one turns the rehearsal into `R01`.
+- **No hop charges a fee yet.** Every forwarded route here is `fee = 0`. That
+  used to be forced: `POST /packets` declared `minimum_delivery = amount`, so
+  `amount_after_fee` refused any hop that would retain anything, and a non-zero
+  fee turned the rehearsal into `R01`. The lockout is retired (ADR 0057, issue
+  #1143) -- no packet declares a floor and `R01` is gone from the reject
+  vocabulary -- so the fees can be raised. Issue #1144 does that, raising each
+  node's `price` to match; until then the rehearsal still exercises the flat
+  per-packet fee nowhere.
 
 ## What a peer claim does and does not check
 

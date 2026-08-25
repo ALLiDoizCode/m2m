@@ -147,13 +147,13 @@ This is the group that spells out the nginx sentence at the top of this page.
 Neither connector-internal nor wire law: decisions about how the fleet is run, migrated, or
 how another repository is regarded.
 
-| #                                                                                    | Decision                                                                | Status                                           |
-| ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- | ------------------------------------------------ |
-| [0017](0017-the-typescript-connector-is-a-prototype.md)                              | The TypeScript connector is a prototype, not a reference implementation | Accepted — a judgement about another repo        |
-| [0041](0041-a-moving-tag-carries-the-fleets-committed-config-or-it-does-not-move.md) | A moving tag carries the fleet's committed config, or it does not move  | Accepted                                         |
-| [0055](0055-a-release-is-one-dispatch-and-the-ordering-rides-as-data.md)             | A release is one dispatch, and the deploy ordering rides as data        | **Proposed** — extends 0041                      |
-| [0056](0056-production-is-a-named-empty-tier.md)                                     | Production is a named, empty tier                                       | **Proposed** — describes an absence              |
-| [0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)                   | Minimum delivery is retired; a claim bounds erosion                     | Accepted — **not built**, blocked on 0042 item 3 |
+| #                                                                                    | Decision                                                                | Status                                    |
+| ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- | ----------------------------------------- |
+| [0017](0017-the-typescript-connector-is-a-prototype.md)                              | The TypeScript connector is a prototype, not a reference implementation | Accepted — a judgement about another repo |
+| [0041](0041-a-moving-tag-carries-the-fleets-committed-config-or-it-does-not-move.md) | A moving tag carries the fleet's committed config, or it does not move  | Accepted                                  |
+| [0055](0055-a-release-is-one-dispatch-and-the-ordering-rides-as-data.md)             | A release is one dispatch, and the deploy ordering rides as data        | **Proposed** — extends 0041               |
+| [0056](0056-production-is-a-named-empty-tier.md)                                     | Production is a named, empty tier                                       | **Proposed** — describes an absence       |
+| [0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)                   | Minimum delivery is retired; a claim bounds erosion                     | Accepted — **built** (#1143)              |
 
 ---
 

@@ -113,12 +113,11 @@ impl PeerForward {
 
 /// Forwards a [`Prepare`] to the connector reachable at `peer_id` and
 /// returns whatever that peer answered, unchanged -- a reject originated at
-/// the far end reaches the caller exactly as that peer sent it.
-/// `minimum_delivery` is the amount the original sender declared must reach
-/// the destination (ADR 0010) -- carried alongside `prepare` rather than
-/// inside it, and passed to the peer unchanged so every hop enforces it
-/// against the same figure. `claim` piggybacks whatever this connector
-/// currently owes `peer_id` (peer-semantics-pre-868.md §3.2).
+/// the far end reaches the caller exactly as that peer sent it. `claim`
+/// piggybacks whatever this connector currently owes `peer_id`
+/// (peer-semantics-pre-868.md §3.2), and is what bounds erosion across the
+/// path now that no declared floor rides beside the packet (ADR 0057,
+/// issue #1143).
 ///
 /// See [`PeerForward`] for what comes back, and in particular for why a
 /// carriage that read x402 terms off a refusal must report them rather than
@@ -129,7 +128,6 @@ pub trait PeerTransport: Send + Sync {
         &self,
         peer_id: &str,
         prepare: Prepare,
-        minimum_delivery: u64,
         claim: Option<WireClaim>,
     ) -> PeerForward;
 
@@ -162,7 +160,6 @@ pub(crate) fn peer_unreachable(peer_id: &str) -> PacketResponse {
 enum PeerMessage {
     Prepare {
         prepare: Prepare,
-        minimum_delivery: u64,
         claim: Option<WireClaim>,
         respond_to: oneshot::Sender<(PacketResponse, ClaimAckOutcome)>,
     },
@@ -196,13 +193,10 @@ impl PeerLink {
                 match message {
                     PeerMessage::Prepare {
                         prepare,
-                        minimum_delivery,
                         claim,
                         respond_to,
                     } => {
-                        let result = connector
-                            .handle_peer_prepare(prepare, minimum_delivery, claim)
-                            .await;
+                        let result = connector.handle_peer_prepare(prepare, claim).await;
                         let _ = respond_to.send(result);
                     }
                     PeerMessage::Flush { claim, respond_to } => {
@@ -219,7 +213,6 @@ impl PeerLink {
         &self,
         peer_id: &str,
         prepare: Prepare,
-        minimum_delivery: u64,
         claim: Option<WireClaim>,
     ) -> PeerForward {
         let (respond_to, receiver) = oneshot::channel();
@@ -227,7 +220,6 @@ impl PeerLink {
             .sender
             .send(PeerMessage::Prepare {
                 prepare,
-                minimum_delivery,
                 claim,
                 respond_to,
             })
@@ -289,14 +281,10 @@ impl PeerTransport for InProcessPeerTransport {
         &self,
         peer_id: &str,
         prepare: Prepare,
-        minimum_delivery: u64,
         claim: Option<WireClaim>,
     ) -> PeerForward {
         match self.peers.get(peer_id) {
-            Some(link) => {
-                link.forward(peer_id, prepare, minimum_delivery, claim)
-                    .await
-            }
+            Some(link) => link.forward(peer_id, prepare, claim).await,
             None => PeerForward::unreachable(peer_id),
         }
     }
@@ -389,7 +377,7 @@ mod tests {
             ack,
             reached_peer: reached,
             ..
-        } = transport.forward("peer-b", sealed, 0, None).await;
+        } = transport.forward("peer-b", sealed, None).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -415,7 +403,7 @@ mod tests {
             reached_peer: reached,
             ..
         } = transport
-            .forward("nowhere", prepare("g.example.app"), 0, None)
+            .forward("nowhere", prepare("g.example.app"), None)
             .await;
 
         match response {
@@ -448,7 +436,7 @@ mod tests {
             reached_peer: reached,
             ..
         } = transport
-            .forward("peer-b", prepare("g.nowhere-on-peer-b"), 0, None)
+            .forward("peer-b", prepare("g.nowhere-on-peer-b"), None)
             .await;
 
         match response {
@@ -484,7 +472,7 @@ mod tests {
         let claim = sign_wire_claim(&signer, 1, 1, 50);
 
         let PeerForward { response, ack, .. } = transport
-            .forward("peer-b", prepare("g.nowhere"), 0, Some(claim))
+            .forward("peer-b", prepare("g.nowhere"), Some(claim))
             .await;
 
         // The claim is judged independently of the packet: no route exists
@@ -543,7 +531,7 @@ mod tests {
             let transport = transport.clone();
             handles.push(tokio::spawn(async move {
                 transport
-                    .forward("peer-b", prepare("g.example.app"), 0, None)
+                    .forward("peer-b", prepare("g.example.app"), None)
                     .await
             }));
         }
@@ -610,7 +598,7 @@ mod tests {
                 response,
                 reached_peer: reached,
                 ..
-            } = transport.forward("peer-b", sealed, 0, None).await;
+            } = transport.forward("peer-b", sealed, None).await;
             match response {
                 PacketResponse::Fulfill(fulfill) => {
                     assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
@@ -628,7 +616,7 @@ mod tests {
                 reached_peer: reached,
                 ..
             } = transport
-                .forward("peer-c", prepare("g.nowhere-on-peer-c"), 0, None)
+                .forward("peer-c", prepare("g.nowhere-on-peer-c"), None)
                 .await;
             match response {
                 PacketResponse::Reject(reject) => {
@@ -644,7 +632,7 @@ mod tests {
                 reached_peer: reached,
                 ..
             } = transport
-                .forward("nowhere", prepare("g.example.app"), 0, None)
+                .forward("nowhere", prepare("g.example.app"), None)
                 .await;
             match response {
                 PacketResponse::Reject(reject) => {

@@ -87,3 +87,24 @@ history (issue #1065) and stays as it is; the other two are corrected.
 
 **A second implementation may add codes this table does not list**, within the class its situation
 demands. It may not reuse a binding code for a different situation.
+
+## Update (issue #1143) — `R01` leaves the vocabulary, and `F01` loses a clause
+
+[0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md) retires minimum delivery, and
+issue #1143 deletes it. Two rows of the tables above change:
+
+- **The `R01` row is deleted in full.** It fails this record's own test: with no floor to declare,
+  _"lower the floor, or take a cheaper path"_ is no longer a move a sender has, and half of what
+  remains is not a distinct action. No connector emits `R01`, and no second implementation should
+  reuse the code for a different situation.
+- **`F01` loses its "malformed minimum-delivery header" clause.** The other three situations —
+  undecodable envelope, zero or absent condition, a termination reject that could not be sealed —
+  stand, and `F01` stays class-only.
+
+**`F03` gains the residual case the deletion left behind**, within the row it already has: a packet
+that does not cover **this hop's own fee** is refused `F03` naming the fee and the amount. The
+sender's move is the row's existing one — pay the stated amount — which is why this is that row and
+not a new code. It sits beside the row's other two situations rather than replacing either.
+
+One reject code fewer is one fewer sender behaviour to specify, which is the test this record
+applies to every row.

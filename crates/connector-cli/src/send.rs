@@ -62,9 +62,10 @@ pub struct SendOptions {
     pub operator_key_file: String,
     /// The ILP address the packet is bound for.
     pub destination: String,
-    /// The packet's amount, which is also its declared minimum delivery:
-    /// `POST /packets` treats the operator as the original sender, so this
-    /// is what must survive every downstream hop's fee (ADR 0010).
+    /// The packet's amount. Each hop it crosses takes that peering's flat
+    /// fee out of it (ADR 0010), so this must cover the terminating side's
+    /// price plus every fee on the way; the packet declares no floor of its
+    /// own (ADR 0057).
     pub amount: u64,
     /// Base URL of the connector that will TERMINATE this packet -- whose
     /// `/ilp/identity` the payload is sealed to. See the module header.

@@ -47,9 +47,9 @@ key_file = "/app/data/signer.key"
 # the destination `g.local.mixed.b.c.app` matches here and is forwarded, while
 # A's table matched the shorter `g.local.mixed.b` and forwarded to here.
 #
-# `fee = 0` for the same operator-surface reason A's row carries it: a packet
-# originated through `POST /packets` declares `minimum_delivery = amount`, so
-# no hop on its path may retain anything.
+# `fee = 0` for the same reason A's row carries it: the operator-surface
+# lockout that forced it is retired (ADR 0057, issue #1143) and raising every
+# hop's fee together is issue #1144's job.
 [[routes]]
 prefix = "g.local.mixed.b.c"
 peer_id = "b-c"

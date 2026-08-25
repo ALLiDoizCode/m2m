@@ -145,3 +145,17 @@ connector does enforce is the half it can see: it never forwards more value than
 Every existing configuration with a `peer_id` route fails to load until a `price` is written. No
 configuration committed in this repository has one, and a hard failure is what ADR 0009 asks of a
 config whose meaning changed.
+
+## Update (issue #1143) — the `R01` minimum-delivery clause is deleted; the `F03` cap is not
+
+[0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md) retires minimum delivery, and
+issue #1143 deletes it. The parenthetical _"including its `R01` minimum-delivery rule"_ in the
+forwards-`price - fee` clause is dead: a forwarding hop subtracts its fee and forwards the rest,
+with no floor to check and no `R01` to raise. It still earns exactly its `fee`, which is the point
+that clause was making.
+
+**Untouched:** the `F03` over-carry cap — a priced forwarded route refusing `amount > price`, so a
+hop never carries more value than it was paid for — along with everything about probes
+short-circuiting at a priced forwarded route and rollback on reject. The over-carry cap bounds this
+hop against carrying more than it collected; the retired floor bounded a _downstream_ hop against
+eroding what it passed on, and that job now belongs to the claim covering each crossing.

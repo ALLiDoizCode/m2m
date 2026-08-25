@@ -21,7 +21,7 @@ use base64::Engine;
 use connector_btp::{
     decode_frame, encode_message, encode_response, encode_transfer, ProtocolData,
     ACCUMULATED_COST_HEADER, AUTH_PROTOCOL, CLAIM_ACK_HEADER, CLAIM_ACK_PROTOCOL, CLAIM_HEADER,
-    CONTENT_TYPE_TEXT, FLUSH_REQUESTED_HEADER, MINIMUM_DELIVERY_HEADER, MINIMUM_DELIVERY_PROTOCOL,
+    CONTENT_TYPE_TEXT, FLUSH_REQUESTED_HEADER,
 };
 use connector_domain::{
     derive_condition, fulfillment_matches_condition, EnvelopeError, EnvelopeRequest,
@@ -29,13 +29,13 @@ use connector_domain::{
 };
 use connector_peer_auth::{
     encode_base64 as auth_encode_base64, encode_raw as auth_encode_raw, present_base64,
-    present_raw, PresentedCredential, SessionRole,
+    present_raw, PresentedCredential,
 };
 use connector_peer_btp::{ack, claim_json, fields, AcceptedClaims, PeerClaimDomain};
 use connector_peer_http::headers::{
     accumulated_cost as http_accumulated_cost, claim_ack as http_claim_ack, claim_ack_header_value,
     claim_header_value, claim_json as http_claim_json, flush_requested as http_flush_requested,
-    minimum_delivery as http_minimum_delivery, Headers,
+    Headers,
 };
 use connector_runtime::{
     ChannelDomain, ClaimAckOutcome, ClaimBook, ClaimRejectReason, ClaimSignature, WireClaim,
@@ -65,7 +65,18 @@ use serde::Serialize;
 /// which is exactly what this number exists to announce -- the connector
 /// still accepts such a claim on the strength of its signature, and refusing
 /// on it waits on this adoption (§1.3, issue #1127 step 4).
-pub const SCHEMA_VERSION: u32 = 2;
+///
+/// **3** (issue #1143): minimum delivery is retired (ADR 0057). The
+/// `minimum_delivery` field is gone from both `peer_prepare` cases, the
+/// `peer_minimum_delivery_absent` and `peer_minimum_delivery_malformed`
+/// sections are deleted, and the `toon-minimum-delivery` entry and
+/// `Toon-Minimum-Delivery` header no longer ride the pinned frames -- so
+/// `peer_prepare.btp_message_hex` changed bytes. A replaying SDK that still
+/// emits the field is emitting a field no connector reads, and one that
+/// expects `R01` for an unmet floor is expecting a code that has left the
+/// vocabulary (ADR 0051). Removals rather than additions, which is what this
+/// number exists to announce.
+pub const SCHEMA_VERSION: u32 = 3;
 
 fn seq_bytes<const N: usize>(start: u8) -> [u8; N] {
     let mut out = [0u8; N];
@@ -680,7 +691,6 @@ pub struct PreparePairCase {
     pub name: &'static str,
     pub prepare: PreparePacketFields,
     pub claim_json: Option<String>,
-    pub minimum_delivery: Option<u64>,
     pub btp_message_hex: String,
     pub http_headers: Vec<(String, String)>,
     pub http_body_hex: String,
@@ -756,17 +766,6 @@ pub struct PeerFlushRequestedCase {
     pub note: &'static str,
 }
 
-/// `minimumDelivery`'s absent-means-zero and malformed-is-`F01` rules
-/// (§5.1, §10.2 items 18, 19).
-#[derive(Debug, Serialize)]
-pub struct PeerMinimumDeliveryCase {
-    pub name: &'static str,
-    pub present: bool,
-    pub raw_value: Option<String>,
-    pub decoded_minimum_delivery: Option<u64>,
-    pub reject_code: Option<&'static str>,
-}
-
 /// A sealed giftwrap payload carried unchanged as a PREPARE's `data`, on
 /// both carriages (§8.1, §10.2 item 20).
 #[derive(Debug, Serialize)]
@@ -799,8 +798,6 @@ pub struct PeerCarriageVectors {
     pub claim_retransmit: PeerRetransmitCase,
     pub claim_same_nonce_different_bytes: PeerRetransmitCase,
     pub flush_requested: PeerFlushRequestedCase,
-    pub minimum_delivery_absent: PeerMinimumDeliveryCase,
-    pub minimum_delivery_malformed: PeerMinimumDeliveryCase,
     pub forwarded_data_unchanged: PeerForwardedDataCase,
 }
 
@@ -1019,48 +1016,30 @@ fn generate_prepare_pair_cases(evm_claim: &PeerClaimCase) -> (PreparePairCase, P
         prepare
     );
 
-    let minimum_delivery: u64 = 100_000;
-    let md_entry =
-        fields::minimum_delivery_protocol_data(minimum_delivery).expect("a non-zero floor rides");
     let claim_entry = claim_json::protocol_data(&evm_claim.json);
-    let role = SessionRole::peer("store-box");
 
-    // Item 5: claim + minimum-delivery, both riding one PREPARE.
-    let btp_with_claim = encode_message(
-        9_001,
-        &[claim_entry.clone(), md_entry.clone()],
-        &prepare_bytes,
-    );
+    // Item 5: a claim riding one PREPARE.
+    let btp_with_claim = encode_message(9_001, &[claim_entry], &prepare_bytes);
     let decoded = decode_frame(&btp_with_claim).expect("self-generated frame decodes");
     assert_eq!(decoded.ilp_packet, prepare_bytes);
     assert_eq!(
         claim_json::from_protocol_data(&decoded.protocol_data),
         Some(evm_claim.json.as_bytes())
     );
-    assert_eq!(
-        fields::minimum_delivery(&role, &decoded.protocol_data),
-        Ok(minimum_delivery)
-    );
 
     let mut headers_with_claim = Headers::new();
     headers_with_claim.push(CLAIM_HEADER, claim_header_value(&evm_claim.json));
-    headers_with_claim.push(MINIMUM_DELIVERY_HEADER, minimum_delivery.to_string());
     assert_eq!(
         http_claim_json(&headers_with_claim)
             .expect("a claim rode")
             .expect("valid base64"),
         evm_claim.json.as_bytes()
     );
-    assert_eq!(
-        http_minimum_delivery(&role, &headers_with_claim),
-        Ok(minimum_delivery)
-    );
 
     let with_claim = PreparePairCase {
         name: "peer_prepare",
         prepare: prepare_fields(&prepare),
         claim_json: Some(evm_claim.json.clone()),
-        minimum_delivery: Some(minimum_delivery),
         btp_message_hex: hex_of(&btp_with_claim),
         http_headers: headers_pairs(&headers_with_claim),
         http_body_hex: hex_of(&prepare_bytes),
@@ -1068,19 +1047,17 @@ fn generate_prepare_pair_cases(evm_claim: &PeerClaimCase) -> (PreparePairCase, P
 
     // Item 6: the same PREPARE with no claim entry/header -- "claimless is
     // legal" pinned rather than assumed.
-    let btp_no_claim = encode_message(9_002, &[md_entry], &prepare_bytes);
+    let btp_no_claim = encode_message(9_002, &[], &prepare_bytes);
     let decoded_no_claim = decode_frame(&btp_no_claim).expect("self-generated frame decodes");
     assert!(claim_json::from_protocol_data(&decoded_no_claim.protocol_data).is_none());
 
-    let mut headers_no_claim = Headers::new();
-    headers_no_claim.push(MINIMUM_DELIVERY_HEADER, minimum_delivery.to_string());
+    let headers_no_claim = Headers::new();
     assert!(http_claim_json(&headers_no_claim).is_none());
 
     let without_claim = PreparePairCase {
         name: "peer_prepare_no_claim",
         prepare: prepare_fields(&prepare),
         claim_json: None,
-        minimum_delivery: Some(minimum_delivery),
         btp_message_hex: hex_of(&btp_no_claim),
         http_headers: headers_pairs(&headers_no_claim),
         http_body_hex: hex_of(&prepare_bytes),
@@ -1503,45 +1480,6 @@ fn generate_flush_requested_case() -> PeerFlushRequestedCase {
     }
 }
 
-fn generate_minimum_delivery_cases() -> (PeerMinimumDeliveryCase, PeerMinimumDeliveryCase) {
-    let role = SessionRole::peer("store-box");
-
-    assert_eq!(fields::minimum_delivery(&role, &[]), Ok(0));
-    assert_eq!(http_minimum_delivery(&role, &Headers::new()), Ok(0));
-    let absent = PeerMinimumDeliveryCase {
-        name: "peer_minimum_delivery_absent",
-        present: false,
-        raw_value: None,
-        decoded_minimum_delivery: Some(0),
-        reject_code: None,
-    };
-
-    let malformed_value = "twelve";
-    let entry = ProtocolData {
-        name: MINIMUM_DELIVERY_PROTOCOL.to_string(),
-        content_type: CONTENT_TYPE_TEXT,
-        data: malformed_value.as_bytes().to_vec(),
-    };
-    let error = fields::minimum_delivery(&role, &[entry])
-        .expect_err("a malformed value is refused, never silently zero");
-    let reject = fields::malformed_minimum_delivery_reject(&error);
-    assert_eq!(reject.code.as_str(), "F01");
-
-    let mut headers = Headers::new();
-    headers.push(MINIMUM_DELIVERY_HEADER, malformed_value);
-    assert!(http_minimum_delivery(&role, &headers).is_err());
-
-    let malformed = PeerMinimumDeliveryCase {
-        name: "peer_minimum_delivery_malformed",
-        present: true,
-        raw_value: Some(malformed_value.to_string()),
-        decoded_minimum_delivery: None,
-        reject_code: Some("F01"),
-    };
-
-    (absent, malformed)
-}
-
 fn generate_forwarded_data_case(giftwrap: &GiftwrapVectors) -> PeerForwardedDataCase {
     let sealed = hex::decode(&giftwrap.cases[0].request_wrap_hex)
         .expect("hex from this run's own giftwrap section");
@@ -1591,7 +1529,6 @@ fn generate_peer_carriage_vectors(
     let flush = generate_flush_case(&claim_evm);
     let (claim_retransmit, claim_same_nonce_different_bytes) = generate_retransmit_cases();
     let flush_requested = generate_flush_requested_case();
-    let (minimum_delivery_absent, minimum_delivery_malformed) = generate_minimum_delivery_cases();
     let forwarded_data_unchanged = generate_forwarded_data_case(giftwrap);
 
     PeerCarriageVectors {
@@ -1612,8 +1549,6 @@ fn generate_peer_carriage_vectors(
         claim_retransmit,
         claim_same_nonce_different_bytes,
         flush_requested,
-        minimum_delivery_absent,
-        minimum_delivery_malformed,
         forwarded_data_unchanged,
     }
 }

@@ -32,11 +32,11 @@ SHOULD, SHOULD NOT and MAY are per RFC 2119.
 
 ADR 0027 split one document into two layers.
 
-| Layer                                                                                                                                                             | Where it is specified                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Semantics** — what a peer interaction _means_: claim exchange, claim acknowledgement, claim contents, fees and minimum delivery, reject codes, accumulated cost | **the records**, not a prose spec. [`peer-semantics-pre-868.md`](peer-semantics-pre-868.md) is **frozen history** (issue #1065): it claimed normative status over §3.2's trailing claim, §3.3's flush, §5.3's ceiling and §5.4's greeting gate, all retired or superseded. Its three live sections — §3.1, §4, §5.2 — migrate to the payment and packet-flow specifications. Authority meanwhile: [ADR 0010](../adr/0010-flat-per-packet-fee-and-minimum-delivery.md), [0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md), [0042](../adr/0042-a-packet-carries-its-claim.md), [0049](../adr/0049-the-cap-bounds-one-packet-is-discovered-by-t04-and-is-set-from-outside.md), [0051](../adr/0051-a-reject-code-binds-where-a-sender-must-act-differently.md) |
-| **Carriage** — _where the bytes ride_ for each of those concepts, on each of the two wires a connector already serves                                             | **this document**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| **Framing** — the deleted raw-TCP stream and its six frame types                                                                                                  | gone: `peer-semantics-pre-868.md` §1–§2, superseded by ADR 0027, implementation removed by issue #679                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Layer                                                                                                                                        | Where it is specified                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| -------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Semantics** — what a peer interaction _means_: claim exchange, claim acknowledgement, claim contents, fees, reject codes, accumulated cost | **the records**, not a prose spec. [`peer-semantics-pre-868.md`](peer-semantics-pre-868.md) is **frozen history** (issue #1065): it claimed normative status over §3.2's trailing claim, §3.3's flush, §5.3's ceiling and §5.4's greeting gate, all retired or superseded. Its three live sections — §3.1, §4, §5.2 — migrate to the payment and packet-flow specifications. Authority meanwhile: [ADR 0010](../adr/0010-flat-per-packet-fee-and-minimum-delivery.md), [0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md), [0042](../adr/0042-a-packet-carries-its-claim.md), [0049](../adr/0049-the-cap-bounds-one-packet-is-discovered-by-t04-and-is-set-from-outside.md), [0051](../adr/0051-a-reject-code-binds-where-a-sender-must-act-differently.md), [0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md) |
+| **Carriage** — _where the bytes ride_ for each of those concepts, on each of the two wires a connector already serves                        | **this document**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| **Framing** — the deleted raw-TCP stream and its six frame types                                                                             | gone: `peer-semantics-pre-868.md` §1–§2, superseded by ADR 0027, implementation removed by issue #679                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 **This document sits beside `peer-semantics-pre-868.md` §3–§6. It supersedes nothing in them.** It does
 not restate them and MUST NOT be read as replacing them: every existing citation of §3.2, §3.3,
@@ -280,7 +280,7 @@ A connector MUST NOT infer, weight or override role from any of:
 - the source address, the TLS SNI name, or the presence of a TLS client certificate;
 - whether the `btp` websocket subprotocol was offered or selected;
 - a hostname or endpoint appearing in `[[peers]]`;
-- the shape of what the interaction sent — an inbound TRANSFER, or a `toon-minimum-delivery` entry;
+- the shape of what the interaction sent — an inbound TRANSFER, or any carriage-layer entry;
 - anything the interaction did earlier, or that another interaction from the same address did.
 
 Role is decided by P2 and a verified claim, or it is `client`.
@@ -387,7 +387,6 @@ undefined trust is what leaks.
   and appended to the peer claim ledger;
 - being a next hop: packets from this interaction may be forwarded per the routing table, and this
   peering relation may be a route's next hop;
-- `minimumDelivery` honoured as a sender declaration (§5, `peer-semantics-pre-868.md` §4);
 - `accumulatedCost` relayed with this hop's own fee added (`peer-semantics-pre-868.md` §5.2);
 - FLUSH accepted (§6).
 
@@ -399,8 +398,6 @@ a route's price; nor the ability to open the payload of a packet it forwards.
 it presents bytes that look like them:**
 
 - advancing a `[[peer_channels]]` watermark or writing to the peer claim ledger;
-- a `toon-minimum-delivery` / `Toon-Minimum-Delivery` field being honoured — a client
-  interaction's minimum-delivery field MUST be **ignored**, not rejected and not applied;
 - a `claim-ack` / `Toon-Claim-Ack` on a client response — a connector MUST NOT emit one on a
   client interaction;
 - being treated as a peering relation for flush purposes (§6.4).
@@ -542,7 +539,6 @@ ride on each carriage.
 | piggybacked claim (§3.2)              | `payment-channel-claim` protocolData entry, **raw UTF-8 JSON** (§4)                                                                        | `ILP-Payment-Channel-Claim` request header, `base64(JSON)` (§4)                                                     |
 | **FLUSH** (§3.3)                      | **TRANSFER** (type 7): `amount` = the claim's new cumulative, claim in `payment-channel-claim`, no `ilpPacket`                             | **POST with an empty body** plus the claim header — the standalone-claim shape of `client-edge-spec.md` §1.9 step 5 |
 | **CLAIM_ACK** (§3.4)                  | `claim-ack` protocolData entry on the RESPONSE that already answers the claim-bearing frame (§5)                                           | `Toon-Claim-Ack` response header on the response that already answers the claim-bearing request (§5)                |
-| `minimumDelivery` (§4)                | `toon-minimum-delivery` protocolData entry on the MESSAGE, decimal-uint64 UTF-8 (§5.1)                                                     | `Toon-Minimum-Delivery` request header, decimal-uint64 ASCII (§5.1)                                                 |
 | `accumulatedCost` (§5.2)              | `toon-accumulated-cost` entry on the REJECT's RESPONSE, decimal-uint64 UTF-8 — **already implemented on the client edge, reused verbatim** | `Toon-Accumulated-Cost` response header — **already implemented on the client edge, reused verbatim**               |
 | peer credential (§1.4)                | `auth` protocolData entry, raw UTF-8 JSON                                                                                                  | `Toon-Peer-Auth` request header, `base64(JSON)`                                                                     |
 | flush prompt (§6.4)                   | _(none — the payee can originate on BTP)_                                                                                                  | `Toon-Flush-Requested` response header, optional (§6.4)                                                             |
@@ -604,8 +600,8 @@ additively extensible) and MUST NOT be emitted.
     client-facing direction of the same node: the `price` is a fact about this node's client edge,
     and it is not what a peer owes.
   - **Not the `fee`, and not the post-fee amount this hop passes on.** The send half covers the next
-    hop for `amount_after_fee(amount, fee, minimum_delivery)`
-    (`Connector::forward_via_peer_route`), so a peer covering the amount that _arrives_ leaves this
+    hop for `amount_after_fee(amount, fee)` (`Connector::forward_via_peer_route`), so a peer
+    covering the amount that _arrives_ leaves this
     node exactly its bilaterally agreed flat fee. Peer fees stay bilateral configuration
     (`peer-semantics-pre-868.md` §4) and are not negotiated by this greeting; `requiredTransport`
     (issue #701) remains a client-edge route policy with no peer analogue.
@@ -752,28 +748,19 @@ unchanged, and the vectors pin it (§10).
 
 ### 5.1 `minimumDelivery`
 
-`minimumDelivery` is a sender declaration, set once by the original sender and unchanged by every
-hop (`peer-semantics-pre-868.md` §4). RFC-0027 has no field for it, so it rides the carriage:
+**Retired 2026-08-24 by [ADR 0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)
+(issue #1143).** No packet declares a minimum delivery. The `toon-minimum-delivery` protocolData
+entry and the `Toon-Minimum-Delivery` header are gone from both carriages — deleted together,
+because a field on one carriage and not the other is the drift §9 exists to prevent — along with
+absent-means-zero, malformed-is-`F01`, the propagate-unchanged rule, the client-role ignore rule and
+the `R01` reject the inequality produced. `R01` has left the reject vocabulary
+([ADR 0051](../adr/0051-a-reject-code-binds-where-a-sender-must-act-differently.md)).
 
-| Carriage | Field                          | Encoding                                              |
-| -------- | ------------------------------ | ----------------------------------------------------- |
-| BTP      | `toon-minimum-delivery` entry  | decimal uint64 as UTF-8 text, no sign, no leading `+` |
-| HTTP     | `Toon-Minimum-Delivery` header | decimal uint64 as ASCII, one value, no list form      |
-
-Normative handling:
-
-- **Absent means zero.** A claim-free floor is the correct default and the one the deleted wire's
-  fixed-width field expressed as `0`.
-- A **malformed** value — not decimal digits, empty, or exceeding `u64::MAX` — MUST reject the
-  PREPARE with `F01` (`peer-semantics-pre-868.md` §5.1). It MUST NOT be silently treated as zero: zero is
-  the weakest possible floor, and quietly substituting it for an unparseable one converts a
-  framing bug into an under-delivery.
-- A forwarding hop MUST re-emit the value **unchanged** on its outbound PREPARE, on whichever
-  carriage that outbound hop uses. Crossing carriages MUST NOT alter it. This is the one
-  carriage-layer field that propagates; §8.3 states the general rule.
-- The inequality of `peer-semantics-pre-868.md` §4 (`A' = A − fee`, reject `R01` if `A' < M`) is computed
-  identically on both carriages by the existing `connector_domain::fee::amount_after_fee`.
-- On a **client**-role interaction the field MUST be ignored (§1.7).
+What bounds erosion instead is the claim covering each crossing: `cover_forward` mints for the
+packet's own forwarded value, so every hop holds a claim for at least what it passes on and its fee
+is the difference — which chains, without any hop being handed a figure and trusted to check it.
+`connector_domain::fee::amount_after_fee(amount, fee)` takes no floor; a packet that does not cover
+this hop's own fee is refused **`F03`** naming both numbers.
 
 ### 5.2 `accumulatedCost`
 
@@ -1059,16 +1046,16 @@ forwarded to it adds its own fee on the way back.
 
 > **Carriage-layer fields are never sealed, and sealed payloads are never carriage-layer fields.**
 
-The claim, the claim ack, `minimumDelivery`, `accumulatedCost` and the peer credential ride the
+The claim, the claim ack, `accumulatedCost` and the peer credential ride the
 carriage — protocolData entries or headers — precisely so a hop can read and judge them without
 opening a payload it has no key for. Nothing in this document ever asks a connector to look inside
 `data`, and nothing in ADR 0018's wrap is ever promoted to a protocolData entry or a header.
 
-Corollary on propagation: **a carriage-layer field is re-derived by each hop, not copied**, with
-exactly one exception. `accumulatedCost` is recomputed (`+ thisHopFee`); the claim is this hop's own
-claim on its own channel; the credential is this hop's own; the claim ack answers this hop's own
-inbound claim. Only `minimumDelivery` propagates unchanged (§5.1), because it is a declaration by
-the original sender and every hop enforces the same inequality against the same value.
+Corollary on propagation: **a carriage-layer field is re-derived by each hop, not copied**, with no
+exceptions. `accumulatedCost` is recomputed (`+ thisHopFee`); the claim is this hop's own claim on
+its own channel; the credential is this hop's own; the claim ack answers this hop's own inbound
+claim. The one field that used to propagate unchanged was `minimumDelivery`, and it is retired
+(§5.1) — the rule is now universal rather than universal-with-an-exception.
 
 ---
 
@@ -1172,8 +1159,8 @@ fixture.
 **Claim-bearing PREPARE**
 
 5. `peer_prepare` _(pair)_ — BTP: a complete MESSAGE frame's bytes (type, `requestId`, protocolData
-   list containing `payment-channel-claim` and `toon-minimum-delivery`, the OER PREPARE in
-   `ilpPacket`). HTTP: method, path, the full header set and the OER body.
+   list containing `payment-channel-claim`, the OER PREPARE in `ilpPacket`). HTTP: method, path, the
+   full header set and the OER body.
 6. `peer_prepare_no_claim` _(pair)_ — the same PREPARE with no claim entry/header, so "claimless is
    legal" is pinned rather than assumed.
 
@@ -1213,10 +1200,11 @@ fixture.
 
 **Minimum delivery**
 
-18. `peer_minimum_delivery_absent` _(pair)_ — a PREPARE with the field omitted, pinning "absent
-    means zero".
-19. `peer_minimum_delivery_malformed` _(pair)_ — a non-decimal value and the `F01` it provokes,
-    pinning that it is not silently zero.
+18–19. ~~`peer_minimum_delivery_absent`, `peer_minimum_delivery_malformed`~~ **Retired 2026-08-24 by
+[ADR 0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md) (issue #1143)**, and
+deleted from `vectors/wire-vectors.json`. The item numbers are not reused. This was a cross-repo
+wire change ([ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md)): `toon-client`, `rig`
+and `swap` replay this set.
 
 **Sealing**
 
@@ -1459,9 +1447,10 @@ not the claim ack as a field, not role-by-auth, not the deletion of the raw-TCP 
 
 This specification uses exactly the vocabulary of `CONTEXT.md` (connector, app, packet, route,
 client edge, claim, nonce, watermark, exposure, ceiling, flush, in flight, projection, settlement,
-fee, minimum delivery, probe — of which _exposure_, _ceiling_ and _flush_ are retired terms per
-[ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md) and appear above only in
-clauses marked retired or historical), adding **carriage**, **expose**, **dial** and **peering
+fee, probe — of which _exposure_, _ceiling_ and _flush_ are retired terms per
+[ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md), and _minimum delivery_
+per [ADR 0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md); all four appear
+above only in clauses marked retired or historical), adding **carriage**, **expose**, **dial** and **peering
 relation** as defined in §0.1 and §2 — the first three from ADR 0027, the fourth already implicit in
 `peer-semantics-pre-868.md` §3.3's "per peering relation".
 

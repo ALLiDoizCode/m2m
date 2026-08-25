@@ -2,7 +2,7 @@
 //!
 //! ILPv4 packet types (RFC-0027) with their OER wire encoding (RFC-0030),
 //! ILP address validation (RFC-0015), longest-prefix route selection,
-//! flat per-packet fee / minimum-delivery arithmetic (ADR 0010),
+//! flat per-packet fee arithmetic (ADR 0010),
 //! execution condition / fulfilment / expiry rules (RFC-0022, issue #417),
 //! claim nonce / watermark rules (ADR 0004, ADR 0005, issue #423), and the
 //! structured envelope a packet carries to and from the app behind a

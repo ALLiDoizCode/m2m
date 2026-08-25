@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use connector_btp::{
     ACCUMULATED_COST_HEADER, CLAIM_ACK_HEADER, CLAIM_HEADER, FLUSH_REQUESTED_HEADER,
-    MINIMUM_DELIVERY_HEADER, PAYMENT_REQUIRED_HEADER,
+    PAYMENT_REQUIRED_HEADER,
 };
 use connector_config::{PeerCredential, StaticRoute};
 use connector_domain::x402::parse_greeting;
@@ -558,7 +558,7 @@ async fn a_claim_riding_a_prepare_is_judged_independently_of_the_packet() {
         reached_peer: reached,
         ..
     } = transport
-        .forward(PEER_ID, prepare("g.nowhere"), 0, Some(claim))
+        .forward(PEER_ID, prepare("g.nowhere"), Some(claim))
         .await;
 
     match response {
@@ -570,8 +570,7 @@ async fn a_claim_riding_a_prepare_is_judged_independently_of_the_packet() {
 }
 
 /// §3's table, as bytes: the credential and the claim are `base64(JSON)`
-/// headers, the minimum-delivery declaration is decimal ASCII, and the body
-/// is the OER PREPARE unchanged (§8.1).
+/// headers, and the body is the OER PREPARE unchanged (§8.1).
 #[tokio::test]
 async fn the_request_a_dialed_peering_puts_on_the_wire_is_the_one_section_3_names() {
     let payer_signer = LocalSigner::generate("payer");
@@ -585,7 +584,7 @@ async fn the_request_a_dialed_peering_puts_on_the_wire_is_the_one_section_3_name
     let prepare = prepare("g.nowhere");
 
     let _ = transport
-        .forward(PEER_ID, prepare.clone(), 1_250, Some(claim.clone()))
+        .forward(PEER_ID, prepare.clone(), Some(claim.clone()))
         .await;
 
     let sent = client.last();
@@ -600,19 +599,17 @@ async fn the_request_a_dialed_peering_puts_on_the_wire_is_the_one_section_3_name
         connector_peer_btp::claim_json::parse(&claim_json).expect("the client edge's validator"),
         claim
     );
-    // §5.1: decimal uint64 ASCII, one value, no list form.
-    assert_eq!(sent.headers.get(MINIMUM_DELIVERY_HEADER), Some("1250"));
     // §8.1: `data` rides byte-for-byte unchanged, in the same OER encoding
     // every other carriage puts on a wire.
     assert_eq!(sent.body, prepare.encode());
     // §3: a peer connector MUST NOT invent additional headers.
-    assert_eq!(sent.headers.len(), 3, "got {:?}", sent.headers);
+    assert_eq!(sent.headers.len(), 2, "got {:?}", sent.headers);
 }
 
-/// §5.1: a zero floor rides as an **absent** header, because absent means
-/// zero on receipt.
+/// §10.2 item 6: a claimless PREPARE is legal, and carries no claim header
+/// rather than an empty one.
 #[tokio::test]
-async fn a_zero_minimum_delivery_rides_as_an_absent_header() {
+async fn a_claimless_prepare_carries_no_claim_header() {
     let payer_signer = LocalSigner::generate("payer");
     let peer = accepting(payee(&payer_signer), bound_policy());
     let client = Loopback::new(peer);
@@ -621,14 +618,9 @@ async fn a_zero_minimum_delivery_rides_as_an_absent_header() {
         &payer_signer,
     );
 
-    let _ = transport
-        .forward(PEER_ID, prepare("g.nowhere"), 0, None)
-        .await;
+    let _ = transport.forward(PEER_ID, prepare("g.nowhere"), None).await;
 
     let sent = client.last();
-    assert_eq!(sent.headers.get(MINIMUM_DELIVERY_HEADER), None);
-    // §10.2 item 6: a claimless PREPARE is legal, and carries no claim
-    // header rather than an empty one.
     assert_eq!(sent.headers.get(CLAIM_HEADER), None);
 }
 
@@ -968,7 +960,6 @@ async fn a_non_200_answer_is_no_ilp_answer_at_all() {
         .forward(
             PEER_ID,
             prepare("g.nowhere"),
-            0,
             Some(sign_claim(&payer_signer, 1, 500)),
         )
         .await;
@@ -999,9 +990,7 @@ async fn a_peer_that_cannot_be_reached_rejects_t01_and_was_never_reached() {
         ack,
         reached_peer: reached,
         ..
-    } = transport
-        .forward(PEER_ID, prepare("g.nowhere"), 0, None)
-        .await;
+    } = transport.forward(PEER_ID, prepare("g.nowhere"), None).await;
 
     match response {
         PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "T01"),
@@ -1027,7 +1016,7 @@ async fn a_peer_this_connector_cannot_originate_to_says_why_in_its_t01() {
         reached_peer: reached,
         ..
     } = transport
-        .forward("accept-only", prepare("g.nowhere"), 0, None)
+        .forward("accept-only", prepare("g.nowhere"), None)
         .await;
 
     match response {
@@ -1188,50 +1177,32 @@ async fn a_request_without_the_credential_is_a_client_however_the_last_one_was_j
     );
 }
 
-/// §1.7/§5.1: a client's `Toon-Minimum-Delivery` is **ignored** -- not
-/// rejected and not applied -- so a client SDK setting an unrecognised header
-/// is not broken by a peer feature, and no error discloses the peer surface.
+/// §5.2: a REJECT this carriage sends always carries the running cost,
+/// **even at zero**, so "absent" never has to carry meaning in the
+/// direction that matters. Kept when §5.1's malformed-floor case went with
+/// minimum delivery (ADR 0057, issue #1143), which is where this assertion
+/// used to ride.
 #[tokio::test]
-async fn a_client_roles_minimum_delivery_header_is_ignored_not_refused() {
-    let payer_signer = LocalSigner::generate("payer");
-    let peer = accepting(payee(&payer_signer), bound_policy());
-    let mut request = request(None, None, prepare("g.nowhere").encode());
-    request.headers.push(MINIMUM_DELIVERY_HEADER, "twelve");
-
-    let response = peer.handle(request).await;
-
-    assert_eq!(response.status, 200);
-    // The client's packet reaches no peer handling: `F02`, not the `F01` a
-    // peer's malformed declaration would provoke.
-    let reject = connector_domain::Reject::decode(&response.body).expect("a reject");
-    assert_eq!(reject.code.as_str(), "F02");
-}
-
-/// §5.1: on a **peer** request the same header is never silently zero -- a
-/// malformed floor is `F01`, because zero is the weakest possible floor and
-/// substituting it converts a framing bug into an under-delivery.
-#[tokio::test]
-async fn a_peers_malformed_minimum_delivery_is_f01_and_never_silently_zero() {
+async fn a_peers_reject_always_carries_the_accumulated_cost_even_at_zero() {
     let payer_signer = LocalSigner::generate("payer");
     let peer = accepting(payee(&payer_signer), bound_policy());
     let json = claim_as_json(&sign_claim(&payer_signer, 1, 500), &payer_signer);
-    let mut request = request(
-        Some((PEER_ID, SECRET)),
-        Some(&json),
-        prepare("g.nowhere").encode(),
-    );
-    request.headers.push(MINIMUM_DELIVERY_HEADER, "twelve");
 
-    let response = peer.handle(request).await;
+    let response = peer
+        .handle(request(
+            Some((PEER_ID, SECRET)),
+            Some(&json),
+            prepare("g.nowhere").encode(),
+        ))
+        .await;
 
     assert_eq!(response.status, 200);
     let reject = connector_domain::Reject::decode(&response.body).expect("a reject");
-    assert_eq!(reject.code.as_str(), "F01");
+    assert_eq!(reject.code.as_str(), "F02");
+    assert_eq!(response.headers.get(ACCUMULATED_COST_HEADER), Some("0"));
     // §6.2: the two verdicts are independent, so the claim that rode the
     // refused packet is still judged and still acknowledged.
     assert_eq!(ack_on(&response), Some(ClaimAckOutcome::Accepted));
-    // §5.2: always emitted on a REJECT, even at zero.
-    assert_eq!(response.headers.get(ACCUMULATED_COST_HEADER), Some("0"));
 }
 
 /// §1.10's bounded escape hatch: on a **dedicated** peer listener a request
@@ -1306,9 +1277,7 @@ async fn a_flush_prompt_is_read_by_the_payer_and_obliges_nothing() {
         .flush(PEER_ID, sign_claim(&payer_signer, 1, 500))
         .await;
     hints.request(PEER_ID, &channel_id());
-    let _ = transport
-        .forward(PEER_ID, prepare("g.nowhere"), 0, None)
-        .await;
+    let _ = transport.forward(PEER_ID, prepare("g.nowhere"), None).await;
 
     assert!(
         transport.flush_hints(PEER_ID).is_empty(),

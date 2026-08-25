@@ -100,3 +100,34 @@ it conclusive: the client-side guarantee already exists and is not this field.
 
 **Everything else in this record stands:** flat per-packet fees, and a hop that cannot meet a declared
 minimum delivery after its fee rejecting (`R01`) rather than forwarding less.
+
+## Update (issue #1143) — the minimum-delivery half is deleted, in code and on both wires
+
+[0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md) is built. What that record
+retires is gone from the binary and from both carriages: the `minimumDelivery` field, its
+`toon-minimum-delivery` protocolData entry, its `Toon-Minimum-Delivery` header, its two vectors and
+the `R01` reject it produced. `amount_after_fee(amount, fee)` no longer takes a floor.
+
+**Dead in this record**, as of that deletion:
+
+- The title's second clause and the opening paragraph's _"Every packet declares the amount that must
+  reach its destination"_. No packet declares one.
+- **"Why minimum delivery rather than quoting"** in full. The argument was sound under
+  [0004](0004-value-moves-on-fulfilment.md)'s postpay, where a rejecting hop earned nothing;
+  [0042](0042-a-packet-carries-its-claim.md) inverted that premise, so the reject the section prizes
+  now costs the sender exactly what silent under-delivery would have. 0057 is the long form.
+- The **#1072 update** above in full — its peer-versus-client asymmetry, its "a client role MUST
+  ignore it" rule and its closing line about `R01`. Neither role declares a floor now, so there is
+  no asymmetry left to state and nothing for a client to ignore. Its actual finding survives
+  elsewhere and unchanged: **a client's guarantee is the price**
+  ([0028](0028-a-forwarded-route-is-priced-at-the-client-edge.md)), which is now every sender's.
+
+**Alive and untouched:** the flat per-packet fee and why it is flat rather than proportional; the
+earnings rule (a hop earns the difference between the cumulative it receives and the cumulative it
+sends); and cost discoverability in one shot, which [0011](0011-rejects-accumulate-fees-and-probes-discover-cost.md)'s
+probe now carries alone rather than as one of two mechanisms.
+
+One residual case kept a code: a packet that does not cover **this hop's own fee** cannot be
+forwarded at all, and is refused **`F03`** — the amount is wrong for what this hop charges and the
+sender's move is to pay it, which is [0051](0051-a-reject-code-binds-where-a-sender-must-act-differently.md)'s
+`F03` row rather than a floor to lower. `R01` is not reused for it.

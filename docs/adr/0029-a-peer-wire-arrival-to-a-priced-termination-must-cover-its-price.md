@@ -143,3 +143,17 @@ An operator who terminates the same route behind two doors at two different pric
 issue #557's free-gateway guard and the live `g.toon.relay` incident both name) is unaffected by this
 decision specifically — it does not reconcile two prices for one handler, only whether one path's own
 declared price was met by what it received.
+
+## Update (issue #1143) — the two `R01` citations are deleted; this decision is strengthened
+
+[0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md) retires minimum delivery, and
+issue #1143 deletes it. Two sentences here cite it and are dead: `R01`'s minimum-delivery check in
+the list of refusals this wire already takes, and the reject-taxonomy case comparing a peer that
+sends too little to _"a PREPARE this hop cannot forward at the declared minimum delivery"_. `R01`
+has left the reject vocabulary entirely; the surviving members of that list — ADR 0028's `F03`
+over-carry cap, and this record's own `F03` — are unaffected.
+
+**The decision itself is strengthened, not disturbed.** "A peer arrival at a priced termination
+covers that price" is precisely what 0057 generalises to the forwarded case: every crossing is
+covered by a claim, so what a hop passes on is bounded by what it was paid rather than by a figure
+it was handed and trusted to check.

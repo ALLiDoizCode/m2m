@@ -6,7 +6,7 @@
 //! # What this crate is, and what it deliberately is not
 //!
 //! It is the **carriage**: where the bytes ride. It is not the semantics.
-//! Claim exchange, flush, fees, minimum delivery and the refusal taxonomy
+//! Claim exchange, flush, fees and the refusal taxonomy
 //! are `peer-semantics-pre-868.md` §3--§6's and live above the
 //! [`connector_runtime::PeerTransport`] port, unchanged by which wire
 //! carried them. This crate maps §3's table onto frames and back, and
@@ -19,7 +19,6 @@
 //! | piggybacked claim | `payment-channel-claim` entry, raw UTF-8 JSON ([`claim_json`]) |
 //! | **FLUSH** | **TRANSFER (type 7)**: `amount` = the claim's new cumulative, claim in `payment-channel-claim`, **no `ilpPacket`** |
 //! | CLAIM_ACK | `claim-ack` entry on the RESPONSE that already answers the claim-bearing frame ([`ack`]) |
-//! | `minimumDelivery` | `toon-minimum-delivery` entry ([`fields`]) |
 //! | `accumulatedCost` | `toon-accumulated-cost` entry on a REJECT ([`fields`]) |
 //! | x402 greeting | `payment-required` entry on the `F06` REJECT an uncovered PREPARE gets ([`price_gate`], [`fields`]) |
 //! | peer credential | `auth` entry, raw UTF-8 JSON |

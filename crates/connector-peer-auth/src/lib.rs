@@ -97,10 +97,7 @@ pub use decision::{
     UnmetRequirement, PEER_AUTH_REFUSED_EVENT,
 };
 pub use policy::PeerAuthPolicy;
-pub use role::{
-    claim_ack_to_emit, honoured_minimum_delivery, Capability, RoleAlreadyBound, SessionRole,
-    SessionRoleBinding,
-};
+pub use role::{claim_ack_to_emit, Capability, RoleAlreadyBound, SessionRole, SessionRoleBinding};
 
 #[cfg(test)]
 mod tests {
