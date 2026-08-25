@@ -870,10 +870,35 @@ fn the_mixed_chain_covers_both_legs_before_it_sends_them() {
         "both roles sign against the same on-chain channel, so the EIP-712 domain cannot differ \
          -- a claim under the wrong `verifyingContract` recovers to another address entirely"
     );
-    assert_eq!(
+    // The claim-state ask goes to B's own `POST /ilp`, and since issue #1155
+    // it is provably NOT the URL this peering dials: `a-b` is a `ws://`
+    // peering. `pay_channel.rs` has always refused to derive one from the
+    // other -- "on a `wss://` peering there is no HTTP URL there at all, and
+    // turning one into the other by swapping scheme and appending a path is
+    // exactly the class of guess ADR 0030 refuses for `btpEndpoint`" -- but
+    // until this peering moved to BTP the two were the same string in every
+    // committed config, which is the state in which a derivation looks free.
+    // This is the assertion in its place, and it is the stronger one.
+    assert_ne!(
         Some(a_pays.client_edge_url()),
         a.peers()[0].endpoint(),
-        "the claim-state ask goes to B's own `POST /ilp`"
+        "the two URLs must differ, or this topology has stopped being the place the separation \
+         is demonstrated rather than merely documented"
+    );
+    assert_eq!(
+        a_pays.client_edge_url().scheme(),
+        "http",
+        "the claim-state ask is an HTTP POST whatever carriage the peering rides -- there is no \
+         BTP spelling of `POST /ilp/claim-state`"
+    );
+    assert_eq!(
+        a_pays.client_edge_url().host_str(),
+        a.peers()[0]
+            .endpoint()
+            .expect("A dials, so A's row carries the endpoint")
+            .host_str(),
+        "same node, two wires: the peering's websocket and the claim-state ask must reach the \
+         SAME connector, or A is asking one node where its claims against another stand"
     );
 
     // B -> C, on the Solana validator. A different SHAPE, not a different
@@ -963,6 +988,116 @@ fn the_mixed_chain_forwarded_arrival_is_enforced() {
         connector_config::ForwardedClaimEnforcement::Observe,
         "left at the default, and it does nothing either way: C terminates, so no arrival from \
          B is ever a forwarded one"
+    );
+}
+
+/// **The carriage each peering rides, pinned** (issue #1155).
+///
+/// No shipped image had ever carried a packet over BTP: all three topologies
+/// were ILP-over-HTTP end to end, so ADR 0027's first carriage was proven by
+/// `connector-peer-btp`'s in-process suites and by nothing else. `mixed-chain`
+/// now runs `a-b` over BTP and leaves `b-c` on HTTP, which is the allocation
+/// this test exists to hold -- and it is an allocation, not a preference:
+///
+/// * `a-b` is the only peering in this repository whose arrival is
+///   **forwarded**, and the only row where `forwarded_claim_enforcement`
+///   binds, so it is where a carriage has to move a covering claim through a
+///   gate that will refuse the packet without one rather than merely move
+///   bytes.
+/// * `b-c` staying on HTTP is what makes this stack mixed-**carriage** as well
+///   as mixed-**chain**, which is the property `CONTEXT.md` asserts: one
+///   pipeline below the transport port, a PREPARE indistinguishable by the
+///   wire it arrived on. Both peerings on BTP would prove the carriage and
+///   lose the comparison.
+/// * `two-hop` staying on HTTP keeps the priced peer termination proven on the
+///   carriage it is already proven on, and keeps it the containerised
+///   counterpart of `two_connectors_peer.rs`, which it diverges from in
+///   exactly one deliberate place today.
+///
+/// **`peer_expose` still defaults to `Neither`, and this test must never be
+/// read as pressure to change that.** Say nothing and a node opens no peer
+/// listener at all; a peer listener is the surface that accepts value-bearing
+/// traffic, and closed-by-default is correct. Carriage is operator policy,
+/// never a protocol constant -- what is pinned here is what these topologies
+/// *run*.
+#[test]
+fn the_local_topologies_run_both_carriages_and_not_by_accident() {
+    let solo = load("local/solo/connector.toml", SOLO_CONFIG);
+    let two_hop_a = load("local/two-hop/connector-a.toml", TWO_HOP_A);
+    let two_hop_b = load("local/two-hop/connector-b.toml", TWO_HOP_B);
+    let a = load("local/mixed-chain/connector-a.toml", MIXED_A);
+    let b = load("local/mixed-chain/connector-b.toml", MIXED_B);
+    let c = load("local/mixed-chain/connector-c.toml", MIXED_C);
+
+    // The dial axis: the scheme of each dialing side's `endpoint`, and nothing
+    // else, selects the carriage (§2.1). There is no `carriage` key to read.
+    assert_eq!(
+        a.peers()[0].dial(),
+        Some(connector_config::PeerCarriage::Btp),
+        "`mixed-chain`'s a-b is the one peering in this repository a shipped image carries a \
+         packet over BTP on. Back on `http://` and ADR 0027's first carriage is again proven \
+         only in-process."
+    );
+    let b_to_c = b
+        .peers()
+        .iter()
+        .find(|peer| peer.id() == "b-c")
+        .expect("B dials C");
+    assert_eq!(
+        b_to_c.dial(),
+        Some(connector_config::PeerCarriage::Http),
+        "b-c stays ILP-over-HTTP so that ONE packet crosses both carriages. This is the half of \
+         the pair that would be silently lost by 'converting the topology to BTP'."
+    );
+    assert_eq!(
+        two_hop_a.peers()[0].dial(),
+        Some(connector_config::PeerCarriage::Http),
+        "two-hop is left alone: it is where a PRICED peer termination is proven, and moving it \
+         would give it a second divergence from `two_connectors_peer.rs`"
+    );
+
+    // The expose axis, which is per CONNECTOR and answers a different
+    // question. B is the node that makes the two axes visibly independent: it
+    // exposes BTP and dials HTTP, in one file, with no key pairing them.
+    assert_eq!(
+        b.peer_expose(),
+        connector_config::PeerExposure::Btp,
+        "B accepts A over BTP. Not `Both`: an ILP-over-HTTP peer listener here would be a \
+         value-bearing surface no configured peer would ever reach -- and it is the absence of \
+         one that makes an accepted peer claim in B's journal evidence of the CARRIAGE, since \
+         there is nothing else mounted that could have accepted it."
+    );
+    assert_eq!(
+        c.peer_expose(),
+        connector_config::PeerExposure::Http,
+        "C is dialled over HTTP, so HTTP is what it exposes. Two nodes in one stack exposing \
+         different carriages is §2.1 working, not drift."
+    );
+    assert_eq!(
+        two_hop_b.peer_expose(),
+        connector_config::PeerExposure::Http,
+        "two-hop's payee is dialled over HTTP"
+    );
+    assert_eq!(
+        solo.peer_expose(),
+        connector_config::PeerExposure::Neither,
+        "THE DEFAULT, AND IT MUST STAY THE DEFAULT. `solo` has no `[[peers]]` at all and writes \
+         no `peer_expose`, so it is also the assertion that saying nothing opens no peer \
+         listener. Issue #1155 changed what two topologies RUN; it deliberately did not touch \
+         what a config that says nothing gets."
+    );
+
+    // Both carriages are plaintext here, and the same node-wide opt-in covers
+    // both: `Config::plaintext_peerings` matches `ws` and `http` alike, and a
+    // websocket that was never wrapped in TLS carries claims and credentials
+    // in the clear exactly as an unwrapped POST does.
+    let named: Vec<&str> = a.plaintext_peerings().map(|(id, _)| id).collect();
+    assert_eq!(
+        named,
+        vec!["a-b"],
+        "the startup WARN must still name this peering now that it is `ws://` -- the switch is \
+         about TLS, not about carriage, and a `ws://` endpoint that slipped past it would be an \
+         unwrapped peering nobody was told about"
     );
 }
 
@@ -1081,9 +1216,11 @@ fn the_mixed_chain_configs_and_their_compose_file_agree() {
         }
     }
     assert!(
-        MIXED_A.contains("endpoint = \"http://connector-b:3000/ilp\"")
+        MIXED_A.contains("endpoint = \"ws://connector-b:3000/ilp/btp\"")
             && MIXED_B.contains("endpoint = \"http://connector-c:3000/ilp\""),
-        "each dialing side's peer endpoint must name the next node's compose service"
+        "each dialing side's peer endpoint must name the next node's compose service, and the \
+         port its `client_edge_addr` binds -- BOTH carriages ride that one listener, BTP on \
+         `GET /ilp/btp` and ILP-over-HTTP on `POST /ilp`, so neither needs a port of its own"
     );
     assert!(
         MIXED_C.contains("http://stub-app:3100/"),

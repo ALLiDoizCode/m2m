@@ -10,7 +10,8 @@
 # `make local-up LOCAL_TOPOLOGY=mixed-chain` does exactly that.
 #
 #   connector-a  --EVM peering-->  connector-b  --Solana peering-->  connector-c
-#                                  (both backends)                   stub-app
+#                 over BTP         (both backends)  over HTTP        stub-app
+#                 ws://…/ilp/btp                    http://…/ilp
 #
 # The packet is originated at A's operator surface and terminates at C's app,
 # and the money changes chain at B. Nothing in this repository covers that
@@ -18,6 +19,14 @@
 # in-process, `local/solo` boots one node with both attached, and
 # `two_connectors_peer.rs` peers two nodes on EVM -- none of them has a second
 # node on the far side of the OTHER chain.
+#
+# The CARRIAGE line under the arrows is issue #1155, and it needs no service of
+# its own: BTP rides the listener `client_edge_addr` already binds, on
+# `GET /ilp/btp`, so A reaches B on the same container port 3000 it always did
+# and this file gained no port, no service and no dependency for it. What it
+# bought is that `a-b` is the first peering any shipped image has carried a
+# packet over BTP on -- and, because `b-c` stayed on HTTP, that one packet now
+# crosses two carriages as well as two chains.
 # =============================================================================
 
 services:
@@ -164,6 +173,15 @@ services:
   # journal stayed empty crossed a chain boundary for free, and
   # `--expect-fulfill` could not have noticed -- a peer claim's verdict rides
   # back in `Toon-Claim-Ack` and never gates the packet.
+  #
+  # Since issue #1155 the first of those two greps says one more thing, for
+  # free. B's `peer_expose = "btp"` mounts NO ILP-over-HTTP peer carriage at
+  # all, so a claim in B's peer journal cannot have arrived on an HTTP request
+  # -- there is nothing there to accept one, and an A that fell back to
+  # `POST /ilp` would be admitted as an ordinary client whose claims never
+  # reach the peer book (§1.8). An accepted peer claim at B is therefore
+  # evidence the packet was carried over a BTP frame, not merely that it
+  # arrived.
   #
   # Around those, one on-chain read: the Solana channel account exists and
   # belongs to the payment-channel program. A journal grep proves a claim was
