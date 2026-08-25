@@ -15,9 +15,17 @@ on:
     paths:
       - 'packages/contracts/**'
       - '.github/workflows/contracts.yml'
+  # Every base branch, not just `main` — the same defect ci.yml carried and
+  # the same fix (issue #1152). A `pull_request` trigger filters on the PR's
+  # BASE, so `branches: [main]` silently skipped `forge test` on any stacked
+  # PR that touched the contracts. The `paths` filter below is the deliberate
+  # narrowing here and is untouched; the base filter never was one, it was an
+  # accident of where this workflow was split out of ci.yml. Widening costs
+  # almost nothing extra, because `paths` still keeps this job off every PR
+  # that does not touch `packages/contracts/`.
   pull_request:
     branches:
-      - main
+      - '**'
     paths:
       - 'packages/contracts/**'
       - '.github/workflows/contracts.yml'
