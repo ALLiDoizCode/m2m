@@ -1,6 +1,6 @@
 # Architecture decision records
 
-56 records. **Every one now carries a `**Status:**` line under its title** — that line, not this
+57 records. **Every one now carries a `**Status:**` line under its title** — that line, not this
 index, is the authority for whether a record is live. This page is the map: what is live, grouped
 by area; what is dead, grouped by what killed it; and what the folder still says that the code no
 longer does.
@@ -219,7 +219,7 @@ does not go looking.
 | 0039   | `max_purchased_rows`, `max_routes_per_payer`, `max_prefix_length`       | **Deleted** (0043).                                                                                                                                                                                                                                                                                                   |
 | 0042   | a covering claim on forwarded arrivals                                  | **Built** (#1142), defaulting to observe per peering, so no deployed box is bound yet. The cap and the send half (`[[pay_channels]]`) are built too — the send half on **both** chains since #1146, EVM-only before it. `ClaimEnforcement::Observe` — once listed here — is **deleted** (#1077). See its Status line. |
 | 0044   | a route `description`                                                   | **Not built.** No such field in `connector-config`.                                                                                                                                                                                                                                                                   |
-| 0045   | the rule-classification gate, numbered rule ids                         | **Not built.** Needs the successor doc set (#1065); no rule ids exist yet.                                                                                                                                                                                                                                            |
+| 0045   | the rule-classification gate, numbered rule ids                         | **Rule ids shipped** — 105 of them, `CF`/`PF`/`PM`/`ND`/`OP`, with audience tags. The **gate** is not built: no per-rule classification, no committed debt literal, no vector naming a rule id. (This row said "no rule ids exist yet" long after they did.)                                                          |
 | 0030   | `connector announce`, the kind:10032 event, `[announce]`'s publish keys | **Removal pending** (0046). `[announce]`'s `addresses`/`btp_endpoint` stay — they feed the greeting.                                                                                                                                                                                                                  |
 | 0009   | the `child-expander`, `apex`, `[[children]]`                            | **Removal pending** (#1057). No committed config ever used them; both become parsed-to-be-rejected keys.                                                                                                                                                                                                              |
 
@@ -298,3 +298,28 @@ project settled on; fix the glossary, never the record.
   made but unbuilt, state that plainly and list what must be true for the record to be true. A
   record written in the present tense about behaviour the binary does not have is the failure mode
   above, committed on purpose. ADR 0042 and ADR 0044 are the two that currently do this.
+- **A record that claims an absence writes down what would prove it wrong, and that statement is
+  run.** Directly beneath the `**Scope:**` line:
+
+  ```
+  **Falsifier:** `<path glob>` matching `<regex>` — <what a match would mean>
+  ```
+
+  It asserts that **no file matching the glob contains a line matching the regex** — the config
+  field the implementation would have to add, the route it would have to register, the deleted type
+  that would have to come back. `crates/connector-bin/tests/records_state_their_own_falsifier.rs`
+  runs every one of them on `cargo test --workspace`, and a Status line saying "not yet built",
+  "not built" or "unbuilt" **without** one fails the build. It must be **one line** — a wrapped
+  marker is reported as malformed rather than silently ignored. Comment lines are skipped when
+  matching, so a record may keep naming the symbol it retired. Pick a pattern the implementation
+  cannot avoid rather than one that merely sounds right; where no such pattern exists, say so in
+  the prose (ADR 0048 does). For a status phrase that is not a claim about this tree — a quotation
+  of superseded wording, a fact about another repository — the escape hatch is the same marker,
+  with the reason mandatory:
+
+  ```
+  **Falsifier:** none — <why this claim cannot be checked mechanically>
+  ```
+
+  The harness's own doc comment says what it structurally cannot catch, which is most of the
+  semantic half; this convention narrows the failure mode, it does not close it.

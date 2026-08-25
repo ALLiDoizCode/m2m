@@ -4,6 +4,12 @@
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
+**Falsifier:** `crates/**/*.rs` matching `\bClaimEnforcement\b` — the type the `## Update (issue #1062)` section below said was deleted while it was still in the tree, and that issue #1077 actually deleted. The live `ForwardedClaimEnforcement` is a different identifier and the word boundary is what keeps them apart.
+
+**Falsifier:** `infra/**/*.toml` matching `^\s*\[\[peers\]\]` — item 3's deploy caveat reasons from the fleet holding no peering (issue #872 removed both). The `## Update (issue #1145)` section below calls that "a fact about today's tree, not a property"; this is the line that makes a box config regaining a peering announce itself.
+
+**Falsifier:** `deploy/**/*.toml` matching `^\s*\[\[peers\]\]` — the same fact for the two committed deploy templates. A commented-out example does not count and is skipped, which is deliberate: a commented `[[peers]]` block breaks nobody, an uncommented one puts the ordering constraint back.
+
 Every packet carries the claim that pays for it. A PREPARE arrives at a connector with a covering
 claim or it is refused, whether that connector will forward it or terminate it; and a connector
 covers every PREPARE it sends. A **fulfilment proves that the intended receiver got the packet**

@@ -4,6 +4,10 @@
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
+**Falsifier:** `crates/connector-operator/src/**/*.rs` matching `\bmax_packet_amount\b` — Consequences below: "The operator surface must be able to express a cap, and today it cannot." A runtime-settable cap has to be nameable on the write half, so the key appearing here means it landed.
+
+**Falsifier:** `crates/connector-runtime/src/peer_route_store.rs` matching `\bmax_packet_amount\b` — the other end of the same mechanism: a runtime peer row would have to carry the cap and persist it, under the durability rules [0034](0034-a-runtime-peer-route-table-never-shadows-the-config-file.md) already decided.
+
 **A cap is the largest amount a connector will forward to one peer in a single packet.** A packet
 exceeding it is refused `T04`, never carried and never split. **The reject's message carries the
 current cap**, and that is the only way a sender learns it. A connector never raises a cap on its own:

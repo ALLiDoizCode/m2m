@@ -74,3 +74,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"]
 # shape of those channel tables changes.
 toml = "0.8"
 
+# `records_state_their_own_falsifier.rs` (the ADR/spec drift gate): a record
+# declares what would prove its "not yet built" claim wrong as a regex over a
+# path glob, and the harness runs it. A regex rather than a substring because
+# the distinctions that matter are word-boundary ones -- `\bClaimEnforcement\b`
+# must not fire on the live `ForwardedClaimEnforcement`, and a substring search
+# cannot express that without inviting exactly the false positive that gets a
+# doc gate deleted. Already in `Cargo.lock` via `tracing-subscriber`.
+regex = "1"

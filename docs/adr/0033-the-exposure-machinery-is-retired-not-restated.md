@@ -4,6 +4,8 @@
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
+**Falsifier:** `crates/**/*.rs` matching `\b(record_inbound_delivery|is_over_ceiling|ExposureView)\b` — the three symbols this record retired and whose absence its Status line asserts it verified in the tree. Any of them back in code means the exposure projection was restated rather than retired.
+
 ADR 0031 (issue #868/B1) retired the credit window as the peer path's operating mode — every peer
 PREPARE now carries its own covering claim, or is greeted — but explicitly left one question open:
 "the exposure machinery's remaining purpose is undecided here... `record_inbound_delivery`, `ceiling`

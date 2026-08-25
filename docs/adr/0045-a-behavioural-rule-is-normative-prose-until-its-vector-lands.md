@@ -1,8 +1,10 @@
 # A behavioural rule is normative prose until its vector lands, and the debt only shrinks
 
-**Status:** Accepted, **not yet built** — the gate this record specifies cannot be written until [0021](0021-vectors-are-normative-prose-is-not.md)'s successor doc set exists (issue #1065). Amends [0021](0021-vectors-are-normative-prose-is-not.md) in two places: it adds a bounded prose tier, and it corrects 0021's claim that vectors are generated from property tests.
+**Status:** Accepted, **not yet built** — no rule is classified, no vector names a rule id, and the debt literal decision 4 requires does not exist. **The blocker this line used to name is spent:** it said the gate "cannot be written until [0021](0021-vectors-are-normative-prose-is-not.md)'s successor doc set exists (issue #1065)", and that doc set has landed — see the [Update](#update-2026-08-25--the-doc-set-landed-and-the-rule-ids-with-it) at the foot. Amends [0021](0021-vectors-are-normative-prose-is-not.md) in two places: it adds a bounded prose tier, and it corrects 0021's claim that vectors are generated from property tests.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
+
+**Falsifier:** `crates/**/*.rs` matching `\brule_id\b` — Consequences below: "A vector must name the rule it covers. This is new work for the vector format." No vector names one today, so a `rule_id` anywhere in the crates means the classification this record specifies has begun and its "not yet built" is stale.
 
 A behavioural rule of this protocol is stated as a **numbered rule** in prose, and that prose is
 **normative until a vector covers the rule, and no longer**. Every numbered rule is classified —
@@ -161,3 +163,34 @@ header their pinned frames carried. **This is a cross-repo wire change** ([0021]
 The rest of the list, and this record's rule, are untouched — a rule with no vector is normative
 prose, and deleting a rule deletes its vector rather than leaving one pinning behaviour nothing
 implements.
+
+## Update (2026-08-25) — the doc set landed, and the rule ids with it
+
+**This record's Status line named a blocker that is no longer there.** It said the gate could not be
+written until issue #1065 ruled on the fate of `docs/protocol/`'s five specs, and
+[`README.md`](README.md)'s debt row said flatly that **"no rule ids exist yet"**. Both were true when
+written and neither is true now, and nobody re-read them — the failure this folder's Conventions
+describe, found by the sweep that added the `**Falsifier:**` line above.
+
+**What landed.** The territory documents exist and carry **105 numbered rules**, each with the
+audience tag the issue #1052 Update below specifies:
+
+| document                                                           | rules             |
+| ------------------------------------------------------------------ | ----------------- |
+| [`configuration-spec.md`](../protocol/configuration-spec.md)       | `CF-01` – `CF-36` |
+| [`packet-flow-spec.md`](../protocol/packet-flow-spec.md)           | `PF-01` – `PF-24` |
+| [`payment-spec.md`](../protocol/payment-spec.md)                   | `PM-01` – `PM-22` |
+| [`self-description-spec.md`](../protocol/self-description-spec.md) | `ND-01` – `ND-16` |
+| [`operator-spec.md`](../protocol/operator-spec.md)                 | `OP-01` – `OP-07` |
+
+Each also carries a document-level `**Coverage:**` banner, and two of them use it to say the rules
+never enter the ledger at all — configuration and the operator surface are not wire surfaces, so per
+this record they are prose-normative permanently rather than provisionally. That is decision 2 being
+applied, and it was applied without the gate.
+
+**What is still not built, which is what the Status line above now says instead.** Decision 3's
+per-rule classification (a document-level "none of these is vectored" banner is precisely the
+document-wide banner decision 2 rejects), decision 4's committed debt literal and its ratchet, the
+build failure on an unclassified rule, and the vector-format change that lets a vector name the rule
+it covers. The falsifier above is keyed on that last one, because it is the piece none of the others
+can be built without.

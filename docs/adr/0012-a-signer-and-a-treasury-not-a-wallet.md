@@ -4,6 +4,8 @@
 
 **Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
 
+**Falsifier:** `crates/**/*.rs` matching `\bTreasury\b` — this record's Status line says nothing named `Treasury` remains in `crates/`; a live use of the name would mean the treasury half was rebuilt without a record deciding to, which is what issue #556 deleted it to prevent. (Comment lines are skipped, so `connector-signer`'s header may keep explaining what it was.)
+
 Key handling collapses to one crate exposing a `Signer` — a local key or a key management
 service backend, with rotation — and a treasury account that funds payment channels and pays
 gas. Mnemonic recovery, seed management, human wallet authentication, the wallet database and

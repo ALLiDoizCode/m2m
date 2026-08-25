@@ -14,6 +14,10 @@ and the burn-down order is issue #1084's.
 
 **Vocabulary:** [`CONTEXT.md`](../../CONTEXT.md). MUST, MUST NOT, SHOULD, MAY per RFC 2119.
 
+**Falsifier:** `crates/connector-client-edge/src/**/*.rs` matching `\.route\("/ilp",.*\bget\(` — the "not yet built" above is the endpoint: `GET /ilp` is unrouted, so a `GET` answers `405`. Registering a `GET` handler on that exact path is unavoidable for anything that serves this document, and `crates/connector-bin/tests/records_state_their_own_falsifier.rs` runs this line on every `cargo test`.
+
+**Falsifier:** `crates/connector-runtime/src/connector.rs` matching `fn unsealed_termination_reject\([^)]*,` — the second item "Not built" below (#1083, the unsealed reject's URL, [ADR 0054](../adr/0054-an-unsealed-termination-reject-answers-where-to-ask.md)). The reject builder takes a message and nothing else; the URL has to be handed to it.
+
 ---
 
 ## Why this document exists

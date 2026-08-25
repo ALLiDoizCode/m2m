@@ -4,6 +4,8 @@
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
+**Falsifier:** `crates/**/*.rs` matching `\bterminated_subtree\b` — the terminated-subtree protection is the half of this record that is not built, and unlike the falsifiers on the records around it this one is a **name this record prescribes** rather than a pattern the implementation cannot avoid: route selection lives in `connector-runtime`'s `select_route` callers, where "terminated" already appears everywhere and no unavoidable tell exists. Whoever builds it either uses this identifier or corrects this record; both are the outcome wanted.
+
 **A destination is matched by longest prefix first, and route _kind_ breaks a tie — with one
 exception: a leased route may never out-specify a terminated route's subtree.** A client session is
 not part of that ordering at all: it is an exact-address lookup that receives only what the route
