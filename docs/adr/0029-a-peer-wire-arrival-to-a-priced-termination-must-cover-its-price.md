@@ -157,3 +157,17 @@ over-carry cap, and this record's own `F03` — are unaffected.
 covers that price" is precisely what 0057 generalises to the forwarded case: every crossing is
 covered by a claim, so what a hop passes on is bounded by what it was paid rather than by a figure
 it was handed and trusted to check.
+
+## Update (issue #1143, corrected) — `R01` did not leave the vocabulary
+
+_"`R01` has left the reject vocabulary entirely"_ above is wrong; see
+[0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)'s corrected Update and
+[0051](0051-a-reject-code-binds-where-a-sender-must-act-differently.md)'s corrected row. Its
+minimum-delivery meaning left; RFC 0027's own — a hop whose fee alone exceeds the arriving amount has
+_"too little to forward"_ — did not, and a forwarding hop still raises it.
+
+**Both deletions this record made are still right**, because both cited the floor rather than the
+code: the minimum-delivery check in the list of refusals this wire takes, and the reject-taxonomy
+comparison to _"a PREPARE this hop cannot forward at the declared minimum delivery"_. The list is
+simply longer than that update said — ADR 0028's `F03` over-carry cap, this record's own `F03`, and
+`R01` in its RFC 0027 sense. This record's decision is untouched either way.

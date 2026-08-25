@@ -407,8 +407,9 @@ fn the_two_hop_topologys_committed_configs_load() {
     assert!(
         forward.fee() > 0,
         "THE HOP MUST CHARGE (issue #1144). This was `0` for as long as `POST /packets` declared \
-         `minimum_delivery = amount`, which made any non-zero fee an `R01`; minimum delivery is \
-         retired (ADR 0057, issue #1143) and the flat per-packet fee that is ADR 0010's whole \
+         `minimum_delivery = amount`, which made any non-zero fee an unmeetable floor; minimum \
+         delivery is retired (ADR 0057, issue #1143) and the flat per-packet fee that is ADR \
+         0010's whole \
          revenue model is exercised by a shipped image only here and in `mixed-chain`. A fee \
          quietly back at zero is a rehearsal that carries for free, and no container can see it: \
          B's journal reads exactly as green either way."

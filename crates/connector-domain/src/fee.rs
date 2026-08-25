@@ -9,10 +9,20 @@
 //! covering each crossing: `cover_forward` mints for the packet's forwarded
 //! value, so every hop holds a claim for at least what it passes on (ADR
 //! 0057, issue #1143). There is no declared floor for this module to check.
+//! What survives is the plain "was there anything left at all" question,
+//! whose answer a hop reports as RFC 0027's `R01`.
 
 /// The amount this hop forwards downstream once its own flat `fee` (agreed
 /// bilaterally for the peering relation, per ADR 0010) is taken from
 /// `amount`, or `None` if the fee alone exceeds what arrived.
+///
+/// A hop that gets `None` here must reject
+/// ([`crate::RejectCode::r01_insufficient_source_amount`], RFC 0027's
+/// "too little to forward") rather than forward a smaller amount and hope a
+/// downstream hop makes up the difference: no downstream hop ever increases
+/// an amount, so the shortfall would only grow. That reject is unaffected by
+/// ADR 0057, which retired the *declared floor* this function used to check
+/// and not the arithmetic below.
 pub fn amount_after_fee(amount: u64, fee: u64) -> Option<u64> {
     amount.checked_sub(fee)
 }

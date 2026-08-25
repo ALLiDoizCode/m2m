@@ -315,8 +315,9 @@ Two consequences worth knowing before editing a config here:
   image and not by `cargo test` alone. It could not be until #1143: the operator
   surface declared `minimum_delivery = amount` on every packet it originated, so
   `amount_after_fee` refused any hop that would retain anything and a non-zero
-  fee turned the rehearsal into `R01`. That lockout is retired (ADR 0057) — no packet declares a floor,
-  `R01` is gone from the reject vocabulary, and a hop keeps its fee.
+  fee turned the rehearsal into an unmeetable floor. That lockout is retired (ADR 0057) — no packet
+  declares a floor, and a hop keeps its fee. (`R01` itself is not gone: it still answers RFC 0027's
+  own case, a hop whose fee alone exceeds the arriving amount, which no topology here provokes.)
 
   The arithmetic is ADR 0028's: a hop collects `price`, forwards `price - fee`,
   earns exactly its `fee`, and a path adds up only while every hop's

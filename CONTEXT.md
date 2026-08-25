@@ -320,8 +320,10 @@ and answered with `R01` when it could not be met. Retired: once a packet carries
 pays for it (ADR 0042), the covering claim is already banked when a hop evaluates the floor, so
 rejecting on it returns the sender nothing and only moves where the packet dies. What bounds
 erosion is the claim itself — a hop mints one for the packet's **forwarded** value, so it holds a
-claim for at least what it passes on, and that chains. The field, both its carriage bindings, its
-two vectors and `R01` are all deleted. Kept here because the term still appears in historical prose
+claim for at least what it passes on, and that chains. The field, both its carriage bindings and its
+two vectors are all deleted. `R01` is **not**: only its floor meaning went, and the code still
+answers RFC 0027's own case — a hop's fee alone exceeding the arriving amount, so nothing would be
+forwarded (ADR 0057 as corrected, ADR 0051). Kept here because the term still appears in historical prose
 (`docs/protocol/peer-semantics-pre-868.md` §4, §5.1;
 [`docs/protocol/money-model-pre-868.md`](docs/protocol/money-model-pre-868.md)) and in clauses
 marked retired.

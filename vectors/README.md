@@ -275,8 +275,10 @@ first_claim_json, second_claim_json, first_ack, second_ack, second_ack_reason }`
 - ~~**`minimum_delivery_absent`**, **`minimum_delivery_malformed`** (items 18, 19)~~ -- **deleted**
   in `schema_version` 3 (issue #1143). Minimum delivery is retired
   ([ADR 0057](../docs/adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)): no packet
-  declares a floor, the `toon-minimum-delivery` entry and `Toon-Minimum-Delivery` header are gone
-  from both carriages, and `R01` has left the reject vocabulary. The item numbers are not reused.
+  declares a floor, and the `toon-minimum-delivery` entry and `Toon-Minimum-Delivery` header are
+  gone from both carriages. `R01` stays in the reject vocabulary with RFC 0027's own meaning -- a
+  hop's fee alone exceeding the arriving amount -- and answers an unmet floor no longer, because
+  there is no floor (ADR 0051 as corrected). The item numbers are not reused.
 - **`forwarded_data_unchanged`** (item 20) -- `{ name, sealed_data_hex, btp_ilp_packet_prepare_hex,
 http_body_hex }`: one sealed request wrap from this file's own `giftwrap` section (§8.1), carried
   as a PREPARE's `data` on both carriages. `sealed_data_hex` must appear byte-for-byte inside both

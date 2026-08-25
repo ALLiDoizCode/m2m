@@ -187,6 +187,22 @@ impl RejectCode {
         RejectCode("R00".to_string())
     }
 
+    /// R01: Insufficient Source Amount -- RFC 0027's own definition, "the
+    /// amount received by a connector in the path was too little to forward
+    /// (zero or less)": this hop's flat fee alone exceeds what arrived, so
+    /// `amount_after_fee` yields nothing to pass on.
+    ///
+    /// This is the *standard* ILPv4 meaning and the only one. The
+    /// minimum-delivery meaning this code also carried -- "the amount minus
+    /// this hop's fee falls below the floor the sender declared" -- is
+    /// retired with the field itself (ADR 0057, issue #1143); the case
+    /// above is not, and is RFC 0027's `R01` rather than ADR 0051's `F03`,
+    /// whose row is about an amount wrong for a *price* the sender can pay.
+    /// Relative, not final, because the sender's move is to send more.
+    pub fn r01_insufficient_source_amount() -> RejectCode {
+        RejectCode("R01".to_string())
+    }
+
     /// T00: Internal Error -- this connector could not do its own part of
     /// the work, through no fault of the packet. Retryable, and
     /// deliberately temporary rather than final (issue #605): a claim this
@@ -479,6 +495,7 @@ mod tests {
         assert_eq!(RejectCode::f00_bad_request().as_str(), "F00");
         assert_eq!(RejectCode::f01_invalid_packet().as_str(), "F01");
         assert_eq!(RejectCode::r00_transfer_timed_out().as_str(), "R00");
+        assert_eq!(RejectCode::r01_insufficient_source_amount().as_str(), "R01");
         assert_eq!(RejectCode::f03_invalid_amount().as_str(), "F03");
     }
 }

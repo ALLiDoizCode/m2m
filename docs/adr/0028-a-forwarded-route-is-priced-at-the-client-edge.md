@@ -159,3 +159,16 @@ hop never carries more value than it was paid for — along with everything abou
 short-circuiting at a priced forwarded route and rollback on reject. The over-carry cap bounds this
 hop against carrying more than it collected; the retired floor bounded a _downstream_ hop against
 eroding what it passed on, and that job now belongs to the claim covering each crossing.
+
+## Update (issue #1143, corrected) — there is still an `R01` to raise, for RFC 0027's reason
+
+The sentence _"with no floor to check and no `R01` to raise"_ above overstates its second half.
+There is no floor to check — that stands. But a forwarding hop whose **own fee exceeds the arriving
+amount** forwards nothing, and answers RFC 0027's `R01`, _"too little to forward"_
+([0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)'s corrected Update,
+[0051](0051-a-reject-code-binds-where-a-sender-must-act-differently.md)'s corrected row). What died
+is the code's minimum-delivery meaning, not the code.
+
+The rest of that update is unaffected: the `F03` over-carry cap still bounds `amount > price` at the
+top, and `R01` now bounds the same route at the bottom — a hop carries between its fee and its price
+or it carries nothing.

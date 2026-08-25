@@ -73,9 +73,18 @@ use serde::Serialize;
 /// `Toon-Minimum-Delivery` header no longer ride the pinned frames -- so
 /// `peer_prepare.btp_message_hex` changed bytes. A replaying SDK that still
 /// emits the field is emitting a field no connector reads, and one that
-/// expects `R01` for an unmet floor is expecting a code that has left the
-/// vocabulary (ADR 0051). Removals rather than additions, which is what this
+/// expects `R01` for an unmet floor is expecting a verdict no connector
+/// reaches -- but `R01` itself stays in the vocabulary with RFC 0027's own
+/// meaning, "the amount received by a connector in the path was too little to
+/// forward", which is what a hop answers when its fee alone exceeds the amount
+/// (ADR 0051 as corrected). Removals rather than additions, which is what this
 /// number exists to announce.
+///
+/// That correction landed without a further bump, on purpose: it moves no
+/// frame in this file. The reject vocabulary is prose in ADR 0051 rather than
+/// a pinned vector, so `schema_version` -- which guards the bytes an SDK
+/// replays -- has nothing to announce, and bumping it would spend a cross-repo
+/// signal on a file that did not change.
 pub const SCHEMA_VERSION: u32 = 3;
 
 fn seq_bytes<const N: usize>(start: u8) -> [u8; N] {

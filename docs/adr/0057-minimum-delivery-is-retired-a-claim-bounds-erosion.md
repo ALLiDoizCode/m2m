@@ -143,3 +143,69 @@ a priced multi-hop rehearsal possible.
 
 **`R01` leaves the reject vocabulary**, and one reject code fewer is one fewer sender behaviour to
 specify (ADR 0051's own test).
+
+## Update (issue #1143, corrected) — `R01` does not leave the vocabulary; only its floor meaning does
+
+**This record's sweep overreached on `R01`, and the error is this record's, not the
+implementer's.** The sentence at fault, in the `0051` bullet and repeated as the closing
+consequence:
+
+> _`R01` leaves the vocabulary: no sender action remains behind it, since "lower the floor" stops
+> being a move a sender has._
+
+`R01` carried **two** meanings, and the sweep saw only one.
+
+1. **The minimum-delivery meaning** — _amount minus this hop's fee falls below the declared floor_.
+   This is [ADR 0010](0010-flat-per-packet-fee-and-minimum-delivery.md)'s, it is what ADR 0051's row
+   described, and it does die here. "Lower the floor" genuinely stops being a move a sender has.
+2. **RFC 0027's own meaning** — _Insufficient Source Amount: "the amount received by a connector in
+   the path was too little to forward (zero or less)"_. This case is **untouched by this record**.
+   `amount_after_fee` still returns `None` when the fee alone exceeds the amount, and a hop still
+   has to answer something.
+
+Meaning 2 was never this record's to retire. It does not come from ADR 0010; it comes from RFC 0027,
+which [ADR 0051](0051-a-reject-code-binds-where-a-sender-must-act-differently.md) opens by making
+the source of the codes: _"The reject codes are RFC 0027's; what this protocol adds is which code
+answers which situation."_ Deleting a field this protocol invented cannot delete a code the base
+protocol defines.
+
+**So: `R01` is restored, narrowed to meaning 2 alone.** The `F03` rehoming issue #1143 made — a
+reasonable call under this record's wrong premise — is reversed, and ADR 0051 carries the corrected
+row. What the sweep should have said about `0051` is: _the `R01` row's **situation** is rewritten to
+RFC 0027's, and its sender action with it; the row itself stays._ `F01`'s loss of its
+"malformed minimum-delivery header" clause was correct and stands.
+
+### Why `F03` was the wrong home, on this protocol's own test
+
+ADR 0051's test is whether a sender can act differently on the code than on its class alone. Two
+things separate the cases:
+
+- **The class letter is itself an instruction.** RFC 0027 makes `F` final and `R` relative —
+  _"Relative errors indicate that the payment did not have enough of a margin in terms of money or
+  time"_, and a sender **MAY retry with a larger margin**. Answering `F03` tells a sender its packet
+  is finally invalid when the truth is "send more". That is not a nuance of taxonomy; it is the
+  opposite retry decision.
+- **The situations differ.** `F03`'s row is an amount wrong against a **price** — the route's, or a
+  priced termination's — where the sender's move is to pay the stated figure. Here there is no price
+  in question: the hop's own fee consumed everything and nothing would go onward. ADR 0051's closing
+  rule is that an implementation _"may not reuse a binding code for a different situation"_, and
+  folding this into `F03` is that reuse, committed by this record's own author.
+
+The cross-repo argument agrees rather than leads: ADR 0051 is scoped **protocol law**, `toon-client`,
+`rig` and `swap` read it, and a standard ILPv4 code answering the standard ILPv4 situation is what
+those readers can already handle without being told.
+
+### What did not change
+
+**Everything else in the sweep stands**, including every deletion issue #1143 made: the field, both
+carriage bindings, the two vectors, the role-dependent ignore rule, the `F01` clause, and
+`connector-operator`'s `minimum_delivery = prepare.amount` convention. This record's decision —
+_a claim bounds erosion, not a declared floor_ — is unaffected, because a hop that cannot cover its
+own fee forwards nothing and therefore mints no covering claim either. The correction is to which
+code names that, and to the reasoning this record gave for erasing it.
+
+**No vector moves and `schema_version` stays at 3.** The reject vocabulary is prose in ADR 0051, not
+a pinned frame (ADR 0045), so `vectors/wire-vectors.json` is byte-identical across this correction.
+An SDK written against schema 3 as first published would expect `F03` here and now gets `R01`; that
+is a behavioural change announced in prose, which is exactly the gap ADR 0045 names and exactly why
+the code's own emission site, its message, ADR 0051's table and this Update are landed together.

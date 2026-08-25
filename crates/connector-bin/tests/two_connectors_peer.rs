@@ -692,8 +692,9 @@ fn peer_journal(state_dir: &std::path::Path) -> String {
 ///
 /// `support::sample_prepare` mints an `amount: 0` packet, which is right
 /// for a terminated route and wrong for a forwarding one: a hop forwards
-/// `A - fee` and refuses `F03` when its own fee alone exceeds `A` (ADR
-/// 0010, ADR 0057), so a zero-amount packet never reaches the peer
+/// `A - fee` and refuses `R01` when its own fee alone exceeds `A` (ADR
+/// 0010; RFC 0027's own meaning for that code, which ADR 0057 as corrected
+/// leaves standing), so a zero-amount packet never reaches the peer
 /// transport at all -- it is refused one layer earlier, by arithmetic. A
 /// test that used a zero amount here would be asserting the fee check, not
 /// the peering.

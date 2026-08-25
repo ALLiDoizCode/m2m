@@ -90,10 +90,13 @@ realised as the difference between the amount received and the amount forwarded.
 **PF-13** `[connector]` — A hop MUST NOT increase an amount while forwarding.
 
 **PF-14** `[connector]` — Given an inbound amount `A` and this hop's fee `f`, the outgoing amount is
-`A' = A − f`. A hop whose fee alone exceeds `A` MUST reject **`F03`**, stating both figures, rather
-than forwarding what is left. **The declared floor this rule used to check is retired**: there is no
-`M`, and `R01` is not emitted.
+`A' = A − f`. A hop whose fee alone exceeds `A` MUST reject **`R01`** (RFC 0027, Insufficient Source
+Amount: _"the amount received by a connector in the path was too little to forward"_), stating both
+figures, rather than forwarding what is left. **The declared floor this rule used to check is
+retired**: there is no `M`, and `R01` no longer answers an unmet floor — only this, its RFC 0027
+meaning.
 ([ADR 0010](../adr/0010-flat-per-packet-fee-and-minimum-delivery.md),
+[ADR 0051](../adr/0051-a-reject-code-binds-where-a-sender-must-act-differently.md),
 [ADR 0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md))
 
 **PF-15** `[connector]` — **Retired**, and replaced by the claim rather than restated. What bounds
@@ -162,10 +165,12 @@ Which code answers which situation, and how much of it binds, is
 where a sender can act differently on it than on its class alone, and only there.**
 
 **Binding** — `F00` fix your envelope's target · `F02` this path is wrong · `F03` pay the stated
-amount (the route's price, or this hop's own fee) · `F06` attach a claim · `F99` stop trusting that
-counterparty · `T04` send smaller. **`R01` has left the vocabulary**
-([ADR 0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)): with no floor to
-declare, "lower the floor" is not a move a sender has.
+amount (the route's price, or a priced termination's) · `F06` attach a claim · `F99` stop trusting
+that counterparty · `R01` send more — this hop's fee alone exceeded the amount, so nothing would be
+forwarded (PF-14) · `T04` send smaller. **`R01` no longer answers an unmet floor**
+([ADR 0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md) as corrected): with
+no floor to declare, "lower the floor" is not a move a sender has, but RFC 0027's own meaning for the
+code is untouched and is the only one this connector emits.
 
 **Class-only** — `F01` (malformed packet) · `R00` (expired) · `T00` (this connector's own
 configuration error) · `T01` (app or peer unreachable) · `T05` (rate limited).

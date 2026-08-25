@@ -753,14 +753,16 @@ unchanged, and the vectors pin it (§10).
 entry and the `Toon-Minimum-Delivery` header are gone from both carriages — deleted together,
 because a field on one carriage and not the other is the drift §9 exists to prevent — along with
 absent-means-zero, malformed-is-`F01`, the propagate-unchanged rule, the client-role ignore rule and
-the `R01` reject the inequality produced. `R01` has left the reject vocabulary
-([ADR 0051](../adr/0051-a-reject-code-binds-where-a-sender-must-act-differently.md)).
+the `R01` reject the inequality produced. **`R01` itself stays in the reject vocabulary**, narrowed to
+RFC 0027's own meaning — _"the amount received by a connector in the path was too little to
+forward"_ — which no floor was ever needed to state
+([ADR 0051](../adr/0051-a-reject-code-binds-where-a-sender-must-act-differently.md) as corrected).
 
 What bounds erosion instead is the claim covering each crossing: `cover_forward` mints for the
 packet's own forwarded value, so every hop holds a claim for at least what it passes on and its fee
 is the difference — which chains, without any hop being handed a figure and trusted to check it.
 `connector_domain::fee::amount_after_fee(amount, fee)` takes no floor; a packet that does not cover
-this hop's own fee is refused **`F03`** naming both numbers.
+this hop's own fee is refused **`R01`** naming both numbers and the figure to clear.
 
 ### 5.2 `accumulatedCost`
 

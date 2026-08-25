@@ -131,3 +131,19 @@ One residual case kept a code: a packet that does not cover **this hop's own fee
 forwarded at all, and is refused **`F03`** — the amount is wrong for what this hop charges and the
 sender's move is to pay it, which is [0051](0051-a-reject-code-binds-where-a-sender-must-act-differently.md)'s
 `F03` row rather than a floor to lower. `R01` is not reused for it.
+
+## Update (issue #1143, corrected) — that residual case is `R01`, not `F03`
+
+The last paragraph above is wrong and is replaced by this one.
+[0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)'s corrected Update establishes
+why: `R01` carried both this record's minimum-delivery meaning **and** RFC 0027's own — _"the amount
+received by a connector in the path was too little to forward (zero or less)"_ — and only the first
+dies with the field.
+
+So a packet that does not cover **this hop's own fee** is refused **`R01`**, naming the fee and the
+amount it carried. `F03` does not gain the case: that row is an amount wrong against a _price_ a
+sender can pay, and here the fee consumed everything with no price in question. The code is reused
+for exactly the situation RFC 0027 defines it for, which is not "reuse" at all.
+
+This changes nothing else in the update above. The floor, its two carriage bindings, its two vectors
+and `amount_after_fee`'s third parameter are gone and stay gone.

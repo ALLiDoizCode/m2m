@@ -90,6 +90,10 @@ demands. It may not reuse a binding code for a different situation.
 
 ## Update (issue #1143) — `R01` leaves the vocabulary, and `F01` loses a clause
 
+> **Half of this update is wrong and is superseded by the corrected one below. `F01`'s half stands;
+> `R01`'s does not.** Left in place because the trail is the point (see the [index](README.md)'s
+> Conventions), not because any of it is still true.
+
 [0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md) retires minimum delivery, and
 issue #1143 deletes it. Two rows of the tables above change:
 
@@ -108,3 +112,42 @@ not a new code. It sits beside the row's other two situations rather than replac
 
 One reject code fewer is one fewer sender behaviour to specify, which is the test this record
 applies to every row.
+
+## Update (issue #1143, corrected) — `R01` stays; its situation is RFC 0027's, not the floor's
+
+The update above is **wrong about `R01` and is superseded by this one.** `F01`'s half of it stands
+unchanged; so does every deletion issue #1143 made. Only the reject taxonomy moves.
+
+[0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)'s sweep claimed _"no sender action
+remains behind `R01`"_ and this record took it. It does not hold. `R01` carried two situations and
+the sweep saw one:
+
+- the **minimum-delivery** one this record's original row named — _amount minus this hop's fee falls
+  below the declared floor_ — which does die with the field; and
+- **RFC 0027's own** — _"the amount received by a connector in the path was too little to forward
+  (zero or less)"_ — which does not. `connector_domain::fee::amount_after_fee` still yields nothing
+  when a hop's flat fee alone exceeds what arrived, and that packet still has to be answered.
+
+This record's first line is that _"the reject codes are RFC 0027's"_. A field this protocol invented
+cannot retire a code the base protocol defines. So **the `R01` row stays, with its situation and its
+sender action rewritten** — replacing the row in the binding table above, which now reads:
+
+| code  | situation                                                                                                                                             | what a sender does about it                      |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| `R01` | this hop's own flat fee exceeds the amount, so nothing would be forwarded at all (RFC 0027, [0010](0010-flat-per-packet-fee-and-minimum-delivery.md)) | send a larger amount — the message names the fee |
+
+**`F03` does not gain this case**, and the paragraph above that gave it one is withdrawn. `F03`'s
+row is an amount wrong against a **price** — the route's, or a priced termination's — and its move is
+to pay that stated figure. Here no price is in question and there is no figure to pay: the fee ate
+everything. Folding the two together is this record's own prohibition — _"may not reuse a binding
+code for a different situation"_ — and `F03`'s three-situation row goes back to two.
+
+It passes the test twice over. The **situations** are distinct, above. And the **class letter is
+itself a sender instruction**: RFC 0027 makes `F` final and `R` relative, where _"relative errors
+indicate that the payment did not have enough of a margin in terms of money or time"_ and the sender
+MAY retry with a larger one. `F03` says the packet is finally invalid; the truth here is "send more".
+A sender that keys its retry policy off the class — which is the whole point of the class — takes the
+opposite action on the wrong one.
+
+Restoring it costs this record's other rule nothing: `R01` is still one situation, still one move,
+and no second implementation may put anything else behind it.

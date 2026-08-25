@@ -1193,7 +1193,9 @@ impl Connector {
     ///
     /// Forwarding to a peer subtracts that peering relation's flat fee
     /// from `prepare.amount` (ADR 0010); a packet that does not even cover
-    /// that fee is refused `F03` rather than forwarded at zero. Nothing
+    /// that fee is refused `R01` -- RFC 0027's Insufficient Source Amount,
+    /// the standard meaning that survives ADR 0057's retirement of the
+    /// minimum-delivery one -- rather than forwarded at zero. Nothing
     /// here checks a declared floor: the packet carries none since ADR
     /// 0057 (issue #1143), and what bounds erosion is the claim covering
     /// each crossing -- `cover_forward` mints for the forwarded value, so
@@ -1673,19 +1675,32 @@ impl Connector {
     ) -> PacketResponse {
         let condition = prepare.execution_condition;
         // A packet that does not cover this hop's own flat fee is refused
-        // rather than forwarded at whatever is left. `F03` and not the
-        // retired `R01` (ADR 0057, issue #1143): the amount is wrong for
-        // this hop's price and the sender's move is to pay it, which is
-        // ADR 0051's `F03` row rather than a floor to lower.
+        // rather than forwarded at whatever is left. `R01` -- RFC 0027's
+        // "the amount received by a connector in the path was too little to
+        // forward (zero or less)", which is this case verbatim. ADR 0057's
+        // first sweep retired the code outright and ADR 0051's #1143 update
+        // rehomed this case to `F03`; both were wrong, and 0057's corrected
+        // update says so: only R01's *minimum-delivery* meaning dies with
+        // the field. `F03` is for an amount wrong against a price the
+        // sender can pay; here nothing survives the fee at all, the class
+        // letter is relative rather than final, and the move is "send
+        // more".
         let Some(forwarded_amount) = amount_after_fee(prepare.amount, peer_route.fee()) else {
             return PacketResponse::Reject(Reject {
-                code: RejectCode::f03_invalid_amount(),
+                code: RejectCode::r01_insufficient_source_amount(),
                 triggered_by: String::new(),
+                // The message is the sender's only way to learn its next
+                // move, and for a relative code that move is "send more" --
+                // so both figures are named and so is the threshold to
+                // clear (ADR 0051, "what a reject carries besides its
+                // code").
                 message: format!(
-                    "peer '{}' charges a fee of {} and this packet carried only {}",
+                    "peer '{}' charges a fee of {} and this packet carried only {}: nothing \
+                     would be left to forward. Send more than {}",
                     peer_route.peer_id(),
                     peer_route.fee(),
-                    prepare.amount
+                    prepare.amount,
+                    peer_route.fee()
                 ),
                 data: Vec::new(),
                 accumulated_cost: 0,
@@ -3647,7 +3662,11 @@ mod tests {
 
         match response {
             PacketResponse::Reject(reject) => {
-                assert_eq!(reject.code.as_str(), "F03");
+                // RFC 0027's `R01`, "too little to forward (zero or less)",
+                // and not `F03`: the class letter is itself the sender's
+                // instruction, and this one is relative -- send more --
+                // rather than final (ADR 0051, ADR 0057 as corrected).
+                assert_eq!(reject.code.as_str(), "R01");
                 assert!(reject.message.contains("10"), "{}", reject.message);
                 assert!(reject.message.contains('4'), "{}", reject.message);
             }

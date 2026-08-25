@@ -224,3 +224,10 @@ vectors and the `R01` reject. Item 3's own text above still spells the send-side
 what a peer must cover on arrival — is unchanged. Erosion is bounded by the covering claim alone,
 and on a peering still defaulting to observe it is bounded by the send half's own coverage until an
 operator flips it.
+
+**One correction to the paragraph above** (issue #1143, corrected): the floor is deleted, but the
+`R01` reject is not — only its minimum-delivery meaning is. RFC 0027's own `R01`, _"the amount
+received by a connector in the path was too little to forward"_, is what a hop answers when its fee
+alone exceeds the arriving amount, and it is emitted at exactly the `amount_after_fee(amount, fee)`
+call site this paragraph names. See [0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)'s
+corrected Update. Nothing else here changes.
