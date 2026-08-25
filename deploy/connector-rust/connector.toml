@@ -254,12 +254,28 @@ write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STE
 #
 # # The channel this node PAYS that peer from, as an ordinary client of it
 # # (ADR 0042, "a connector covers every PREPARE it sends"; issue #881).
-# # Write this and every packet forwarded to `peer_id` carries a covering
-# # claim, signed before the packet is sent, worth exactly what the packet
-# # forwards. Omit it -- as every config on this fleet does today -- and
-# # nothing about that peering changes: it keeps riding the peer ledger's
-# # postpay claim (ADR 0004), which is why this table is safe to add one
-# # peering at a time.
+# # Every packet forwarded to `peer_id` carries a covering claim, signed
+# # before the packet is sent, worth exactly what the packet forwards.
+# #
+# # REQUIRED, since issue #1145, of any peering a [[routes]] entry FORWARDS
+# # to. A route naming a peer with no row here is refused at load by name
+# # (`peer '<id>' is the next hop of route '<prefix>' but has no
+# # '[[pay_channels]]' entry`) -- the node does not start. It used to be
+# # optional, and a peering without one fell back to ADR 0004's postpay
+# # convention: the claim covering crossing n was signed once crossing n
+# # fulfilled and rode crossing n + 1. That path is deleted, so there is
+# # nothing left for an uncovered forward to fall back to.
+# #
+# # THIS IS A BREAKING DEPLOY (ADR 0009). A newly required key means the
+# # binary and this file are a matched pair in both directions: land the
+# # config that carries this row FIRST, then move the image tag. The other
+# # order is a node that will not boot. No config on this fleet forwards to
+# # a peering today -- neither box has an uncommented [[peers]] table at all
+# # (issue #872) -- so nothing deployed is affected right now; the ordering
+# # rule does not depend on that staying true.
+# #
+# # A peering this node only ever RECEIVES on needs no row: the requirement
+# # is keyed on the route, not on the peering.
 # #
 # # Three tables name channels and they are not interchangeable:
 # #   [[peer_channels]]   -- the channel a peering's claims are JUDGED against

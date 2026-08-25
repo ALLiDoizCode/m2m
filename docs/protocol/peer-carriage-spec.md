@@ -161,9 +161,12 @@ side: covering an outbound peer PREPARE with a claim in the first place. It land
 `Connector::forward_via_peer_route` (`crates/connector-runtime/src/connector.rs`): a next hop
 configured via `Connector::with_outbound_client_hop` is covered proactively, from the outbound
 client ledger (#873), for this node's own forwarded value -- before the first attempt is ever sent,
-not merely recovered by #875's retry arm after a refusal teaches this node it must pay. A hop with
-no such config keeps riding the peer ledger's `pending_claim` (ADR 0004's postpay convention),
-untouched: bilateral peer-to-peer forwarding is not what #868/#881 changed. ADR 0042's item 3 has
+not merely recovered by #875's retry arm after a refusal teaches this node it must pay. **A hop with
+no such config is refused, not carried** (issue #1145): `cover_forward` has no not-configured arm,
+the packet answers `T00` naming the hop, and `Config::load` refuses a route to such a peering by
+name before the node serves at all. Until #1145 that case fell through to the peer ledger's
+`pending_claim` — ADR 0004's postpay convention, the claim covering crossing _n_ signed after it
+fulfilled and riding crossing _n + 1_ — and nothing arms one any more. ADR 0042's item 3 has
 since extended the same shared gate to a `Forwarded` arrival, judged against the PREPARE's own
 `amount` and defaulting to observe rather than refuse — §3.1 below states both rules and the one
 per-peer knob that is left to select between them (the terminated rule's own `claim_enforcement`
@@ -176,8 +179,27 @@ the `channel_id` it pays from, that channel's `chain_id`/`token_network` (its EI
 same two facts its `[[peer_channels]]` row carries, because both roles sign against the very same
 on-chain channel), and `client_edge_url`: that hop's own `POST /ilp` endpoint, asked over
 `POST /ilp/claim-state` (#693) for where this node's claims stand, on every covered packet. The
-signing key is `[settlement.evm]`'s and no second key exists (ADR 0030). The table is additive: a
-peering with no row is the "no such config" case above, byte for byte.
+signing key is `[settlement.evm]`'s and no second key exists (ADR 0030). **The table is required of
+any peering a `[[routes]]` entry forwards to** (issue #1145): a route naming a peer with no row is
+`ConfigError::PayChannelUnbound`, refused at load naming the peer and the route. A peering this node
+only accepts on needs no row -- the requirement is keyed on the route, not on the peering. It was
+additive when it shipped, and stopped being so when the postpay path it fell back to was deleted.
+
+**The row has a Solana shape too** (issue #1146), a different shape rather than a different spelling
+of the same one, exactly as `[[peer_channels]]` and `[[client_channels]]` do: `channel_account` in
+place of `channel_id`, no `chain_id` and no `token_network` (Solana has neither a numeric chain id
+nor a per-token verifying contract), the same `client_edge_url`, and the signing key
+`[settlement.solana]`'s. Its ADR 0053 binding — the settlement program id — is **not** a field of the
+row: it is read from `[settlement.solana] program_id`, the one program this node can redeem through,
+under issue #1128's rule. Before #1146 there was no such shape, so a Solana peering could only be
+paid postpay.
+
+A Solana row additionally requires that the same peering bind that channel account as a Solana
+`[[peer_channels]]` row, refused at load naming the peer if it does not. `programId` is a required
+field of the claim wire (§4.2) where an EVM claim's domain fields are optional and ride absent, and
+both carriages render it from the peer-channel row; without one there is nothing to write there.
+Holding one channel in both roles with one hop is the shape this table is for, so a real config
+already satisfies it.
 
 The hop being asked MUST answer that ask out of the book that judges the channel — for a channel it
 holds as a `[[peer_channels]]` row, its **peer** book, not its client edge's (`client-edge-spec.md`
@@ -1339,7 +1361,9 @@ cannot be paid by channel claim"_.
   already requires every peering to carry a row, so this is the row that binds nothing, and the node
   also signs no covering claim outbound (ADR 0024's peer-claim key is that same settlement key).
 - `[[client_channels]]` — a buyer's claim verifies, the write is served, the claim is worthless.
-- `[[pay_channels]]` — there is no key to sign a covering claim with. Already refused before #1138.
+- `[[pay_channels]]` — there is no key to sign a covering claim with. Already refused before #1138
+  for an EVM row; a Solana row (issue #1146) is refused the same way, and for the second reason as
+  well: `[settlement.solana]` is also where the program id ADR 0053 signs into the claim comes from.
 
 One consequence of stating it once is worth naming: because every peering must carry a channel row,
 the only file that can now reach `PayChannelWithoutEvmSettlement` is one peering over a chain it
@@ -1363,6 +1387,11 @@ Named load-time errors this specification requires (spelling #677's, identity ou
 | `ClientChannelSolanaSettlementProgramIdInvalid` | a Solana `[[client_channels]]` row whose `[settlement.solana] program_id` is not base58 of a 32-byte value — the twin of the peer row's, and it replaces a boot panic                                                                                                                                                       | §11.1, #1138       |
 | `PeerChannelSolanaSettlementProgramIdInvalid`   | a Solana `[[peer_channels]]` row whose `[settlement.solana] program_id` is not base58 of a 32-byte value                                                                                                                                                                                                                    | #1128              |
 | `PeerChannelInvalidSolanaAccount`               | a Solana `[[peer_channels]]` row's `channel_account`/`counterparty_key` is not base58 of a 32-byte value                                                                                                                                                                                                                    | #759               |
+| `PayChannelWithoutSolanaSettlement`             | a Solana `[[pay_channels]]` row on a node with no `[settlement.solana]` table — no ed25519 key to sign a covering claim with, and no program id for ADR 0053 to bind into it                                                                                                                                                | §11.1, #1146       |
+| `PayChannelSolanaSettlementProgramIdInvalid`    | a Solana `[[pay_channels]]` row whose `[settlement.solana] program_id` is not base58 of a 32-byte value — the pay-book twin of the peer and client rows'                                                                                                                                                                    | #1146              |
+| `PayChannelInvalidSolanaAccount`                | a Solana `[[pay_channels]]` row's `channel_account` is not base58 of a 32-byte value                                                                                                                                                                                                                                        | #1146              |
+| `PayChannelProgramIdNotDeclared`                | a Solana `[[pay_channels]]` row setting `program_id` — this table never declared one; the program is `[settlement.solana]`'s, as it is for the other two books. Named rather than left to `#[serde(untagged)]`'s "matched no variant"                                                                                       | #1146              |
+| `PayChannelSolanaWithoutPeerChannel`            | a Solana `[[pay_channels]]` row whose channel account is not also bound by a Solana `[[peer_channels]]` row for that peering — `programId` is a required claim-wire field and the carriage renders it from that row, so every claim this row minted would be unrenderable                                                   | #1146              |
 | `PeerRouteUndeliverable`                        | a route naming as next hop a peer this connector can never originate to                                                                                                                                                                                                                                                     | §2.2, §6.4         |
 | `DuplicatePeerId`                               | two `[[peers]]` entries with the same `id`                                                                                                                                                                                                                                                                                  | —                  |
 | `InvalidForwardedClaimEnforcement`              | `forwarded_claim_enforcement` set to anything other than `"observe"` or `"enforce"` — here a typo meant as `"enforce"` falls through to the permissive default and carries forwards for free                                                                                                                                | ADR 0042           |

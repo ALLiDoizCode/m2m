@@ -144,20 +144,33 @@ forwarded_claim_enforcement = "enforce"   # default, if omitted: "observe"
 ```
 
 - **The default is `"observe"`, the opposite of the deleted `claim_enforcement`'s**, and
-  deliberately so. No
-  box on this fleet covers its forwards yet — `[[pay_channels]]` (ADR 0042 item 2) is opt-in per
-  peering and no committed config writes one — and the boxes forward to each other, so a binary
-  that enforced this on upgrade would stop forwarding fleet-wide. Omitted, an uncovered forwarded
-  arrival is admitted, forwarded, and logged.
+  deliberately so: enforcing on upgrade would stop forwarding on any peering whose far side is not
+  covering yet. Omitted, an uncovered forwarded arrival is admitted, forwarded, and logged.
+
+  **What changed under it (issue #1145): this node's own send half is no longer optional.**
+  `[[pay_channels]]` (ADR 0042 item 2) is now **required** of any peering a `[[routes]]` entry
+  forwards to — a config without one does not load — and the postpay path an omitted row used to
+  fall back to is deleted. So the far side of a peering you enforce on is covering its forwards by
+  construction, provided it is running a binary from this era. The remaining reason to soak on
+  `"observe"` is a counterparty on an OLDER binary, or one whose row names a channel yours does not
+  recognise. Neither devnet box carries a peering at all (issue #872), so on this fleet the setting
+  is inert either way.
+
 - **The observed line has its own text**, so the two rollouts are watched separately. Grep for
   `peer PREPARE admitted without a covering claim (forwarded_claim_enforcement = observe` — the
   same fields as the terminated line except that the required figure is logged as `amount` rather
   than `price`. The refusal it stands in for reads
   `peer PREPARE refused: no claim covers this packet's amount`.
-- **Same rollout order as above, per peering:** upgrade every box first (its send half only
-  covers a peering that has a `[[pay_channels]]` row, so writing that row is the actual "senders
-  first" step here), soak on the default `"observe"` until that peering's admissions stop, then
+- **Same rollout order as above, per peering:** land the far side's `[[pay_channels]]` row and its
+  binary first — that row is the actual "senders first" step here, and since issue #1145 it is a
+  **breaking deploy** in its own right (ADR 0009: a newly required key means the config lands before
+  the tag moves) — then soak on the default `"observe"` until that peering's admissions stop, then
   write `"enforce"` on that one peering. Never fleet-wide in one edit.
+
+  `local/mixed-chain`'s `a-b` row is the worked example, and the only place in the repository this
+  setting does anything: A holds a `[[pay_channels]]` row covering `amount_after_fee(1200, 100)`,
+  and B enforces on the 1100 that arrives.
+
 - A mistyped value is refused at config load by name
   (`ConfigError::InvalidForwardedClaimEnforcement`). The stakes are the mirror image of the
   deleted `claim_enforcement`'s: here a typo meant as `"enforce"` would fall through to the

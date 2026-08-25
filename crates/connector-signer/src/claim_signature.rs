@@ -39,17 +39,21 @@
 //! still hashed -- omitting them would compute a different digest than the
 //! one the signer's wallet actually signed.
 //!
-//! ## Solana: Ed25519 over a 48-byte balance-proof message
-//!
-//! The exact message layout the legacy TypeScript connector built and
-//! verified (`solana-payment-channel-sdk.ts::_buildBalanceProofMessage`,
-//! recovered the same way):
+//! ## Solana: Ed25519 over a 96-byte balance-proof message
 //!
 //! ```text
-//! message[0..32)  = channel account pubkey, raw bytes
-//! message[32..40) = nonce,               u64 little-endian
-//! message[40..48) = transferred amount,  u64 little-endian
+//! message[0..16)  = SOLANA_BALANCE_PROOF_DOMAIN_TAG
+//! message[16..48) = settlement program id, raw bytes
+//! message[48..80) = channel account pubkey, raw bytes
+//! message[80..88) = nonce,                 u64 little-endian
+//! message[88..96) = transferred amount,    u64 little-endian
 //! ```
+//!
+//! It was 48 bytes -- account, nonce, amount, the exact layout the legacy
+//! TypeScript connector built and verified
+//! (`solana-payment-channel-sdk.ts::_buildBalanceProofMessage`, recovered
+//! the same way) -- until ADR 0053/issue #1082 put the program id inside
+//! it. [`solana_balance_proof_message`] carries the full reasoning.
 
 use libsecp256k1::{Message, RecoveryId, Signature as RawSignature};
 use sha3::{Digest, Keccak256};

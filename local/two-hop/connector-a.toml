@@ -142,22 +142,28 @@ token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
 
 # ── Paying for the crossing, BEFORE it crosses (ADR 0042 item 2) ─────────────
 # `[[pay_channels]]` makes this node cover a forwarded PREPARE with a
-# client-role claim before it is sent, instead of owing for it after it
-# fulfils. That is the only reason B can price the route it terminates: under
-# ADR 0004's postpay convention the claim covering crossing n is signed after
-# crossing n has fulfilled, so the FIRST crossing carries nothing, a priced
-# peer termination refuses it `F06` (issue #880), it never fulfils, nothing is
-# ever owed, and the second carries nothing either. `cover_forward` breaks that
-# circle by minting the claim first, so crossing 1 arrives already paid for.
-# B's own `price` comment is the other half of this.
+# client-role claim before it is sent. It is REQUIRED since issue #1145 -- a
+# peering a `[[routes]]` entry forwards to with no row here is refused at load
+# by name -- and this file has held one since #1107, so nothing about it
+# changed except that removing it now stops the node booting rather than
+# quietly changing how the peering is paid.
+#
+# It is also the only reason B can price the route it terminates. Under the
+# deleted postpay convention (ADR 0004) the claim covering crossing n was
+# signed after crossing n had fulfilled, so the FIRST crossing carried nothing,
+# a priced peer termination refused it `F06` (issue #880), it never fulfilled,
+# nothing was ever owed, and the second carried nothing either. `cover_forward`
+# breaks that circle by minting the claim first, so crossing 1 arrives already
+# paid for. B's own `price` comment is the other half of this.
 #
 # ONE CHANNEL, TWO ROLES, WITH ONE HOP. This row names the same `channel_id`
 # the `[[peer_channels]]` row above does, and `Config::load` permits exactly
 # that -- `pay_channel.rs` calls it "the deployed shape": the peer role for
-# what arrives, the client role for what this node sends. A packet covered
-# here is not owed a second time on the peer ledger; `forward_via_peer_route`
-# is built for it. (The collision it DOES refuse is with `[[client_channels]]`,
-# a channel this node receives on.)
+# what arrives, the client role for what this node sends. Nothing is ever owed
+# on the peer ledger for a forward any more (issue #1145 deleted that half
+# outright), so exactly one book signs per packet and it is this one. (The
+# collision `Config::load` DOES refuse is with `[[client_channels]]`, a channel
+# this node receives on.)
 #
 # Only the facts nothing can derive are written here (ADR 0030's table):
 #

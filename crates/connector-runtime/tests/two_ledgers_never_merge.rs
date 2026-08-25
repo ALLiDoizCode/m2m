@@ -29,8 +29,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use connector_domain::JournalEntry;
 use connector_runtime::{
-    ChannelDomain, ClaimAckOutcome, ClaimBook, ClaimSignature, ClaimStateSource, ClaimWatermark,
-    EvmDomain, FileJournal, Journal, OutboundClientError, OutboundClientLedger, WireClaim,
+    ChannelDomain, ClaimAckOutcome, ClaimBook, ClaimSignature, ClaimStateDomain, ClaimStateSource,
+    ClaimWatermark, EvmDomain, FileJournal, Journal, OutboundClaimBinding, OutboundClientError,
+    OutboundClientLedger, WireClaim,
 };
 use connector_signer::{
     derive_evm_address, evm_balance_proof_digest, EvmBalanceProof, LocalSigner, Signer,
@@ -76,7 +77,7 @@ impl ClaimStateSource for ReceiverSaying {
     async fn watermark(
         &self,
         _channel: &[u8; 32],
-        _domain: &EvmDomain,
+        _domain: &ClaimStateDomain,
     ) -> Result<ClaimWatermark, OutboundClientError> {
         Ok(ClaimWatermark {
             nonce: self.nonce,
@@ -190,11 +191,13 @@ async fn an_inbound_claim_and_an_outbound_client_claim_never_move_each_others_le
                 cumulative: 0,
             },
             &CHANNEL,
-            &EvmDomain {
-                chain_id: CHAIN_ID,
-                token_network: TOKEN_NETWORK,
+            &OutboundClaimBinding::Evm {
+                domain: EvmDomain {
+                    chain_id: CHAIN_ID,
+                    token_network: TOKEN_NETWORK,
+                },
+                signer: &signer,
             },
-            &signer,
             OUTBOUND_AMOUNT,
         )
         .await

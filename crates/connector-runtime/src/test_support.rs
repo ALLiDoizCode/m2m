@@ -18,6 +18,10 @@ use connector_signer::{evm_balance_proof_digest, Address, LocalSigner, Signer};
 use crate::app_client::AppOutcome;
 use crate::claim::{evm_proof, parse_channel_id, ChannelDomain, WireClaim};
 use crate::connector::Connector;
+use crate::outbound_client::{
+    ClaimStateDomain, ClaimStateSource, ClaimWatermark, EvmDomain, OutboundClientError,
+    OutboundClientLedger,
+};
 
 /// This crate's one shared "this connector's own identity" fixture: every
 /// [`envelope_request_data`]/[`sealed_envelope_request_data`] call seals to
@@ -195,4 +199,63 @@ pub(crate) fn sign_wire_claim(
                 .expect("sign"),
         ),
     }
+}
+
+/// A next hop that answers where this node's claims on a channel stand --
+/// the authority the outbound client ledger prices every covering claim off
+/// (see [`crate::outbound_client`]'s header). A fake upholding the port's
+/// contract, not a stub with expectations (ADR 0007): it reports a
+/// watermark, which is the whole of what the port is for.
+struct AlwaysReportsAWatermark;
+
+#[async_trait::async_trait]
+impl ClaimStateSource for AlwaysReportsAWatermark {
+    async fn watermark(
+        &self,
+        _channel: &[u8; 32],
+        _domain: &ClaimStateDomain,
+    ) -> Result<ClaimWatermark, OutboundClientError> {
+        Ok(ClaimWatermark {
+            nonce: 0,
+            cumulative: 0,
+            available: Some(u64::MAX.into()),
+        })
+    }
+}
+
+/// Give `connector` what ADR 0042 requires of **any** peering it forwards
+/// to: a channel to pay `peer_id` from, and a ledger to sign the covering
+/// claim out of.
+///
+/// Every test in this crate that forwards a packet to a peer needs this,
+/// and that is the point of issue #1145. Before it, a peering with no
+/// client-role config fell through to ADR 0004's postpay convention and
+/// the packet went out uncovered; now `Connector::forward_via_peer_route`
+/// refuses it outright, and `Config::load` refuses the file that would
+/// have produced it (`ConfigError::PayChannelUnbound`). A fixture that
+/// forwards without this is not a simpler fixture -- it is one no
+/// configuration can produce.
+///
+/// The channel is [`test_channel_id`]`(1)` and the ledger is in-memory,
+/// which is right for a test but never for a serving node: a restart that
+/// reissued a nonce would fork its own outbound nonce line, which is why
+/// `OutboundClientLedger::open` is what `connector-cli` wires.
+pub(crate) fn covering(connector: Connector, peer_id: &str) -> Connector {
+    let connector = if connector.claims.signer().is_some() {
+        connector
+    } else {
+        connector.with_signer(Arc::new(LocalSigner::generate("test-support-settlement")))
+    };
+    connector
+        .with_outbound_client_ledger(Arc::new(OutboundClientLedger::in_memory()))
+        .with_outbound_client_hop(
+            peer_id,
+            test_channel_id(1),
+            EvmDomain {
+                chain_id: test_channel_domain().chain_id,
+                token_network: test_channel_domain().token_network_address,
+            },
+            Arc::new(AlwaysReportsAWatermark),
+        )
+        .expect("test_channel_id(1) is a valid on-chain channel id")
 }

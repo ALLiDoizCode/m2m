@@ -35,7 +35,7 @@ pub use config::Config;
 pub use error::ConfigError;
 pub use identity::ClientIdentityConfig;
 pub use operator::OperatorConfig;
-pub use pay_channel::PayChannelConfig;
+pub use pay_channel::{EvmPayChannelConfig, PayChannelConfig, SolanaPayChannelConfig};
 pub use peer::{
     ForwardedClaimEnforcement, PeerCarriage, PeerConfig, PeerCredential, PeerExposure,
     DEFAULT_MAX_PACKET_AMOUNT,
@@ -45,5 +45,5 @@ pub use route::{PeerRouteConfig, StaticRoute, TransportPolicy};
 pub use secret::SecretLocation;
 pub use settlement::{
     EvmSettlementConfig, SettlementChain, SettlementConfig, SolanaSettlementConfig,
-    UnknownSettlementChain,
+    UnknownSettlementChain, DEFAULT_CHANNEL_INDEX_CONFIRMATIONS,
 };

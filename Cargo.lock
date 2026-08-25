@@ -1090,6 +1090,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "bs58",
  "chrono",
  "connector-btp",
  "connector-client-edge",
@@ -1276,6 +1277,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "base64 0.22.1",
  "bs58",
  "chrono",
  "connector-config",

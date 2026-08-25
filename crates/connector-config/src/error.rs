@@ -412,8 +412,9 @@ pub enum ConfigError {
         "'[[pay_channels]]' for peer '{peer_id}' has client_edge_url '{value}', whose scheme \
          '{scheme}' is not one this node may ask a channel's claim state over: it must be \
          'https://' (or 'http://' with peer_allow_plaintext_endpoints, which is a loopback and \
-         test setting). The ask carries a signed EIP-712 challenge -- a capability to read a \
-         channel's state -- so it is TLS-only by default. A peering's own 'wss://' endpoint is \
+         test setting). The ask carries a signed challenge -- an EIP-712 digest on EVM, an ed25519 \
+         message on Solana, and on either chain a capability to read a channel's state -- so it is \
+         TLS-only by default. A peering's own 'wss://' endpoint is \
          not this URL and is never turned into it by swapping scheme and appending a path \
          (ADR 0030)"
     )]
@@ -454,6 +455,76 @@ pub enum ConfigError {
          (ADR 0030)"
     )]
     PayChannelWithoutEvmSettlement { peer_id: String },
+
+    #[error(
+        "'[[pay_channels]]' for peer '{peer_id}' has an invalid {field} '{value}': it must be a \
+         base58-encoded 32-byte Solana address. It is the channel account every covering claim \
+         on this row signs over (ADR 0053), and one that does not decode is a claim the far \
+         gate verifies against a different account"
+    )]
+    PayChannelInvalidSolanaAccount {
+        peer_id: String,
+        field: &'static str,
+        value: String,
+    },
+
+    #[error(
+        "'[[pay_channels]]' for peer '{peer_id}' names a 'program_id', which this table does \
+         not declare: the settlement program a covering claim is signed under is \
+         '[settlement.solana] program_id' and nothing else -- the one program this node can \
+         redeem through, and since ADR 0053 part of what every claim signs. Remove the key \
+         (issue #1128's rule, and the same one '[[peer_channels]]' and '[[client_channels]]' \
+         already hold)"
+    )]
+    PayChannelProgramIdNotDeclared { peer_id: String },
+
+    #[error(
+        "'[[pay_channels]]' names a Solana channel for peer '{peer_id}' but this node has no \
+         '[settlement.solana]' table: a covering claim on Solana is an ed25519 balance proof \
+         signed by the channel's on-chain participant -- '[settlement.solana.key]'s key -- \
+         under '[settlement.solana] program_id', and neither exists to read. There is no \
+         second key to configure and none is invented (ADR 0030)"
+    )]
+    PayChannelWithoutSolanaSettlement { peer_id: String },
+
+    #[error(
+        "'[[pay_channels]]' names a Solana channel for peer '{peer_id}', but '[settlement.solana] \
+         program_id' is '{value}', which is not a base58-encoded 32-byte address. ADR 0053 signs \
+         that program id into every claim on the channel, so it has to be a real address before \
+         a claim can be minted at all -- not only when the settlement backend first dials a chain"
+    )]
+    PayChannelSolanaSettlementProgramIdInvalid { peer_id: String, value: String },
+
+    #[error(
+        "'[[pay_channels]]' names Solana channel '{value}' for peer '{peer_id}', which has no \
+         Solana '[[peer_channels]]' row for that same peering. Unlike an EVM claim's optional \
+         EIP-712 domain, a Solana claim's 'programId' is a REQUIRED wire field, and the peer \
+         carriage renders it from that peering's Solana peer-channel row -- so this row would \
+         mint claims that could not be put on the wire at all. Holding one channel in both \
+         roles with one hop is the deployed shape (the peer role for what arrives, the client \
+         role for what this node sends); add the matching '[[peer_channels]]' row"
+    )]
+    PayChannelSolanaWithoutPeerChannel { peer_id: String, value: String },
+
+    #[error(
+        "peer '{peer_id}' is the next hop of route '{prefix}' but has no '[[pay_channels]]' \
+         entry: a connector covers every PREPARE it sends (ADR 0042), so a peering this node \
+         FORWARDS to must name the channel it pays that hop from. There is no postpay \
+         fallback any more -- ADR 0004's 'the claim covering crossing n rides crossing n + 1' \
+         was deleted in issue #1145 -- so without this row every packet on that route would be \
+         refused at packet time. Add:\n\
+         \n\
+             [[pay_channels]]\n\
+             peer_id = \"{peer_id}\"\n\
+             # EVM:    channel_id / chain_id / token_network\n\
+             # Solana: channel_account (and a Solana '[[peer_channels]]' row for the same \
+         channel)\n\
+             client_edge_url = \"<that hop's own POST /ilp endpoint>\"\n\
+         \n\
+         This key is newly REQUIRED, which by ADR 0009 makes it a breaking deploy: land the \
+         config before moving the image tag, never the other way round"
+    )]
+    PayChannelUnbound { prefix: String, peer_id: String },
 
     #[error(
         "'[[pay_channels]]' is configured but 'state_dir' is not: the outbound client ledger \

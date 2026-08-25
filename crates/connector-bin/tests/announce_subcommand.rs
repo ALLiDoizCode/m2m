@@ -510,6 +510,18 @@ peer_id = "carrier"
 price = 1002
 fee = 2
 
+# ADR 0042, and required since issue #1145: a peering this node FORWARDS to
+# must name the channel it pays that hop from, because there is no postpay
+# path left for an uncovered forward to fall back to. One channel in both
+# roles with one hop is the deployed shape, so this is the peer row's own
+# channel.
+[[pay_channels]]
+peer_id = "carrier"
+channel_id = "0xaaaabbbbccccddddeeeeffff00001111aaaabbbbccccddddeeeeffff00001111"
+chain_id = 84532
+token_network = "0x00000000000000000000000000000000000000bb"
+client_edge_url = "https://carrier.test.example/ilp"
+
 [announce]
 addresses = ["g.test.ario"]
 http_endpoint = "https://node.test.example/ilp"

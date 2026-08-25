@@ -101,6 +101,7 @@ use connector_btp::{
     decode_frame, encode_message, ProtocolData, AUTH_PROTOCOL, BTP_RESPONSE, CLAIM_ACK_PROTOCOL,
     CLAIM_PROTOCOL, CONTENT_TYPE_TEXT,
 };
+use connector_config::DEFAULT_CHANNEL_INDEX_CONFIRMATIONS;
 use connector_domain::{Prepare, Reject};
 use connector_settlement::SettlementBackend;
 use connector_settlement_evm::test_support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
@@ -355,6 +356,30 @@ struct PeerFixture {
     client_channel_id: String,
 }
 
+/// Mine one empty block on the disposable anvil this fixture spawned.
+///
+/// `anvil_mine` rather than a throwaway transaction: the point is a block
+/// with nothing in it, and a transaction would also move value nobody in
+/// this fixture accounts for.
+async fn mine_one_block(rpc_url: &str) {
+    let response = reqwest::Client::new()
+        .post(rpc_url)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "anvil_mine",
+            "params": [1],
+        }))
+        .send()
+        .await
+        .expect("anvil answers anvil_mine");
+    assert!(
+        response.status().is_success(),
+        "anvil_mine failed: {}",
+        response.status()
+    );
+}
+
 impl PeerFixture {
     /// Spawn the chain and fund the peering's channel. `None` when `anvil`
     /// is unavailable, so callers report the same skip
@@ -440,6 +465,28 @@ impl PeerFixture {
             .fund_counterparty(&client_channel, u128::from(100 * CLIENT_PRICE))
             .await
             .expect("fund the client channel with real ERC-20 value");
+
+        // Both deposits are now real on chain, and both must also be
+        // VISIBLE to a node that starts next -- which is a different
+        // question (issue #661). A node's local channel index applies a
+        // `ChannelNewDeposit` only once it is
+        // `DEFAULT_CHANNEL_INDEX_CONFIRMATIONS` blocks behind head, and
+        // answers `Active { deposit }` for any channel whose `ChannelOpened`
+        // it HAS applied -- so a payee whose index has seen the open and
+        // not yet the deposit reports a `depositTotal` of 0 over
+        // `POST /ilp/claim-state`, and a payer covering a forward against
+        // that answer refuses its own packet for want of headroom it
+        // actually has.
+        //
+        // anvil mines only on a transaction, so nothing here would ever
+        // advance past that window on its own. Six empty blocks put both
+        // deposits behind it, which is the state a chain with any traffic
+        // on it is in permanently. Needed since issue #1145, because the
+        // payer now covers every crossing rather than owing for it
+        // afterwards, and covering is what reads this figure.
+        for _ in 0..(DEFAULT_CHANNEL_INDEX_CONFIRMATIONS + 1) {
+            mine_one_block(&anvil.rpc_url).await;
+        }
 
         Some(PeerFixture {
             rpc_url: anvil.rpc_url.clone(),
@@ -595,6 +642,7 @@ fn spawn_payer(
     state_dir: &std::path::Path,
     carriage: Carriage,
     payee_endpoint: &str,
+    payee_client_edge: &str,
 ) -> (
     ConnectorProcess,
     tempfile::NamedTempFile,
@@ -651,6 +699,30 @@ counterparty_key = "{payee}"
 chain_id = {ANVIL_CHAIN_ID}
 token_network = "{token_network}"
 
+# ADR 0042, and REQUIRED of any peering this node forwards to since issue
+# #1145: the channel this node pays the payee from, as an ordinary client
+# of it, covering each PREPARE **before** it is sent. Without this row the
+# binary refuses to start (`ConfigError::PayChannelUnbound`), because there
+# is no longer an uncovered path for a forward to take -- ADR 0004's
+# postpay convention, where the claim covering crossing n rode crossing
+# n + 1, is deleted.
+#
+# The same `channel_id` the `[[peer_channels]]` row above names, which is
+# the deployed shape: the peer role for what arrives, the client role for
+# what this node sends. `client_edge_url` is the payee's own `POST /ilp`,
+# where this node asks where its claims on that channel stand -- answered
+# out of the payee's PEER book, because that is the book the channel is
+# bound in there (issue #1102). It is HTTP even when the peering itself is
+# carried over BTP: the claim-state ask is its own request, and a `wss://`
+# peering has no HTTP client edge to derive one from, which is why this is
+# written out rather than inferred.
+[[pay_channels]]
+peer_id = "{PAYEE_ID}"
+channel_id = "{channel_id}"
+chain_id = {ANVIL_CHAIN_ID}
+token_network = "{token_network}"
+client_edge_url = "{payee_client_edge}"
+
 # The client leg's channel, in the *other* namespace (§1.8): whose
 # signature this node accepts on a claim presented at its client edge. A
 # channel id may appear in exactly one of the two tables --
@@ -669,6 +741,7 @@ token_network_address = "{token_network}"
         settlement = fixture.settlement_block(settlement_key_file.path()),
         channel_id = fixture.channel_id,
         payee = to_hex(&fixture.payee_address),
+        payee_client_edge = payee_client_edge,
         client_channel_id = fixture.client_channel_id,
         client = to_hex(&fixture.client_address),
         token_network = to_hex(&fixture.token_network_address),
@@ -1106,8 +1179,14 @@ async fn two_connectors_move_a_paid_packet(carriage: Carriage) {
             Carriage::Http => "/ilp",
         }
     );
-    let (payer, _payer_config, _payer_key) =
-        spawn_payer(&fixture, payer_state.path(), carriage, &endpoint);
+    let payee_client_edge = format!("http://{}/ilp", payee.client_edge_addr);
+    let (payer, _payer_config, _payer_key) = spawn_payer(
+        &fixture,
+        payer_state.path(),
+        carriage,
+        &endpoint,
+        &payee_client_edge,
+    );
 
     // The packet is sealed to the **payee's** identity: it terminates
     // there, and the payer is a forwarding hop that cannot open it (§8.1).
@@ -1172,13 +1251,19 @@ async fn two_connectors_move_a_paid_packet(carriage: Carriage) {
 
     cross(b"across the peering", 1).await;
 
-    // **Twice, because value moves on fulfilment** (ADR 0004,
-    // `peer-semantics-pre-868.md` §3.2). The payer owes nothing until the first
-    // crossing has actually fulfilled, so the claim covering crossing *n*
-    // is signed after it and rides crossing *n + 1*. One packet proves
-    // delivery; the second is what proves the peering is *paid*, which is
-    // the property #620 exists for and the one a free-write path would
-    // silently lose.
+    // **Twice, and no longer for ADR 0004's reason** (issue #1145). It used
+    // to be that the payer owed nothing until the first crossing had
+    // fulfilled, so the claim covering crossing *n* was signed after it and
+    // rode crossing *n + 1* -- one packet could prove delivery and say
+    // nothing about payment. That model is deleted: crossing 1 arrives
+    // already covered.
+    //
+    // The second crossing still earns its place, for `local/two-hop`'s
+    // reason instead (issue #1102). A covering payer asks the payee where
+    // its claims stand on every packet, and a payee answering out of the
+    // wrong book reports nonce 0 forever -- so crossing 2 re-signs crossing
+    // 1's cumulative amount at a fresh nonce and advances nothing, which is
+    // accepted every time and buys nothing. One crossing cannot see that.
     cross(b"across the peering again", 2).await;
 
     // Delivery alone is what the deleted test settled for. This asserts the
@@ -1234,8 +1319,13 @@ async fn a_client_may_not_declare_more_than_the_forwarded_route_charges() {
     let (payee, _payee_config, _payee_key) =
         spawn_payee(&fixture, payee_state.path(), &stub_app.addr);
     let endpoint = format!("http://{}/ilp", payee.client_edge_addr);
-    let (payer, _payer_config, _payer_key) =
-        spawn_payer(&fixture, payer_state.path(), Carriage::Http, &endpoint);
+    let (payer, _payer_config, _payer_key) = spawn_payer(
+        &fixture,
+        payer_state.path(),
+        Carriage::Http,
+        &endpoint,
+        &endpoint,
+    );
 
     let payee_identity = identity_from_key_seed(PAYEE_SIGNER_SEED);
     let (data, shared_secret) = sealed_prepare_data(b"over-carried", &payee_identity);

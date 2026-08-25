@@ -778,9 +778,55 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use connector_config::StaticRoute;
-    use connector_runtime::{FakeAppClient, InProcessPeerTransport, RouteSource, TestClock};
+    use connector_runtime::{
+        ClaimStateDomain, ClaimStateSource, ClaimWatermark, EvmDomain, FakeAppClient,
+        InProcessPeerTransport, OutboundClientError, OutboundClientLedger, RouteSource, TestClock,
+    };
     use connector_signer::LocalSigner;
     use tower::ServiceExt;
+
+    /// A next hop reporting where this node's claims on a channel stand --
+    /// the authority every covering claim is priced off (see
+    /// `connector_runtime::outbound_client`'s header). A fake upholding the
+    /// port's contract, not a stub with expectations (ADR 0007).
+    struct ReportsAWatermark;
+
+    #[axum::async_trait]
+    impl ClaimStateSource for ReportsAWatermark {
+        async fn watermark(
+            &self,
+            _channel: &[u8; 32],
+            _domain: &ClaimStateDomain,
+        ) -> Result<ClaimWatermark, OutboundClientError> {
+            Ok(ClaimWatermark {
+                nonce: 0,
+                cumulative: 0,
+                available: Some(u128::MAX),
+            })
+        }
+    }
+
+    /// The `[[pay_channels]]` half of a peering, which ADR 0042 requires of
+    /// every peering a node forwards to and issue #1145 made unavoidable: a
+    /// forward this node cannot cover is refused `T00` before the transport
+    /// is reached at all. A fixture that forwards to a peer without this is
+    /// not a simpler fixture, it is one no config can produce
+    /// (`ConfigError::PayChannelUnbound`).
+    fn covering(connector: Connector, peer_id: &str) -> Connector {
+        connector
+            .with_signer(Arc::new(LocalSigner::generate("operator-test-settlement")))
+            .with_outbound_client_ledger(Arc::new(OutboundClientLedger::in_memory()))
+            .with_outbound_client_hop(
+                peer_id,
+                format!("0x{:064x}", 1),
+                EvmDomain {
+                    chain_id: 84_532,
+                    token_network: [0x1E; 20],
+                },
+                Arc::new(ReportsAWatermark),
+            )
+            .expect("a valid on-chain channel id")
+    }
 
     fn test_router(routes: Vec<StaticRoute>, bearer_token: &str) -> Router {
         let app_client = Arc::new(FakeAppClient::new());
@@ -1265,12 +1311,15 @@ mod tests {
             let keypair = keypair();
             let app_client = Arc::new(FakeAppClient::new());
             let clock = Arc::new(TestClock::new(chrono::Utc::now()));
-            let connector = Arc::new(Connector::new(
-                vec![],
-                vec![PeerRoute::new("g.example", "peer-1", 5)],
-                app_client,
-                Arc::new(InProcessPeerTransport::new()),
-                clock,
+            let connector = Arc::new(covering(
+                Connector::new(
+                    vec![],
+                    vec![PeerRoute::new("g.example", "peer-1", 5)],
+                    app_client,
+                    Arc::new(InProcessPeerTransport::new()),
+                    clock,
+                ),
+                "peer-1",
             ));
             let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
             let app = router(
@@ -1351,12 +1400,19 @@ mod tests {
 
         fn router_with(clock: Arc<TestClock>, write_keys: Vec<[u8; 32]>) -> Router {
             let app_client = Arc::new(FakeAppClient::new());
-            let connector = Arc::new(Connector::new(
-                vec![],
-                vec![],
-                app_client,
-                Arc::new(InProcessPeerTransport::new()),
-                clock,
+            // A leased route reaches `forward_via_peer_route` without ever
+            // passing `Config::load`, so ADR 0042's covering configuration
+            // has to be supplied here for a packet on one to be deliverable
+            // at all (issue #1145).
+            let connector = Arc::new(covering(
+                Connector::new(
+                    vec![],
+                    vec![],
+                    app_client,
+                    Arc::new(InProcessPeerTransport::new()),
+                    clock,
+                ),
+                "peer-1",
             ));
             let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
             router(connector, signer, "correct-token".to_string(), write_keys)

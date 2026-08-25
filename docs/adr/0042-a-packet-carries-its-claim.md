@@ -1,6 +1,6 @@
 # A packet carries its claim
 
-**Status:** Accepted — **a target record, partly built**. **Supersedes [0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md)**, retires [0004](0004-value-moves-on-fulfilment.md)'s headline, and amends [0010](0010-flat-per-packet-fee-and-minimum-delivery.md) and [0011](0011-rejects-accumulate-fees-and-probes-discover-cost.md). Built: the cap (`max_packet_amount`, with a default), the send half (`[[pay_channels]]` populating `outbound_client_hops`, issue #881), and — issue #1142 — the rule that a **forwarded** arrival must carry a covering claim, which ships **defaulting to observe** per peering and so does not yet bind a deployed box. (`ClaimEnforcement::Observe` was the _other_ item listed here; it is resolved — **deleted**, decided in issue #1062 and deleted from the tree in issue #1077 — and it never governed forwarded arrivals in the first place, since `payment_required` filtered to `ClientRouteKind::Terminated`. The two debts were independent and this line used to read as though they were one.) Until an operator writes `forwarded_claim_enforcement = "enforce"`, forwarding still runs [0004](0004-value-moves-on-fulfilment.md)'s model end to end.
+**Status:** Accepted — **built** (issue #1145). **Supersedes [0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md)**, retires [0004](0004-value-moves-on-fulfilment.md)'s headline, and amends [0010](0010-flat-per-packet-fee-and-minimum-delivery.md) and [0011](0011-rejects-accumulate-fees-and-probes-discover-cost.md). Built: the cap (`max_packet_amount`, with a default), the send half on **both chains** (`[[pay_channels]]` populating `outbound_client_hops` — issue #881 for EVM, issue #1146 for Solana), the rule that a **forwarded** arrival must carry a covering claim (issue #1142, per-peer `forwarded_claim_enforcement`, still defaulting to observe), and — issue #1145 — the **deletion of the postpay path** that made all of the above optional. `[[pay_channels]]` is now required of a peering this node forwards to, refused at load by name. (`ClaimEnforcement::Observe` was another item once listed here; it is resolved — **deleted**, decided in issue #1062 and deleted from the tree in issue #1077 — and it never governed forwarded arrivals in the first place, since `payment_required` filtered to `ClientRouteKind::Terminated`.) ~~Until an operator writes `forwarded_claim_enforcement = "enforce"`, forwarding still runs [0004](0004-value-moves-on-fulfilment.md)'s model end to end.~~ **That sentence is retired: 0004's model is deleted from the tree, and forwarding is covered whether or not a peering enforces on arrival.** See the issue #1145 Update at the foot of this record.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
@@ -275,3 +275,116 @@ folding the two settings together would have tied this default to the terminated
 deletion; that deletion has now happened, and the default survived it exactly as intended. The two
 error variants sit next to each other and the removed-key message says so, because the two spellings
 differ by one word.
+
+## Update (issue #1146): item 2's "Built." was true only on EVM
+
+**Item 2 above records the send half as flatly "Built."** It was built for **EVM only**, and had been
+since #881. A node could not cover a forward to a **Solana** peering at all, so such a peering could
+only ever be paid **postpay** — [ADR 0004](0004-value-moves-on-fulfilment.md)'s model, the one this
+record exists to retire, running on a leg this record claimed it had left behind.
+
+Four pieces were missing, and each was EVM-shaped rather than merely absent:
+
+- `[[pay_channels]]` had no `#[serde(untagged)]` Solana twin. `crates/connector-config/src/pay_channel.rs`
+  said so outright and gave a reason — an outbound client claim is an EIP-712 balance proof and the
+  outbound client ledger signs nothing else — so a Solana row was refused as an unknown field.
+- `OutboundClientLedger::next_claim` took an `EvmDomain` and a secp256k1 `&dyn Signer`.
+- `HttpClaimState` could sign only an EIP-712 claim-state challenge, so a covering payer had no way to
+  ask a Solana peer where its claims stood — even though the **receiving** half,
+  `verify_solana_claim_state_challenge`, already existed and was already wired into
+  `POST /ilp/claim-state`.
+- `cover_forward` minted `ClaimSignature::Evm` and nothing else.
+
+**Since issue #1146 the send half is built on both chains.** A Solana `[[pay_channels]]` row names a
+`channel_account` and a `client_edge_url`; its settlement program is
+`[settlement.solana] program_id`, never declared by the row, so the program
+[ADR 0053](0053-a-solana-claim-binds-its-domain-the-way-an-evm-claim-does.md) signs into every
+covering claim is by construction the one this node would redeem it through (issue #1128's rule).
+`next_claim` takes an `OutboundClaimBinding` carrying a domain and its signer together, so a
+secp256k1 key can never be paired with a Solana program id. The claim-state ask is the Solana
+challenge the existing verifier accepts — base58 `channelAccount`, base64 ed25519 signature — rather
+than a second design.
+
+**One thing a Solana row must have that an EVM row need not**, refused at load naming the peer
+(`ConfigError::PayChannelSolanaWithoutPeerChannel`): the same peering must also bind that channel as a
+Solana `[[peer_channels]]` row. `programId` is a **required** field of the Solana claim wire, where an
+EVM claim's EIP-712 domain fields are optional and simply ride absent; both peer carriages render it
+from that peer-channel row. Without one, every covering claim the row minted would reach
+`claim_json::encode` with nothing to write there — a caller bug it panics on, on the packet path, with
+the money already committed. Holding one channel in both roles with one hop is the deployed shape this
+record's own item 2 describes, so the requirement costs a real config nothing.
+
+**What is still true of every deployed box.** Nothing above changes a running node: a peering covers
+its forwards only once an operator writes `[[pay_channels]]` for it, and no committed config on this
+fleet or in `local/` writes a Solana one yet. `local/mixed-chain`'s b-c leg remains postpay, and
+converting it belongs with deleting the postpay path
+([issue #1145](https://github.com/toon-protocol/connector/issues/1145)), which this unblocks.
+
+## Update (issue #1145): the postpay path is deleted, and item 3's deploy caveat was stale
+
+**The three items above are now all built, and the model they were replacing is gone from the
+tree.** Until this landed, "a connector covers every PREPARE it sends" was a target with a
+fallback underneath it: `Connector::cover_forward` answered `NotConfigured` for a peering with no
+`[[pay_channels]]` row, `forward_via_peer_route` then rode `ClaimBook::pending_claim` — armed by a
+_previous_ fulfilment via `ClaimBook::record_fulfillment` — and the peering was paid under
+[ADR 0004](0004-value-moves-on-fulfilment.md)'s model, the one this record exists to retire. Item
+2's own text describes that fallback as the thing that makes the send half "additive". It is not
+additive any more.
+
+What went:
+
+- **The `NotConfigured` fallback.** `cover_forward` returns a claim or a reason it could not mint
+  one, and a forward it cannot cover is refused with `T00` naming the hop. There is no arm that
+  reaches the wire uncovered.
+- **The peer role's postpay arming.** No fulfilment signs a peer claim; nothing reads
+  `pending_claim` on the peer side; `Connector::with_peer_claim_channel` is deleted, so
+  `[[peer_channels]]` is an **inbound** binding only — whose signature this node accepts on a claim
+  naming that channel, and nothing else.
+- **The FLUSH sweep.** `Connector::sweep_flush` and `ClaimBook::due_for_flush` existed to deliver a
+  claim armed by a fulfilment that had no packet to ride. Nothing arms one. (The `flush` carriage
+  itself is untouched: a peer may still send a standalone claim, and this node still accepts one.)
+
+`ClaimBook::record_fulfillment` survives, and deliberately: `ClientPayoutLedger` wraps it for this
+connector paying a **client** back (ADR 0026, issues #699/#770/#779), which is a different edge and
+a live feature. Only the peer-role caller is gone.
+
+### `[[pay_channels]]` is required, and that makes it a breaking deploy
+
+A peering a `[[routes]]` entry forwards to must carry a `[[pay_channels]]` row, refused at load by
+name (`ConfigError::PayChannelUnbound`) the way `PeerChannelUnbound` already refuses a peering with
+no `[[peer_channels]]` row. A peering this node only ever _receives_ from needs nothing — that is
+why the check is keyed on routes rather than on peerings.
+
+Load-time rather than packet-time because the alternative is precisely what
+[ADR 0009](0009-typed-configuration-with-fail-fast-validation.md) exists to prevent: the node would
+boot cleanly and then refuse every packet on that route. And a newly required key is a **breaking
+deploy** by 0009's own definition — the binary and the box's bind-mounted TOML are a matched pair in
+both directions, so the config lands first and the tag moves second. Nothing deployed is affected
+today (see below), but the ordering rule does not depend on that.
+
+### The deploy caveat this record carried was stale, and is now resolved
+
+Item 3 said to enforce only once every box's send half was live, "because the other end is not
+covering yet" — written when both devnet boxes held BTP peerings to the apex. **Issue #872 removed
+them.** Re-checked at this change: `infra/linode-relay/connector-rust.toml`,
+`infra/linode-store/connector-rust.toml`, `deploy/connector-rust/connector.toml` and
+`connector.production.toml` contain no uncommented `[[peers]]`, `[[peer_channels]]` or
+`[[pay_channels]]` table between them — the only uncommented array-of-tables in any of the four is
+`[[routes]]`. Neither box forwards a peer packet, so deleting the postpay path cannot take the fleet
+dark, and requiring a new key cannot refuse a fleet config's boot.
+
+That is a fact about today's tree, not a property. **A fleet config that gains a peering brings the
+ordering constraint straight back**, and this caveat went stale exactly once already by nobody
+re-reading it.
+
+### Item 3 is enforced somewhere for the first time
+
+`local/mixed-chain`'s `a-b` row reads `forwarded_claim_enforcement = "enforce"`. It is the only
+peering in the repository where a node forwards a packet that arrived from a peer, and therefore the
+only place the enforcing path can be exercised against a running image at all. It could not be
+turned on before this: A had no `[[pay_channels]]` row, so crossing 1 arrived uncovered by
+construction and enforcing would have deadlocked the peering rather than charging for it. A has one
+now, and covers `amount_after_fee(1200, 100)` — exactly the 1100 that arrives at B.
+
+`local/mixed-chain`'s `b-c` leg is prepay too, on Solana, which the Update above (issue #1146) made
+possible. **No topology in this repository runs ADR 0004's model any longer**, and ADR 0004 says so.

@@ -49,11 +49,13 @@ key_file = "/app/data/signer.key"
 # prices must arrive carrying a claim that covers that price, or it is refused
 # `F06` with the x402 greeting (`peer-carriage-spec.md` §3.1, issue #880).
 #
-# Under ADR 0004's postpay convention nothing can satisfy that, and the failure
-# is a deadlock rather than a degradation: value moves on fulfilment, so a
-# peering's payer owes nothing until a crossing has fulfilled -- the FIRST
-# crossing therefore carries no claim, is refused, never fulfils, leaves
-# nothing owed, and the second carries none either. It never recovers.
+# Under ADR 0004's postpay convention -- deleted in issue #1145, and the reason
+# this file could not hold a price before #1103 -- nothing could satisfy that,
+# and the failure was a deadlock rather than a degradation: value moved on
+# fulfilment, so a peering's payer owed nothing until a crossing had fulfilled
+# -- the FIRST crossing therefore carried no claim, was refused, never
+# fulfilled, left nothing owed, and the second carried none either. It never
+# recovered.
 #
 # WHAT BREAKS THE CIRCLE IS ON A, NOT HERE. A holds a `[[pay_channels]]` row
 # (ADR 0042 item 2), which covers each PREPARE *before* it is sent instead of

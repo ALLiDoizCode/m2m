@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{mpsc, Arc, RwLock};
 use std::thread;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 
 use connector_domain::{
     advance_watermark, validate_claim, ClaimError, JournalEntry, Projection, Watermark,
@@ -229,11 +229,12 @@ pub struct ChannelDomain {
 /// public key whose signature this connector accepts on a claim naming it.
 ///
 /// Deliberately **not** folded into [`ChannelDomain`]. A Solana claim's
-/// signature covers a 48-byte little-endian message with no domain
-/// separator, no `verifyingContract` and no chain id -- there is nothing an
-/// EIP-712 domain and this have in common to abstract over, and merging
-/// them would mean one of the two carrying fields the other's verifier
-/// silently ignores. `connector_domain::client_claim::ClientClaim`
+/// signature covers a tagged 96-byte little-endian message binding the
+/// settlement program id (ADR 0053) -- no `verifyingContract`, no chain id,
+/// and no EIP-712 typed struct anywhere in it. There is nothing an EIP-712
+/// domain and this have in common to abstract over, and merging them would
+/// mean one of the two carrying fields the other's verifier silently
+/// ignores. `connector_domain::client_claim::ClientClaim`
 /// discriminates the same two chains the same way, and this is the peer
 /// wire's counterpart to that decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -298,7 +299,7 @@ pub enum ClaimSignature {
     /// digest.
     Evm(Signature),
     /// ed25519 over
-    /// `connector_signer::solana_balance_proof_message`'s 48 bytes.
+    /// `connector_signer::solana_balance_proof_message`'s 96 bytes.
     Solana([u8; 64]),
 }
 
@@ -568,6 +569,17 @@ impl ClaimBook {
     /// end up signing as two different addresses on one channel.
     pub fn signer(&self) -> Option<&Arc<dyn Signer>> {
         self.signer.as_ref()
+    }
+
+    /// This connector's own ed25519 identity, or `None` when it was never
+    /// given one -- the Solana counterpart of [`ClaimBook::signer`], and
+    /// read for the same reason it is: the outbound CLIENT ledger
+    /// (`crate::outbound_client`) signs its covering claims with the very
+    /// same settlement key this book signs peer claims with, because the
+    /// channel's on-chain participant is the same identity in both roles
+    /// (issue #1146).
+    pub fn solana_signer(&self) -> Option<&Arc<dyn Ed25519Signer>> {
+        self.solana_signer.as_ref()
     }
 
     /// Configure this connector's own ed25519 identity, used to sign every
@@ -1100,32 +1112,6 @@ impl ClaimBook {
             .get(peer_id)
             .map(|ledger| ledger.cumulative_amount)
             .unwrap_or(0)
-    }
-
-    /// Every peer whose pending claim has waited at least `flush_interval`
-    /// since it armed, as of `now` -- what a flush sweep should send
-    /// (peer-semantics-pre-868.md §3.3). Checked fresh against the injected clock,
-    /// like `Connector`'s leased-route expiry, rather than driven by a
-    /// stored deadline.
-    pub fn due_for_flush(
-        &self,
-        now: DateTime<Utc>,
-        flush_interval: Duration,
-    ) -> Vec<(String, WireClaim)> {
-        self.outbound
-            .read()
-            .expect("outbound claims lock poisoned")
-            .iter()
-            .filter_map(|(peer_id, ledger)| {
-                let since = ledger.pending_since?;
-                let claim = ledger.pending.clone()?;
-                if now - since >= flush_interval {
-                    Some((peer_id.clone(), claim))
-                } else {
-                    None
-                }
-            })
-            .collect()
     }
 
     /// Record the outcome of a claim of `nonce` sent to `peer_id`. On
@@ -2002,40 +1988,6 @@ mod tests {
     }
 
     #[test]
-    fn a_claim_not_yet_waiting_the_full_flush_interval_is_not_due() {
-        let key = derive_evm_address(&LocalSigner::generate("k").public_key().unwrap());
-        let book = book_with_peer("peer-b", &channel_id(1), key);
-        book.record_fulfillment("peer-b", 100, now()).unwrap();
-
-        let due = book.due_for_flush(now() + Duration::seconds(5), Duration::seconds(10));
-
-        assert!(due.is_empty());
-    }
-
-    #[test]
-    fn a_claim_waiting_the_full_flush_interval_is_due() {
-        let key = derive_evm_address(&LocalSigner::generate("k").public_key().unwrap());
-        let book = book_with_peer("peer-b", &channel_id(1), key);
-        let claim = book.record_fulfillment("peer-b", 100, now()).unwrap();
-
-        let due = book.due_for_flush(now() + Duration::seconds(10), Duration::seconds(10));
-
-        assert_eq!(due, vec![("peer-b".to_string(), claim)]);
-    }
-
-    #[test]
-    fn an_acknowledged_claim_is_never_due_for_flush() {
-        let key = derive_evm_address(&LocalSigner::generate("k").public_key().unwrap());
-        let book = book_with_peer("peer-b", &channel_id(1), key);
-        let claim = book.record_fulfillment("peer-b", 100, now()).unwrap();
-        book.acknowledge_outbound("peer-b", claim.nonce, ClaimAckOutcome::Accepted);
-
-        let due = book.due_for_flush(now() + Duration::days(1), Duration::seconds(10));
-
-        assert!(due.is_empty());
-    }
-
-    #[test]
     fn a_genuinely_signed_claim_from_the_registered_counterparty_is_accepted() {
         let peer_signer = LocalSigner::generate("peer-key");
         let key = derive_evm_address(&peer_signer.public_key().unwrap());
@@ -2887,7 +2839,7 @@ mod tests {
         }
 
         /// A claim on `account(n)`, genuinely signed by `signer` over the
-        /// 48-byte balance-proof message -- exactly what a peer's own
+        /// 96-byte balance-proof message -- exactly what a peer's own
         /// Solana signing path produces.
         fn sign_solana(signer: &Keypair, n: u8, nonce: u64, amount: u64) -> WireClaim {
             let message = solana_balance_proof_message(&[7u8; 32], &account(n), nonce, amount);

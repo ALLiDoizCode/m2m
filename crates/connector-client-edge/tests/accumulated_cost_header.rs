@@ -19,7 +19,10 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{TimeZone, Utc};
 use connector_domain::{Prepare, Reject};
-use connector_runtime::{Connector, FakeAppClient, InProcessPeerTransport, PeerRoute, TestClock};
+use connector_runtime::{
+    ClaimStateDomain, ClaimStateSource, ClaimWatermark, Connector, EvmDomain, FakeAppClient,
+    InProcessPeerTransport, OutboundClientError, OutboundClientLedger, PeerRoute, TestClock,
+};
 use connector_signer::{LocalSigner, Signer};
 use tower::ServiceExt;
 
@@ -33,6 +36,45 @@ fn test_clock() -> Arc<TestClock> {
 
 fn test_signer() -> Arc<dyn Signer> {
     Arc::new(LocalSigner::generate("cost-header-test-signer"))
+}
+
+/// A next hop reporting where this node's claims on a channel stand -- the
+/// authority a covering claim is priced off.
+struct ReportsAWatermark;
+
+#[async_trait::async_trait]
+impl ClaimStateSource for ReportsAWatermark {
+    async fn watermark(
+        &self,
+        _channel: &[u8; 32],
+        _domain: &ClaimStateDomain,
+    ) -> Result<ClaimWatermark, OutboundClientError> {
+        Ok(ClaimWatermark {
+            nonce: 0,
+            cumulative: 0,
+            available: Some(u128::MAX),
+        })
+    }
+}
+
+/// The `[[pay_channels]]` half of a peering. ADR 0042 has a connector cover
+/// every PREPARE it sends, and since issue #1145 a forward it cannot cover
+/// is refused rather than carried -- so a hop that forwards at all needs
+/// this, and a fixture without it is one no config could produce.
+fn covering(connector: Connector, peer_id: &str) -> Connector {
+    connector
+        .with_signer(Arc::new(LocalSigner::generate("cost-header-settlement")))
+        .with_outbound_client_ledger(Arc::new(OutboundClientLedger::in_memory()))
+        .with_outbound_client_hop(
+            peer_id,
+            format!("0x{:064x}", 1),
+            EvmDomain {
+                chain_id: 84_532,
+                token_network: [0x1E; 20],
+            },
+            Arc::new(ReportsAWatermark),
+        )
+        .expect("a valid on-chain channel id")
 }
 
 /// A PREPARE bound for `destination`, carrying nothing a termination could
@@ -123,12 +165,15 @@ async fn a_reject_relayed_through_a_paying_hop_reports_that_hops_fee() {
     ));
     let mut peer_transport = InProcessPeerTransport::new();
     peer_transport.add_peer("second-hop", second_hop);
-    let connector = Arc::new(Connector::new(
-        vec![],
-        vec![PeerRoute::new("g.example", "second-hop", 7)],
-        Arc::new(FakeAppClient::new()),
-        Arc::new(peer_transport),
-        test_clock(),
+    let connector = Arc::new(covering(
+        Connector::new(
+            vec![],
+            vec![PeerRoute::new("g.example", "second-hop", 7)],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(peer_transport),
+            test_clock(),
+        ),
+        "second-hop",
     ));
 
     let (reject, reported) =

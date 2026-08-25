@@ -49,6 +49,11 @@ tracing = "0.1"
 
 [dev-dependencies]
 base64 = "0.22"
+# Reads a Solana channel account and program id back off a rendered claim
+# and a rendered claim-state ask (issue #1146's `[[pay_channels]]` wiring
+# test), so the assertions are against the base58 the far side decodes
+# rather than against this crate's own idea of it.
+bs58 = "0.5"
 connector-operator = { path = "../connector-operator", features = ["test-util"] }
 connector-settlement-evm = { path = "../connector-settlement-evm", features = ["test-util"] }
 connector-settlement-solana = { path = "../connector-settlement-solana", features = ["test-util"] }

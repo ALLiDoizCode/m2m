@@ -1431,7 +1431,7 @@ mod tests {
     /// A fixed EIP-712 domain for this module's one peer claim test
     /// (issue #575/#566) -- an arbitrary but consistent chain id and
     /// `TokenNetwork` address.
-    fn test_channel_domain() -> connector_runtime::ChannelDomain {
+    pub(crate) fn test_channel_domain() -> connector_runtime::ChannelDomain {
         connector_runtime::ChannelDomain {
             chain_id: 84_532,
             token_network_address: [0x1E; 20],
@@ -1440,8 +1440,58 @@ mod tests {
 
     /// A valid on-chain `bytes32` peer channel id for tests (issue
     /// #575's AC4).
-    fn channel_a() -> String {
+    pub(crate) fn channel_a() -> String {
         format!("0x{:064x}", 1)
+    }
+
+    /// A next hop reporting where this node's claims on a channel stand --
+    /// the authority every covering claim is priced off (see
+    /// `connector_runtime::outbound_client`'s header). A fake upholding the
+    /// port's contract rather than a stub with expectations (ADR 0007).
+    struct ReportsAWatermark;
+
+    #[async_trait::async_trait]
+    impl connector_runtime::ClaimStateSource for ReportsAWatermark {
+        async fn watermark(
+            &self,
+            _channel: &[u8; 32],
+            _domain: &connector_runtime::ClaimStateDomain,
+        ) -> Result<connector_runtime::ClaimWatermark, connector_runtime::OutboundClientError>
+        {
+            Ok(connector_runtime::ClaimWatermark {
+                nonce: 0,
+                cumulative: 0,
+                available: Some(u128::MAX),
+            })
+        }
+    }
+
+    /// Give `connector` the `[[pay_channels]]` half of a peering: ADR 0042
+    /// requires a connector to cover every PREPARE it sends, so since issue
+    /// #1145 a forward to a hop with no channel to pay it from is refused
+    /// outright rather than carried on ADR 0004's postpay convention. Every
+    /// test here that forwards to a peer needs this, and a fixture without
+    /// it is one no configuration could produce
+    /// (`ConfigError::PayChannelUnbound`).
+    pub(crate) fn covering(connector: Connector, peer_id: &str) -> Connector {
+        connector
+            // The settlement key the covering claim is signed with. A test
+            // that cares which key that is calls `with_signer` again after
+            // this, which is the same setter.
+            .with_signer(Arc::new(LocalSigner::generate("covering-settlement")))
+            .with_outbound_client_ledger(Arc::new(
+                connector_runtime::OutboundClientLedger::in_memory(),
+            ))
+            .with_outbound_client_hop(
+                peer_id,
+                channel_a(),
+                connector_runtime::EvmDomain {
+                    chain_id: test_channel_domain().chain_id,
+                    token_network: test_channel_domain().token_network_address,
+                },
+                Arc::new(ReportsAWatermark),
+            )
+            .expect("channel_a() is a valid on-chain channel id")
     }
 
     fn test_signer() -> Arc<dyn Signer> {
@@ -1682,12 +1732,15 @@ mod tests {
         );
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
-        let first_hop = Arc::new(Connector::new(
-            vec![],
-            vec![PeerRoute::new("g.example.app", "second-hop", 0)],
-            Arc::new(FakeAppClient::new()),
-            Arc::new(peer_transport),
-            test_clock(),
+        let first_hop = Arc::new(covering(
+            Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(peer_transport),
+                test_clock(),
+            ),
+            "second-hop",
         ));
         // Sealed to the *second* hop's identity -- the connector that
         // actually terminates this route, not the one the client's router
@@ -1744,20 +1797,26 @@ mod tests {
             .unwrap()
             .with_identity_signer(second_hop_identity.clone()),
         );
+        let second_hop_claims = Arc::clone(&second_hop);
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
         let first_hop = Arc::new(
-            Connector::new(
-                vec![],
-                vec![PeerRoute::new("g.example.app", "second-hop", 3)],
-                Arc::new(FakeAppClient::new()),
-                Arc::new(peer_transport),
-                test_clock(),
+            covering(
+                Connector::new(
+                    vec![],
+                    vec![PeerRoute::new("g.example.app", "second-hop", 3)],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(peer_transport),
+                    test_clock(),
+                )
+                .with_channel_domain(channel_a(), test_channel_domain())
+                .unwrap(),
+                "second-hop",
             )
-            .with_signer(Arc::new(payer_signer))
-            .with_peer_claim_channel("second-hop", channel_a())
-            .with_channel_domain(channel_a(), test_channel_domain())
-            .unwrap(),
+            // After `covering`, so this is the key the covering claim is
+            // actually signed with -- and therefore the one the second hop
+            // has registered as its counterparty.
+            .with_signer(Arc::new(payer_signer)),
         );
         let (prepare, _shared_secret) = sealed_sample_prepare_with_amount(
             "g.example.app",
@@ -1778,10 +1837,16 @@ mod tests {
         let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
         Fulfill::decode(&bytes).expect("decode fulfill");
         // The port never sees a `Prepare` (issue #521), so the forwarded
-        // amount is asserted through the claim it armed rather than
-        // through the app client -- 50 minus this peer relationship's
-        // flat fee of 3.
-        assert_eq!(first_hop.claims()[0].cumulative_amount, 47);
+        // amount is asserted through the covering claim that rode it --
+        // 50 minus this peer relationship's flat fee of 3. Read off the
+        // SECOND hop, which verified and watermarked it: since issue #1145
+        // the claim is minted before the packet is sent and its watermark
+        // authority is the receiver, so the payer's own peer book records
+        // nothing at all.
+        assert!(first_hop.claims().is_empty());
+        let accepted = second_hop_claims.claims();
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].cumulative_amount, 47);
     }
 
     /// A packet forwarded to a second connector that has no route for it is
@@ -1798,12 +1863,15 @@ mod tests {
         ));
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
-        let first_hop = Arc::new(Connector::new(
-            vec![],
-            vec![PeerRoute::new("g.example.app", "second-hop", 0)],
-            Arc::new(FakeAppClient::new()),
-            Arc::new(peer_transport),
-            test_clock(),
+        let first_hop = Arc::new(covering(
+            Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(peer_transport),
+                test_clock(),
+            ),
+            "second-hop",
         ));
         let app = router(first_hop, test_signer());
 
@@ -1857,12 +1925,15 @@ mod tests {
 
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
-        let first_hop = Arc::new(Connector::new(
-            vec![],
-            vec![PeerRoute::new("g.example.app", "second-hop", 0)],
-            Arc::new(FakeAppClient::new()),
-            Arc::new(peer_transport),
-            test_clock(),
+        let first_hop = Arc::new(covering(
+            Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(peer_transport),
+                test_clock(),
+            ),
+            "second-hop",
         ));
         let (prepare, shared_secret) =
             sealed_sample_prepare("g.example.app", &second_hop_identity.public_key().unwrap());
@@ -4161,7 +4232,7 @@ mod tests {
 
             let mut transport = InProcessPeerTransport::new();
             transport.add_peer(PEER_ID, payee);
-            let payer = Arc::new(
+            let payer = Arc::new(covering(
                 Connector::new(
                     vec![],
                     vec![PeerRoute::new_priced(
@@ -4175,7 +4246,8 @@ mod tests {
                     test_clock(),
                 )
                 .with_identity_signer(signer),
-            );
+                PEER_ID,
+            ));
             (payer, remote_app)
         }
 
@@ -4343,7 +4415,7 @@ mod tests {
             );
             let mut transport = InProcessPeerTransport::new();
             transport.add_peer(PEER_ID, payee);
-            let payer = Arc::new(
+            let payer = Arc::new(covering(
                 Connector::new(
                     vec![],
                     vec![PeerRoute::new_priced(FORWARD_PREFIX, PEER_ID, 0, 0)],
@@ -4352,7 +4424,8 @@ mod tests {
                     test_clock(),
                 )
                 .with_identity_signer(signer.clone()),
-            );
+                PEER_ID,
+            ));
             let app = router(payer, signer.clone());
 
             let (prepare, _shared_secret) =
@@ -4398,7 +4471,7 @@ mod tests {
             ));
             let mut transport = InProcessPeerTransport::new();
             transport.add_peer(PEER_ID, payee);
-            let payer = Arc::new(
+            let payer = Arc::new(covering(
                 Connector::new(
                     vec![],
                     vec![PeerRoute::new_priced(
@@ -4412,7 +4485,8 @@ mod tests {
                     test_clock(),
                 )
                 .with_identity_signer(signer.clone()),
-            );
+                PEER_ID,
+            ));
             let app = router_with_gate(payer, signer.clone(), None, test_gate(test_channels()));
 
             let claim_json = evm_claim_json(1, FORWARD_PRICE);

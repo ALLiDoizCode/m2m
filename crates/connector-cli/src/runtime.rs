@@ -22,9 +22,9 @@ use connector_config::{
     SecretLocation, SettlementChain, SettlementConfig, SolanaSettlementConfig,
 };
 use connector_runtime::{
-    ChannelDomain, Connector, EvmDomain, FileJournal, HttpAppClient, InMemoryJournal, Journal,
-    JournalError, OutboundClientError, OutboundClientLedger, OwnedHttpClaimState, PeerRoute,
-    PeerRouteStore, PeerRouteStoreError, SystemClock,
+    ChannelDomain, ClaimStateChallengeSigner, Connector, EvmDomain, FileJournal, HttpAppClient,
+    InMemoryJournal, Journal, JournalError, OutboundClientError, OutboundClientLedger,
+    OwnedHttpClaimState, PeerRoute, PeerRouteStore, PeerRouteStoreError, SystemClock,
 };
 use connector_settlement::{SettlementBackend, SettlementError};
 use connector_settlement_evm::{
@@ -688,14 +688,21 @@ fn check_evm_channel_domains(config: &Config, settled: EvmDomain) -> Result<(), 
         }
     }
     for pay_channel in config.pay_channels() {
+        // As above: a Solana pay channel declares no EVM domain, and its
+        // program id is `[settlement.solana]`'s by construction rather than
+        // a second declaration that could drift (issue #1128/#1146), so
+        // there is no pair here for this check to compare.
+        let PayChannelConfig::Evm(evm) = pay_channel else {
+            continue;
+        };
         let declared = EvmDomain {
-            chain_id: pay_channel.chain_id(),
-            token_network: pay_channel.token_network(),
+            chain_id: evm.chain_id(),
+            token_network: evm.token_network(),
         };
         if declared != settled {
             return Err(RuntimeError::PayChannelDomainDisagreesWithSettlement(
                 EvmDomainMismatch {
-                    channel_id: pay_channel.channel_id().to_string(),
+                    channel_id: evm.channel_id().to_string(),
                     declared,
                     settled,
                 },
@@ -1130,22 +1137,26 @@ fn peer_claim_identity_solana(
 }
 
 /// Wire every `[[peer_channels]]` row into the claim ledger (issue #678,
-/// `peer-carriage-spec.md` §11): which channel this node claims against
-/// when it owes a peer, whose signature it accepts on a claim naming that
-/// channel, and -- on EVM -- the EIP-712 domain both are judged under (ADR
-/// 0024). A Solana row (issue #759) has no separate domain call: the
-/// channel account *is* the whole of a Solana claim's signed message, so
-/// [`Connector::with_solana_channel`] does both jobs
+/// `peer-carriage-spec.md` §11): whose signature this node accepts on a
+/// claim naming that channel, and -- on EVM -- the EIP-712 domain it is
+/// judged under (ADR 0024). A Solana row (issue #759) has no separate
+/// domain call: the channel account *is* the whole of a Solana claim's
+/// signed message, so [`Connector::with_solana_channel`] does both jobs
 /// [`Connector::with_channel_verification_key`] and
 /// [`Connector::with_channel_domain`] do together on EVM, in one call (see
 /// [`connector_runtime::ClaimBook::set_solana_channel`]'s own doc).
 ///
-/// A peering with several rows -- on either chain, or one of each -- claims
-/// against the **first row in the file**: an outbound ledger is per peer,
-/// so there is exactly one channel this node can owe on, and picking the
-/// last would make the answer depend on file order. Every row is still
-/// accepted *inbound* -- a counterparty may legitimately claim on any
-/// channel the two of them have bound, on whichever chain it is on.
+/// **These rows are now inbound-only, and that changed in issue #1145.**
+/// A `[[peer_channels]]` row also used to register the channel this node
+/// would *claim against* when it owed a peer for a forward it had already
+/// made -- ADR 0004's postpay model, `Connector::with_peer_claim_channel`
+/// feeding `ClaimBook::record_fulfillment`. Nothing owes a peer after the
+/// fact any more: a forward is covered before it is sent, from the
+/// `[[pay_channels]]` row that peering is now required to have (ADR 0042).
+/// A peering with several rows therefore no longer needs a "first row in
+/// the file wins" rule for the outbound direction -- every row here is
+/// accepted *inbound*, on whichever chain it is on, and none of them is a
+/// channel this node signs from.
 ///
 /// Issue #998: before this, a Solana row loaded, validated, and reached
 /// claim *rendering* (its `program_id` reaches `PeerRelation::from_config`
@@ -1166,21 +1177,14 @@ fn wire_peer_channels(
     mut connector: Connector,
     config: &Config,
 ) -> Result<Connector, RuntimeError> {
-    let mut claiming_against: Vec<&str> = Vec::new();
     for channel in config.peer_channels() {
         // What a claim on this row names, and what `ClaimBook` files its
-        // ledger and watermark under: an EVM `channel_id` or a Solana
-        // `channel_account`. Read before the per-chain wiring below so the
-        // "first row in the file wins, on whichever chain it is" rule lives
-        // in one place rather than once per chain.
+        // watermark under: an EVM `channel_id` or a Solana
+        // `channel_account`.
         let claim_channel = match channel {
             PeerChannelConfig::Evm(evm) => evm.channel_id(),
             PeerChannelConfig::Solana(solana) => solana.channel_account(),
         };
-        if !claiming_against.contains(&channel.peer_id()) {
-            claiming_against.push(channel.peer_id());
-            connector = connector.with_peer_claim_channel(channel.peer_id(), claim_channel);
-        }
         match channel {
             PeerChannelConfig::Evm(evm) => {
                 connector =
@@ -1264,6 +1268,7 @@ fn wire_outbound_client_hops(
     mut connector: Connector,
     config: &Config,
     claim_signer: Option<Arc<dyn Signer>>,
+    claim_signer_solana: Option<Arc<dyn Ed25519Signer>>,
 ) -> Result<Connector, RuntimeError> {
     if config.pay_channels().is_empty() {
         return Ok(connector);
@@ -1273,9 +1278,6 @@ fn wire_outbound_client_hops(
         missing,
     };
     let first = &config.pay_channels()[0];
-    let Some(signer) = claim_signer else {
-        return Err(unwirable(first, "[settlement.evm] signing key"));
-    };
     let Some(state_dir) = config.state_dir() else {
         return Err(unwirable(first, "state_dir to keep its nonce floor in"));
     };
@@ -1313,28 +1315,63 @@ fn wire_outbound_client_hops(
                 peer_id: pay_channel.peer_id().to_string(),
                 source,
             })?;
-        let claim_state = Arc::new(OwnedHttpClaimState::new(
-            client,
-            pay_channel.client_edge_url().as_str(),
-            Arc::clone(&signer),
-        ));
-        connector = connector
-            .with_outbound_client_hop(
-                pay_channel.peer_id(),
-                pay_channel.channel_id(),
-                EvmDomain {
-                    chain_id: pay_channel.chain_id(),
-                    token_network: pay_channel.token_network(),
-                },
-                claim_state,
-            )
-            .map_err(|_| RuntimeError::PayChannelUnusable {
-                channel_id: pay_channel.channel_id().to_string(),
-            })?;
+        // The challenge signer and the claim signer are the same key, on
+        // the channel's own chain: the ask proves control of the channel's
+        // on-chain participant, and the claim is signed by it.
+        connector = match pay_channel {
+            PayChannelConfig::Evm(evm) => {
+                let Some(signer) = claim_signer.clone() else {
+                    return Err(unwirable(pay_channel, "[settlement.evm] signing key"));
+                };
+                let claim_state = Arc::new(OwnedHttpClaimState::new(
+                    client,
+                    evm.client_edge_url().as_str(),
+                    ClaimStateChallengeSigner::Evm(signer),
+                ));
+                connector
+                    .with_outbound_client_hop(
+                        evm.peer_id(),
+                        evm.channel_id(),
+                        EvmDomain {
+                            chain_id: evm.chain_id(),
+                            token_network: evm.token_network(),
+                        },
+                        claim_state,
+                    )
+                    .map_err(|_| RuntimeError::PayChannelUnusable {
+                        channel_id: evm.channel_id().to_string(),
+                    })?
+            }
+            // Issue #1146. `program_id` is `[settlement.solana]`'s, copied
+            // in by `Config::load` rather than declared by the row, so the
+            // program ADR 0053 signs into every covering claim here is by
+            // construction the program this node would itself redeem the
+            // claim through -- there is no pair to compare.
+            PayChannelConfig::Solana(solana) => {
+                let Some(signer) = claim_signer_solana.clone() else {
+                    return Err(unwirable(pay_channel, "[settlement.solana] signing key"));
+                };
+                let claim_state = Arc::new(OwnedHttpClaimState::new(
+                    client,
+                    solana.client_edge_url().as_str(),
+                    ClaimStateChallengeSigner::Solana(signer),
+                ));
+                connector
+                    .with_solana_outbound_client_hop(
+                        solana.peer_id(),
+                        solana.channel_account(),
+                        solana.program_id(),
+                        claim_state,
+                    )
+                    .map_err(|_| RuntimeError::PayChannelUnusable {
+                        channel_id: solana.channel_account().to_string(),
+                    })?
+            }
+        };
         tracing::info!(
             peer_id = pay_channel.peer_id(),
-            channel_id = pay_channel.channel_id(),
-            chain_id = pay_channel.chain_id(),
+            channel = pay_channel.channel(),
+            chain = ?pay_channel.chain(),
             client_edge = %pay_channel.client_edge_url(),
             "covering every PREPARE forwarded to this peer with a client-role claim (ADR 0042)"
         );
@@ -1506,6 +1543,10 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     let claim_signer = peer_claim_identity
         .as_ref()
         .map(|(signer, _)| Arc::clone(signer));
+    // The Solana half of the same sentence (issue #1146): the ed25519 key
+    // that signs this peering's outbound peer claims is the key that signs
+    // its client-role covering claims too.
+    let claim_signer_solana_for_cover = peer_claim_identity_solana.as_ref().map(Arc::clone);
     if let Some((claim_signer, _)) = peer_claim_identity {
         connector = connector.with_signer(claim_signer);
     }
@@ -1516,7 +1557,12 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     // ADR 0042 item 2, issue #881: `[[pay_channels]]` reaching
     // `Connector::with_outbound_client_hop` at last. A node with no such
     // table is untouched by this call -- see the function's own doc.
-    connector = wire_outbound_client_hops(connector, config, claim_signer)?;
+    connector = wire_outbound_client_hops(
+        connector,
+        config,
+        claim_signer,
+        claim_signer_solana_for_cover,
+    )?;
     let mut client_channel_source_evm: Option<Arc<dyn ClientChannelSource>> = None;
     let mut client_channel_source_solana: Option<Arc<dyn ClientChannelSource>> = None;
     let mut solana_cluster: Option<&'static str> = None;
@@ -2071,9 +2117,15 @@ mod tests {
     use tower::ServiceExt;
 
     fn load_config(text: &str) -> Config {
+        try_load_config(text).expect("load config")
+    }
+
+    /// [`load_config`] without the `expect`, for a test whose subject IS
+    /// the refusal (issue #1145's required `[[pay_channels]]` row).
+    fn try_load_config(text: &str) -> Result<Config, connector_config::ConfigError> {
         let mut config_file = tempfile::NamedTempFile::new().expect("temp config file");
         write!(config_file, "{text}").expect("write config file");
-        Config::load(config_file.path()).expect("load config")
+        Config::load(config_file.path())
     }
 
     /// A throwaway signer for a [`client_claim_gate`] call whose test is
@@ -3906,13 +3958,16 @@ key_file = "{key_file}"
 
         use axum::extract::State;
         use axum::routing::post;
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine;
         use connector_domain::{derive_condition, Fulfill, PacketResponse, Prepare};
         use connector_runtime::{
             ClaimAckOutcome, ClaimSignature, FakeAppClient, PeerForward, PeerTransport, WireClaim,
         };
         use connector_signer::{
             derive_evm_address, verify_evm_balance_proof, verify_evm_claim_state_challenge,
-            EvmBalanceProof, EvmClaimStateChallenge,
+            verify_solana_balance_proof, verify_solana_claim_state_challenge, EvmBalanceProof,
+            EvmClaimStateChallenge,
         };
 
         /// The peering, its peer-role channel, and the channel this node
@@ -4107,14 +4162,18 @@ key_file = "{key_file}"
         /// A node peered with [`PEER_ID`] and routing [`ROUTE_PREFIX`] to
         /// it, with the `[settlement.evm]` key a claim is signed with --
         /// plus the `[[pay_channels]]` row, unless `pay_channel` is empty.
-        fn fixture(pay_channel: &str) -> Fixture {
+        /// Returns a `Result` rather than a `Config`, because since issue
+        /// #1145 the interesting case is the one that does not load: a
+        /// peering this node routes to and has no `[[pay_channels]]` row
+        /// for is refused by name.
+        fn fixture(pay_channel: &str) -> Result<Fixture, connector_config::ConfigError> {
             let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
             key_file
                 .write_all(&[7u8; 32])
                 .expect("write raw 32-byte key");
             let key_path = key_file.into_temp_path();
             let state_dir = tempfile::tempdir().expect("temp state dir");
-            let config = load_config(&format!(
+            let config = try_load_config(&format!(
                 r#"
 client_edge_addr = "127.0.0.1:0"
 peer_expose = "btp"
@@ -4154,12 +4213,12 @@ price = {CLIENT_AMOUNT}
 "#,
                 state_dir = state_dir.path().display(),
                 key_file = key_path.display(),
-            ));
-            Fixture {
+            ))?;
+            Ok(Fixture {
                 config,
                 state_dir,
                 _key_path: key_path,
-            }
+            })
         }
 
         /// The row under test, pointed at a real claim-state edge.
@@ -4206,7 +4265,11 @@ client_edge_url = "{url}"
             )
             .with_signer(Arc::clone(&claim_signer));
             connector = wire_peer_channels(connector, config).expect("wire [[peer_channels]]");
-            wire_outbound_client_hops(connector, config, Some(claim_signer))
+            // The fixture is EVM-only, so there is no Solana settlement key
+            // to hand over -- a Solana `[[pay_channels]]` row on such a
+            // node would not have loaded in the first place
+            // (`PayChannelWithoutSolanaSettlement`).
+            wire_outbound_client_hops(connector, config, Some(claim_signer), None)
                 .expect("wire [[pay_channels]]")
         }
 
@@ -4236,7 +4299,7 @@ client_edge_url = "{url}"
         #[tokio::test]
         async fn a_configured_pay_channel_covers_the_forward_and_the_claim_rides_the_prepare() {
             let edge = spawn_claim_state_edge().await;
-            let fixture = fixture(&pay_channel_row(&edge));
+            let fixture = fixture(&pay_channel_row(&edge)).expect("the config loads");
             let peer = RecordingPeerTransport::new();
             let connector = connector(&fixture, Arc::clone(&peer));
 
@@ -4329,58 +4392,256 @@ client_edge_url = "{url}"
             );
         }
 
-        /// **The regression guard** (ADR 0042: "additive -- a peering with
-        /// nothing configured behaves exactly as it does now").
+        /// **The row is not optional any more** (issue #1145). ADR 0042
+        /// item 2 shipped `[[pay_channels]]` as additive -- "a peering with
+        /// nothing configured behaves exactly as it does now", which meant
+        /// falling through to ADR 0004's postpay convention: the first
+        /// forward carried no claim and the second carried the one the
+        /// first fulfilment armed on the peer ledger.
         ///
-        /// The same node, the same peering, the same packet, with the
-        /// `[[pay_channels]]` row simply absent: the first forward carries
-        /// no claim, the second carries the one the FIRST one's fulfilment
-        /// armed on the PEER ledger -- ADR 0004's postpay convention,
-        /// unchanged -- and the receiver is never asked for a watermark at
-        /// all, because no client-role hop exists to ask on behalf of.
-        #[tokio::test]
-        async fn a_peering_with_no_pay_channels_row_forwards_exactly_as_before() {
-            let edge = spawn_claim_state_edge().await;
-            let fixture = fixture("");
-            assert!(fixture.config.pay_channels().is_empty());
-            let peer = RecordingPeerTransport::new();
-            let connector = connector(&fixture, Arc::clone(&peer));
+        /// That convention is deleted, so this node's own config is now the
+        /// thing that refuses. The same file, unchanged except for the
+        /// missing row, does not load at all -- and the refusal names the
+        /// peer and the route that forwards to it, because "which peering
+        /// do I add a row for" is the only question an operator holding
+        /// this error has.
+        ///
+        /// A load-time refusal rather than a packet-time one is the whole
+        /// point (ADR 0009): without it this config would boot cleanly and
+        /// then reject every packet on that route with `T00`.
+        #[test]
+        fn a_peering_this_node_forwards_to_with_no_pay_channels_row_is_refused_at_load() {
+            let message = match fixture("") {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("a routed peering with no channel to pay it from must not load"),
+            };
 
-            for _ in 0..2 {
-                let response = connector
-                    .handle_prepare(peer_bound_prepare(&peer.fulfillment))
-                    .await;
-                assert!(matches!(response, PacketResponse::Fulfill(_)));
+            assert!(
+                message.contains(PEER_ID) && message.contains(ROUTE_PREFIX),
+                "the refusal must name the peer and the route: {message}"
+            );
+            assert!(
+                message.contains("[[pay_channels]]"),
+                "and the table to add: {message}"
+            );
+            assert!(
+                message.contains("breaking deploy"),
+                "a newly REQUIRED key is a breaking deploy (ADR 0009), and the operator \
+                 reading this is the one who has to order it: {message}"
+            );
+        }
+
+        // -------------------------------------------------------------
+        // Solana (issue #1146). Until this landed a Solana peering had no
+        // `[[pay_channels]]` shape to configure, no arm in
+        // `OutboundClientLedger::next_claim` to sign with, and no
+        // challenge signer to ask its next hop's watermark with -- so it
+        // could only ever be paid POSTPAY, the model ADR 0042 exists to
+        // retire.
+        // -------------------------------------------------------------
+
+        /// `local/mixed-chain`'s own b-c channel account and program id, so
+        /// nothing here reads as a placeholder.
+        const SOLANA_CHANNEL_ACCOUNT: &str = "G5mXQzfZb4tXWX7cQvXP9ZJnDBcUo6irWTmGGtX3xpzL";
+        const SOLANA_COUNTERPARTY: &str = "93mxPHokL6EhVxzVicSyouEhvTVGUcKXKtHH1uTmw2Aw";
+        const SOLANA_PROGRAM_ID: &str = "HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR";
+
+        fn base58_bytes(value: &str) -> [u8; 32] {
+            bs58::decode(value)
+                .into_vec()
+                .expect("base58")
+                .try_into()
+                .expect("32 bytes")
+        }
+
+        /// [`fixture`]'s Solana twin: the same peering and route, settling
+        /// on Solana instead of anvil, with a `[[pay_channels]]` row on the
+        /// same channel account the `[[peer_channels]]` row binds -- the
+        /// deployed shape, and on Solana a load-time requirement.
+        fn solana_fixture(client_edge_url: &str) -> Fixture {
+            let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
+            key_file
+                .write_all(&[9u8; 32])
+                .expect("write raw 32-byte key");
+            let key_path = key_file.into_temp_path();
+            let state_dir = tempfile::tempdir().expect("temp state dir");
+            let config = load_config(&format!(
+                r#"
+client_edge_addr = "127.0.0.1:0"
+peer_expose = "btp"
+peer_allow_plaintext_endpoints = true
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_file}"
+
+[settlement.solana]
+rpc_url = "http://127.0.0.1:8899"
+program_id = "{SOLANA_PROGRAM_ID}"
+token_address = "{SOLANA_COUNTERPARTY}"
+decimals = 6
+
+[settlement.solana.key]
+key_file = "{key_file}"
+
+[[peers]]
+id = "{PEER_ID}"
+endpoint = "wss://store.example:443/btp"
+credential = {{ secret = "shared-secret" }}
+
+[[peer_channels]]
+peer_id = "{PEER_ID}"
+channel_account = "{SOLANA_CHANNEL_ACCOUNT}"
+counterparty_key = "{SOLANA_COUNTERPARTY}"
+
+[[routes]]
+prefix = "{ROUTE_PREFIX}"
+peer_id = "{PEER_ID}"
+fee = {PEER_FEE}
+price = {CLIENT_AMOUNT}
+
+[[pay_channels]]
+peer_id = "{PEER_ID}"
+channel_account = "{SOLANA_CHANNEL_ACCOUNT}"
+client_edge_url = "{client_edge_url}"
+"#,
+                state_dir = state_dir.path().display(),
+                key_file = key_path.display(),
+            ));
+            Fixture {
+                config,
+                state_dir,
+                _key_path: key_path,
             }
+        }
 
-            let claims = peer.claims();
+        /// [`connector`]'s Solana twin -- the production wiring, called in
+        /// the production order, with the ed25519 settlement key in place
+        /// of the secp256k1 one.
+        fn solana_connector(fixture: &Fixture, peer: Arc<RecordingPeerTransport>) -> Connector {
+            let config = &fixture.config;
+            let peer_routes = config
+                .peer_routes()
+                .iter()
+                .map(|route| {
+                    PeerRoute::new_priced(
+                        route.prefix(),
+                        route.peer_id(),
+                        route.fee(),
+                        route.price(),
+                    )
+                })
+                .collect();
+            let claim_signer = peer_claim_identity_solana(config)
+                .expect("read the settlement key")
+                .expect("the fixture configures [settlement.solana]");
+            let mut connector = Connector::new(
+                config.routes().to_vec(),
+                peer_routes,
+                Arc::new(FakeAppClient::new()),
+                peer,
+                Arc::new(SystemClock),
+            )
+            .with_solana_signer(Arc::clone(&claim_signer));
+            connector = wire_peer_channels(connector, config).expect("wire [[peer_channels]]");
+            wire_outbound_client_hops(connector, config, None, Some(claim_signer))
+                .expect("wire [[pay_channels]]")
+        }
+
+        /// **The Solana wiring, end to end** -- the twin of
+        /// [`a_configured_pay_channel_covers_the_forward_and_the_claim_rides_the_prepare`].
+        ///
+        /// A Solana peering with a `[[pay_channels]]` row covers its
+        /// forward from the first attempt: the claim rides the outgoing
+        /// PREPARE, it is an ed25519 balance proof worth exactly what this
+        /// packet forwards, its nonce advances the receiver's own watermark
+        /// (asked over a real `POST /ilp/claim-state`), and the ask itself
+        /// carries the Solana challenge -- `channelAccount` in base58 and a
+        /// base64 ed25519 signature -- that
+        /// `verify_solana_claim_state_challenge` accepts. That last check is
+        /// the one that says the ask matches the verifier that already
+        /// existed, rather than being a second, plausible-looking design.
+        #[tokio::test]
+        async fn a_configured_solana_pay_channel_covers_the_forward_with_an_ed25519_claim() {
+            let edge = spawn_claim_state_edge().await;
+            let fixture = solana_fixture(&edge.url);
+            let peer = RecordingPeerTransport::new();
+            let connector = solana_connector(&fixture, Arc::clone(&peer));
+            let public_key = peer_claim_identity_solana(&fixture.config)
+                .expect("read the settlement key")
+                .expect("the fixture configures [settlement.solana]")
+                .public_key();
+
+            let response = connector
+                .handle_prepare(peer_bound_prepare(&peer.fulfillment))
+                .await;
+
             assert!(
-                claims[0].is_none(),
-                "an unconfigured peering's first forward is uncovered, exactly as before #881: \
-                 {:?}",
-                claims[0]
+                matches!(response, PacketResponse::Fulfill(_)),
+                "the covered forward fulfils: {response:?}"
             );
-            let postpay = claims[1]
+            assert_eq!(peer.forwarded_amounts(), vec![FORWARDED]);
+            let claim = peer.claims()[0]
                 .clone()
-                .expect("the second forward carries the claim the first fulfilment armed");
+                .expect("a configured Solana hop covers its forward");
             assert_eq!(
-                postpay.channel_id, PEER_CHANNEL,
-                "the postpay claim is the PEER ledger's, on the [[peer_channels]] channel"
+                claim.channel_id, SOLANA_CHANNEL_ACCOUNT,
+                "the covering claim names the channel account in base58, the spelling the \
+                 Solana claim namespace uses"
             );
-            assert_eq!(postpay.cumulative_amount, FORWARDED);
+            assert_eq!(claim.nonce, RECEIVER_NONCE + 1);
+            assert_eq!(claim.cumulative_amount, RECEIVER_CUMULATIVE + FORWARDED);
 
+            let ClaimSignature::Solana(signature) = claim.signature else {
+                panic!("a Solana channel's covering claim is an ed25519 balance proof");
+            };
             assert!(
-                edge.asks.lock().expect("asks lock poisoned").is_empty(),
-                "a node with no client-role hop never asks anybody for a watermark"
+                verify_solana_balance_proof(
+                    &base58_bytes(SOLANA_PROGRAM_ID),
+                    &base58_bytes(SOLANA_CHANNEL_ACCOUNT),
+                    RECEIVER_NONCE + 1,
+                    RECEIVER_CUMULATIVE + FORWARDED,
+                    &signature,
+                    &public_key,
+                ),
+                "the claim must verify against this node's own Solana settlement key under the \
+                 program `[settlement.solana]` names -- ADR 0053 signs that program id into the \
+                 message, so a claim minted under any other is refused at the far gate with the \
+                 packet already paid for"
             );
+
+            // The ask: one, about this account, with a challenge the far
+            // side's own verifier accepts.
+            let asks = edge.asks.lock().expect("asks lock poisoned").clone();
+            assert_eq!(asks.len(), 1, "one covered packet, one watermark ask");
+            let asked = &asks[0]["channels"][0];
+            assert_eq!(asked["blockchain"], "solana");
+            assert_eq!(asked["channelAccount"], SOLANA_CHANNEL_ACCOUNT);
             assert!(
-                !fixture
-                    .state_dir
-                    .path()
-                    .join(OUTBOUND_CLIENT_LEDGER)
-                    .exists(),
-                "and it opens no outbound client ledger: the file is created only for a node \
-                 that actually signs client-role claims"
+                asked.get("channelId").is_none(),
+                "an EVM-shaped ask about a Solana channel is answered `unverified`: {asked}"
+            );
+            let expires = asked["expires"].as_u64().expect("an expiry");
+            let challenge_signature = BASE64
+                .decode(asked["signature"].as_str().expect("a challenge signature"))
+                .expect("the challenge signature is base64, as the far side decodes it");
+            assert!(
+                verify_solana_claim_state_challenge(
+                    &base58_bytes(SOLANA_CHANNEL_ACCOUNT),
+                    expires,
+                    &challenge_signature,
+                    &public_key,
+                ),
+                "the claim-state ask proves control of the channel's on-chain participant"
+            );
+
+            // And the nonce floor is durable, exactly as on the EVM leg:
+            // one ledger, one file, whichever chain the hop settles on.
+            let ledger = fixture.state_dir.path().join(OUTBOUND_CLIENT_LEDGER);
+            let written = std::fs::read_to_string(&ledger).expect("read the ledger");
+            assert!(
+                written.contains(&format!("\"nonce\":{}", RECEIVER_NONCE + 1)),
+                "the issued nonce reaches the disk before the claim exists: {written}"
             );
         }
 

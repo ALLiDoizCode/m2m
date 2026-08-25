@@ -7,17 +7,24 @@
 //! the connector actually makes -- `strace` counts them from the outside,
 //! nothing here counts them for itself. Nothing is stubbed on the money
 //! path: the inbound claims are signed by a second, real [`ClaimBook`]
-//! standing in for the upstream node (the same `record_fulfillment` a peer
-//! signs its own claims with), the downstream peer is a second real
-//! `Connector` reached over [`InProcessPeerTransport`], and the outbound
-//! claim box 1 signs per forward is signed by a real [`LocalSigner`].
+//! standing in for the upstream node, the downstream peer is a second real
+//! `Connector` reached over [`InProcessPeerTransport`], and the covering
+//! claim box 1 signs per forward comes out of a real file-backed
+//! [`OutboundClientLedger`] signed by a real [`LocalSigner`].
 //!
 //! Two modes, which together separate the journal's two writers:
 //!
-//! | mode       | inbound claim | journal entries per packet     |
-//! | ---------- | ------------- | ------------------------------- |
-//! | `baseline` | no            | `OutboundClaimSigned`            |
-//! | `covering` | yes           | `InboundClaimAccepted` + outbound |
+//! | mode       | inbound claim | durable writes per packet                    |
+//! | ---------- | ------------- | -------------------------------------------- |
+//! | `baseline` | no            | the outbound client ledger's nonce reservation |
+//! | `covering` | yes           | `InboundClaimAccepted` + that reservation      |
+//!
+//! The outbound half moved books in issue #1145. It used to be a
+//! `JournalEntry::OutboundClaimSigned` -- the peer role's postpay claim,
+//! signed after a forward fulfilled -- and it is now the outbound CLIENT
+//! ledger's nonce reservation, made before the forward is sent, because a
+//! connector covers every PREPARE it sends (ADR 0042). One durable write
+//! per forward either way; a different file.
 //!
 //! `covering` is what ships (ADR 0031, ADR 0033, issue #882): every peer
 //! PREPARE carries its own covering claim, and the exposure/ceiling
@@ -64,8 +71,9 @@ use connector_domain::{
     derive_condition, EnvelopeRequest, EnvelopeResponse, PacketResponse, Prepare,
 };
 use connector_runtime::{
-    AppOutcome, ChannelDomain, ClaimBook, Connector, FakeAppClient, FileJournal,
-    InProcessPeerTransport, PeerRoute, SystemClock, WireClaim,
+    AppOutcome, ChannelDomain, ClaimBook, ClaimStateDomain, ClaimStateSource, ClaimWatermark,
+    Connector, EvmDomain, FakeAppClient, FileJournal, InProcessPeerTransport, OutboundClientError,
+    OutboundClientLedger, PeerRoute, SystemClock, WireClaim,
 };
 use connector_signer::giftwrap::{derive_fulfillment, seal_request};
 use connector_signer::{derive_evm_address, Address, LocalSigner, Signer};
@@ -155,6 +163,28 @@ fn parse_args() -> Result<Args, String> {
 }
 
 /// The 32-byte on-chain channel id `n`, hex, as the peer semantics spells one.
+/// The downstream box answering where box 1's claims on the channel stand
+/// -- the authority every covering claim is priced off. A real deployment
+/// asks it over `POST /ilp/claim-state`; here it is in process, because
+/// what this bench measures is box 1's own disk writes rather than a peer's
+/// HTTP latency.
+struct DownstreamWatermark;
+
+#[async_trait::async_trait]
+impl ClaimStateSource for DownstreamWatermark {
+    async fn watermark(
+        &self,
+        _channel: &[u8; 32],
+        _domain: &ClaimStateDomain,
+    ) -> Result<ClaimWatermark, OutboundClientError> {
+        Ok(ClaimWatermark {
+            nonce: 0,
+            cumulative: 0,
+            available: Some(u128::MAX),
+        })
+    }
+}
+
 fn channel_id(n: u8) -> String {
     format!("0x{n:064x}")
 }
@@ -284,8 +314,27 @@ async fn main() {
         Arc::new(SystemClock),
     )
     .with_signer(box_1_signer)
-    // The channel box 1 signs its own outbound claims against, per forward.
-    .with_peer_claim_channel(DOWNSTREAM_PEER, channel_id(2))
+    // The channel box 1 signs its own outbound claims against, per forward
+    // -- the CLIENT role, which is the only outbound role there is since
+    // issue #1145 deleted the postpay one. The nonce reservation this
+    // ledger makes per forward is one of the `fdatasync` calls this bench
+    // is counting.
+    .with_outbound_client_ledger(Arc::new(
+        OutboundClientLedger::open(
+            journal_dir.join(format!("{}.outbound-client.log", args.mode.name())),
+        )
+        .expect("open the outbound client ledger"),
+    ))
+    .with_outbound_client_hop(
+        DOWNSTREAM_PEER,
+        channel_id(2),
+        EvmDomain {
+            chain_id: bench_channel_domain().chain_id,
+            token_network: bench_channel_domain().token_network_address,
+        },
+        Arc::new(DownstreamWatermark),
+    )
+    .expect("channel 2 is a valid on-chain channel id")
     .with_channel_domain(channel_id(2), bench_channel_domain())
     .expect("channel 2 is a valid on-chain channel id")
     // The channel the upstream node's claims arrive on, and the key box 1

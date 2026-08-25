@@ -37,26 +37,26 @@ key_file = "/app/data/signer.key"
 # request (ADR 0019). The trailing slash is load-bearing (`handler_url.join`
 # and RFC 3986).
 #
-# `price = 0`, AND THAT IS A PROPERTY OF THE b-c PEERING RATHER THAN A RULE.
-# A route a node both TERMINATES and PRICES refuses a peer PREPARE that arrives
-# without a claim covering that price (`F06`, issue #880). The b-c peering is
-# POSTPAY: value moves on fulfilment (ADR 0004), so B owes this node nothing
-# until a crossing has fulfilled, the first crossing therefore carries no claim,
-# is refused, never fulfils, leaves nothing owed, and the second carries none
-# either. A price here deadlocks the peering instead of charging for it.
+# `price = 0`, AND THAT IS NOW A CHOICE RATHER THAN A CONSTRAINT. A route a
+# node both TERMINATES and PRICES refuses a peer PREPARE that arrives without a
+# claim covering that price (`F06`, issue #880), and this leg used to be
+# POSTPAY -- B owed this node nothing until a crossing had fulfilled, so the
+# first crossing carried no claim, was refused, never fulfilled, left nothing
+# owed, and the second carried none either. A price here deadlocked the peering
+# instead of charging for it.
 #
-# WHAT WOULD CHANGE THAT IS A ROW ON B, NOT A FIGURE HERE. `local/two-hop` does
-# exactly that and its payee IS priced: a `[[pay_channels]]` row on the payer
-# (ADR 0042 item 2) covers each PREPARE *before* it is sent, so crossing 1
-# arrives already paid for. `local/two-hop/connector-a.toml` and
-# `connector-b.toml` are the two halves of that arrangement. Nothing forbids
-# the same on this leg; it is simply not what this topology is about, which is
-# one node holding a settlement backend on each of two chains.
+# THAT IS OVER (issue #1145). B holds a `[[pay_channels]]` row for `b-c` and
+# covers each PREPARE *before* it is sent, so crossing 1 arrives here already
+# paid for and a price would be perfectly payable. It stays at zero because
+# pricing a peer termination is what `local/two-hop` is for -- there is no
+# second thing this topology would learn from doing it again on the other
+# chain, and what this topology IS for is one node holding a settlement backend
+# on each of two.
 #
-# So what B owes this node is the forwarded amount, and `[[peer_channels]]`
+# So what B pays this node is the forwarded amount, and `[[peer_channels]]`
 # below is what that claim is written against. Since issue #1144 that figure
 # is what is left after two hops have taken their fees: the rehearsal sends
-# 1200, A keeps 100, B keeps 50, and 1000 arrives here -- unpriced, so nothing
+# 1200, A keeps 100, B keeps 50, and 1050 arrives here -- unpriced, so nothing
 # is required of it, but paid for all the same by the claim B signs on the
 # Solana channel. `connector-a.toml` writes the whole path's arithmetic out in
 # one block.

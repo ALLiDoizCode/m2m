@@ -1115,7 +1115,9 @@ be replayed as a payment or vice versa:
   ClaimStateChallenge(bytes32 channelId,uint256 expires)
   ```
 - **solana** — Ed25519 over a tagged message distinct in both content and length from a real
-  claim's 48-byte balance-proof message:
+  claim's 96-byte balance-proof message (48 bytes before ADR 0053 bound the program id into it,
+  issue #1082; the challenge tag was chosen to be neither the same length as nor a prefix or suffix
+  of either layout):
   ```text
   message = "toon-claim-state-challenge-v1" || channelAccount(32 bytes) || expires(u64 LE)
   ```
