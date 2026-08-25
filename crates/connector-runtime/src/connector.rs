@@ -405,8 +405,7 @@ pub struct Connector {
     /// Claims owed to and received from every peering relation (ADR 0004,
     /// ADR 0005, issue #423): signing an outbound claim on fulfilment,
     /// verifying and watermarking an inbound one. Empty and signer-less
-    /// until configured via [`Connector::with_signer`],
-    /// [`Connector::with_peer_claim_channel`] and
+    /// until configured via [`Connector::with_signer`] and
     /// [`Connector::with_channel_verification_key`] -- a node with none of
     /// those simply never emits or accepts a claim, matching how
     /// `settlement` degrades to `None`.
@@ -703,10 +702,11 @@ impl Connector {
     /// it** (issue #875): the channel it holds with that hop, and the hop
     /// itself as the source of that channel's watermark.
     ///
-    /// Deliberately separate from [`Connector::with_peer_claim_channel`]
-    /// even where both name the same channel id. That one configures the
-    /// PEER role -- claims this node signs against its own `ClaimBook`
-    /// projection once a forward has fulfilled. This one configures the
+    /// Deliberately separate from the PEER-role binding a `[[peer_channels]]`
+    /// row makes, even where both name the same channel id. That one is now
+    /// INBOUND ONLY: its outbound half signed a claim against this node's own
+    /// `ClaimBook` projection once a forward had fulfilled, which was ADR
+    /// 0004's postpay model and was deleted in issue #1145. This one configures the
     /// CLIENT role, whose watermark authority is the receiver, asked over
     /// `claim_state` every time. The two books must never merge (see
     /// `crate::outbound_client`'s header), and configuring them apart is
@@ -844,7 +844,7 @@ impl Connector {
     /// Configure `channel_id`'s EIP-712 signing domain -- the chain it is
     /// deployed on and the `TokenNetwork` contract that verifies a claim's
     /// signature on redemption (issue #575/#566). Required, alongside
-    /// [`Connector::with_peer_claim_channel`] or
+    /// a `[[peer_channels]]` row or
     /// [`Connector::with_channel_verification_key`], before this channel
     /// can sign or accept a claim -- see [`ClaimBook::set_channel_domain`].
     /// `channel_id` must already be the channel's on-chain `bytes32`, refused
