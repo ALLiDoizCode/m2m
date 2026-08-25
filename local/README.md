@@ -66,11 +66,11 @@ nothing left to forward.
 
 ## Topologies
 
-| Topology                       | Nodes | What it proves                                                                                                                                                                                                                                                    |
-| ------------------------------ | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`solo/`](solo/)               | 1     | The image boots on a mounted config with **both** settlement backends live at once, and a real packet reaches the app behind its one route.                                                                                                                       |
-| [`two-hop/`](two-hop/)         | 2     | Two images peered over ILP-over-HTTP. B **prices** the route it terminates; A covers each crossing before sending it, with a real EIP-712 claim on a real funded channel on the local anvil.                                                                      |
-| [`mixed-chain/`](mixed-chain/) | 3     | A↔B settles on EVM, B↔C on Solana, and B holds **both** backends. A packet originated at A reaches C's app, crossing a chain boundary in the middle — and B **enforces** on the arrival it forwards, the only place ADR 0042 item 3's enforcing path runs at all. |
+| Topology                       | Nodes | What it proves                                                                                                                                                                                                                                                                                                               |
+| ------------------------------ | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`solo/`](solo/)               | 1     | The image boots on a mounted config with **both** settlement backends live at once, and a real packet reaches the app behind its one route.                                                                                                                                                                                  |
+| [`two-hop/`](two-hop/)         | 2     | Two images peered over ILP-over-HTTP. B **prices** the route it terminates; A covers each crossing before sending it, with a real EIP-712 claim on a real funded channel on the local anvil.                                                                                                                                 |
+| [`mixed-chain/`](mixed-chain/) | 3     | A↔B settles on EVM **over BTP**, B↔C on Solana **over ILP-over-HTTP**, and B holds both backends. One packet crosses two chains _and_ two carriages — the only place a shipped image carries a packet over BTP at all — and B **enforces** on the arrival it forwards, the only place ADR 0042 item 3's enforcing path runs. |
 
 `two_ledgers_never_merge.rs` is named for the both-chains concern and proves it
 in-process; `solo` is the only place a node is actually stood up with an EVM and
@@ -258,7 +258,9 @@ and the sender's `AMOUNT`/`PRICE`/`FEE` to one arithmetic is
 which claim paid for which packet, only that the totals line up. It says nothing
 about whether any of it could be **redeemed on chain**, for the reason the next
 section gives: nothing on the peer path reads a chain. And it says nothing about
-the BTP carriage, which no topology here runs.
+the BTP carriage, because `two-hop` is ILP-over-HTTP on both sides and stays
+that way — that gap moved to `mixed-chain` in issue #1155 rather than closing
+here, and the paragraph below is where it closed.
 
 `mixed-chain`'s money check used to be the weaker one, and could not have been
 anything else: it greps each payee's journal for an accepted claim on its own
@@ -275,6 +277,33 @@ It gained a second thing on the other side of the same crossing: B's `a-b`
 peering **enforces**, so an arrival from A that carried no covering claim is
 refused `F06` and never reaches C at all. A regression that stopped A covering
 fails `--expect-fulfill` on the first crossing rather than passing quietly.
+
+And a third, in issue #1155: **that crossing is now carried over BTP**, and it
+is the only place in this repository where a shipped image carries a packet on
+ADR 0027's first carriage at all. A dials `ws://connector-b:3000/ilp/btp` — the
+same listener `client_edge_addr` binds, since BTP rides `GET /ilp/btp` and
+needs no port of its own — while B still dials C over `http://`. So one packet
+crosses two carriages as well as two chains, which is the property `CONTEXT.md`
+asserts and nothing here could previously show: below the transport port there
+is one pipeline, and peer behaviour that exists on one carriage and not the
+other is a defect rather than a difference.
+
+The journal grep at B is what makes that a measurement rather than a
+configuration claim. B sets `peer_expose = "btp"`, so **no ILP-over-HTTP peer
+carriage is mounted on it at all** — an A that fell back to `POST /ilp` would
+be admitted as an ordinary client, whose claims never reach the peer book. An
+accepted peer claim in B's journal therefore cannot have arrived on anything
+but a BTP frame, and the 2200 cumulative that check already demanded is
+evidence of the carriage for free.
+
+`two-hop` is deliberately **not** converted. It is where a priced peer
+termination is proven and it is the containerised counterpart of
+`two_connectors_peer.rs`, which it already diverges from in exactly one place;
+a second divergence is worth more than a second BTP peering. `peer_expose`'s
+default is untouched too — say nothing and a node still exposes no peer
+listener at all, which is right, because a peer listener is the surface that
+accepts value-bearing traffic. Carriage is operator policy, never a protocol
+constant.
 
 This is also why `make local-down` removes the state volumes. Both local chains
 wipe their own state on every start, so keeping a claim journal across a

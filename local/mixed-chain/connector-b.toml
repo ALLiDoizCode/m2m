@@ -22,6 +22,16 @@
 # process, and `local/solo` stands a node up with both attached -- but neither
 # has a second node on the far side of either chain, so neither can show a
 # packet crossing from one to the other.
+#
+# SINCE ISSUE #1155 THE MIDDLE IS DOUBLY MIXED. A reaches this node over BTP
+# (`ws://`, `peer_expose = "btp"` below) and this node reaches C over
+# ILP-over-HTTP (`http://`), so one packet crosses both carriages as well as
+# both chains, and the hop that reads it off one wire and writes it onto the
+# other is this one. That is what makes this file evidence for `CONTEXT.md`'s
+# claim rather than a restatement of it: "below the transport port there is one
+# pipeline ... peer behaviour that exists on one carriage and not the other is
+# a defect rather than a property of the carriage". The fee below is subtracted
+# once, between the two.
 # =============================================================================
 
 client_edge_addr = "0.0.0.0:3000"
@@ -38,7 +48,29 @@ state_dir = "/app/state"
 # plain container port with no TLS terminator). Expose and dial are separate
 # settings with separate spellings for exactly this reason -- a carriage name
 # and a URL scheme (peer-carriage-spec.md §2.1).
-peer_expose = "http"
+#
+# AND SINCE ISSUE #1155 THEY DISAGREE, WHICH IS THE POINT. This node exposes
+# BTP and dials HTTP: A reaches it at `GET /ilp/btp` on the very listener
+# `client_edge_addr` binds, and it reaches C at C's `POST /ilp`. Exposure is
+# per CONNECTOR and dialling is per PEER, so those are not two answers to one
+# question -- and a config where they had to agree would have made the
+# separate spellings decoration. `local/two-hop` still exposes and dials HTTP,
+# so both readings are committed somewhere.
+#
+# `"btp"` and not `"both"`: this node accepts exactly one peering, A's, and
+# that peering is BTP. `"both"` would open an ILP-over-HTTP peer listener no
+# configured peer would ever reach -- a value-bearing surface with no
+# counterparty, which is what `peer_expose` defaulting to `"neither"` exists to
+# avoid. The narrower value is also what makes this topology's money check
+# evidence of the CARRIAGE: with no HTTP peer path mounted at all, a claim in
+# this node's peer journal can only have arrived over a BTP frame.
+#
+# Nothing about the CLIENT edge changes. `POST /ilp`, `GET /ilp/identity` and
+# `POST /ilp/claim-state` are served exactly as before -- `peer_expose` decides
+# which carriages may bind a PEER ROLE, never which routes exist -- which is
+# why A can still ask this node where its claims stand over plain HTTP while
+# peering with it over a websocket.
+peer_expose = "btp"
 peer_allow_plaintext_endpoints = true
 
 [signer]
@@ -70,9 +102,21 @@ peer_id = "b-c"
 fee = 50
 price = 1100
 
-# ── The EVM peering: A dials in ──────────────────────────────────────────────
-# No `endpoint`: A dials us, which on ILP-over-HTTP makes this node the payee
-# of that peering (§6.4).
+# ── The EVM peering: A dials in, over BTP ────────────────────────────────────
+# No `endpoint`: A dials us. Since issue #1155 it dials
+# `ws://connector-b:3000/ilp/btp`, and this row is unchanged by that -- WHICH
+# CARRIAGE A REACHES US ON IS A'S FILE'S BUSINESS AND NOT THIS ROW'S (§2.1).
+# The only thing on this node that names the carriage at all is `peer_expose`
+# above, and it names it once.
+#
+# BUT THE REASON THIS NODE IS THE PAYEE CHANGED, and the old comment here would
+# now be wrong. On ILP-over-HTTP the accept-only side is STRUCTURALLY the payee
+# (§6.4): only the dialing side can originate, so packets can only flow one way
+# and debt follows packets. BTP has no such asymmetry -- §2.3 makes a dialed
+# session symmetric once auth has bound it, and either side may originate on
+# it. This node is the payee of this peering because of ROUTING: A holds a
+# `[[routes]]` row forwarding to `a-b` and this node holds none pointing back.
+# The carriage stopped deciding it; the route tables always did.
 #
 # `forwarded_claim_enforcement = "enforce"` HERE, AND THIS IS THE ONLY ROW IN
 # THE REPOSITORY WHERE IT DOES ANYTHING. ADR 0042 item 3 (issue #1142) says a
@@ -103,7 +147,19 @@ forwarded_claim_enforcement = "enforce"
 [peers.credential]
 secret_file = "/app/data/peer-a-b-secret"
 
-# ── The Solana peering: we dial C ────────────────────────────────────────────
+# ── The Solana peering: we dial C, over ILP-over-HTTP ────────────────────────
+# `http://` ON PURPOSE, AND IT IS HALF OF WHAT ISSUE #1155 BOUGHT. Moving both
+# peerings to BTP would have proven the carriage and lost the comparison: with
+# `a-b` on `ws://` and this one on `http://`, one packet arrives here on a
+# websocket frame and leaves on an HTTP POST, and every rule between the two --
+# the route match, the flat fee, the covering claim minted for the next hop --
+# runs once and knows about neither. A regression that made a peer arrival
+# behave differently by carriage cannot hide in a stack where the same hop does
+# both.
+#
+# Note also what this node does NOT have to say: it exposes BTP and dials HTTP,
+# and there is no key anywhere pairing those two answers. `peer_expose` is per
+# connector, this `endpoint` is per peer (§2.1).
 [[peers]]
 id = "b-c"
 endpoint = "http://connector-c:3000/ilp"

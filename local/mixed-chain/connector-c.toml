@@ -25,6 +25,14 @@ state_dir = "/app/state"
 # CF-17: the peer carriage rides this node's own listener. C dials nobody, so
 # there is no `peer_allow_plaintext_endpoints` here -- the opt-in widens which
 # schemes this node may DIAL, and C never does.
+#
+# `"http"`, and B one hop back exposes `"btp"` (issue #1155). Two nodes in one
+# stack exposing different carriages is not an inconsistency to tidy up: §2.1
+# makes exposure a property of each connector, and a topology where every node
+# answered the same way could never show that. What each node exposes is the
+# carriage the peer that dials IT actually uses -- B is dialled over BTP, this
+# node is dialled over HTTP -- so neither opens a value-bearing listener with
+# no counterparty behind it.
 peer_expose = "http"
 
 [signer]

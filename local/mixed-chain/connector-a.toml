@@ -20,6 +20,15 @@
 # A's role in that is to be the ordinary end: one chain, one peering, no idea
 # that the hop after B is on a different one. Routing does not carry chain, and
 # a hop that had to know would be a hop that could disagree.
+#
+# Since issue #1155 A is also the ordinary end in a SECOND sense: it is the
+# first node in this repository whose peering rides BTP. `a-b` is a `ws://`
+# peering and `b-c` is still `http://`, so this topology is mixed-CARRIAGE as
+# well as mixed-chain, and the packet B forwards arrived over a different wire
+# than the one it leaves on. That is the property `CONTEXT.md` asserts and
+# nothing here could previously show: below the transport port there is one
+# pipeline, and a PREPARE that arrived over BTP is indistinguishable from one
+# that arrived over HTTP.
 # =============================================================================
 
 client_edge_addr = "0.0.0.0:3000"
@@ -31,6 +40,16 @@ state_dir = "/app/state"
 # front of it. Node-wide and default false (CF-18); every deployed config
 # leaves it unset, and a node that sets it logs a WARN naming every plaintext
 # peering at startup.
+#
+# It covers BOTH plaintext schemes and always did: `Config::plaintext_peerings`
+# matches `ws` and `http` alike, and `ws://` is exactly as plaintext as
+# `http://` -- a websocket that was never wrapped in TLS carries every claim,
+# credential and packet in the clear. Since issue #1155 this node's peering is
+# a `ws://` one, so the WARN this switch produces at startup names
+# `a-b` at `ws://connector-b:3000/ilp/btp` rather than an `http://` URL.
+# It also still allows the `http://` `client_edge_url` further down, which is
+# checked by its own rule (`resolve_client_edge_url`) and is a different URL
+# reached over plain HTTP -- see that block.
 peer_allow_plaintext_endpoints = true
 
 [signer]
@@ -76,9 +95,43 @@ peer_id = "a-b"
 fee = 100
 price = 1200
 
+# ── The carriage: BTP, and the first one in this repository ──────────────────
+# THE SCHEME IS THE CARRIAGE, AND NOTHING ELSE IS (peer-carriage-spec.md §2.1).
+# `ws://` selects `connector-peer-btp`; `http://` would select
+# `connector-peer-http`. There is no `carriage = ...` key and there must not be
+# one: `Config::load` reads the scheme, `PeerRelation::from_config` filters on
+# the same answer, and `ConfiguredPeerTransport` is built from it -- one fact,
+# read once.
+#
+# The path matters as well as the scheme. BTP rides THIS NODE'S ORDINARY
+# LISTENER (CF-17): B's `client_edge_addr` binds one port, `POST /ilp` serves
+# ILP-over-HTTP and `GET /ilp/btp` serves the websocket upgrade, and role is
+# decided by the `auth` frame's credential rather than by which port arrived
+# on (§1.3). So this change added no port, no service and no dependency to
+# `compose.yml`: A reaches B on the container port 3000 it always did, and
+# `POST /ilp/claim-state` further down still reaches the same listener.
+#
+# WHY THIS PEERING AND NOT ANOTHER (issue #1155). No shipped image had ever
+# carried a packet over BTP: all three topologies were ILP-over-HTTP, so
+# ADR 0027's first carriage was proven by `connector-peer-btp`'s in-process
+# suites and by nothing else. This is the peering worth spending on, because
+# it is the only one in this repository whose arrival is FORWARDED -- B's
+# `a-b` row is where `forwarded_claim_enforcement = "enforce"` binds (ADR 0042
+# item 3), so putting it on BTP proves the carriage moving a covering claim
+# through a gate that will refuse the packet without one, not just moving
+# bytes. `local/two-hop` stays on HTTP on purpose: it is the containerised
+# counterpart of `two_connectors_peer.rs` and already diverges from it in
+# exactly one deliberate place.
+#
+# WHAT DOES NOT CHANGE: everything above the transport port. The fee, the
+# route, the claim, the watermark and the answer are the same objects they
+# were on HTTP (spec I5), which is the whole point -- `b-c` below stays
+# `http://`, so ONE packet crosses both carriages and a hop's behaviour that
+# differed between them would show up here as a broken topology rather than as
+# a documented quirk.
 [[peers]]
 id = "a-b"
-endpoint = "http://connector-b:3000/ilp"
+endpoint = "ws://connector-b:3000/ilp/btp"
 
 [peers.credential]
 secret_file = "/app/data/peer-a-b-secret"
@@ -118,12 +171,22 @@ token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
 # packet and never remembered; the CHANNEL ID and EIP-712 DOMAIN are the peer
 # row's own, because both roles sign against the very same on-chain channel.
 #
-# `client_edge_url` is B's `POST /ilp` -- the same URL the peering dials, still
-# written out rather than derived from it (a `wss://` peering has no HTTP
-# client edge to derive one from). `http://` needs
-# `peer_allow_plaintext_endpoints` above, because the claim-state ask carries a
-# signed EIP-712 challenge -- a capability to read this channel's state -- in
-# the clear.
+# `client_edge_url` is B's `POST /ilp`, AND IT IS NOT THE URL THIS PEERING
+# DIALS -- since issue #1155 it visibly is not, because the peering dials
+# `ws://connector-b:3000/ilp/btp` and this is `http://connector-b:3000/ilp`.
+# `pay_channel.rs` has always said a peering's own endpoint "is not it: on a
+# `wss://` peering there is no HTTP URL there at all, and turning one into the
+# other by swapping scheme and appending a path is exactly the class of guess
+# ADR 0030 refuses for `btpEndpoint`". Until this peering moved to BTP the two
+# happened to be the same string in every committed config, which is the state
+# in which a derivation looks free; this is the first file where the claim-state
+# ask and the packet carriage genuinely part company, and the reason the key is
+# written out rather than computed.
+#
+# `http://` needs `peer_allow_plaintext_endpoints` above -- the same switch the
+# `ws://` endpoint needs, checked separately (`resolve_client_edge_url`) --
+# because the claim-state ask carries a signed EIP-712 challenge, a capability
+# to read this channel's state, in the clear.
 #
 # What this row buys the topology beyond paying for the crossing: it is what
 # lets B ENFORCE on the arrival. B's `a-b` row reads
