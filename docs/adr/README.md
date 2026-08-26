@@ -1,6 +1,6 @@
 # Architecture decision records
 
-61 records. **Every one now carries a `**Status:**` line under its title** — that line, not this
+62 records. **Every one now carries a `**Status:**` line under its title** — that line, not this
 index, is the authority for whether a record is live. This page is the map: what is live, grouped
 by area; what is dead, grouped by what killed it; and what the folder still says that the code no
 longer does.
@@ -78,6 +78,7 @@ not change what anything else must do.
 | [0047](0047-the-configuration-schema-is-implementation-detail-capabilities-are-law.md) | The configuration schema is implementation detail; capabilities are law | Accepted — sharpens 0009                                 |
 | [0058](0058-a-peering-is-established-from-a-url.md)                                    | A peering is established from a URL; its identity is trust-on-first-use | Accepted — **built** (#1160); completes 0034             |
 | [0061](0061-a-fee-attaches-to-a-peering-not-to-a-route.md)                             | A fee attaches to a peering, not to a route                             | Accepted — **built** (#1159); amends 0010 and 0028       |
+| [0062](0062-an-rfc-is-vendored-verbatim-and-profiled-never-forked.md)                  | An RFC is vendored verbatim and profiled, never forked                  | Accepted — **built** (#1173); extends 0021               |
 
 ---
 
@@ -273,6 +274,14 @@ rather than per document:
 | `wire-vectors.md`                                                  | the vector companion                                                                                                                                                                                       |
 | `money-model-pre-868.md`                                           | **history** — the pre-#868 credit window (issue #1056)                                                                                                                                                     |
 | `peer-semantics-pre-868.md`                                        | **history** — claimed normative status over retired mechanisms (issue #1065)                                                                                                                               |
+
+[`docs/rfcs/`](../rfcs/README.md) holds the ten Interledger RFCs this connector implements or
+directly profiles, vendored verbatim at a pinned upstream commit, each beneath a **TOON profile**
+naming the departures and the record that governs each
+([0062](0062-an-rfc-is-vendored-verbatim-and-profiled-never-forked.md)). An RFC body is the bottom
+of the precedence order — vectors, then these records, then `docs/protocol/`, then a profile, then
+the body — and is never edited to match this connector. That directory is CC BY-SA 4.0 rather than
+the repository's MIT.
 
 The committed vectors remain the contract for anything a vector covers.
 

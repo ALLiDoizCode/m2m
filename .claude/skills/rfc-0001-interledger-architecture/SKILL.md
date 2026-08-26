@@ -1,39 +1,38 @@
 ---
 name: rfc-0001-interledger-architecture
-description: Expert knowledge of Interledger RFC 0001 - Architecture specification. Use when users ask about Interledger architecture, protocol layers, payment routing, ledger abstraction, or overall system design. Triggers on questions about "how Interledger works", "ILP architecture", "protocol stack", or architectural concepts.
+description: Expert knowledge of Interledger RFC 0001 - Architecture specification. Use when users ask about Interledger architecture, protocol layers, payment routing, ledger abstraction, or overall system design. Answers from the copy vendored in this repository at docs/rfcs/, which carries a TOON profile saying where this connector departs. Triggers on questions about "how Interledger works", "ILP architecture", "protocol stack", or architectural concepts.
 ---
 
 # RFC 0001: Interledger Architecture
 
-## Overview
+**Read [`docs/rfcs/0001-interledger-architecture/0001-interledger-architecture.md`](../../../docs/rfcs/0001-interledger-architecture/0001-interledger-architecture.md).**
+It is the upstream RFC, unmodified, beneath a **TOON profile** written by this
+project. Answer from that file rather than from memory or from the network.
 
-Provides expert guidance on Interledger Protocol architecture including the layer model, payment routing, connector design, and ledger abstraction as specified in RFC 0001.
+It gives you the layered model and the hop-by-hop shape of a payment.
 
-## Core Capabilities
+## How to read it
 
-### 1. Architecture Explanation
-Answer questions about Interledger's layered architecture and design principles using the MCP tool:
+1. **The TOON profile, at the top.** Every place this connector departs from the
+   RFC, each citing the ADR or `docs/protocol/` rule that governs it. Departures
+   marked ⚠ are unrecorded gaps or divergences nothing guards — say so plainly
+   when one is relevant.
+2. **The body, below the `<!-- BEGIN VERBATIM UPSTREAM BODY -->` marker.** The
+   standard as written. It is never edited to match this connector
+   ([ADR 0062](../../../docs/adr/0062-an-rfc-is-vendored-verbatim-and-profiled-never-forked.md)),
+   and a test enforces that.
+
+## Precedence when they disagree
+
 ```
-mcp__interledger_org-v4_Docs__search_rfcs_documentation
+vectors  >  ADRs  >  docs/protocol/ specs  >  the TOON profile  >  the RFC body
 ```
 
-Search with queries like:
-- "interledger architecture layers"
-- "protocol stack design"
-- "ledger abstraction model"
+The RFC body never overrides anything local — it is what the local rules are
+stated against. If the question is "what does this connector do", the ADR wins.
+If the question is "what does Interledger specify", the body wins. Distinguish
+the two in your answer; they are often not the same, and this file exists
+because that surprised somebody.
 
-### 2. Protocol Layer Guidance
-Explain the different protocol layers (Application, Transport, Interledger, Ledger) and their responsibilities.
-
-### 3. Payment Routing
-Describe how payments are routed through connectors across different ledgers.
-
-### 4. Integration Advice
-Help users understand how to integrate with the Interledger architecture.
-
-## Common Topics
-- Layer model and separation of concerns
-- Connector architecture and responsibilities
-- Routing and forwarding mechanisms
-- Ledger abstraction principles
-- End-to-end payment flows
+Never edit the body. A correction to how TOON aligns goes **above** the marker,
+or into the record that owns the rule.
