@@ -22,9 +22,10 @@ use connector_config::{
     PeerChannelConfig, SecretLocation, SettlementChain, SettlementConfig, SolanaSettlementConfig,
 };
 use connector_runtime::{
-    ChannelDomain, ClaimStateChallengeSigner, Connector, EvmDomain, FileJournal, HttpAppClient,
-    InMemoryJournal, Journal, JournalError, OutboundClientError, OutboundClientLedger,
-    OwnedHttpClaimState, PeerRoute, PeerRouteStore, PeerRouteStoreError, SystemClock,
+    BoundedHttpSelfDescription, ChannelDomain, ClaimStateChallengeSigner, Connector, EvmDomain,
+    FileJournal, HttpAppClient, InMemoryJournal, Journal, JournalError, OutboundClientError,
+    OutboundClientLedger, OwnedHttpClaimState, PeerRegistrar, PeerRoute, PeerRouteStore,
+    PeerRouteStoreError, PeerTransport, SystemClock,
 };
 use connector_settlement::{SettlementBackend, SettlementError};
 use connector_settlement_evm::{
@@ -1523,10 +1524,27 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
         config.routes().to_vec(),
         peer_routes,
         Arc::new(HttpAppClient::new()),
-        peer_transport,
+        Arc::clone(&peer_transport) as Arc<dyn PeerTransport>,
         Arc::new(SystemClock),
     )
     .with_identity_signer(signer.clone())
+    // ADR 0058: the same transport, in its other role. `POST /peers`
+    // establishes a peering and registers its carriage here, and
+    // `DELETE /peers/:id` takes it away -- neither waits for a restart,
+    // which is the whole of what made a runtime peer row a name with
+    // nothing behind it.
+    .with_peer_registrar(Arc::clone(&peer_transport) as Arc<dyn PeerRegistrar>)
+    // The one outbound request this connector makes to an
+    // operator-supplied host, and it is bounded (ADR 0058): a whole-
+    // exchange timeout, a body cap enforced as the body streams, and no
+    // redirect followed. Never reached from the packet path.
+    .with_self_description_source(Arc::new(BoundedHttpSelfDescription::new(
+        config.peer_allow_plaintext_endpoints(),
+    )))
+    // The same node-wide opt-in a `[[peers]]` endpoint takes (issue #678
+    // gap 3), so a peering established at runtime picks its carriage by
+    // exactly the rule a config-file peering does.
+    .with_peer_allow_plaintext_endpoints(config.peer_allow_plaintext_endpoints())
     // Issue #884: the routing table IS the relationship set enforced at
     // load (`connector-config`'s `UnknownPeerId` check), so a runtime
     // write must never be able to add, update or remove a peer id the

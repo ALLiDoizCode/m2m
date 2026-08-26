@@ -33,6 +33,11 @@ url = "2"
 [dev-dependencies]
 ed25519-dalek = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-hyper = { version = "0.14", features = ["server", "http1", "tcp", "runtime"] }
+# A real HTTP server for the self-description fetch's own bounds (ADR
+# 0058): a redirect, a status, and a body that never ends are properties of
+# an exchange, not values a fake can hand back.
+axum = "0.6"
+futures-util = "0.3"
+hyper = { version = "0.14", features = ["server", "http1", "tcp", "runtime", "stream"] }
 tempfile = "3"
 proptest = "1"

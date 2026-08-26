@@ -11,7 +11,9 @@ mod operator_view;
 mod outbound_client;
 mod peer_route_store;
 mod peer_transport;
+mod peering;
 mod route;
+mod self_description;
 #[cfg(test)]
 mod test_support;
 
@@ -50,6 +52,20 @@ pub use outbound_client::{
     HttpClaimState, OutboundClaim, OutboundClaimBinding, OutboundClientError, OutboundClientLedger,
     OwnedHttpClaimState, SolanaDomain,
 };
-pub use peer_route_store::{PeerRouteStore, PeerRouteStoreError};
-pub use peer_transport::{InProcessPeerTransport, PeerForward, PeerTransport};
+pub use peer_route_store::{
+    PeerRouteStore, PeerRouteStoreError, RuntimePeerChannel, RuntimePeering, RuntimePeers,
+};
+pub use peer_transport::{InProcessPeerTransport, PeerForward, PeerRegistrar, PeerTransport};
+// ADR 0058's one operator write: establish a peering from a URL.
+pub use peering::{
+    ChannelBranch, EstablishPeeringError, EstablishedChannel, PeeringEstablished,
+    PEERING_SETTLEMENT_TIMEOUT_SECONDS,
+};
 pub use route::{LeasedRoute, PeerRoute};
+// Reading ANOTHER node's self-description, so a peering can be established
+// from a URL (ADR 0058, ADR 0050). The one outbound request this connector
+// makes to an operator-supplied host, and it is bounded.
+pub use self_description::{
+    BoundedHttpSelfDescription, SelfDescriptionError, SelfDescriptionSource,
+    UnreachableSelfDescription, FETCH_TIMEOUT, MAX_DOCUMENT_BYTES,
+};

@@ -122,18 +122,57 @@ tells you about the node.
 A peering is created by an **operator** and by nothing else. It cannot be bought, learned, earned or
 announced into existence ([ADR 0043](../adr/0043-purchasable-peering-is-removed.md)).
 
-Both operators act, and the facts each needs come from the other's self-description — fetched
-directly, over TLS, from the node itself. **Ask direct, pay through**
-([ADR 0022](../adr/0022-a-connector-answers-it-does-not-announce.md)).
+**One write, and the URL is the whole of what you give it**
+([ADR 0058](../adr/0058-a-peering-is-established-from-a-url.md)):
 
-Each side needs: the counterparty's id, its **counterparty key**, an endpoint whose scheme selects the
-carriage (`wss://` for BTP, `https://` for HTTP), a fee, a cap, and a channel the other side's claims
-are judged against.
+```
+POST /peers { "id": "...", "url": "https://…/ilp", "fee": 100, "max_packet_amount": 5000 }
+```
+
+The node `GET`s that URL's self-description and takes from it the endpoint, the carriage that
+endpoint's scheme selects (`wss://` for BTP, `https://` for HTTP), the counterparty's edge identity,
+and its per-chain settlement address and chain facts. It then derives the payment channel from the
+two settlement addresses, opens it on chain if it is absent, and writes the peering down
+([ADR 0059](../adr/0059-a-channel-is-derived-from-its-participants.md)). Both operators do this,
+each with the other's URL, and they land on the same channel without exchanging an identifier.
+
+**What you supply, and why only these three.** `id` is your own **local label** — never derived from
+the peer's ILP address, which is self-asserted, and never from the URL host. `fee` and
+`max_packet_amount` are your policy about that counterparty, and are in the request precisely because
+no document can supply them.
+
+**Whatever the URL serves is who the peering is with.** The identity in the document is not checked
+against anything you sent, and it is not pinned, verified or attested by anything. It is
+trust-on-first-use over TLS, and your vetting of the URL is the whole of the assurance. A party who
+controls that hostname's DNS, or a certificate for it, chooses the counterparty — and that choice
+determines the channel address, so it is a party you would fund.
+
+**This write can spend gas.** It is safe to retry: a repeat against a peering already established
+finds the same channel and succeeds. The answer says which branch it took —
+`"channel": { "id": "0x…", "status": "found" | "created" }` — so an unintended second channel shows
+up in your own output rather than on a block explorer later.
+
+**Two nodes that settle on more than one chain in common** must say which: add `"chain": "evm"` or
+`"chain": "solana"`. Without it the write is refused by name rather than resolved silently.
 
 **A new peering starts at a conservative cap.** The cap is the most this connector is willing to lose
 in one theft, and nothing raises it automatically — a connector never earns its own cap
 ([ADR 0049](../adr/0049-the-cap-bounds-one-packet-is-discovered-by-t04-and-is-set-from-outside.md)).
-Raising it is an operator decision, or a controller's, through the operator surface.
+Raising it is an operator decision, or a controller's: post the same `id` again with a larger
+`max_packet_amount`. Omitting it, or writing zero, keeps the standing bound; nothing on this surface
+removes one.
+
+**A route through the peering is a second, separate write** — `POST /routes/peers { prefix, peer_id,
+price }` — because a peering and a route are different decisions and one may exist without the other.
+Onboarding is those two calls, with `POST /channels` still available for an operator who wants to open
+a channel on their own terms first; this write then _finds_ it.
+
+**`DELETE /peers/:id` is the kill switch.** It takes the carriage away with the durable row, so it is
+immediate and needs no restart. A peering still referenced by a runtime route is refused until the
+route goes ([ADR 0034](../adr/0034-a-runtime-peer-route-table-never-shadows-the-config-file.md)).
+
+A peering written in the config file is the same object, differing only in where it is recorded and
+which wins a collision: config always wins, by refusing the runtime write outright.
 
 ### 1.6 There is no announce
 
@@ -248,14 +287,16 @@ exposed through. Both are live and both are load-bearing for OP-05 and OP-02.
 Uses exactly the vocabulary of [`CONTEXT.md`](../../CONTEXT.md) and implements
 [ADR 0008](../adr/0008-operator-surface-splits-read-from-write.md),
 [ADR 0022](../adr/0022-a-connector-answers-it-does-not-announce.md),
-[ADR 0034](../adr/0034-a-runtime-peer-route-table-never-shadows-the-config-file.md) and
-[ADR 0046](../adr/0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md).
+[ADR 0034](../adr/0034-a-runtime-peer-route-table-never-shadows-the-config-file.md),
+[ADR 0046](../adr/0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md) and
+[ADR 0058](../adr/0058-a-peering-is-established-from-a-url.md).
 
 **Coverage:** none of OP-01 – OP-07 is vectored and none will be. The operator surface is not a wire
 surface; per [ADR 0045](../adr/0045-a-behavioural-rule-is-normative-prose-until-its-vector-lands.md)
 these are prose-normative permanently and do not enter the debt ledger.
 
-**Not yet built**, and marked rather than narrated: `GET /ilp` returning the self-description (§1.4) is
-#1080; §2.1's boot-time deletion of a colliding runtime row is #1076; a runtime-settable cap (§1.5) is
-#1079. The sixteen task-runbooks in `docs/operators/` remain what they are — procedures for specific
-boxes and specific migrations — and several describe a fleet topology that no longer exists.
+**Not yet built**, and marked rather than narrated: §2.1's boot-time deletion of a colliding runtime
+row is #1076. `GET /ilp` returning the self-description (§1.4) landed in #1080, and the
+runtime-settable cap (§1.5) in #1160, which put it on the write that establishes a peering. The
+sixteen task-runbooks in `docs/operators/` remain what they are — procedures for specific boxes and
+specific migrations — and several describe a fleet topology that no longer exists.

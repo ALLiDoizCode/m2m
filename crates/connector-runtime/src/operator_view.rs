@@ -64,6 +64,15 @@ pub struct PeerView {
     /// rather than on [`PeerRouteView`] because it is a property of the
     /// counterparty, not of any prefix routed to it.
     pub fee: u64,
+    /// ADR 0049's cap: the largest amount this connector will forward to
+    /// this peering in one packet. Always a number, never absent -- a
+    /// peering that states none keeps
+    /// [`connector_config::DEFAULT_MAX_PACKET_AMOUNT`], and reporting the
+    /// bound that is actually enforced is the whole point of reporting it
+    /// (0049: *"the operator surface must be able to express a cap"*, and
+    /// an operator who cannot read one back cannot tell whether their
+    /// write landed).
+    pub max_packet_amount: u64,
     pub source: RouteSource,
 }
 

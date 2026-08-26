@@ -1,10 +1,14 @@
 # A peering is established from a URL, and its identity is trust-on-first-use
 
-**Status:** Accepted, **not yet built**. **Depends on [0050](0050-a-connectors-url-resolves-to-its-self-description.md)** (issue #1080) — there is no document to fetch until `GET /ilp` answers one. Completes [0034](0034-a-runtime-peer-route-table-never-shadows-the-config-file.md), whose precedence rules today govern a table that cannot hold a peering. Satisfies both falsifiers of [0049](0049-the-cap-bounds-one-packet-is-discovered-by-t04-and-is-set-from-outside.md). Leaves [0043](0043-purchasable-peering-is-removed.md) and [0006](0006-the-connector-is-mechanism-not-policy.md) intact; **narrows** [0022](0022-a-connector-answers-it-does-not-announce.md), and says how below.
+**Status:** Accepted — **built** (#1160). `POST /peers { id, url, fee, max_packet_amount }` reads the counterparty's self-description, derives the channel, opens it if absent and writes a durable runtime peering; `build_peer_transport` adds and removes a carriage while the process serves. Built on [0050](0050-a-connectors-url-resolves-to-its-self-description.md) (#1080), [0059](0059-a-channel-is-derived-from-its-participants.md) (#1158) and [0060](0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md) (#1157). Completes [0034](0034-a-runtime-peer-route-table-never-shadows-the-config-file.md), whose precedence rules governed a table that could not hold a peering. Satisfies both falsifiers of [0049](0049-the-cap-bounds-one-packet-is-discovered-by-t04-and-is-set-from-outside.md). Leaves [0043](0043-purchasable-peering-is-removed.md) and [0006](0006-the-connector-is-mechanism-not-policy.md) intact; **narrows** [0022](0022-a-connector-answers-it-does-not-announce.md), and says how below.
 
 **Scope:** connector architecture — internal to this codebase. The document it reads is protocol law ([0050](0050-a-connectors-url-resolves-to-its-self-description.md)); the request that reads it is not. See the [ADR index](README.md).
 
-**Falsifier:** `crates/connector-runtime/src/peer_route_store.rs` matching `\bendpoint\b` — a durable runtime peering must persist somewhere to reach its peer, and today the store holds a bare id (`peer_route_store.rs:81-86`). No implementation of this record can avoid putting an endpoint in that file.
+The falsifier this record carried while it was unbuilt — no file at
+`crates/connector-runtime/src/peer_route_store.rs` matching `endpoint` — is **satisfied and
+removed**. `RuntimePeering::endpoint` is that field, and it is precisely the one the marker said no
+implementation of this record could avoid: a durable peering has to persist somewhere to reach its
+peer.
 
 **An operator adds a peering to a running node by naming the peer's URL.** The connector `GET`s that
 URL's self-description, derives the payment channel from the two participants, opens it on chain if
@@ -230,3 +234,38 @@ only in where they are recorded and which wins a collision, which is what 0034 a
 **`CONTEXT.md`'s Peering entry changes.** _"a counterparty key, a carriage to reach it on, a fee, and
 a cap"_ stays accurate in substance, but "created by an operator — in the config file or through the
 operator surface" stops being aspirational for the second half.
+
+## Update (issue #1160) — what the build settled that the decision left open
+
+Three questions the record did not answer had to be answered to build it, and each is answered the
+way this folder's existing rules already pointed.
+
+**Which chain, when two nodes settle on more than one.** The write takes an optional `chain`, and
+refuses by name when several are shared and none was named — the same posture `POST /channels`
+already takes for the identical ambiguity (issue #630). Picking one silently would be picking which
+asset a peering settles in, which is the operator's decision and not this connector's
+([0006](0006-the-connector-is-mechanism-not-policy.md)).
+
+**Which endpoint, when a node publishes both.** BTP where both are published. A dialed BTP session
+is symmetric once established, so either side may originate on it (`peer-carriage-spec.md` §2.3),
+where an ILP-over-HTTP peering can only ever be originated on by the dialer (§6.4). Preferring the
+carriage that leaves both directions open forecloses least, and an operator who wants the other
+writes the peering in the config file.
+
+**How long the opened channel's settlement window is.** A fixed day, and not a field on this
+request. An operator who wants a different one opens the channel with `POST /channels` first, and
+this write then **finds** it — which is the derive-or-open branch working as designed rather than a
+special case, and is why that endpoint stays available.
+
+**The bounds on the outbound fetch, stated as numbers.** Ten seconds for the whole exchange, a 64
+KiB body cap enforced as the body streams rather than after it is buffered, and **no redirect
+followed at all** — a `3xx` is refused by name, because following one would let the named host hand
+the peering to a different host, and under [0059](0059-a-channel-is-derived-from-its-participants.md)
+that choice determines the channel address.
+
+**Trust-on-first-use is unchanged and unstrengthened.** No `settlement_address` pin, no fingerprint,
+no confirmation step was added, and no doc comment, log line or error message describes a peering's
+identity as pinned, verified or attested. The one thing the build does check is the _shape_ of a
+published settlement address — 20 bytes on EVM, 32 base58 bytes on Solana — and that is not a check
+against anything the operator supplied. It is the refusal to coerce bytes into an address that names
+a participant no chain holds.

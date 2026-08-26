@@ -1390,7 +1390,8 @@ mod tests {
     use connector_config::StaticRoute;
     use connector_domain::{derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Reject};
     use connector_runtime::{
-        AppOutcome, FakeAppClient, InMemoryJournal, InProcessPeerTransport, PeerRoute, TestClock,
+        AppOutcome, FakeAppClient, InMemoryJournal, InProcessPeerTransport, PeerRoute,
+        RuntimePeerChannel, RuntimePeering, TestClock,
     };
     use connector_signer::LocalSigner;
     use tower::ServiceExt;
@@ -2930,7 +2931,22 @@ mod tests {
         );
 
         connector
-            .upsert_runtime_peer("later", 0)
+            .upsert_runtime_peer(
+                "later",
+                // A peering with no channel bound to it is refused at
+                // write time (ADR 0058), so the route this test is
+                // actually about needs a peering that could carry it.
+                RuntimePeering {
+                    endpoint: Some("https://later.example/ilp".to_string()),
+                    channels: vec![RuntimePeerChannel::Evm {
+                        channel_id: format!("0x{}", "ab".repeat(32)),
+                        counterparty_key: "0x00000000000000000000000000000000000000aa".to_string(),
+                        chain_id: 31337,
+                        token_network: "0x00000000000000000000000000000000000000bb".to_string(),
+                    }],
+                    ..RuntimePeering::default()
+                },
+            )
             .expect("add a runtime peer");
         connector
             .upsert_runtime_peer_route("g.later", "later", 42)

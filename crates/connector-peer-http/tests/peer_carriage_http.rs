@@ -565,7 +565,7 @@ fn relation() -> PeerRelation {
 }
 
 fn transport(client: Arc<dyn PeerHttpClient>, payer: &dyn Signer) -> HttpPeerTransport {
-    let mut transport = HttpPeerTransport::new(
+    let transport = HttpPeerTransport::new(
         client,
         derive_evm_address(&payer.public_key().unwrap()),
         clock() as Arc<dyn Clock>,

@@ -1423,7 +1423,7 @@ fn generate_retransmit_cases() -> (PeerRetransmitCase, PeerRetransmitCase) {
 
     let mut counterparties = HashMap::new();
     counterparties.insert(first.channel_id.clone(), signer_address);
-    let mut book = ClaimBook::new(None, HashMap::new(), counterparties);
+    let book = ClaimBook::new(None, HashMap::new(), counterparties);
     book.set_channel_domain(
         &first.channel_id,
         ChannelDomain {

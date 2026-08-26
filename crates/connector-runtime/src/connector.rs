@@ -34,9 +34,12 @@ use crate::operator_view::{
 use crate::outbound_client::{
     ClaimStateSource, EvmDomain, OutboundClaimBinding, OutboundClientLedger, SolanaDomain,
 };
-use crate::peer_route_store::{PeerRouteStore, PeerRouteStoreError, RuntimePeers};
-use crate::peer_transport::PeerTransport;
+use crate::peer_route_store::{
+    PeerRouteStore, PeerRouteStoreError, RuntimePeerChannel, RuntimePeering, RuntimePeers,
+};
+use crate::peer_transport::{PeerRegistrar, PeerTransport};
 use crate::route::{LeasedRoute, PeerRoute};
+use crate::self_description::{SelfDescriptionSource, UnreachableSelfDescription};
 
 /// A reject this connector originates before a gift wrap's shared secret
 /// could be recovered -- no identity key configured, or the wrap itself
@@ -94,6 +97,26 @@ pub enum PeerRouteTableError {
     /// route with a peer id nothing recognizes.
     #[error("peer '{0}' is still referenced by a runtime route")]
     PeerInUse(String),
+    /// A runtime peering carried no payment-channel binding -- the runtime
+    /// twin of `connector-config`'s load-time `PeerChannelUnbound`, which
+    /// refuses a `[[peers]]` row with no `[[peer_channels]]` row for it.
+    ///
+    /// ADR 0058 requires this to be a refusal at *write* time rather than
+    /// a discovery at the first arriving frame: without a channel binding
+    /// a peering can never take the peer role at all (ADR 0060 -- role is
+    /// a verified claim on a channel this peering configures), so a row
+    /// written without one is a peering that silently only ever behaves
+    /// as a stranger.
+    #[error("peering '{0}' has no payment channel bound to it")]
+    PeerChannelUnbound(String),
+    /// A runtime route forwards to a peering this node cannot pay -- the
+    /// runtime twin of the `[[pay_channels]]` rule ADR 0042 made
+    /// load-refusing: *"a peering this node forwards to must name the
+    /// channel it pays from"*. A forward this node cannot cover is
+    /// refused rather than carried, so a route to such a peering would
+    /// only ever produce refused packets.
+    #[error("route '{prefix}' forwards to peering '{peer_id}', which has no channel to pay from")]
+    PeerHasNoPayChannel { prefix: String, peer_id: String },
     #[error("no such runtime peer '{0}'")]
     PeerNotFound(String),
     #[error("no such runtime route '{0}'")]
@@ -556,6 +579,29 @@ pub struct Connector {
     /// amount forwarded, and added to the accumulated cost of a reject this
     /// peer itself decided on (ADR 0011).
     peer_fees: HashMap<String, u64>,
+    /// Reads another node's self-description so a peering can be
+    /// established from a URL (ADR 0058). Defaults to
+    /// [`UnreachableSelfDescription`]: a node whose builder never gave it
+    /// one refuses `POST /peers` by name rather than hanging or panicking,
+    /// the same "degrade to a named refusal" every other unconfigured port
+    /// on this connector takes.
+    ///
+    /// **Never read on the packet path.** The only caller is
+    /// [`Connector::establish_peering`], which is reached from one
+    /// authenticated operator write.
+    self_description: Arc<dyn SelfDescriptionSource>,
+    /// Adds and removes a dial carriage while this process serves (ADR
+    /// 0058). `None` on a node whose transport cannot be changed at
+    /// runtime -- every in-process test harness, and any deployment whose
+    /// peerings all come from the config file -- and then a peering
+    /// established at runtime is durable and unreachable until the next
+    /// boot wires it.
+    peer_registrar: Option<Arc<dyn PeerRegistrar>>,
+    /// The node's own `peer_allow_plaintext_endpoints` (issue #678, gap 3),
+    /// carried here because a peering established at runtime decides its
+    /// carriage by the same rule a config-file peering does and must reach
+    /// the same answer.
+    peer_allow_plaintext: bool,
     /// Where the runtime peer/route table is written durably (issue #884).
     /// `None` on a node with no `state_dir` configured -- the table is
     /// still mutable, exactly like `leased_routes` always is, it simply
@@ -655,8 +701,153 @@ impl Connector {
             runtime_peer_routes: ArcSwap::from_pointee(HashMap::new()),
             runtime_table_lock: Mutex::new(()),
             runtime_store: None,
+            self_description: Arc::new(UnreachableSelfDescription),
+            peer_registrar: None,
+            peer_allow_plaintext: false,
             peer_packet_caps: HashMap::new(),
             peer_fees: HashMap::new(),
+        }
+    }
+
+    /// Give this node the port that reads another node's self-description,
+    /// so `POST /peers` can establish a peering from a URL (ADR 0058).
+    /// Without one every such write is refused by name.
+    pub fn with_self_description_source(mut self, source: Arc<dyn SelfDescriptionSource>) -> Self {
+        self.self_description = source;
+        self
+    }
+
+    /// Give this node the port that adds and removes a dial carriage while
+    /// it serves (ADR 0058), so a peering established at runtime is
+    /// reachable without a restart.
+    pub fn with_peer_registrar(mut self, registrar: Arc<dyn PeerRegistrar>) -> Self {
+        self.peer_registrar = Some(registrar);
+        self
+    }
+
+    /// Tell this node whether plaintext peer endpoints are permitted
+    /// (issue #678, gap 3) -- the same node-wide opt-in `Config` holds, so
+    /// a peering established at runtime chooses its carriage by exactly the
+    /// rule a config-file peering does.
+    pub fn with_peer_allow_plaintext_endpoints(mut self, allow: bool) -> Self {
+        self.peer_allow_plaintext = allow;
+        self
+    }
+
+    pub(crate) fn self_description_source(&self) -> &Arc<dyn SelfDescriptionSource> {
+        &self.self_description
+    }
+
+    pub(crate) fn peer_allows_plaintext(&self) -> bool {
+        self.peer_allow_plaintext
+    }
+
+    /// Refuse a peering write that could never land, **before** any
+    /// outbound request is made: an empty id, or one the config file owns
+    /// (ADR 0034 -- config wins by refusing the write). A stranger's host
+    /// is not worth dialling on behalf of a write this node has already
+    /// decided against.
+    pub(crate) fn refuse_unlandable_peering(&self, id: &str) -> Result<(), PeerRouteTableError> {
+        if id.trim().is_empty() {
+            return Err(PeerRouteTableError::InvalidPeerId);
+        }
+        if self.config_peer_ids.contains(id) {
+            return Err(PeerRouteTableError::OwnedByConfig(id.to_string()));
+        }
+        Ok(())
+    }
+
+    /// The settlement backend for `chain`, for the peering path.
+    pub(crate) fn settlement_on_chain(
+        &self,
+        chain: SettlementChain,
+    ) -> Result<Arc<dyn SettlementBackend>, ChannelOperationError> {
+        self.settlement_on(chain).cloned()
+    }
+
+    /// Narrow a fetched self-description's published settlements to the one
+    /// chain this connector will derive a channel on.
+    pub(crate) fn shared_settlement(
+        &self,
+        document: &connector_domain::NodeSelfDescription,
+        wanted: Option<SettlementChain>,
+        url: &url::Url,
+    ) -> Result<crate::peering::SharedSettlement, crate::peering::EstablishPeeringError> {
+        crate::peering::shared_settlement_of(
+            document,
+            |chain| self.settlement_on(chain).is_ok(),
+            wanted,
+            url,
+        )
+    }
+
+    /// Register a runtime peering's channel binding with this node's claim
+    /// book, so a claim on it is judged from the moment the peering is
+    /// established rather than from the next boot.
+    ///
+    /// The channel is bound in **both** roles with one call, which is the
+    /// deployed shape (`connector_config::pay_channel`'s own header): the
+    /// peer role for what arrives -- a counterparty key and a signing
+    /// domain -- and the client role for what this node sends, which is the
+    /// outbound channel for this peer id.
+    ///
+    /// A binding whose identifiers do not parse is skipped rather than
+    /// coerced: an unparseable channel id names no channel, and a book
+    /// entry filed under a mangled key would accept claims for a channel
+    /// that does not exist.
+    pub(crate) fn bind_runtime_peer_channel(&self, peer_id: &str, binding: &RuntimePeerChannel) {
+        match binding {
+            RuntimePeerChannel::Evm {
+                channel_id,
+                counterparty_key,
+                chain_id,
+                token_network,
+            } => {
+                let (Some(counterparty), Some(token_network_address)) = (
+                    crate::peering::parse_evm_address(counterparty_key),
+                    crate::peering::parse_evm_address(token_network),
+                ) else {
+                    tracing::warn!(
+                        peer_id,
+                        "peering published an EVM address this node cannot read; \
+                         its channel is not bound"
+                    );
+                    return;
+                };
+                if let Err(error) = self.claims.set_channel_domain(
+                    channel_id,
+                    ChannelDomain {
+                        chain_id: *chain_id,
+                        token_network_address,
+                    },
+                ) {
+                    tracing::warn!(peer_id, %error, "peering's channel id is not bindable");
+                    return;
+                }
+                self.claims.set_verification_key(channel_id, counterparty);
+                self.claims.set_outbound_channel(peer_id, channel_id);
+            }
+            RuntimePeerChannel::Solana {
+                channel_account,
+                counterparty_key,
+                program_id,
+            } => {
+                if let Err(error) =
+                    self.claims
+                        .set_solana_channel(channel_account, counterparty_key, program_id)
+                {
+                    tracing::warn!(peer_id, %error, "peering's Solana channel is not bindable");
+                    return;
+                }
+                self.claims.set_outbound_channel(peer_id, channel_account);
+            }
+        }
+    }
+
+    /// Make a runtime peering dialable, if this node holds a registrar.
+    pub(crate) fn register_runtime_peering(&self, peer_id: &str, peering: &RuntimePeering) {
+        if let Some(registrar) = &self.peer_registrar {
+            registrar.register(peer_id, peering);
         }
     }
 
@@ -673,13 +864,30 @@ impl Connector {
     }
 
     /// The most this connector will forward to `peer_id` in one packet --
-    /// its configured cap, or [`DEFAULT_MAX_PACKET_AMOUNT`] for a peer that
-    /// configured none.
+    /// its configured cap, or [`DEFAULT_MAX_PACKET_AMOUNT`] for a peering
+    /// that states none.
+    ///
+    /// Two sources, never overlapping, read in the same order and for the
+    /// same reason [`Self::fee_for`] reads them: the config file's
+    /// `[[peers]]` rows (`peer_packet_caps`) and the runtime peer table,
+    /// which can never hold an id the config file owns (ADR 0034). A
+    /// runtime peering states its cap on its own row, written there by
+    /// `POST /peers` (ADR 0058) -- a peering established at runtime is
+    /// exactly the counterparty ADR 0049 says an operator must be able to
+    /// set a cap for, and the row it lands on is this one.
+    ///
+    /// A stated cap of zero is "this row states none", not "forward
+    /// nothing": there is no call anywhere that removes a bound, and a
+    /// peering that could be silently capped at zero would go dark on a
+    /// default rather than on a decision.
     fn packet_cap_for(&self, peer_id: &str) -> u64 {
-        self.peer_packet_caps
-            .get(peer_id)
-            .copied()
-            .unwrap_or(DEFAULT_MAX_PACKET_AMOUNT)
+        if let Some(cap) = self.peer_packet_caps.get(peer_id) {
+            return *cap;
+        }
+        match self.runtime_peers_snapshot().get(peer_id) {
+            Some(peering) => crate::peering::stated_cap(peering.max_packet_amount),
+            None => DEFAULT_MAX_PACKET_AMOUNT,
+        }
     }
 
     /// Give each named peering the flat per-packet fee its `[[peers]]` row
@@ -708,8 +916,7 @@ impl Connector {
             None => self
                 .runtime_peers_snapshot()
                 .get(peer_id)
-                .copied()
-                .unwrap_or(0),
+                .map_or(0, |peering| peering.fee),
         }
     }
 
@@ -728,12 +935,25 @@ impl Connector {
     /// store -- the two must always be given together, since a table
     /// replayed from `peers`/`routes` but not armed to persist further
     /// writes would silently stop being durable after the first mutation.
+    /// Every replayed peering is also **re-armed**: its channel binding
+    /// goes back into the claim book and its carriage back into the
+    /// registrar, exactly as establishing it did. A durable row that came
+    /// back as a name would be the hollow row ADR 0058 exists to remove,
+    /// one restart later. Call this after
+    /// [`Connector::with_peer_registrar`], or the carriages replay
+    /// nowhere.
     pub fn with_runtime_peer_route_store(
         mut self,
         store: PeerRouteStore,
         peers: RuntimePeers,
         routes: HashMap<String, PeerRoute>,
     ) -> Self {
+        for (id, peering) in &peers {
+            for binding in &peering.channels {
+                self.bind_runtime_peer_channel(id, binding);
+            }
+            self.register_runtime_peering(id, peering);
+        }
         self.runtime_peers = ArcSwap::from_pointee(peers);
         self.runtime_peer_routes = ArcSwap::from_pointee(routes);
         self.runtime_store = Some(store);
@@ -896,7 +1116,7 @@ impl Connector {
     /// claim naming a channel with no domain configured is refused
     /// regardless of this.
     pub fn with_channel_verification_key(
-        mut self,
+        self,
         channel_id: impl Into<String>,
         counterparty: Address,
     ) -> Self {
@@ -913,7 +1133,7 @@ impl Connector {
     /// `channel_id` must already be the channel's on-chain `bytes32`, refused
     /// otherwise rather than hashed or truncated into shape.
     pub fn with_channel_domain(
-        mut self,
+        self,
         channel_id: impl Into<String>,
         domain: ChannelDomain,
     ) -> Result<Self, InvalidChannelId> {
@@ -929,7 +1149,7 @@ impl Connector {
     /// [`ClaimBook::set_solana_channel`] for why the two cannot be
     /// separated on this chain.
     pub fn with_solana_channel(
-        mut self,
+        self,
         channel_account: impl Into<String>,
         counterparty_public_key: &str,
         program_id: &str,
@@ -1068,18 +1288,29 @@ impl Connector {
         }
     }
 
-    /// Add or update a runtime peer row (issue #884): `POST /peers`.
+    /// Add or update a runtime peering (issue #884, ADR 0058): the durable
+    /// half of `POST /peers`.
+    ///
     /// Refused by name -- never silently accepted as a no-op -- when `id`
-    /// is empty or already belongs to the config file
-    /// (`docs/adr/0034-a-runtime-peer-route-table-never-shadows-the-config-file.md`).
-    /// Calling this again for an id already in the runtime table is an
-    /// update (there is nothing to update yet beyond the id itself, but
-    /// the write still persists and still returns `Ok`, matching
-    /// `upsert_leased_route`'s own renew-by-reinsertion shape).
+    /// is empty, when it already belongs to the config file
+    /// (`docs/adr/0034-a-runtime-peer-route-table-never-shadows-the-config-file.md`),
+    /// or when `peering` carries **no payment-channel binding**. That last
+    /// one is the runtime twin ADR 0058 requires of
+    /// `connector-config`'s load-time `PeerChannelUnbound`: a peering with
+    /// no channel can never take the peer role (ADR 0060), so writing one
+    /// would record a relationship that behaves as a stranger and says so
+    /// nowhere.
+    ///
+    /// Calling this again for an id already in the runtime table replaces
+    /// that row wholesale, matching `upsert_leased_route`'s own
+    /// renew-by-reinsertion shape. It is how a peering is repriced, and --
+    /// because ADR 0059 derives the same channel from the same two
+    /// participants -- how repeating `POST /peers` lands on the peering
+    /// that already exists rather than a second one.
     pub fn upsert_runtime_peer(
         &self,
         id: impl Into<String>,
-        fee: u64,
+        peering: RuntimePeering,
     ) -> Result<PeerView, PeerRouteTableError> {
         let id = id.into();
         if id.trim().is_empty() {
@@ -1088,19 +1319,32 @@ impl Connector {
         if self.config_peer_ids.contains(&id) {
             return Err(PeerRouteTableError::OwnedByConfig(id));
         }
+        if peering.channels.is_empty() {
+            return Err(PeerRouteTableError::PeerChannelUnbound(id));
+        }
+        let view = PeerView {
+            id: id.clone(),
+            fee: peering.fee,
+            max_packet_amount: crate::peering::stated_cap(peering.max_packet_amount),
+            source: RouteSource::Runtime,
+        };
         let _write_guard = self
             .runtime_table_lock
             .lock()
             .expect("runtime peer/route table lock poisoned");
         let mut peers = (*self.runtime_peers_snapshot()).clone();
-        peers.insert(id.clone(), fee);
+        peers.insert(id, peering);
         self.persist_runtime_table(&peers, &self.runtime_peer_routes_snapshot())?;
         self.runtime_peers.store(Arc::new(peers));
-        Ok(PeerView {
-            id,
-            fee,
-            source: RouteSource::Runtime,
-        })
+        Ok(view)
+    }
+
+    /// The runtime peering `id` names, or `None` for an id this table does
+    /// not hold. A config-file peering is never here (ADR 0034 keeps the
+    /// two tables disjoint by refusing a collision).
+    #[must_use]
+    pub fn runtime_peering(&self, id: &str) -> Option<RuntimePeering> {
+        self.runtime_peers_snapshot().get(id).cloned()
     }
 
     /// Remove a runtime peer row (issue #884): `DELETE /peers/:id`.
@@ -1130,6 +1374,12 @@ impl Connector {
         next_peers.remove(id);
         self.persist_runtime_table(&next_peers, &routes)?;
         self.runtime_peers.store(Arc::new(next_peers));
+        // ADR 0060 named `DELETE /peers` as the kill switch that replaced
+        // revoking a shared secret: "immediate, does not require a
+        // restart". It is only immediate if the carriage goes with the row.
+        if let Some(registrar) = &self.peer_registrar {
+            registrar.deregister(id);
+        }
         Ok(())
     }
 
@@ -1157,6 +1407,13 @@ impl Connector {
     /// (app route or peer route alike), or when `peer_id` resolves to no
     /// known peer -- the config file's or the runtime table's --
     /// mirroring `connector-config`'s load-time `UnknownPeerId` check.
+    ///
+    /// A **runtime** peering is additionally required to have a channel to
+    /// pay from ([`PeerRouteTableError::PeerHasNoPayChannel`]) -- the
+    /// runtime twin of ADR 0042's `[[pay_channels]]` load rule, which ADR
+    /// 0058 requires enforced continuously rather than once at boot. A
+    /// config-file peering is not re-checked here: `Config::load` already
+    /// refused to start without the row, and this table cannot see it.
     pub fn upsert_runtime_peer_route(
         &self,
         prefix: impl Into<String>,
@@ -1175,10 +1432,14 @@ impl Connector {
             .runtime_table_lock
             .lock()
             .expect("runtime peer/route table lock poisoned");
-        if !self.config_peer_ids.contains(&peer_id)
-            && !self.runtime_peers_snapshot().contains_key(&peer_id)
-        {
-            return Err(PeerRouteTableError::UnknownPeerId { prefix, peer_id });
+        if !self.config_peer_ids.contains(&peer_id) {
+            match self.runtime_peers_snapshot().get(&peer_id) {
+                None => return Err(PeerRouteTableError::UnknownPeerId { prefix, peer_id }),
+                Some(peering) if peering.channels.is_empty() => {
+                    return Err(PeerRouteTableError::PeerHasNoPayChannel { prefix, peer_id })
+                }
+                Some(_) => {}
+            }
         }
         let route = PeerRoute::new_priced(prefix.clone(), peer_id.clone(), price);
         let mut routes = (*self.runtime_peer_routes_snapshot()).clone();
@@ -2580,18 +2841,16 @@ impl Connector {
             .map(|id| PeerView {
                 id: id.clone(),
                 fee: self.fee_for(id),
+                max_packet_amount: self.packet_cap_for(id),
                 source: RouteSource::Config,
             })
             .collect();
-        views.extend(
-            self.runtime_peers_snapshot()
-                .iter()
-                .map(|(id, fee)| PeerView {
-                    id: id.clone(),
-                    fee: *fee,
-                    source: RouteSource::Runtime,
-                }),
-        );
+        views.extend(self.runtime_peers_snapshot().keys().map(|id| PeerView {
+            id: id.clone(),
+            fee: self.fee_for(id),
+            max_packet_amount: self.packet_cap_for(id),
+            source: RouteSource::Runtime,
+        }));
         views
     }
 
@@ -5544,6 +5803,16 @@ mod tests {
                     self.0
                 )))
             }
+
+            async fn live_channel_with(
+                &self,
+                _counterparty: Vec<u8>,
+            ) -> Result<Option<ChannelId>, SettlementError> {
+                Err(SettlementError::Backend(format!(
+                    "{}: live_channel_with",
+                    self.0
+                )))
+            }
         }
 
         fn bare_connector() -> Connector {
@@ -6915,6 +7184,32 @@ mod tests {
     mod runtime_peer_route_table {
         use super::*;
 
+        /// A peering as ADR 0058's `POST /peers` writes one: an endpoint
+        /// to dial the counterparty on and a channel its claims are
+        /// judged against, beside the operator's own fee.
+        ///
+        /// Every test below builds its peerings through this, because a
+        /// peering with no channel bound to it is refused at write time
+        /// (`PeerChannelUnbound`) -- the runtime twin of the load-time
+        /// rule that a `[[peers]]` row needs a `[[peer_channels]]` row.
+        /// The channel id varies with the fee only so two peerings in one
+        /// test do not name the same channel.
+        fn peering(fee: u64) -> RuntimePeering {
+            RuntimePeering {
+                fee,
+                max_packet_amount: 0,
+                endpoint: Some("https://peer.example/ilp".to_string()),
+                edge_identity: Some("0x04ab".to_string()),
+                client_edge_url: Some("https://peer.example/ilp".to_string()),
+                channels: vec![RuntimePeerChannel::Evm {
+                    channel_id: format!("0x{:064x}", fee + 1),
+                    counterparty_key: "0x00000000000000000000000000000000000000aa".to_string(),
+                    chain_id: 31337,
+                    token_network: "0x00000000000000000000000000000000000000bb".to_string(),
+                }],
+            }
+        }
+
         /// A round trip through the exact shape
         /// `forwards_a_packet_matching_a_peer_route_to_the_next_hop`
         /// exercises for a config-file peer route, except the peer and the
@@ -6958,7 +7253,9 @@ mod tests {
                 ),
                 "runtime-hop",
             );
-            first_hop.upsert_runtime_peer("runtime-hop", 0).unwrap();
+            first_hop
+                .upsert_runtime_peer("runtime-hop", peering(0))
+                .unwrap();
             first_hop
                 .upsert_runtime_peer_route("g.example.app", "runtime-hop", 0)
                 .unwrap();
@@ -6991,7 +7288,9 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             );
-            connector.upsert_runtime_peer("runtime-hop", 0).unwrap();
+            connector
+                .upsert_runtime_peer("runtime-hop", peering(0))
+                .unwrap();
             connector
                 .upsert_runtime_peer_route("g.example.app", "runtime-hop", 25)
                 .unwrap();
@@ -7016,7 +7315,9 @@ mod tests {
             )
             .with_config_peer_ids(["apex-store".to_string()]);
 
-            let error = connector.upsert_runtime_peer("apex-store", 0).unwrap_err();
+            let error = connector
+                .upsert_runtime_peer("apex-store", peering(0))
+                .unwrap_err();
             assert!(matches!(error, PeerRouteTableError::OwnedByConfig(id) if id == "apex-store"));
 
             // Not removable at runtime either -- the same rule, checked on
@@ -7119,7 +7420,9 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             );
-            connector.upsert_runtime_peer("runtime-hop", 0).unwrap();
+            connector
+                .upsert_runtime_peer("runtime-hop", peering(0))
+                .unwrap();
             connector
                 .upsert_runtime_peer_route("g.example.app", "runtime-hop", 0)
                 .unwrap();
@@ -7189,7 +7492,9 @@ mod tests {
             connector
                 .upsert_leased_route("g.example.app", "leased-hop", Duration::seconds(60))
                 .unwrap();
-            connector.upsert_runtime_peer("runtime-hop", 0).unwrap();
+            connector
+                .upsert_runtime_peer("runtime-hop", peering(0))
+                .unwrap();
             connector
                 .upsert_runtime_peer_route("g.example.app", "runtime-hop", 0)
                 .unwrap();
@@ -7226,7 +7531,7 @@ mod tests {
             )
             .with_runtime_peer_route_store(store, peers, routes);
             before_restart
-                .upsert_runtime_peer("apex-relay-2", 3)
+                .upsert_runtime_peer("apex-relay-2", peering(3))
                 .unwrap();
             before_restart
                 .upsert_runtime_peer_route("g.example.relay2", "apex-relay-2", 25)
@@ -7272,7 +7577,9 @@ mod tests {
                 test_clock(),
             );
 
-            connector.upsert_runtime_peer("runtime-hop", 0).unwrap();
+            connector
+                .upsert_runtime_peer("runtime-hop", peering(0))
+                .unwrap();
             assert_eq!(connector.peers().len(), 1);
         }
 
@@ -7290,7 +7597,9 @@ mod tests {
             )
             .with_peer_fees([("configured-peer".to_string(), 1)])
             .with_config_peer_ids(["configured-peer".to_string()]);
-            connector.upsert_runtime_peer("runtime-peer", 2).unwrap();
+            connector
+                .upsert_runtime_peer("runtime-peer", peering(2))
+                .unwrap();
             connector
                 .upsert_runtime_peer_route("g.example.runtime", "runtime-peer", 5)
                 .unwrap();
@@ -7303,11 +7612,17 @@ mod tests {
                     PeerView {
                         id: "configured-peer".to_string(),
                         fee: 1,
+                        max_packet_amount: DEFAULT_MAX_PACKET_AMOUNT,
                         source: RouteSource::Config,
                     },
+                    // The cap this peering states is zero -- "this row
+                    // states none" -- so what is reported is the bound
+                    // actually enforced, never a zero that would read as
+                    // "forward nothing" (ADR 0049).
                     PeerView {
                         id: "runtime-peer".to_string(),
                         fee: 2,
+                        max_packet_amount: DEFAULT_MAX_PACKET_AMOUNT,
                         source: RouteSource::Runtime,
                     },
                 ]
@@ -7343,12 +7658,102 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             );
-            connector.upsert_runtime_peer("runtime-hop", 0).unwrap();
+            connector
+                .upsert_runtime_peer("runtime-hop", peering(0))
+                .unwrap();
 
             let error = connector
                 .upsert_runtime_peer_route("not an ilp address", "runtime-hop", 0)
                 .unwrap_err();
             assert!(matches!(error, PeerRouteTableError::InvalidPrefix(_)));
+        }
+
+        /// ADR 0058's first runtime twin, and the one that makes a
+        /// runtime peering a peering rather than a name: a peering with no
+        /// payment channel bound to it is refused **at write time**, the
+        /// runtime analogue of `connector-config`'s load-time
+        /// `PeerChannelUnbound`.
+        ///
+        /// Discovering it at the first arriving frame instead is a peering
+        /// that silently only ever behaves as a stranger: role is a
+        /// verified claim on a channel this peering configures (ADR 0060),
+        /// so with no channel there is no route to the peer role at all.
+        #[test]
+        fn a_peering_with_no_channel_bound_to_it_is_refused_at_write_time() {
+            let connector = Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            );
+
+            let unbound = RuntimePeering {
+                fee: 100,
+                endpoint: Some("https://peer.example/ilp".to_string()),
+                ..RuntimePeering::default()
+            };
+            let error = connector
+                .upsert_runtime_peer("runtime-hop", unbound)
+                .unwrap_err();
+
+            assert!(
+                matches!(error, PeerRouteTableError::PeerChannelUnbound(id) if id == "runtime-hop"),
+                "an endpoint and a fee are not a peering"
+            );
+            assert!(
+                connector.peers().is_empty(),
+                "a refused write leaves no row behind"
+            );
+        }
+
+        /// ADR 0058's second runtime twin: a route forwarding to a peering
+        /// with no channel to pay from is refused, the runtime analogue of
+        /// ADR 0042's `[[pay_channels]]` load rule.
+        ///
+        /// Reached here through a peering replayed out of a durable
+        /// snapshot written before ADR 0058 -- the one way a channel-less
+        /// runtime peering can still exist, since the write above refuses
+        /// to create one. A route to it would produce nothing but refused
+        /// packets: a forward this node cannot cover is refused rather
+        /// than carried.
+        #[test]
+        fn a_route_forwarding_to_a_peering_with_no_pay_channel_is_refused() {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join("runtime_peers.json");
+            // Exactly the bytes the pre-ADR-0058 snapshot format wrote.
+            std::fs::write(
+                &path,
+                r#"{"peers":[{"id":"legacy-hop","fee":7}],"routes":[]}"#,
+            )
+            .expect("write an older snapshot");
+            let (store, peers, routes) = PeerRouteStore::open(&path).expect("replay it");
+
+            let connector = Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_runtime_peer_route_store(store, peers, routes);
+
+            let error = connector
+                .upsert_runtime_peer_route("g.example.runtime", "legacy-hop", 25)
+                .unwrap_err();
+
+            assert!(
+                matches!(
+                    error,
+                    PeerRouteTableError::PeerHasNoPayChannel { ref peer_id, .. }
+                        if peer_id == "legacy-hop"
+                ),
+                "expected the pay-channel twin to fire, got {error:?}"
+            );
+            // Distinct from `UnknownPeerId`: the peering is known, and
+            // saying so is what tells an operator to fix the peering
+            // rather than the route's `peer_id`.
+            assert!(!matches!(error, PeerRouteTableError::UnknownPeerId { .. }));
         }
 
         #[test]
@@ -7361,7 +7766,7 @@ mod tests {
                 test_clock(),
             );
 
-            let error = connector.upsert_runtime_peer("", 0).unwrap_err();
+            let error = connector.upsert_runtime_peer("", peering(0)).unwrap_err();
             assert!(matches!(error, PeerRouteTableError::InvalidPeerId));
         }
 

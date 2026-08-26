@@ -27,30 +27,58 @@
 //! drop** (§2.2). That is exactly what an empty [`InProcessPeerTransport`]
 //! answers, so it is what an unmapped peer id falls through to, rather than
 //! this module minting a second copy of the same reject.
+//!
+//! # It is no longer only built from configuration (ADR 0058)
+//!
+//! This module's title stopped being the whole truth when a peering could
+//! be established over the operator surface. `build_peer_transport` running
+//! once at boot from `config.peers()` is exactly what made a runtime peer
+//! row a name with nothing behind it, so [`ConfiguredPeerTransport`] is
+//! also a [`PeerRegistrar`]: a peering added while the process serves gets
+//! its carriage here, and a peering removed loses it.
+//!
+//! Two consequences follow, and both are deliberate. **Both carriages are
+//! always built**, because a runtime peering's endpoint may select the one
+//! this node's config never named. And a registered relation reads its
+//! claim bindings off the durable row rather than off `[[peer_channels]]`,
+//! which is the same two maps `PeerRelation::from_config` builds, from the
+//! other source.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use connector_config::{Config, PeerCarriage};
+use connector_config::{Config, PeerCarriage, DEFAULT_PEER_TIMEOUT_MS};
 use connector_domain::Prepare;
-use connector_peer_btp::{BtpPeerTransport, TungsteniteDialer};
+use connector_peer_btp::claim_json::canonical_evm_channel_id;
+use connector_peer_btp::{BtpPeerTransport, PeerClaimDomain, TungsteniteDialer};
 use connector_peer_http::{HttpPeerTransport, ReqwestPeerClient};
 use connector_runtime::{
-    ClaimAckOutcome, Clock, InProcessPeerTransport, PeerForward, PeerTransport, WireClaim,
+    ClaimAckOutcome, Clock, InProcessPeerTransport, PeerForward, PeerRegistrar, PeerTransport,
+    RuntimePeerChannel, RuntimePeering, WireClaim,
 };
 
-/// One [`PeerTransport`] over however many carriages a node's `[[peers]]`
-/// name, dispatching by peer id.
+/// One [`PeerTransport`] over both carriages, dispatching by peer id --
+/// and, since ADR 0058, one [`PeerRegistrar`] as well.
 pub(crate) struct ConfiguredPeerTransport {
-    btp: Option<BtpPeerTransport>,
-    http: Option<HttpPeerTransport>,
+    btp: BtpPeerTransport,
+    http: HttpPeerTransport,
     /// Peer id → the carriage its endpoint's scheme selected. A peer id
     /// absent from this map is one this connector cannot dial at all.
-    carriage: HashMap<String, PeerCarriage>,
+    ///
+    /// Copy-on-write behind an [`ArcSwap`], for the same reason each
+    /// carriage's own relation map is: the packet path reads it, and an
+    /// operator write changes it.
+    carriage: ArcSwap<HashMap<String, PeerCarriage>>,
     /// Registered with no peers, so every unmapped peer id gets §2.2's
     /// `T01` from the one place that already produces it.
     unreachable: InProcessPeerTransport,
+    /// The node's own `peer_allow_plaintext_endpoints`, so a peering
+    /// registered at runtime picks its carriage by exactly the rule a
+    /// config-file peering did.
+    allow_plaintext: bool,
 }
 
 /// The transport a validated [`Config`] describes.
@@ -68,64 +96,52 @@ pub(crate) struct ConfiguredPeerTransport {
 /// doc. `clock` is the one the rest of the node reads, so a claim's
 /// `timestamp` and a fulfilment's agree.
 ///
-/// A node with no dialable peering gets a bare [`InProcessPeerTransport`],
-/// which is what it held before this function existed: a peer-routed packet
-/// is answered `T01 peer unreachable`.
+/// A node with no dialable peering registers no carriage at all, and every
+/// peer-routed packet falls through to the bare [`InProcessPeerTransport`]
+/// this holds: `T01 peer unreachable`, with the peer named.
 pub(crate) fn build_peer_transport(
     config: &Config,
     signer_address: [u8; 20],
     signer_solana_public_key: Option<[u8; 32]>,
     clock: Arc<dyn Clock>,
-) -> Arc<dyn PeerTransport> {
+) -> Arc<ConfiguredPeerTransport> {
     let mut carriage = HashMap::new();
     for peer in config.peers() {
         if let Some(dial) = peer.dial() {
             carriage.insert(peer.id().to_string(), dial);
         }
     }
-    if carriage.is_empty() {
-        return Arc::new(InProcessPeerTransport::new());
-    }
 
-    let dials = |wanted: PeerCarriage| carriage.values().any(|dial| *dial == wanted);
-    let btp = dials(PeerCarriage::Btp).then(|| {
-        // Ask-only (`TungsteniteDialer::new`) rather than symmetric
-        // (`::serving`): §2.3's inbound half of a *dialed* session needs a
-        // `PeerCarriageState`, which needs the `Connector` this transport is
-        // about to be handed to. Answers still correlate; what a dialed
-        // session cannot yet do is serve a request the far side originates
-        // on it, which no gate of issue #678 exercises -- the far side of a
-        // `wss://` peering reaches this node on its own listener like
-        // everybody else.
-        let mut transport = BtpPeerTransport::new(
-            Arc::new(TungsteniteDialer::new()),
-            signer_address,
-            Arc::clone(&clock),
-        );
-        if let Some(public_key) = signer_solana_public_key {
-            transport.set_solana_signer_public_key(public_key);
-        }
-        transport.add_peers_from_config(config.peers(), config.peer_channels());
-        transport
-    });
-    let http = dials(PeerCarriage::Http).then(|| {
-        let mut transport = HttpPeerTransport::new(
-            Arc::new(ReqwestPeerClient::default()),
-            signer_address,
-            clock,
-        );
-        if let Some(public_key) = signer_solana_public_key {
-            transport.set_solana_signer_public_key(public_key);
-        }
-        transport.add_peers_from_config(config.peers(), config.peer_channels());
-        transport
-    });
+    // Ask-only (`TungsteniteDialer::new`) rather than symmetric
+    // (`::serving`): §2.3's inbound half of a *dialed* session needs a
+    // `PeerCarriageState`, which needs the `Connector` this transport is
+    // about to be handed to. Answers still correlate; what a dialed session
+    // cannot yet do is serve a request the far side originates on it, which
+    // no gate of issue #678 exercises -- the far side of a `wss://` peering
+    // reaches this node on its own listener like everybody else.
+    let mut btp = BtpPeerTransport::new(
+        Arc::new(TungsteniteDialer::new()),
+        signer_address,
+        Arc::clone(&clock),
+    );
+    let mut http = HttpPeerTransport::new(
+        Arc::new(ReqwestPeerClient::default()),
+        signer_address,
+        clock,
+    );
+    if let Some(public_key) = signer_solana_public_key {
+        btp.set_solana_signer_public_key(public_key);
+        http.set_solana_signer_public_key(public_key);
+    }
+    btp.add_peers_from_config(config.peers(), config.peer_channels());
+    http.add_peers_from_config(config.peers(), config.peer_channels());
 
     Arc::new(ConfiguredPeerTransport {
         btp,
         http,
-        carriage,
+        carriage: ArcSwap::from_pointee(carriage),
         unreachable: InProcessPeerTransport::new(),
+        allow_plaintext: config.peer_allow_plaintext_endpoints(),
     })
 }
 
@@ -133,11 +149,135 @@ impl ConfiguredPeerTransport {
     /// The carriage `peer_id` is dialed on, as a transport. `None` for a
     /// peer this connector does not dial.
     fn transport_for(&self, peer_id: &str) -> Option<&dyn PeerTransport> {
-        match self.carriage.get(peer_id)? {
-            PeerCarriage::Btp => self.btp.as_ref().map(|btp| btp as &dyn PeerTransport),
-            PeerCarriage::Http => self.http.as_ref().map(|http| http as &dyn PeerTransport),
+        match self.carriage.load().get(peer_id)? {
+            PeerCarriage::Btp => Some(&self.btp as &dyn PeerTransport),
+            PeerCarriage::Http => Some(&self.http as &dyn PeerTransport),
         }
     }
+
+    /// Replace the peer-id → carriage map with a copy that has `change`
+    /// applied.
+    fn rebind(&self, change: impl FnOnce(&mut HashMap<String, PeerCarriage>)) {
+        let mut next = (**self.carriage.load()).clone();
+        change(&mut next);
+        self.carriage.store(Arc::new(next));
+    }
+}
+
+/// ADR 0058: a peering established over the operator surface becomes
+/// dialable **while this process serves**, and a removed one stops being
+/// dialed -- no restart in either direction.
+///
+/// The relation is registered on whichever carriage the peering's endpoint
+/// scheme selects, and on that one only: §2.1's rule, applied through
+/// `connector_config::PeerCarriage` rather than restated here.
+impl PeerRegistrar for ConfiguredPeerTransport {
+    fn register(&self, peer_id: &str, peering: &RuntimePeering) {
+        let (Some(endpoint), Some(carriage)) =
+            (peering.endpoint_url(), peering.dial(self.allow_plaintext))
+        else {
+            // No endpoint, or one whose scheme selects no carriage this
+            // node dials. Deregister rather than leave a stale mapping in
+            // place: the peering's answer is then §2.2's `T01` with the
+            // peer named, which is what an unmapped id already falls
+            // through to.
+            self.deregister(peer_id);
+            return;
+        };
+        let (domains, programs) = claim_bindings(peering);
+        let answer_timeout = Duration::from_millis(DEFAULT_PEER_TIMEOUT_MS);
+        match carriage {
+            PeerCarriage::Btp => self.btp.add_peer(connector_peer_btp::PeerRelation::new(
+                peer_id,
+                endpoint,
+                domains,
+                programs,
+                answer_timeout,
+                answer_timeout,
+            )),
+            PeerCarriage::Http => self.http.add_peer(connector_peer_http::PeerRelation::new(
+                peer_id,
+                endpoint,
+                domains,
+                programs,
+                answer_timeout,
+                answer_timeout,
+            )),
+        }
+        self.rebind(|map| {
+            map.insert(peer_id.to_string(), carriage);
+        });
+    }
+
+    fn deregister(&self, peer_id: &str) {
+        // Removed from both, not from whichever the map says: a peering
+        // re-registered onto the other carriage would otherwise leave a
+        // relation behind on the first.
+        self.btp.remove_peer(peer_id);
+        self.http.remove_peer(peer_id);
+        self.rebind(|map| {
+            map.remove(peer_id);
+        });
+    }
+}
+
+/// The EIP-712 domains a runtime peering's EVM channels sign under, and the
+/// programs its Solana channels bind to (ADR 0053) -- the same two maps
+/// `PeerRelation::from_config` builds out of `[[peer_channels]]`, built
+/// instead out of the durable row.
+///
+/// A binding whose `token_network` is not a readable address is skipped
+/// rather than defaulted: a claim signed under a zero `verifyingContract`
+/// verifies nowhere, and producing no claim at all is what a channel with
+/// no domain has always done.
+fn claim_bindings(
+    peering: &RuntimePeering,
+) -> (HashMap<String, PeerClaimDomain>, HashMap<String, String>) {
+    let mut domains = HashMap::new();
+    let mut programs = HashMap::new();
+    for binding in &peering.channels {
+        match binding {
+            RuntimePeerChannel::Evm {
+                channel_id,
+                chain_id,
+                token_network,
+                ..
+            } => {
+                let Some(token_network) = parse_evm_address(token_network) else {
+                    continue;
+                };
+                domains.insert(
+                    canonical_evm_channel_id(channel_id),
+                    PeerClaimDomain {
+                        chain_id: *chain_id,
+                        token_network,
+                    },
+                );
+            }
+            RuntimePeerChannel::Solana {
+                channel_account,
+                program_id,
+                ..
+            } => {
+                programs.insert(channel_account.clone(), program_id.clone());
+            }
+        }
+    }
+    (domains, programs)
+}
+
+/// A 20-byte EVM address from its hex spelling, or `None` -- never a padded
+/// or truncated one.
+fn parse_evm_address(value: &str) -> Option<[u8; 20]> {
+    let hex = value.strip_prefix("0x").unwrap_or(value);
+    if hex.len() != 40 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut address = [0u8; 20];
+    for (i, byte) in address.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(address)
 }
 
 #[async_trait]
@@ -346,5 +486,136 @@ token_network = "0x00000000000000000000000000000000000000bb"
 
         assert!(t01(&response), "{response:?}");
         assert!(!reached);
+    }
+
+    /// A [`RuntimePeering`] as `POST /peers` writes one, endpoint and all.
+    fn runtime_peering(endpoint: &str) -> RuntimePeering {
+        RuntimePeering {
+            fee: 100,
+            max_packet_amount: 5_000,
+            endpoint: Some(endpoint.to_string()),
+            edge_identity: Some("0x04ab".to_string()),
+            client_edge_url: Some(endpoint.to_string()),
+            channels: vec![RuntimePeerChannel::Evm {
+                channel_id: format!("0x{}", "ab".repeat(32)),
+                counterparty_key: "0x00000000000000000000000000000000000000aa".to_string(),
+                chain_id: 31337,
+                token_network: "0x00000000000000000000000000000000000000bb".to_string(),
+            }],
+        }
+    }
+
+    /// ADR 0058: **`build_peer_transport` adds and removes a carriage
+    /// while the process serves.** Running it once at boot is what made a
+    /// runtime peer row hollow.
+    ///
+    /// The proof is the change in what a forward to one peer id does. It
+    /// is unmapped and falls through to §2.2's `T01` from an empty
+    /// transport; then it is registered and the forward is genuinely
+    /// dialed -- still `T01`, because nothing is listening on port 1, but
+    /// `reached_peer` and the dial attempt are the difference; then it is
+    /// deregistered and it falls through again. Same transport value
+    /// throughout, with no rebuild and no restart.
+    #[tokio::test]
+    async fn a_carriage_is_added_and_removed_while_the_transport_serves() {
+        // A config with no `[[peers]]` at all: everything below is
+        // established over the operator surface.
+        let (config, _state, _key) = config("", "");
+        let transport = build_peer_transport(&config, [0u8; 20], None, Arc::new(SystemClock));
+
+        let forward = |transport: Arc<ConfiguredPeerTransport>| async move {
+            transport
+                .forward("added-at-runtime", prepare("g.example.app"), None)
+                .await
+        };
+
+        // Before: unmapped, and answered by the empty in-process
+        // transport rather than by a dial.
+        let PeerForward { response, .. } = forward(Arc::clone(&transport)).await;
+        match response {
+            PacketResponse::Reject(reject) => {
+                assert_eq!(reject.code.as_str(), "T01");
+                assert!(reject.message.contains("added-at-runtime"));
+            }
+            other => panic!("expected T01, got {other:?}"),
+        }
+
+        // Register. `http://` selects ILP-over-HTTP because this config
+        // opted into plaintext endpoints -- §2.1's rule, read through
+        // `connector_config` rather than restated here.
+        transport.register(
+            "added-at-runtime",
+            &runtime_peering("http://127.0.0.1:1/ilp"),
+        );
+        let PeerForward {
+            response,
+            reached_peer,
+            ..
+        } = forward(Arc::clone(&transport)).await;
+        assert!(t01(&response), "nothing listens on port 1: {response:?}");
+        assert!(!reached_peer, "the dial failed, which is the point");
+
+        // A `wss://` endpoint re-registers the same id onto the OTHER
+        // carriage. Nothing is left behind on the first: the carriage is
+        // the endpoint's scheme, and re-registering must not leave a
+        // relation this node would still dial.
+        transport.register(
+            "added-at-runtime",
+            &runtime_peering("ws://127.0.0.1:1/ilp/btp"),
+        );
+        assert!(transport.http.flush_hints("added-at-runtime").is_empty());
+
+        // Deregister -- the other half of ADR 0060's kill switch, which is
+        // only "immediate" if the carriage goes with the durable row.
+        transport.deregister("added-at-runtime");
+        let PeerForward { response, .. } = forward(Arc::clone(&transport)).await;
+        match response {
+            PacketResponse::Reject(reject) => {
+                assert_eq!(reject.code.as_str(), "T01");
+                assert!(reject.message.contains("added-at-runtime"));
+            }
+            other => panic!("expected T01 after deregistration, got {other:?}"),
+        }
+    }
+
+    /// A peering whose endpoint selects no carriage this node dials --
+    /// here a plaintext one on a node that did not opt in -- registers
+    /// nothing, and the peer id stays unmapped. Its answer is §2.2's `T01`
+    /// with the peer named, which is what an unmapped id already falls
+    /// through to; a stale mapping would instead dial nowhere.
+    #[tokio::test]
+    async fn a_peering_whose_scheme_selects_no_carriage_registers_nothing() {
+        let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
+        key_file.write_all(&[7u8; 32]).expect("write key file");
+        let state_dir = tempfile::tempdir().expect("temp state dir");
+        let mut config_file = tempfile::NamedTempFile::new().expect("temp config file");
+        write!(
+            config_file,
+            r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_file}"
+"#,
+            state_dir = state_dir.path().display(),
+            key_file = key_file.path().display(),
+        )
+        .expect("write config file");
+        let config = Config::load(config_file.path()).expect("load a node with no peering");
+        assert!(!config.peer_allow_plaintext_endpoints());
+
+        let transport = build_peer_transport(&config, [0u8; 20], None, Arc::new(SystemClock));
+        transport.register("plaintext", &runtime_peering("http://127.0.0.1:1/ilp"));
+
+        let PeerForward {
+            response,
+            reached_peer,
+            ..
+        } = transport
+            .forward("plaintext", prepare("g.example.app"), None)
+            .await;
+        assert!(t01(&response), "{response:?}");
+        assert!(!reached_peer);
     }
 }

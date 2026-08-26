@@ -537,7 +537,7 @@ fn relation() -> PeerRelation {
 }
 
 fn transport(dialer: Arc<dyn PeerDialer>, payer: &dyn Signer) -> BtpPeerTransport {
-    let mut transport = BtpPeerTransport::new(
+    let transport = BtpPeerTransport::new(
         dialer,
         derive_evm_address(&payer.public_key().unwrap()),
         clock() as Arc<dyn Clock>,

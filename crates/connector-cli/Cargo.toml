@@ -24,6 +24,7 @@ connector-settlement-evm = { path = "../connector-settlement-evm" }
 connector-settlement-solana = { path = "../connector-settlement-solana" }
 connector-signer = { path = "../connector-signer" }
 async-trait = "0.1"
+arc-swap = "1.9.2"
 axum = "0.6"
 # The `ilp-payment-channel-claim` header is base64 of the claim JSON -- the
 # client send path of `connector announce` (issue #784).

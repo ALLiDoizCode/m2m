@@ -73,11 +73,13 @@ use serde::{Deserialize, Serialize};
 
 use connector_domain::{PacketResponse, Prepare};
 use connector_runtime::{
-    ChannelOperationError, ChannelView, ClaimView, Connector, LeaseRouteError, LeasedRouteView,
-    PeerRouteTableError, PeerRouteView, PeerView, RouteView, SettlementChain,
+    ChannelOperationError, ChannelView, ClaimView, Connector, EstablishPeeringError,
+    LeaseRouteError, LeasedRouteView, PeerRouteTableError, PeerRouteView, PeerView, RouteView,
+    SettlementChain,
 };
 use connector_settlement::Claim;
 use connector_signer::{derive_evm_address, to_hex, Signer, SignerError};
+use url::Url;
 use write_auth::{authenticate_write, AuditRecord, WriteAuth};
 
 const OCTET_STREAM: &str = "application/octet-stream";
@@ -356,9 +358,17 @@ fn peer_route_table_error_response(error: PeerRouteTableError) -> Response {
         PeerRouteTableError::OwnedByConfig(_) | PeerRouteTableError::PeerInUse(_) => {
             (StatusCode::CONFLICT, error.to_string()).into_response()
         }
+        // The last two are ADR 0058's runtime twins: a peering with no
+        // channel bound to it, and a route forwarding to a peering with no
+        // channel to pay from. `400`, beside `UnknownPeerId` -- the
+        // request names something that cannot resolve to a valid row
+        // whatever the table's current state is, which is the line this
+        // function already draws.
         PeerRouteTableError::UnknownPeerId { .. }
         | PeerRouteTableError::InvalidPrefix(_)
-        | PeerRouteTableError::InvalidPeerId => {
+        | PeerRouteTableError::InvalidPeerId
+        | PeerRouteTableError::PeerChannelUnbound(_)
+        | PeerRouteTableError::PeerHasNoPayChannel { .. } => {
             (StatusCode::BAD_REQUEST, error.to_string()).into_response()
         }
         PeerRouteTableError::PeerNotFound(_) | PeerRouteTableError::RouteNotFound(_) => {
@@ -370,29 +380,96 @@ fn peer_route_table_error_response(error: PeerRouteTableError) -> Response {
     }
 }
 
-/// A `POST /peers` request body: add or update a runtime peer row (issue
-/// #884). Refused (`409`) when `id` is already defined by the config
-/// file -- see
-/// `docs/adr/0034-a-runtime-peer-route-table-never-shadows-the-config-file.md`.
+/// A `POST /peers` request body: **establish a peering** (ADR 0058).
 ///
-/// `fee` is this peering's flat per-packet fee (ADR 0010, ADR 0061): what
-/// this connector retains for carrying one packet to `id`, whichever prefix
-/// the packet was addressed to. Omitted is zero -- free carriage, the value
-/// a peer row carried before this field existed -- and a later post of the
-/// same `id` with a different `fee` reprices the peering, since the packet
-/// path reads the fee off the peering on every forward rather than off a
-/// copy baked into each route.
+/// ```json
+/// { "id": "apex-relay-2",
+///   "url": "https://relay.example/ilp",
+///   "fee": 100,
+///   "max_packet_amount": 5000 }
+/// ```
+///
+/// * `url` is the counterparty's connector URL. The node `GET`s the
+///   self-description there (ADR 0050) and takes from it the endpoint, the
+///   carriage that endpoint's scheme implies, the edge identity, and the
+///   per-chain settlement addresses and chain facts. **Whatever that URL
+///   serves is who the peering is with:** the fetched identity is not
+///   checked against anything in this request, and ADR 0058 considered
+///   requiring such a check and rejected it. The operator's vetting of the
+///   URL is the whole of the assurance.
+/// * `id` is the operator's own **local label** for the peering. Never
+///   derived from the peer's ILP address -- that is self-asserted, a claim
+///   and not a grant -- nor from the URL host. Refused (`409`) when the
+///   config file already defines it (ADR 0034).
+/// * `fee` is this peering's flat per-packet fee (ADR 0010, ADR 0061):
+///   what this connector retains for carrying one packet to `id`,
+///   whichever prefix the packet was addressed to. Omitted is zero -- free
+///   carriage -- and a later post of the same `id` with a different `fee`
+///   reprices the peering, since the packet path reads the fee off the
+///   peering on every forward rather than off a copy baked into each
+///   route.
+/// * `max_packet_amount` is ADR 0049's **cap**: the largest amount this
+///   connector will forward to `id` in one packet, refused `T04` above it.
+///   Omitted -- or zero -- keeps `DEFAULT_MAX_PACKET_AMOUNT`; no value
+///   here removes the bound.
+/// * `chain` disambiguates the one case with no honest default: two nodes
+///   settling on more than one chain in common. Left out, a single shared
+///   chain is used and several are refused by name rather than resolved
+///   silently, the same posture `POST /channels` takes.
+///
+/// `fee` and `max_packet_amount` are the operator's policy about this
+/// counterparty, and are in this request precisely because no document can
+/// supply them (ADR 0006).
 #[derive(Debug, Deserialize)]
 struct UpsertPeerRequest {
     id: String,
+    url: String,
     #[serde(default)]
     fee: u64,
+    #[serde(default)]
+    max_packet_amount: u64,
+    #[serde(default)]
+    chain: Option<String>,
 }
 
-/// `POST /peers`: issue #884's runtime peer-table write. Authenticated
-/// exactly like every other write on this surface --
-/// [`authenticate_write`] first, nothing else in this handler accepts the
-/// request until that succeeds.
+/// Map an [`EstablishPeeringError`] to the response `POST /peers` answers
+/// with.
+///
+/// The distinction that matters: `502 Bad Gateway` for everything the
+/// **counterparty's host** did -- unreachable, redirecting, oversized,
+/// malformed, or describing a node this one cannot peer with -- and `400`
+/// for what this request itself got wrong. An operator reading a `502`
+/// knows to go and look at the URL they named; a `400` is theirs to fix
+/// here.
+fn establish_peering_error_response(error: EstablishPeeringError) -> Response {
+    match error {
+        EstablishPeeringError::SelfDescription(_)
+        | EstablishPeeringError::NoDialableEndpoint { .. }
+        | EstablishPeeringError::NoSharedChain { .. }
+        | EstablishPeeringError::UnreadableSettlementAddress { .. } => {
+            (StatusCode::BAD_GATEWAY, error.to_string()).into_response()
+        }
+        EstablishPeeringError::AmbiguousChain { .. } => {
+            (StatusCode::BAD_REQUEST, error.to_string()).into_response()
+        }
+        EstablishPeeringError::Channel(error) => channel_operation_error_response(error),
+        EstablishPeeringError::Table(error) => peer_route_table_error_response(error),
+    }
+}
+
+/// `POST /peers`: ADR 0058's one operator write. Authenticated exactly
+/// like every other write on this surface -- [`authenticate_write`] first,
+/// nothing else in this handler accepts the request until that succeeds.
+/// No bearer token reaches it: establishing a peering moves value.
+///
+/// **This endpoint can spend gas.** It may open a payment channel and wait
+/// for it to confirm, so it is deliberately safe to retry: repeating the
+/// same request against a peering already established finds the same
+/// channel and is a success, not a second channel (ADR 0059's derivation
+/// makes that structural). The answer says which branch it took --
+/// `channel: { id, status: "found" | "created" }` -- so an unintended
+/// second channel is visible in the operator's own output rather than
+/// discovered later on a block explorer.
 async fn upsert_peer(
     State(state): State<OperatorState>,
     method: Method,
@@ -408,10 +485,35 @@ async fn upsert_peer(
         Ok(request) => request,
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     };
+    let url = match Url::parse(&request.url) {
+        Ok(url) => url,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("'{}' is not a URL: {error}", request.url),
+            )
+                .into_response()
+        }
+    };
+    let chain = match request.chain.as_deref().map(str::parse::<SettlementChain>) {
+        None => None,
+        Some(Ok(chain)) => Some(chain),
+        Some(Err(error)) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    };
 
-    match state.connector.upsert_runtime_peer(request.id, request.fee) {
-        Ok(view) => Json(view).into_response(),
-        Err(error) => peer_route_table_error_response(error),
+    match state
+        .connector
+        .establish_peering(
+            request.id,
+            &url,
+            request.fee,
+            request.max_packet_amount,
+            chain,
+        )
+        .await
+    {
+        Ok(established) => Json(established).into_response(),
+        Err(error) => establish_peering_error_response(error),
     }
 }
 
@@ -539,18 +641,27 @@ struct RedeemChannelRequest {
 fn channel_operation_response(result: Result<ChannelView, ChannelOperationError>) -> Response {
     match result {
         Ok(view) => Json(view).into_response(),
+        Err(error) => channel_operation_error_response(error),
+    }
+}
+
+/// The status a failed channel operation answers with, shared by every
+/// endpoint that drives one -- the channel lifecycle writes, and
+/// `POST /peers`, which opens a channel of its own (ADR 0058).
+fn channel_operation_error_response(error: ChannelOperationError) -> Response {
+    match error {
         // Both "no backend at all" and "no backend on that chain" are the
         // node's own configuration lacking what the request needs -- 503,
         // not a caller error.
-        Err(
-            error @ (ChannelOperationError::NoSettlementBackend
-            | ChannelOperationError::NoSettlementBackendForChain(_)),
-        ) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
-        Err(
-            error @ (ChannelOperationError::NoClaimToRedeem
-            | ChannelOperationError::AmbiguousSettlementChain
-            | ChannelOperationError::Settlement(_)),
-        ) => (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+        ChannelOperationError::NoSettlementBackend
+        | ChannelOperationError::NoSettlementBackendForChain(_) => {
+            (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response()
+        }
+        ChannelOperationError::NoClaimToRedeem
+        | ChannelOperationError::AmbiguousSettlementChain
+        | ChannelOperationError::Settlement(_) => {
+            (StatusCode::BAD_REQUEST, error.to_string()).into_response()
+        }
     }
 }
 
@@ -1650,24 +1761,108 @@ mod tests {
     mod runtime_peer_route_writes {
         use super::*;
         use crate::rfc9421::sign_request;
-        use connector_runtime::PeerRouteView;
+        use connector_domain::x402::{X402ChainSettlementTerms, X402SettlementTerms};
+        use connector_domain::{EdgeIdentity, NodeFacts, NodeSelfDescription};
+        use connector_runtime::{BoundedHttpSelfDescription, PeerRouteView};
+        use connector_settlement::InMemorySettlementBackend;
         use ed25519_dalek::Keypair;
         use rand::rngs::OsRng;
+        use std::net::SocketAddr;
 
         fn keypair() -> Keypair {
             Keypair::generate(&mut OsRng)
         }
 
+        /// A **real** node self-description on a **real** socket, served
+        /// by axum on loopback.
+        ///
+        /// `POST /peers` establishes a peering by fetching this document
+        /// (ADR 0058), and what it does with the answer -- which endpoint
+        /// it dials, which settlement address it derives a channel from --
+        /// is the behaviour under test. A fake handing back a value would
+        /// skip the fetch, which is the half that is new.
+        fn serve_self_description(settlement_address: &str) -> SocketAddr {
+            let document = NodeSelfDescription::describe(
+                &NodeFacts {
+                    ilp_addresses: vec!["g.example.counterparty".to_string()],
+                    http_endpoint: Some("http://counterparty.example/ilp".to_string()),
+                    btp_endpoint: None,
+                    peer_carriages: vec!["http".to_string()],
+                    settlements: vec![X402ChainSettlementTerms::Evm(X402SettlementTerms {
+                        chain: "evm:31337".to_string(),
+                        settlement_address: settlement_address.to_string(),
+                        token_network_registry: "0x00000000000000000000000000000000000000cc"
+                            .to_string(),
+                        token_network: "0x00000000000000000000000000000000000000bb".to_string(),
+                        token_address: "0x00000000000000000000000000000000000000dd".to_string(),
+                        decimals: 6,
+                    })],
+                },
+                Some(EdgeIdentity {
+                    key_id: "counterparty-key".to_string(),
+                    public_key: "0x04ab".to_string(),
+                }),
+                Vec::new(),
+                None,
+            );
+            let app = Router::new().route(
+                "/ilp",
+                axum::routing::get(move || {
+                    let document = document.clone();
+                    async move { Json(document) }
+                }),
+            );
+            let server = axum::Server::bind(&"127.0.0.1:0".parse().expect("loopback"))
+                .serve(app.into_make_service());
+            let addr = server.local_addr();
+            tokio::spawn(async move {
+                let _ = server.await;
+            });
+            addr
+        }
+
+        /// The counterparty's EVM settlement address, as its document
+        /// publishes it. Deliberately not this node's own and deliberately
+        /// not an edge identity: the channel derives from the settlement
+        /// address of the chain in question.
+        const COUNTERPARTY_SETTLEMENT: &str = "0x00000000000000000000000000000000000000aa";
+
+        /// A `POST /peers` body: the operator's label, the counterparty's
+        /// URL, and the operator's own policy about them.
+        fn peer_body(id: &str, addr: SocketAddr, fee: u64) -> Vec<u8> {
+            serde_json::to_vec(&serde_json::json!({
+                "id": id,
+                "url": format!("http://{addr}/ilp"),
+                "fee": fee,
+            }))
+            .unwrap()
+        }
+
         fn router_with(write_keys: Vec<[u8; 32]>) -> Router {
             let app_client = Arc::new(FakeAppClient::new());
             let clock = Arc::new(TestClock::new(chrono::Utc::now()));
-            let connector = Arc::new(Connector::new(
-                vec![],
-                vec![],
-                app_client,
-                Arc::new(InProcessPeerTransport::new()),
-                clock,
-            ));
+            let connector = Arc::new(
+                Connector::new(
+                    vec![],
+                    vec![],
+                    app_client,
+                    Arc::new(InProcessPeerTransport::new()),
+                    clock,
+                )
+                // The in-memory backend is the first implementation to
+                // pass the settlement port's contract suite, `live_channel_with`
+                // included -- so the derive-or-open branch these tests
+                // drive is the same one a chain-backed backend takes.
+                .with_settlement(
+                    SettlementChain::Evm,
+                    Arc::new(InMemorySettlementBackend::new()),
+                )
+                // Loopback is `http://`, so these tests are a node that
+                // opted into plaintext peer endpoints -- the same opt-in
+                // every `local/` topology takes for the same reason.
+                .with_self_description_source(Arc::new(BoundedHttpSelfDescription::new(true)))
+                .with_peer_allow_plaintext_endpoints(true),
+            );
             let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
             router(connector, signer, "correct-token".to_string(), write_keys)
         }
@@ -1696,9 +1891,16 @@ mod tests {
         #[tokio::test]
         async fn upserting_a_peer_requires_a_valid_write_signature() {
             let app = router_with(vec![]);
-            let body = serde_json::to_vec(&serde_json::json!({"id": "runtime-hop"})).unwrap();
+            let addr = serve_self_description(COUNTERPARTY_SETTLEMENT);
 
-            let response = app.oneshot(unsigned("POST", "/peers", body)).await.unwrap();
+            let response = app
+                .oneshot(unsigned(
+                    "POST",
+                    "/peers",
+                    peer_body("runtime-hop", addr, 0),
+                ))
+                .await
+                .unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
 
@@ -1706,20 +1908,30 @@ mod tests {
         async fn a_validly_signed_write_creates_a_peer_visible_over_the_read_surface() {
             let keypair = keypair();
             let app = router_with(vec![keypair.public.to_bytes()]);
-            let body = serde_json::to_vec(&serde_json::json!({"id": "runtime-hop"})).unwrap();
+            let addr = serve_self_description(COUNTERPARTY_SETTLEMENT);
 
             let write_response = app
                 .clone()
-                .oneshot(signed(&keypair, "POST", "/peers", body))
+                .oneshot(signed(
+                    &keypair,
+                    "POST",
+                    "/peers",
+                    peer_body("runtime-hop", addr, 0),
+                ))
                 .await
                 .unwrap();
             assert_eq!(write_response.status(), StatusCode::OK);
             let bytes = hyper::body::to_bytes(write_response.into_body())
                 .await
                 .unwrap();
-            let created: PeerView = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(created.id, "runtime-hop");
-            assert_eq!(created.source, RouteSource::Runtime);
+            let established: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(established["id"], "runtime-hop");
+            assert_eq!(established["source"], "runtime");
+            // The answer says which branch the derive-or-open took, so an
+            // unintended second channel is visible here (ADR 0058).
+            assert_eq!(established["channel"]["status"], "created");
+            assert_eq!(established["channel"]["chain"], "evm");
+            let created: PeerView = serde_json::from_value(established).unwrap();
 
             let read_response = get(app, "/peers", Some("correct-token")).await;
             assert_eq!(read_response.status(), StatusCode::OK);
@@ -1734,10 +1946,14 @@ mod tests {
         async fn a_validly_signed_write_creates_a_peer_route_visible_over_the_read_surface() {
             let keypair = keypair();
             let app = router_with(vec![keypair.public.to_bytes()]);
-            let peer_body =
-                serde_json::to_vec(&serde_json::json!({"id": "runtime-hop", "fee": 3})).unwrap();
+            let addr = serve_self_description(COUNTERPARTY_SETTLEMENT);
             app.clone()
-                .oneshot(signed(&keypair, "POST", "/peers", peer_body))
+                .oneshot(signed(
+                    &keypair,
+                    "POST",
+                    "/peers",
+                    peer_body("runtime-hop", addr, 3),
+                ))
                 .await
                 .unwrap();
             let route_body = serde_json::to_vec(&serde_json::json!({
@@ -1798,9 +2014,14 @@ mod tests {
         async fn a_validly_signed_delete_removes_a_peer() {
             let keypair = keypair();
             let app = router_with(vec![keypair.public.to_bytes()]);
-            let peer_body = serde_json::to_vec(&serde_json::json!({"id": "runtime-hop"})).unwrap();
+            let addr = serve_self_description(COUNTERPARTY_SETTLEMENT);
             app.clone()
-                .oneshot(signed(&keypair, "POST", "/peers", peer_body))
+                .oneshot(signed(
+                    &keypair,
+                    "POST",
+                    "/peers",
+                    peer_body("runtime-hop", addr, 0),
+                ))
                 .await
                 .unwrap();
 
@@ -1837,9 +2058,14 @@ mod tests {
         async fn a_validly_signed_delete_removes_a_peer_route() {
             let keypair = keypair();
             let app = router_with(vec![keypair.public.to_bytes()]);
-            let peer_body = serde_json::to_vec(&serde_json::json!({"id": "runtime-hop"})).unwrap();
+            let addr = serve_self_description(COUNTERPARTY_SETTLEMENT);
             app.clone()
-                .oneshot(signed(&keypair, "POST", "/peers", peer_body))
+                .oneshot(signed(
+                    &keypair,
+                    "POST",
+                    "/peers",
+                    peer_body("runtime-hop", addr, 0),
+                ))
                 .await
                 .unwrap();
             let route_body = serde_json::to_vec(&serde_json::json!({
@@ -1880,9 +2106,14 @@ mod tests {
         async fn deleting_a_peer_still_referenced_by_a_route_is_a_conflict() {
             let keypair = keypair();
             let app = router_with(vec![keypair.public.to_bytes()]);
-            let peer_body = serde_json::to_vec(&serde_json::json!({"id": "runtime-hop"})).unwrap();
+            let addr = serve_self_description(COUNTERPARTY_SETTLEMENT);
             app.clone()
-                .oneshot(signed(&keypair, "POST", "/peers", peer_body))
+                .oneshot(signed(
+                    &keypair,
+                    "POST",
+                    "/peers",
+                    peer_body("runtime-hop", addr, 0),
+                ))
                 .await
                 .unwrap();
             let route_body = serde_json::to_vec(&serde_json::json!({

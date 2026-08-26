@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{mpsc, Arc, RwLock};
 use std::thread;
 
+use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 
 use connector_domain::{
@@ -461,7 +462,13 @@ pub struct ClaimBook {
     solana_signer: Option<Arc<dyn Ed25519Signer>>,
     /// `peer_id` -> the channel this connector claims against when it owes
     /// that peer.
-    outbound_channels: HashMap<String, String>,
+    ///
+    /// Copy-on-write behind an [`ArcSwap`], like the three binding maps
+    /// below: a peering established at runtime (ADR 0058) binds its channel
+    /// while the process is serving, and the packet path reads these on
+    /// every claim. See [`ClaimBook::rebind`] for what a write costs and
+    /// why that is the right trade here.
+    outbound_channels: ArcSwap<HashMap<String, String>>,
     /// `channel_id` -> its parsed on-chain `bytes32` and the EIP-712 domain
     /// its claims are signed and verified under (issue #575/#566). Shared
     /// by both directions -- outbound signing (`record_fulfillment`) and
@@ -469,12 +476,12 @@ pub struct ClaimBook {
     /// [`EvmBalanceProof`] shape from the same channel, differing only in
     /// which nonce/amount they carry and, for inbound, which address the
     /// recovered signer must match.
-    channel_domains: HashMap<String, (OnChainChannelId, ChannelDomain)>,
+    channel_domains: ArcSwap<HashMap<String, (OnChainChannelId, ChannelDomain)>>,
     /// `channel_id` -> the EVM address whose signature this connector
     /// accepts on a claim for that channel -- recovered from the signature
     /// via `connector_signer::verify_evm_balance_proof`, never the claim's
     /// own self-declared field.
-    counterparties: HashMap<String, Address>,
+    counterparties: ArcSwap<HashMap<String, Address>>,
     /// `channel_id` -> its Solana binding (issue #732): the channel account
     /// bytes a claim's ed25519 message is built over and the counterparty
     /// key its signature must verify against. Deliberately a **second**
@@ -484,7 +491,7 @@ pub struct ClaimBook {
     /// [`ClaimRejectReason::UnknownChannel`] a claim presenting the wrong
     /// chain's signature for a channel deserves. See
     /// [`ClaimBook::set_solana_channel`].
-    solana_channels: HashMap<String, SolanaChannel>,
+    solana_channels: ArcSwap<HashMap<String, SolanaChannel>>,
     /// `Arc`-wrapped, like `inbound_watermarks` and `projection`, so
     /// [`GroupCommitter`]'s thread can arm a peer's pending claim once its
     /// entry is durable -- and put this ledger back if it never is --
@@ -532,10 +539,10 @@ impl ClaimBook {
         ClaimBook {
             signer,
             solana_signer: None,
-            outbound_channels,
-            channel_domains: HashMap::new(),
-            counterparties,
-            solana_channels: HashMap::new(),
+            outbound_channels: ArcSwap::from_pointee(outbound_channels),
+            channel_domains: ArcSwap::from_pointee(HashMap::new()),
+            counterparties: ArcSwap::from_pointee(counterparties),
+            solana_channels: ArcSwap::from_pointee(HashMap::new()),
             outbound,
             inbound_watermarks,
             journal,
@@ -593,13 +600,36 @@ impl ClaimBook {
 
     /// Configure the channel this connector claims against when it owes
     /// `peer_id`.
-    pub fn set_outbound_channel(
-        &mut self,
-        peer_id: impl Into<String>,
-        channel_id: impl Into<String>,
-    ) {
-        self.outbound_channels
-            .insert(peer_id.into(), channel_id.into());
+    pub fn set_outbound_channel(&self, peer_id: impl Into<String>, channel_id: impl Into<String>) {
+        Self::rebind(&self.outbound_channels, |map| {
+            map.insert(peer_id.into(), channel_id.into());
+        });
+    }
+
+    /// Replace one of this book's channel-binding maps with a copy that
+    /// has `change` applied.
+    ///
+    /// The maps are read on the packet path -- once per claim signed and
+    /// once per claim verified -- and written only when an operator
+    /// establishes a peering (ADR 0058) or while a `Connector` is being
+    /// built. So the reads take no lock at all and a write pays for a whole
+    /// clone of a map with one entry per channel this node holds, which is
+    /// the same trade `Connector`'s own runtime peer/route table makes and
+    /// for the same reason (ADR 0015's cold-path exception).
+    ///
+    /// Concurrent writers can lose each other's change, exactly as a
+    /// read-modify-write without a lock always can. Every caller is behind
+    /// `Connector`'s `runtime_table_lock` or is single-threaded
+    /// construction, so this is a property of the type rather than a race
+    /// in practice -- and it is stated here rather than assumed.
+    fn rebind<K, V>(swap: &ArcSwap<HashMap<K, V>>, change: impl FnOnce(&mut HashMap<K, V>))
+    where
+        K: Clone + Eq + std::hash::Hash,
+        V: Clone,
+    {
+        let mut next = (**swap.load()).clone();
+        change(&mut next);
+        swap.store(Arc::new(next));
     }
 
     /// Configure the EVM address whose signature this connector accepts on
@@ -609,8 +639,10 @@ impl ClaimBook {
     /// anything). Also call [`ClaimBook::set_channel_domain`] for the same
     /// `channel_id` -- without a domain configured, a claim naming it is
     /// refused as [`ClaimRejectReason::UnknownChannel`] regardless of this.
-    pub fn set_verification_key(&mut self, channel_id: impl Into<String>, counterparty: Address) {
-        self.counterparties.insert(channel_id.into(), counterparty);
+    pub fn set_verification_key(&self, channel_id: impl Into<String>, counterparty: Address) {
+        Self::rebind(&self.counterparties, |map| {
+            map.insert(channel_id.into(), counterparty);
+        });
     }
 
     /// Whether `channel_id` is one this connector recognizes -- a
@@ -620,7 +652,7 @@ impl ClaimBook {
     /// #426, ADR 0011): a sender with no recognized channel gets no free
     /// traversal of this connector's network.
     pub fn has_verification_key(&self, channel_id: &str) -> bool {
-        self.counterparties.contains_key(channel_id)
+        self.counterparties.load().contains_key(channel_id)
     }
 
     /// Whether `channel_account` is a Solana channel this connector has a
@@ -629,7 +661,7 @@ impl ClaimBook {
     /// reason: a channel registered here can `accept_inbound` a claim
     /// naming it.
     pub fn has_solana_channel(&self, channel_account: &str) -> bool {
-        self.solana_channels.contains_key(channel_account)
+        self.solana_channels.load().contains_key(channel_account)
     }
 
     /// The watermark this book holds for `channel_id` -- the highest nonce
@@ -659,7 +691,7 @@ impl ClaimBook {
     /// `[[client_channels]]`) decide whether it needs to resolve one at all,
     /// without spending a payout attempt just to find out.
     pub fn has_channel_domain(&self, channel_id: &str) -> bool {
-        self.channel_domains.contains_key(channel_id)
+        self.channel_domains.load().contains_key(channel_id)
     }
 
     /// Configure `channel_id`'s EIP-712 signing domain (issue #575/#566):
@@ -674,14 +706,15 @@ impl ClaimBook {
     /// shapes -- and is refused here, never hashed or truncated into
     /// shape, if it is not (AC4).
     pub fn set_channel_domain(
-        &mut self,
+        &self,
         channel_id: impl Into<String>,
         domain: ChannelDomain,
     ) -> Result<(), InvalidChannelId> {
         let channel_id = channel_id.into();
         let on_chain_id = parse_channel_id(&channel_id)?;
-        self.channel_domains
-            .insert(channel_id, (on_chain_id, domain));
+        Self::rebind(&self.channel_domains, |map| {
+            map.insert(channel_id, (on_chain_id, domain));
+        });
         Ok(())
     }
 
@@ -710,7 +743,7 @@ impl ClaimBook {
     /// ambiguous one -- and in practice cannot happen, since a 32-byte
     /// base58 id is never `0x` + 64 hex nor a decimal numeral.
     pub fn set_solana_channel(
-        &mut self,
+        &self,
         channel_account: impl Into<String>,
         counterparty_public_key: &str,
         program_id: &str,
@@ -719,14 +752,16 @@ impl ClaimBook {
         let account_bytes = parse_base58_32("channel account", &channel_account)?;
         let counterparty_public_key = parse_base58_32("counterparty key", counterparty_public_key)?;
         let program_id = parse_base58_32("program id", program_id)?;
-        self.solana_channels.insert(
-            channel_account,
-            SolanaChannel {
-                program_id,
-                channel_account: account_bytes,
-                counterparty_public_key,
-            },
-        );
+        Self::rebind(&self.solana_channels, |map| {
+            map.insert(
+                channel_account,
+                SolanaChannel {
+                    program_id,
+                    channel_account: account_bytes,
+                    counterparty_public_key,
+                },
+            );
+        });
         Ok(())
     }
 
@@ -747,9 +782,9 @@ impl ClaimBook {
         let (outbound, inbound_watermarks, projection) = Self::rebuild_from(
             &entries,
             self.signer.as_ref(),
-            &self.channel_domains,
+            &self.channel_domains.load(),
             self.solana_signer.as_ref(),
-            &self.solana_channels,
+            &self.solana_channels.load(),
         );
         let projection = Arc::new(RwLock::new(projection));
         let outbound = Arc::new(RwLock::new(outbound));
@@ -897,7 +932,7 @@ impl ClaimBook {
     /// outgoing frame to `peer_id` is claimed against, independent of
     /// whether a claim happens to be pending right now).
     pub fn outbound_channel_id(&self, peer_id: &str) -> Option<String> {
-        self.outbound_channels.get(peer_id).cloned()
+        self.outbound_channels.load().get(peer_id).cloned()
     }
 
     /// The latest claim this connector has ever accepted on `channel_id`
@@ -952,21 +987,22 @@ impl ClaimBook {
         amount: u64,
         now: DateTime<Utc>,
     ) -> Option<WireClaim> {
-        let channel_id = self.outbound_channels.get(peer_id)?.clone();
+        let channel_id = self.outbound_channels.load().get(peer_id)?.clone();
 
         enum Binding<'a> {
             Evm(&'a Arc<dyn Signer>, OnChainChannelId, ChannelDomain),
             Solana(&'a Arc<dyn Ed25519Signer>, SolanaChannel),
         }
-        let binding = if let Some(&(on_chain_id, domain)) = self.channel_domains.get(&channel_id) {
-            let signer = self.signer.as_ref()?;
-            Binding::Evm(signer, on_chain_id, domain)
-        } else if let Some(&channel) = self.solana_channels.get(&channel_id) {
-            let solana_signer = self.solana_signer.as_ref()?;
-            Binding::Solana(solana_signer, channel)
-        } else {
-            return None;
-        };
+        let binding =
+            if let Some(&(on_chain_id, domain)) = self.channel_domains.load().get(&channel_id) {
+                let signer = self.signer.as_ref()?;
+                Binding::Evm(signer, on_chain_id, domain)
+            } else if let Some(&channel) = self.solana_channels.load().get(&channel_id) {
+                let solana_signer = self.solana_signer.as_ref()?;
+                Binding::Solana(solana_signer, channel)
+            } else {
+                return None;
+            };
 
         let mut outbound = self.outbound_mut();
         let ledger = outbound
@@ -1170,11 +1206,13 @@ impl ClaimBook {
     pub fn verify_signature(&self, claim: &WireClaim) -> Result<(), ClaimRejectReason> {
         match &claim.signature {
             ClaimSignature::Evm(signature) => {
-                let Some(&(on_chain_id, domain)) = self.channel_domains.get(&claim.channel_id)
+                let Some(&(on_chain_id, domain)) =
+                    self.channel_domains.load().get(&claim.channel_id)
                 else {
                     return Err(ClaimRejectReason::UnknownChannel);
                 };
-                let Some(counterparty) = self.counterparties.get(&claim.channel_id) else {
+                let counterparties = self.counterparties.load();
+                let Some(counterparty) = counterparties.get(&claim.channel_id) else {
                     return Err(ClaimRejectReason::UnknownChannel);
                 };
                 let proof = evm_proof(on_chain_id, domain, claim.nonce, claim.cumulative_amount);
@@ -1185,7 +1223,8 @@ impl ClaimBook {
                 }
             }
             ClaimSignature::Solana(signature) => {
-                let Some(channel) = self.solana_channels.get(&claim.channel_id) else {
+                let solana_channels = self.solana_channels.load();
+                let Some(channel) = solana_channels.get(&claim.channel_id) else {
                     return Err(ClaimRejectReason::UnknownChannel);
                 };
                 if verify_solana_balance_proof(
@@ -1748,7 +1787,7 @@ mod tests {
         outbound_channels.insert(peer_id.to_string(), channel.to_string());
         let mut counterparties = HashMap::new();
         counterparties.insert(channel.to_string(), counterparty);
-        let mut book = ClaimBook::new(Some(signer), outbound_channels, counterparties);
+        let book = ClaimBook::new(Some(signer), outbound_channels, counterparties);
         book.set_channel_domain(channel, test_domain())
             .expect("test channel id is valid");
         book
@@ -1830,7 +1869,7 @@ mod tests {
 
         #[test]
         fn set_channel_domain_refuses_an_invalid_channel_id_and_registers_nothing() {
-            let mut book = ClaimBook::new(None, HashMap::new(), HashMap::new());
+            let book = ClaimBook::new(None, HashMap::new(), HashMap::new());
 
             let result = book.set_channel_domain("channel-a", test_domain());
 
@@ -1842,7 +1881,7 @@ mod tests {
     fn no_claim_is_recorded_without_a_signer() {
         let mut outbound_channels = HashMap::new();
         outbound_channels.insert("peer-b".to_string(), channel_id(1));
-        let mut book = ClaimBook::new(None, outbound_channels, HashMap::new());
+        let book = ClaimBook::new(None, outbound_channels, HashMap::new());
         book.set_channel_domain(channel_id(1), test_domain())
             .unwrap();
 
@@ -1902,7 +1941,7 @@ mod tests {
     #[test]
     fn a_channel_change_rebinds_the_ledger_instead_of_carrying_the_old_watermark() {
         let key = derive_evm_address(&LocalSigner::generate("k").public_key().unwrap());
-        let mut book = book_with_peer("peer-b", &channel_id(1), key);
+        let book = book_with_peer("peer-b", &channel_id(1), key);
         book.record_fulfillment("peer-b", 100, now()).unwrap();
         book.record_fulfillment("peer-b", 50, now()).unwrap();
         assert_eq!(book.outbound_cumulative_amount("peer-b"), 150);
@@ -2121,7 +2160,7 @@ mod tests {
         let own_address = derive_evm_address(&signer.public_key().unwrap());
         let mut outbound_channels = HashMap::new();
         outbound_channels.insert("peer-b".to_string(), channel_id(1));
-        let mut book = ClaimBook::new(Some(Arc::new(signer)), outbound_channels, HashMap::new());
+        let book = ClaimBook::new(Some(Arc::new(signer)), outbound_channels, HashMap::new());
         book.set_channel_domain(channel_id(1), test_domain())
             .unwrap();
 
@@ -2206,7 +2245,7 @@ mod tests {
 
     #[test]
     fn outbound_channel_id_reports_the_configured_channel_for_a_peer() {
-        let mut book = ClaimBook::new(None, HashMap::new(), HashMap::new());
+        let book = ClaimBook::new(None, HashMap::new(), HashMap::new());
         book.set_outbound_channel("peer-b", channel_id(1));
 
         assert_eq!(book.outbound_channel_id("peer-b"), Some(channel_id(1)));
@@ -2837,7 +2876,7 @@ mod tests {
 
         /// A book that accepts claims on `account(n)` signed by `signer`.
         fn book_with_solana_channel(n: u8, signer: &Keypair) -> ClaimBook {
-            let mut book = ClaimBook::new(None, HashMap::new(), HashMap::new());
+            let book = ClaimBook::new(None, HashMap::new(), HashMap::new());
             book.set_solana_channel(
                 base58(&account(n)),
                 &base58(&signer.public.to_bytes()),
@@ -2892,7 +2931,7 @@ mod tests {
         fn re_registering_the_counterparty_invalidates_the_old_keys_claims() {
             let peer = keypair(1);
             let claim = sign_solana(&peer, 1, 1, 100);
-            let mut book = book_with_solana_channel(1, &peer);
+            let book = book_with_solana_channel(1, &peer);
             book.set_solana_channel(
                 base58(&account(1)),
                 &base58(&keypair(2).public.to_bytes()),
@@ -3038,7 +3077,7 @@ mod tests {
         /// `set_channel_domain` holds an EVM id to.
         #[test]
         fn set_solana_channel_refuses_anything_that_is_not_a_32_byte_account() {
-            let mut book = ClaimBook::new(None, HashMap::new(), HashMap::new());
+            let book = ClaimBook::new(None, HashMap::new(), HashMap::new());
             let good = base58(&account(1));
 
             assert!(book
@@ -3111,7 +3150,7 @@ mod tests {
         fn an_evm_outbound_ledger_and_a_solana_inbound_watermark_do_not_disturb_each_other() {
             let peer = keypair(1);
             let evm_key = derive_evm_address(&LocalSigner::generate("k").public_key().unwrap());
-            let mut book = book_with_peer("peer-b", &channel_id(1), evm_key);
+            let book = book_with_peer("peer-b", &channel_id(1), evm_key);
             book.set_solana_channel(
                 base58(&account(1)),
                 &base58(&peer.public.to_bytes()),
@@ -3282,7 +3321,7 @@ mod tests {
             fn no_outbound_solana_claim_is_recorded_without_a_solana_signer() {
                 let mut outbound_channels = HashMap::new();
                 outbound_channels.insert("peer-b".to_string(), base58(&account(1)));
-                let mut book = ClaimBook::new(None, outbound_channels, HashMap::new());
+                let book = ClaimBook::new(None, outbound_channels, HashMap::new());
                 book.set_solana_channel(
                     base58(&account(1)),
                     &base58(&keypair(1).public.to_bytes()),
@@ -3420,7 +3459,7 @@ mod tests {
                 let evm_peer_signer = LocalSigner::generate("peer-key");
                 let evm_key = derive_evm_address(&evm_peer_signer.public_key().unwrap());
 
-                let mut book = book_with_solana_peer("peer-b", 1, [6u8; 32]);
+                let book = book_with_solana_peer("peer-b", 1, [6u8; 32]);
                 book.set_verification_key(channel_id(2), evm_key);
                 book.set_channel_domain(channel_id(2), test_domain())
                     .unwrap();

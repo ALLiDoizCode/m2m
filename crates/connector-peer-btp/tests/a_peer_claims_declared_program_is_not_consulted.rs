@@ -76,7 +76,7 @@ fn peer_keypair() -> Keypair {
 /// under `PROGRAM` -- what `Connector::with_solana_channel` is handed at
 /// boot from `[[peer_channels]]` plus `[settlement.solana]`.
 fn book(peer: &Keypair) -> ClaimBook {
-    let mut book = ClaimBook::new(None, HashMap::new(), HashMap::new());
+    let book = ClaimBook::new(None, HashMap::new(), HashMap::new());
     book.set_solana_channel(
         CHANNEL_ACCOUNT,
         &bs58::encode(peer.public.to_bytes()).into_string(),

@@ -37,6 +37,7 @@ pub use operator::OperatorConfig;
 pub use pay_channel::{EvmPayChannelConfig, PayChannelConfig, SolanaPayChannelConfig};
 pub use peer::{
     ForwardedClaimEnforcement, PeerCarriage, PeerConfig, PeerExposure, DEFAULT_MAX_PACKET_AMOUNT,
+    DEFAULT_PEER_TIMEOUT_MS,
 };
 pub use peer_channel::{EvmPeerChannelConfig, PeerChannelConfig, SolanaPeerChannelConfig};
 pub use route::{PeerRouteConfig, StaticRoute, TransportPolicy};

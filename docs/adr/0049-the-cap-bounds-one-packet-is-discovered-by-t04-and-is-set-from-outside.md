@@ -1,12 +1,14 @@
 # The cap bounds one packet, is discovered by its own `T04`, and is never earned by the connector
 
-**Status:** Accepted, **partly not yet built** — the cap and its `T04` refusal are live; the message-carries-the-cap rule is live but unstated, and a runtime-settable cap does not exist. Corrects `CONTEXT.md`'s **Cap** entry, and corrects three documents that claim nothing emits `T04`. Both falsifiers below are answered by [0058](0058-a-peering-is-established-from-a-url.md), which puts the cap on the write that establishes a peering.
+**Status:** Accepted — **built** (#1160). The cap and its `T04` refusal were already live; a runtime-settable cap now exists, put there by [0058](0058-a-peering-is-established-from-a-url.md) as this record anticipated. Corrects `CONTEXT.md`'s **Cap** entry, and corrects three documents that claim nothing emits `T04`.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
-**Falsifier:** `crates/connector-operator/src/**/*.rs` matching `\bmax_packet_amount\b` — Consequences below: "The operator surface must be able to express a cap, and today it cannot." A runtime-settable cap has to be nameable on the write half, so the key appearing here means it landed.
-
-**Falsifier:** `crates/connector-runtime/src/peer_route_store.rs` matching `\bmax_packet_amount\b` — the other end of the same mechanism: a runtime peer row would have to carry the cap and persist it, under the durability rules [0034](0034-a-runtime-peer-route-table-never-shadows-the-config-file.md) already decided.
+Both falsifiers this record carried while a runtime-settable cap did not exist — no file under
+`crates/connector-operator/src/` and none at `crates/connector-runtime/src/peer_route_store.rs`
+matching `max_packet_amount` — are **satisfied and removed**. `POST /peers` takes the key and the
+durable peer row persists it, which is precisely what those two lines said no implementation could
+avoid.
 
 **A cap is the largest amount a connector will forward to one peer in a single packet.** A packet
 exceeding it is refused `T04`, never carried and never split. **The reject's message carries the
@@ -79,3 +81,24 @@ advisory source is a surface to maintain and keep honest, for the saving of one 
 **Three documents need correcting** and none of them is this record's to fix: `packet.rs`'s
 constructor doc, ADR 0033's body, and `peer-semantics-pre-868.md` §5.1–§5.3. They are named here so the
 correction is not re-derived.
+
+## Update (issue #1160) — the operator surface can express a cap now
+
+Consequences above says _"The operator surface must be able to express a cap, and today it cannot.
+`Connector::upsert_runtime_peer` takes an `id` and nothing else."_ That was true when it was
+written and is not true now: `POST /peers` carries `max_packet_amount` beside `fee`, and the durable
+runtime peering persists both ([0058](0058-a-peering-is-established-from-a-url.md),
+[0061](0061-a-fee-attaches-to-a-peering-not-to-a-route.md)). The paragraph is left standing rather
+than rewritten, per this folder's conventions; read it as a record of the gap this record was
+written into.
+
+**Nothing about the decision moved.** The cap still bounds one packet and never an accumulation,
+over it is still `T04` and never a split, the reject's message still states the current cap, no cap
+is published in advance, and the connector still never raises its own — a controller writes the
+number, which is what the write half now makes possible.
+
+**Zero is not a cap.** A peering row that states `max_packet_amount = 0` keeps
+`DEFAULT_MAX_PACKET_AMOUNT`, exactly as a `[[peers]]` row that writes nothing does. There is no
+value on this surface that removes a bound, and none that silently sets one to "forward nothing":
+clause 5's "a connector never raises its own cap" is not weakened by a default that is a floor
+rather than an absence.
