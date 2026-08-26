@@ -110,16 +110,21 @@ contract DeployTestnetCutoverScript is Script {
         console.log("BASE_TOKEN_NETWORK_ADDRESS=%s", address(tokenNetwork));
         console.log("BASE_USDC_TOKEN_ADDRESS=%s (unchanged)", tokenNetwork.token());
         console.log("");
-        console.log("NEXT STEPS -- see docs/evm-deployment.md for the full runbook:");
+        console.log("NEXT STEPS -- docs/evm-deployment.md carries the checklist; this is the summary:");
         console.log("  1. Repoint [settlement.evm] contract_address to the registry address above in");
         console.log("     infra/linode-store/connector-rust.toml AND infra/linode-relay/connector-rust.toml");
         console.log("     (both boxes must agree, or a claim one accepts the other cannot resolve).");
-        console.log("  2. Redeploy/restart both boxes, then re-run `connector announce` so the live");
-        console.log("     kind:10032 event advertises the new TokenNetwork address.");
+        console.log("  2. Work the rest of the runbook's repoint checklist: test literals, the two");
+        console.log("     live-chain workflows, infra/linode-relay/swap.config.json and");
+        console.log("     infra/linode/endpoints.json all name the registry or the TokenNetwork too.");
+        console.log("     Nothing advertises the address any more -- ADR 0046 removed the announce.");
         console.log("  3. Record the addresses above in packages/contracts/deployments.json and");
         console.log("     packages/contracts/deployments/base-sepolia.md.");
-        console.log("  4. Rollback (one step): revert contract_address to the OLD registry in both");
-        console.log("     .toml files and redeploy -- the old TokenNetwork is untouched and still");
-        console.log("     settles pre-cutover channels.");
+        console.log("  4. Land the config, verify the apply, and only THEN move :rust-release --");
+        console.log("     config-change-required: true (ADR 0055). Contract, both box configs and the");
+        console.log("     image tag are one matched set once channel ids are derived (ADR 0059).");
+        console.log("  5. Rollback: revert contract_address to the OLD registry in both .toml files,");
+        console.log("     AND move :rust-release back to the last pre-ADR-0059 digest. The old");
+        console.log("     TokenNetwork is untouched and still settles pre-cutover channels.");
     }
 }
