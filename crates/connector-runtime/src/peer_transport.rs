@@ -24,6 +24,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::peer_route_store::RuntimePeering;
+
 use connector_domain::x402::X402PaymentRequired;
 use connector_domain::{PacketResponse, Prepare, Reject, RejectCode};
 
@@ -136,6 +138,32 @@ pub trait PeerTransport: Send + Sync {
     /// has stopped. Returns [`ClaimAckOutcome::NotSent`] if `peer_id`
     /// could not be reached.
     async fn flush(&self, peer_id: &str, claim: WireClaim) -> ClaimAckOutcome;
+}
+
+/// Adds and removes a **carriage** while the process serves (ADR 0058).
+///
+/// A dial transport built once at boot from `config.peers()` is what made a
+/// runtime peer row hollow: the row could name a peering the node had no
+/// way to reach. This port is the other half -- a peering established at
+/// runtime registers its carriage here, and a removed one deregisters,
+/// without a restart.
+///
+/// Separate from [`PeerTransport`] rather than a method on it because the
+/// two have different callers and different frequencies: forwarding is the
+/// packet path, and this is an operator write. An implementation may of
+/// course be the same value behind both, and
+/// `connector-cli`'s `ConfiguredPeerTransport` is.
+pub trait PeerRegistrar: Send + Sync {
+    /// Make `peering` dialable under `peer_id`, replacing whatever was
+    /// registered under that id. A peering whose endpoint selects no
+    /// carriage this node dials registers nothing and is left unreachable
+    /// -- which is `T01` with the peer named, the answer an undialable
+    /// peering has always had (`peer-carriage-spec.md` §2.2).
+    fn register(&self, peer_id: &str, peering: &RuntimePeering);
+
+    /// Stop dialing `peer_id`. A no-op for an id that was never
+    /// registered.
+    fn deregister(&self, peer_id: &str);
 }
 
 /// §2.2, §5.1 of `peer-semantics-pre-868.md`: a peer this connector could not reach

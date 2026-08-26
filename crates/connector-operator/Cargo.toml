@@ -19,6 +19,10 @@ serde_json = "1"
 ed25519-dalek = "1"
 sha2 = "0.10"
 base64 = "0.22"
+# `POST /peers` takes the counterparty's URL as a field (ADR 0058) and
+# parses it here, so a request that names something that is not a URL is a
+# `400` from this crate rather than a refusal deeper in.
+url = "2"
 
 [dev-dependencies]
 connector-config = { path = "../connector-config" }

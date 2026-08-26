@@ -76,7 +76,7 @@ not change what anything else must do.
 | [0034](0034-a-runtime-peer-route-table-never-shadows-the-config-file.md)               | A runtime peer/route table never shadows the config file                | Accepted — extends 0009; survives 0043; amended by #1059 |
 | [0043](0043-purchasable-peering-is-removed.md)                                         | Purchasable peering is removed                                          | Accepted — **retires 0037, 0038, 0039**                  |
 | [0047](0047-the-configuration-schema-is-implementation-detail-capabilities-are-law.md) | The configuration schema is implementation detail; capabilities are law | Accepted — sharpens 0009                                 |
-| [0058](0058-a-peering-is-established-from-a-url.md)                                    | A peering is established from a URL; its identity is trust-on-first-use | Accepted — **not yet built** (#1160); completes 0034     |
+| [0058](0058-a-peering-is-established-from-a-url.md)                                    | A peering is established from a URL; its identity is trust-on-first-use | Accepted — **built** (#1160); completes 0034             |
 | [0061](0061-a-fee-attaches-to-a-peering-not-to-a-route.md)                             | A fee attaches to a peering, not to a route                             | Accepted — **built** (#1159); amends 0010 and 0028       |
 
 ---
@@ -104,7 +104,7 @@ outside this repository.
 | [0028](0028-a-forwarded-route-is-priced-at-the-client-edge.md)                         | A forwarded route is priced at the client edge, and carries no more than it was paid | Accepted — extended by 0029                                                                             |
 | [0029](0029-a-peer-wire-arrival-to-a-priced-termination-must-cover-its-price.md)       | A peer arrival to a priced termination must cover its price                          | Accepted in part — the `F03` check stands; its ceiling cites don't                                      |
 | [0033](0033-the-exposure-machinery-is-retired-not-restated.md)                         | The exposure machinery is retired, not restated                                      | Accepted — **retires `ceiling`, `flush_interval_ms`, exposure**                                         |
-| [0049](0049-the-cap-bounds-one-packet-is-discovered-by-t04-and-is-set-from-outside.md) | The cap bounds one packet, is discovered by its `T04`, and is set from outside       | Accepted — **partly not yet built**; corrects CONTEXT.md                                                |
+| [0049](0049-the-cap-bounds-one-packet-is-discovered-by-t04-and-is-set-from-outside.md) | The cap bounds one packet, is discovered by its `T04`, and is set from outside       | Accepted — **built** (#1160, the runtime cap); corrects CONTEXT.md                                      |
 | [0035](0035-request-request-binding-ships-no-new-mechanism.md)                         | Request-request binding ships no new mechanism                                       | Accepted                                                                                                |
 | [0052](0052-permissionless-payment-is-guaranteed-and-a-claim-is-what-authorises.md)    | Permissionless payment is guaranteed; a claim, never an identity, authorises         | Accepted — the client edge's first record                                                               |
 

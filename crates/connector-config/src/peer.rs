@@ -8,7 +8,12 @@ use crate::error::ConfigError;
 
 /// The default for `claim_ack_timeout_ms` and `peer_answer_timeout_ms`
 /// (`peer-carriage-spec.md` §6.3): thirty seconds each.
-const DEFAULT_PEER_TIMEOUT_MS: u64 = 30_000;
+///
+/// Public because a peering established at runtime (ADR 0058) has no
+/// `[[peers]]` row to read a timeout off and must land on the same number a
+/// config-file peering that wrote none does -- read from here rather than
+/// typed again somewhere the two could drift.
+pub const DEFAULT_PEER_TIMEOUT_MS: u64 = 30_000;
 
 /// The default `max_packet_amount` (ADR 0042, "The cap"): the largest
 /// amount this connector will forward to one peer in a **single packet**,
@@ -103,7 +108,14 @@ impl PeerCarriage {
     /// laptop-runnable end-to-end test can point one connector at another's
     /// loopback socket without a TLS terminator in the harness; it is not
     /// a deployment shape.
-    fn from_scheme_allowing_plaintext(scheme: &str, allow_plaintext: bool) -> Option<PeerCarriage> {
+    /// Public because a peering established at runtime from a URL (ADR
+    /// 0058) decides its carriage by exactly this rule and must not grow
+    /// a second copy of it: §2.1 is one sentence, and two implementations
+    /// of one sentence is how a `wss://` peering ends up dialed over HTTP.
+    pub fn from_scheme_allowing_plaintext(
+        scheme: &str,
+        allow_plaintext: bool,
+    ) -> Option<PeerCarriage> {
         match PeerCarriage::from_scheme(scheme) {
             Some(carriage) => Some(carriage),
             None if allow_plaintext => match scheme {

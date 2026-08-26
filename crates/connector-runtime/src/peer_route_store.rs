@@ -19,6 +19,28 @@
 //! ships on -- so a crash mid-write leaves the previous, still-valid
 //! snapshot in place rather than a half-written file. An operator inspects
 //! the current table at any time with `cat`/`jq` directly on `path`.
+//!
+//! # What a peer row holds, and why it holds it
+//!
+//! Until ADR 0058 a runtime peer row was *a name*: an id a route might
+//! legally reference, with no endpoint, no carriage and no channel
+//! binding. That is what made the row hollow -- a peering could not be
+//! added to a running node at all, because the four config tables a
+//! peering needs could only be edited with the process stopped.
+//!
+//! [`RuntimePeering`] is that row grown into the thing ADR 0034's rules
+//! were always about: the endpoint to reach the counterparty on, the edge
+//! identity a payload is sealed to, the operator's own fee and cap, and
+//! the payment channel this peering's claims are judged against. Every one
+//! of those but the fee and the cap is read from the counterparty's own
+//! self-description (ADR 0050) or derived from it (ADR 0059); the fee and
+//! the cap are the operator's policy and no document can supply them
+//! (ADR 0006, ADR 0049, ADR 0061).
+//!
+//! **Nothing here is pinned, verified or attested.** The identity in a row
+//! is whatever the URL the operator named served at the moment they named
+//! it -- trust-on-first-use, which ADR 0058 states plainly and declines to
+//! strengthen.
 
 use std::collections::HashMap;
 use std::fs;
@@ -26,8 +48,10 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+use connector_config::PeerCarriage;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use url::Url;
 
 use crate::route::PeerRoute;
 
@@ -42,21 +66,158 @@ pub enum PeerRouteStoreError {
     },
 }
 
+/// One runtime peering's binding to one payment channel, by chain.
+///
+/// The runtime twin of a `[[peer_channels]]` row plus its `[[pay_channels]]`
+/// counterpart: the same channel holds both roles with one hop -- the peer
+/// role for what arrives, the client role for what this node sends -- which
+/// is the deployed shape `connector_config::pay_channel`'s own header
+/// describes.
+///
+/// `counterparty_key` is **the counterparty's settlement address on this
+/// entry's own chain**, and is what the channel was derived from (ADR
+/// 0059). It is never the peer's edge identity: `TokenNetwork` recovers a
+/// balance proof's signer and requires it to *be* a channel participant, so
+/// a secp256k1 edge key in this field would name a participant no chain
+/// holds. On Solana the two could not even be confused -- an ed25519 public
+/// key and a secp256k1 one are different values on different curves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "chain", rename_all = "lowercase")]
+pub enum RuntimePeerChannel {
+    Evm {
+        /// The `TokenNetwork` channel id, `0x`-prefixed lowercase hex.
+        channel_id: String,
+        /// The peer's 20-byte EVM settlement address, `0x`-prefixed hex.
+        counterparty_key: String,
+        /// Half of the EIP-712 domain this channel's claims are signed
+        /// under (ADR 0024).
+        chain_id: u64,
+        /// The other half: the `TokenNetwork` that verifies a claim on
+        /// redemption, `0x`-prefixed hex.
+        token_network: String,
+    },
+    Solana {
+        /// The channel PDA, base58.
+        channel_account: String,
+        /// The peer's 32-byte ed25519 settlement public key, base58.
+        counterparty_key: String,
+        /// The deployed `payment-channel` program a claim on this channel
+        /// binds its domain to (ADR 0053), base58.
+        program_id: String,
+    },
+}
+
+impl RuntimePeerChannel {
+    /// How a claim on this channel names it on the wire -- an EVM
+    /// `channelId` or a Solana `channelAccount`. The one spelling every
+    /// cross-table check compares by, matching
+    /// `connector_config::PayChannelConfig::channel`.
+    #[must_use]
+    pub fn channel(&self) -> &str {
+        match self {
+            RuntimePeerChannel::Evm { channel_id, .. } => channel_id,
+            RuntimePeerChannel::Solana {
+                channel_account, ..
+            } => channel_account,
+        }
+    }
+
+    /// The counterparty's settlement address on this entry's chain, in
+    /// that chain's own spelling.
+    #[must_use]
+    pub fn counterparty_key(&self) -> &str {
+        match self {
+            RuntimePeerChannel::Evm {
+                counterparty_key, ..
+            }
+            | RuntimePeerChannel::Solana {
+                counterparty_key, ..
+            } => counterparty_key,
+        }
+    }
+}
+
+/// A peering held in the runtime table: everything ADR 0058's one operator
+/// write establishes.
+///
+/// `endpoint` and `edge_identity` come from the counterparty's
+/// self-description; `channels` are derived from the two settlement
+/// addresses and read (or opened) on chain; `fee` and `max_packet_amount`
+/// are the operator's.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RuntimePeering {
+    /// ADR 0061's flat per-packet fee: what this connector retains for
+    /// carrying one packet to this counterparty, whichever prefix it was
+    /// addressed to.
+    pub fee: u64,
+    /// ADR 0049's cap: the largest amount this connector will forward to
+    /// this counterparty in one packet. Zero means "this row states none",
+    /// and the peering keeps `DEFAULT_MAX_PACKET_AMOUNT` -- there is no
+    /// call anywhere that removes a bound.
+    pub max_packet_amount: u64,
+    /// Where this connector dials the counterparty, from its
+    /// self-description's `btpEndpoint` or `httpEndpoint`. `None` for a
+    /// peering that predates ADR 0058 or for one this node only ever
+    /// accepts on.
+    pub endpoint: Option<String>,
+    /// The counterparty's edge identity -- the secp256k1 key a payload is
+    /// sealed to (ADR 0018) -- as the `0x`-prefixed uncompressed public
+    /// key its self-description published. **Not** a settlement address
+    /// and never usable as one.
+    pub edge_identity: Option<String>,
+    /// The counterparty's own client edge (`POST /ilp`), read from its
+    /// self-description's `httpEndpoint`. What
+    /// `POST /ilp/claim-state` is asked on when this node covers a packet
+    /// it forwards to this peering.
+    pub client_edge_url: Option<String>,
+    /// The payment channels this peering's claims are judged against, one
+    /// per chain the two nodes share. A peering with none is refused at
+    /// write time (the runtime twin of `ConfigError::PeerChannelUnbound`).
+    pub channels: Vec<RuntimePeerChannel>,
+}
+
+impl RuntimePeering {
+    /// Which carriage this connector dials this peering on, decided
+    /// **solely** by the endpoint's scheme
+    /// (`peer-carriage-spec.md` §2.1) -- the same rule
+    /// `connector_config::PeerConfig::dial` applies to a config-file
+    /// peering, read from the same place rather than restated.
+    ///
+    /// `None` for a peering with no endpoint, and for one whose endpoint
+    /// names a scheme this node will not dial.
+    #[must_use]
+    pub fn dial(&self, allow_plaintext: bool) -> Option<PeerCarriage> {
+        let url = self.endpoint_url()?;
+        PeerCarriage::from_scheme_allowing_plaintext(url.scheme(), allow_plaintext)
+    }
+
+    /// This peering's endpoint as a parsed URL, or `None` when it has none
+    /// (or holds something that is not a URL, which only a hand-edited
+    /// snapshot can produce).
+    #[must_use]
+    pub fn endpoint_url(&self) -> Option<Url> {
+        Url::parse(self.endpoint.as_deref()?).ok()
+    }
+}
+
 /// The on-disk shapes a stored peer has ever had, all folded into what a
-/// peer row is now: an id and the peering's flat per-packet fee.
+/// peer row is now.
 ///
 /// Issue #884 wrote `peers` as a bare `Vec<String>`; #886 grew each entry
 /// into a struct so it could carry a peer-sale lease's `expires_at`; ADR
 /// 0043 removed purchasable peering and with it the lease, so that field is
-/// read and dropped rather than refused; ADR 0061 gave the row a `fee`,
-/// which is the peering's and never the route's. `state_dir` is a
-/// persistent volume that outlives image upgrades
-/// (deploy/connector-rust/README.md) and a snapshot format has no version
-/// field to migrate on, so a box holding any older shape must still boot:
-/// refusing to parse one is a crash loop with no migration path. A row from
-/// either older shape replays at `fee` zero -- free carriage, which is what
-/// a peering whose fee lived on its routes charged the moment those routes
-/// stopped carrying one.
+/// read and dropped rather than refused; ADR 0061 gave the row a `fee`; ADR
+/// 0058 gave it the rest of a peering. `state_dir` is a persistent volume
+/// that outlives image upgrades (deploy/connector-rust/README.md) and a
+/// snapshot format has no version field to migrate on, so a box holding any
+/// older shape must still boot: refusing to parse one is a crash loop with
+/// no migration path.
+///
+/// A row from an older shape replays with no endpoint and no channel --
+/// which is exactly what it was, since the table could hold neither. Such
+/// a row is still readable and still removable; what it cannot do is be
+/// *written* again, because [`RuntimePeering::channels`] being empty is
+/// refused at write time now.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum StoredPeerCompat {
@@ -72,28 +233,99 @@ enum StoredPeerCompat {
         /// ADR 0061's fee, absent from every snapshot written before it.
         #[serde(default)]
         fee: Option<u64>,
+        /// Everything ADR 0058 added, absent from every snapshot written
+        /// before it.
+        #[serde(default)]
+        max_packet_amount: Option<u64>,
+        #[serde(default)]
+        endpoint: Option<String>,
+        #[serde(default)]
+        edge_identity: Option<String>,
+        #[serde(default)]
+        client_edge_url: Option<String>,
+        #[serde(default)]
+        channels: Vec<RuntimePeerChannel>,
     },
 }
 
-impl From<StoredPeerCompat> for StoredPeer {
-    fn from(compat: StoredPeerCompat) -> StoredPeer {
+/// One row as it comes back out of the compat layer: an id and the
+/// peering it names, whichever of the four on-disk shapes it was written
+/// in.
+struct ReadPeer {
+    id: String,
+    peering: RuntimePeering,
+}
+
+impl From<StoredPeerCompat> for ReadPeer {
+    fn from(compat: StoredPeerCompat) -> ReadPeer {
         match compat {
-            StoredPeerCompat::Bare(id) => StoredPeer { id, fee: 0 },
-            StoredPeerCompat::Full { id, fee, .. } => StoredPeer {
+            StoredPeerCompat::Bare(id) => ReadPeer {
                 id,
-                fee: fee.unwrap_or(0),
+                peering: RuntimePeering::default(),
+            },
+            StoredPeerCompat::Full {
+                id,
+                fee,
+                max_packet_amount,
+                endpoint,
+                edge_identity,
+                client_edge_url,
+                channels,
+                ..
+            } => ReadPeer {
+                id,
+                peering: RuntimePeering {
+                    fee: fee.unwrap_or(0),
+                    max_packet_amount: max_packet_amount.unwrap_or(0),
+                    endpoint,
+                    edge_identity,
+                    client_edge_url,
+                    channels,
+                },
             },
         }
     }
 }
 
-/// A peer row as written: the id, and the peering's flat per-packet fee
-/// (ADR 0061).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(from = "StoredPeerCompat")]
+/// A peer row as written: the id, and the peering it names.
+///
+/// Flattened rather than nested so the JSON an operator reads with `jq` is
+/// one object per peering, and so the compat layer above can keep reading
+/// the shapes that had no nesting either.
+#[derive(Debug, Clone, Serialize)]
 struct StoredPeer {
     id: String,
+    #[serde(flatten)]
+    peering: StoredPeeringFields,
+}
+
+/// The wire form of [`RuntimePeering`], with every field that a
+/// still-default peering would write as noise skipped.
+#[derive(Debug, Clone, Serialize)]
+struct StoredPeeringFields {
     fee: u64,
+    max_packet_amount: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    edge_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_edge_url: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    channels: Vec<RuntimePeerChannel>,
+}
+
+impl From<RuntimePeering> for StoredPeeringFields {
+    fn from(peering: RuntimePeering) -> StoredPeeringFields {
+        StoredPeeringFields {
+            fee: peering.fee,
+            max_packet_amount: peering.max_packet_amount,
+            endpoint: peering.endpoint,
+            edge_identity: peering.edge_identity,
+            client_edge_url: peering.client_edge_url,
+            channels: peering.channels,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -113,23 +345,28 @@ struct StoredRoute {
     price: u64,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize)]
 struct Snapshot {
-    #[serde(default)]
     peers: Vec<StoredPeer>,
+    routes: Vec<StoredRoute>,
+}
+
+/// The read half of [`Snapshot`], which goes through the compat layer.
+#[derive(Default, Deserialize)]
+struct StoredSnapshot {
+    #[serde(default)]
+    peers: Vec<StoredPeerCompat>,
     #[serde(default)]
     routes: Vec<StoredRoute>,
 }
 
-/// The runtime peerings this node holds (issue #884), each id mapped to its
-/// flat per-packet fee (ADR 0061) -- what this connector retains for
-/// carrying one packet to that counterparty. A map rather than the bare set
-/// #884 wrote, because a fee attaches to the peering: it was the one thing
-/// a peer row needed to carry once ADR 0061 took it off the route.
-pub type RuntimePeers = HashMap<String, u64>;
+/// The runtime peerings this node holds (issue #884, ADR 0058), each id
+/// mapped to the peering it names -- endpoint, edge identity, channel
+/// bindings, fee and cap.
+pub type RuntimePeers = HashMap<String, RuntimePeering>;
 
 /// What opening a [`PeerRouteStore`] replays: the store itself, plus
-/// whatever peer ids and peer-forwarding routes its file already held
+/// whatever peerings and peer-forwarding routes its file already held
 /// (empty for a fresh file).
 pub type PeerRouteTable = (PeerRouteStore, RuntimePeers, HashMap<String, PeerRoute>);
 
@@ -145,7 +382,7 @@ pub struct PeerRouteStore {
 
 impl PeerRouteStore {
     /// Open (or, if absent, note the future location of) the table file at
-    /// `path`, returning the store alongside whatever peer ids and routes
+    /// `path`, returning the store alongside whatever peerings and routes
     /// it already held.
     pub fn open(path: &Path) -> Result<PeerRouteTable, PeerRouteStoreError> {
         let store = PeerRouteStore {
@@ -161,7 +398,7 @@ impl PeerRouteStore {
         if text.trim().is_empty() {
             return Ok((store, RuntimePeers::new(), HashMap::new()));
         }
-        let snapshot: Snapshot =
+        let snapshot: StoredSnapshot =
             serde_json::from_str(&text).map_err(|source| PeerRouteStoreError::Corrupt {
                 path: path.to_path_buf(),
                 source,
@@ -169,7 +406,10 @@ impl PeerRouteStore {
         let peers = snapshot
             .peers
             .into_iter()
-            .map(|peer| (peer.id, peer.fee))
+            .map(|peer| {
+                let peer = ReadPeer::from(peer);
+                (peer.id, peer.peering)
+            })
             .collect();
         let routes = snapshot
             .routes
@@ -196,9 +436,9 @@ impl PeerRouteStore {
     ) -> Result<(), PeerRouteStoreError> {
         let mut stored_peers: Vec<StoredPeer> = peers
             .iter()
-            .map(|(id, fee)| StoredPeer {
+            .map(|(id, peering)| StoredPeer {
                 id: id.clone(),
-                fee: *fee,
+                peering: peering.clone().into(),
             })
             .collect();
         stored_peers.sort_by(|a, b| a.id.cmp(&b.id));
@@ -251,6 +491,22 @@ impl PeerRouteStore {
 mod tests {
     use super::*;
 
+    fn peering(fee: u64) -> RuntimePeering {
+        RuntimePeering {
+            fee,
+            max_packet_amount: 5_000,
+            endpoint: Some("https://peer.example/ilp".to_string()),
+            edge_identity: Some("0x04ab".to_string()),
+            client_edge_url: Some("https://peer.example/ilp".to_string()),
+            channels: vec![RuntimePeerChannel::Evm {
+                channel_id: format!("0x{}", "ab".repeat(32)),
+                counterparty_key: "0x00000000000000000000000000000000000000aa".to_string(),
+                chain_id: 31337,
+                token_network: "0x00000000000000000000000000000000000000bb".to_string(),
+            }],
+        }
+    }
+
     #[test]
     fn opening_a_path_that_does_not_exist_yet_yields_an_empty_table() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -268,7 +524,7 @@ mod tests {
         let (store, _, _) = PeerRouteStore::open(&path).expect("open");
 
         let mut peers = RuntimePeers::new();
-        peers.insert("apex-relay-2".to_string(), 3);
+        peers.insert("apex-relay-2".to_string(), peering(3));
         let mut routes = HashMap::new();
         routes.insert(
             "g.example.relay2".to_string(),
@@ -281,13 +537,67 @@ mod tests {
         assert_eq!(read_routes, routes);
     }
 
+    /// ADR 0058: the endpoint, the edge identity and the channel binding
+    /// survive the restart they are written for. Without the endpoint the
+    /// node comes back unable to dial the counterparty it was peered with;
+    /// without the channel it comes back unable to judge a claim from one.
+    #[test]
+    fn a_peerings_endpoint_identity_and_channel_survive_a_restart() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("runtime_peers.json");
+        let (store, _, _) = PeerRouteStore::open(&path).expect("open");
+
+        let mut peers = RuntimePeers::new();
+        peers.insert("apex-relay-2".to_string(), peering(100));
+        store.persist(&peers, &HashMap::new()).expect("persist");
+
+        let (_store, read_peers, _) = PeerRouteStore::open(&path).expect("re-open");
+        let read = &read_peers["apex-relay-2"];
+        assert_eq!(read.fee, 100);
+        assert_eq!(read.max_packet_amount, 5_000);
+        assert_eq!(
+            read.endpoint.as_deref(),
+            Some("https://peer.example/ilp"),
+            "a peering with no endpoint is one this node cannot dial"
+        );
+        assert_eq!(read.edge_identity.as_deref(), Some("0x04ab"));
+        assert_eq!(read.channels.len(), 1);
+        assert_eq!(
+            read.channels[0].channel(),
+            &format!("0x{}", "ab".repeat(32))
+        );
+    }
+
+    /// The carriage is the endpoint's scheme and nothing else -- read
+    /// through `connector_config`'s own rule rather than restated here.
+    #[test]
+    fn the_carriage_is_the_endpoints_scheme() {
+        let mut wss = peering(0);
+        wss.endpoint = Some("wss://peer.example/ilp/btp".to_string());
+        assert_eq!(wss.dial(false), Some(PeerCarriage::Btp));
+        assert_eq!(peering(0).dial(false), Some(PeerCarriage::Http));
+
+        let mut plaintext = peering(0);
+        plaintext.endpoint = Some("http://127.0.0.1:4000/ilp".to_string());
+        assert_eq!(
+            plaintext.dial(false),
+            None,
+            "a plaintext endpoint selects no carriage unless the node opted in"
+        );
+        assert_eq!(plaintext.dial(true), Some(PeerCarriage::Http));
+
+        let accept_only = RuntimePeering::default();
+        assert_eq!(accept_only.dial(true), None);
+    }
+
     /// The exact bytes issue #884's format wrote -- `peers` as bare
     /// strings, and a `fee` on each route -- still replay: `state_dir`
     /// outlives image upgrades, so a node that added a runtime peer before
     /// #886 grew each entry into a struct boots with this very file on
     /// disk, and refusing to parse it is a crash loop with no migration
     /// path. The route's `fee` is read and dropped (ADR 0061); the peering
-    /// it belonged to replays at zero.
+    /// it belonged to replays at zero, with no endpoint and no channel --
+    /// which is precisely what it was.
     #[test]
     fn a_bare_string_peer_snapshot_still_replays() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -299,7 +609,7 @@ mod tests {
         .expect("write the #884-format file");
 
         let (store, peers, routes) = PeerRouteStore::open(&path).expect("the old format parses");
-        assert_eq!(peers.get("apex-relay-2"), Some(&0));
+        assert_eq!(peers["apex-relay-2"], RuntimePeering::default());
         assert_eq!(routes.len(), 1);
         assert_eq!(routes["g.example.relay2"].price(), 25);
 
@@ -340,6 +650,23 @@ mod tests {
         );
     }
 
+    /// A snapshot written by the ADR 0061 shape -- an id and a fee, and
+    /// nothing else a peering needs -- still replays, at its own fee.
+    #[test]
+    fn a_fee_only_snapshot_still_replays_at_that_fee() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("runtime_peers.json");
+        fs::write(
+            &path,
+            r#"{"peers":[{"id":"apex-relay-2","fee":100}],"routes":[]}"#,
+        )
+        .expect("write the ADR 0061-format file");
+
+        let (_store, peers, _) = PeerRouteStore::open(&path).expect("the fee format parses");
+        assert_eq!(peers["apex-relay-2"].fee, 100);
+        assert!(peers["apex-relay-2"].channels.is_empty());
+    }
+
     #[test]
     fn persisting_again_overwrites_rather_than_appends() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -347,13 +674,13 @@ mod tests {
         let (store, _, _) = PeerRouteStore::open(&path).expect("open");
 
         let mut peers = RuntimePeers::new();
-        peers.insert("peer-a".to_string(), 0);
+        peers.insert("peer-a".to_string(), peering(0));
         store
             .persist(&peers, &HashMap::new())
             .expect("first persist");
 
         peers.remove("peer-a");
-        peers.insert("peer-b".to_string(), 0);
+        peers.insert("peer-b".to_string(), peering(0));
         store
             .persist(&peers, &HashMap::new())
             .expect("second persist");
@@ -374,22 +701,31 @@ mod tests {
         assert!(routes.is_empty());
     }
 
-    /// ADR 0061: a peering's fee survives the restart it is written for.
-    /// The row is the durable one -- a runtime peer added over
-    /// `POST /peers` -- so a fee that did not round-trip would mean a node
-    /// carrying that peering's packets for free after every restart.
+    /// A Solana peering round-trips through its own chain shape: a channel
+    /// account and a program id, never an EVM channel id and a chain id.
     #[test]
-    fn a_peerings_fee_round_trips_through_the_snapshot() {
+    fn a_solana_binding_round_trips_in_its_own_shape() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("runtime_peers.json");
         let (store, _, _) = PeerRouteStore::open(&path).expect("open");
 
+        let solana = RuntimePeerChannel::Solana {
+            channel_account: "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi".to_string(),
+            counterparty_key: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
+            program_id: "Toon11111111111111111111111111111111111111".to_string(),
+        };
         let mut peers = RuntimePeers::new();
-        peers.insert("apex-relay-2".to_string(), 100);
+        peers.insert(
+            "solana-hop".to_string(),
+            RuntimePeering {
+                channels: vec![solana.clone()],
+                ..RuntimePeering::default()
+            },
+        );
         store.persist(&peers, &HashMap::new()).expect("persist");
 
         let (_store, read_peers, _) = PeerRouteStore::open(&path).expect("re-open");
-        assert_eq!(read_peers.get("apex-relay-2"), Some(&100));
+        assert_eq!(read_peers["solana-hop"].channels, vec![solana]);
     }
 
     #[test]

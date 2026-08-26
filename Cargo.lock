@@ -1088,6 +1088,7 @@ dependencies = [
 name = "connector-cli"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "axum",
  "base64 0.22.1",
@@ -1209,6 +1210,7 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "tower",
+ "url",
 ]
 
 [[package]]
@@ -1222,6 +1224,7 @@ dependencies = [
 name = "connector-peer-btp"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "base64 0.22.1",
  "bs58",
@@ -1248,6 +1251,7 @@ dependencies = [
 name = "connector-peer-http"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "base64 0.22.1",
  "chrono",

@@ -40,6 +40,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use connector_btp::{BtpFrame, BtpSessionHandle, ProtocolData, BTP_ERROR};
 use connector_config::{PeerCarriage, PeerChannelConfig, PeerConfig};
@@ -219,7 +220,19 @@ pub struct BtpPeerTransport {
     /// had a Solana identity to sign never had one to render either.
     solana_signer_public_key: Option<[u8; 32]>,
     clock: Arc<dyn Clock>,
-    relations: HashMap<String, RelationState>,
+    /// Peer id → that peering's relation and its claim-exchange state.
+    ///
+    /// Copy-on-write behind an [`ArcSwap`] since ADR 0058: a peering
+    /// established over the operator surface must be dialable **while this
+    /// process serves**, and a map built once at boot is precisely what
+    /// made a runtime peer row a name with nothing behind it. Reads stay on
+    /// the packet path and stay lock-free; a write clones a map with one
+    /// entry per peering, which is an operator-frequency cost.
+    ///
+    /// Each entry is an [`Arc`] so a forward already in flight keeps the
+    /// state it started on even if the peering is deregistered underneath
+    /// it -- the alternative is a claim's pending set vanishing mid-request.
+    relations: ArcSwap<HashMap<String, Arc<RelationState>>>,
 }
 
 impl BtpPeerTransport {
@@ -234,7 +247,7 @@ impl BtpPeerTransport {
             signer_address,
             solana_signer_public_key: None,
             clock,
-            relations: HashMap::new(),
+            relations: ArcSwap::from_pointee(HashMap::new()),
         }
     }
 
@@ -247,22 +260,54 @@ impl BtpPeerTransport {
         self.solana_signer_public_key = Some(public_key);
     }
 
-    /// Register a peering this connector dials over BTP. Relations are
-    /// added before the transport is shared; the map itself is never
-    /// mutated afterwards, so reading it on the packet path takes no lock.
-    pub fn add_peer(&mut self, relation: PeerRelation) {
-        self.relations.insert(
-            relation.peer_id.clone(),
-            RelationState {
-                relation,
-                session: tokio::sync::Mutex::new(None),
-                pending: Mutex::new(Pending::default()),
-            },
-        );
+    /// Register a peering this connector dials over `wss://`, replacing
+    /// whatever was registered under the same id.
+    ///
+    /// Callable while the process serves (ADR 0058), not only during
+    /// construction: `POST /peers` establishes a peering and this is how it
+    /// becomes reachable without a restart.
+    pub fn add_peer(&self, relation: PeerRelation) {
+        self.rebind(|relations| {
+            relations.insert(
+                relation.peer_id.clone(),
+                Arc::new(RelationState {
+                    relation,
+                    session: tokio::sync::Mutex::new(None),
+                    pending: Mutex::new(Pending::default()),
+                }),
+            );
+        });
+    }
+
+    /// Stop dialing `peer_id`. A no-op for an id this transport never
+    /// held.
+    ///
+    /// The other half of runtime registration: `DELETE /peers` is the kill
+    /// switch ADR 0060 named when it removed the shared secret, and a kill
+    /// switch that leaves the carriage dialing is not one.
+    pub fn remove_peer(&self, peer_id: &str) {
+        self.rebind(|relations| {
+            relations.remove(peer_id);
+        });
+    }
+
+    /// Replace the relation map with a copy that has `change` applied. See
+    /// the field's own doc for what this costs and why the packet path
+    /// pays nothing for it.
+    fn rebind(&self, change: impl FnOnce(&mut HashMap<String, Arc<RelationState>>)) {
+        let mut next = (**self.relations.load()).clone();
+        change(&mut next);
+        self.relations.store(Arc::new(next));
+    }
+
+    /// The relation registered for `peer_id`, held past the read so a
+    /// forward in flight is unaffected by a concurrent deregistration.
+    fn relation(&self, peer_id: &str) -> Option<Arc<RelationState>> {
+        self.relations.load().get(peer_id).cloned()
     }
 
     /// Every `wss://` peering in a loaded config, with its channels.
-    pub fn add_peers_from_config(&mut self, peers: &[PeerConfig], channels: &[PeerChannelConfig]) {
+    pub fn add_peers_from_config(&self, peers: &[PeerConfig], channels: &[PeerChannelConfig]) {
         for peer in peers {
             if let Some(relation) = PeerRelation::from_config(peer, channels) {
                 self.add_peer(relation);
@@ -443,9 +488,10 @@ impl PeerTransport for BtpPeerTransport {
         prepare: Prepare,
         claim: Option<WireClaim>,
     ) -> PeerForward {
-        let Some(state) = self.relations.get(peer_id) else {
+        let Some(state) = self.relation(peer_id) else {
             return PeerForward::unreachable(peer_id);
         };
+        let state = state.as_ref();
         let handle = match self.session(state).await {
             Ok(handle) => handle,
             Err(error) => {
@@ -529,9 +575,10 @@ impl PeerTransport for BtpPeerTransport {
     }
 
     async fn flush(&self, peer_id: &str, claim: WireClaim) -> ClaimAckOutcome {
-        let Some(state) = self.relations.get(peer_id) else {
+        let Some(state) = self.relation(peer_id) else {
             return ClaimAckOutcome::NotSent;
         };
+        let state = state.as_ref();
         let handle = match self.session(state).await {
             Ok(handle) => handle,
             Err(error) => {

@@ -235,7 +235,7 @@ fn downstream_box(identity: Arc<dyn Signer>) -> Arc<Connector> {
 /// hand-assembled one. Its journal is the default in-memory one, so it
 /// costs no syscalls.
 fn upstream_claim_source(signer: Arc<dyn Signer>) -> ClaimBook {
-    let mut book = ClaimBook::new(
+    let book = ClaimBook::new(
         Some(signer),
         HashMap::from([(UPSTREAM_SELF.to_string(), channel_id(1))]),
         HashMap::new(),
