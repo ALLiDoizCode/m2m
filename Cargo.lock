@@ -1273,6 +1273,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "axum",
  "base64 0.22.1",
  "bs58",
  "chrono",
@@ -1281,6 +1282,7 @@ dependencies = [
  "connector-settlement",
  "connector-signer",
  "ed25519-dalek",
+ "futures-util",
  "hyper",
  "percent-encoding",
  "prometheus",
