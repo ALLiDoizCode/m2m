@@ -22,7 +22,8 @@ use tracing::Instrument;
 use crate::app_client::{AppClient, AppOutcome};
 use crate::attribution::{apply_payment_attribution, PaymentAttribution};
 use crate::claim::{
-    ChannelDomain, ClaimAckOutcome, ClaimBook, InvalidChannelId, InvalidSolanaChannel, WireClaim,
+    ChannelDomain, ClaimAckOutcome, ClaimBook, ClaimRejectReason, InvalidChannelId,
+    InvalidSolanaChannel, WireClaim,
 };
 use crate::clock::Clock;
 use crate::journal::{Journal, JournalError};
@@ -1555,6 +1556,22 @@ impl Connector {
             }
         }
         Ok(self.handle_prepare(prepare).await)
+    }
+
+    /// What this node's own record of a peer channel makes of `claim`'s
+    /// signature -- `Ok(())`, [`ClaimRejectReason::UnknownChannel`] or
+    /// [`ClaimRejectReason::SignatureInvalid`] -- with nothing accepted,
+    /// no watermark advanced and nothing journaled.
+    ///
+    /// This is `peer-carriage-spec.md` §1.2's **P3**, and it is what
+    /// decides role: a peer carriage asks this of the claim a frame
+    /// carries, and admits the frame as a peer frame only on `Ok`. The
+    /// check is against the counterparty key the `[[peer_channels]]` row
+    /// configures, never against anything the claim declares about itself,
+    /// which is the whole reason a signature proves more here than a
+    /// bearer string ever did (ADR 0060).
+    pub fn verify_peer_claim(&self, claim: &WireClaim) -> Result<(), ClaimRejectReason> {
+        self.claims.verify_signature(claim)
     }
 
     /// Verify and, if valid, accept a claim received over the peer semantics --

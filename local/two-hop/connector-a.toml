@@ -98,21 +98,18 @@ peer_id = "a-b"
 price = 1100
 
 # ── The peering ──────────────────────────────────────────────────────────────
-# ONE id, written identically in both files. `[[peers]].id` names the
-# *relation*, and it is the `peerId` this node presents in its credential
-# (peer-carriage-spec.md §1.4) -- so P1 ("a credential naming a peer id that
-# appears in `[[peers]]`") only holds when the two configs agree on the literal
-# string. `two_connectors_peer.rs` records what happens when they do not: the
-# dialer is admitted as an ordinary client, silently.
+# `[[peers]].id` names the *relation*, and since ADR 0060 it is a purely LOCAL
+# label: nothing puts it on the wire. Role is decided by the claim, which names
+# a channel, which names at most one `[[peer_channels]]` row, which names one
+# peering (§1.2's P2 and P3). So the two files no longer have to agree on this
+# literal string -- they happen to here, because one name for one relation is
+# easier to read across two configs, not because anything checks.
 #
 # `endpoint` selects the carriage by scheme (§2.1): `http://` is
 # ILP-over-HTTP, `ws://` would be BTP. Only the dialing side has one, and on
 # HTTP that makes this node structurally the payer (§6.4) -- there is no path
 # for B to originate back.
 #
-# `secret_file`, not `secret`: a peering secret written into a committed config
-# is a credential in a public repository. Both nodes' copies are written by
-# `local/keys.sh` from one `openssl rand`.
 # `fee` is what this node retains for carrying ONE packet over this peering
 # (ADR 0010, ADR 0061) -- flat, per packet, never a share of the amount, and
 # the same figure whichever prefix `a-b` carries. It rides here rather than on
@@ -123,9 +120,6 @@ price = 1100
 id = "a-b"
 endpoint = "http://connector-b:3000/ilp"
 fee = 100
-
-[peers.credential]
-secret_file = "/app/data/peer-a-b-secret"
 
 # P2 (§1.2): the channel this relation's claims are judged against, and the
 # EIP-712 domain they are signed under (ADR 0024). A peering with no row here

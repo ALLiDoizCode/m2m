@@ -476,20 +476,12 @@ PY
   echo "$node: evm $(cast wallet address --private-key "0x$(cat "$dir/settlement.key")")  solana $solana_address  operator keyid $keyid"
 done
 
-# ── The peering secrets ──────────────────────────────────────────────────────
-# §1.4's shared secret, one per peering, written into BOTH participants' key
-# directories. A `[[peers]]` entry takes `secret_file` as well as a literal
-# `secret`, and this is why the file form exists: a peering secret in a
-# committed config is a credential in a public repository.
-for peering in $PEERINGS; do
-  IFS=':' read -r id _chain payer payee _port <<<"$peering"
-  secret_file="peer-$id-secret"
-  if [[ ! -f "$(node_dir "$payer")/$secret_file" ]]; then
-    openssl rand -hex 32 >"$(node_dir "$payer")/$secret_file"
-    echo "generated the '$id' peering secret"
-  fi
-  cp "$(node_dir "$payer")/$secret_file" "$(node_dir "$payee")/$secret_file"
-done
+# There is no peering secret to generate (ADR 0060). A peering used to need a
+# shared `{peerId, secret}` written into both participants' key directories;
+# role is now decided by the covering claim's signature against the
+# counterparty key `[[peer_channels]]` configures, which is strictly stronger
+# and needs nothing symmetric to distribute. The channels below are the whole
+# of what a peering needs from this script.
 
 # The connector containers mount these directories READ-ONLY as uid 10001, so
 # the files must be world-readable to them. They are mode 600 above for the

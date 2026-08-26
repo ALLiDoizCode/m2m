@@ -1215,12 +1215,7 @@ dependencies = [
 name = "connector-peer-auth"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
- "connector-btp",
  "connector-config",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
 ]
 
 [[package]]

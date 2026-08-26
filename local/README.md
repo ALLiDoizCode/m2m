@@ -110,9 +110,11 @@ named after that node's compose service; the node's config is
 `local/<topology>/<node>.toml`.
 
 Per node it writes `signer.key`, `settlement.key`, `settlement-solana.key`,
-`settlement-solana-cli.json`, `operator-bearer-token`, `operator-write-keys`,
-`operator-send.key` and — for each peering the node is in — a shared
-`peer-<id>-secret`. The operator two are a pair: the allowlist holds the
+`settlement-solana-cli.json`, `operator-bearer-token`, `operator-write-keys`
+and `operator-send.key`. A peering needs nothing here: since ADR 0060 there is
+no shared `peer-<id>-secret`, because role is decided by the covering claim's
+signature rather than by a string both operators wrote down. The operator two
+are a pair: the allowlist holds the
 **public** half (derived by the same binary that will sign, so the two cannot
 disagree), and `connector send` holds the private half. Ask for the allowlist
 value directly with:

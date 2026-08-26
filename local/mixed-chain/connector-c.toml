@@ -79,8 +79,6 @@ price = 0
 [[peers]]
 id = "b-c"
 
-[peers.credential]
-secret_file = "/app/data/peer-b-c-secret"
 
 # The other half of B's Solana row. `counterparty_key` is B's Solana
 # SETTLEMENT public key -- the identity a claim on this channel must be signed

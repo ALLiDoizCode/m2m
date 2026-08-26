@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "envelope": {
     "valid": [
       {
@@ -184,13 +184,6 @@
     ]
   },
   "peer_carriage": {
-    "credential": {
-      "name": "peer_auth",
-      "peer_id": "store-box",
-      "secret": "s3cret-peering-key",
-      "btp_raw_hex": "7b22706565724964223a2273746f72652d626f78222c22736563726574223a227333637265742d70656572696e672d6b6579227d",
-      "http_base64": "eyJwZWVySWQiOiJzdG9yZS1ib3giLCJzZWNyZXQiOiJzM2NyZXQtcGVlcmluZy1rZXkifQ=="
-    },
     "claim_evm": {
       "name": "peer_claim_evm",
       "signed_message_hex": "",

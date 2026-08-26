@@ -1120,17 +1120,16 @@ fn open_evm_channel_index(state_dir: Option<&Path>) -> Result<Arc<EvmChannelInde
 /// nothing else: a peering carries signed balance proofs (ADR 0004), so
 /// `ws://` and `http://` remain a hard `PeerEndpointScheme` load error on
 /// every config that does not set it. A node that *did* set it is one whose
-/// peer credentials and claims cross the wire in the clear, and the only
-/// thing worse than that in a test harness is that in production with
-/// nobody noticing.
+/// peer claims cross the wire in the clear, and the only thing worse than
+/// that in a test harness is that in production with nobody noticing.
 fn warn_about_plaintext_peerings(config: &Config) {
     for (peer_id, endpoint) in config.plaintext_peerings() {
         tracing::warn!(
             peer_id,
             %endpoint,
             "peer_allow_plaintext_endpoints is set and this peering is dialed in the clear -- \
-             the credential and every claim on it are readable on the wire. This is a loopback \
-             and test setting; see docs/operators/btp-peer-transport-bringup.md"
+             every claim on it is readable on the wire. This is a loopback and test setting; \
+             see docs/operators/btp-peer-transport-bringup.md"
         );
     }
 }
@@ -2303,8 +2302,6 @@ key_file = "{key_file}"
 id = "store"
 endpoint = "wss://store.example:443/ilp/btp"
 
-[peers.credential]
-secret = "a-real-peering-secret"
 
 [[peer_channels]]
 peer_id = "store"
@@ -2372,8 +2369,6 @@ key_file = "{key_file}"
 id = "store"
 endpoint = "wss://store.example:443/ilp/btp"
 
-[peers.credential]
-secret = "a-real-peering-secret"
 
 [[peer_channels]]
 peer_id = "store"
@@ -3768,7 +3763,6 @@ key_file = "{key_path}"
 [[peers]]
 id = "store"
 endpoint = "wss://store.example:443/btp"
-credential = {{ secret = "a-shared-peering-secret" }}
 
 [[peer_channels]]
 peer_id = "store"
@@ -3963,7 +3957,6 @@ key_file = "{key_file}"
 [[peers]]
 id = "store"
 endpoint = "wss://store.example:443/btp"
-credential = {{ secret = "a-shared-peering-secret" }}
 
 [[peer_channels]]
 peer_id = "store"
@@ -4267,7 +4260,6 @@ key_file = "{key_file}"
 [[peers]]
 id = "{PEER_ID}"
 endpoint = "wss://store.example:443/btp"
-credential = {{ secret = "shared-secret" }}
 fee = {PEER_FEE}
 
 [[peer_channels]]
@@ -4558,7 +4550,6 @@ key_file = "{key_file}"
 [[peers]]
 id = "{PEER_ID}"
 endpoint = "wss://store.example:443/btp"
-credential = {{ secret = "shared-secret" }}
 fee = {PEER_FEE}
 
 [[peer_channels]]

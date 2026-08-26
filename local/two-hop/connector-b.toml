@@ -96,8 +96,6 @@ price = 1000
 [[peers]]
 id = "a-b"
 
-[peers.credential]
-secret_file = "/app/data/peer-a-b-secret"
 
 # The other half of A's row. Same channel, same EIP-712 domain, and the
 # `counterparty_key` pointed the other way: this is A's SETTLEMENT address,

@@ -41,14 +41,10 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use connector_btp::{
-    BtpFrame, BtpSessionHandle, OriginateError, ProtocolData, AUTH_PROTOCOL, BTP_ERROR,
-    CONTENT_TYPE_TEXT,
-};
+use connector_btp::{BtpFrame, BtpSessionHandle, ProtocolData, BTP_ERROR};
 use connector_config::{PeerCarriage, PeerChannelConfig, PeerConfig};
 use connector_domain::x402::{GreetingError, X402PaymentRequired};
 use connector_domain::{Fulfill, PacketResponse, Prepare, Reject};
-use connector_peer_auth::{encode_raw, PresentedCredential};
 use connector_runtime::{ClaimAckOutcome, Clock, PeerForward, PeerTransport, WireClaim};
 use url::Url;
 
@@ -90,14 +86,18 @@ pub trait PeerDialer: Send + Sync {
 
 /// One peering relation, as the dial side needs it.
 ///
-/// Per **relation**, never per connection (§2.5): the timeouts, the
-/// credential and the claim domains all belong to the relation, and
-/// splitting them per connection is a double-spend surface.
+/// Per **relation**, never per connection (§2.5): the timeouts and the
+/// claim domains belong to the relation, and splitting them per connection
+/// is a double-spend surface.
+///
+/// There is nothing here to present on the way in. ADR 0060 deleted the
+/// `{peerId, secret}` credential this used to carry and dial with: what
+/// proves the peering at the far end is the claim covering each packet,
+/// which this transport already renders and sends.
 #[derive(Debug, Clone)]
 pub struct PeerRelation {
     peer_id: String,
     endpoint: Url,
-    credential: PresentedCredential,
     /// Canonical EVM channel id → the EIP-712 domain its claims are signed
     /// under, from that peering's EVM-shaped `[[peer_channels]]` rows.
     domains: HashMap<String, PeerClaimDomain>,
@@ -150,7 +150,6 @@ impl PeerRelation {
         Some(PeerRelation {
             peer_id: peer.id().to_string(),
             endpoint,
-            credential: PresentedCredential::new(peer.id(), peer.credential().secret()),
             domains,
             solana_program_ids,
             peer_answer_timeout: Duration::from_millis(peer.peer_answer_timeout_ms()),
@@ -164,7 +163,6 @@ impl PeerRelation {
     pub fn new(
         peer_id: impl Into<String>,
         endpoint: Url,
-        credential: PresentedCredential,
         domains: HashMap<String, PeerClaimDomain>,
         solana_program_ids: HashMap<String, String>,
         peer_answer_timeout: Duration,
@@ -173,7 +171,6 @@ impl PeerRelation {
         PeerRelation {
             peer_id: peer_id.into(),
             endpoint,
-            credential,
             solana_program_ids,
             domains,
             peer_answer_timeout,
@@ -273,8 +270,17 @@ impl BtpPeerTransport {
         }
     }
 
-    /// The session for `peer_id`, dialing and authenticating one if there
-    /// is none.
+    /// The session for `peer_id`, dialing one if there is none.
+    ///
+    /// There is no handshake on it, and there used to be: the session's
+    /// first MESSAGE carried a `{peerId, secret}` credential in an `auth`
+    /// entry, and its answer doubled as a liveness check. ADR 0060 deleted
+    /// the credential, and an empty frame sent only to be answered is not a
+    /// substitute -- the far end takes its role from the claim on each
+    /// packet, so the first real MESSAGE is both the proof and the check. A
+    /// socket that dials and then cannot carry surfaces where every other
+    /// carriage failure does: as `T01` on the packet, naming the peer and
+    /// the endpoint (§2.2).
     async fn session(&self, state: &RelationState) -> Result<BtpSessionHandle, DialError> {
         let mut slot = state.session.lock().await;
         if let Some(handle) = slot.as_ref() {
@@ -284,38 +290,8 @@ impl BtpPeerTransport {
             .dialer
             .dial(&state.relation.peer_id, &state.relation.endpoint)
             .await?;
-
-        // §1.4: the credential rides the session's first MESSAGE as the
-        // `auth` protocolData entry, raw UTF-8 JSON -- the same entry, in
-        // the same shape, a client already sends. What differs is only
-        // that the far side *evaluates* P1 and P2 against it.
-        let auth = ProtocolData {
-            name: AUTH_PROTOCOL.to_string(),
-            content_type: CONTENT_TYPE_TEXT,
-            data: encode_raw(&state.relation.credential),
-        };
-        let answered = tokio::time::timeout(
-            state.relation.peer_answer_timeout,
-            handle.send_message(&[auth], &[]),
-        )
-        .await;
-        match answered {
-            Ok(Ok(frame)) if frame.frame_type != BTP_ERROR => {
-                *slot = Some(handle.clone());
-                Ok(handle)
-            }
-            other => Err(DialError {
-                peer_id: state.relation.peer_id.clone(),
-                endpoint: state.relation.endpoint.to_string(),
-                reason: match other {
-                    Ok(Ok(_)) => "the peer refused our credential".to_string(),
-                    Ok(Err(OriginateError::SessionGone)) => "the session closed".to_string(),
-                    Ok(Err(OriginateError::Timeout)) | Err(_) => {
-                        "the peer did not answer the auth frame".to_string()
-                    }
-                },
-            }),
-        }
+        *slot = Some(handle.clone());
+        Ok(handle)
     }
 
     /// Forget the session after a failure, so the next packet dials a new
@@ -617,7 +593,7 @@ impl BtpPeerTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use connector_btp::{BTP_RESPONSE, PAYMENT_REQUIRED_PROTOCOL};
+    use connector_btp::{BTP_RESPONSE, CONTENT_TYPE_TEXT, PAYMENT_REQUIRED_PROTOCOL};
     use connector_domain::RejectCode;
 
     /// The bytes the client edge's §1.9 greeting carries, in miniature.

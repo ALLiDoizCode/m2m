@@ -1,4 +1,12 @@
-//! The two roles, what each one grants, and how a session binds one.
+//! The two roles and what each one grants.
+//!
+//! There is no session binding here, and there used to be one. A
+//! `SessionRoleBinding` bound a BTP session's role once, at the `auth`
+//! frame, and held it for the socket's lifetime — which was right while a
+//! per-session credential decided role. ADR 0060 deleted that credential,
+//! and §1.5 inverted with it: role is a property of the **frame**, decided
+//! from the claim that frame carries, so there is nothing left to bind and
+//! no second bind to refuse.
 //!
 //! §1.7 states the containment as an enumeration "because 'peer trust' and
 //! 'client trust' are otherwise undefined, and undefined trust is what
@@ -9,8 +17,13 @@
 
 use std::fmt;
 
-/// The role of one interaction — a BTP session from its websocket upgrade
-/// to its close, or a single HTTP request (§1.1).
+/// The role of one interaction (§1.1).
+///
+/// **A property of the frame, not of the session** (§1.5, as amended by
+/// #868): each frame stands on the claim it carries, and a frame carrying
+/// no claim that satisfies P2 and P3 is a client frame however many peer
+/// frames preceded it on the same socket. A per-session credential fixed a
+/// per-session role; a per-packet claim fixes a per-packet one.
 ///
 /// Two variants, and there will not be a third. §1.2 admits no `Unknown`,
 /// no unroled state and no degraded peer: "if either fails, for any
@@ -19,17 +32,20 @@ use std::fmt;
 /// would get is the fallthrough §1.2 forbids.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum SessionRole {
-    /// Everything that is not a proven peer, including an interaction that
-    /// asserted a peer id and failed to prove it (§1.6). The default,
-    /// because §1.5 starts every session here.
+    /// Everything that is not a proven peer, including a frame that named
+    /// a configured peer channel and failed to prove it (§1.6). The
+    /// default, because §1.5 starts every interaction here.
     #[default]
     Client,
-    /// A proven peering: P1 and P2 both held.
+    /// A proven peering: P2 and P3 both held — the frame's claim named a
+    /// channel a `[[peer_channels]]` row binds, and its signature verified
+    /// against the counterparty key that row configures.
     Peer {
-        /// The **configured** peer id — the `[[peers]]` entry that was
-        /// proven, not the string the interaction asserted. They are equal
-        /// bytes, but taking it from config is what lets everything
-        /// downstream treat it as an identifier rather than as input.
+        /// The **configured** peer id — the `[[peer_channels]]` row's own
+        /// `peer_id`, never a string the interaction asserted. The claim
+        /// names a channel and config names the relation, which is what
+        /// lets everything downstream treat this as an identifier rather
+        /// than as input.
         peer_id: String,
     },
 }
@@ -205,91 +221,6 @@ pub fn claim_ack_to_emit<T>(role: &SessionRole, acknowledgement: Option<T>) -> O
     }
 }
 
-/// A second role decision arrived on a session whose role is already bound.
-///
-/// §1.5: it MUST NOT be evaluated, the role MUST be left unchanged, and
-/// the frame MUST be answered with a BTP ERROR (`code F00`, `name
-/// NotAcceptedError`). Re-authentication mid-session is the escalation
-/// path that closes.
-///
-/// The BTP code and name are named in this doc comment and nowhere in this
-/// crate's types: they are the carriage's vocabulary, and a crate that
-/// spelled them would be a crate that knows what a frame is.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-#[error(
-    "role is already bound for this session and MUST NOT be re-evaluated \
-     (peer-carriage-spec.md §1.5)"
-)]
-pub struct RoleAlreadyBound;
-
-/// A session's role over its lifetime (§1.5), for the carriage that owns
-/// the session.
-///
-/// It starts `client` and binds **once**. Three of §1.5's rules fall out
-/// of the shape rather than out of discipline:
-///
-/// * *Role is bound once and immutable for the session's lifetime* —
-///   [`SessionRoleBinding::bind`] returns [`RoleAlreadyBound`] on a second
-///   call and leaves the role untouched. There is no setter and no way to
-///   unbind.
-/// * *A second `auth` on a bound session MUST NOT be evaluated* — the
-///   carriage calls `bind` before it calls [`crate::decide_role`], or
-///   discards the decision on the error; either way the role does not
-///   move.
-/// * *Frames processed before the role is bound are client frames and are
-///   never retroactively reclassified* — a binding has no history to
-///   rewrite. It answers what the role is **now**, and a claim already
-///   ingested as a client claim was ingested against the value this
-///   returned then.
-///
-/// An HTTP carriage has no session and needs none of this: it decides per
-/// request (§1.4), because HTTP has no session for a role to outlive.
-#[derive(Debug, Clone, Default)]
-pub struct SessionRoleBinding {
-    role: SessionRole,
-    bound: bool,
-}
-
-impl SessionRoleBinding {
-    /// A fresh session: `client`, unbound. Every session starts here,
-    /// including one that is about to prove a peering — §1.5's "a session
-    /// starts as `client`".
-    #[must_use]
-    pub fn new() -> Self {
-        SessionRoleBinding::default()
-    }
-
-    /// This session's role right now.
-    #[must_use]
-    pub fn role(&self) -> &SessionRole {
-        &self.role
-    }
-
-    /// Whether a role decision has already been evaluated for this
-    /// session. A carriage checks this to answer a second credential with
-    /// an ERROR *without* evaluating it.
-    #[must_use]
-    pub fn is_bound(&self) -> bool {
-        self.bound
-    }
-
-    /// Bind this session's role to a decided one.
-    ///
-    /// Succeeds exactly once. A second call is [`RoleAlreadyBound`] and
-    /// changes nothing — including when the second decision is the same
-    /// one, and including when it would *downgrade*, because a rule that
-    /// permitted the harmless direction would need to decide which
-    /// direction is harmless.
-    pub fn bind(&mut self, role: SessionRole) -> Result<&SessionRole, RoleAlreadyBound> {
-        if self.bound {
-            return Err(RoleAlreadyBound);
-        }
-        self.role = role;
-        self.bound = true;
-        Ok(&self.role)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,54 +302,6 @@ mod tests {
             claim_ack_to_emit(&SessionRole::peer("store-box"), Some("accepted")),
             Some("accepted")
         );
-    }
-
-    #[test]
-    fn a_session_starts_as_a_client_and_unbound() {
-        let binding = SessionRoleBinding::new();
-
-        assert_eq!(binding.role(), &SessionRole::Client);
-        assert!(!binding.is_bound());
-    }
-
-    #[test]
-    fn a_role_binds_once() {
-        let mut binding = SessionRoleBinding::new();
-
-        assert_eq!(
-            binding
-                .bind(SessionRole::peer("store-box"))
-                .expect("first bind"),
-            &SessionRole::peer("store-box")
-        );
-        assert!(binding.is_bound());
-    }
-
-    /// §1.5's anti-escalation rule, in the direction that matters: a
-    /// second credential on a bound client session cannot promote it.
-    #[test]
-    fn a_second_bind_is_an_error_not_an_escalation() {
-        let mut binding = SessionRoleBinding::new();
-        binding.bind(SessionRole::Client).expect("first bind");
-
-        assert_eq!(
-            binding.bind(SessionRole::peer("store-box")),
-            Err(RoleAlreadyBound)
-        );
-        assert_eq!(binding.role(), &SessionRole::Client);
-    }
-
-    /// And in the other direction too. A rule that allowed the "harmless"
-    /// direction would have to decide which direction is harmless.
-    #[test]
-    fn a_second_bind_cannot_downgrade_either() {
-        let mut binding = SessionRoleBinding::new();
-        binding
-            .bind(SessionRole::peer("store-box"))
-            .expect("first bind");
-
-        assert_eq!(binding.bind(SessionRole::Client), Err(RoleAlreadyBound));
-        assert_eq!(binding.role(), &SessionRole::peer("store-box"));
     }
 
     #[test]

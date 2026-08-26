@@ -21,7 +21,12 @@
 //! | CLAIM_ACK | `claim-ack` entry on the RESPONSE that already answers the claim-bearing frame ([`ack`]) |
 //! | `accumulatedCost` | `toon-accumulated-cost` entry on a REJECT ([`fields`]) |
 //! | x402 greeting | `payment-required` entry on the `F06` REJECT an uncovered PREPARE gets ([`price_gate`], [`fields`]) |
-//! | peer credential | `auth` entry, raw UTF-8 JSON |
+//!
+//! There is no row for a peer credential, and there was one: the `auth`
+//! entry used to carry a `{peerId, secret}` shared secret. ADR 0060 deleted
+//! it — the claim already in the table above is what proves the peering, so
+//! the `auth` entry is the client edge's again and this carriage neither
+//! sends one nor reads one.
 //!
 //! # Three things this crate must not do, and how it cannot
 //!
@@ -33,11 +38,12 @@
 //!    that difference is caller-side, expressed by which functions each
 //!    carriage calls, never by a flag on the codec.
 //! 2. **Re-decide role.** [`connector_peer_auth::decide_role`] owns
-//!    §1.2's P1/P2 rule, and [`accept`] calls it. What this crate owns is
-//!    what a *session* adds and that crate cannot see: role bound once and
-//!    never re-evaluated, a second `auth` frame as an ERROR rather than an
-//!    escalation, and frames processed before the binding staying client
-//!    frames forever (§1.5).
+//!    §1.2's P2/P3 rule, and [`role_gate::decide`] is the one place in this
+//!    workspace that joins it to the claim book's verdict on a signature --
+//!    called by this carriage, by the HTTP one, and by the client edge's
+//!    shared front door, so one rule runs on every arrival. What this crate
+//!    owns is what a *frame* adds and that crate cannot see: which bytes on
+//!    the wire are the claim.
 //! 3. **Fork the claim.** §4's claim JSON *is* the client edge's claim
 //!    JSON, parsed by the client edge's own structural validator and
 //!    judged by the same `ClaimBook` (spec I4). See [`claim_json`].
@@ -67,10 +73,12 @@ pub mod claim_json;
 pub mod dial;
 pub mod fields;
 pub mod price_gate;
+pub mod role_gate;
 pub mod ws;
 
 pub use accept::{AcceptedClaims, PeerAcceptPolicy, PeerCarriageState, PeerSession};
 pub use claim_json::{ClaimDecodeError, PeerClaimDomain};
 pub use dial::{decode_answer, BtpPeerTransport, DialError, PeerAnswer, PeerDialer, PeerRelation};
 pub use price_gate::{ClaimEnforcementPolicy, PaymentRequired};
+pub use role_gate::decide as decide_frame_role;
 pub use ws::TungsteniteDialer;
