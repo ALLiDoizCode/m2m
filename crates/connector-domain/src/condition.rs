@@ -85,6 +85,39 @@ pub fn forwarded_expiry(expires_at: DateTime<Utc>, now: DateTime<Utc>) -> Option
     (!is_expired(shortened, now)).then_some(shortened)
 }
 
+/// How long a *termination* may wait for its app: everything the packet has
+/// left, and not one instant more -- `None` when it has nothing left, meaning
+/// the app MUST NOT be asked at all (`packet-flow-spec.md` PF-25, ADR 0064).
+///
+/// This is [`forwarded_expiry`]'s counterpart for the last hop, and the two
+/// differ in exactly one way: a forward keeps a [`FORWARDING_MESSAGE_WINDOW`]
+/// back and a termination keeps nothing back. That is not an oversight, it is
+/// what PF-19 bought. The hop above already shortened this packet by its own
+/// window before handing it here, precisely so the answer has time to travel
+/// back up; a termination that shortened *again* would be spending a second
+/// window on a return leg somebody else has already paid for, and would refuse
+/// packets it could have served. Where nobody shortened -- a packet a client
+/// posted straight to this connector's own edge -- the deadline is the payer's
+/// own, unmediated, and waiting all of it is doing exactly what the payer
+/// asked.
+///
+/// The boundary is [`is_expired`]'s, for [`forwarded_expiry`]'s reason: a
+/// packet must fulfil strictly before its deadline, so a budget of exactly
+/// zero is no budget. The returned span is therefore always strictly
+/// positive, which is what makes it safe to hand to a timer.
+///
+/// It is deliberately a *budget* rather than a verdict. The rule this
+/// implements is that the deadline bounds the wait, not that it censors the
+/// answer: an app that answers inside the budget is answered for, however
+/// close to the line it came, and the caller never asks this question a
+/// second time about work already done (ADR 0064). Charging is not what is
+/// being decided here and cannot be -- the claim that pays for this packet
+/// was taken before the app was called, and no verdict returned afterwards
+/// gives it back.
+pub fn delivery_budget(expires_at: DateTime<Utc>, now: DateTime<Utc>) -> Option<TimeDelta> {
+    (!is_expired(expires_at, now)).then(|| expires_at - now)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,6 +220,55 @@ mod tests {
         assert_eq!(forwarded_expiry(now - Duration::seconds(1), now), None);
     }
 
+    #[test]
+    fn a_delivery_budget_is_everything_the_packet_has_left() {
+        let now = at(2030, 1, 1, 0, 0, 0);
+        assert_eq!(
+            delivery_budget(now + Duration::seconds(30), now),
+            Some(Duration::seconds(30))
+        );
+    }
+
+    #[test]
+    fn a_termination_keeps_no_window_back_where_a_forward_would() {
+        // PF-25 against PF-19 on the same packet: the last hop may spend
+        // the whole remaining budget waiting for its app, because the hop
+        // above already kept a window back for the answer's journey home.
+        let now = at(2030, 1, 1, 0, 0, 0);
+        let expires_at = now + Duration::seconds(30);
+
+        let budget = delivery_budget(expires_at, now).expect("30s is a budget");
+        let forwarded = forwarded_expiry(expires_at, now).expect("30s leaves room to forward");
+
+        assert_eq!(budget, expires_at - now);
+        assert_eq!(budget - (forwarded - now), FORWARDING_MESSAGE_WINDOW);
+    }
+
+    #[test]
+    fn a_packet_with_a_millisecond_left_still_has_a_delivery_budget() {
+        // The counterpart of `forwarded_expiry`'s refusal at a whole
+        // window: a termination has nobody to hand the packet on to and no
+        // window to keep, so any strictly positive remainder is a budget it
+        // is entitled to spend.
+        let now = at(2030, 1, 1, 0, 0, 0);
+        assert_eq!(
+            delivery_budget(now + Duration::milliseconds(1), now),
+            Some(Duration::milliseconds(1))
+        );
+    }
+
+    #[test]
+    fn a_packet_at_exactly_its_expiry_has_no_delivery_budget() {
+        let deadline = at(2030, 1, 1, 0, 0, 0);
+        assert_eq!(delivery_budget(deadline, deadline), None);
+    }
+
+    #[test]
+    fn an_already_expired_packet_has_no_delivery_budget() {
+        let now = at(2030, 1, 1, 0, 0, 0);
+        assert_eq!(delivery_budget(now - Duration::seconds(1), now), None);
+    }
+
     proptest! {
         /// PF-19, both halves at once: a forward either keeps a whole
         /// message window back -- landing strictly before the expiry that
@@ -211,6 +293,31 @@ mod tests {
                     prop_assert_eq!(expires_at - forwarded, FORWARDING_MESSAGE_WINDOW);
                 }
                 None => prop_assert!(remaining <= FORWARDING_MESSAGE_WINDOW),
+            }
+        }
+
+        /// PF-25: a delivery budget is exactly the packet's own remaining
+        /// time whenever the packet is alive, and is refused outright
+        /// whenever it is not. It is never zero or negative, which is the
+        /// property that makes it safe to hand straight to a timer. Which
+        /// of the two happens is decided by [`is_expired`] and by nothing
+        /// else, so the app is asked on exactly the packets PF-02 would
+        /// still admit and on no others.
+        #[test]
+        fn a_delivery_budget_is_the_whole_remainder_or_nothing(
+            expires_at_secs in 0i64..1_000_000_000,
+            remaining_millis in -5_000i64..5_000,
+        ) {
+            let expires_at = Utc.timestamp_opt(expires_at_secs, 0).unwrap();
+            let now = expires_at - Duration::milliseconds(remaining_millis);
+
+            match delivery_budget(expires_at, now) {
+                Some(budget) => {
+                    prop_assert!(!is_expired(expires_at, now));
+                    prop_assert!(budget > Duration::zero());
+                    prop_assert_eq!(budget, expires_at - now);
+                }
+                None => prop_assert!(is_expired(expires_at, now)),
             }
         }
 

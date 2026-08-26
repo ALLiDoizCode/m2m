@@ -1,6 +1,6 @@
 # A terminating connector derives the fulfilment it is paid against
 
-**Status:** Accepted. Bounded by [0032](0032-a-client-destination-is-never-a-route-termination.md). Live: `Connector::deliver_opened_envelope`. The `TOON-Fulfillment` header it retires is gone from `crates/`.
+**Status:** Accepted. Bounded by [0032](0032-a-client-destination-is-never-a-route-termination.md), extended by [0064](0064-a-deadline-bounds-the-wait-for-an-app-not-the-answer.md) — which states the one condition under which a termination declines to derive at all: the packet's deadline fired before the app answered (#1183). Live: `Connector::deliver_opened_envelope`. The `TOON-Fulfillment` header it retires is gone from `crates/`.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
