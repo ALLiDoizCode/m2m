@@ -67,9 +67,26 @@ connector's own app, not an unaffiliated payer — and is out of scope for this 
 ### 1.1 Transport and framing
 
 - **Method/path:** `POST /ilp`.
-- **Request body:** an ILPv4 PREPARE packet (RFC-0027), OER-encoded (RFC-0030),
-  `Content-Type: application/octet-stream`.
-- **Response:** `200 OK` with an OER-encoded FULFILL or REJECT body, `Content-Type:
+- **Request body:** an ILPv4 PREPARE packet, `Content-Type: application/octet-stream`. **ILPv4
+  semantics, TOON encoding**
+  ([ADR 0063](../adr/0063-the-ilp-packet-is-toons-dialect-not-rfc-0027s.md)): the three type bytes,
+  the field order and meanings, `condition = sha256(fulfilment)` and the `F`/`T`/`R` taxonomy are
+  RFC-0027's; the **bytes are not**. This packet is not byte-compatible with RFC 0027, has never
+  been, and is not going to be — an off-the-shelf ILPv4 encoder does not produce one this edge
+  accepts. It diverges in exactly three places:
+  - no outer type-length wrapper: the type byte is followed by the fields inline, not by a
+    VarOctetString;
+  - `amount` is a VarUInt, not a fixed 8-byte `UInt64`;
+  - `expiresAt` is a 19-byte GeneralizedTime, `YYYYMMDDHHMMSS.fffZ`, not the 17-byte Interledger
+    Timestamp.
+
+  **The bytes are pinned by `vectors/wire-vectors.json`**, whose `peer_carriage.prepare`
+  fixture carries a complete encoded PREPARE as `http_body_hex` and `btp_message_hex`. That
+  fixture is the cross-repo contract for this encoding
+  ([ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md)), not the RFC;
+  `vectors/README.md`'s "The ILP packet encoding" section walks it byte by byte.
+
+- **Response:** `200 OK` with a FULFILL or REJECT body in that same encoding, `Content-Type:
 application/octet-stream`. An ILP-level outcome — fulfilled or rejected — is always HTTP 200;
   a non-2xx status is reserved for a transport-level failure and never carries an OER body:
 

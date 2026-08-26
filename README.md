@@ -52,18 +52,30 @@ which record governs the departure
 Read the profile before the body; they often disagree, and the profile is where
 you find out why.
 
-| RFC                                                                                                         | What it gives you                        | Where TOON departs                                                                                                                               |
-| ----------------------------------------------------------------------------------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| [0001 Architecture](docs/rfcs/0001-interledger-architecture/0001-interledger-architecture.md)               | The layered model, the hop-by-hop shape  | Two of its five layers are absent: no transport layer, no ledger abstraction                                                                     |
-| [0015 ILP Addresses](docs/rfcs/0015-ilp-addresses/0015-ilp-addresses.md)                                    | `g.example.app`, longest-prefix matching | Addresses are self-asserted; allocation schemes (`peer.`, `self.`, `private.`) have no behaviour here                                            |
-| [0018 Risk Mitigations](docs/rfcs/0018-connector-risk-mitigations/0018-connector-risk-mitigations.md)       | The risks of running a forwarding node   | Exposure limits are deleted, not reduced; one per-packet cap replaces them                                                                       |
-| [0019 Glossary](docs/rfcs/0019-glossary/0019-glossary.md)                                                   | The field's vocabulary                   | [`CONTEXT.md`](CONTEXT.md) is this repo's vocabulary and wins; "ledger", "transfer" and "receiver" are gone                                      |
-| [0023 BTP](docs/rfcs/0023-bilateral-transfer-protocol/0023-bilateral-transfer-protocol.md)                  | The `wss://` carriage                    | The frame grammar is the deployed client's dialect; the `auth` frame authenticates nothing                                                       |
-| [0027 ILPv4](docs/rfcs/0027-interledger-protocol-4/0027-interledger-protocol-4.md)                          | The packet: PREPARE, FULFILL, REJECT     | ⚠ **The wire encoding differs** ([#1174](https://github.com/toon-protocol/connector/issues/1174)); `data` is sealed to the terminating connector |
-| [0030 OER Encoding](docs/rfcs/0030-notes-on-oer-encoding/0030-notes-on-oer-encoding.md)                     | How a packet becomes bytes               | Stricter: length determinants must be canonical, trailing bytes are refused                                                                      |
-| [0032 Peering & Settlement](docs/rfcs/0032-peering-clearing-settlement/0032-peering-clearing-settlement.md) | What a peering is for                    | Clearing is per packet. No balance, no threshold, no netting cycle, no credit limit                                                              |
-| [0034 Connector Requirements](docs/rfcs/0034-connector-requirements/0034-connector-requirements.md)         | The job of the thing you are running     | No route discovery, no advertisement, no exchange rates, no quoting                                                                              |
-| [0035 ILP over HTTP](docs/rfcs/0035-ilp-over-http/0035-ilp-over-http.md)                                    | The `https://` carriage, `POST /ilp`     | Adds the claim header, the `402` payment-required document, and an anonymous-by-default caller                                                   |
+| RFC                                                                                                         | What it gives you                        | Where TOON departs                                                                                                                                                            |
+| ----------------------------------------------------------------------------------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [0001 Architecture](docs/rfcs/0001-interledger-architecture/0001-interledger-architecture.md)               | The layered model, the hop-by-hop shape  | Two of its five layers are absent: no transport layer, no ledger abstraction                                                                                                  |
+| [0015 ILP Addresses](docs/rfcs/0015-ilp-addresses/0015-ilp-addresses.md)                                    | `g.example.app`, longest-prefix matching | Addresses are self-asserted; allocation schemes (`peer.`, `self.`, `private.`) have no behaviour here                                                                         |
+| [0018 Risk Mitigations](docs/rfcs/0018-connector-risk-mitigations/0018-connector-risk-mitigations.md)       | The risks of running a forwarding node   | Exposure limits are deleted, not reduced; one per-packet cap replaces them                                                                                                    |
+| [0019 Glossary](docs/rfcs/0019-glossary/0019-glossary.md)                                                   | The field's vocabulary                   | [`CONTEXT.md`](CONTEXT.md) is this repo's vocabulary and wins; "ledger", "transfer" and "receiver" are gone                                                                   |
+| [0023 BTP](docs/rfcs/0023-bilateral-transfer-protocol/0023-bilateral-transfer-protocol.md)                  | The `wss://` carriage                    | The frame grammar is the deployed client's dialect; the `auth` frame authenticates nothing                                                                                    |
+| [0027 ILPv4](docs/rfcs/0027-interledger-protocol-4/0027-interledger-protocol-4.md)                          | The packet: PREPARE, FULFILL, REJECT     | ⚠ **The wire encoding is TOON's, not this RFC's** ([ADR 0063](docs/adr/0063-the-ilp-packet-is-toons-dialect-not-rfc-0027s.md)); `data` is sealed to the terminating connector |
+| [0030 OER Encoding](docs/rfcs/0030-notes-on-oer-encoding/0030-notes-on-oer-encoding.md)                     | How a packet becomes bytes               | Stricter: length determinants must be canonical, trailing bytes are refused                                                                                                   |
+| [0032 Peering & Settlement](docs/rfcs/0032-peering-clearing-settlement/0032-peering-clearing-settlement.md) | What a peering is for                    | Clearing is per packet. No balance, no threshold, no netting cycle, no credit limit                                                                                           |
+| [0034 Connector Requirements](docs/rfcs/0034-connector-requirements/0034-connector-requirements.md)         | The job of the thing you are running     | No route discovery, no advertisement, no exchange rates, no quoting                                                                                                           |
+| [0035 ILP over HTTP](docs/rfcs/0035-ilp-over-http/0035-ilp-over-http.md)                                    | The `https://` carriage, `POST /ilp`     | Adds the claim header, the `402` payment-required document, and an anonymous-by-default caller                                                                                |
+
+**Read the 0027 row twice.** This connector has **ILPv4 semantics and TOON's own
+encoding**, and "speaks ILPv4" is retired as a description of it
+([ADR 0063](docs/adr/0063-the-ilp-packet-is-toons-dialect-not-rfc-0027s.md)). The
+packet's meanings are RFC 0027's — the three types, the field order, `condition
+= sha256(fulfilment)`, the `F`/`T`/`R` codes — but its bytes are not, and will
+not decode in a conforming ILPv4 implementation. That is deliberate, not a bug
+to fix: four other things would stop a standard sender from paying a node here
+even with perfect bytes, so the encoding is the _last_ obstacle to
+interoperation rather than the first. The bytes are pinned in
+[`vectors/wire-vectors.json`](vectors/README.md#the-ilp-packet-encoding), which
+walks them one at a time for anyone writing an encoder.
 
 **What TOON does not use, and why.** If you know Interledger, these are the
 absences to notice — each is deliberate, and none is vendored:
@@ -278,8 +290,11 @@ me":
    `GET /ilp/routes/price?destination=g.example.app` for the price. Both are
    free, and the price is the same lookup a real request is charged against, so
    it can never quote a price you would not also charge.
-2. They `POST /ilp` an OER `PREPARE`. **An ILP outcome is never an HTTP one** —
-   a `FULFILL` and a `REJECT` both come back at HTTP **200**.
+2. They `POST /ilp` an OER `PREPARE` — in TOON's encoding, not RFC 0027's byte
+   layout ([ADR 0063](docs/adr/0063-the-ilp-packet-is-toons-dialect-not-rfc-0027s.md)),
+   which is why an off-the-shelf ILPv4 client is not the thing you debug
+   against. **An ILP outcome is never an HTTP one** — a `FULFILL` and a
+   `REJECT` both come back at HTTP **200**.
 3. With no claim on a route you both terminate and price, they get **402** and
    an x402 `PaymentRequired` document quoting that price.
 4. They retry with a signed claim in `ILP-Payment-Channel-Claim`. It is checked

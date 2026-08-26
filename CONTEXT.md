@@ -42,7 +42,13 @@ reads one is reading text from a stranger. _(Decided and not yet built — ADR 0
 
 **Packet**:
 The unit of forwarding: a destination, an amount, an expiry, and a payload that is opaque to
-every hop that carries it. Every packet terminates in either fulfilment or rejection.
+every hop that carries it. Every packet terminates in either fulfilment or rejection. Its
+**semantics are ILPv4's and its encoding is this project's own**, and the two are not
+byte-compatible — deliberately, and ratified rather than tolerated
+([ADR 0063](docs/adr/0063-the-ilp-packet-is-toons-dialect-not-rfc-0027s.md)). Where the
+distinction matters, say which of the two you mean.
+_Avoid_: speaks ILPv4 (retired — it names the semantics and implies the bytes; the accurate form
+is "ILPv4 semantics, TOON encoding")
 
 **Condition**:
 A commitment minted by the sender and carried on the packet, naming what will count as proof of
@@ -231,8 +237,8 @@ machines the operator does not control.
 _Avoid_: client API, ingress
 
 **Vector**:
-A committed input/output pair — a wrapped packet, an envelope, a condition, the fulfilment it
-derives — that every implementation replays as its own suite. Vectors are generated from the
+A committed input/output pair — an encoded packet, a wrapped packet, an envelope, a condition, the
+fulfilment it derives — that every implementation replays as its own suite. Vectors are generated from the
 properties, never captured from whatever an implementation happened to emit, and reproducing them
 is what conformance means. Prose describing the wire is not normative; these are.
 _Avoid_: fixture, golden file, test case (when the cross-repo contract is what is meant)

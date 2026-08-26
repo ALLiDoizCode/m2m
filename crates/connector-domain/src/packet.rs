@@ -1,9 +1,49 @@
-//! ILPv4 packet types (RFC-0027) and their OER wire encoding (RFC-0030).
+//! ILPv4 packet types and their wire encoding: **RFC-0027's semantics in
+//! TOON's own encoding, which is not byte-compatible with it** (ADR 0063).
 //!
-//! Ported byte-for-byte from `packages/shared/src/types/ilp.ts` and
-//! `packages/shared/src/encoding/oer.ts` so a real ILPv4-over-HTTP client
-//! (RFC-0035) can address this connector's client edge and a Rust connector
-//! agrees on the wire with the existing TypeScript one.
+//! A packet these types produce will not decode in a conforming ILPv4
+//! implementation, and one from a conforming implementation will not decode
+//! here. Three things differ from RFC-0027 §Packet Format, and nothing else
+//! does:
+//!
+//! | RFC-0027                                                | This codec                                     |
+//! | ------------------------------------------------------- | ---------------------------------------------- |
+//! | Outer type-length wrapper: `type` then a VarOctetString | Type byte, then fields inline -- no wrapper    |
+//! | `amount` is a fixed `UInt64` (8 bytes)                  | `encode_var_uint` -- a VarUInt                 |
+//! | `expiresAt` is a 17-byte Interledger Timestamp          | 19-byte GeneralizedTime, `YYYYMMDDHHMMSS.fffZ` |
+//!
+//! Everything else here is RFC-0027's: the three type bytes (12, 13, 14), the
+//! field order and meanings, `condition = sha256(fulfilment)`, and the
+//! `F`/`T`/`R` error taxonomy. The OER primitives the fields are built from are
+//! RFC-0030's, tightened by ADR 0023 -- see `oer.rs`.
+//!
+//! **The bytes are pinned, not merely described.**
+//! `vectors/wire-vectors.json`'s `peer_carriage.prepare.http_body_hex` is a
+//! complete PREPARE in this dialect and `peer_carriage.fulfill_ack_accepted` /
+//! `reject_with_cost` carry the other two; `vectors/README.md` walks the
+//! PREPARE byte by byte. ADR 0021 makes those the cross-repo contract
+//! `toon-client`, `rig` and `swap` are held to, so a change to this file that
+//! does not regenerate them fails `cargo test --workspace`.
+//!
+//! ## Why the dialect exists, and why it stays
+//!
+//! These types were ported byte-for-byte from the TypeScript prototype's
+//! `packages/shared/src/types/ilp.ts` and `packages/shared/src/encoding/oer.ts`
+//! -- a **historical** citation: ADR 0017 retired that connector and the path
+//! no longer exists in this repository. That encoder had already diverged from
+//! RFC-0027, so porting it faithfully reproduced the divergence.
+//!
+//! The comment that stood here until ADR 0063 drew a false conclusion from that
+//! true premise: it said the port was so "a real ILPv4-over-HTTP client
+//! (RFC-0035) can address this connector's client edge". It does not follow
+//! from porting an encoder that was never conformant, nobody checked it, and
+//! three independent readings of this codebase took it at face value. Byte
+//! compatibility would not buy that property in any case -- ADR 0018 makes
+//! `data` a gift wrap sealed to the terminating connector's identity key and
+//! ADR 0019 derives the fulfilment from the secret inside it, so a conforming
+//! sender with perfect bytes still cannot build a packet this connector will
+//! pay out on. ADR 0063 has the other three reasons and the cost of changing
+//! it.
 
 use chrono::{DateTime, Utc};
 
@@ -279,10 +319,14 @@ impl RejectCode {
 /// never used. It is a single sum -- never a per-hop breakdown, and never
 /// split between fees and price, since either would leak topology or
 /// pricing a probe has no need to know.
-/// Deliberately **not** part of this struct's OER wire encoding below: this
-/// type is ported byte-for-byte from RFC-0027 so an existing ILPv4-over-HTTP
-/// client can address this connector's client edge, and RFC-0027 has no such
-/// field. `accumulated_cost` instead rides beside the packet -- at the peer
+/// Deliberately **not** part of this struct's OER wire encoding below:
+/// RFC-0027 has no such field, and this codec's **field set** is faithfully
+/// the RFC's even though its byte layout is not (see this module's own doc and
+/// ADR 0063). Adding a field would be a departure of a larger and different
+/// kind from the three encoding ones -- every reader of the reject bytes,
+/// including ones this project does not write, would have to learn it, whereas
+/// the encoding divergences leave the field set intelligible.
+/// `accumulated_cost` instead rides beside the packet -- at the peer
 /// wire's frame level, or the client edge's `TOON-Accumulated-Cost` response
 /// header (`docs/protocol/client-edge-spec.md` §1.6) -- never inside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
