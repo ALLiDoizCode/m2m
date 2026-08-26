@@ -1,56 +1,89 @@
-//! Guards the README's config-key table against the parser (issue #900).
+//! Guards the committed config-key table against the parser (issue #900).
 //!
 //! `README.md`'s "Configure" section documented `peer_wire_addr`, a key the
 //! parser refuses by name -- an operator who copied it got a node that
 //! refused to start (connector#849). `refuses_to_start.rs` proves the
-//! parser's side of that; nothing proved the README's. This file reads the
+//! parser's side of that; nothing proved the table's. This file reads the
 //! committed table and, for every key it names, hands the same parser a
 //! probe config setting that key and asserts it is not rejected as an
 //! unrecognized or removed key.
 //!
+//! **The table moved** (issue #1173). It used to be the README's; the README
+//! is now an operator's guide and the key table lives in
+//! `docs/protocol/configuration-spec.md` §2.1, which is the document that
+//! already owned the configuration contract and carries the CF- rules each
+//! key expresses. Nothing about the check changed -- it reads whatever rows
+//! the committed table has -- but the file it reads did, and a gate that
+//! silently reads the wrong file is worse than no gate, so the section
+//! lookup below panics rather than defaulting when it cannot find the table.
+//!
 //! Deliberately does not read a second, hand-maintained list of "the keys
-//! the README should have" -- that list would drift from the table under
-//! test exactly the way the table drifted from the parser. The table's own
-//! rows are the input.
+//! the spec should have" -- that list would drift from the table under test
+//! exactly the way the table drifted from the parser. The table's own rows
+//! are the input.
 
 use std::io::Write;
 use std::path::Path;
 
 use connector_config::{Config, ConfigError};
 
-const README: &str = include_str!("../../../README.md");
+const CONFIG_SPEC: &str = include_str!("../../../docs/protocol/configuration-spec.md");
 
-/// The "## Configure" section's text, up to (not including) the next `##`
-/// heading -- scopes every later step to the one table this check is about,
-/// so a backtick anywhere else in this ~400-line file (there are hundreds)
-/// can never be misread as a config key.
-fn configure_section(readme: &str) -> &str {
-    let heading = "\n## Configure\n";
-    let start = readme
-        .find(heading)
-        .expect("README.md has a '## Configure' section")
-        + heading.len();
-    let rest = &readme[start..];
-    let end = rest.find("\n## ").unwrap_or(rest.len());
+/// The path, for error messages that have to tell somebody where to look.
+const CONFIG_SPEC_PATH: &str = "docs/protocol/configuration-spec.md";
+
+/// §2.1's text, up to (not including) the next heading -- scopes every later
+/// step to the one table this check is about, so a backtick anywhere else in
+/// the document (there are hundreds) can never be misread as a config key.
+///
+/// §2.1 specifically, not the whole of §2: §2.3 is the **tombstones**, keys
+/// the parser refuses by name on purpose. Feeding those to the probe would
+/// assert the exact opposite of what this file is for.
+fn top_level_key_section(spec: &str) -> &str {
+    let heading = "\n### 2.1 Top level\n";
+    let start = spec.find(heading).unwrap_or_else(|| {
+        panic!(
+            "{CONFIG_SPEC_PATH} has no '### 2.1 Top level' section. That section holds the \
+             config-key table this gate reads; if it was renamed or moved, repoint this file \
+             rather than deleting the check."
+        )
+    }) + heading.len();
+    let rest = &spec[start..];
+    let end = rest.find("\n### ").unwrap_or(rest.len());
     &rest[..end]
 }
 
 /// The key-table's data rows, as the literal backticked text of each row's
 /// first column -- `client_edge_addr`, `[signer]`, `[[routes]]`, and so on.
 ///
-/// A markdown table row here is `| `key` | ... |`; the header row (`| Key |
+/// A markdown table row here is `| `key` | ... |`; the header row (`| key |
 /// ...`) and the separator row (`| --- | ...`) don't start their first cell
 /// with a backtick and are excluded by that shape, not by skipping a fixed
 /// number of lines -- so inserting or reordering rows can't desync this
 /// from the table it reads.
+///
+/// **Every** backticked token in the cell is taken, not just the first,
+/// because a row may legitimately name two spellings of one thing:
+/// `[settlement.evm]` / `[settlement.solana]` is one row and two keys, and
+/// reading only the first would quietly stop checking the second.
 fn table_keys(section: &str) -> Vec<String> {
     section
         .lines()
         .filter_map(|line| {
             let first_cell = line.split('|').nth(1)?.trim();
-            let inner = first_cell.strip_prefix('`')?.strip_suffix('`')?;
-            (!inner.is_empty()).then(|| inner.to_string())
+            if !first_cell.starts_with('`') {
+                return None;
+            }
+            let keys: Vec<String> = first_cell
+                .split('`')
+                .skip(1)
+                .step_by(2)
+                .filter(|token| !token.is_empty())
+                .map(|token| token.to_string())
+                .collect();
+            (!keys.is_empty()).then_some(keys)
         })
+        .flatten()
         .collect()
 }
 
@@ -139,11 +172,11 @@ fn names_an_unrecognized_key(message: &str) -> bool {
 }
 
 #[test]
-fn every_readme_config_key_is_known_to_the_parser() {
-    let keys = table_keys(configure_section(README));
+fn every_documented_config_key_is_known_to_the_parser() {
+    let keys = table_keys(top_level_key_section(CONFIG_SPEC));
     assert!(
         keys.len() >= 10,
-        "expected to find the README's '## Configure' key-table rows, found {}: {keys:?} -- \
+        "expected to find {CONFIG_SPEC_PATH} §2.1's key-table rows, found {}: {keys:?} -- \
          did the table move or change shape?",
         keys.len(),
     );
@@ -156,7 +189,7 @@ fn every_readme_config_key_is_known_to_the_parser() {
             let message = error.to_string();
             assert!(
                 !names_an_unrecognized_key(&message),
-                "README.md's config-key table documents `{raw_key}`, but connector-config's \
+                "{CONFIG_SPEC_PATH} §2.1 documents `{raw_key}`, but connector-config's \
                  parser rejects it as unknown or removed: {message}\n\nprobe config:\n{text}"
             );
         }
@@ -166,7 +199,7 @@ fn every_readme_config_key_is_known_to_the_parser() {
 /// A negative control on the mechanism itself: `peer_wire_addr` is a real
 /// key this parser refuses by name (ADR 0027, issue #679) -- the same
 /// defect this whole file exists to catch if it ever reappeared in the
-/// README's table. If the probe ever stopped flagging this key, the test
+/// documented table. If the probe ever stopped flagging this key, the test
 /// above would be green no matter what the table said.
 #[test]
 fn the_probe_flags_a_key_the_parser_actually_refuses() {

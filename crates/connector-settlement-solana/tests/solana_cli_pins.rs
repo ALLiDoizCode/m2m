@@ -343,6 +343,12 @@ fn the_repository_installs_the_solana_cli_from_exactly_the_known_places() {
         ".github/workflows/ci.yml",
         ".github/workflows/local-topologies.yml",
         ".sandcastle/Dockerfile",
+        // The contributor-facing copy of the run-side pin (issue #1173).
+        // `CONTRIBUTING.md` is where the chain-binary table lives now that the
+        // README is an operator's guide rather than a build reference, and it
+        // installs RUST_GATE_CLI for the reason this file's header gives: a
+        // local gate on a different CLI is not the gate.
+        "CONTRIBUTING.md",
         "README.md",
         "devbox.json",
         "docs/operators/faucet-box-bringup.md",
