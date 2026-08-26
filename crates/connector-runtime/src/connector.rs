@@ -7668,6 +7668,94 @@ mod tests {
             assert!(matches!(error, PeerRouteTableError::InvalidPrefix(_)));
         }
 
+        /// ADR 0058's first runtime twin, and the one that makes a
+        /// runtime peering a peering rather than a name: a peering with no
+        /// payment channel bound to it is refused **at write time**, the
+        /// runtime analogue of `connector-config`'s load-time
+        /// `PeerChannelUnbound`.
+        ///
+        /// Discovering it at the first arriving frame instead is a peering
+        /// that silently only ever behaves as a stranger: role is a
+        /// verified claim on a channel this peering configures (ADR 0060),
+        /// so with no channel there is no route to the peer role at all.
+        #[test]
+        fn a_peering_with_no_channel_bound_to_it_is_refused_at_write_time() {
+            let connector = Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            );
+
+            let unbound = RuntimePeering {
+                fee: 100,
+                endpoint: Some("https://peer.example/ilp".to_string()),
+                ..RuntimePeering::default()
+            };
+            let error = connector
+                .upsert_runtime_peer("runtime-hop", unbound)
+                .unwrap_err();
+
+            assert!(
+                matches!(error, PeerRouteTableError::PeerChannelUnbound(id) if id == "runtime-hop"),
+                "an endpoint and a fee are not a peering"
+            );
+            assert!(
+                connector.peers().is_empty(),
+                "a refused write leaves no row behind"
+            );
+        }
+
+        /// ADR 0058's second runtime twin: a route forwarding to a peering
+        /// with no channel to pay from is refused, the runtime analogue of
+        /// ADR 0042's `[[pay_channels]]` load rule.
+        ///
+        /// Reached here through a peering replayed out of a durable
+        /// snapshot written before ADR 0058 -- the one way a channel-less
+        /// runtime peering can still exist, since the write above refuses
+        /// to create one. A route to it would produce nothing but refused
+        /// packets: a forward this node cannot cover is refused rather
+        /// than carried.
+        #[test]
+        fn a_route_forwarding_to_a_peering_with_no_pay_channel_is_refused() {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join("runtime_peers.json");
+            // Exactly the bytes the pre-ADR-0058 snapshot format wrote.
+            std::fs::write(
+                &path,
+                r#"{"peers":[{"id":"legacy-hop","fee":7}],"routes":[]}"#,
+            )
+            .expect("write an older snapshot");
+            let (store, peers, routes) = PeerRouteStore::open(&path).expect("replay it");
+
+            let connector = Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_runtime_peer_route_store(store, peers, routes);
+
+            let error = connector
+                .upsert_runtime_peer_route("g.example.runtime", "legacy-hop", 25)
+                .unwrap_err();
+
+            assert!(
+                matches!(
+                    error,
+                    PeerRouteTableError::PeerHasNoPayChannel { ref peer_id, .. }
+                        if peer_id == "legacy-hop"
+                ),
+                "expected the pay-channel twin to fire, got {error:?}"
+            );
+            // Distinct from `UnknownPeerId`: the peering is known, and
+            // saying so is what tells an operator to fix the peering
+            // rather than the route's `peer_id`.
+            assert!(!matches!(error, PeerRouteTableError::UnknownPeerId { .. }));
+        }
+
         #[test]
         fn upsert_runtime_peer_rejects_an_empty_id() {
             let connector = Connector::new(

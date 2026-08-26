@@ -487,4 +487,135 @@ token_network = "0x00000000000000000000000000000000000000bb"
         assert!(t01(&response), "{response:?}");
         assert!(!reached);
     }
+
+    /// A [`RuntimePeering`] as `POST /peers` writes one, endpoint and all.
+    fn runtime_peering(endpoint: &str) -> RuntimePeering {
+        RuntimePeering {
+            fee: 100,
+            max_packet_amount: 5_000,
+            endpoint: Some(endpoint.to_string()),
+            edge_identity: Some("0x04ab".to_string()),
+            client_edge_url: Some(endpoint.to_string()),
+            channels: vec![RuntimePeerChannel::Evm {
+                channel_id: format!("0x{}", "ab".repeat(32)),
+                counterparty_key: "0x00000000000000000000000000000000000000aa".to_string(),
+                chain_id: 31337,
+                token_network: "0x00000000000000000000000000000000000000bb".to_string(),
+            }],
+        }
+    }
+
+    /// ADR 0058: **`build_peer_transport` adds and removes a carriage
+    /// while the process serves.** Running it once at boot is what made a
+    /// runtime peer row hollow.
+    ///
+    /// The proof is the change in what a forward to one peer id does. It
+    /// is unmapped and falls through to §2.2's `T01` from an empty
+    /// transport; then it is registered and the forward is genuinely
+    /// dialed -- still `T01`, because nothing is listening on port 1, but
+    /// `reached_peer` and the dial attempt are the difference; then it is
+    /// deregistered and it falls through again. Same transport value
+    /// throughout, with no rebuild and no restart.
+    #[tokio::test]
+    async fn a_carriage_is_added_and_removed_while_the_transport_serves() {
+        // A config with no `[[peers]]` at all: everything below is
+        // established over the operator surface.
+        let (config, _state, _key) = config("", "");
+        let transport = build_peer_transport(&config, [0u8; 20], None, Arc::new(SystemClock));
+
+        let forward = |transport: Arc<ConfiguredPeerTransport>| async move {
+            transport
+                .forward("added-at-runtime", prepare("g.example.app"), None)
+                .await
+        };
+
+        // Before: unmapped, and answered by the empty in-process
+        // transport rather than by a dial.
+        let PeerForward { response, .. } = forward(Arc::clone(&transport)).await;
+        match response {
+            PacketResponse::Reject(reject) => {
+                assert_eq!(reject.code.as_str(), "T01");
+                assert!(reject.message.contains("added-at-runtime"));
+            }
+            other => panic!("expected T01, got {other:?}"),
+        }
+
+        // Register. `http://` selects ILP-over-HTTP because this config
+        // opted into plaintext endpoints -- §2.1's rule, read through
+        // `connector_config` rather than restated here.
+        transport.register(
+            "added-at-runtime",
+            &runtime_peering("http://127.0.0.1:1/ilp"),
+        );
+        let PeerForward {
+            response,
+            reached_peer,
+            ..
+        } = forward(Arc::clone(&transport)).await;
+        assert!(t01(&response), "nothing listens on port 1: {response:?}");
+        assert!(!reached_peer, "the dial failed, which is the point");
+
+        // A `wss://` endpoint re-registers the same id onto the OTHER
+        // carriage. Nothing is left behind on the first: the carriage is
+        // the endpoint's scheme, and re-registering must not leave a
+        // relation this node would still dial.
+        transport.register(
+            "added-at-runtime",
+            &runtime_peering("ws://127.0.0.1:1/ilp/btp"),
+        );
+        assert!(transport.http.flush_hints("added-at-runtime").is_empty());
+
+        // Deregister -- the other half of ADR 0060's kill switch, which is
+        // only "immediate" if the carriage goes with the durable row.
+        transport.deregister("added-at-runtime");
+        let PeerForward { response, .. } = forward(Arc::clone(&transport)).await;
+        match response {
+            PacketResponse::Reject(reject) => {
+                assert_eq!(reject.code.as_str(), "T01");
+                assert!(reject.message.contains("added-at-runtime"));
+            }
+            other => panic!("expected T01 after deregistration, got {other:?}"),
+        }
+    }
+
+    /// A peering whose endpoint selects no carriage this node dials --
+    /// here a plaintext one on a node that did not opt in -- registers
+    /// nothing, and the peer id stays unmapped. Its answer is §2.2's `T01`
+    /// with the peer named, which is what an unmapped id already falls
+    /// through to; a stale mapping would instead dial nowhere.
+    #[tokio::test]
+    async fn a_peering_whose_scheme_selects_no_carriage_registers_nothing() {
+        let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
+        key_file.write_all(&[7u8; 32]).expect("write key file");
+        let state_dir = tempfile::tempdir().expect("temp state dir");
+        let mut config_file = tempfile::NamedTempFile::new().expect("temp config file");
+        write!(
+            config_file,
+            r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+
+[signer]
+key_file = "{key_file}"
+"#,
+            state_dir = state_dir.path().display(),
+            key_file = key_file.path().display(),
+        )
+        .expect("write config file");
+        let config = Config::load(config_file.path()).expect("load a node with no peering");
+        assert!(!config.peer_allow_plaintext_endpoints());
+
+        let transport = build_peer_transport(&config, [0u8; 20], None, Arc::new(SystemClock));
+        transport.register("plaintext", &runtime_peering("http://127.0.0.1:1/ilp"));
+
+        let PeerForward {
+            response,
+            reached_peer,
+            ..
+        } = transport
+            .forward("plaintext", prepare("g.example.app"), None)
+            .await;
+        assert!(t01(&response), "{response:?}");
+        assert!(!reached_peer);
+    }
 }

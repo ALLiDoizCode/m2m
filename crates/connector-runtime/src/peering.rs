@@ -295,6 +295,7 @@ fn peer_endpoint(
 
 /// One chain's published settlement facts, narrowed to the chain this
 /// connector also settles on.
+#[derive(Debug)]
 pub(crate) enum SharedSettlement {
     Evm(X402SettlementTerms),
     Solana(X402SolanaSettlementTerms),
@@ -441,5 +442,289 @@ pub(crate) fn stated_cap(max_packet_amount: u64) -> u64 {
         max_packet_amount
     } else {
         DEFAULT_MAX_PACKET_AMOUNT
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::Arc;
+
+    use connector_domain::{EdgeIdentity, NodeFacts, NodeSelfDescription};
+    use connector_settlement::InMemorySettlementBackend;
+
+    use crate::app_client::FakeAppClient;
+    use crate::clock::TestClock;
+    use crate::peer_transport::InProcessPeerTransport;
+
+    fn url() -> Url {
+        Url::parse("https://peer.example/ilp").expect("url")
+    }
+
+    fn evm(settlement_address: &str) -> X402ChainSettlementTerms {
+        X402ChainSettlementTerms::Evm(X402SettlementTerms {
+            chain: "evm:31337".to_string(),
+            settlement_address: settlement_address.to_string(),
+            token_network_registry: "0x00000000000000000000000000000000000000cc".to_string(),
+            token_network: "0x00000000000000000000000000000000000000bb".to_string(),
+            token_address: "0x00000000000000000000000000000000000000dd".to_string(),
+            decimals: 6,
+        })
+    }
+
+    fn solana() -> X402ChainSettlementTerms {
+        X402ChainSettlementTerms::Solana(X402SolanaSettlementTerms {
+            chain: "solana".to_string(),
+            settlement_address: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM".to_string(),
+            program_id: "Toon11111111111111111111111111111111111111".to_string(),
+            token_address: "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi".to_string(),
+            decimals: 6,
+        })
+    }
+
+    fn document(
+        btp: Option<&str>,
+        http: Option<&str>,
+        settlements: Vec<X402ChainSettlementTerms>,
+    ) -> NodeSelfDescription {
+        NodeSelfDescription::describe(
+            &NodeFacts {
+                ilp_addresses: vec!["g.example.peer".to_string()],
+                http_endpoint: http.map(str::to_string),
+                btp_endpoint: btp.map(str::to_string),
+                peer_carriages: vec!["http".to_string()],
+                settlements,
+            },
+            Some(EdgeIdentity {
+                key_id: "peer-key".to_string(),
+                public_key: "0x04ab".to_string(),
+            }),
+            Vec::new(),
+            None,
+        )
+    }
+
+    /// §2.3 against §6.4: a dialed BTP session is symmetric once
+    /// established, so either side may originate on it, where an
+    /// ILP-over-HTTP peering can only ever be originated on by the dialer.
+    /// Where a node publishes both, preferring BTP forecloses least.
+    #[test]
+    fn btp_wins_where_a_node_publishes_both_endpoints() {
+        let both = document(
+            Some("wss://peer.example/ilp/btp"),
+            Some("https://peer.example/ilp"),
+            Vec::new(),
+        );
+        assert_eq!(
+            peer_endpoint(&both, false).map(|url| url.to_string()),
+            Some("wss://peer.example/ilp/btp".to_string())
+        );
+
+        let http_only = document(None, Some("https://peer.example/ilp"), Vec::new());
+        assert_eq!(
+            peer_endpoint(&http_only, false).map(|url| url.to_string()),
+            Some("https://peer.example/ilp".to_string())
+        );
+    }
+
+    /// A plaintext endpoint selects no carriage on a node that did not opt
+    /// in, so such a document publishes nothing this node can dial -- and
+    /// a node with an opt-in falls back to it rather than to nothing.
+    #[test]
+    fn a_plaintext_endpoint_is_dialable_only_where_the_node_opted_in() {
+        let plaintext = document(
+            Some("ws://127.0.0.1:1/ilp/btp"),
+            Some("http://127.0.0.1:1/ilp"),
+            Vec::new(),
+        );
+
+        assert_eq!(peer_endpoint(&plaintext, false), None);
+        assert_eq!(
+            peer_endpoint(&plaintext, true).map(|url| url.to_string()),
+            Some("ws://127.0.0.1:1/ilp/btp".to_string())
+        );
+    }
+
+    /// A node publishing no endpoint at all is one this connector could
+    /// only ever accept from, and a peering it cannot reach is refused
+    /// rather than written.
+    #[test]
+    fn a_document_with_no_endpoint_is_not_dialable() {
+        assert_eq!(peer_endpoint(&document(None, None, Vec::new()), true), None);
+    }
+
+    #[test]
+    fn one_shared_chain_is_the_answer_and_none_is_a_named_refusal() {
+        let evm_only = document(None, Some("https://peer.example/ilp"), vec![evm("0xaa")]);
+
+        let shared = shared_settlement_of(&evm_only, |_| true, None, &url()).expect("one shared");
+        assert_eq!(shared.chain(), SettlementChain::Evm);
+
+        // This node settles only on Solana; the counterparty only on EVM.
+        // No channel can exist between them and no claim could ever be
+        // paid, so the peering is refused rather than written unbacked.
+        let error = shared_settlement_of(
+            &evm_only,
+            |chain| chain == SettlementChain::Solana,
+            None,
+            &url(),
+        )
+        .expect_err("no chain in common");
+        assert!(matches!(error, EstablishPeeringError::NoSharedChain { .. }));
+    }
+
+    /// Two nodes settling on both chains have no honest default, so the
+    /// write refuses by name and says which chains it saw -- the same
+    /// posture `POST /channels` takes for the identical ambiguity, rather
+    /// than silently choosing which asset a peering settles in.
+    #[test]
+    fn several_shared_chains_are_refused_unless_the_request_names_one() {
+        let both = document(
+            None,
+            Some("https://peer.example/ilp"),
+            vec![evm("0xaa"), solana()],
+        );
+
+        let error =
+            shared_settlement_of(&both, |_| true, None, &url()).expect_err("ambiguous chain");
+        match error {
+            EstablishPeeringError::AmbiguousChain { chains, .. } => {
+                assert!(chains.contains("evm"), "{chains}");
+                assert!(chains.contains("solana"), "{chains}");
+            }
+            other => panic!("expected an ambiguity refusal, got {other:?}"),
+        }
+
+        let named = shared_settlement_of(&both, |_| true, Some(SettlementChain::Solana), &url())
+            .expect("the request named one");
+        assert_eq!(named.chain(), SettlementChain::Solana);
+    }
+
+    /// The counterparty a channel is derived from is read in the byte form
+    /// its own chain takes -- 20 bytes on EVM, 32 on Solana -- and an
+    /// address of the wrong shape is refused rather than padded or
+    /// truncated into one. A coerced address names a participant no chain
+    /// holds, and every claim on the channel derived from it would be
+    /// unredeemable.
+    #[test]
+    fn a_settlement_address_is_read_in_its_own_chains_shape_or_refused() {
+        let evm_terms =
+            SharedSettlement::Evm(match evm("0x00000000000000000000000000000000000000aa") {
+                X402ChainSettlementTerms::Evm(terms) => terms,
+                X402ChainSettlementTerms::Solana(_) => unreachable!(),
+            });
+        assert_eq!(
+            counterparty_bytes(&evm_terms, &url()).expect("20 bytes"),
+            vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xaa]
+        );
+
+        let solana_terms = SharedSettlement::Solana(match solana() {
+            X402ChainSettlementTerms::Solana(terms) => terms,
+            X402ChainSettlementTerms::Evm(_) => unreachable!(),
+        });
+        assert_eq!(
+            counterparty_bytes(&solana_terms, &url())
+                .expect("32 bytes")
+                .len(),
+            32
+        );
+
+        // A base58 Solana key where an EVM address belongs, which is
+        // exactly the identity confusion this refusal exists for.
+        let confused =
+            SharedSettlement::Evm(match evm("9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM") {
+                X402ChainSettlementTerms::Evm(terms) => terms,
+                X402ChainSettlementTerms::Solana(_) => unreachable!(),
+            });
+        assert!(matches!(
+            counterparty_bytes(&confused, &url()),
+            Err(EstablishPeeringError::UnreadableSettlementAddress { .. })
+        ));
+    }
+
+    /// A peering write that could never land is refused **before** any
+    /// outbound request is made. A stranger's host is not worth dialling
+    /// on behalf of a write this node has already decided against, and an
+    /// operator gets the refusal that is theirs to act on rather than one
+    /// about a host.
+    #[tokio::test]
+    async fn a_write_that_cannot_land_is_refused_before_the_fetch() {
+        let connector = Connector::new(
+            Vec::new(),
+            Vec::new(),
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            Arc::new(TestClock::new(chrono::Utc::now())),
+        )
+        .with_config_peer_ids(["owned-by-config".to_string()])
+        .with_settlement(
+            SettlementChain::Evm,
+            Arc::new(InMemorySettlementBackend::new()),
+        );
+
+        // The default source reaches no network at all, so a refusal that
+        // named the host would prove the fetch happened first.
+        let error = connector
+            .establish_peering("owned-by-config", &url(), 0, 0, None)
+            .await
+            .expect_err("the config file owns this id");
+        assert!(matches!(
+            error,
+            EstablishPeeringError::Table(PeerRouteTableError::OwnedByConfig(_))
+        ));
+
+        let error = connector
+            .establish_peering("  ", &url(), 0, 0, None)
+            .await
+            .expect_err("an empty id is not a label");
+        assert!(matches!(
+            error,
+            EstablishPeeringError::Table(PeerRouteTableError::InvalidPeerId)
+        ));
+    }
+
+    /// **The fetch is never made on the packet path**, and the whole of
+    /// this workspace's packet-moving tests are the evidence: the default
+    /// [`crate::UnreachableSelfDescription`] reaches no host at all, and
+    /// every one of them runs against it. This states the claim in one
+    /// place so it is a decision rather than an accident -- a `Connector`
+    /// built with no source configured is a fully working connector, and
+    /// only `POST /peers` notices.
+    #[tokio::test]
+    async fn a_node_that_can_reach_no_host_still_has_a_working_packet_path() {
+        let connector = Connector::new(
+            Vec::new(),
+            Vec::new(),
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            Arc::new(TestClock::new(chrono::Utc::now())),
+        );
+
+        let error = connector
+            .establish_peering("anyone", &url(), 0, 0, None)
+            .await
+            .expect_err("no source configured");
+        assert!(matches!(
+            error,
+            EstablishPeeringError::SelfDescription(SelfDescriptionError::Unreachable { .. })
+        ));
+
+        // ...and the packet path is untouched by that: an unroutable
+        // destination is answered the way it always was, with no fetch to
+        // hang on and no source to consult.
+        let response = connector
+            .handle_prepare(connector_domain::Prepare {
+                amount: 100,
+                expires_at: chrono::Utc::now() + chrono::Duration::seconds(30),
+                execution_condition: [0u8; 32],
+                destination: "g.nowhere".to_string(),
+                data: Vec::new(),
+            })
+            .await;
+        assert!(
+            matches!(response, connector_domain::PacketResponse::Reject(_)),
+            "an unroutable destination is rejected, not left to a fetch"
+        );
     }
 }
