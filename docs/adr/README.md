@@ -76,7 +76,7 @@ not change what anything else must do.
 | [0034](0034-a-runtime-peer-route-table-never-shadows-the-config-file.md)               | A runtime peer/route table never shadows the config file                | Accepted — extends 0009; survives 0043; amended by #1059 |
 | [0043](0043-purchasable-peering-is-removed.md)                                         | Purchasable peering is removed                                          | Accepted — **retires 0037, 0038, 0039**                  |
 | [0047](0047-the-configuration-schema-is-implementation-detail-capabilities-are-law.md) | The configuration schema is implementation detail; capabilities are law | Accepted — sharpens 0009                                 |
-| [0058](0058-a-peering-is-established-from-a-url.md)                                    | A peering is established from a URL; its identity is trust-on-first-use | Accepted — **not yet built**; completes 0034; needs 0050 |
+| [0058](0058-a-peering-is-established-from-a-url.md)                                    | A peering is established from a URL; its identity is trust-on-first-use | Accepted — **not yet built** (#1160); completes 0034     |
 | [0061](0061-a-fee-attaches-to-a-peering-not-to-a-route.md)                             | A fee attaches to a peering, not to a route                             | Accepted — **built** (#1159); amends 0010 and 0028       |
 
 ---
@@ -138,11 +138,11 @@ This is the group that spells out the nginx sentence at the top of this page.
 
 ### Discovery
 
-| #                                                                             | Decision                                                       | Status                                                      |
-| ----------------------------------------------------------------------------- | -------------------------------------------------------------- | ----------------------------------------------------------- |
-| [0022](0022-a-connector-answers-it-does-not-announce.md)                      | A connector answers when asked; it still never announces       | Accepted — one consequence lost to 0027                     |
-| [0046](0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md) | The kind:10032 announce is removed; a connector needs no relay | Accepted — **retires 0030**; restores 0022 and 0006 in full |
-| [0050](0050-a-connectors-url-resolves-to-its-self-description.md)             | A connector's URL resolves to its self-description             | Accepted — **not yet built**; completes 0022                |
+| #                                                                             | Decision                                                       | Status                                                              |
+| ----------------------------------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------- |
+| [0022](0022-a-connector-answers-it-does-not-announce.md)                      | A connector answers when asked; it still never announces       | Accepted — one consequence lost to 0027                             |
+| [0046](0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md) | The kind:10032 announce is removed; a connector needs no relay | Accepted — **built** (#1074); **retires 0030**; restores 0022, 0006 |
+| [0050](0050-a-connectors-url-resolves-to-its-self-description.md)             | A connector's URL resolves to its self-description             | Accepted — **built** (#1080); completes 0022                        |
 
 ---
 

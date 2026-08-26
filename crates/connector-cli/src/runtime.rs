@@ -18,8 +18,8 @@ use connector_client_edge::{
     UnresolvableLookupBudgetPolicy,
 };
 use connector_config::{
-    ClientChannelConfig, Config, EvmSettlementConfig, PayChannelConfig, PeerChannelConfig,
-    SecretLocation, SettlementChain, SettlementConfig, SolanaSettlementConfig,
+    ClientChannelConfig, Config, EvmSettlementConfig, PayChannelConfig, PeerCarriage,
+    PeerChannelConfig, SecretLocation, SettlementChain, SettlementConfig, SolanaSettlementConfig,
 };
 use connector_runtime::{
     ChannelDomain, ClaimStateChallengeSigner, Connector, EvmDomain, FileJournal, HttpAppClient,
@@ -242,15 +242,6 @@ pub enum RuntimeError {
     /// channel is exempt from a chain-derived *policy* but not from a
     /// chain-stated *fact*.
     ClientChannelDomainDisagreesWithSettlement(EvmDomainMismatch),
-    /// `[announce] identity_key_file`'s path exists (config load already
-    /// checked that) but could not be read.
-    AnnounceIdentityKeyFileUnreadable {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    /// `[announce] identity_key_file`'s contents are neither 32 raw bytes
-    /// nor 64 hex characters encoding 32 bytes.
-    InvalidAnnounceIdentityKeyMaterial { path: PathBuf },
 }
 
 impl fmt::Display for RuntimeError {
@@ -386,17 +377,6 @@ impl fmt::Display for RuntimeError {
                  could never collect on (ADR 0024, issue #1136). Fix the row, or point \
                  [settlement.evm] at the deployment the channel actually lives in"
             ),
-            RuntimeError::AnnounceIdentityKeyFileUnreadable { path, source } => write!(
-                f,
-                "failed to read [announce] identity_key_file at {}: {source}",
-                path.display()
-            ),
-            RuntimeError::InvalidAnnounceIdentityKeyMaterial { path } => write!(
-                f,
-                "[announce] identity_key_file at {} must contain either 32 raw bytes or \
-                 64 hex characters encoding a 32-byte secret key",
-                path.display()
-            ),
         }
     }
 }
@@ -459,30 +439,6 @@ pub(crate) fn read_signer_secret(location: &SecretLocation) -> Result<[u8; 32], 
         }
         SecretLocation::Kms { .. } => Err(RuntimeError::UnsupportedSignerLocation),
     }
-}
-
-/// The raw 32-byte secret `[announce] identity_key_file` points at (issue
-/// #799): a durable Nostr identity carried over from wherever an operator
-/// previously announced this node from -- typically the retired sidecar's
-/// own `ANNOUNCER_IDENTITY_SECRET_KEY_FILE` -- so a genesis peer seed that
-/// already pins that pubkey does not go stale the day the sidecar is
-/// switched off in favour of `connector announce`.
-///
-/// Not `[signer]`'s own key, and read through this sibling function rather
-/// than [`read_signer_secret`] on purpose: the two locations answer
-/// different questions ("what does this node sign gift wraps and
-/// `GET /ilp/identity` with" versus "what did the last publisher of this
-/// node's announce sign with"), and an unreadable-file or bad-material
-/// error must name the field that is actually misconfigured.
-pub(crate) fn read_announce_identity_secret(path: &Path) -> Result<[u8; 32], RuntimeError> {
-    let bytes =
-        std::fs::read(path).map_err(|source| RuntimeError::AnnounceIdentityKeyFileUnreadable {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    decode_secret_key(&bytes).ok_or_else(|| RuntimeError::InvalidAnnounceIdentityKeyMaterial {
-        path: path.to_path_buf(),
-    })
 }
 
 fn build_signer(location: &SecretLocation) -> Result<Arc<dyn Signer>, RuntimeError> {
@@ -1471,18 +1427,20 @@ pub struct Runtime {
     /// it to the client edge, where a claim's self-declared `cluster` is
     /// compared against it (issue #975).
     pub solana_cluster: Option<&'static str>,
-    /// The channel-opening facts the x402 greeting carries (issue #617) --
-    /// `Some` exactly when `[settlement.evm]` (or the legacy flat
-    /// `[settlement]`) is configured, composed here in `build` because that
-    /// is the one place the config's own values and the facts the chain
-    /// connection proved (chain id, the resolved `TokenNetwork`, the
-    /// backend's signing address) are both in scope.
-    pub settlement_terms: Option<connector_client_edge::X402SettlementTerms>,
-    /// Every configured chain's channel-opening facts (issue #632), additive
-    /// beside [`settlement_terms`](Self::settlement_terms): one entry per
-    /// `[settlement.<chain>]` table this node has, so a node settling on N
-    /// chains (epic #627) advertises all N in the x402 greeting's
-    /// `extra.settlements` rather than only the EVM leg.
+    /// Every configured chain's channel-opening facts (issues #617, #632):
+    /// one entry per `[settlement.<chain>]` table this node has, so a node
+    /// settling on N chains (epic #627) publishes all N. Composed here in
+    /// `build` because this is the one place the config's own values and the
+    /// facts the chain connection proved (chain id, the resolved
+    /// `TokenNetwork`, the backend's signing address) are both in scope.
+    ///
+    /// **This is the only copy.** The x402 greeting's legacy singular
+    /// `extra.settlement` object used to be composed beside this list and
+    /// carried separately; since ADR 0050 it is
+    /// [`connector_domain::NodeFacts::evm_settlement`] -- the list's own EVM
+    /// entry, derived. A node has at most one `[settlement.evm]` table, so
+    /// there was never a second fact there to hold, only a second chance to
+    /// disagree.
     pub settlements: Vec<connector_client_edge::X402ChainSettlementTerms>,
 }
 
@@ -1637,7 +1595,6 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
     let mut client_channel_source_evm: Option<Arc<dyn ClientChannelSource>> = None;
     let mut client_channel_source_solana: Option<Arc<dyn ClientChannelSource>> = None;
     let mut solana_cluster: Option<&'static str> = None;
-    let mut settlement_terms: Option<connector_client_edge::X402SettlementTerms> = None;
     let mut settlements: Vec<connector_client_edge::X402ChainSettlementTerms> = Vec::new();
     for settlement in config.settlements() {
         match settlement {
@@ -1673,7 +1630,6 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
                     ),
                     decimals: evm.decimals(),
                 };
-                settlement_terms = Some(evm_terms.clone());
                 settlements.push(connector_client_edge::X402ChainSettlementTerms::Evm(
                     evm_terms,
                 ));
@@ -1785,7 +1741,6 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
         client_channel_source_evm,
         client_channel_source_solana,
         solana_cluster,
-        settlement_terms,
         settlements,
     })
 }
@@ -2084,6 +2039,50 @@ fn client_payout_ledger(config: &Config, signer: Arc<dyn Signer>) -> Arc<ClientP
     Arc::new(ledger)
 }
 
+/// This node's own facts (ADR 0050), assembled once at router construction:
+/// the single value `GET /ilp` serves as this node's self-description and
+/// every x402 greeting projects its `extra` block out of (ND-11).
+///
+/// There is no second assembly anywhere. Before this, the greeting's node
+/// facts were three separate arguments to the router and a kind:10032
+/// announce composed a fourth set of its own -- which is exactly how
+/// `requiredTransport` came to be enforced long before it was advertised, and
+/// how `[announce].solana_chain_id` came to label a mainnet node's settlement
+/// facts `solana:devnet` (issue #981). One value cannot disagree with itself.
+///
+/// Each field's provenance, because they differ and the difference is the
+/// point (ND-05, ND-07):
+///
+///   * the three `[node]` fields are **configured**, because no process can
+///     introspect them: a container sees `0.0.0.0:4000`, never
+///     `https://proxy.ario.devnet.toonprotocol.dev/ilp`;
+///   * `peer_carriages` is `peer_expose`, i.e. which listeners this node
+///     opens. **Which** carriages exist, never **who** rides them -- peer
+///     identities and per-peering terms are operator-private (ND-09);
+///   * `settlements` is **proved**: every entry was resolved and checked
+///     against a live chain by a `SettlementBackend::connect` that refused to
+///     boot on a disagreement. Nothing re-declares any of it.
+fn node_facts(config: &Config, runtime: &Runtime) -> connector_domain::NodeFacts {
+    let node = config.node();
+    connector_domain::NodeFacts {
+        ilp_addresses: node
+            .map(|node| node.addresses().to_vec())
+            .unwrap_or_default(),
+        http_endpoint: node.map(|node| node.http_endpoint().to_string()),
+        btp_endpoint: node.map(|node| node.btp_endpoint().to_string()),
+        // Every carriage this node exposes a listener for, in the operator's
+        // own spelling. `"neither"` -- the default -- is an empty list rather
+        // than the word: a reader asks "can I peer over BTP?", and an empty
+        // list answers it without knowing this config file's vocabulary.
+        peer_carriages: [PeerCarriage::Btp, PeerCarriage::Http]
+            .into_iter()
+            .filter(|carriage| config.peer_expose().exposes(*carriage))
+            .map(|carriage| carriage.name().to_string())
+            .collect(),
+        settlements: runtime.settlements.clone(),
+    }
+}
+
 /// Merge the client edge and (if `[operator]` is configured) the operator
 /// surface into the one router the binary serves. The operator router is
 /// mounted only when [`Config::operator`] is `Some` -- absence means the
@@ -2121,13 +2120,12 @@ pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError
     tokio::spawn(reap_unresolvable_client_channels_periodically(Arc::clone(
         &claim_gate,
     )));
-    let app = connector_client_edge::router_with_bootstrap_identity(
+    let app = connector_client_edge::router_with_node_facts(
         connector.clone(),
         signer.clone(),
         wrap_receiver_secret,
         claim_gate,
-        runtime.settlement_terms.clone(),
-        runtime.settlements.clone(),
+        node_facts(config, runtime),
         config
             .btp_session_window()
             .unwrap_or(connector_client_edge::DEFAULT_BTP_SESSION_WINDOW),
@@ -2142,18 +2140,6 @@ pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError
             config.peer_channels(),
             config.peer_expose(),
         ),
-        // Issue #807: `[announce]` is the one config section that already
-        // holds this node's own ILP address(es) and BTP endpoint (they
-        // cannot be introspected -- `connector_config::announce`'s own
-        // module doc explains why). `None` for a node that does not
-        // configure it, in which case the greeting still broadens (issue
-        // #807's core fix) but carries no `ilpAddresses`/`btpEndpoint`.
-        config
-            .announce()
-            .map(|announce| connector_client_edge::BootstrapIdentity {
-                ilp_addresses: announce.addresses().to_vec(),
-                btp_endpoint: announce.btp_endpoint().to_string(),
-            }),
         // Issue #502: every `[[client_identities]]` entry, as the
         // `id`/`secret` pair `resolve_identity` authenticates an
         // `ILP-Peer-Id` against. Empty is every node before this config
@@ -2609,18 +2595,21 @@ secret = "s3cr3t"
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// Issue #807, wired end to end: `router` reads `[announce]` off the
-    /// same [`Config`] `build` validated and threads it into the client
-    /// edge's [`connector_client_edge::BootstrapIdentity`], so a
-    /// zero-condition PREPARE -- `packages/announcer/src/edge-client.ts`'s
-    /// `fetchGreeting` probe shape -- answered by the router this crate
-    /// actually serves carries this node's own `ilpAddresses`/`btpEndpoint`,
-    /// not just the library-level unit tests in `connector-client-edge`
-    /// that construct a [`connector_client_edge::BootstrapIdentity`] by
-    /// hand.
+    /// Issue #807, wired end to end and re-homed by ADR 0050: `router` reads
+    /// `[node]` -- the section `[announce]` became when the announce was
+    /// removed (ADR 0046, issue #1074) -- off the same [`Config`] `build`
+    /// validated, and threads it into the client edge's node facts, so a
+    /// zero-condition PREPARE answered by the router this crate actually
+    /// serves carries this node's own `ilpAddresses`/`btpEndpoint`, not just
+    /// the library-level unit tests in `connector-client-edge` that build the
+    /// facts by hand.
+    ///
+    /// The greeting is a projection of the same facts `GET /ilp` publishes,
+    /// so this asserts the wiring on the one surface a client that cannot yet
+    /// address the node still reaches.
     #[tokio::test]
-    async fn router_answers_a_zero_condition_greeting_with_the_announce_configured_bootstrap_identity(
-    ) {
+    async fn router_answers_a_zero_condition_greeting_with_the_node_configured_bootstrap_identity()
+    {
         let (config, _key_path) = config_with_raw_key_file(|key_path| {
             format!(
                 r#"
@@ -2629,7 +2618,7 @@ client_edge_addr = "127.0.0.1:0"
 [signer]
 key_file = "{}"
 
-[announce]
+[node]
 addresses = ["g.toon.apex"]
 http_endpoint = "https://apex.example/ilp"
 btp_endpoint = "wss://apex.example/ilp/btp"
@@ -5206,10 +5195,12 @@ key_file = "{key_path}"
         }
 
         /// Issue #632's EVM-only acceptance criterion: "EVM-only node:
-        /// greeting unchanged apart from the additive one-entry list" --
-        /// `build` composes both the legacy singular `settlement_terms` and
-        /// the new `settlements` list from the same EVM backend, and the
-        /// two agree.
+        /// greeting unchanged apart from the additive one-entry list".
+        ///
+        /// Since ADR 0050 there is nothing left for the two to disagree
+        /// about: the greeting's legacy singular `extra.settlement` object is
+        /// `NodeFacts::evm_settlement()`, i.e. this list's own EVM entry, so
+        /// what this asserts is that the derivation finds it.
         #[tokio::test]
         async fn an_evm_only_node_composes_the_legacy_terms_and_a_one_entry_settlements_list() {
             if !anvil_available() {
@@ -5259,14 +5250,18 @@ key_file = "{key_path}"
             ));
 
             let runtime = build(&config).await.expect("build");
-            let terms = runtime
-                .settlement_terms
-                .clone()
-                .expect("an EVM settlement section composes the legacy greeting terms");
+            let facts = connector_domain::NodeFacts {
+                settlements: runtime.settlements.clone(),
+                ..Default::default()
+            };
+            let terms = facts
+                .evm_settlement()
+                .cloned()
+                .expect("an EVM settlement section yields the legacy greeting object");
             assert_eq!(
                 runtime.settlements,
                 vec![connector_client_edge::X402ChainSettlementTerms::Evm(terms)],
-                "an EVM-only node's settlements list is a one-entry list matching the legacy terms verbatim"
+                "an EVM-only node's settlements list is a one-entry list, and the legacy object is that entry"
             );
         }
 
@@ -5762,10 +5757,14 @@ key_file = "{solana_key_path}"
                 .await
                 .expect("both legs construct and attach without either refusing startup");
 
-            let evm_terms = runtime
-                .settlement_terms
-                .clone()
-                .expect("the EVM leg composes the legacy greeting terms");
+            let facts = connector_domain::NodeFacts {
+                settlements: runtime.settlements.clone(),
+                ..Default::default()
+            };
+            let evm_terms = facts
+                .evm_settlement()
+                .cloned()
+                .expect("the EVM leg is the one the legacy greeting object is derived from");
             assert_eq!(
                 evm_terms.token_address,
                 format!("{token:#x}"),

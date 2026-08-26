@@ -11,11 +11,7 @@ conforming connector accepts payment from a buyer it has never heard of; a **cla
 identity does not; _unverifiable is never accepted, by configuration, flag or build profile_; and a
 claim may be presented plaintext or NIP-59-wrapped at the **client's** choice, with both accepted.
 Before that record this surface appeared in none of the first 51.
-Known corrections pending: §2 and §3.4 cite [ADR 0013](../adr/0013-cut-over-through-a-parallel-address-space.md)
-as live authority and it is spent (the fleet was switched off, issue #872); §3.2 describes
-`GET /ilp/versions` in the present tense and no such route exists — version discovery moves to the node
-self-description (issue #1054, #1060); §1.4 says no settlement address is configured while the greeting
-publishes several. _Originally:_ Non-normative. [ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md) makes the
+_Originally:_ Non-normative. [ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md) makes the
 Rust implementation (`crates/connector-client-edge`) the definition of this wire, and the committed
 vector set (`vectors/wire-vectors.json`, issue #527) — fixed literal fixtures pushed through the
 real implementation and self-verified against the same functions the invariants listed in
@@ -1252,16 +1248,18 @@ third surface describing the same node, after the greeting and the kind:10032 an
 mess ADR 0046 and ADR 0050 exist to end.
 
 `supportedVersions` and `defaultVersion` are therefore fields on that document, carrying exactly what
-this section described:
+this section described. Built with #1080; on a connector serving only version 1 they read:
 
 ```json
-{ "supported": [1, 2], "default": 1 }
+{ "supportedVersions": [1], "defaultVersion": 1 }
 ```
 
-`default` is the version `POST /ilp` (unversioned) currently serves — always `1`, per §3.1's
+`defaultVersion` is the version `POST /ilp` (unversioned) currently serves — always `1`, per §3.1's
 permanence guarantee; the field exists so a client can assert its assumption rather than infer it.
-A client SHOULD call this once (and MAY cache the result) before deciding whether to address a
-version-qualified path, but is never required to — addressing `/ilp` directly always works.
+A client MAY read the document before deciding whether to address a version-qualified path, but is
+never required to — addressing `/ilp` directly always works. Note that reading it is a `GET` on the
+**same URL** the client already posts packets to, so there is no second address to discover, and the
+answer arrives with every other fact about the node rather than on its own.
 
 ### 3.3 Agreement
 

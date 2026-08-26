@@ -133,9 +133,8 @@ fn workflow_triggers(raw: &str) -> BTreeSet<String> {
 /// auto-on-green with four extra steps in the middle. connector#990 was the
 /// one-line version of that mistake and it reached both live devnet boxes
 /// within ~60s of every merge. The reasoning has not changed since:
-/// `connector-rust` is the client edge on BOTH boxes and `announce` is the
-/// same image, so one bad digest takes the whole devnet's paid-write path
-/// dark on two machines at once.
+/// `connector-rust` is the client edge on BOTH boxes, so one bad digest takes
+/// the whole devnet's paid-write path dark on two machines at once.
 ///
 /// A `pull_request` trigger would be no better than a `push` one here — this
 /// workflow ends in a move of the tag the fleet follows.
@@ -931,7 +930,6 @@ fn the_config_compat_gate_reproduces_the_makers_committed_service_environment() 
 const WATCHTOWER_MANAGED_SERVICES: &[&str] = &[
     // relay + store boxes
     "connector-rust",
-    "announce",
     // relay box
     "relay",
     "swap-node",

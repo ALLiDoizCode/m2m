@@ -405,15 +405,13 @@ mod tests {
             signer: test_signer(),
             claim_gate: claim_gate.into(),
             wrap_receiver_secret: None,
-            settlement_terms: None,
-            settlements: Vec::new(),
+            node: Arc::new(connector_domain::NodeFacts::default()),
             btp_session_window: crate::DEFAULT_BTP_SESSION_WINDOW,
             session_registry: Arc::new(session_registry),
             // A node that mounts no peer carriage (issue #678): every
             // interaction on its listeners is a client's, which is the only
             // audience session routing has.
             peers: None,
-            bootstrap_identity: None,
             identities: Arc::from([]),
         }
     }

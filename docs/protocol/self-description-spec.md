@@ -1,9 +1,11 @@
 # The node self-description
 
-**Status:** **Normative for its numbered rules — and not yet built.** `GET /ilp` is unrouted today
-(the edge registers `POST` only, so a `GET` answers `405`); issue #1080 carries the implementation.
-Written as a target, and marked as one, rather than in the present tense — the failure this folder has
-already committed twice.
+**Status:** **Normative for its numbered rules.** The endpoint is **built** (#1080): `GET /ilp`
+serves this document and the x402 greeting is a projection of the same source. Two rules are still
+**not built** and are marked so rather than written in the present tense — ND-15's unsealed reject
+carrying a URL (#1083, [ADR 0054](../adr/0054-an-unsealed-termination-reject-answers-where-to-ask.md))
+and the route descriptions [ADR 0044](../adr/0044-a-probe-answers-what-a-route-costs-and-what-it-does.md)
+adds.
 
 **Coverage:** none of ND-01 – ND-16 is vectored. This **is** a wire surface, so unlike the
 configuration and operator documents these rules **do** enter
@@ -13,8 +15,6 @@ and the burn-down order is issue #1084's.
 **Consumers:** every client SDK, every controller, every operator configuring a peering by hand.
 
 **Vocabulary:** [`CONTEXT.md`](../../CONTEXT.md). MUST, MUST NOT, SHOULD, MAY per RFC 2119.
-
-**Falsifier:** `crates/connector-client-edge/src/**/*.rs` matching `\.route\("/ilp",.*\bget\(` — the "not yet built" above is the endpoint: `GET /ilp` is unrouted, so a `GET` answers `405`. Registering a `GET` handler on that exact path is unavoidable for anything that serves this document, and `crates/connector-bin/tests/records_state_their_own_falsifier.rs` runs this line on every `cargo test`.
 
 **Falsifier:** `crates/connector-runtime/src/connector.rs` matching `fn unsealed_termination_reject\([^)]*,` — the second item "Not built" below (#1083, the unsealed reject's URL, [ADR 0054](../adr/0054-an-unsealed-termination-reject-answers-where-to-ask.md)). The reject builder takes a message and nothing else; the URL has to be handed to it.
 
@@ -165,10 +165,22 @@ Uses exactly the vocabulary of [`CONTEXT.md`](../../CONTEXT.md) and implements
 [ADR 0046](../adr/0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md) and
 [ADR 0054](../adr/0054-an-unsealed-termination-reject-answers-where-to-ask.md).
 
-**Not built:** the endpoint (#1080), the unsealed reject's URL (#1083), and route descriptions
-([ADR 0044](../adr/0044-a-probe-answers-what-a-route-costs-and-what-it-does.md)). The `[announce]`
-configuration section becomes `[node]` with #1080, and the announce itself is removed by #1074.
+**Built (#1080):** the endpoint. `GET /ilp` answers this document, free and unauthenticated,
+projected from live state on each request; the x402 greeting's `extra` node facts are read off the
+same value (ND-11); `[announce]` is `[node]` with its three surviving fields and every other key
+refused by name; and the announce itself is gone (#1074).
 
-**Closed by construction** once this is built: issue #1026 (a forwarded route is unreachable because
-the terminating identity is published nowhere) and issue #981 (`solana_chain_id` is a second
-declaration of a fact the settlement backend already holds).
+**Not built:** the unsealed reject's URL (#1083, ND-15) and route descriptions
+([ADR 0044](../adr/0044-a-probe-answers-what-a-route-costs-and-what-it-does.md)).
+
+**Issue #981 is closed by construction.** There is no `solana_chain_id` in the tree — not defaulted,
+not overridable, not compared against anything. A Solana entry's `chain` is what
+`SolanaSettlementBackend::connect` reported after proving the program against the chain, and no
+consistency check was added because there is no second source to check against.
+
+**Issue #1026 is not.** ND-06 is built — the terminating connector publishes the key a packet is
+sealed to — but that is the _publication_ half, and each node's `GET /ilp/identity` already published
+the same key before this landed. The half #1026 actually lacks is the _discovery_: how a client
+learns the terminating connector's URL without asking a hop, which ND-14 forbids answering. That is
+ND-15/#1083. Until it is built, a forwarded route is reachable only by a client that already knows
+the terminating node's URL out of band.

@@ -354,6 +354,19 @@ pub struct ClientRouteFacts {
     pub kind: ClientRouteKind,
 }
 
+/// One priced prefix, as [`Connector::client_route_prices`] enumerates them
+/// for the node self-description (ADR 0050).
+///
+/// Prefix and price only. What else a route has -- where it terminates, which
+/// peer it forwards to, what that peering costs this node -- is either an app
+/// fact or an operator-private one, and neither belongs in a document a
+/// stranger reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientRoutePrice {
+    pub prefix: String,
+    pub price: u64,
+}
+
 /// The connector's packet plane: a fixed set of terminated routes and peer
 /// routes, an [`AppClient`] port for delivering to the apps behind
 /// terminated routes, a [`PeerTransport`] port for forwarding to the next
@@ -2414,6 +2427,47 @@ impl Connector {
     /// the rest.
     pub fn client_route_price(&self, destination: &str) -> Option<u64> {
         self.client_route(destination).map(|route| route.price)
+    }
+
+    /// Every prefix this connector prices at the client edge, with what it
+    /// costs -- the enumeration behind the node self-description's `routes`
+    /// (ADR 0050).
+    ///
+    /// Each prefix's price is read back through [`Self::client_route`] rather
+    /// than off the table it was found in, so a prefix that appears in more
+    /// than one source is quoted at the price a real request to it would be
+    /// charged. There is exactly one lookup rule and this uses it.
+    ///
+    /// Sorted by prefix, which makes the answer stable across restarts and
+    /// across a runtime write that happens to land in a different map slot --
+    /// a document whose field order wanders is a document nobody can diff.
+    ///
+    /// Deliberately carries **prefix and price and nothing else**. A
+    /// terminated route's `handler_url` describes software behind this
+    /// connector (ND-08); a forwarded route's peer id and per-peering fee are
+    /// operator-private (ND-09). Leased routes are absent for the reason
+    /// [`Self::client_route`] gives: a lease carries no price at all.
+    pub fn client_route_prices(&self) -> Vec<ClientRoutePrice> {
+        let mut prefixes: std::collections::BTreeSet<String> = self
+            .routes
+            .iter()
+            .map(|route| route.prefix().to_string())
+            .collect();
+        prefixes.extend(
+            self.peer_routes
+                .iter()
+                .map(|route| route.prefix().to_string()),
+        );
+        prefixes.extend(self.runtime_peer_routes.load().keys().cloned());
+        prefixes
+            .into_iter()
+            .filter_map(|prefix| {
+                self.client_route(&prefix).map(|facts| ClientRoutePrice {
+                    prefix,
+                    price: facts.price,
+                })
+            })
+            .collect()
     }
 
     /// Whether `prepare` names a terminated app route whose envelope

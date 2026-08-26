@@ -4,8 +4,15 @@
 # ── WHY A WORKFLOW AND NOT AN AGENT ─────────────────────────────────────────
 # A class of devnet tickets is blocked on nothing but reach: read what a live
 # box is actually running, put the committed config on it, restart the thing
-# that reads that config, announce. Those are not design decisions — they are
+# that reads that config. Those are not design decisions — they are
 # deterministic operations a human has been doing by hand at a terminal.
+#
+# There used to be a fourth: `announce`, which forced a box's resident
+# kind:10032 publisher to publish now. ADR 0046 removed the announce outright
+# (issue #1074) — a connector answers when asked and never announces — and the
+# operation, the loop it forced and the compose overlays that ran it are all
+# gone. A node's own facts are read with an unauthenticated `GET /ilp`
+# (ADR 0050); nothing has to be pushed anywhere for them to be current.
 #
 # They still must not run inside the agent sandbox. `.sandcastle/sandbox-
 # secrets.ts` forwards exactly two values into the container
@@ -106,13 +113,13 @@ on:
         required: true
         options: [relay, ario, faucet]
       operation:
-        description: "box-status | config-read | pin-verify (reads) — config-apply | restart | deploy | announce (writes)"
+        description: "box-status | config-read | pin-verify (reads) — config-apply | restart | deploy (writes)"
         type: choice
         required: true
         default: box-status
-        options: [box-status, config-read, pin-verify, config-apply, restart, deploy, announce]
+        options: [box-status, config-read, pin-verify, config-apply, restart, deploy]
       service:
-        description: "restart/deploy: compose service name (connector-rust, relay, store, nginx, faucet; swap-node and watchtower are relay-only). announce: which resident publisher to force -- announce (default) or swap-announce (relay only, issue #983)."
+        description: "restart/deploy: compose service name (connector-rust, relay, store, nginx, faucet; swap-node and watchtower are relay-only)."
         type: string
         required: false
         default: "connector-rust"
@@ -171,7 +178,7 @@ jobs:
           # The faucet box has no connector, deliberately. Refuse here rather
           # than half-executing and leaving the operator to read a stack trace.
           case "$OPERATION" in
-            config-read|config-apply|announce|pin-verify)
+            config-read|config-apply|pin-verify)
               if [ "$BOX" = "faucet" ]; then
                 echo "::error::'$OPERATION' is a connector operation and the faucet box has no"
                 echo "::error::connector (two-node-architecture.md §4). Nothing to act on."
@@ -240,30 +247,15 @@ jobs:
           # resolves the repo-root dev-stack file, which defines no
           # `connector-rust` service at all, so every compose verb below
           # would target the wrong stack (issue #948).
-          # COMPOSE_ANNOUNCE adds the box's announce overlay. Only the relay
-          # and store overlays define the resident `announce` loop publisher
-          # (docs/operators/announcing-a-node.md) -- the faucet box announces
-          # nothing, so COMPOSE_ANNOUNCE is empty there and the `announce`
-          # operation below refuses it outright. The apex box ("toon") used
-          # to be a third case here, carrying the long-running TypeScript
-          # `announcer` sidecar instead of this loop -- removed along with
-          # the rest of `infra/linode-node/` by issue #872 (toon-meta#310 /
-          # toon-meta#313's live cutover); it is no longer a valid `$BOX`.
           #
           # The relay's own COMPOSE also carries docker-compose.relay.swap.yml
           # (issue #983): the rolling-swap maker sidecar lives ONLY on the
-          # relay box (co-located with the box it announces through), so
+          # relay box, so
           # `service=swap-node` resolves for `restart`/`deploy` there and
           # nowhere else -- `deploy`/`restart` against `ario`/`faucet` with
           # that service name fails the same way any other undefined service
           # name would (compose itself refuses it), which is the correct
           # refusal: there is no swap-node service to target on those boxes.
-          # COMPOSE_SWAP_ANNOUNCE is the maker's OWN announce overlay --
-          # separate from COMPOSE_ANNOUNCE (the box's own kind:10032) because
-          # the two loops sign under two different identities and must be
-          # forceable independently. Empty wherever the maker sidecar does
-          # not exist, same convention as COMPOSE_ANNOUNCE on the faucet box.
-          #
           # BOTH boxes' COMPOSE carries their own docker-compose.*.watchtower.yml
           # (issues #988 and #992, toon-meta#403): the label-scoped Watchtower
           # that recreates the box's opted-in services on a new digest. The
@@ -284,20 +276,14 @@ jobs:
             relay)
               INFRA_DIR=infra/linode-relay
               COMPOSE="docker compose -f infra/linode-relay/docker-compose.relay.yml -f infra/linode-relay/docker-compose.relay.rust.yml -f infra/linode-relay/docker-compose.relay.swap.yml -f infra/linode-relay/docker-compose.relay.watchtower.yml"
-              COMPOSE_ANNOUNCE="$COMPOSE -f infra/linode-relay/docker-compose.relay.announce.yml"
-              COMPOSE_SWAP_ANNOUNCE="$COMPOSE -f infra/linode-relay/docker-compose.relay.swap-announce.yml"
               ;;
             ario)
               INFRA_DIR=infra/linode-store
               COMPOSE="docker compose -f infra/linode-store/docker-compose.store.yml -f infra/linode-store/docker-compose.store.rust.yml -f infra/linode-store/docker-compose.store.watchtower.yml"
-              COMPOSE_ANNOUNCE="$COMPOSE -f infra/linode-store/docker-compose.store.announce.yml"
-              COMPOSE_SWAP_ANNOUNCE=""
               ;;
             faucet)
               INFRA_DIR=infra/linode-faucet
               COMPOSE="docker compose -f infra/linode-faucet/docker-compose.faucet.yml"
-              COMPOSE_ANNOUNCE=""
-              COMPOSE_SWAP_ANNOUNCE=""
               ;;
           esac
           CONF_REL="$INFRA_DIR/connector-rust.toml"
@@ -481,78 +467,6 @@ jobs:
               say '```'
               sshbox "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'" | tee -a "$GITHUB_STEP_SUMMARY"
               say '```'
-              ;;
-
-            announce)
-              # `service` (default `connector-rust`, meaningful for
-              # restart/deploy) doubles here as WHICH resident announce loop
-              # to force: the box's own kind:10032 (`announce`, the
-              # default -- left at `connector-rust` a dispatch behaves
-              # exactly as it did before this branch existed) or the relay's
-              # swap-maker sidecar (`swap-announce`, issue #983). Two
-              # different identities publish two different addresses, so
-              # they must be forceable independently rather than sharing one
-              # verdict line.
-              ANNOUNCE_SERVICE="$SERVICE"
-              if [ "$ANNOUNCE_SERVICE" = "connector-rust" ]; then
-                ANNOUNCE_SERVICE="announce"
-              fi
-              case "$ANNOUNCE_SERVICE" in
-                announce)      ANNOUNCE_COMPOSE="$COMPOSE_ANNOUNCE" ;;
-                swap-announce) ANNOUNCE_COMPOSE="$COMPOSE_SWAP_ANNOUNCE" ;;
-                *)
-                  echo "::error::operation 'announce' only knows services 'announce' and 'swap-announce', got '$ANNOUNCE_SERVICE'"
-                  exit 1
-                  ;;
-              esac
-              if [ -z "$ANNOUNCE_COMPOSE" ]; then
-                echo "::error::box '$BOX' runs no resident '$ANNOUNCE_SERVICE' publisher"
-                exit 1
-              fi
-              if [ "$APPLY" != "true" ]; then
-                say "**Dry run.** Would force \`$BOX\`'s resident \`$ANNOUNCE_SERVICE\` publisher to publish now (\`up -d $ANNOUNCE_SERVICE && restart $ANNOUNCE_SERVICE\`), then fail unless its log prints \`[$ANNOUNCE_SERVICE] OK\` within 90s."
-                say "Announce is a PAID write through the node's own routing (ADR 0030)."
-                exit 0
-              fi
-              # ADR 0030: an operator announces a node; the node never does.
-              # Every announce service is a RESIDENT loop publisher --
-              # publish, sleep, repeat (its overlay's own header explains
-              # why) -- NOT a one-shot: `run --rm` would hang this job on
-              # the loop while standing up a SECOND publisher issuing
-              # duplicate PAID writes beside the box's own (issue #948).
-              # Restarting the resident service re-enters the loop
-              # at its first iteration: one publish, now, from the box that
-              # holds the identity key -- and the loop's greppable verdict
-              # line is the read-back this file's doctrine demands.
-              sshbox "cd $REMOTE_REPO && $ANNOUNCE_COMPOSE up -d $ANNOUNCE_SERVICE && $ANNOUNCE_COMPOSE restart $ANNOUNCE_SERVICE"
-              # Anchor the read-back at the restarted container's own
-              # StartedAt, never a relative window: `restart` reuses the
-              # container and its log file, and the loop publishes every
-              # 240s on its own, so `--since 90s` could match an OK (or a
-              # FAILED) printed BEFORE the restart -- a verdict about a
-              # publish this run never triggered (issue #948). Every line
-              # `--since $STARTED_AT` matches is from the forced run.
-              STARTED_AT=$(sshbox "cd $REMOTE_REPO && docker inspect -f '{{.State.StartedAt}}' \$($ANNOUNCE_COMPOSE ps -q $ANNOUNCE_SERVICE)")
-              if [ -z "$STARTED_AT" ]; then
-                echo "::error::could not read the restarted $ANNOUNCE_SERVICE container's StartedAt"
-                exit 1
-              fi
-              VERDICT=""
-              LOGS=""
-              for i in $(seq 1 18); do
-                sleep 5
-                LOGS=$(sshbox "cd $REMOTE_REPO && $ANNOUNCE_COMPOSE logs --since '$STARTED_AT' $ANNOUNCE_SERVICE" 2>/dev/null || true)
-                if echo "$LOGS" | grep -q "\[$ANNOUNCE_SERVICE\] OK"; then VERDICT=ok; break; fi
-                if echo "$LOGS" | grep -q "\[$ANNOUNCE_SERVICE\] FAILED"; then VERDICT=failed; break; fi
-              done
-              say '```'
-              echo "$LOGS" | tail -10 | tee -a "$GITHUB_STEP_SUMMARY"
-              say '```'
-              if [ "$VERDICT" != "ok" ]; then
-                echo "::error::$ANNOUNCE_SERVICE publisher did not report '[$ANNOUNCE_SERVICE] OK' (verdict: ${VERDICT:-none within 90s})"
-                exit 1
-              fi
-              say "**Published and verified** — the resident \`$ANNOUNCE_SERVICE\` publisher reported \`[$ANNOUNCE_SERVICE] OK\`."
               ;;
           esac
 

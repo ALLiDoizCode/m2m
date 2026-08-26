@@ -979,6 +979,15 @@ impl ClientChannelRegistry {
         self
     }
 
+    /// This registry's shaper, for the one caller outside it: `GET /ilp`'s
+    /// self-description is metered through the **same** bucket rather than a
+    /// second mechanism (ADR 0050). Sharing is deliberate -- one bucket is one
+    /// thing for an operator to size -- and it shapes rather than drops, so
+    /// the coupling costs latency and never availability.
+    pub(crate) fn lookup_budget(&self) -> &UnresolvableLookupBudget {
+        &self.lookup_budget
+    }
+
     /// How long a lookup for a channel this registry has never resolved
     /// would currently wait for its slot -- zero on a node whose discovery
     /// drain is not saturated. For a log line or a test, never for a

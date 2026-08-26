@@ -118,7 +118,8 @@ chains, so serving is an assertion — but its configs necessarily name local
 container URLs, so it can never be the fleet check. Promotion proves
 image-matches-fleet-config; `local/` proves image-serves-and-settles.
 
-`connector send` is the binary's third verb (after serving and `announce`). It forms
+`connector send` is the binary's second verb (serving is the other; `announce` was removed by
+ADR 0046 / #1074 and is now refused by name). It forms
 a real packet — an OER `Prepare` gift-wrapped to the terminating connector (ADR
 0018), under a condition derived from that wrap (ADR 0019), inside an RFC
 9421-signed `POST /packets` (ADR 0008) — and is what drives the topologies. It is an
@@ -145,7 +146,11 @@ A node reads these:
 | `[signer] key_file`                | `signer.key`            | claims and gift-wrap; 32 raw bytes or 64 hex, secp256k1 |
 | `[settlement.evm.key] key_file`    | `settlement.key`        | EVM settlement transactions                             |
 | `[settlement.solana.key] key_file` | `settlement-solana.key` | Solana settlement transactions                          |
-| `[announce] key_file`              | `announce.key`          | the announcer sidecar's Nostr identity                  |
+
+`[announce]` is gone (ADR 0046 / #1074): the section is now `[node]`, holding only `addresses`,
+`http_endpoint` and `btp_endpoint` — the facts a node cannot introspect about itself — and no key of
+any kind. Its `identity_key_file`, which carried the retired announcer sidecar's Nostr identity, is
+refused by name at boot along with every other announce-only key.
 
 `[operator] write_keys` is different: it holds the **public** halves (64 hex each) of
 the keys allowed to make an authenticated write. The private half lives with whoever

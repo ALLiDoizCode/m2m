@@ -208,94 +208,36 @@ state_dir = "/app/state"
 [signer]
 key_file = "/app/data/signer.key"
 
-# ── Announce (issue #833) ───────────────────────────────────────────────────
-# This box's own kind:10032 publisher, so `g.toon.ario` is discoverable under
-# THIS node's identity -- the same `[signer]` key that answers `GET
-# /ilp/identity` and opens every gift wrap this node terminates.
+# ── The facts this node cannot introspect (ADR 0050, issue #1080) ────────
+# `[node]` was `[announce]` until ADR 0046 removed the kind:10032 announce
+# outright (issue #1074). Two of its fields already fed the packet path -- the
+# x402 greeting carries them so a client with a stale genesis peer seed can
+# bootstrap (issue #807) -- and ADR 0050 re-homed them, with the public HTTP
+# endpoint beside them, into a section named for what they ARE rather than for
+# a verb this connector no longer has.
 #
-# Before this section existed, the ONLY publisher of `g.toon.ario` was the
-# apex's announcer sidecar (docker-compose.node.announcer.yml, removed along
-# with the rest of infra/linode-node/ by issue #872), advertising the PROXY's
-# identity for a prefix the proxy FORWARDS rather than terminates (ADR
-# 0028/#772). A stock client reads that announce, seals its gift wrap to the
-# proxy's key, pays at the client edge -- and the store box, which is the
-# connector that actually holds the key the wrap is sealed to (ADR 0018),
-# cannot open it: `F01 gift wrap could not be opened`, after the money is
-# already spent. That defect is what issue #833 is. This section is the
-# fix's terminating-side half; the proxy's stopgap announce of this same
-# prefix was retired in the same change (its file is gone now).
+# Three fields, and they are here for one reason: no process can learn them
+# about itself. This container sees `0.0.0.0:4000` and a private docker
+# network, never `https://proxy.ario.devnet.toonprotocol.dev/ilp`. Everything
+# else this node says about itself is DERIVED -- prices from `[[routes]]`,
+# settlement facts from the `[settlement.*]` backends that verified them
+# against a chain at startup, the edge identity from `[signer]` -- and is
+# served, free and unauthenticated, by `GET /ilp`.
 #
-# `identity_key_file` is deliberately ABSENT. That field exists to carry a
-# PRIOR publisher's identity forward (issue #799) so a genesis seed already
-# pinning that pubkey does not go stale -- and it does not apply here: this
-# box has never had a kind:10032 publisher of its own (no sidecar, no prior
-# `connector announce`), and the genesis seed pins the g.toon proxy's
-# announcer pubkey, not this box's. Announcing under this node's own
-# `[signer]` is correct from the start and strands nobody.
-#
-# `relay_url` is deliberately ABSENT too: this box fronts no relay (see
-# docs/operators/announcing-a-node.md), and pointing it at the g.toon proxy's
-# relay would advertise free reads this node does not serve.
-[announce]
+# What used to be here and is now refused BY NAME at boot (ADR 0009):
+# `relay_url` (an assertion about the relay app BEHIND a node, which a
+# self-description never carries -- ND-08), `publish_to`, `publish_btp_url`,
+# `pay_channel` (this box no longer pays anybody to be discovered; issue
+# #1074 removed the verb that spent it), `identity_key_file`, `ttl_secs`,
+# `route_publish`, `route_store`, `asset_code`, `asset_scale`,
+# `solana_chain_id` and the four `notice_*`. The two-box-cutover notice this
+# section used to carry rode the announce; with the announce gone there is no
+# wire for it, and toon-meta's own `docs/operators/2026-08-13-two-box-cutover.md`
+# remains the durable text.
+[node]
 addresses     = ["g.toon.ario"]
 http_endpoint = "https://proxy.ario.devnet.toonprotocol.dev/ilp"
 btp_endpoint  = "wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp"
-# The address of the route that terminates at the chosen relay's write
-# ingress. `g.toon.relay` is the RELAY BOX's own terminating route -- as of
-# issue #871 this node pays THROUGH THE RELAY's client edge directly, not
-# through the apex, per toon-meta#310 (retiring the apex: the relay box is
-# the fleet's only public write ingress once it goes). Still the same
-# address; only who terminates it, and who this box pays, changed.
-publish_to = "g.toon.relay"
-# The TARGET's BTP endpoint -- where THIS node pays the relay box, not
-# where clients pay this node (`btp_endpoint` above is that one; the two
-# point in opposite directions, which is why this one is spelled `publish_*`
-# alongside `publish_to`).
-#
-# Issue #871: repointed off the apex (`wss://proxy.devnet.toonprotocol.dev/
-# ilp/btp`, issue #820's value) onto the relay box's own advertised
-# `btp_endpoint` (infra/linode-relay/connector-rust.toml's `[announce]`
-# section). The relay's own `g.toon.relay` route is pinned
-# `transport = "btp"` (issue #701, the relay's high-frequency
-# always-connected traffic) -- `pay_the_through_url` reads that requirement
-# off the target's own greeting and refuses `NoBtpEndpoint` up front,
-# before anything is signed, with neither `--btp-url` nor this key set. The
-# scheduled command in docker-compose.store.announce.yml passes no
-# `--btp-url`, so this is where it comes from.
-publish_btp_url = "wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp"
-# `pay_channel` names a funded EVM channel this box PAYS THE RELAY BOX
-# from, as an ordinary client. It is deliberately NOT a
-# `[[client_channels]]` row: that table is channels this node RECEIVES on,
-# and one channel in both roles is the same collision `Config::load`
-# already refuses between the peer and client books
-# (`ConfigError::ChannelInBothNamespaces`). See ADR 0030.
-#
-# Opening and funding the real channel -- WITH THE RELAY BOX, replacing the
-# apex-funded channel issue #820's cutover made obsolete -- is a live,
-# human step (docs/operators/announcing-a-node.md's "What the node needs
-# before this can work"), not something a repo diff can supply, so -- per
-# the same #822 placeholder policy the `[[peer_channels]]` channel id above
-# already follows -- this commits a clearly-marked placeholder rather than
-# either the live value or an absent field. The real id lives only on the
-# box (issues #853/#871); the scheduled `connector announce` in
-# docker-compose.store.announce.yml reads whichever value the box's own
-# copy of this file carries.
-pay_channel = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeadc0de"
-
-# `notice_id`/`notice_severity`/`notice_summary`/`notice_url` (issue #948,
-# re-homed from toon-meta#335) put the two-box-cutover operator notice on the
-# wire via the schema'd `notice` field (toon#183, issue #912) -- the
-# permanent mechanism, not toon-meta#335's retired content ride-along. The
-# durable text lives at `notice_url`, in toon-meta's own
-# `docs/operators/2026-08-13-two-box-cutover.md`; this box's announce carries
-# only the pointer, per that doc's own convention
-# (`docs/operators/README.md` in toon-meta). `severity` is `action-required`:
-# this box IS the store leg the notice warns about -- an upload here does not
-# self-heal after the cutover without an updated client.
-notice_id       = "2026-08-13-two-box-cutover"
-notice_severity = "action-required"
-notice_summary  = "The devnet apex is being retired; reads and relay publishing repair themselves, but store uploads need a client released after the cutover."
-notice_url      = "https://github.com/toon-protocol/toon-meta/blob/main/docs/operators/2026-08-13-two-box-cutover.md"
 
 # ── Routes ─────────────────────────────────────────────────────────────────
 

@@ -43,9 +43,8 @@ name: Publish connector-rust image
 # hands the resulting `rust-sha-` tag to promote-to-fleet.yml. What it does
 # not do -- and must never be edited to do -- is start itself. A green merge
 # to `main` still reaches GHCR and stops there. ADR 0041 Decision 3 is not a
-# preference about gates: `connector-rust` is the client edge on BOTH boxes
-# and `announce` is the same image, so one bad digest takes the whole devnet's
-# paid-write path dark at once. The human choice of build is the deploy
+# preference about gates: `connector-rust` is the client edge on BOTH boxes,
+# so one bad digest takes the whole devnet's paid-write path dark at once. The human choice of build is the deploy
 # decision; only the labour after it is automated.
 #
 # NAME HISTORY (reversal, connector#633): #487 originally shipped this as a

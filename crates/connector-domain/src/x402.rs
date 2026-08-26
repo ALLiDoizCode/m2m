@@ -22,6 +22,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::node::NodeFacts;
+
 /// The x402 version this connector emits and reads.
 pub const X402_VERSION: u32 = 2;
 
@@ -335,21 +337,30 @@ const X402_MAX_TIMEOUT_SECONDS: u64 = 60;
 /// comment gives for [`parse_greeting`] living here rather than being
 /// re-declared per reader.
 ///
-/// Every emitter passes [`GreetingTerms`] rather than eight positional
-/// arguments, four of which are empty on a carriage carrying neither
+/// Every emitter passes [`GreetingTerms`] rather than a row of positional
+/// arguments, most of which are empty on a carriage carrying neither
 /// identity nor settlement terms: named at the call site, two of them
 /// cannot be transposed without anyone noticing.
 pub fn terms_body(terms: &GreetingTerms<'_>) -> Vec<u8> {
     let GreetingTerms {
         destination,
         price,
-        settlement,
-        settlements,
-        ilp_addresses,
-        btp_endpoint,
+        node,
         required_transport,
         session_lease_ttl_ms,
     } = *terms;
+    // ND-11: every node fact in `extra` is read off the SAME value the node
+    // self-description is projected from. There is no second assembly of
+    // these fields, so the greeting cannot fall behind the document -- which
+    // is the whole of what "the greeting is a projection" buys, and the
+    // structural end of the `requiredTransport` defect.
+    let ilp_addresses: &[String] = node
+        .map(|node| node.ilp_addresses.as_slice())
+        .unwrap_or(&[]);
+    let btp_endpoint: Option<&str> = node.and_then(|node| node.btp_endpoint.as_deref());
+    let settlement: Option<&X402SettlementTerms> = node.and_then(NodeFacts::evm_settlement);
+    let settlements: &[X402ChainSettlementTerms] =
+        node.map(|node| node.settlements.as_slice()).unwrap_or(&[]);
     let terms = X402PaymentRequired {
         x402_version: X402_VERSION,
         resource: X402Resource {
@@ -392,16 +403,24 @@ pub struct GreetingTerms<'a> {
     pub destination: &'a str,
     /// What that address costs, quoted as both `amount` and `extra.price`.
     pub price: u64,
-    /// The emitting node's settlement terms, and the per-chain terms beside
-    /// them; absent on a node that settles nowhere yet.
-    pub settlement: Option<&'a X402SettlementTerms>,
-    pub settlements: &'a [X402ChainSettlementTerms],
-    /// The emitting node's own bootstrap identity (issue #807):
-    /// empty/`None` on a node -- or a carriage -- that carries none.
-    pub ilp_addresses: &'a [String],
-    pub btp_endpoint: Option<&'a str>,
+    /// The emitting node's own facts -- its addresses, its BTP endpoint and
+    /// the chains it settles on ([`crate::node::NodeFacts`], ADR 0050).
+    ///
+    /// **The same value the node self-description is projected from**, which
+    /// is what ND-11 requires: the greeting is a projection of that
+    /// document's source, never a second description assembled beside it.
+    /// `None` for a carriage that describes no node at all -- the peer
+    /// carriages, whose counterparty already knows this node and needs only
+    /// the figure quoted.
+    pub node: Option<&'a NodeFacts>,
     /// `Some("http" | "btp")` only when this same shape is reused to tell a
     /// client it used the wrong transport entirely (issue #701).
+    ///
+    /// Deliberately **not** the self-description's own `requiredTransport`,
+    /// which is a standing fact about this node's routes. This one is
+    /// self-diagnosing: present only on the greeting answering a request that
+    /// arrived over the wrong carriage (ND-12 -- the greeting keeps its own
+    /// job).
     pub required_transport: Option<&'a str>,
     /// The emitting node's client session lease backstop (issue #722); a
     /// carriage with no client session registry of its own (the peer
