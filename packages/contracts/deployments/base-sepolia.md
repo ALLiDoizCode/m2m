@@ -73,6 +73,16 @@ is a placeholder.
 
 ## ERC-2771 cutover deployment (2026-08-06) — CURRENT LIVE
 
+> **A second cutover is prepared and not yet broadcast.**
+> [ADR 0059](../../../docs/adr/0059-a-channel-is-derived-from-its-participants.md) derives a channel
+> id from its participants instead of a global counter, which `TokenNetwork` cannot be upgraded to
+> do — so it needs another fresh registry + forwarder + `TokenNetwork`, deployed by this same
+> script. Until that broadcasts, the `TokenNetwork` below is still the live one and still carries
+> the counter: read live on 2026-08-26, `channelCounter()` answers `31` and
+> `channelEpoch(address,address)` reverts. The runbook, the repoint checklist and the ordering
+> rules are `docs/evm-deployment.md`, "Second cutover, PENDING"; when it broadcasts, this section
+> gets marked superseded and a new one is added below it.
+
 Issue #695. Broadcast of `packages/contracts/script/DeployTestnetCutover.s.sol`; the runbook is
 `docs/evm-deployment.md`. `TokenNetwork` is not upgradeable, so meta-tx support (#694) shipped as a
 fresh registry + forwarder. The **same** mock USDC above is reused, so no balance or faucet
