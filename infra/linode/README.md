@@ -71,6 +71,26 @@ public-devnet deploy nor the disposable local validator's. Since ADR 0053 binds
 the program id into a claim's signed message, a stale one here is not a
 mislabelling for long.
 
+The EVM half of this file drifted the same way and was caught the same way, a
+month later. `tokenNetworkUsdc` is **derived**: it is whatever
+`registryAddress.getTokenNetwork(tokenAddress)` answers on chain, so the three
+move together or the document is lying. The 2026-08-06 ERC-2771 cutover
+(#695/#811, [`docs/evm-deployment.md`](../../docs/evm-deployment.md)) repointed
+`registryAddress` in both blocks and left `tokenNetworkUsdc` naming the
+2026-07-18 contract it replaced. It stood wrong for three weeks, and nothing on
+the fleet was affected for a reason worth stating: a connector is configured
+with the **registry** (`[settlement.evm] contract_address`) and resolves the
+`TokenNetwork` itself at boot, so it never reads this key. Only the audience
+this file exists for — someone configuring themselves from it — was pointed at
+a contract the live registry does not resolve. Two guards now stand where
+memory did: `devnet_configs_load.rs`'s
+`the_public_endpoints_document_names_the_fleets_live_evm_deployment` holds both
+blocks to the fleet's addresses on every push, and
+`.github/workflows/base-sepolia-redeem-gate.yml` asks Base Sepolia itself
+whether the registry still resolves to the address published here.
+`docs/evm-deployment.md`'s repoint checklist names this file now; it did not
+then, which is the whole of why the repoint half-finished.
+
 ## Where the live devnet is documented
 
 | Thing                                          | Where                                                                         |

@@ -98,6 +98,17 @@ Then redeploy/restart both boxes and re-run `connector announce` (issue #784) so
 event advertises the new `TokenNetwork` address -- the next announce picks it up automatically, with
 no announce-side config change needed.
 
+> **"Exactly one config value" is true of the connector and false of the repository.** Because a
+> node resolves the `TokenNetwork` at boot, none of its own config carries one -- which makes it
+> easy to read the sentence above as "the registry is the only address a repoint moves". It is not.
+> Four committed files publish the **resolved** `TokenNetwork` as a literal, and a literal cannot
+> re-derive itself when the registry moves. They are in "Bookkeeping" below; do not stop at the two
+> `.toml` files. This is not hypothetical: the 2026-08-06 broadcast repointed
+> `infra/linode/endpoints.json`'s `registryAddress` and left the `tokenNetworkUsdc` immediately
+> below it naming the retired contract, in both of that file's blocks, for three weeks. Nothing on
+> the fleet broke, because nothing on the fleet reads that field -- which is exactly why nobody
+> noticed, and why the miss belongs on a checklist rather than to an operator's memory.
+
 ### What this did NOT touch: the apex↔store peer channel (retired, issue #872)
 
 > **History.** This subsection describes a `[[peer_channels]]` row that no committed config carries
@@ -122,15 +133,65 @@ not because the peer channel is still unmigrated.
 
 ### Bookkeeping that must be updated alongside the repoint
 
+This is the whole list. A file is on it because it names a `TokenNetworkRegistry` or a resolved
+`TokenNetwork` as a **literal** -- something that goes on describing the old deployment until a
+human retypes it. Anything you add here, add with the guard that makes forgetting it loud.
+
+**The registry moved, so these move:**
+
 - **`crates/connector-bin/tests/devnet_configs_load.rs`** -- `FLEET_LIVE_REGISTRY` asserts the live
   registry address as a literal against both `.toml` files; update it to the new registry or this
   test fails the moment the boxes are repointed.
+- **`infra/linode-relay/swap.config.json`** -- `chainProviders[].registryAddress`. Not a connector
+  config; the rolling-swap maker reads it (swap#134, issue #983), and it settles on this same
+  deployment. `devnet_configs_load.rs`'s
+  `the_makers_leg_a_token_network_is_the_fleets_and_is_not_its_leg_b_channel` holds it to
+  `FLEET_LIVE_REGISTRY`.
+
+**The resolved `TokenNetwork` moved, so these move too** -- the ones the "exactly one config value"
+note above warns about:
+
+- **`infra/linode/endpoints.json`** -- `tokenNetworkUsdc` **and** `registryAddress`, in BOTH the
+  `evm` block and its `baseSepolia` mirror: four values, not two. This is the hand-maintained
+  document a third party configures itself from (`infra/linode/README.md`), and the only committed
+  file that publishes the resolved address to people who are not this fleet. It is also the file
+  the 2026-08-06 repoint half-finished. Held now by `devnet_configs_load.rs`'s
+  `the_public_endpoints_document_names_the_fleets_live_evm_deployment` (against the constants, on
+  every push) and by `.github/workflows/base-sepolia-redeem-gate.yml`'s first step (against the
+  chain, on dispatch).
+- **`infra/linode-relay/swap.config.json`** -- `chainProviders[].tokenNetworkAddress`, held to
+  `FLEET_LIVE_TOKEN_NETWORK` by the same maker test. Leave `channelAddress` alone: it is the leg-B
+  `RollingSwapChannel`, a different contract with a different ABI, and this cutover does not touch
+  it.
+- **`crates/connector-bin/tests/devnet_configs_load.rs`** -- `FLEET_LIVE_TOKEN_NETWORK`, the
+  constant both of the above are held to. It is the one number a human types after reading the
+  chain, so type it from a `cast call`, not from another document:
+
+  ```shell
+  cast call --rpc-url https://base-sepolia-rpc.publicnode.com \
+    <BASE_REGISTRY_ADDRESS> "getTokenNetwork(address)(address)" \
+    0x49beE1Bca5d15Fb0963117923403F9498119a9Ce
+  ```
+
+- **`crates/connector-settlement-evm/tests/channel_index_sync.rs`** -- `DEVNET_TOKEN_NETWORK`, the
+  contract that test's `eth_getLogs` names (issue #970).
+
+**Records of the deploy, which gain the new addresses without losing the old:**
+
 - **`packages/contracts/deployments.json`** and **`packages/contracts/deployments/base-sepolia.md`**
   -- add the new forwarder/registry/TokenNetwork addresses, transaction hashes, and deploy date,
   the same way the pre-cutover deployment is recorded there today.
 - **`crates/connector-settlement-evm/contracts/BYTECODE-PROVENANCE.md`** -- its own text says "If
   either contract is ever redeployed, this file must be redone against the new address." Redo it
   against the new registry/`TokenNetwork` addresses once they exist on chain.
+
+**Deliberately NOT repointed**, so that a future reader does not "fix" them: the pre-cutover tables
+in this document, `packages/contracts/test/DeployTestnetCutover.fork.t.sol`'s `OLD_REGISTRY` /
+`OLD_TOKEN_NETWORK` (the fork test proves the old deployment is undisturbed), the captured-greeting
+fixtures in `crates/connector-cli/src/announce.rs` and `crates/connector-client-edge/src/lib.rs`
+(parser inputs recorded from a real pre-cutover greeting -- the addresses in them decide nothing),
+and `docs/operators/peer-channel-migration.md`, which is about a channel that lives on the old
+contract on purpose.
 
 ## Rollback: one step
 
