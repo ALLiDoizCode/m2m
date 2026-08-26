@@ -75,8 +75,18 @@ fn run_signer_contract(make_signer: impl Fn() -> Arc<dyn Signer>) {
     let signer_for_reader = signer.clone();
     let stop = Arc::new(AtomicBool::new(false));
     let stop_for_reader = stop.clone();
+    // The reader sends once it has signed, and the writer blocks on that
+    // before rotating -- so the reader's loop cannot be empty and the
+    // rotations cannot all land before the reader ever runs. A channel
+    // rather than a spin flag: the writer parks instead of burning a core
+    // against the very thread it is waiting for. See the comment on the
+    // assertion below for why this handshake exists at all.
+    let (reader_signed, reader_signed_rx) = std::sync::mpsc::channel::<()>();
 
     let writer = thread::spawn(move || {
+        reader_signed_rx
+            .recv()
+            .expect("the reader signs before the writer rotates");
         for _ in 0..20 {
             signer_for_writer.rotate().expect("rotate under contention");
         }
@@ -85,17 +95,29 @@ fn run_signer_contract(make_signer: impl Fn() -> Arc<dyn Signer>) {
 
     let reader = thread::spawn(move || {
         let mut signed_at_least_once = false;
-        while !stop_for_reader.load(Ordering::SeqCst) {
+        loop {
             signer_for_reader
                 .sign(&digest)
                 .expect("sign must not fail during rotation");
-            signed_at_least_once = true;
+            if !signed_at_least_once {
+                signed_at_least_once = true;
+                reader_signed.send(()).expect("the writer is waiting");
+            }
+            if stop_for_reader.load(Ordering::SeqCst) {
+                break;
+            }
         }
         // One final sign after the writer is done, proving the signer is
         // still usable post-rotation.
         signer_for_reader
             .sign(&digest)
             .expect("sign must succeed after rotation settles");
+        // Now a real claim rather than a hopeful one. Before the handshake
+        // above, a writer that finished all twenty rotations before this
+        // thread was first scheduled left `stop` already set, so the `while`
+        // never entered its body and this fired on an empty loop -- a
+        // scheduling accident reported as a signer defect, on whichever
+        // unrelated PR happened to run on a busy runner.
         assert!(signed_at_least_once);
     });
 
