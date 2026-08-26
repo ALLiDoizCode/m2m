@@ -182,7 +182,16 @@ impl RejectCode {
         RejectCode("F99".to_string())
     }
 
-    /// R00: Transfer Timed Out -- the packet's expiry has already passed.
+    /// R00: Transfer Timed Out -- the packet has run out of time here.
+    ///
+    /// Two cases, one fact. Its expiry has already passed on arrival
+    /// (`packet-flow-spec.md` PF-02), or it arrived alive but with no more
+    /// time left than the message window a hop must keep back to forward at
+    /// all (PF-19, [`crate::forwarded_expiry`]) -- the second is the first
+    /// one hop later, and neither is about this hop's fee, route or
+    /// configuration. Class-only under ADR 0051: the sender's move is a
+    /// fresh packet with more budget either way, so there is nothing for
+    /// the code to bind beyond its class.
     pub fn r00_transfer_timed_out() -> RejectCode {
         RejectCode("R00".to_string())
     }
