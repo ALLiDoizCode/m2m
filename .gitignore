@@ -81,7 +81,11 @@ Thumbs.db
 .cache/
 
 # Test databases
-data/*.db
+# Nothing under data/ is ever tracked. It was `data/*.db` until issue #1179,
+# which is why 66 prototype ledger fixtures and three encrypted wallet seeds
+# from the deleted TypeScript connector sat in the index for months: the rule
+# covered the test databases and nothing else.
+data/
 
 # Playwright test artifacts
 .playwright-mcp/
