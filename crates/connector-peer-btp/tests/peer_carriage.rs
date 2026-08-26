@@ -323,13 +323,13 @@ fn forwarding_payee(payer: &dyn Signer) -> (Arc<Connector>, Arc<FakeAppClient>, 
             vec![PeerRoute::new_priced(
                 FORWARDED_DESTINATION,
                 NEXT_HOP_ID,
-                FORWARD_FEE,
                 FORWARD_ROUTE_PRICE,
             )],
             Arc::new(FakeAppClient::new()),
             Arc::new(onward),
             clock(),
         )
+        .with_peer_fees([(NEXT_HOP_ID.to_string(), FORWARD_FEE)])
         .with_channel_verification_key(channel_id(), counterparty)
         .with_channel_domain(channel_id(), domain())
         .expect("a bytes32 channel id"),

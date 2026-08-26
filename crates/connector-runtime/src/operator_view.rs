@@ -47,7 +47,6 @@ pub struct RouteView {
 pub struct LeasedRouteView {
     pub prefix: String,
     pub peer_id: String,
-    pub fee: u64,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -60,6 +59,11 @@ pub struct LeasedRouteView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerView {
     pub id: String,
+    /// This peering's flat per-packet fee (ADR 0010, ADR 0061): what this
+    /// connector retains for carrying one packet to it. Reported here
+    /// rather than on [`PeerRouteView`] because it is a property of the
+    /// counterparty, not of any prefix routed to it.
+    pub fee: u64,
     pub source: RouteSource,
 }
 
@@ -68,12 +72,13 @@ pub struct PeerView {
 /// `[[routes]]`'s peer form (`source: Config`) plus every row added at
 /// runtime (`source: Runtime`). Deliberately excludes a leased route
 /// (issue #427) -- [`LeasedRouteView`] already reports those, and a lease
-/// carries no `price` at all, unlike either of these.
+/// carries no `price` at all, unlike either of these. Neither carries a
+/// `fee`: that attaches to the peering, and is reported on [`PeerView`]
+/// (ADR 0061).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerRouteView {
     pub prefix: String,
     pub peer_id: String,
-    pub fee: u64,
     pub price: u64,
     pub source: RouteSource,
 }

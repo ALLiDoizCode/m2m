@@ -166,6 +166,18 @@ write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STE
 # # peer PREPARE now carries its own covering claim, whether or not this
 # # node dials. Setting either is a named load-time error, not a default.
 #
+# # What this node RETAINS for carrying one packet to this peer (ADR 0010,
+# # ADR 0061). Flat and per packet -- never a share of the amount -- and
+# # realized on the wire as the difference between the amount that arrived
+# # and the amount forwarded. It sits here, on the peering, and not on a
+# # [[routes]] entry: this hop does the same work whichever prefix the
+# # packet was addressed to, so the number is a fact about the counterparty.
+# # Writing `fee` on a [[routes]] entry is a named load-time error.
+# #
+# # Omit for free carriage, which is what every config on this fleet does
+# # today -- no devnet box charges a fee at all.
+# fee = 3
+#
 # # How long this node waits for a claim's acknowledgement and for an
 # # answer. Both default to 30000 ms each.
 # claim_ack_timeout_ms = 30000
@@ -228,28 +240,27 @@ write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STE
 # chain_id = 31337
 # token_network = "0x0000000000000000000000000000000000000000"
 #
-# # A route forwarding over the peering. Both numbers are required and they
-# # answer different questions (ADR 0028):
+# # A route forwarding over the peering. `price` is required (ADR 0028):
+# # what THIS node's client edge charges a client for a packet to this
+# # prefix. Greeted with x402 terms, claim-gated and journaled exactly as a
+# # terminated route's price is. A forwarded route is never silently free:
+# # omitting `price` is a refuse-to-start error, and `price = 0` means free
+# # carriage was deliberate.
 # #
-# #   price -- what THIS node's client edge charges a client for a packet to
-# #            this prefix. Greeted with x402 terms, claim-gated and
-# #            journaled exactly as a terminated route's price is. A
-# #            forwarded route is never silently free: omitting `price` is a
-# #            refuse-to-start error, and `price = 0` means free carriage
-# #            was deliberate.
-# #   fee   -- what THIS hop retains of that price for the carriage (ADR
-# #            0010). The difference, `price - fee`, is what reaches the
-# #            peer, so a client's packet may not declare an amount larger
-# #            than `price`.
+# # `fee` used to be set here too -- what this hop retains of that price.
+# # It moved to the [[peers]] row above (ADR 0061), because it is the same
+# # number whichever prefix the packet was addressed to, and writing it on
+# # a route is now a named load-time error rather than a value read. The
+# # difference, `price - fee`, is still what reaches the peer, so a client's
+# # packet may not declare an amount larger than `price`.
 # #
 # # Set `price` to at least what the rest of the path charges plus this
-# # hop's `fee`, or this node forwards value it was not paid for. The
+# # peering's `fee`, or this node forwards value it was not paid for. The
 # # connector cannot check that -- it does not know what the far end
 # # charges -- so it is the operator's number to get right.
 # [[routes]]
 # prefix = "g.example.store"
 # peer_id = "store"
-# fee = 3
 # price = 1000
 #
 # # The channel this node PAYS that peer from, as an ordinary client of it

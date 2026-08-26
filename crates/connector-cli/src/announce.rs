@@ -1155,22 +1155,37 @@ pub fn amount_to_pay(config: &Config, destination: &str, terminus_price: u64) ->
     terminus_price.saturating_add(fee)
 }
 
-/// The `fee` of the `[[routes]]` entry that would FORWARD `destination` over
-/// a peering, or `None` when no peer route matches -- i.e. when this node
-/// either terminates the destination itself or cannot route it at all.
+/// The fee of the PEERING that would carry `destination` (ADR 0061), or
+/// `None` when no peer route matches -- i.e. when this node either
+/// terminates the destination itself or cannot route it at all.
+///
+/// Two lookups, because the two halves live in two tables now: the
+/// `[[routes]]` entry says WHICH peering carries this destination, and that
+/// peering's own `[[peers]]` row says what carrying it costs. A peering
+/// that writes no fee carries for free, exactly as a route that wrote none
+/// did.
 ///
 /// Two callers, and the second is why this is its own function rather than
 /// an expression inside [`amount_to_pay`]: forwarding over a peering is
 /// exactly the condition under which an announce would sign an outbound
 /// claim, and so exactly the condition [`refuse_if_a_second_process_would_fork_the_ledger`]
-/// has to check.
+/// has to check. `Some(0)` and `None` are therefore genuinely different
+/// answers -- free carriage over a peering, versus no peering at all.
 fn forwarding_fee(config: &Config, destination: &str) -> Option<u64> {
-    config
+    let peer_id = config
         .peer_routes()
         .iter()
         .filter(|route| route_matches(route.prefix(), destination))
         .max_by_key(|route| route.prefix().len())
-        .map(|route| route.fee())
+        .map(|route| route.peer_id())?;
+    Some(
+        config
+            .peers()
+            .iter()
+            .find(|peer| peer.id() == peer_id)
+            .map(|peer| peer.fee())
+            .unwrap_or(0),
+    )
 }
 
 /// ILP longest-prefix matching's own rule: a prefix matches a destination

@@ -80,7 +80,12 @@ node self-description publishes. A connector describes **itself**.
 **CF-10** `[operator]` — A route MUST be expressible as a prefix plus exactly one of:
 
 - a **handler** and a **price** — the route terminates here; or
-- a **peer** and a **fee** — the route is forwarded to that peer.
+- a **peer** and a **price** — the route is forwarded to that peer.
+
+A route MUST NOT carry a **fee**. A fee is what a connector retains for carrying one packet to a
+counterparty, and that is the same work whichever prefix was addressed — so it belongs to the
+peering, not to any route reaching it.
+([ADR 0061](../adr/0061-a-fee-attaches-to-a-peering-not-to-a-route.md))
 
 **CF-11** `[connector]` — A route that names both, or neither, MUST be refused at load. A terminated
 route with no price MUST be refused: a route is never silently free.
@@ -260,6 +265,7 @@ finding a tombstone, not a live mechanism.
 | `[peer_sale]`                       | [ADR 0043](../adr/0043-purchasable-peering-is-removed.md)                                        |
 | `apex`, `[[children]]`              | [ADR 0009](../adr/0009-one-typed-config-file-no-environment-layer.md)'s update (#1057)           |
 | `claim_enforcement`                 | [ADR 0042](../adr/0042-a-packet-carries-its-claim.md) item 4 (#1062 decided, #1077 deleted)      |
+| a route's `fee`                     | [ADR 0061](../adr/0061-a-fee-attaches-to-a-peering-not-to-a-route.md) (#1159)                    |
 | the announce-only `[announce]` keys | [ADR 0046](../adr/0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md)         |
 
 ---

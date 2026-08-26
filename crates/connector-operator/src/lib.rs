@@ -281,17 +281,21 @@ async fn originate_packet(
 }
 
 /// A `POST /routes/leased` request body: create or renew a leased route
-/// (ADR 0006, issue #427) forwarding `prefix` to peer `peer_id`, charging
-/// `fee` per packet, for `ttl_seconds` from this node's own clock. Posting
-/// the same `prefix` again before it lapses renews it to a fresh
-/// `ttl_seconds` from whenever the renewal is received -- that is the only
-/// way a leased route stays alive, since nothing in the runtime extends
-/// one on its own.
+/// (ADR 0006, issue #427) forwarding `prefix` to peer `peer_id` for
+/// `ttl_seconds` from this node's own clock. Posting the same `prefix`
+/// again before it lapses renews it to a fresh `ttl_seconds` from whenever
+/// the renewal is received -- that is the only way a leased route stays
+/// alive, since nothing in the runtime extends one on its own.
+///
+/// Carries no `fee`: what this hop retains for carrying a packet to
+/// `peer_id` is that peering's own fee, written on the `[[peers]]` row or
+/// posted to `POST /peers` (ADR 0061). A controller that leased a route at
+/// its own fee was setting a peering's terms through a route, which is
+/// exactly what that record moved.
 #[derive(Debug, Deserialize)]
 struct CreateLeasedRouteRequest {
     prefix: String,
     peer_id: String,
-    fee: u64,
     ttl_seconds: i64,
 }
 
@@ -318,7 +322,6 @@ async fn create_leased_route(
     match state.connector.upsert_leased_route(
         request.prefix,
         request.peer_id,
-        request.fee,
         chrono::Duration::seconds(request.ttl_seconds),
     ) {
         Ok(view) => Json(view).into_response(),
@@ -371,9 +374,19 @@ fn peer_route_table_error_response(error: PeerRouteTableError) -> Response {
 /// #884). Refused (`409`) when `id` is already defined by the config
 /// file -- see
 /// `docs/adr/0034-a-runtime-peer-route-table-never-shadows-the-config-file.md`.
+///
+/// `fee` is this peering's flat per-packet fee (ADR 0010, ADR 0061): what
+/// this connector retains for carrying one packet to `id`, whichever prefix
+/// the packet was addressed to. Omitted is zero -- free carriage, the value
+/// a peer row carried before this field existed -- and a later post of the
+/// same `id` with a different `fee` reprices the peering, since the packet
+/// path reads the fee off the peering on every forward rather than off a
+/// copy baked into each route.
 #[derive(Debug, Deserialize)]
 struct UpsertPeerRequest {
     id: String,
+    #[serde(default)]
+    fee: u64,
 }
 
 /// `POST /peers`: issue #884's runtime peer-table write. Authenticated
@@ -396,7 +409,7 @@ async fn upsert_peer(
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     };
 
-    match state.connector.upsert_runtime_peer(request.id) {
+    match state.connector.upsert_runtime_peer(request.id, request.fee) {
         Ok(view) => Json(view).into_response(),
         Err(error) => peer_route_table_error_response(error),
     }
@@ -428,11 +441,14 @@ async fn remove_peer(
 /// peer-forwarding route (issue #884), keyed by `prefix` exactly like
 /// `POST /routes/leased` -- posting the same prefix again updates the row
 /// rather than adding a duplicate.
+///
+/// `price` is what this node's client edge charges a client for a packet to
+/// `prefix` (ADR 0028). What this hop retains of it is `peer_id`'s own fee,
+/// written on the peering by `POST /peers` and never here (ADR 0061).
 #[derive(Debug, Deserialize)]
 struct UpsertPeerRouteRequest {
     prefix: String,
     peer_id: String,
-    fee: u64,
     price: u64,
 }
 
@@ -454,12 +470,10 @@ async fn upsert_peer_route(
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     };
 
-    match state.connector.upsert_runtime_peer_route(
-        request.prefix,
-        request.peer_id,
-        request.fee,
-        request.price,
-    ) {
+    match state
+        .connector
+        .upsert_runtime_peer_route(request.prefix, request.peer_id, request.price)
+    {
         Ok(view) => Json(view).into_response(),
         Err(error) => peer_route_table_error_response(error),
     }
@@ -1314,11 +1328,12 @@ mod tests {
             let connector = Arc::new(covering(
                 Connector::new(
                     vec![],
-                    vec![PeerRoute::new("g.example", "peer-1", 5)],
+                    vec![PeerRoute::new("g.example", "peer-1")],
                     app_client,
                     Arc::new(InProcessPeerTransport::new()),
                     clock,
-                ),
+                )
+                .with_peer_fees([("peer-1".to_string(), 5)]),
                 "peer-1",
             ));
             let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
@@ -1446,7 +1461,6 @@ mod tests {
             let body = serde_json::to_vec(&serde_json::json!({
                 "prefix": "g.example.leased",
                 "peer_id": "peer-1",
-                "fee": 3,
                 "ttl_seconds": 60,
             }))
             .unwrap();
@@ -1469,7 +1483,6 @@ mod tests {
             let created: LeasedRouteView = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(created.prefix, "g.example.leased");
             assert_eq!(created.peer_id, "peer-1");
-            assert_eq!(created.fee, 3);
             assert_eq!(created.expires_at, start + chrono::Duration::seconds(60));
 
             let read_response = get(app, "/routes/leased", Some("correct-token")).await;
@@ -1721,7 +1734,8 @@ mod tests {
         async fn a_validly_signed_write_creates_a_peer_route_visible_over_the_read_surface() {
             let keypair = keypair();
             let app = router_with(vec![keypair.public.to_bytes()]);
-            let peer_body = serde_json::to_vec(&serde_json::json!({"id": "runtime-hop"})).unwrap();
+            let peer_body =
+                serde_json::to_vec(&serde_json::json!({"id": "runtime-hop", "fee": 3})).unwrap();
             app.clone()
                 .oneshot(signed(&keypair, "POST", "/peers", peer_body))
                 .await
@@ -1729,7 +1743,6 @@ mod tests {
             let route_body = serde_json::to_vec(&serde_json::json!({
                 "prefix": "g.example.runtime",
                 "peer_id": "runtime-hop",
-                "fee": 3,
                 "price": 25,
             }))
             .unwrap();
@@ -1746,7 +1759,6 @@ mod tests {
             let created: PeerRouteView = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(created.prefix, "g.example.runtime");
             assert_eq!(created.peer_id, "runtime-hop");
-            assert_eq!(created.fee, 3);
             assert_eq!(created.price, 25);
             assert_eq!(created.source, RouteSource::Runtime);
 
@@ -1769,7 +1781,6 @@ mod tests {
             let body = serde_json::to_vec(&serde_json::json!({
                 "prefix": "g.example.runtime",
                 "peer_id": "nobody",
-                "fee": 0,
                 "price": 0,
             }))
             .unwrap();

@@ -525,6 +525,23 @@ pub struct Connector {
     /// this reason). The cap is checked against one packet's own forwarded
     /// amount and forgotten.
     peer_packet_caps: HashMap<String, u64>,
+    /// ADR 0010's flat per-packet **fee**, keyed by peer id: what this
+    /// connector retains for carrying one packet to that peer, from its
+    /// `[[peers]]` row's `fee`.
+    ///
+    /// Keyed by peering rather than carried on the route because this hop
+    /// does the same work whichever prefix the packet was addressed to (ADR
+    /// 0061) -- `[[routes]] fee` is a refuse-to-start tombstone now. A peer
+    /// with no entry here charges nothing, which is what an operator who
+    /// wrote no fee meant; a peer added at runtime over the operator
+    /// surface carries its own fee on its row instead
+    /// (`runtime_peers`), and [`Self::fee_for`] reads whichever holds it.
+    ///
+    /// Flat and per packet, never a share of the amount: it is realized on
+    /// the wire as the difference between the amount that arrived and the
+    /// amount forwarded, and added to the accumulated cost of a reject this
+    /// peer itself decided on (ADR 0011).
+    peer_fees: HashMap<String, u64>,
     /// Where the runtime peer/route table is written durably (issue #884).
     /// `None` on a node with no `state_dir` configured -- the table is
     /// still mutable, exactly like `leased_routes` always is, it simply
@@ -625,6 +642,7 @@ impl Connector {
             runtime_table_lock: Mutex::new(()),
             runtime_store: None,
             peer_packet_caps: HashMap::new(),
+            peer_fees: HashMap::new(),
         }
     }
 
@@ -648,6 +666,37 @@ impl Connector {
             .get(peer_id)
             .copied()
             .unwrap_or(DEFAULT_MAX_PACKET_AMOUNT)
+    }
+
+    /// Give each named peering the flat per-packet fee its `[[peers]]` row
+    /// configures (ADR 0010, ADR 0061): what this connector retains for
+    /// carrying one packet to it. A peering left out of `fees` charges
+    /// nothing -- and one added at runtime carries its fee on its own row
+    /// instead, which [`Self::fee_for`] reads.
+    pub fn with_peer_fees(mut self, fees: impl IntoIterator<Item = (String, u64)>) -> Self {
+        self.peer_fees = fees.into_iter().collect();
+        self
+    }
+
+    /// What this connector retains for carrying one packet to `peer_id` --
+    /// the peering's own flat fee (ADR 0010, ADR 0061), zero for a peering
+    /// that configured none.
+    ///
+    /// Two sources, never overlapping: the config file's `[[peers]]` rows
+    /// (`peer_fees`) and the runtime peer table (`runtime_peers`), which
+    /// can never hold an id the config file owns (ADR 0034). The runtime
+    /// snapshot is loaded only on a config miss, so a config peering -- the
+    /// only kind either devnet box has -- costs the packet path one hash
+    /// lookup and no `ArcSwap` load at all.
+    pub(crate) fn fee_for(&self, peer_id: &str) -> u64 {
+        match self.peer_fees.get(peer_id) {
+            Some(fee) => *fee,
+            None => self
+                .runtime_peers_snapshot()
+                .get(peer_id)
+                .copied()
+                .unwrap_or(0),
+        }
     }
 
     /// Reserve every peer id this node's config file names (issue #884):
@@ -932,7 +981,6 @@ impl Connector {
         &self,
         prefix: impl Into<String>,
         peer_id: impl Into<String>,
-        fee: u64,
         ttl: Duration,
     ) -> Result<LeasedRouteView, LeaseRouteError> {
         let prefix = prefix.into();
@@ -940,7 +988,7 @@ impl Connector {
             return Err(LeaseRouteError::InvalidPrefix(prefix));
         }
         let expires_at = self.clock.now() + ttl;
-        let route = LeasedRoute::new(prefix.clone(), peer_id.into(), fee, expires_at);
+        let route = LeasedRoute::new(prefix.clone(), peer_id.into(), expires_at);
         let view = leased_route_view(&route);
         self.leased_routes.rcu(|current| {
             let mut next = (**current).clone();
@@ -1017,6 +1065,7 @@ impl Connector {
     pub fn upsert_runtime_peer(
         &self,
         id: impl Into<String>,
+        fee: u64,
     ) -> Result<PeerView, PeerRouteTableError> {
         let id = id.into();
         if id.trim().is_empty() {
@@ -1030,11 +1079,12 @@ impl Connector {
             .lock()
             .expect("runtime peer/route table lock poisoned");
         let mut peers = (*self.runtime_peers_snapshot()).clone();
-        peers.insert(id.clone());
+        peers.insert(id.clone(), fee);
         self.persist_runtime_table(&peers, &self.runtime_peer_routes_snapshot())?;
         self.runtime_peers.store(Arc::new(peers));
         Ok(PeerView {
             id,
+            fee,
             source: RouteSource::Runtime,
         })
     }
@@ -1055,7 +1105,7 @@ impl Connector {
             .lock()
             .expect("runtime peer/route table lock poisoned");
         let peers = self.runtime_peers_snapshot();
-        if !peers.contains(id) {
+        if !peers.contains_key(id) {
             return Err(PeerRouteTableError::PeerNotFound(id.to_string()));
         }
         let routes = self.runtime_peer_routes_snapshot();
@@ -1097,7 +1147,6 @@ impl Connector {
         &self,
         prefix: impl Into<String>,
         peer_id: impl Into<String>,
-        fee: u64,
         price: u64,
     ) -> Result<PeerRouteView, PeerRouteTableError> {
         let prefix = prefix.into();
@@ -1113,11 +1162,11 @@ impl Connector {
             .lock()
             .expect("runtime peer/route table lock poisoned");
         if !self.config_peer_ids.contains(&peer_id)
-            && !self.runtime_peers_snapshot().contains(&peer_id)
+            && !self.runtime_peers_snapshot().contains_key(&peer_id)
         {
             return Err(PeerRouteTableError::UnknownPeerId { prefix, peer_id });
         }
-        let route = PeerRoute::new_priced(prefix.clone(), peer_id.clone(), fee, price);
+        let route = PeerRoute::new_priced(prefix.clone(), peer_id.clone(), price);
         let mut routes = (*self.runtime_peer_routes_snapshot()).clone();
         routes.insert(prefix.clone(), route);
         self.persist_runtime_table(&self.runtime_peers_snapshot(), &routes)?;
@@ -1125,7 +1174,6 @@ impl Connector {
         Ok(PeerRouteView {
             prefix,
             peer_id,
-            fee,
             price,
             source: RouteSource::Runtime,
         })
@@ -1163,7 +1211,6 @@ impl Connector {
             .map(|route| PeerRouteView {
                 prefix: route.prefix().to_string(),
                 peer_id: route.peer_id().to_string(),
-                fee: route.fee(),
                 price: route.price(),
                 source: RouteSource::Config,
             })
@@ -1174,7 +1221,6 @@ impl Connector {
                 .map(|route| PeerRouteView {
                     prefix: route.prefix().to_string(),
                     peer_id: route.peer_id().to_string(),
-                    fee: route.fee(),
                     price: route.price(),
                     source: RouteSource::Runtime,
                 }),
@@ -1600,7 +1646,8 @@ impl Connector {
         tracing::debug!(peer_id = %peer_route.peer_id(), "routed to peer");
         let response = self.forward_via_peer_route(&peer_route, prepare).await;
         if matches!(response, PacketResponse::Fulfill(_)) {
-            self.metrics.record_fee_earned(peer_route.fee());
+            self.metrics
+                .record_fee_earned(self.fee_for(peer_route.peer_id()));
         }
         self.finish(response)
     }
@@ -1704,7 +1751,12 @@ impl Connector {
         // sender can pay; here nothing survives the fee at all, the class
         // letter is relative rather than final, and the move is "send
         // more".
-        let Some(forwarded_amount) = amount_after_fee(prepare.amount, peer_route.fee()) else {
+        // ADR 0061: this hop's fee belongs to the PEERING, so it is read off
+        // `peer_route.peer_id()` rather than off the route the packet
+        // matched. Every prefix forwarded to one counterparty therefore
+        // costs the same, which is what "flat, per packet" always meant.
+        let fee = self.fee_for(peer_route.peer_id());
+        let Some(forwarded_amount) = amount_after_fee(prepare.amount, fee) else {
             return PacketResponse::Reject(Reject {
                 code: RejectCode::r01_insufficient_source_amount(),
                 triggered_by: String::new(),
@@ -1717,9 +1769,9 @@ impl Connector {
                     "peer '{}' charges a fee of {} and this packet carried only {}: nothing \
                      would be left to forward. Send more than {}",
                     peer_route.peer_id(),
-                    peer_route.fee(),
+                    fee,
                     prepare.amount,
-                    peer_route.fee()
+                    fee
                 ),
                 data: Vec::new(),
                 accumulated_cost: 0,
@@ -1846,7 +1898,7 @@ impl Connector {
             // the packet never actually traversed this hop in that case.
             PacketResponse::Reject(mut reject) => {
                 if answer.reached_peer {
-                    reject.accumulated_cost += peer_route.fee();
+                    reject.accumulated_cost += fee;
                 }
                 PacketResponse::Reject(reject)
             }
@@ -2456,13 +2508,19 @@ impl Connector {
             .iter()
             .map(|id| PeerView {
                 id: id.clone(),
+                fee: self.fee_for(id),
                 source: RouteSource::Config,
             })
             .collect();
-        views.extend(self.runtime_peers_snapshot().iter().map(|id| PeerView {
-            id: id.clone(),
-            source: RouteSource::Runtime,
-        }));
+        views.extend(
+            self.runtime_peers_snapshot()
+                .iter()
+                .map(|(id, fee)| PeerView {
+                    id: id.clone(),
+                    fee: *fee,
+                    source: RouteSource::Runtime,
+                }),
+        );
         views
     }
 
@@ -2780,7 +2838,6 @@ fn leased_route_view(route: &LeasedRoute) -> LeasedRouteView {
     LeasedRouteView {
         prefix: route.prefix().to_string(),
         peer_id: route.peer_id().to_string(),
-        fee: route.fee(),
         expires_at: route.expires_at(),
     }
 }
@@ -3535,7 +3592,7 @@ mod tests {
         let first_hop = covering(
             Connector::new(
                 vec![],
-                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
                 Arc::new(FakeAppClient::new()),
                 Arc::new(peer_transport),
                 test_clock(),
@@ -3578,11 +3635,12 @@ mod tests {
         peer_transport.add_peer("second-hop", second_hop);
         let first_hop = Connector::new(
             vec![],
-            vec![PeerRoute::new("g.example.app", "second-hop", 10)],
+            vec![PeerRoute::new("g.example.app", "second-hop")],
             Arc::new(FakeAppClient::new()),
             Arc::new(peer_transport),
             test_clock(),
-        );
+        )
+        .with_peer_fees([("second-hop".to_string(), 10)]);
 
         // amount 4, fee 10: nothing is left to forward, so this hop
         // refuses rather than carrying a packet it is not paid for.
@@ -3638,11 +3696,12 @@ mod tests {
         let first_hop = covering(
             Connector::new(
                 vec![],
-                vec![PeerRoute::new("g.example.app", "second-hop", fee)],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
                 Arc::new(FakeAppClient::new()),
                 Arc::new(peer_transport),
                 test_clock(),
             )
+            .with_peer_fees([("second-hop".to_string(), fee)])
             .with_peer_packet_caps(caps),
             "second-hop",
         );
@@ -3821,7 +3880,7 @@ mod tests {
         let first_hop = covering(
             Connector::new(
                 vec![],
-                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
                 Arc::new(FakeAppClient::new()),
                 Arc::new(peer_transport),
                 test_clock(),
@@ -3844,7 +3903,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_terminated_route_wins_over_a_shorter_peer_route() {
-        let peer_route = PeerRoute::new("g.example", "second-hop", 0);
+        let peer_route = PeerRoute::new("g.example", "second-hop");
         let terminated_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
         app_client.respond(terminated_route.handler_url(), answered(b"handled locally"));
@@ -3897,7 +3956,7 @@ mod tests {
         let first_hop = covering(
             Connector::new(
                 vec![terminated_route],
-                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
                 app_client,
                 Arc::new(peer_transport),
                 test_clock(),
@@ -3958,11 +4017,12 @@ mod tests {
         let app_client = Arc::new(FakeAppClient::new());
         let connector = Connector::new(
             vec![],
-            vec![PeerRoute::new_priced("g.example.store", "store", 3, 100)],
+            vec![PeerRoute::new_priced("g.example.store", "store", 100)],
             app_client,
             Arc::new(InProcessPeerTransport::new()),
             test_clock(),
-        );
+        )
+        .with_peer_fees([("store".to_string(), 3)]);
 
         let facts = connector
             .client_route("g.example.store.sub")
@@ -3984,11 +4044,12 @@ mod tests {
         let app_client = Arc::new(FakeAppClient::new());
         let connector = Connector::new(
             vec![StaticRoute::new_priced("g.example", "http://localhost:4000", 25).unwrap()],
-            vec![PeerRoute::new_priced("g.example.store", "store", 3, 100)],
+            vec![PeerRoute::new_priced("g.example.store", "store", 100)],
             app_client,
             Arc::new(InProcessPeerTransport::new()),
             test_clock(),
-        );
+        )
+        .with_peer_fees([("store".to_string(), 3)]);
 
         assert_eq!(connector.client_route_price("g.example.relay"), Some(25));
         assert_eq!(connector.client_route_price("g.example.store"), Some(100));
@@ -4100,11 +4161,12 @@ mod tests {
         let first_hop = covering(
             Connector::new(
                 vec![],
-                vec![PeerRoute::new("g.example.app", "second-hop", 7)],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
                 Arc::new(FakeAppClient::new()),
                 Arc::new(peer_transport),
                 test_clock(),
-            ),
+            )
+            .with_peer_fees([("second-hop".to_string(), 7)]),
             "second-hop",
         );
 
@@ -4154,7 +4216,7 @@ mod tests {
             "second-hop",
         );
         first_hop
-            .upsert_leased_route("g.example.app", "second-hop", 0, Duration::seconds(60))
+            .upsert_leased_route("g.example.app", "second-hop", Duration::seconds(60))
             .unwrap();
         let (sealed, shared_secret) = sealed_prepare(b"hello");
 
@@ -4187,7 +4249,7 @@ mod tests {
             clock.clone(),
         );
         first_hop
-            .upsert_leased_route("g.example.app", "second-hop", 0, Duration::seconds(60))
+            .upsert_leased_route("g.example.app", "second-hop", Duration::seconds(60))
             .unwrap();
 
         // Still active a moment before its limit.
@@ -4232,12 +4294,12 @@ mod tests {
             clock.clone(),
         );
         first_hop
-            .upsert_leased_route("g.example.app", "second-hop", 0, Duration::seconds(60))
+            .upsert_leased_route("g.example.app", "second-hop", Duration::seconds(60))
             .unwrap();
 
         clock.advance(Duration::seconds(30));
         first_hop
-            .upsert_leased_route("g.example.app", "second-hop", 0, Duration::seconds(60))
+            .upsert_leased_route("g.example.app", "second-hop", Duration::seconds(60))
             .unwrap();
 
         // Past the *original* lease's limit (60s from the start), but well
@@ -4270,7 +4332,7 @@ mod tests {
         )
         .with_identity_signer(identity_signer());
         connector
-            .upsert_leased_route("g.example.app", "second-hop", 0, Duration::seconds(60))
+            .upsert_leased_route("g.example.app", "second-hop", Duration::seconds(60))
             .unwrap();
         let (sealed, shared_secret) = sealed_prepare(b"hello");
 
@@ -4303,7 +4365,7 @@ mod tests {
             clock.clone(),
         );
         before_restart
-            .upsert_leased_route("g.example.app", "second-hop", 0, Duration::seconds(60))
+            .upsert_leased_route("g.example.app", "second-hop", Duration::seconds(60))
             .unwrap();
         assert_eq!(before_restart.leased_routes().len(), 1);
 
@@ -4328,14 +4390,13 @@ mod tests {
             clock.clone(),
         );
         connector
-            .upsert_leased_route("g.example.app", "second-hop", 3, Duration::seconds(60))
+            .upsert_leased_route("g.example.app", "second-hop", Duration::seconds(60))
             .unwrap();
 
         let leases = connector.leased_routes();
         assert_eq!(leases.len(), 1);
         assert_eq!(leases[0].prefix, "g.example.app");
         assert_eq!(leases[0].peer_id, "second-hop");
-        assert_eq!(leases[0].fee, 3);
 
         clock.advance(Duration::seconds(60));
         assert!(connector.leased_routes().is_empty());
@@ -4352,8 +4413,7 @@ mod tests {
             clock,
         );
 
-        let result =
-            connector.upsert_leased_route("g..app", "second-hop", 0, Duration::seconds(60));
+        let result = connector.upsert_leased_route("g..app", "second-hop", Duration::seconds(60));
 
         assert!(matches!(result, Err(LeaseRouteError::InvalidPrefix(_))));
         assert!(connector.leased_routes().is_empty());
@@ -4411,7 +4471,7 @@ mod tests {
         let connector = covering(
             Connector::new(
                 vec![],
-                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
                 Arc::new(FakeAppClient::new()),
                 Arc::new(peer_transport),
                 test_clock(),
@@ -4661,11 +4721,12 @@ mod tests {
         ) -> Connector {
             Connector::new(
                 vec![],
-                vec![PeerRoute::new("g.example.app", "second-hop", fee)],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
                 Arc::new(FakeAppClient::new()),
                 peer,
                 test_clock(),
             )
+            .with_peer_fees([("second-hop".to_string(), fee)])
             .with_signer(Arc::new(LocalSigner::generate("settlement-key")))
             .with_channel_domain(test_channel_id(1), test_channel_domain())
             .expect("test_channel_id(1) is a valid on-chain channel id")
@@ -5018,7 +5079,7 @@ mod tests {
             Arc::get_mut(&mut peer).expect("sole owner").greets = false;
             let connector = Connector::new(
                 vec![],
-                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
                 Arc::new(FakeAppClient::new()),
                 peer.clone(),
                 test_clock(),
@@ -5201,7 +5262,7 @@ mod tests {
             );
             Connector::new(
                 vec![],
-                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
                 Arc::new(FakeAppClient::new()),
                 peer,
                 test_clock(),
@@ -5301,7 +5362,7 @@ mod tests {
             let program = solana_base58(&SOLANA_PROGRAM);
             let connector = Connector::new(
                 vec![],
-                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
                 Arc::new(FakeAppClient::new()),
                 peer.clone(),
                 test_clock(),
@@ -5879,11 +5940,12 @@ mod tests {
                 downstream = Arc::new(covering(
                     Connector::new(
                         vec![],
-                        vec![PeerRoute::new("g.example.app", "next", fee)],
+                        vec![PeerRoute::new("g.example.app", "next")],
                         Arc::new(FakeAppClient::new()),
                         Arc::new(transport),
                         test_clock(),
-                    ),
+                    )
+                    .with_peer_fees([("next".to_string(), fee)]),
                     "next",
                 ));
             }
@@ -5893,11 +5955,12 @@ mod tests {
             covering(
                 Connector::new(
                     vec![],
-                    vec![PeerRoute::new("g.example.app", "next", fees[0])],
+                    vec![PeerRoute::new("g.example.app", "next")],
                     Arc::new(FakeAppClient::new()),
                     Arc::new(entry_transport),
                     test_clock(),
-                ),
+                )
+                .with_peer_fees([("next".to_string(), fees[0])]),
                 "next",
             )
         }
@@ -5966,11 +6029,12 @@ mod tests {
             let hop1 = Arc::new(covering(
                 Connector::new(
                     vec![],
-                    vec![PeerRoute::new("g.example.app", "unregistered", 3)],
+                    vec![PeerRoute::new("g.example.app", "unregistered")],
                     Arc::new(FakeAppClient::new()),
                     Arc::new(InProcessPeerTransport::new()),
                     test_clock(),
-                ),
+                )
+                .with_peer_fees([("unregistered".to_string(), 3)]),
                 "unregistered",
             ));
             let mut hop0_transport = InProcessPeerTransport::new();
@@ -5978,11 +6042,12 @@ mod tests {
             let hop0 = covering(
                 Connector::new(
                     vec![],
-                    vec![PeerRoute::new("g.example.app", "hop-1", 7)],
+                    vec![PeerRoute::new("g.example.app", "hop-1")],
                     Arc::new(FakeAppClient::new()),
                     Arc::new(hop0_transport),
                     test_clock(),
-                ),
+                )
+                .with_peer_fees([("hop-1".to_string(), 7)]),
                 "hop-1",
             );
 
@@ -6384,12 +6449,7 @@ mod tests {
             assert!(connector.envelope_target_would_be_refused(&to_leased_prefix));
 
             connector
-                .upsert_leased_route(
-                    "g.example.app.leased",
-                    "leased-peer",
-                    0,
-                    Duration::seconds(60),
-                )
+                .upsert_leased_route("g.example.app.leased", "leased-peer", Duration::seconds(60))
                 .unwrap();
 
             // With the lease active, this packet forwards -- nothing to
@@ -6400,7 +6460,7 @@ mod tests {
             // that tie (issue #427, `RouteRank`), the packet terminates
             // here, and the probe still predicts the refusal.
             connector
-                .upsert_leased_route("g.example.app", "leased-peer", 0, Duration::seconds(60))
+                .upsert_leased_route("g.example.app", "leased-peer", Duration::seconds(60))
                 .unwrap();
             let (data, _shared_secret) =
                 sealed_envelope_request_data_with_target("/admin", b"hello");
@@ -6433,11 +6493,12 @@ mod tests {
             let first_hop = covering(
                 Connector::new(
                     vec![],
-                    vec![PeerRoute::new("g.example.app", "second-hop", 7)],
+                    vec![PeerRoute::new("g.example.app", "second-hop")],
                     Arc::new(FakeAppClient::new()),
                     Arc::new(peer_transport),
                     test_clock(),
-                ),
+                )
+                .with_peer_fees([("second-hop".to_string(), 7)]),
                 "second-hop",
             );
             let (mismatched_data, _shared_secret) = sealed_envelope_request_data(b"hello");
@@ -6679,11 +6740,12 @@ mod tests {
         async fn a_probe_beyond_this_connector_accumulates_the_hops_it_traversed() {
             let connector = Connector::new(
                 vec![],
-                vec![PeerRoute::new("g.example", "unreachable-peer", 7)],
+                vec![PeerRoute::new("g.example", "unreachable-peer")],
                 Arc::new(FakeAppClient::new()),
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
-            );
+            )
+            .with_peer_fees([("unreachable-peer".to_string(), 7)]);
             connector.recognize_channel(CHANNEL);
 
             let response = connector
@@ -6736,7 +6798,6 @@ mod tests {
                     .upsert_leased_route(
                         format!("g.other-{i}.app"),
                         "unused-peer",
-                        0,
                         Duration::seconds(60),
                     )
                     .unwrap();
@@ -6826,9 +6887,9 @@ mod tests {
                 ),
                 "runtime-hop",
             );
-            first_hop.upsert_runtime_peer("runtime-hop").unwrap();
+            first_hop.upsert_runtime_peer("runtime-hop", 0).unwrap();
             first_hop
-                .upsert_runtime_peer_route("g.example.app", "runtime-hop", 0, 0)
+                .upsert_runtime_peer_route("g.example.app", "runtime-hop", 0)
                 .unwrap();
             let (sealed, shared_secret) = sealed_prepare(b"hello");
 
@@ -6859,9 +6920,9 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             );
-            connector.upsert_runtime_peer("runtime-hop").unwrap();
+            connector.upsert_runtime_peer("runtime-hop", 0).unwrap();
             connector
-                .upsert_runtime_peer_route("g.example.app", "runtime-hop", 3, 25)
+                .upsert_runtime_peer_route("g.example.app", "runtime-hop", 25)
                 .unwrap();
 
             let facts = connector.client_route("g.example.app").unwrap();
@@ -6884,7 +6945,7 @@ mod tests {
             )
             .with_config_peer_ids(["apex-store".to_string()]);
 
-            let error = connector.upsert_runtime_peer("apex-store").unwrap_err();
+            let error = connector.upsert_runtime_peer("apex-store", 0).unwrap_err();
             assert!(matches!(error, PeerRouteTableError::OwnedByConfig(id) if id == "apex-store"));
 
             // Not removable at runtime either -- the same rule, checked on
@@ -6904,7 +6965,7 @@ mod tests {
             let app_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
             let connector = Connector::new(
                 vec![app_route],
-                vec![PeerRoute::new("g.example.peer", "configured-peer", 0)],
+                vec![PeerRoute::new("g.example.peer", "configured-peer")],
                 Arc::new(FakeAppClient::new()),
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
@@ -6912,14 +6973,14 @@ mod tests {
             .with_config_peer_ids(["configured-peer".to_string()]);
 
             let error = connector
-                .upsert_runtime_peer_route("g.example.app", "configured-peer", 0, 0)
+                .upsert_runtime_peer_route("g.example.app", "configured-peer", 0)
                 .unwrap_err();
             assert!(
                 matches!(error, PeerRouteTableError::OwnedByConfig(prefix) if prefix == "g.example.app")
             );
 
             let error = connector
-                .upsert_runtime_peer_route("g.example.peer", "configured-peer", 0, 0)
+                .upsert_runtime_peer_route("g.example.peer", "configured-peer", 0)
                 .unwrap_err();
             assert!(
                 matches!(error, PeerRouteTableError::OwnedByConfig(prefix) if prefix == "g.example.peer")
@@ -6942,7 +7003,7 @@ mod tests {
             );
 
             let error = connector
-                .upsert_runtime_peer_route("g.example.app", "nobody", 0, 0)
+                .upsert_runtime_peer_route("g.example.app", "nobody", 0)
                 .unwrap_err();
             assert!(matches!(
                 error,
@@ -6968,7 +7029,7 @@ mod tests {
             .with_config_peer_ids(["configured-peer".to_string()]);
 
             let view = connector
-                .upsert_runtime_peer_route("g.example.new", "configured-peer", 2, 10)
+                .upsert_runtime_peer_route("g.example.new", "configured-peer", 10)
                 .unwrap();
             assert_eq!(view.peer_id, "configured-peer");
             assert_eq!(view.source, RouteSource::Runtime);
@@ -6987,9 +7048,9 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             );
-            connector.upsert_runtime_peer("runtime-hop").unwrap();
+            connector.upsert_runtime_peer("runtime-hop", 0).unwrap();
             connector
-                .upsert_runtime_peer_route("g.example.app", "runtime-hop", 0, 0)
+                .upsert_runtime_peer_route("g.example.app", "runtime-hop", 0)
                 .unwrap();
 
             let error = connector.remove_runtime_peer("runtime-hop").unwrap_err();
@@ -7055,11 +7116,11 @@ mod tests {
                 "runtime-hop",
             );
             connector
-                .upsert_leased_route("g.example.app", "leased-hop", 0, Duration::seconds(60))
+                .upsert_leased_route("g.example.app", "leased-hop", Duration::seconds(60))
                 .unwrap();
-            connector.upsert_runtime_peer("runtime-hop").unwrap();
+            connector.upsert_runtime_peer("runtime-hop", 0).unwrap();
             connector
-                .upsert_runtime_peer_route("g.example.app", "runtime-hop", 0, 0)
+                .upsert_runtime_peer_route("g.example.app", "runtime-hop", 0)
                 .unwrap();
             let (sealed, shared_secret) = sealed_prepare(b"hello");
 
@@ -7093,9 +7154,11 @@ mod tests {
                 test_clock(),
             )
             .with_runtime_peer_route_store(store, peers, routes);
-            before_restart.upsert_runtime_peer("apex-relay-2").unwrap();
             before_restart
-                .upsert_runtime_peer_route("g.example.relay2", "apex-relay-2", 3, 25)
+                .upsert_runtime_peer("apex-relay-2", 3)
+                .unwrap();
+            before_restart
+                .upsert_runtime_peer_route("g.example.relay2", "apex-relay-2", 25)
                 .unwrap();
             assert_eq!(before_restart.peers().len(), 1);
 
@@ -7113,11 +7176,14 @@ mod tests {
             assert_eq!(peers.len(), 1);
             assert_eq!(peers[0].id, "apex-relay-2");
             assert_eq!(peers[0].source, RouteSource::Runtime);
+            // The peering's fee came back with it (ADR 0061), and so did
+            // the forward this node charges a client for.
+            assert_eq!(peers[0].fee, 3);
+            assert_eq!(after_restart.fee_for("apex-relay-2"), 3);
             let routes = after_restart.peer_routes_view();
             assert_eq!(routes.len(), 1);
             assert_eq!(routes[0].prefix, "g.example.relay2");
             assert_eq!(routes[0].peer_id, "apex-relay-2");
-            assert_eq!(routes[0].fee, 3);
             assert_eq!(routes[0].price, 25);
         }
 
@@ -7135,7 +7201,7 @@ mod tests {
                 test_clock(),
             );
 
-            connector.upsert_runtime_peer("runtime-hop").unwrap();
+            connector.upsert_runtime_peer("runtime-hop", 0).unwrap();
             assert_eq!(connector.peers().len(), 1);
         }
 
@@ -7146,15 +7212,16 @@ mod tests {
         fn peers_and_peer_routes_report_config_and_runtime_rows_with_their_source() {
             let connector = Connector::new(
                 vec![],
-                vec![PeerRoute::new("g.example.configured", "configured-peer", 1)],
+                vec![PeerRoute::new("g.example.configured", "configured-peer")],
                 Arc::new(FakeAppClient::new()),
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             )
+            .with_peer_fees([("configured-peer".to_string(), 1)])
             .with_config_peer_ids(["configured-peer".to_string()]);
-            connector.upsert_runtime_peer("runtime-peer").unwrap();
+            connector.upsert_runtime_peer("runtime-peer", 2).unwrap();
             connector
-                .upsert_runtime_peer_route("g.example.runtime", "runtime-peer", 2, 5)
+                .upsert_runtime_peer_route("g.example.runtime", "runtime-peer", 5)
                 .unwrap();
 
             let mut peers = connector.peers();
@@ -7164,10 +7231,12 @@ mod tests {
                 vec![
                     PeerView {
                         id: "configured-peer".to_string(),
+                        fee: 1,
                         source: RouteSource::Config,
                     },
                     PeerView {
                         id: "runtime-peer".to_string(),
+                        fee: 2,
                         source: RouteSource::Runtime,
                     },
                 ]
@@ -7181,14 +7250,12 @@ mod tests {
                     PeerRouteView {
                         prefix: "g.example.configured".to_string(),
                         peer_id: "configured-peer".to_string(),
-                        fee: 1,
                         price: 0,
                         source: RouteSource::Config,
                     },
                     PeerRouteView {
                         prefix: "g.example.runtime".to_string(),
                         peer_id: "runtime-peer".to_string(),
-                        fee: 2,
                         price: 5,
                         source: RouteSource::Runtime,
                     },
@@ -7205,10 +7272,10 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             );
-            connector.upsert_runtime_peer("runtime-hop").unwrap();
+            connector.upsert_runtime_peer("runtime-hop", 0).unwrap();
 
             let error = connector
-                .upsert_runtime_peer_route("not an ilp address", "runtime-hop", 0, 0)
+                .upsert_runtime_peer_route("not an ilp address", "runtime-hop", 0)
                 .unwrap_err();
             assert!(matches!(error, PeerRouteTableError::InvalidPrefix(_)));
         }
@@ -7223,7 +7290,7 @@ mod tests {
                 test_clock(),
             );
 
-            let error = connector.upsert_runtime_peer("").unwrap_err();
+            let error = connector.upsert_runtime_peer("", 0).unwrap_err();
             assert!(matches!(error, PeerRouteTableError::InvalidPeerId));
         }
 

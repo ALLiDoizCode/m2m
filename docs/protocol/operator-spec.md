@@ -46,7 +46,8 @@ further along.
    This one key is everything the node signs for — the key a packet is sealed to, the key its outbound
    claims carry, the key its self-description publishes. There is no second key for a second surface.
 2. **At least one route**, or the node serves nothing. A terminated route needs a handler and a price;
-   a forwarded route needs a peer and a fee.
+   a forwarded route needs a peer and a price. What the forwarding hop keeps is the **peering's** fee,
+   which is configured on the peering and not on the route.
 3. **A settlement backend**, if the node is to be paid on chain. A node with none can still route and
    still terminate — it simply cannot verify a claim against a chain, so it serves only channels its
    configuration names.
@@ -89,7 +90,7 @@ below is a **boot failure naming what is wrong**, not a runtime surprise:
 | no configuration path was given                                        | there is no default and no environment fallback                                  |
 | the signer key file is missing, or holds invalid material              | the node cannot sign anything                                                    |
 | a **terminated** route has no `price`                                  | a route is never silently free                                                   |
-| a **terminated** route sets a `fee`                                    | a fee buys carriage; this route carries nothing                                  |
+| **any** route sets a `fee`                                             | a fee attaches to a peering, not to a route (ADR 0061)                           |
 | a **forwarded** route has no `price`                                   | it is priced at this connector's own client edge                                 |
 | a forwarded route names a peer id no `[[peers]]` row configures        | the routing table _is_ the relationship set                                      |
 | `[[client_channels]]` is configured with no `state_dir`                | a restart would hand every spent claim back as free service                      |

@@ -338,9 +338,11 @@ write_keys = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     );
 }
 
-/// Issue #556: `fee` on a terminated route was read by no branch of
-/// `resolve_routes` and silently earned nothing -- the same shape #520
-/// refused for a missing `price`.
+/// ADR 0061's tombstone, terminated half. A `fee` on a terminated route was
+/// read by no branch of `resolve_routes` and silently earned nothing (issue
+/// #556) -- the same shape #520 refused for a missing `price`. The key is
+/// gone from routes entirely now, so this is the removed-field trap
+/// `peer_wire_addr`, `ceiling`, `flush_interval_ms` and `[peer_sale]` get.
 #[test]
 fn exits_non_zero_when_a_terminated_route_sets_a_fee() {
     let key_file = write_raw_key_file();
@@ -365,8 +367,51 @@ fee = 5
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("fee"),
-        "expected an actionable fee-on-a-terminated-route error, got: {stderr}"
+        stderr.contains("fee") && stderr.contains("peers"),
+        "expected a named removal error pointing at the '[[peers]]' row, got: {stderr}"
+    );
+}
+
+/// ADR 0061's tombstone, FORWARDED half -- the one that actually moves
+/// something. `[[routes]] fee` was read and honoured on this branch, so
+/// every config in this tree that charged anything wrote it here. Rejected
+/// by name rather than ignored: a node whose operator wrote a fee on the
+/// route believes it is charging one, and after the move it would carry for
+/// free. This is the case the devnet note in issue #1159 is about -- no box
+/// sets a fee today, so the fleet change is nil, but a box whose TOML grew
+/// one would stop at boot by name rather than peer for free.
+#[test]
+fn exits_non_zero_when_a_forwarded_route_sets_a_fee() {
+    let key_file = write_raw_key_file();
+    let config_file = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+
+[[peers]]
+id = "store"
+endpoint = "wss://store.example:443/btp"
+credential = {{ secret = "shared-secret" }}
+fee = 3
+
+[[routes]]
+prefix = "g.example.store"
+peer_id = "store"
+price = 1000
+fee = 3
+"#,
+        key_file.path().display()
+    ));
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("fee") && stderr.contains("g.example.store"),
+        "expected a named removal error naming the route, got: {stderr}"
     );
 }
 
@@ -389,7 +434,6 @@ key_file = "{}"
 [[routes]]
 prefix = "g.example.store"
 peer_id = "store"
-fee = 3
 "#,
         key_file.path().display()
     ));

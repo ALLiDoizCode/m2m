@@ -625,22 +625,22 @@ key_file = "{key_file}"
 # node terminates `{APP_PREFIX}`, so a fulfilled packet addressed there can
 # only have crossed the peering.
 #
-# ADR 0028's two numbers, and the whole of issue #620's client leg. `price`
-# is what this node's own client edge charges a client for a packet to this
-# prefix -- greeted, claim-gated and journaled exactly as a terminated
-# route's price is. `fee` is only what this hop retains of it; the
-# difference is what reaches the payee. Before ADR 0028 `price` here was a
-# hard config error, which is precisely why a forwarded route was a free
-# gateway that also paid its own peer.
+# ADR 0028's `price`, and the whole of issue #620's client leg: what this
+# node's own client edge charges a client for a packet to this prefix --
+# greeted, claim-gated and journaled exactly as a terminated route's price
+# is. Before ADR 0028 `price` here was a hard config error, which is
+# precisely why a forwarded route was a free gateway that also paid its own
+# peer. What this hop retains of it is the peering's `fee` below (ADR 0061),
+# and the difference is what reaches the payee.
 [[routes]]
 prefix = "{PEER_ROUTE_PREFIX}"
 peer_id = "{PAYEE_ID}"
-fee = {PEER_FEE}
 price = {CLIENT_PRICE}
 
 [[peers]]
 id = "{PAYEE_ID}"
 endpoint = "{payee_endpoint}"
+fee = {PEER_FEE}
 
 [peers.credential]
 secret = "{PEER_SECRET}"

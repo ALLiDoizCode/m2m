@@ -1152,6 +1152,7 @@ key_file = "{key_file}"
 id = "store"
 endpoint = "wss://store.example:443/btp"
 credential = {{ secret = "shared-secret" }}
+fee = 3
 
 [[peer_channels]]
 peer_id = "store"
@@ -1163,7 +1164,6 @@ token_network = "{PEER_TOKEN_NETWORK}"
 [[routes]]
 prefix = "g.example.store"
 peer_id = "store"
-fee = 3
 price = 1000
 
 [[pay_channels]]
@@ -1243,7 +1243,9 @@ client_edge_url = "https://store.example/ilp"
 
         assert_eq!(config.peer_routes().len(), 1);
         assert_eq!(config.peer_routes()[0].peer_id(), "store");
-        assert_eq!(config.peer_routes()[0].fee(), 3);
+        assert_eq!(config.peer_routes()[0].price(), 1000);
+        // ADR 0061: the fee rode in on the `[[peers]]` row, not the route.
+        assert_eq!(config.peers()[0].fee(), 3);
     }
 
     /// ADR 0042's cap round-trips from a real TOML file, and a file that
@@ -3302,9 +3304,10 @@ pirce = 5
         assert_names_the_unknown_key(result, "pirce");
     }
 
-    /// A `[[children]]` entry has no `fee` field at all, so the same
-    /// mistake a `[[routes]]` entry now refuses used to vanish entirely
-    /// here.
+    /// A `[[children]]` entry has no `fee` field at all -- and since ADR
+    /// 0061 neither does a `[[routes]]` entry, which refuses the key by
+    /// name of its own. Here the generic unknown-key refusal is what
+    /// catches it.
     #[test]
     fn an_unknown_key_in_a_child_entry_is_rejected() {
         let result = with_key_file(|key_path| {
@@ -3351,6 +3354,7 @@ key_file = "{key_file}"
 id = "store"
 endpoint = "wss://store.example:443/btp"
 credential = {{ secret = "shared-secret" }}
+fee = 3
 
 [[peer_channels]]
 peer_id = "store"
@@ -3367,7 +3371,6 @@ price = 100
 [[routes]]
 prefix = "g.example.store"
 peer_id = "store"
-fee = 3
 price = 1000
 
 # Required of a peering this node forwards to since issue #1145: a

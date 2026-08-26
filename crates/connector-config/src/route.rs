@@ -38,27 +38,27 @@ pub(crate) fn is_valid_ilp_address(address: &str) -> bool {
 /// thing on each: what this connector's client edge charges a client for a
 /// packet to this prefix. On a terminated route it buys the app's work
 /// (issue #520); on a forwarded one it buys the whole path, of which this
-/// hop keeps `fee`. Its absence is [`ConfigError::RouteMissingPrice`] or
+/// hop keeps the *peering's* fee. Its absence is
+/// [`ConfigError::RouteMissingPrice`] or
 /// [`ConfigError::PeerRouteMissingPrice`] respectively -- no route is ever
 /// silently free (issue #557).
 ///
-/// `fee` is only meaningful alongside `peer_id` (ADR 0010) and defaults to
-/// zero there: it is what this hop *retains* of the price, realized on the
-/// wire as the difference between the amount received and the amount
-/// forwarded (`peer-semantics-pre-868.md` §4). `transport` is only meaningful
-/// alongside `handler_url` (toon-meta#262 decision 11, issue #701) -- not
-/// because a forwarded route is unreachable over a client transport (ADR
-/// 0028 makes it reachable over both), but because the policy is not
-/// applied to one.
+/// `fee` is **not** a route key any more (ADR 0061): what this hop retains
+/// is the same number whichever prefix a packet is addressed to, so it
+/// belongs to the peering and is written on the `[[peers]]` row instead. It
+/// is kept here as a *parsed and rejected* tombstone
+/// ([`ConfigError::RouteFeeRemoved`]) -- on **either** branch, terminated or
+/// forwarded -- so a config that still writes one stops the node by name
+/// rather than being read and discarded (ADR 0009). `toml::Value` rather
+/// than `u64` for the same reason `ceiling` is: the key is refused for
+/// existing, so any spelling of a value must reach the refusal.
 ///
-/// Neither field is silently ignored on the branch it does not belong to
-/// (issue #556): `fee` is an `Option` rather than a defaulted `u64`
-/// precisely so [`resolve_routes`] can tell "written as zero" from "not
-/// written", and refuse the former on a terminated route
-/// ([`ConfigError::TerminatedRouteHasFee`]) exactly as it refuses a
-/// `transport` on a peer route ([`ConfigError::PeerRouteHasTransport`]).
-/// Before that, a `handler_url` route with `fee = 5` earned nothing and was
-/// not an error.
+/// `transport` is only meaningful alongside `handler_url` (toon-meta#262
+/// decision 11, issue #701) -- not because a forwarded route is unreachable
+/// over a client transport (ADR 0028 makes it reachable over both), but
+/// because the policy is not applied to one, and it is refused rather than
+/// ignored on the branch it does not belong to
+/// ([`ConfigError::PeerRouteHasTransport`], issue #556).
 ///
 /// `deny_unknown_fields` closes the same hole for every other key: a
 /// mistyped `pefix` or `handler_ur` is a refuse-to-start error, not a route
@@ -71,8 +71,10 @@ pub(crate) struct RawRoute {
     handler_url: Option<String>,
     #[serde(default)]
     peer_id: Option<String>,
+    /// Moved to the `[[peers]]` row (ADR 0061); parsed only so it can be
+    /// refused **by name**, the way a peer's `ceiling` is.
     #[serde(default)]
-    fee: Option<u64>,
+    fee: Option<toml::Value>,
     #[serde(default)]
     price: Option<u64>,
     #[serde(default)]
@@ -89,7 +91,7 @@ pub(crate) struct RawRoute {
 /// `deny_unknown_fields` (issue #556): a child always terminates locally,
 /// so it has no `fee` field at all -- writing one used to vanish silently,
 /// and now fails config load, matching what an explicit `[[routes]]` entry
-/// with a `handler_url` does with the same key.
+/// does with the same key now that ADR 0061 has moved it to `[[peers]]`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawChild {
@@ -167,9 +169,9 @@ impl std::str::FromStr for TransportPolicy {
 
 /// A static route that terminates at this connector: packets matching
 /// `prefix` are delivered to the app at `handler_url`, which charges
-/// `price` for the work it does -- distinct from a peer route's `fee`,
-/// which buys carriage rather than the terminating app's work (issue
-/// #520). A peer route has a `price` of its own (ADR 0028), meaning the
+/// `price` for the work it does -- distinct from a peering's `fee`, which
+/// buys carriage rather than the terminating app's work (issue #520, ADR
+/// 0061). A peer route has a `price` of its own (ADR 0028), meaning the
 /// same client-facing thing this one does. A route is never silently free: [`resolve_routes`] refuses to
 /// return one with no configured price, so `price == 0` always means the
 /// operator wrote it deliberately.
@@ -275,7 +277,6 @@ impl StaticRoute {
 pub struct PeerRouteConfig {
     prefix: String,
     peer_id: String,
-    fee: u64,
     price: u64,
 }
 
@@ -289,12 +290,6 @@ impl PeerRouteConfig {
     /// against a `[[peers]]` entry's own `id`.
     pub fn peer_id(&self) -> &str {
         &self.peer_id
-    }
-
-    /// This peering relation's flat per-packet fee (ADR 0010) -- what this
-    /// hop retains of [`Self::price`], not what a client is charged.
-    pub fn fee(&self) -> u64 {
-        self.fee
     }
 
     /// The flat price this connector's client edge charges a client for a
@@ -401,7 +396,6 @@ fn insert_consistent_handler_price(
 fn build_peer_route(
     prefix: String,
     peer_id: String,
-    fee: u64,
     price: Option<u64>,
 ) -> Result<PeerRouteConfig, ConfigError> {
     let prefix = validate_prefix(prefix)?;
@@ -415,7 +409,6 @@ fn build_peer_route(
     Ok(PeerRouteConfig {
         prefix,
         peer_id,
-        fee,
         price,
     })
 }
@@ -445,18 +438,18 @@ pub(crate) fn resolve_routes(
     let mut peer_routes = Vec::new();
 
     for raw in raw_routes {
+        // ADR 0061: a fee attaches to a peering, not to a route. Refused on
+        // BOTH branches and before either is examined -- a terminated route
+        // never had one to charge (issue #556's rule, unchanged), and a
+        // forwarded one now reads it off the `[[peers]]` row its `peer_id`
+        // names. Refused by name rather than read and discarded, because an
+        // operator who wrote a fee here believes this hop is charging it
+        // (ADR 0009).
+        if raw.fee.is_some() {
+            return Err(ConfigError::RouteFeeRemoved { prefix: raw.prefix });
+        }
         match (raw.handler_url, raw.peer_id) {
             (Some(handler_url), None) => {
-                // A terminated route buys the app's work, priced by
-                // `price`; `fee` buys carriage over a peering relation
-                // this route has none of (ADR 0010). Refused rather than
-                // read and discarded (issue #556).
-                if let Some(fee) = raw.fee {
-                    return Err(ConfigError::TerminatedRouteHasFee {
-                        prefix: raw.prefix,
-                        fee,
-                    });
-                }
                 let transport_policy = parse_transport_policy(&raw.prefix, raw.transport)?;
                 let route = build_route(raw.prefix, handler_url, raw.price, transport_policy)?;
                 insert_unique_prefix(&mut seen, route.prefix())?;
@@ -464,21 +457,22 @@ pub(crate) fn resolve_routes(
                 routes.push(route);
             }
             (None, Some(peer_id)) => {
-                // A forwarded route carries both numbers (ADR 0028):
-                // `price` is what this connector's client edge charges a
-                // client for the packet, `fee` is what this hop retains of
-                // it. What it still cannot carry is a `transport` policy --
-                // not because it is unreachable over a client transport,
-                // but because that policy is not applied to a forwarded
-                // route (issue #701); refused rather than read and
-                // discarded (issue #556).
+                // A forwarded route carries one number of its own (ADR
+                // 0028): `price`, what this connector's client edge charges
+                // a client for the packet. What this hop retains of it is
+                // the peering's `fee` (ADR 0061), read off `[[peers]]`.
+                // What a forwarded route still cannot carry is a
+                // `transport` policy -- not because it is unreachable over
+                // a client transport, but because that policy is not
+                // applied to a forwarded route (issue #701); refused rather
+                // than read and discarded (issue #556).
                 if let Some(value) = raw.transport {
                     return Err(ConfigError::PeerRouteHasTransport {
                         prefix: raw.prefix,
                         value,
                     });
                 }
-                let route = build_peer_route(raw.prefix, peer_id, raw.fee.unwrap_or(0), raw.price)?;
+                let route = build_peer_route(raw.prefix, peer_id, raw.price)?;
                 insert_unique_prefix(&mut seen, route.prefix())?;
                 peer_routes.push(route);
             }
@@ -537,16 +531,16 @@ mod tests {
         }
     }
 
-    fn peer_route(prefix: &str, peer_id: &str, fee: u64) -> RawRoute {
-        priced_peer_route(prefix, peer_id, fee, 0)
+    fn peer_route(prefix: &str, peer_id: &str) -> RawRoute {
+        priced_peer_route(prefix, peer_id, 0)
     }
 
-    fn priced_peer_route(prefix: &str, peer_id: &str, fee: u64, price: u64) -> RawRoute {
+    fn priced_peer_route(prefix: &str, peer_id: &str, price: u64) -> RawRoute {
         RawRoute {
             prefix: prefix.to_string(),
             handler_url: None,
             peer_id: Some(peer_id.to_string()),
-            fee: Some(fee),
+            fee: None,
             price: Some(price),
             transport: None,
         }
@@ -611,9 +605,10 @@ mod tests {
         assert!(matches!(result, Err(ConfigError::RouteMissingPrice { .. })));
     }
 
-    /// Issue #556: `fee` was read only on the `peer_id` branch, so a
-    /// terminated route that wrote one earned nothing from it and nothing
-    /// said so. A field written down is honoured or refused, never dropped.
+    /// ADR 0061: a fee attaches to a peering, not to a route. A terminated
+    /// route never had one to charge (issue #556's rule, which this
+    /// subsumes), and the error now names where the key went rather than
+    /// suggesting `price` in its place.
     #[test]
     fn a_terminated_route_that_sets_a_fee_is_rejected_rather_than_ignored() {
         let result = resolve_routes(
@@ -622,7 +617,7 @@ mod tests {
                 prefix: "g.example.app".to_string(),
                 handler_url: Some("http://localhost:4000".to_string()),
                 peer_id: None,
-                fee: Some(5),
+                fee: Some(toml::Value::Integer(5)),
                 price: Some(100),
                 transport: None,
             }],
@@ -630,13 +625,13 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(ConfigError::TerminatedRouteHasFee { fee: 5, .. })
+            Err(ConfigError::RouteFeeRemoved { prefix }) if prefix == "g.example.app"
         ));
     }
 
-    /// `fee = 0` on a terminated route is refused too: the point is that
-    /// the key was written at all, not that its value was non-zero --
-    /// `fee` is an `Option` precisely so this case is visible.
+    /// `fee = 0` is refused too: the point is that the key was written at
+    /// all, not that its value was non-zero -- `fee` is parsed as an opaque
+    /// `toml::Value` precisely so every spelling reaches the refusal.
     #[test]
     fn a_terminated_route_that_sets_a_zero_fee_is_still_rejected() {
         let result = resolve_routes(
@@ -645,7 +640,29 @@ mod tests {
                 prefix: "g.example.app".to_string(),
                 handler_url: Some("http://localhost:4000".to_string()),
                 peer_id: None,
-                fee: Some(0),
+                fee: Some(toml::Value::Integer(0)),
+                price: Some(100),
+                transport: None,
+            }],
+            vec![],
+        );
+        assert!(matches!(result, Err(ConfigError::RouteFeeRemoved { .. })));
+    }
+
+    /// ADR 0061's actual move: the key is refused on a **forwarded** route
+    /// too, which is the only branch that ever read it. `TerminatedRouteHasFee`
+    /// refused it on one branch and honoured it on the other; a tombstone
+    /// that a forwarded route could still write would leave every config in
+    /// the tree spelling a fee the connector no longer reads from there.
+    #[test]
+    fn a_forwarded_route_that_sets_a_fee_is_rejected_too() {
+        let result = resolve_routes(
+            None,
+            vec![RawRoute {
+                prefix: "g.example.store".to_string(),
+                handler_url: None,
+                peer_id: Some("store".to_string()),
+                fee: Some(toml::Value::Integer(3)),
                 price: Some(100),
                 transport: None,
             }],
@@ -653,68 +670,45 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(ConfigError::TerminatedRouteHasFee { fee: 0, .. })
+            Err(ConfigError::RouteFeeRemoved { prefix }) if prefix == "g.example.store"
         ));
     }
 
-    /// ADR 0028: a forwarded route carries both numbers. `price` is what
-    /// this connector's client edge charges the client; `fee` is what this
-    /// hop retains of it. Before ADR 0028 this combination was a hard
-    /// `PeerRouteHasPrice` error, which is exactly why no configuration
-    /// could charge for a packet that crossed a peering (issue #620).
+    /// ADR 0028: a forwarded route carries a `price` of its own -- what
+    /// this connector's client edge charges the client for the whole path.
+    /// Before ADR 0028 that was a hard `PeerRouteHasPrice` error, which is
+    /// exactly why no configuration could charge for a packet that crossed
+    /// a peering (issue #620). What this hop retains of it is the peering's
+    /// fee, and lives on `[[peers]]` (ADR 0061).
     #[test]
-    fn a_peer_route_carries_both_a_price_and_a_fee() {
+    fn a_peer_route_carries_a_client_edge_price() {
         let (routes, peer_routes) = resolve_routes(
             None,
-            vec![priced_peer_route("g.example.store", "store", 3, 100)],
+            vec![priced_peer_route("g.example.store", "store", 100)],
             vec![],
         )
         .expect("resolve");
 
         assert!(routes.is_empty());
         assert_eq!(peer_routes[0].price(), 100);
-        assert_eq!(peer_routes[0].fee(), 3);
     }
 
-    /// The counterweight to both: each field on the branch it belongs to
-    /// is still read and still honoured.
+    /// The counterweight: a price on the branch it belongs to is still read
+    /// and still honoured, on both kinds of route.
     #[test]
     fn each_field_is_honoured_on_the_branch_it_belongs_to() {
         let (routes, peer_routes) = resolve_routes(
             None,
             vec![
                 priced_route("g.example.app", "http://localhost:4000", 100),
-                peer_route("g.example.store", "store", 3),
+                priced_peer_route("g.example.store", "store", 40),
             ],
             vec![],
         )
         .expect("resolve");
 
         assert_eq!(routes[0].price(), 100);
-        assert_eq!(peer_routes[0].fee(), 3);
-    }
-
-    /// A peer route that omits `fee` entirely still defaults to zero --
-    /// unlike a terminated route's `price`, carriage has never been
-    /// required to be written down (ADR 0010), and #556 does not change
-    /// that.
-    #[test]
-    fn a_peer_route_with_no_fee_still_defaults_to_zero() {
-        let (_, peer_routes) = resolve_routes(
-            None,
-            vec![RawRoute {
-                prefix: "g.example.store".to_string(),
-                handler_url: None,
-                peer_id: Some("store".to_string()),
-                fee: None,
-                price: Some(100),
-                transport: None,
-            }],
-            vec![],
-        )
-        .expect("resolve");
-
-        assert_eq!(peer_routes[0].fee(), 0);
+        assert_eq!(peer_routes[0].price(), 40);
     }
 
     #[test]
@@ -741,7 +735,7 @@ mod tests {
                 prefix: "g.peer-b".to_string(),
                 handler_url: None,
                 peer_id: Some("peer-b".to_string()),
-                fee: Some(5),
+                fee: None,
                 price: None,
                 transport: None,
             }],
@@ -758,9 +752,7 @@ mod tests {
     #[test]
     fn a_peer_route_priced_zero_is_deliberately_free_not_rejected() {
         let (_, peer_routes) =
-            resolve_routes(None, vec![peer_route("g.peer-b", "peer-b", 5)], vec![])
-                .expect("resolve");
-        assert_eq!(peer_routes[0].fee(), 5);
+            resolve_routes(None, vec![peer_route("g.peer-b", "peer-b")], vec![]).expect("resolve");
         assert_eq!(peer_routes[0].price(), 0);
     }
 
@@ -830,14 +822,12 @@ mod tests {
     #[test]
     fn resolves_explicit_peer_routes() {
         let (routes, peer_routes) =
-            resolve_routes(None, vec![peer_route("g.peer-b", "peer-b", 5)], vec![])
-                .expect("resolve");
+            resolve_routes(None, vec![peer_route("g.peer-b", "peer-b")], vec![]).expect("resolve");
 
         assert!(routes.is_empty());
         assert_eq!(peer_routes.len(), 1);
         assert_eq!(peer_routes[0].prefix(), "g.peer-b");
         assert_eq!(peer_routes[0].peer_id(), "peer-b");
-        assert_eq!(peer_routes[0].fee(), 5);
     }
 
     #[test]
@@ -882,7 +872,7 @@ mod tests {
 
     #[test]
     fn rejects_a_peer_route_with_an_empty_peer_id() {
-        let result = resolve_routes(None, vec![peer_route("g.peer-b", "   ", 0)], vec![]);
+        let result = resolve_routes(None, vec![peer_route("g.peer-b", "   ")], vec![]);
         assert!(matches!(result, Err(ConfigError::RoutePeerIdEmpty { .. })));
     }
 
@@ -892,7 +882,7 @@ mod tests {
             None,
             vec![
                 route("g.example.app", "http://localhost:4000"),
-                peer_route("g.example.app", "peer-b", 0),
+                peer_route("g.example.app", "peer-b"),
             ],
             vec![],
         );
@@ -1089,7 +1079,7 @@ mod tests {
                 prefix: "g.example.store".to_string(),
                 handler_url: None,
                 peer_id: Some("store".to_string()),
-                fee: Some(3),
+                fee: None,
                 price: None,
                 transport: Some("btp".to_string()),
             }],
