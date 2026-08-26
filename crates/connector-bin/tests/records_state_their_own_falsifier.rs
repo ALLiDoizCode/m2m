@@ -113,7 +113,7 @@
 //! Status lines are covered like an ADR's.
 //!
 //! A separate harness from `production_skeleton_is_inert.rs` and
-//! `readme_config_keys.rs` for the reason those two give about themselves: each
+//! `documented_config_keys.rs` for the reason those two give about themselves: each
 //! asserts a property of a different committed document, and different work
 //! edits them.
 

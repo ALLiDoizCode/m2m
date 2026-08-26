@@ -177,7 +177,7 @@ audience tag the issue #1052 Update below specifies:
 
 | document                                                           | rules             |
 | ------------------------------------------------------------------ | ----------------- |
-| [`configuration-spec.md`](../protocol/configuration-spec.md)       | `CF-01` – `CF-36` |
+| [`configuration-spec.md`](../protocol/configuration-spec.md)       | `CF-01` – `CF-39` |
 | [`packet-flow-spec.md`](../protocol/packet-flow-spec.md)           | `PF-01` – `PF-24` |
 | [`payment-spec.md`](../protocol/payment-spec.md)                   | `PM-01` – `PM-22` |
 | [`self-description-spec.md`](../protocol/self-description-spec.md) | `ND-01` – `ND-16` |
