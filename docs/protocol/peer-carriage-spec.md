@@ -17,7 +17,8 @@ this text is the bug.** §10 enumerates the vectors that must exist for that sen
 anything.
 **End-to-end money model**, of which the claim re-derivation here is one step:
 [`money-model-pre-868.md`](money-model-pre-868.md).
-**Implements:** [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md).
+**Implements:** [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md),
+and §2.1's runtime half [ADR 0058](../adr/0058-a-peering-is-established-from-a-url.md).
 This document carries ADR 0027's decisions through to the wire; it does not re-decide them. Where
 it sharpens or resolves an ambiguity in that ADR it says so, in §12.
 **Consumers:** issue #676 (the two carriage implementations behind the `PeerTransport` port),
@@ -504,10 +505,18 @@ listener with mandatory authentication**. If it does:
 - **`expose`** — which peer carriages this connector opens a listener for. A subset of
   `{btp, http}`, including the empty set. **The empty set is legal and meaningful**: a connector
   behind NAT exposes nothing and only dials.
-- **`dial`** — per configured peer, which carriage this connector reaches _that peer_ on.
-  Determined **solely by the scheme of that peer's configured `endpoint`**: `wss://` → BTP,
-  `https://` → HTTP. Any other scheme MUST be a load-time error. A peer with **no** `endpoint` is
+- **`dial`** — per peering, which carriage this connector reaches _that peer_ on. Determined
+  **solely by the scheme of that peering's `endpoint`**: `wss://` → BTP, `https://` → HTTP. Any
+  other scheme MUST be an error where the peering is declared. A peering with **no** `endpoint` is
   accept-only from this connector's point of view: this connector never dials it, and it dials us.
+
+  "Where the peering is declared" is load time for a `[[peers]]` row and **write time** for a
+  peering established over the operator surface, whose endpoint is read from the counterparty's
+  self-description ([ADR 0058](../adr/0058-a-peering-is-established-from-a-url.md)). One rule, two
+  moments: a peering added while the process serves selects its carriage by this same sentence, and
+  a connector MUST be able to add and remove a dial carriage without a restart. A runtime peering
+  whose endpoint scheme selects no carriage this connector dials registers none, and packets routed
+  to it get §2.2's `T01` with the peer named.
 
 These are independent. Exposing BTP says nothing about how any peer is dialed; dialing a peer over
 HTTP says nothing about what this connector listens on.
