@@ -1,6 +1,6 @@
 # A Solana claim binds its domain, the way an EVM claim already does
 
-**Status:** Accepted and **built** (see the Update below; the wire change landed with issue #1082). Extends [0024](0024-peer-wire-claims-sign-the-eip-712-balance-proof.md) to the second settlement chain [0002](0002-drop-mina-from-the-rust-connector.md) kept. Supersedes the reading under which issue #975 is a missing check.
+**Status:** Accepted and **built** (see the Update below; the wire change landed with issue #1082). Extends [0024](0024-peer-wire-claims-sign-the-eip-712-balance-proof.md) to the second settlement chain [0002](0002-drop-mina-from-the-rust-connector.md) kept. Supersedes the reading under which issue #975 is a missing check. **Disturbed by [0059](0059-a-channel-is-derived-from-its-participants.md)** — the channel account is already a participant-derived PDA, so what moves is EVM's side and the vectors, not this record's decision.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 

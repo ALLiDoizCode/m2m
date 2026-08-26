@@ -1,6 +1,6 @@
 # A forwarded route is priced at the client edge, and carries no more than it was paid
 
-**Status:** Accepted, amended in place by issue #1012 (a forwarded route charges on the forward's FULFILL, never on its REJECT). Extended by [0029](0029-a-peer-wire-arrival-to-a-priced-termination-must-cover-its-price.md), which closes the terminating-side gap this record left open.
+**Status:** Accepted, amended in place by issue #1012 (a forwarded route charges on the forward's FULFILL, never on its REJECT). Extended by [0029](0029-a-peer-wire-arrival-to-a-priced-termination-must-cover-its-price.md), which closes the terminating-side gap this record left open. **Amended by [0061](0061-a-fee-attaches-to-a-peering-not-to-a-route.md)** — `fee` leaves the route row for the peering; `price` stays, and the `F03` over-carry cap is unaffected.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 

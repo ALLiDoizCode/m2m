@@ -1,6 +1,6 @@
 # Architecture decision records
 
-57 records. **Every one now carries a `**Status:**` line under its title** — that line, not this
+61 records. **Every one now carries a `**Status:**` line under its title** — that line, not this
 index, is the authority for whether a record is live. This page is the map: what is live, grouped
 by area; what is dead, grouped by what killed it; and what the folder still says that the code no
 longer does.
@@ -76,6 +76,8 @@ not change what anything else must do.
 | [0034](0034-a-runtime-peer-route-table-never-shadows-the-config-file.md)               | A runtime peer/route table never shadows the config file                | Accepted — extends 0009; survives 0043; amended by #1059 |
 | [0043](0043-purchasable-peering-is-removed.md)                                         | Purchasable peering is removed                                          | Accepted — **retires 0037, 0038, 0039**                  |
 | [0047](0047-the-configuration-schema-is-implementation-detail-capabilities-are-law.md) | The configuration schema is implementation detail; capabilities are law | Accepted — sharpens 0009                                 |
+| [0058](0058-a-peering-is-established-from-a-url.md)                                    | A peering is established from a URL; its identity is trust-on-first-use | Accepted — **not yet built**; completes 0034; needs 0050 |
+| [0061](0061-a-fee-attaches-to-a-peering-not-to-a-route.md)                             | A fee attaches to a peering, not to a route                             | Accepted — **not yet built**; amends 0010 and 0028       |
 
 ---
 
@@ -98,6 +100,7 @@ outside this repository.
 | [0020](0020-a-price-is-flat-and-attaches-to-a-handler.md)                              | A price is flat, attaches to a handler, and buys an answer                           | Accepted, narrowed by 0040                                                                              |
 | [0024](0024-peer-wire-claims-sign-the-eip-712-balance-proof.md)                        | Peer claims sign the EIP-712 balance-proof digest                                    | Accepted — amended by #1136                                                                             |
 | [0053](0053-a-solana-claim-binds-its-domain-the-way-an-evm-claim-does.md)              | A Solana claim binds its domain, the way an EVM claim already does                   | Accepted — **built** (#1082); the wire change has landed                                                |
+| [0059](0059-a-channel-is-derived-from-its-participants.md)                             | A channel is derived from its participants, on both chains, by the same rule         | Accepted — **not yet built**; redeploys `TokenNetwork`; required by 0058                                |
 | [0028](0028-a-forwarded-route-is-priced-at-the-client-edge.md)                         | A forwarded route is priced at the client edge, and carries no more than it was paid | Accepted — extended by 0029                                                                             |
 | [0029](0029-a-peer-wire-arrival-to-a-priced-termination-must-cover-its-price.md)       | A peer arrival to a priced termination must cover its price                          | Accepted in part — the `F03` check stands; its ceiling cites don't                                      |
 | [0033](0033-the-exposure-machinery-is-retired-not-restated.md)                         | The exposure machinery is retired, not restated                                      | Accepted — **retires `ceiling`, `flush_interval_ms`, exposure**                                         |
@@ -110,6 +113,7 @@ outside this repository.
 | #                                                                                     | Decision                                                                    | Status                                                                |
 | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------- |
 | [0027](0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md) | Connectors peer over BTP or ILP-over-HTTP; the raw-TCP peer wire is deleted | Accepted — supersedes 0003's and 0026's peer halves                   |
+| [0060](0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md)             | A claim proves a peering; the shared secret is deleted                      | Accepted — **not yet built**; finishes #868; required by 0058         |
 | [0021](0021-vectors-are-normative-prose-is-not.md)                                    | Vectors are normative; prose is not                                         | Accepted — **the tiebreaker for this whole group**                    |
 | [0045](0045-a-behavioural-rule-is-normative-prose-until-its-vector-lands.md)          | A behavioural rule is normative prose until its vector lands                | Accepted — **not yet built**; amends 0021; amended by #1052           |
 | [0023](0023-oer-length-determinants-are-canonical.md)                                 | OER length determinants are canonical, for every consumer                   | Accepted                                                              |
