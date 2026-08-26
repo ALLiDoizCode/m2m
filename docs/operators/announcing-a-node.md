@@ -1,5 +1,44 @@
 # Announcing a node
 
+> **Historical — `connector announce` no longer exists**
+> ([ADR 0046](../adr/0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md),
+> issue #1074). The subcommand, the kind:10032 producer, every `[announce]` key this document
+> explains and each box's scheduled announce loop were all removed. The binary still recognises the
+> literal token `announce`, solely to refuse it by name and say what replaced it. This document
+> describes nothing in `crates/`.
+>
+> **An announce assumes a relay** — one to accept the event, a connector fronting it with a funded
+> channel to pay the write, plus BIP-340 signing and NIP-01/NIP-40 semantics. A network of pure
+> connectors has none of that and cannot announce, so discovery-by-announce was an application
+> capability compiled into the connector rather than a property of the protocol.
+> [ADR 0030](../adr/0030-an-operator-announces-a-node-the-node-still-does-not.md), which this runbook
+> implemented, reasoned correctly about **who** may announce and is retired for asking a question
+> ADR 0046 removes.
+>
+> **What replaces it: a `GET` on the node's own client-edge URL.**
+> [ADR 0050](../adr/0050-a-connectors-url-resolves-to-its-self-description.md) and
+> [`docs/protocol/self-description-spec.md`](../protocol/self-description-spec.md). It is free,
+> unauthenticated, needs no relay, no channel and no packet, and is generated from live
+> configuration on each request — so there is nothing to schedule, nothing to pay for and nothing to
+> keep fresh:
+>
+> ```
+> curl https://proxy.relay.devnet.toonprotocol.dev/ilp
+> ```
+>
+> The three `[announce]` fields worth keeping — `addresses`, `http_endpoint`, `btp_endpoint` — are
+> now `[node]`'s, unchanged in meaning. Every other key named below is refused **by name** at boot;
+> a config still carrying one does not start.
+>
+> **Copying facts into a discovery network is a controller's job**, outside the connector by
+> definition ([ADR 0006](../adr/0006-the-connector-is-mechanism-not-policy.md)). If you build that,
+> note that a third party publishing facts about a node it did not sign is a materially different
+> object from what kind:10032 meant — that event was the node's claim about itself.
+>
+> Kept, unedited below, for the reasoning that produced it and for anyone reading a box's history.
+
+---
+
 `connector announce` publishes one kind:10032 `IlpPeerInfo` event describing this node, to a relay
 you choose, **from the node being announced**, **paying that relay's connector like any other
 client**.

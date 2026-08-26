@@ -231,9 +231,16 @@ cargo run -p connector --bin connector -- path/to/connector.toml
 
 (`--bin connector` is not optional: the package also builds `stub-app`, a payment-oblivious test
 app used by the integration tests.) The positional argument is the config path — there is one
-subcommand, `announce`, which publishes this node's discovery event instead of serving traffic; see
-[`docs/operators/announcing-a-node.md`](docs/operators/announcing-a-node.md). A missing argument
-prints the usage line and exits 1.
+subcommand, `send`, which originates a single packet through another node's operator surface
+instead of serving traffic. A missing argument prints the usage line and exits 1.
+
+There used to be a second, `announce`.
+[ADR 0046](docs/adr/0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md) removed
+it: an announce assumes a Nostr relay exists, and a network of pure connectors has none. The binary
+still recognises the token, only to refuse it and say what replaced it — a `GET` on the node's own
+client-edge URL, which returns its **self-description**
+([ADR 0050](docs/adr/0050-a-connectors-url-resolves-to-its-self-description.md),
+[`docs/protocol/self-description-spec.md`](docs/protocol/self-description-spec.md)).
 
 Logs are structured JSON on stdout, one object per line. Every line emitted while handling a
 packet carries the same `correlation_id` — the packet's execution condition, hex-encoded — and
@@ -358,8 +365,9 @@ There is **no health endpoint** on either surface, and **no unauthenticated metr
 either. `[operator]` is how a node opts into metrics at all: absent, `/metrics` is not mounted and
 answers 404 rather than 401 ([ADR 0014](docs/adr/0014-metrics-surface-and-packet-correlated-logs.md)
 — metrics are one more bearer-gated read, not a second differently-authenticated surface). The
-client edge's two free `GET`s answer what this node's _configuration_ says (`/ilp/identity`,
-`/ilp/routes/price`, [ADR 0022](docs/adr/0022-a-connector-answers-it-does-not-announce.md)); a
+client edge's free `GET`s answer what this node's _configuration_ says (`/ilp` itself — the node
+self-description, ADR 0050 — plus `/ilp/identity` and `/ilp/routes/price`,
+[ADR 0022](docs/adr/0022-a-connector-answers-it-does-not-announce.md)); a
 counter is operational history and does not follow them onto the free side of that line. A public
 dashboard therefore needs a server-side holder for the token, never a token in the browser and
 never an open endpoint — see issue #669.
@@ -489,8 +497,11 @@ Beside the workspace, and not part of the connector:
 - `packages/faucet`, `packages/mina-zkapp`, `packages/mina-usdc-faucet-web`, `tools/fund-peers` —
   devnet faucet tooling. These are the only reason npm, Jest and `package.json` are still here;
   `npm test` runs them, not the connector.
-- [`packages/announcer`](packages/announcer) — a standalone `kind:10032` announcer sidecar for the
-  client edge (ADR 0022: the connector answers, it does not announce, so this lives outside it).
+- [`packages/announcer`](packages/announcer) — a standalone `kind:10032` announcer sidecar. It is
+  not the connector and never was (ADR 0022: the connector answers, it does not announce), and as
+  of [ADR 0046](docs/adr/0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md) the
+  connector produces no such event at all. Publishing a node's facts into a discovery network is a
+  controller's business, outside the connector by definition.
 - [`local/`](local/README.md) — the shipped image run against real containerised chains: three
   compose topologies (`solo`, `two-hop`, `mixed-chain`), the keys and channels to provision them,
   and a rehearsal that sends a real packet — and, on the two peered topologies, then reads the

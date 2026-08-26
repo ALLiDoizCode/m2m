@@ -680,6 +680,14 @@ impl ClientClaimGate {
         &self.channels
     }
 
+    /// The shaper this node's chain lookups are already metered by
+    /// ([`crate::lookup_budget`]), for the one other caller ADR 0050 gives it:
+    /// `GET /ilp`'s self-description is rate-limited *through this bucket*
+    /// rather than through a second mechanism of its own.
+    pub(crate) fn lookup_budget(&self) -> &crate::lookup_budget::UnresolvableLookupBudget {
+        self.channels.lookup_budget()
+    }
+
     /// What this connector has separately committed to pay EVM channel
     /// `channel_id`'s counterparty back (issue #700's "credited" term --
     /// see [`Self::with_payout_ledger`]). `0` with no payout ledger

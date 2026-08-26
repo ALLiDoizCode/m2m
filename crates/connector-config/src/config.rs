@@ -6,10 +6,10 @@ use std::time::Duration;
 use serde::Deserialize;
 use url::Url;
 
-use crate::announce::{resolve_announce, AnnounceConfig, RawAnnounceConfig};
 use crate::client_channel::{resolve_client_channels, ClientChannelConfig, RawClientChannel};
 use crate::error::ConfigError;
 use crate::identity::{resolve_client_identities, ClientIdentityConfig, RawClientIdentity};
+use crate::node::{resolve_node, NodeConfig, RawNodeConfig};
 use crate::operator::{resolve_operator, OperatorConfig, RawOperatorConfig};
 use crate::pay_channel::{resolve_pay_channels, PayChannelConfig, RawPayChannel};
 use crate::peer::{parse_peer_exposure, resolve_peers, PeerConfig, PeerExposure, RawPeer};
@@ -39,15 +39,20 @@ struct RawConfig {
     children: Vec<RawChild>,
     #[serde(default)]
     operator: Option<RawOperatorConfig>,
-    /// What `connector announce` (issue #784) puts in a kind:10032
-    /// `IlpPeerInfo` event: the short list of facts about this node that
-    /// no node can introspect about itself -- its own PUBLIC endpoints,
-    /// the addresses the announce covers, and the relay clients read it
-    /// on for free, if it fronts one. Absent means this node has nothing
-    /// configured to announce and the subcommand refuses by name; the
-    /// serving path never reads it.
+    /// The short list of facts about this node that no node can introspect
+    /// about itself (ADR 0050, issue #1080): its own PUBLIC ILP-over-HTTP and
+    /// BTP endpoints, and the ILP addresses it answers to. Absent means this
+    /// node was told none of them, and its self-description omits them.
     #[serde(default)]
-    announce: Option<RawAnnounceConfig>,
+    node: Option<RawNodeConfig>,
+    /// Renamed to `[node]` (ADR 0050, issue #1080). Still parsed, and only so
+    /// that a config still writing the old heading fails at boot with
+    /// [`ConfigError::AnnounceSectionRenamed`] rather than tripping the
+    /// generic `deny_unknown_fields` message -- the same treatment
+    /// `peer_wire_addr` and `[peer_sale]` get, for the same reason: the devnet
+    /// boxes run bind-mounted configs that lead the repo copies.
+    #[serde(default)]
+    announce: Option<toml::Value>,
     /// Removed with the raw-TCP transport (ADR 0027, issue #679). Still
     /// parsed, and only so that a stale config naming it fails at boot
     /// with [`ConfigError::PeerWireAddrRemoved`] rather than tripping the
@@ -267,7 +272,7 @@ pub struct Config {
     peer_channels: Vec<PeerChannelConfig>,
     pay_channels: Vec<PayChannelConfig>,
     operator: Option<OperatorConfig>,
-    announce: Option<AnnounceConfig>,
+    node: Option<NodeConfig>,
     settlements: Vec<SettlementConfig>,
     client_channels: Vec<ClientChannelConfig>,
     client_identities: Vec<ClientIdentityConfig>,
@@ -385,7 +390,10 @@ impl Config {
             return Err(ConfigError::PeerWireAddrRemoved);
         }
         let operator = resolve_operator(raw.operator)?;
-        let announce = resolve_announce(raw.announce)?;
+        if raw.announce.is_some() {
+            return Err(ConfigError::AnnounceSectionRenamed);
+        }
+        let node = resolve_node(raw.node)?;
         let client_channels = resolve_client_channels(raw.client_channels, settlement_tables)?;
         let client_identities = resolve_client_identities(raw.client_identities)?;
         // Namespace disjointness (`peer-carriage-spec.md` §1.8). Peer and
@@ -718,7 +726,7 @@ impl Config {
             peer_channels,
             pay_channels,
             operator,
-            announce,
+            node,
             settlements,
             client_channels,
             client_identities,
@@ -900,14 +908,13 @@ impl Config {
         self.operator.as_ref()
     }
 
-    /// What this node announces about itself (issue #784), or `None` when
-    /// the `[announce]` section is absent -- in which case `connector
-    /// announce` refuses by name rather than announcing a node it can only
-    /// half describe. Read by the subcommand and by nothing on the serving
-    /// path: a node that never announces is unaffected by this section's
-    /// presence or absence.
-    pub fn announce(&self) -> Option<&AnnounceConfig> {
-        self.announce.as_ref()
+    /// The three facts this node cannot introspect about itself (ADR 0050),
+    /// or `None` when the `[node]` section is absent -- in which case the
+    /// node's self-description simply omits its addresses and endpoints, and
+    /// the x402 greeting omits `ilpAddresses`/`btpEndpoint` exactly as it did
+    /// before issue #807.
+    pub fn node(&self) -> Option<&NodeConfig> {
+        self.node.as_ref()
     }
 
     /// Every settlement backend the `[settlement]` section configures (issue

@@ -9,7 +9,9 @@
 //! terminated route (ADR 0018, issue #519). Also the x402 `payment-required`
 //! greeting's wire shape and its reader (issue #874, [`x402`]) -- shared here
 //! because the crate that writes one and the crates that read one sit on
-//! opposite sides of the graph and must not each own a definition of it.
+//! opposite sides of the graph and must not each own a definition of it, and
+//! the node self-description ([`node`], ADR 0050) the greeting is now a
+//! projection of.
 
 mod address;
 mod claim;
@@ -19,6 +21,7 @@ mod envelope;
 mod error;
 mod fee;
 pub mod identity;
+pub mod node;
 mod oer;
 mod packet;
 mod projection;
@@ -35,6 +38,10 @@ pub use error::PacketError;
 pub use fee::amount_after_fee;
 pub use identity::{
     anonymous_identity, resolve_identity, ConfiguredIdentity, SenderIdentity, UnauthorizedIdentity,
+};
+pub use node::{
+    agreed_required_transport, EdgeIdentity, NodeFacts, NodeSelfDescription, RoutePrice,
+    CLIENT_EDGE_DEFAULT_VERSION, CLIENT_EDGE_SUPPORTED_VERSIONS,
 };
 pub use packet::{Fulfill, PacketResponse, Prepare, Reject, RejectCode};
 pub use projection::{JournalEntry, Projection};

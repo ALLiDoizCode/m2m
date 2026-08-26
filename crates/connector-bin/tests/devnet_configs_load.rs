@@ -107,9 +107,8 @@ use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 
 use chrono::{Duration as ChronoDuration, Utc};
-use connector_cli::announced_required_transport;
 use connector_config::{Config, SettlementConfig, TransportPolicy};
-use connector_domain::{derive_condition, EnvelopeRequest, Prepare};
+use connector_domain::{agreed_required_transport, derive_condition, EnvelopeRequest, Prepare};
 use connector_settlement_evm::test_support::{require_anvil, Anvil, DEPLOYER_PRIVATE_KEY};
 use connector_settlement_evm::EvmSettlementBackend;
 
@@ -119,14 +118,16 @@ use support::{parse_json_log_addr, write_config, write_raw_key_file};
 const STORE_CONFIG: &str = include_str!("../../../infra/linode-store/connector-rust.toml");
 const RELAY_CONFIG: &str = include_str!("../../../infra/linode-relay/connector-rust.toml");
 
-/// The store box's two overlays, read here for one property they must share
-/// and which nothing else in this suite could see: they bind-mount the SAME
-/// `connector-rust.toml`, so they must pin the same image tag. See
-/// [`store_overlays_sharing_one_config_pin_one_image`].
+/// The store box's serving overlay: the one service that bind-mounts
+/// `connector-rust.toml`.
+///
+/// It was a PAIR until issue #1074 -- a scheduled `announce` loop ran beside
+/// it off the same config, and a whole guard existed here to keep their image
+/// pins from drifting, because the older of the two decided what that file was
+/// allowed to contain. With the announce gone there is one service, one pin,
+/// and nothing left to drift.
 const STORE_RUST_OVERLAY: &str =
     include_str!("../../../infra/linode-store/docker-compose.store.rust.yml");
-const STORE_ANNOUNCE_OVERLAY: &str =
-    include_str!("../../../infra/linode-store/docker-compose.store.announce.yml");
 
 /// The store box's own base file (issue #901), read here for
 /// [`SURVIVING_BOX_COMPOSE_FILES`] -- the file whose retired TypeScript
@@ -135,36 +136,32 @@ const STORE_ANNOUNCE_OVERLAY: &str =
 const STORE_BASE_COMPOSE: &str =
     include_str!("../../../infra/linode-store/docker-compose.store.yml");
 
-/// The relay box's two overlays (issue #843, repo half of #815), read here
-/// for the same property as the store's pair above: they bind-mount the
-/// SAME `connector-rust.toml`, so they must pin the same image tag. See
-/// [`relay_overlays_sharing_one_config_pin_one_image`].
+/// The relay box's serving overlay (issue #843, repo half of #815) -- the
+/// sibling of [`STORE_RUST_OVERLAY`], and likewise no longer half of a pair.
 const RELAY_RUST_OVERLAY: &str =
     include_str!("../../../infra/linode-relay/docker-compose.relay.rust.yml");
-const RELAY_ANNOUNCE_OVERLAY: &str =
-    include_str!("../../../infra/linode-relay/docker-compose.relay.announce.yml");
 
 /// The relay box's own base file, read here for [`SURVIVING_BOX_COMPOSE_FILES`]
 /// -- see [`STORE_BASE_COMPOSE`].
 const RELAY_BASE_COMPOSE: &str =
     include_str!("../../../infra/linode-relay/docker-compose.relay.yml");
 
-/// The relay box's rolling-swap maker sidecar and the maker's OWN announce
-/// loop (issue #983), plus the config that second loop reads.
+/// The relay box's rolling-swap maker sidecar (issue #983).
 ///
-/// The sidecar itself runs somebody else's image (`ghcr.io/toon-protocol/
-/// swap`), so the connector-pin guards below simply find no pin in it -- but
-/// its `ports:` block is a live-box surface like every other, and the
-/// announce overlay beside it IS this fleet's connector, on the fleet's one
-/// pin. Both belong to [`SURVIVING_BOX_COMPOSE_FILES`] for exactly the
-/// reason that list exists: a guard that cannot see a committed file cannot
-/// refuse anything about it.
+/// It runs somebody else's image (`ghcr.io/toon-protocol/swap`), so the
+/// connector-pin guards below simply find no pin in it -- but its `ports:`
+/// block is a live-box surface like every other, which is why it belongs to
+/// [`SURVIVING_BOX_COMPOSE_FILES`]: a guard that cannot see a committed file
+/// cannot refuse anything about it.
+///
+/// A second overlay used to sit beside it (`docker-compose.relay.swap-announce.yml`)
+/// running the maker's OWN kind:10032 publisher off its own config
+/// (`connector-rust.swap-announce.toml`) -- a file that existed for no other
+/// reason than to give `connector announce` an identity and a funded channel
+/// to sign and pay with. ADR 0046 removed the verb (issue #1074) and both
+/// files went with it.
 const RELAY_SWAP_OVERLAY: &str =
     include_str!("../../../infra/linode-relay/docker-compose.relay.swap.yml");
-const RELAY_SWAP_ANNOUNCE_OVERLAY: &str =
-    include_str!("../../../infra/linode-relay/docker-compose.relay.swap-announce.yml");
-const RELAY_SWAP_ANNOUNCE_CONFIG: &str =
-    include_str!("../../../infra/linode-relay/connector-rust.swap-announce.toml");
 
 /// The relay box's label-scoped Watchtower overlay (issue #988,
 /// toon-meta#403's fleet-wide `:release` + Watchtower epic). It pins no
@@ -181,10 +178,8 @@ const RELAY_WATCHTOWER_OVERLAY: &str =
 const STORE_WATCHTOWER_OVERLAY: &str =
     include_str!("../../../infra/linode-store/docker-compose.store.watchtower.yml");
 
-/// The relay box's RENDERED nginx config (the file its `nginx` service
-/// actually bind-mounts), read here so the endpoints the maker announces
-/// can be checked against the locations that serve them. See
-/// [`the_relays_swap_announce_config_speaks_for_the_maker_not_the_relay`].
+/// The relay box's RENDERED nginx config -- the file its `nginx` service
+/// actually bind-mounts.
 const RELAY_NGINX_CONF: &str = include_str!("../../../infra/linode-relay/nginx/conf.d/node.conf");
 
 /// Every nginx file any box in this repo commits: the RENDERED config a box's
@@ -381,6 +376,18 @@ fn replace_expecting_a_match(raw: &str, from: &str, to: &str) -> String {
     raw.replace(from, to)
 }
 
+/// Whether a committed file actually *declares* a TOML table, as opposed to
+/// merely mentioning its name.
+///
+/// A plain `contains("[announce]")` cannot tell the two apart, and both files
+/// carry a comment explaining that `[node]` was `[announce]` until ADR 0046 --
+/// the history that stops the next reader from reintroducing the section. The
+/// comment is the point, so this matches a header line rather than a
+/// substring, the same way the `[[peers]]` check does.
+fn declares_table(config: &str, header: &str) -> bool {
+    config.lines().any(|line| line.trim() == header)
+}
+
 /// Substitute only what this sandbox physically cannot supply: the signer
 /// key file (real key material is never committed), the relay's carried-over
 /// `identity_key_file` when the file carries one (issue #870, same reason),
@@ -424,20 +431,6 @@ fn with_sandbox_paths(
         &replaced,
         "state_dir = \"/app/state\"",
         &format!("state_dir = \"{}\"", state_dir.display()),
-    );
-    // The relay's carried-over announce identity (issue #870) -- same
-    // reasoning as the `[signer]` key_file above (real key material is
-    // never committed, and `Config::load` checks `identity_key_file` exists
-    // regardless of which subcommand reads it), but optional: only the
-    // relay file carries this line, so a plain `.replace` rather than
-    // `replace_expecting_a_match` leaves the store file, which has no
-    // `identity_key_file` at all, untouched. A no-op here is still caught
-    // rather than silently skipped: if the committed path ever moves,
-    // `Config::load` refuses the container path with
-    // `AnnounceIdentityKeyFileNotFound` and the caller's `.expect` fires.
-    let replaced = replaced.replace(
-        "identity_key_file = \"/app/data/announce.key\"",
-        &format!("identity_key_file = \"{}\"", key_path.display()),
     );
     // The `[operator]` section's two files (issue #1003) -- same reasoning
     // as the key files above, and optional in the same way: only the store
@@ -843,17 +836,26 @@ async fn the_relay_side_devnet_config_loads_and_serves_verbatim() {
     .await;
 }
 
-/// Issue #833's fix, terminating side: the store box announces
-/// `g.toon.ario` under its OWN `[signer]` identity -- the key that answers
-/// this node's `/ilp/identity` and opens every gift wrap it terminates
-/// (ADR 0018) -- rather than depending on the apex's now-removed stopgap
-/// announce (the apex, and its announcer sidecar, are gone entirely as of
-/// issue #872).
+/// Issue #833's fix, terminating side, as ADR 0050 re-homes it: the store
+/// box describes `g.toon.ario` as its own, from its own `[node]` section, so
+/// a client learns the terminating identity from the node that holds it --
+/// the key that answers this node's `/ilp/identity`, opens every gift wrap it
+/// terminates (ADR 0018), and now rides its self-description.
+///
+/// The section is `[node]`, not `[announce]`: the announce is gone (ADR 0046,
+/// issue #1074) and the two spellings must never exist at once, which the
+/// negative half below pins.
 #[test]
-fn the_store_devnet_config_announces_g_toon_ario_under_its_own_identity() {
+fn the_store_devnet_config_describes_g_toon_ario_under_its_own_identity() {
     assert!(
-        STORE_CONFIG.contains("[announce]"),
-        "the store config must carry its own [announce] section -- issue #833"
+        declares_table(STORE_CONFIG, "[node]"),
+        "the store config must carry its own [node] section -- ADR 0050"
+    );
+    assert!(
+        !declares_table(STORE_CONFIG, "[announce]"),
+        "the section was RENAMED, not duplicated: `[announce]` is refused by \
+         name at boot (ADR 0046, issue #1074), so a committed file carrying \
+         both would not start at all"
     );
 
     let key_file = write_raw_key_file(9);
@@ -863,28 +865,20 @@ fn the_store_devnet_config_announces_g_toon_ario_under_its_own_identity() {
     let config_file = write_config(&text);
     let config = Config::load(config_file.path()).expect("the committed store config must parse");
 
-    let announce = config
-        .announce()
-        .expect("the store config's [announce] section must parse");
-    assert_eq!(announce.primary_address(), "g.toon.ario");
+    let node = config
+        .node()
+        .expect("the store config's [node] section must parse");
+    assert_eq!(node.primary_address(), "g.toon.ario");
     assert_eq!(
-        announce.http_endpoint(),
+        node.http_endpoint(),
         "https://proxy.ario.devnet.toonprotocol.dev/ilp",
-        "the store must advertise ITS OWN public edge, not the apex's -- \
-         advertising the apex's endpoint here would just relocate the \
+        "the store must publish ITS OWN public edge, not the apex's -- \
+         publishing the apex's endpoint here would just relocate the \
          mismatch from identity to endpoint"
     );
     assert_eq!(
-        announce.identity_key_file(),
-        None,
-        "the store has no prior publisher identity to carry over (issue \
-         #799 does not apply here -- see the config's own comment); it must \
-         sign with its own [signer], not a carried-over key"
-    );
-    assert_eq!(
-        announce.relay_url(),
-        None,
-        "the store fronts no relay and must not advertise reads it does not serve"
+        node.btp_endpoint(),
+        "wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp"
     );
 }
 
@@ -945,20 +939,27 @@ fn the_store_devnet_config_commits_its_operator_surface_by_file_reference() {
 }
 
 /// Issue #843's core property, mirroring #833's for the store: the relay
-/// box's `[announce]` must claim ONLY prefixes it actually terminates.
+/// box's `[node]` must claim ONLY prefixes it actually terminates.
 /// Asserted over the committed `[[routes]]` table rather than a literal
 /// `"g.toon.relay"` on both sides -- a test that hardcodes the same string
 /// twice passes when both are wrong together, which is exactly the shape
 /// that let #841 slip past #839's own test.
 ///
-/// Also covers issue #870's `identity_key_file` addition -- the property
-/// this test's name describes did not change (the relay still announces
-/// only what it terminates), but the identity it signs under did.
+/// The property survives ADR 0050 unchanged; what it is asserted against does
+/// not. The section is `[node]`, `identity_key_file` and `relay_url` are gone
+/// with the announce (issue #1074), and the endpoints are now what a `GET
+/// /ilp` publishes rather than what a kind:10032 event carried.
 #[test]
-fn the_relay_devnet_config_announces_only_prefixes_it_terminates() {
+fn the_relay_devnet_config_describes_only_prefixes_it_terminates() {
     assert!(
-        RELAY_CONFIG.contains("[announce]"),
-        "the relay config must carry its own [announce] section -- issue #843"
+        declares_table(RELAY_CONFIG, "[node]"),
+        "the relay config must carry its own [node] section -- ADR 0050"
+    );
+    assert!(
+        !declares_table(RELAY_CONFIG, "[announce]"),
+        "the section was RENAMED, not duplicated: `[announce]` is refused by \
+         name at boot (ADR 0046, issue #1074), so a committed file carrying \
+         both would not start at all"
     );
 
     let key_file = write_raw_key_file(9);
@@ -977,15 +978,15 @@ fn the_relay_devnet_config_announces_only_prefixes_it_terminates() {
          if that changed, this test's premise needs revisiting"
     );
 
-    let announce = config
-        .announce()
-        .expect("the relay config's [announce] section must parse");
-    for address in announce.addresses() {
+    let node = config
+        .node()
+        .expect("the relay config's [node] section must parse");
+    for address in node.addresses() {
         assert!(
             terminated.iter().any(|prefix| prefix == address),
-            "the relay's [announce] addresses names `{address}`, which the \
+            "the relay's [node] addresses names `{address}`, which the \
              relay's own committed connector-rust.toml does not terminate \
-             (terminated prefixes: {terminated:?}) -- announcing a prefix \
+             (terminated prefixes: {terminated:?}) -- publishing a prefix \
              this box does not terminate is issue #833's exact defect \
              reproduced on a new box: a client seals its gift wrap to this \
              node's key and the node that actually holds it (whichever one \
@@ -994,224 +995,18 @@ fn the_relay_devnet_config_announces_only_prefixes_it_terminates() {
     }
 
     assert_eq!(
-        announce.http_endpoint(),
+        node.http_endpoint(),
         "https://proxy.relay.devnet.toonprotocol.dev/ilp",
-        "the relay must advertise ITS OWN public edge"
+        "the relay must publish ITS OWN public edge"
     );
     assert_eq!(
-        announce.identity_key_file(),
-        Some(key_file.path()),
-        "the relay box carries over the apex's announce identity (issue \
-         #870, toon-meta#310's apex-retirement spec) so already-deployed \
-         clients -- which trust the genesis seed's apex pubkey -- self-heal \
-         without an update; the committed `/app/data/announce.key` must \
-         resolve to whatever `with_sandbox_paths` substituted the signer \
-         key_file to, since both key_file substitutions share one temp file \
-         in this test"
+        node.btp_endpoint(),
+        "wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp"
     );
-    assert!(
-        announce.relay_url().is_some(),
-        "the relay box fronts a relay app (docker-compose.relay.yml) and \
-         must advertise it -- omitting relay_url would mean nobody ever \
-         hears about its free reads"
-    );
-    assert!(
-        announce.publish_to().is_none(),
-        "the relay's announce terminates its own prefix and runs \
-         --via-own-routing with an explicit --to on the command line \
-         (docker-compose.relay.announce.yml) -- a committed publish_to \
-         here would be dead config nothing reads, or worse, silently used \
-         if the compose command ever drops --to"
-    );
-}
-
-/// The two-box-cutover operator notice (issue #948, re-homed from
-/// toon-meta#335), exactly as published at
-/// `toon-meta`'s `docs/operators/2026-08-13-two-box-cutover.md`. Nothing
-/// composes a notice's content (`connector-config/src/announce.rs`'s own
-/// doc) -- it reaches the wire only by being TRANSCRIBED, twice and
-/// independently: once into each box's committed `connector-rust.toml`, and
-/// once into these four literals. A slip on either side is the only way what
-/// the fleet announces can drift from what toon-meta actually published,
-/// which is exactly what asserting one against the other catches.
-const NOTICE_ID: &str = "2026-08-13-two-box-cutover";
-const NOTICE_SEVERITY: &str = "action-required";
-const NOTICE_SUMMARY: &str = "The devnet apex is being retired; reads and relay publishing repair themselves, but store uploads need a client released after the cutover.";
-const NOTICE_URL: &str =
-    "https://github.com/toon-protocol/toon-meta/blob/main/docs/operators/2026-08-13-two-box-cutover.md";
-
-/// Both announcing boxes carry the two-box-cutover notice via the schema'd
-/// `notice` field (#912) -- not the retired content ride-along toon-meta#335
-/// originally shipped as a stopgap ahead of #912 landing (see this issue's
-/// own "Scope" text: "no content ride-along").
-fn assert_carries_two_box_cutover_notice(
-    announce: &connector_config::AnnounceConfig,
-    box_name: &str,
-) {
-    let notice = announce
-        .notice()
-        .unwrap_or_else(|| panic!("{box_name}'s announce must carry a notice (issue #948)"));
-    assert_eq!(notice.id, NOTICE_ID, "{box_name}'s notice id");
-    assert_eq!(
-        notice.severity, NOTICE_SEVERITY,
-        "{box_name}'s notice severity"
-    );
-    assert_eq!(
-        notice.summary, NOTICE_SUMMARY,
-        "{box_name}'s notice summary"
-    );
-    assert_eq!(notice.url, NOTICE_URL, "{box_name}'s notice url");
-}
-
-/// Issue #948's core property for the store box: its announce carries the
-/// two-box-cutover notice, populated from `notice_id`/`notice_severity`/
-/// `notice_summary`/`notice_url` in the committed config, not invented by
-/// this crate.
-#[test]
-fn the_store_devnet_config_carries_the_two_box_cutover_notice() {
-    let key_file = write_raw_key_file(9);
-    let state_dir = tempfile::tempdir().expect("temp state dir");
-    let text = with_sandbox_paths(STORE_CONFIG, key_file.path(), state_dir.path());
-    let text = with_sandbox_settlement_keys(&text, key_file.path());
-    let config_file = write_config(&text);
-    let config = Config::load(config_file.path()).expect("the committed store config must parse");
-
-    let announce = config
-        .announce()
-        .expect("the store config's [announce] section must parse");
-    assert_carries_two_box_cutover_notice(announce, "the store box");
-}
-
-/// Issue #948's core property for the relay box: its announce carries the
-/// two-box-cutover notice, populated the same way as the store's.
-#[test]
-fn the_relay_devnet_config_carries_the_two_box_cutover_notice() {
-    let key_file = write_raw_key_file(9);
-    let state_dir = tempfile::tempdir().expect("temp state dir");
-    let text = with_sandbox_settlement_keys(
-        &with_sandbox_paths(RELAY_CONFIG, key_file.path(), state_dir.path()),
-        key_file.path(),
-    );
-    let config_file = write_config(&text);
-    let config = Config::load(config_file.path()).expect("the committed relay config must parse");
-
-    let announce = config
-        .announce()
-        .expect("the relay config's [announce] section must parse");
-    assert_carries_two_box_cutover_notice(announce, "the relay box");
-}
-
-/// The trimmed lines of a committed `[announce]` section, or `None` for a
-/// file that has no such section -- read off the committed text by line, no
-/// TOML dependency needed for a couple of keys written one per line.
-fn announce_section(raw: &str) -> Option<Vec<&str>> {
-    let mut lines = raw.lines().map(str::trim);
-    lines.find(|line| *line == "[announce]")?;
-    Some(lines.take_while(|line| !line.starts_with('[')).collect())
-}
-
-/// The `addresses = [...]` list of an [`announce_section`], written as one
-/// array literal on one line the way every committed file writes it.
-fn announce_addresses(section: &[&str]) -> Vec<String> {
-    let value = section
-        .iter()
-        .find_map(|line| line.strip_prefix("addresses"))
-        .expect("no `[announce] addresses` line in the committed config text");
-    value
-        .trim_start()
-        .trim_start_matches('=')
-        .trim()
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .split(',')
-        .map(|address| address.trim().trim_matches('"').to_string())
-        .filter(|address| !address.is_empty())
-        .collect()
-}
-
-/// Whether an [`announce_section`] pins `route_store` explicitly. Read off
-/// the raw text rather than a loaded `AnnounceConfig`: the loaded value is
-/// never absent (`derive_route_hints` always fills it in, pinned or
-/// guessed), so only the raw text can tell an explicit pin apart from a
-/// silent fallback -- which is exactly the distinction issue #845 is about.
-fn announce_pins_route_store(section: &[&str]) -> bool {
-    section.iter().any(|line| line.starts_with("route_store"))
-}
-
-/// What `derive_route_hints` (`crates/connector-config/src/announce.rs`)
-/// would guess for `routes.store` from an address list carrying no
-/// `.store`/`.ario` entry, mirroring its fallback rather than approximating
-/// it: cut `.relay` off the address it derives `publish` from and append
-/// `.store` -- and, when no address ends `.relay` for it to cut, the
-/// primary address itself. A guard whose message names a value the real
-/// derivation would not produce sends its reader looking for the wrong bug.
-fn derived_route_store(addresses: &[String]) -> String {
-    let publish = addresses
-        .iter()
-        .find(|address| address.ends_with(".relay"))
-        .or_else(|| addresses.first());
-    match publish {
-        Some(publish) => publish
-            .strip_suffix(".relay")
-            .map(|stem| format!("{stem}.store"))
-            .unwrap_or_else(|| publish.clone()),
-        None => "<no address to guess from>".to_string(),
-    }
-}
-
-/// Issue #845: the connector-native `[announce]` path has the identical
-/// derivation hazard #841 pinned shut on the TypeScript sidecar's
-/// `ANNOUNCER_ROUTE_STORE`. `derive_route_hints`
-/// (`crates/connector-config/src/announce.rs`) first looks for a
-/// `.store`/`.ario` entry in `addresses`; when none exists it falls
-/// through to suffix surgery -- strip `.relay` off whichever address it
-/// does have and append `.store` -- inventing a prefix with no signal that
-/// it was ever guessed. That is exactly how the relay's own announce (only
-/// address `g.toon.relay`) derived `routes.store = g.toon.store`, a prefix
-/// nothing on this fleet routes (the store prefix is `g.toon.ario`).
-///
-/// This is the guard the issue asks for: every committed devnet
-/// `[announce]` section whose address list contains no `.store`/`.ario`
-/// entry must pin `route_store` explicitly, so the fallback never fires
-/// unnoticed on this fleet again. The failure message names the file, the
-/// key it is missing, and the exact unrouted prefix that key's absence
-/// would derive -- the remedy is the message, not a separate lookup.
-#[test]
-fn every_committed_announce_without_a_store_or_ario_address_pins_route_store() {
-    for (label, raw) in [
-        ("infra/linode-store/connector-rust.toml", STORE_CONFIG),
-        ("infra/linode-relay/connector-rust.toml", RELAY_CONFIG),
-        (
-            "infra/linode-relay/connector-rust.swap-announce.toml",
-            RELAY_SWAP_ANNOUNCE_CONFIG,
-        ),
-    ] {
-        let Some(section) = announce_section(raw) else {
-            continue;
-        };
-        let addresses = announce_addresses(&section);
-        let has_store_or_ario = addresses
-            .iter()
-            .any(|address| address.ends_with(".store") || address.ends_with(".ario"));
-        if has_store_or_ario {
-            continue;
-        }
-
-        let derived = derived_route_store(&addresses);
-        assert!(
-            announce_pins_route_store(&section),
-            "{label}'s [announce] addresses ({addresses:?}) contain no \
-             `.store`/`.ario` entry, so `derive_route_hints` falls through \
-             to its suffix-surgery fallback and would derive \
-             `routes.store = {derived}` -- a prefix nothing on this fleet \
-             routes (issue #845, same class as #841's ANNOUNCER_ROUTE_STORE). \
-             Pin `route_store` explicitly in this file's [announce] section."
-        );
-    }
 }
 
 /// The `image:` tag every service in a compose overlay pins, read off the
-/// committed text by line -- [`announce_section`]'s precedent again, and for
+/// committed text by line -- one line, no YAML dependency, and for
 /// the same reason: one line, no YAML dependency.
 fn pinned_connector_images(raw: &str) -> Vec<String> {
     raw.lines()
@@ -1219,126 +1014,6 @@ fn pinned_connector_images(raw: &str) -> Vec<String> {
         .filter_map(|line| line.strip_prefix("image: ghcr.io/toon-protocol/connector:"))
         .map(str::to_string)
         .collect()
-}
-
-/// A box's two overlays (the serving `connector-rust` and the scheduled
-/// `announce` loop) bind-mount the SAME `connector-rust.toml`, so they must
-/// pin the SAME image: the config file and the binary that reads it are one
-/// agreement, and `RawConfig` is `deny_unknown_fields` (issue #542). A
-/// binary older than a section the file carries does not ignore that
-/// section, it exits 1 -- so a stale pin in the announce overlay is not a
-/// broken sidecar, it is `docker compose up` recreating the SERVING
-/// `connector-rust` from a repo where the two disagree and taking that
-/// box's client edge down.
-///
-/// This is the gate that was missing for the store's pair.
-/// `docker-compose.store.announce.yml` was first committed pinning
-/// `rust-sha-b31a7c9`, a tag published three hours BEFORE `[announce]` and
-/// the `connector announce` verb existed (09bc2299, issue #784) -- a config
-/// the binary refuses to load and a subcommand it does not have -- and
-/// every existing test passed, because nothing in this suite had any
-/// notion of an image tag. Asserted as agreement between the two files
-/// rather than against a literal tag so it does not need editing on every
-/// routine bump; what it refuses is the two DRIFTING, which is the only
-/// shape this failure comes in. Shared by the relay's own pair (issue
-/// #843) so the same defect cannot slip past a second time unnoticed.
-fn assert_overlays_sharing_one_config_pin_one_image(
-    box_label: &str,
-    rust_overlay: &str,
-    rust_overlay_name: &str,
-    announce_overlay: &str,
-    announce_overlay_name: &str,
-) {
-    const CONFIG_MOUNT: &str = "./connector-rust.toml:/app/config/connector.toml";
-
-    for (overlay, name) in [
-        (rust_overlay, rust_overlay_name),
-        (announce_overlay, announce_overlay_name),
-    ] {
-        assert!(
-            overlay.contains(CONFIG_MOUNT),
-            "this test's premise is that both {box_label} overlays mount the \
-             SAME `{CONFIG_MOUNT}` -- {name} no longer does, so the \
-             agreement it asserts needs rethinking rather than silently \
-             holding"
-        );
-    }
-
-    let serving = pinned_connector_images(rust_overlay);
-    let announcing = pinned_connector_images(announce_overlay);
-    assert_eq!(
-        serving.len(),
-        1,
-        "{rust_overlay_name} is expected to pin exactly one connector image"
-    );
-    assert_eq!(
-        announcing.len(),
-        1,
-        "{announce_overlay_name} is expected to pin exactly one connector image"
-    );
-    assert_eq!(
-        announcing[0], serving[0],
-        "{announce_overlay_name} pins `{}` while {rust_overlay_name} pins \
-         `{}`, and both mount the same connector-rust.toml. The older of the \
-         two decides what that file may contain: `deny_unknown_fields` makes \
-         an unrecognized section a refuse-to-start, not a warning. Bump the \
-         stale one -- do not add a second config",
-        announcing[0], serving[0]
-    );
-    // Until toon-meta#403 this asserted `serving[0].starts_with("rust-sha-")`
-    // -- an immutable tag, because a floating one would make the agreement
-    // above unfalsifiable: two files could name the same moving tag and still
-    // be running different binaries.
-    //
-    // That is still exactly right, and it is still what is asserted. What
-    // changed is HOW a moving tag can be made falsifiable. Both services on a
-    // box are recreated by the SAME label-scoped Watchtower sweep, so if both
-    // carry the enable label they move to the same digest together, and the
-    // agreement holds at the digest rather than at the tag string. If only
-    // ONE of the pair is labelled, the tag string agrees while the digests
-    // silently diverge -- which is the original defect wearing a disguise, and
-    // is the case this refuses.
-    if !serving[0].starts_with("rust-sha-") {
-        for (overlay, name) in [
-            (rust_overlay, rust_overlay_name),
-            (announce_overlay, announce_overlay_name),
-        ] {
-            assert!(
-                declares_watchtower_label(overlay),
-                "the {box_label} overlays share the MOVING tag `{}`, but \
-                 {name} does not carry `{WATCHTOWER_ENABLE_LABEL_KEY}`. Both \
-                 services mount the same connector-rust.toml and must run the \
-                 same binary; on a moving tag the only thing that keeps them \
-                 together is being recreated by the same Watchtower sweep. \
-                 Label both, or pin both to an immutable `rust-sha-` tag",
-                serving[0]
-            );
-        }
-    }
-}
-
-#[test]
-fn store_overlays_sharing_one_config_pin_one_image() {
-    assert_overlays_sharing_one_config_pin_one_image(
-        "store",
-        STORE_RUST_OVERLAY,
-        "docker-compose.store.rust.yml",
-        STORE_ANNOUNCE_OVERLAY,
-        "docker-compose.store.announce.yml",
-    );
-}
-
-/// The relay's own pair (issue #843), same property as the store's above --
-/// see [`assert_overlays_sharing_one_config_pin_one_image`].
-#[test]
-fn relay_overlays_sharing_one_config_pin_one_image() {
-    assert_overlays_sharing_one_config_pin_one_image(
-        "relay",
-        RELAY_RUST_OVERLAY,
-        "docker-compose.relay.rust.yml",
-        RELAY_ANNOUNCE_OVERLAY,
-        "docker-compose.relay.announce.yml",
-    );
 }
 
 /// The committed store config, parsed the way the two `[announce]` tests
@@ -1376,63 +1051,6 @@ fn load_committed_relay_config() -> Config {
     Config::load(config_file.path()).expect("the committed relay config must parse")
 }
 
-/// Issue #701's carriage negotiation, read across the two boxes: the store
-/// announces THROUGH an address the relay box owns, and if the relay pins
-/// that route to `transport = "btp"` then the store's `[announce]` must
-/// carry a `publish_btp_url` -- `pay_the_through_url` takes the carriage
-/// from the greeting's `requiredTransport` and, for `btp` with neither
-/// `--btp-url` nor `publish_btp_url`, refuses with `NoBtpEndpoint` before
-/// anything is signed. The scheduled command in
-/// `docker-compose.store.announce.yml` passes no `--btp-url`, so the config
-/// is the only place it can come from.
-///
-/// A property over the relay's committed route table rather than a literal,
-/// for the same reason as the announcer test above: the day somebody pins
-/// another route to BTP, or unpins this one, the assertion follows the
-/// config instead of having to be re-taught.
-///
-/// Issue #871 moved the store's announce off the apex and onto the relay
-/// box DIRECTLY -- the store now buys relay writes like any other client,
-/// with no forwarding hop in between. So the target is always the relay's
-/// own terminating route for `publish_to`, never a `peer_id` forward (the
-/// apex's forward is a fact about the apex's OWN client edge, not about how
-/// this announce is paid).
-#[test]
-fn the_store_announce_carries_a_btp_endpoint_when_its_target_route_demands_one() {
-    let store = load_committed_store_config();
-    let announce = store
-        .announce()
-        .expect("the store config's [announce] section must parse");
-    let publish_to = announce
-        .publish_to()
-        .expect("the store's [announce] must name a publish_to -- the destination is not guessed");
-
-    let relay = load_committed_relay_config();
-    let target = relay
-        .routes()
-        .iter()
-        .find(|route| route.prefix() == publish_to)
-        .unwrap_or_else(|| {
-            panic!(
-                "the store announces through `{publish_to}`, which the \
-                 relay's committed route table does not terminate -- issue \
-                 #871 pays the relay box directly, so the target route now \
-                 lives there, not on the apex"
-            )
-        });
-
-    if target.transport_policy() == TransportPolicy::Btp {
-        assert!(
-            announce.publish_btp_url().is_some(),
-            "an announce paid through `{publish_to}` needs a BTP endpoint \
-             from either `--btp-url` or `publish_btp_url` -- and the \
-             scheduled command in docker-compose.store.announce.yml passes \
-             no `--btp-url`. Set `publish_btp_url` in the store's \
-             [announce] section"
-        );
-    }
-}
-
 /// The longest committed route prefix matching `address` at a segment
 /// boundary -- the router's own selection rule, over one file's static
 /// `[[routes]]`, so the transport a committed announce would declare is
@@ -1452,7 +1070,7 @@ fn committed_transport_policy(config: &Config, address: &str) -> Option<Transpor
 
 /// The other half of issue #701, and the one the fleet ran WITHOUT for as
 /// long as the policy has existed: a box that ENFORCES a transport must
-/// ADVERTISE it.
+/// PUBLISH it.
 ///
 /// Verified live 2026-08-14 against `connector:rust-sha-415531a`: the relay
 /// box refuses an HTTP-carried paid write to `g.toon.relay` (its committed
@@ -1462,244 +1080,49 @@ fn committed_transport_policy(config: &Config, address: &str) -> Option<Transpor
 /// reads exactly that key, so it could never fire and every client was
 /// refused after falling through to HTTP.
 ///
-/// Run over the COMMITTED files through `build_announcement`'s own rule
-/// rather than a literal, so this follows the configs: unpin the relay's
-/// route and the relay assertion below changes with it, pin the store's and
-/// the store assertion does.
+/// ADR 0050 closes that class by construction -- there is one description of
+/// a node now, and this is the rule it derives the field with. Run over the
+/// COMMITTED files through the connector's own
+/// [`connector_domain::agreed_required_transport`] rather than a literal, so
+/// this follows the configs: unpin the relay's route and the relay assertion
+/// below changes with it, pin the store's and the store assertion does.
 #[test]
-fn each_boxs_announce_declares_the_transport_its_own_committed_routes_require() {
+fn each_boxs_self_description_declares_the_transport_its_own_routes_require() {
     let relay = load_committed_relay_config();
-    let relay_announce = relay
-        .announce()
-        .expect("the relay config's [announce] section must parse");
+    let relay_node = relay
+        .node()
+        .expect("the relay config's [node] section must parse");
     assert_eq!(
-        announced_required_transport(relay_announce.addresses(), |address| {
-            committed_transport_policy(&relay, address)
-        })
+        agreed_required_transport(
+            relay_node
+                .addresses()
+                .iter()
+                .filter_map(|address| committed_transport_policy(&relay, address))
+                .map(|policy| policy.name())
+        )
         .as_deref(),
         Some("btp"),
         "the relay terminates `g.toon.relay` with `transport = \"btp\"` for huddles' \
-         persistent sessions, so its announce has to say so -- a client that cannot read \
-         the requirement discovers it by being refused a write it has already paid to send"
+         persistent sessions, so its self-description has to say so -- a client that cannot \
+         read the requirement discovers it by being refused a write it has already paid to send"
     );
 
     let store = load_committed_store_config();
-    let store_announce = store
-        .announce()
-        .expect("the store config's [announce] section must parse");
+    let store_node = store
+        .node()
+        .expect("the store config's [node] section must parse");
     assert_eq!(
-        announced_required_transport(store_announce.addresses(), |address| {
-            committed_transport_policy(&store, address)
-        }),
+        agreed_required_transport(
+            store_node
+                .addresses()
+                .iter()
+                .filter_map(|address| committed_transport_policy(&store, address))
+                .map(|policy| policy.name())
+        ),
         None,
-        "the store's route is left at the permissive default, so its announce must carry no \
-         `requiredTransport` key at all -- an announce that names the default would put a new \
-         key on the wire to say nothing"
-    );
-}
-
-/// Issue #871's own AC: `publish_btp_url` names the RELAY box, not the
-/// apex. The store used to pay the apex to publish
-/// (`wss://proxy.devnet.toonprotocol.dev/ilp/btp`, issue #820); toon-meta#310
-/// is retiring the apex, and the relay box is the fleet's only public write
-/// ingress once it goes, so the store buys relay writes directly, like any
-/// other client.
-///
-/// Asserted as equality with the relay's OWN advertised `btp_endpoint`
-/// rather than a literal of this test's own, so the two files cannot drift
-/// the way the apex/store price pair once did. The RETIRED apex endpoint is
-/// then pinned as a literal by a second assertion -- a value that must never
-/// come back is the one thing no other committed file's contents can say,
-/// and it would survive the equality check above if the relay's own
-/// `[announce]` were ever repointed at the apex.
-#[test]
-fn the_store_announces_through_the_relay_box_not_the_apex() {
-    let store = load_committed_store_config();
-    let announce = store
-        .announce()
-        .expect("the store config's [announce] section must parse");
-
-    let relay = load_committed_relay_config();
-    let relay_announce = relay
-        .announce()
-        .expect("the relay config's [announce] section must parse");
-
-    assert_eq!(
-        announce.publish_btp_url(),
-        Some(relay_announce.btp_endpoint()),
-        "the store's [announce] publish_btp_url must name the relay box's \
-         own advertised BTP endpoint -- issue #871 moves this off the apex"
-    );
-    assert_ne!(
-        announce.publish_btp_url(),
-        Some("wss://proxy.devnet.toonprotocol.dev/ilp/btp"),
-        "the store's [announce] publish_btp_url must not still name the apex"
-    );
-}
-
-/// Issue #853's placeholder convention (issue #822 established it for the
-/// now-removed apex peerings' `[[peer_channels]]` rows -- see git history for
-/// that pair, deleted along with the apex by issue #872), applied to
-/// `[announce] pay_channel` rather than a `[[peer_channels]]` row: the store
-/// box's real funded channel -- with the RELAY BOX as of issue #871,
-/// replacing the apex-funded channel #820's cutover made obsolete -- lives
-/// only on the box, so this repo commits a clearly-marked placeholder
-/// instead of either the live value or an absent field.
-///
-/// Fleet-wide rather than store-specific: issue #983's swap-maker announce
-/// commits the SAME value for the same reason, and asserting both against
-/// one constant is what keeps "clearly marked" meaning one recognizable
-/// literal rather than a per-file invention.
-const ANNOUNCE_PAY_CHANNEL_PLACEHOLDER: &str =
-    "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeadc0de";
-
-/// Issue #853's repo-side AC: the store's `[announce]` section carries the
-/// clearly-marked `pay_channel` placeholder (never the live channel id, and
-/// never simply absent) and it decodes -- proving the whole `[announce]`
-/// shape, not just this one field, is enough for a fresh box to load from
-/// the repo plus its secrets with no hand-editing of config structure.
-#[test]
-fn the_store_announce_pay_channel_is_a_clearly_marked_placeholder() {
-    assert!(
-        STORE_CONFIG.contains(&format!(
-            "pay_channel = \"{ANNOUNCE_PAY_CHANNEL_PLACEHOLDER}\""
-        )),
-        "the store config's [announce] pay_channel must be the clearly-marked placeholder -- \
-         the real funded channel id lives only on the box (issue #853) and must never be \
-         committed here"
-    );
-
-    let key_file = write_raw_key_file(9);
-    let state_dir = tempfile::tempdir().expect("temp state dir");
-    let text = with_sandbox_settlement_keys(
-        &with_sandbox_paths(STORE_CONFIG, key_file.path(), state_dir.path()),
-        key_file.path(),
-    );
-    let config_file = write_config(&text);
-    let config = Config::load(config_file.path()).expect("the committed store config must parse");
-
-    let announce = config
-        .announce()
-        .expect("the store config's [announce] section must parse");
-    assert!(
-        announce.pay_channel().is_some(),
-        "the placeholder must decode as a valid 32-byte channel id, not merely appear as text"
-    );
-}
-
-/// The relay box's SECOND committed announce config (issue #983): the one
-/// the rolling-swap maker's own publisher loads. It is not a serving
-/// connector config -- nothing binds against it -- so the verbatim boot
-/// cases above have nothing to say about it, and without this case the
-/// only committed `[announce]` section on this fleet that no test loads
-/// would be the one describing a node that is not even a Rust connector.
-///
-/// The properties it asserts, each of which a hand-edit could break
-/// silently:
-///
-///   * it PARSES under the binary its overlay pins -- `RawConfig` and
-///     `RawAnnounceConfig` are `deny_unknown_fields`, and the loop that
-///     reads this file survives its own failures by design (it logs
-///     `[swap-announce] FAILED` and sleeps), so a config that cannot load
-///     announces nothing forever while the container stays up;
-///   * it speaks for the MAKER, not for the relay: a different primary
-///     address, and a `[signer]` key file that is not the relay's own. The
-///     two loops run side by side on one box under two identities, and the
-///     failure mode of confusing them is a kind:10032 published under a
-///     pubkey that cannot open the gift wraps sealed to it (ADR 0018);
-///   * the public endpoints it announces are the ones this box's nginx
-///     actually serves. The announce is the only place those URLs are
-///     published, and `location =` is exact-match: a renamed location
-///     leaves the announced URL answering 404 with nothing else noticing.
-///
-/// It pays THROUGH the relay, so its `publish_to`/`publish_btp_url` are
-/// asserted against the relay's OWN committed announce rather than against
-/// literals -- the same follow-the-config discipline
-/// [`the_store_announce_carries_a_btp_endpoint_when_its_target_route_demands_one`]
-/// applies across the two boxes.
-#[test]
-fn the_relays_swap_announce_config_speaks_for_the_maker_not_the_relay() {
-    let key_file = write_raw_key_file(9);
-    let text = replace_expecting_a_match(
-        RELAY_SWAP_ANNOUNCE_CONFIG,
-        "key_file = \"/app/data/swap-signer.key\"",
-        &format!("key_file = \"{}\"", key_file.path().display()),
-    );
-    let text = replace_expecting_a_match(
-        &text,
-        "key_file = \"/app/data/swap-settlement.key\"",
-        &format!("key_file = \"{}\"", key_file.path().display()),
-    );
-    let config_file = write_config(&text);
-    let config =
-        Config::load(config_file.path()).expect("the committed swap-announce config must parse");
-
-    let announce = config
-        .announce()
-        .expect("the swap-announce config's [announce] section must parse");
-
-    let relay = load_committed_relay_config();
-    let relay_announce = relay
-        .announce()
-        .expect("the relay config's [announce] section must parse");
-    assert_ne!(
-        announce.primary_address(),
-        relay_announce.primary_address(),
-        "the maker's announce must describe the MAKER -- a second publisher on this box \
-         announcing the relay's own address would be two loops racing for one \
-         (pubkey, kind:10032) slot"
-    );
-    // Asserted on the committed TEXT, not on the loaded value: the loaded
-    // one is a sandbox temp path by the time this test sees it, so only the
-    // text can say which key file the box will actually read.
-    assert!(
-        !RELAY_SWAP_ANNOUNCE_CONFIG.contains("key_file = \"/app/data/signer.key\""),
-        "the maker's announce must sign under the MAKER's own identity key file, never \
-         the relay's `/app/data/signer.key` -- see connector-rust.swap-announce.toml's \
-         own header for the ADR 0018 hazard that confusing them creates"
-    );
-
-    for (field, endpoint) in [
-        ("btp_endpoint", announce.btp_endpoint()),
-        ("http_endpoint", announce.http_endpoint()),
-    ] {
-        let path = endpoint
-            .split_once("://")
-            .and_then(|(_, rest)| rest.find('/').map(|start| rest[start..].to_string()))
-            .unwrap_or_else(|| panic!("the maker's [announce] {field} must name a path on this box's own domain, found `{endpoint}`"));
-        assert!(
-            RELAY_NGINX_CONF.contains(&format!("location = {path} {{")),
-            "the maker's [announce] {field} (`{endpoint}`) is published to the whole \
-             network, but infra/linode-relay/nginx/conf.d/node.conf serves no \
-             `location = {path}` -- an exact-match location is the only thing that \
-             answers it, so a renamed one leaves the announced URL dead"
-        );
-    }
-
-    assert_eq!(
-        announce.publish_to(),
-        Some(relay_announce.primary_address()),
-        "the maker sits behind the relay's client edge and pays it like any other \
-         client, so its `publish_to` is the relay's own announced address"
-    );
-    assert_eq!(
-        announce.publish_btp_url(),
-        Some(relay_announce.btp_endpoint()),
-        "`g.toon.relay` is pinned `transport = \"btp\"` (issue #701), so this loop must \
-         name the relay's OWN btp_endpoint -- `pay_the_through_url` refuses \
-         `NoBtpEndpoint` before signing anything"
-    );
-    assert!(
-        RELAY_SWAP_ANNOUNCE_CONFIG.contains(&format!(
-            "pay_channel     = \"{ANNOUNCE_PAY_CHANNEL_PLACEHOLDER}\""
-        )),
-        "the maker's [announce] pay_channel must be the same clearly-marked placeholder \
-         every other box commits (issue #853) -- the real funded channel id lives only \
-         on the box"
-    );
-    assert!(
-        announce.pay_channel().is_some(),
-        "the placeholder must decode as a valid 32-byte channel id, not merely appear as text"
+        "the store's route is left at the permissive default, so its self-description must \
+         carry no `requiredTransport` key at all -- naming the default would put a key on the \
+         wire to say nothing"
     );
 }
 
@@ -2033,7 +1456,7 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
 /// a reviewed PR. toon-meta#403 gave each box a label-scoped Watchtower
 /// (`infra/linode-*/docker-compose.*.watchtower.yml`) polling ONE tag and
 /// recreating the labelled containers when its digest moves, and repointed
-/// `connector-rust` and `announce` on both boxes at
+/// `connector-rust` on both boxes at
 /// `ghcr.io/toon-protocol/connector:rust-release`. Issues #988 and #992 are
 /// the repo half of that; this constant is the part of it that had to be
 /// DECIDED rather than transcribed.
@@ -2071,10 +1494,11 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
 ///   changes under the box on the next unrelated `docker compose up`, with
 ///   no diff to review and no poll to observe. The store's `store:latest`
 ///   was exactly that until #992.
-/// * [`assert_overlays_sharing_one_config_pin_one_image`] -- a box's
-///   `connector-rust` and `announce` mount the same `connector-rust.toml`,
-///   so on a moving tag BOTH must be labelled: only being recreated in the
-///   same Watchtower sweep keeps them on one digest.
+///   A second guard used to sit beside it: a box's `connector-rust` and its
+///   scheduled `announce` loop mounted the same `connector-rust.toml`, so on
+///   a moving tag both had to be labelled or their digests would silently
+///   diverge. Issue #1074 removed the announce, and with it the second
+///   service and the whole class of drift.
 ///
 /// # The build the fleet was on, and how to read it back
 ///
@@ -2137,9 +1561,9 @@ async fn the_relay_devnet_settlement_section_boots_against_a_deployed_contract()
 ///   matched pair, so a schema change is a refuse-to-start), and then calls
 ///   `fleet-health.yml` to prove both boxes came back.
 /// * `swap`, `store` and `relay` keep auto-on-green. The connector is the
-///   one image held back, because it is the client edge on BOTH boxes and
-///   `announce` runs the same image, so one bad digest takes the whole
-///   devnet's paid-write path dark on two machines at once.
+///   one image held back, because it is the client edge on BOTH boxes, so
+///   one bad digest takes the whole devnet's paid-write path dark on two
+///   machines at once.
 ///
 /// The companion suite `crates/connector-bin/tests/fleet_release_gate.rs` is
 /// the regression guard for that split -- it fails if `rust-release`
@@ -2158,43 +1582,19 @@ const EXPECTED_CONNECTOR_TAG: &str = "rust-release";
 /// Every `image:` pin this suite can see across the surviving two-box fleet
 /// (issue #872 removed the apex's own overlay along with the apex) must name
 /// [`EXPECTED_CONNECTOR_TAG`] -- the property #848 exists to hold. Asserted
-/// against the literal (not merely "the four agree with each other", which
-/// [`store_overlays_sharing_one_config_pin_one_image`] and
-/// [`relay_overlays_sharing_one_config_pin_one_image`] already cover) so
-/// that all four silently drifting to some OTHER shared tag still fails --
-/// the exact shape #848's own investigation found (three artifacts, three
+/// against the literal rather than merely "they agree with each other", so
+/// that both silently drifting to some OTHER shared tag still fails -- the
+/// exact shape #848's own investigation found (three artifacts, three
 /// different tags, none of them what the boxes ran).
+///
+/// Two overlays, not four: issue #1074 deleted each box's scheduled announce
+/// loop, and the relay's `swap-announce` overlay with them.
 #[test]
 fn every_fleet_overlay_pins_the_connector_repos_pin_of_record() {
     let overlays: &[(&str, &str)] = &[
         ("docker-compose.store.rust.yml", STORE_RUST_OVERLAY),
-        ("docker-compose.store.announce.yml", STORE_ANNOUNCE_OVERLAY),
         ("docker-compose.relay.rust.yml", RELAY_RUST_OVERLAY),
-        ("docker-compose.relay.announce.yml", RELAY_ANNOUNCE_OVERLAY),
     ];
-
-    // `docker-compose.relay.swap-announce.yml` was in this list and is not
-    // any more. It runs the same connector binary, but it is the ONE
-    // connector service on the fleet that mounts a different config file
-    // (`connector-rust.swap-announce.toml`, not `connector-rust.toml`), is
-    // not brought up on the box, and is not opted into Watchtower. So the
-    // agreement this test is about -- the four services that share the two
-    // boxes' `connector-rust.toml` all running one binary -- was never the
-    // property that bound it, and it cannot follow the moving tag without
-    // becoming the unwatched-floating-tag case
-    // `no_unwatched_fleet_service_follows_a_floating_tag` refuses.
-    //
-    // It is not unguarded: that test requires it to stay immutable, and
-    // `no_surviving_box_pins_a_non_rust_connector_image` still covers it.
-    assert!(
-        pinned_connector_images(RELAY_SWAP_ANNOUNCE_OVERLAY)
-            .iter()
-            .all(|tag| tag.starts_with("rust-sha-")),
-        "docker-compose.relay.swap-announce.yml must keep an immutable \
-         `rust-sha-` pin: it mounts its own config, is not brought up on the \
-         box, and carries no Watchtower label, so nothing would ever pull a \
-         moving tag for it on purpose"
-    );
 
     for (name, overlay) in overlays {
         let pins = pinned_connector_images(overlay);
@@ -2220,10 +1620,9 @@ fn every_fleet_overlay_pins_the_connector_repos_pin_of_record() {
 /// `infra/*/docker-compose*.yml`: a guard that walked the directory would
 /// silently start (or stop) covering a box the moment the filesystem changed
 /// under it, rather than only when a real image or port regression landed.
-/// Two boxes: the store's four files (its base file, its two overlays and
-/// issue #992's label-scoped Watchtower overlay) and the relay's six (the
-/// same, plus issue #983's rolling-swap maker sidecar and that maker's own
-/// announce overlay) -- see
+/// Two boxes: the store's three files (its base file, its serving overlay and
+/// issue #992's label-scoped Watchtower overlay) and the relay's four (the
+/// same, plus issue #983's rolling-swap maker sidecar) -- see
 /// [`no_surviving_box_pins_a_non_rust_connector_image`] and
 /// [`every_surviving_box_port_binding_is_host_ip_prefixed_or_allowlisted`].
 const SURVIVING_BOX_COMPOSE_FILES: &[(&str, &str)] = &[
@@ -2236,10 +1635,6 @@ const SURVIVING_BOX_COMPOSE_FILES: &[(&str, &str)] = &[
         STORE_RUST_OVERLAY,
     ),
     (
-        "infra/linode-store/docker-compose.store.announce.yml",
-        STORE_ANNOUNCE_OVERLAY,
-    ),
-    (
         "infra/linode-relay/docker-compose.relay.yml",
         RELAY_BASE_COMPOSE,
     ),
@@ -2248,16 +1643,8 @@ const SURVIVING_BOX_COMPOSE_FILES: &[(&str, &str)] = &[
         RELAY_RUST_OVERLAY,
     ),
     (
-        "infra/linode-relay/docker-compose.relay.announce.yml",
-        RELAY_ANNOUNCE_OVERLAY,
-    ),
-    (
         "infra/linode-relay/docker-compose.relay.swap.yml",
         RELAY_SWAP_OVERLAY,
-    ),
-    (
-        "infra/linode-relay/docker-compose.relay.swap-announce.yml",
-        RELAY_SWAP_ANNOUNCE_OVERLAY,
     ),
     (
         "infra/linode-relay/docker-compose.relay.watchtower.yml",
@@ -2291,7 +1678,7 @@ fn no_surviving_box_pins_a_non_rust_connector_image() {
 }
 
 /// The `ports:` mappings a committed compose file's `ports:` block declares,
-/// verbatim, in commit order -- [`announce_section`]'s line-scan precedent
+/// verbatim, in commit order -- one line at a time, no YAML dependency
 /// again: no YAML dependency, and indentation alone (not a parser) tells a
 /// `ports:` list item apart from a `volumes:` one that also starts `- '`. A
 /// `#`-comment line inside the block (several overlays carry one explaining
@@ -2428,12 +1815,6 @@ fn compose_service_block<'a>(name: &str, raw: &'a str, service: &str) -> Option<
         .map(|(_, body)| body)
 }
 
-fn declares_watchtower_label(raw: &str) -> bool {
-    raw.lines()
-        .filter(|line| !line.trim_start().starts_with('#'))
-        .any(|line| line.contains(WATCHTOWER_ENABLE_LABEL_KEY))
-}
-
 /// Every service on the fleet that is opted INTO Watchtower's
 /// auto-recreate, and the file that declares it. Named explicitly, one row
 /// per service, because the opt-in is a security-relevant decision per
@@ -2448,11 +1829,9 @@ fn declares_watchtower_label(raw: &str) -> bool {
 const WATCHTOWER_OPTED_IN_SERVICES: &[(&str, &str)] = &[
     ("docker-compose.relay.yml", "relay"),
     ("docker-compose.relay.rust.yml", "connector-rust"),
-    ("docker-compose.relay.announce.yml", "announce"),
     ("docker-compose.relay.swap.yml", "swap-node"),
     ("docker-compose.store.yml", "store"),
     ("docker-compose.store.rust.yml", "connector-rust"),
-    ("docker-compose.store.announce.yml", "announce"),
 ];
 
 /// Watchtower is label-scoped SPECIFICALLY so it can share a box with
@@ -2476,9 +1855,6 @@ const WATCHTOWER_OPTED_IN_SERVICES: &[(&str, &str)] = &[
 /// * `certbot` -- holds the renewal timer.
 /// * `watchtower` itself -- a self-recreating watcher is a way to lose the
 ///   watcher.
-/// * `swap-announce` -- the maker's one-shot announce sidecar, which is not
-///   brought up on the box and pins an immutable tag; unlabelled and
-///   immutable is the consistent pair.
 #[test]
 fn only_the_opted_in_fleet_services_carry_the_watchtower_label() {
     for (file, service) in WATCHTOWER_OPTED_IN_SERVICES {
@@ -2553,9 +1929,7 @@ fn only_the_opted_in_fleet_services_carry_the_watchtower_label() {
 /// sat next to AND worse than the watched `:release` that replaced it.
 ///
 /// So: this org's own images may name a moving tag only on an opted-in
-/// service, and must otherwise be immutable (`sha-*` / `rust-sha-*`). The
-/// relay's `swap-announce` sidecar is the case that proves the rule -- it is
-/// unlabelled and pins an immutable tag.
+/// service, and must otherwise be immutable (`sha-*` / `rust-sha-*`).
 ///
 /// Scoped to `ghcr.io/toon-protocol/` deliberately. `nginx:alpine` and
 /// `certbot/certbot` are third-party images on third-party release cadences,
@@ -2685,303 +2059,6 @@ fn every_box_watchtower_pins_an_explicit_version_and_sets_docker_api_version() {
              recreate containers without it."
         );
     }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// The announce loops' startup race (issue #996)
-// ═══════════════════════════════════════════════════════════════════════════
-//
-// Every kind:10032 publisher on this fleet is a `/bin/sh` loop embedded in a
-// compose `command:` block. Nothing else in this suite could ever have seen
-// what that loop DOES -- and what it did, until #996, was fire one publish
-// the moment its container started and then, if that publish failed, sit out
-// a full `REFRESH_SECS` (240 s).
-//
-// That is an availability defect rather than an untidy one. Observed live on
-// 2026-08-16: the relay box's label-scoped Watchtower (issue #988) recreated
-// `connector-rust` and `announce` in the SAME sweep -- both follow
-// `:rust-release` on the box -- so the loop published into an edge that was
-// still booting behind an nginx that had not re-resolved it, got a `502`
-// where x402 terms should have been, and went quiet for four minutes. Client
-// discovery is fail-closed and snapshotted at CLIENT STARTUP, so every client
-// that booted inside that window refused every paid write with
-// `TERMINATOR_UNRESOLVED` and could not recover without being restarted. It
-// took a manual `docker restart` to clear.
-//
-// The two properties the fix rests on are behavioural, so they are asserted
-// behaviourally: the committed block scalar is extracted, un-escaped the way
-// compose un-escapes it, pointed at stub `wget`/`connector` binaries, and
-// actually RUN. A `.contains("BACKOFF_SECS")` would have passed against a
-// loop that computed a backoff and then slept on the wrong variable.
-
-/// Every committed announce loop on the surviving two-box fleet. All three
-/// are the same shape deliberately (each header says so, and each was copied
-/// from the one before it), which is exactly why the guard has to cover all
-/// three: the defect propagated by copy, and so would its return.
-const ANNOUNCE_LOOPS: &[(&str, &str)] = &[
-    ("docker-compose.store.announce.yml", STORE_ANNOUNCE_OVERLAY),
-    ("docker-compose.relay.announce.yml", RELAY_ANNOUNCE_OVERLAY),
-    (
-        "docker-compose.relay.swap-announce.yml",
-        RELAY_SWAP_ANNOUNCE_OVERLAY,
-    ),
-];
-
-/// The `/bin/sh` program a compose overlay's `command:` block holds, dedented
-/// out of its `- |` block scalar. A line scan for the same reason
-/// [`pinned_connector_images`] and [`compose_ports`] are line scans: no YAML
-/// dependency, and the shape being read is one this repo writes by hand and
-/// keeps identical across the three files.
-fn announce_loop_block_scalar(name: &str, raw: &str) -> String {
-    let mut lines = raw.lines();
-    while let Some(line) = lines.next() {
-        if line.trim() != "command:" {
-            continue;
-        }
-        let opener = lines
-            .next()
-            .unwrap_or_else(|| panic!("{name}: `command:` is the last line of the file"));
-        assert_eq!(
-            opener.trim(),
-            "- |",
-            "{name}: this helper only understands a `command:` holding a \
-             single `- |` block scalar, the shape all three announce loops \
-             use -- teach it the new shape rather than dropping the guard"
-        );
-        let mut body: Vec<&str> = Vec::new();
-        let mut base: Option<usize> = None;
-        for line in lines.by_ref() {
-            if line.trim().is_empty() {
-                body.push("");
-                continue;
-            }
-            let indent = line.len() - line.trim_start().len();
-            let base = *base.get_or_insert(indent);
-            if indent < base {
-                break;
-            }
-            body.push(&line[base..]);
-        }
-        assert!(
-            !body.is_empty(),
-            "{name}: the `command:` block scalar is empty"
-        );
-        return body.join("\n");
-    }
-    panic!("{name}: no `command:` block found")
-}
-
-/// What the container's `/bin/sh` actually receives. Compose interpolates a
-/// bare `$VAR`/`${VAR}` in a compose file's own text against the HOST's
-/// environment at `up` time, and `$$` is what survives that pass as a literal
-/// `$` -- the escaping every one of these files' headers explains. A LONE `$`
-/// left in a committed loop is therefore not a style slip: it is a variable
-/// the operator's shell expands (to nothing, on a box where it is unset)
-/// before the container ever sees it, which is why that is refused here
-/// rather than merely un-escaped.
-fn as_the_container_shell_sees_it(name: &str, block: &str) -> String {
-    let script = block.replace("$$", "\u{0}");
-    assert!(
-        !script.contains('$'),
-        "{name}: the `command:` block contains a lone `$` -- compose \
-         interpolates that against the HOST environment at `up` time and the \
-         container's shell never sees it. Every `$` in these loops must be \
-         written `$$`."
-    );
-    script.replace('\u{0}', "$")
-}
-
-/// A committed announce loop running against stub `wget`/`connector`
-/// binaries, killed and reaped on drop so a panicking test leaves no shell
-/// (and no `sleep`) behind.
-struct AnnounceLoopRun {
-    child: Child,
-    /// One line per stub invocation, in order: `W` for a readiness probe,
-    /// `C` for a `connector announce` attempt. The whole assertion surface.
-    calls: std::path::PathBuf,
-    /// Holds the stubs and the script alive for as long as the shell is.
-    _dir: tempfile::TempDir,
-}
-
-impl Drop for AnnounceLoopRun {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// Write a `/bin/sh` stub and make it executable -- PATH lookup skips a file
-/// it cannot execute, so a missing chmod would silently fall through to the
-/// real `wget` and put a live network call in a unit test.
-fn write_stub(path: &std::path::Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, body).expect("write stub");
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod stub");
-}
-
-/// Run a committed announce loop with its two external commands stubbed:
-///
-///   * `wget` -- the readiness probe. FAILS its first two calls and succeeds
-///     from the third, standing in for an edge that is still coming up (the
-///     `502` the live box served). Deterministic by construction: it counts
-///     the log rather than the clock.
-///   * `connector` -- the publish. ALWAYS fails, so what the loop does after
-///     a failed publish is observable for as long as the test cares to watch.
-///
-/// `ANNOUNCE_READY_POLL_SECS` is turned down to 1 s so the two failing probes
-/// cost 2 s rather than 10; the retry backoff is deliberately left at the
-/// COMMITTED default, because that is the number under test.
-fn run_announce_loop(name: &str, raw: &str) -> AnnounceLoopRun {
-    let script = as_the_container_shell_sees_it(name, &announce_loop_block_scalar(name, raw));
-
-    let dir = tempfile::tempdir().expect("temp dir");
-    let bin = dir.path().join("bin");
-    std::fs::create_dir(&bin).expect("stub bin dir");
-    let calls = dir.path().join("calls.log");
-    std::fs::write(&calls, "").expect("call log");
-
-    let connector_stub = bin.join("connector-stub");
-    write_stub(
-        &connector_stub,
-        "#!/bin/sh\nprintf 'C\\n' >> \"$ANNOUNCE_TEST_CALLS\"\nexit 7\n",
-    );
-    write_stub(
-        &bin.join("wget"),
-        "#!/bin/sh\nprintf 'W\\n' >> \"$ANNOUNCE_TEST_CALLS\"\n\
-         [ \"$(grep -c W \"$ANNOUNCE_TEST_CALLS\")\" -ge 3 ]\n",
-    );
-
-    let script = replace_expecting_a_match(
-        &script,
-        "/usr/local/bin/connector",
-        connector_stub.to_str().expect("utf-8 temp path"),
-    );
-    let script_path = dir.path().join("announce-loop.sh");
-    std::fs::write(&script_path, &script).expect("write loop script");
-
-    let parsed = Command::new("sh")
-        .arg("-n")
-        .arg(&script_path)
-        .output()
-        .expect("run `sh -n`");
-    assert!(
-        parsed.status.success(),
-        "{name}: the committed `command:` block is not valid POSIX shell:\n{}",
-        String::from_utf8_lossy(&parsed.stderr)
-    );
-
-    let path = format!(
-        "{}:{}",
-        bin.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let child = Command::new("sh")
-        .arg(&script_path)
-        .env("PATH", path)
-        .env("ANNOUNCE_TEST_CALLS", &calls)
-        .env("ANNOUNCE_READY_POLL_SECS", "1")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap_or_else(|error| panic!("{name}: could not spawn the announce loop: {error}"));
-
-    AnnounceLoopRun {
-        child,
-        calls,
-        _dir: dir,
-    }
-}
-
-/// Poll the call log until the loop has attempted `publishes` publishes, or
-/// give up. The ceiling is the real assertion: the shape this test exists to
-/// refuse reaches ONE publish and then sleeps 240 s, so it cannot get here in
-/// any amount of time a test would wait. The fixed loop's third attempt lands
-/// at about 2 s (two failed probes) + 0 + 5 + 10 = ~17 s.
-fn wait_for_publish_attempts(
-    name: &str,
-    run: &AnnounceLoopRun,
-    publishes: usize,
-    ceiling: std::time::Duration,
-) -> Vec<String> {
-    let started = std::time::Instant::now();
-    loop {
-        let calls: Vec<String> = std::fs::read_to_string(&run.calls)
-            .expect("read the call log")
-            .lines()
-            .map(str::to_string)
-            .collect();
-        if calls.iter().filter(|call| *call == "C").count() >= publishes {
-            return calls;
-        }
-        assert!(
-            started.elapsed() < ceiling,
-            "{name}: the announce loop made only {} publish attempt(s) in {:?} \
-             -- expected at least {publishes}. A loop that sleeps the full \
-             refresh interval after a failed publish leaves this fleet's \
-             kind:10032 unpublished for minutes, and client discovery is \
-             fail-closed and snapshotted at client startup (issue #996). \
-             Calls so far: {calls:?}",
-            calls.iter().filter(|call| *call == "C").count(),
-            started.elapsed()
-        );
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    }
-}
-
-/// Issue #996's two properties, asserted against the loop as it actually
-/// runs:
-///
-///   1. it does not publish into an edge that is not answering -- the first
-///      thing in the log is a run of readiness probes, not a publish;
-///   2. a failed publish is retried in seconds, not after the full refresh
-///      interval;
-///
-/// plus the third that keeps (1) honest over time: EVERY publish attempt is
-/// preceded by a probe, so the gate is part of the loop rather than a
-/// once-at-startup courtesy that a later recreate of the edge sails past.
-fn assert_announce_loop_waits_for_its_edge_then_retries_fast(name: &str, raw: &str) {
-    let run = run_announce_loop(name, raw);
-    let calls = wait_for_publish_attempts(name, &run, 3, std::time::Duration::from_secs(60));
-
-    let opening: Vec<&str> = calls.iter().take(4).map(String::as_str).collect();
-    assert_eq!(
-        opening,
-        ["W", "W", "W", "C"],
-        "{name}: expected the loop to probe its edge until it answered (two \
-         failing probes, then one that succeeds) and only THEN publish. It \
-         did: {calls:?}. Publishing into a still-booting edge is the race \
-         that took devnet discovery down on 2026-08-16 (issue #996)."
-    );
-
-    for pair in calls.windows(2) {
-        if pair[1] == "C" {
-            assert_eq!(
-                pair[0], "W",
-                "{name}: a publish attempt was not preceded by a readiness \
-                 probe -- the gate must run every cycle, not only at startup, \
-                 because Watchtower can recreate the edge underneath a \
-                 long-lived loop at any time. Calls: {calls:?}"
-            );
-        }
-    }
-}
-
-#[test]
-fn the_store_announce_loop_waits_for_its_edge_then_retries_fast() {
-    let (name, raw) = ANNOUNCE_LOOPS[0];
-    assert_announce_loop_waits_for_its_edge_then_retries_fast(name, raw);
-}
-
-#[test]
-fn the_relay_announce_loop_waits_for_its_edge_then_retries_fast() {
-    let (name, raw) = ANNOUNCE_LOOPS[1];
-    assert_announce_loop_waits_for_its_edge_then_retries_fast(name, raw);
-}
-
-#[test]
-fn the_relay_swap_announce_loop_waits_for_its_edge_then_retries_fast() {
-    let (name, raw) = ANNOUNCE_LOOPS[2];
-    assert_announce_loop_waits_for_its_edge_then_retries_fast(name, raw);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

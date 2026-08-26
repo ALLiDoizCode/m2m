@@ -76,7 +76,10 @@ use serde::{Deserialize, Serialize};
 use connector_config::TransportPolicy;
 use connector_domain::client_claim::ClientClaim;
 use connector_domain::identity::{anonymous_identity, resolve_identity, ConfiguredIdentity};
-use connector_domain::{condition_is_present, PacketResponse, Prepare, Reject, RejectCode};
+use connector_domain::{
+    agreed_required_transport, condition_is_present, EdgeIdentity, NodeFacts, NodeSelfDescription,
+    PacketResponse, Prepare, Reject, RejectCode, RoutePrice,
+};
 use connector_runtime::{ClientRouteFacts, ClientRouteKind, Connector, ProbeDenied};
 use connector_signer::nip59::{unwrap_claim, WrappedClaim};
 use connector_signer::{PublicKeyBytes, Signer};
@@ -150,13 +153,19 @@ struct ClientEdgeState {
     /// refused with [`ClaimIngestRejection::WrapUnsupported`] rather than
     /// silently accepted unwrapped or left to panic.
     wrap_receiver_secret: Option<[u8; 32]>,
-    /// This node's channel-opening facts, carried in every x402 greeting
-    /// (issue #617). `None` on a node with no settlement backend.
-    settlement_terms: Option<X402SettlementTerms>,
-    /// Every configured chain's channel-opening facts (issue #632), carried
-    /// in `extra.settlements` beside [`settlement_terms`](Self::settlement_terms).
-    /// Empty on a node with no settlement backend.
-    settlements: Vec<X402ChainSettlementTerms>,
+    /// This node's own facts (ADR 0050): its ILP addresses, its public
+    /// endpoints, the peer carriages it exposes, and the channel-opening
+    /// facts every settlement backend proved against a chain at startup.
+    ///
+    /// **One value, two projections.** `GET /ilp` serves it as this node's
+    /// self-description; every x402 greeting reads its `extra` node facts off
+    /// the same value (ND-11). Nothing assembles either set a second time, so
+    /// the two cannot disagree -- which is the structural end of the
+    /// `requiredTransport` defect that came of describing one node in two
+    /// places. Default -- every field empty -- is a node with no `[node]`
+    /// section and no settlement backend: it still answers, and its
+    /// description simply says less.
+    node: Arc<NodeFacts>,
     /// How many of one BTP session's frames may be past claim admission --
     /// waiting out the journal's group commit, being routed downstream, or
     /// answering -- at once (issue #688). Claims themselves are still
@@ -182,12 +191,6 @@ struct ClientEdgeState {
     /// forbids the listener itself deciding which, and it does not --
     /// `peer::PeerCarriages` decides by credential alone.
     peers: Option<Arc<PeerCarriages>>,
-    /// This node's own bootstrap-time facts (issue #807), carried in every
-    /// x402 greeting exactly like `settlement_terms`/`settlements` are.
-    /// `None` on a node with no `[announce]` section configured -- a
-    /// zero-condition greeting still fires (see [`handle_ilp`]) but omits
-    /// `ilpAddresses`/`btpEndpoint`, same shape as before this existed.
-    bootstrap_identity: Option<BootstrapIdentity>,
     /// The client-edge identities this node authenticates over HTTP (issue
     /// #502, client-edge-spec.md §1.2): what an `ILP-Peer-Id` header must
     /// name, and the secret its `Authorization: Bearer <secret>` must
@@ -260,8 +263,7 @@ pub fn router_with_gate(
         signer,
         wrap_receiver_secret,
         claim_gate,
-        None,
-        Vec::new(),
+        NodeFacts::default(),
     )
 }
 
@@ -276,43 +278,38 @@ pub fn router_with_identities(
     claim_gate: ClientClaimGate,
     identities: Arc<[ConfiguredIdentity]>,
 ) -> Router {
-    router_with_bootstrap_identity(
+    router_with_node_facts(
         connector,
         signer,
         wrap_receiver_secret,
         Arc::new(claim_gate),
-        None,
-        Vec::new(),
+        NodeFacts::default(),
         DEFAULT_BTP_SESSION_WINDOW,
-        None,
         None,
         identities,
     )
 }
 
-/// As [`router_with_gate`], but with the node's channel-opening facts to
-/// carry in every x402 greeting: `settlement_terms` is the legacy
-/// EVM-shaped single object (issue #617), `settlements` is the additive
-/// per-chain list (issue #632) -- every chain this node settles on,
-/// including the same EVM entry `settlement_terms` already carries. `None`
-/// and an empty list together -- the plain [`router_with_gate`] -- is a
-/// node with no settlement backend, whose greeting keeps its pre-#617 shape
-/// exactly.
+/// As [`router_with_gate`], but with this node's own facts (ADR 0050): the
+/// channel-opening terms every settlement backend proved against a chain at
+/// startup, and the addresses and endpoints it cannot introspect.
+///
+/// [`NodeFacts::default()`] -- the plain [`router_with_gate`] -- is a node
+/// with no `[node]` section and no settlement backend, whose greeting keeps
+/// its pre-#617 shape exactly.
 pub fn router_with_gate_and_terms(
     connector: Arc<Connector>,
     signer: Arc<dyn Signer>,
     wrap_receiver_secret: Option<[u8; 32]>,
     claim_gate: ClientClaimGate,
-    settlement_terms: Option<X402SettlementTerms>,
-    settlements: Vec<X402ChainSettlementTerms>,
+    node: NodeFacts,
 ) -> Router {
     router_with_gate_terms_and_btp_window(
         connector,
         signer,
         wrap_receiver_secret,
         claim_gate,
-        settlement_terms,
-        settlements,
+        node,
         DEFAULT_BTP_SESSION_WINDOW,
     )
 }
@@ -327,14 +324,12 @@ pub fn router_with_gate_and_terms(
 /// waits forever -- the config layer refuses it before this signature is
 /// ever reached (`btp_session_window = 0`), and the type refuses it here
 /// for every caller that skips the config layer.
-#[allow(clippy::too_many_arguments)]
 pub fn router_with_gate_terms_and_btp_window(
     connector: Arc<Connector>,
     signer: Arc<dyn Signer>,
     wrap_receiver_secret: Option<[u8; 32]>,
     claim_gate: ClientClaimGate,
-    settlement_terms: Option<X402SettlementTerms>,
-    settlements: Vec<X402ChainSettlementTerms>,
+    node: NodeFacts,
     btp_session_window: NonZeroU32,
 ) -> Router {
     router_with_peer_carriages(
@@ -342,8 +337,7 @@ pub fn router_with_gate_terms_and_btp_window(
         signer,
         wrap_receiver_secret,
         claim_gate,
-        settlement_terms,
-        settlements,
+        node,
         btp_session_window,
         None,
     )
@@ -371,45 +365,42 @@ pub fn router_with_peer_carriages(
     signer: Arc<dyn Signer>,
     wrap_receiver_secret: Option<[u8; 32]>,
     claim_gate: ClientClaimGate,
-    settlement_terms: Option<X402SettlementTerms>,
-    settlements: Vec<X402ChainSettlementTerms>,
+    node: NodeFacts,
     btp_session_window: NonZeroU32,
     peers: Option<Arc<PeerCarriages>>,
 ) -> Router {
-    router_with_bootstrap_identity(
+    router_with_node_facts(
         connector,
         signer,
         wrap_receiver_secret,
         Arc::new(claim_gate),
-        settlement_terms,
-        settlements,
+        node,
         btp_session_window,
         peers,
-        None,
         Arc::from([]),
     )
 }
 
-/// As [`router_with_peer_carriages`], but also carrying this node's own
-/// ILP address(es) and BTP endpoint (issue #807) into every x402 greeting,
-/// so a client whose genesis peer seed is stale or missing can bootstrap
-/// against a reachable edge without knowing either in advance. Sourced from
-/// `[announce]` -- the config section that already holds exactly these
-/// facts for `connector announce` (issue #784) -- `None` for a node that
-/// does not configure it. `identities` is `connector_config::Config::client_identities`'s
-/// value (issue #502): every `ILP-Peer-Id` this node recognises and the
-/// secret it authenticates with.
+/// As [`router_with_peer_carriages`], but also naming the client-edge
+/// identities this node authenticates over HTTP -- the full form every other
+/// constructor above delegates to.
+///
+/// `node` is the value both `GET /ilp` and every x402 greeting read this
+/// node's own facts off (ADR 0050, ND-11). Its three configured fields come
+/// from `[node]` -- the section that holds exactly what a node cannot
+/// introspect about itself -- and its settlement terms from the backends that
+/// verified them against a chain at startup. `identities` is
+/// `connector_config::Config::client_identities`'s value (issue #502): every
+/// `ILP-Peer-Id` this node recognises and the secret it authenticates with.
 #[allow(clippy::too_many_arguments)]
-pub fn router_with_bootstrap_identity(
+pub fn router_with_node_facts(
     connector: Arc<Connector>,
     signer: Arc<dyn Signer>,
     wrap_receiver_secret: Option<[u8; 32]>,
     claim_gate: Arc<ClientClaimGate>,
-    settlement_terms: Option<X402SettlementTerms>,
-    settlements: Vec<X402ChainSettlementTerms>,
+    node: NodeFacts,
     btp_session_window: NonZeroU32,
     peers: Option<Arc<PeerCarriages>>,
-    bootstrap_identity: Option<BootstrapIdentity>,
     identities: Arc<[ConfiguredIdentity]>,
 ) -> Router {
     let state = Arc::new(ClientEdgeState {
@@ -417,16 +408,19 @@ pub fn router_with_bootstrap_identity(
         signer,
         claim_gate,
         wrap_receiver_secret,
-        settlement_terms,
-        settlements,
+        node: Arc::new(node),
         btp_session_window,
         session_registry: Arc::new(session_registry::SessionRegistry::new()),
         peers,
-        bootstrap_identity,
         identities,
     });
     Router::new()
-        .route("/ilp", post(handle_ilp))
+        // ADR 0050: `GET` on this connector's own URL is its
+        // self-description, `POST` on the same URL is still the packet
+        // endpoint. One address, two methods, and **never a `POST` for the
+        // document** (ND-03) -- a self-description endpoint that grows a
+        // write is purchasable peering through a side door (ADR 0043).
+        .route("/ilp", post(handle_ilp).get(self_description))
         .route("/ilp/btp", get(btp::handle_btp_upgrade))
         .route("/ilp/probe", post(handle_probe))
         .route("/ilp/identity", get(identity))
@@ -503,6 +497,126 @@ async fn identity(State(state): State<Arc<ClientEdgeState>>) -> Response {
     }
 }
 
+/// `GET /ilp` -- this connector's **self-description** (ADR 0050,
+/// `docs/protocol/self-description-spec.md`).
+///
+/// The facts a stranger needs to transact with this node, as one document,
+/// with no ILP packet, no encoder and no protocol knowledge required. A
+/// stranger who has this node's URL at all therefore has its description,
+/// with nothing further to discover -- which is why the address is this exact
+/// URL and not a sub-resource that would itself have to be found (ND-01).
+///
+/// **Free and unauthenticated** (ND-02): this is what ADR 0022 already means
+/// by *answering* -- it decides nothing, changes nothing, and reaches nobody
+/// who did not ask. **No caching contract and no TTL** (ND-04): the answer is
+/// projected from live state on each request. A `ttl_secs` existed because a
+/// *pushed* copy needed a shelf life; a pulled one does not.
+///
+/// **There is no `POST` here, and there never will be** (ND-03). This
+/// endpoint publishes what an operator needs to configure a peering out of
+/// band; a peering is created by an operator in the config file or through the
+/// operator surface and by nothing else (ADR 0043, ADR 0006). `POST /ilp` is
+/// the packet endpoint and is untouched.
+///
+/// # What is in it, and where each fact comes from
+///
+/// * addresses and public endpoints -- `[node]`, because a container sees
+///   `0.0.0.0:4000` and can never learn its own public name;
+/// * the peer carriages this node exposes -- `peer_expose`. **Which**
+///   carriages exist, never **who** rides them (ND-09);
+/// * the **edge identity**, read from the signer on every request. ND-06
+///   makes this mandatory: a sender that cannot seal to a route's terminating
+///   connector can never have a packet delivered there (ADR 0018);
+/// * per chain, the channel-opening facts -- from the settlement backends,
+///   each of which verified them against a live chain before this node agreed
+///   to boot. Never separately declared (ND-07);
+/// * route prices, from the same `client_route` lookup the greeting and the
+///   claim gate charge from, so a buyer who reads this and one who is billed
+///   see one number;
+/// * `requiredTransport`, when the routes covering this node's own addresses
+///   agree on one;
+/// * the client-edge versions served (issue #1054).
+///
+/// # Rate limiting
+///
+/// Through the shaper that already guards unresolvable chain lookups
+/// ([`UnresolvableLookupBudget`]) rather than a mechanism of its own, per
+/// ADR 0050. One consequence is worth stating rather than discovering: the
+/// node-wide bucket is **shared** with channel resolution, so a flood of
+/// description requests shapes chain lookups too and vice versa. That is the
+/// point of reusing it -- one bucket is one thing to size -- and the shaper
+/// *waits* rather than dropping, so a flood costs latency, never
+/// availability. A request whose slot is further out than the policy's
+/// `max_wait` is answered `429` rather than held.
+///
+/// The shaper's per-signer axis wants an identity and a `GET` has none: this
+/// declares [`SELF_DESCRIPTION_REQUESTER`], so every description request
+/// shares one per-signer bucket. That axis binds only once the node-wide
+/// bucket is in arrears, so an uncontended node never refuses anyone.
+async fn self_description(State(state): State<Arc<ClientEdgeState>>) -> Response {
+    if let Err(exhausted) = state
+        .claim_gate
+        .lookup_budget()
+        .reserve(SELF_DESCRIPTION_REQUESTER)
+        .await
+    {
+        return (StatusCode::TOO_MANY_REQUESTS, exhausted.to_string()).into_response();
+    }
+
+    let edge_identity = state
+        .signer
+        .public_key()
+        .ok()
+        .map(|public_key| EdgeIdentity {
+            key_id: state.signer.key_id(),
+            public_key: format!("0x{}", hex_encode(&public_key)),
+        });
+
+    // Read from the live route table, not from a snapshot taken at boot: a
+    // runtime route written through the operator surface has to show up in the
+    // next answer, which is what ND-04's "generated from live configuration"
+    // means in a node whose route table is not configuration alone.
+    let routes = state
+        .connector
+        .client_route_prices()
+        .into_iter()
+        .map(|route| RoutePrice {
+            prefix: route.prefix,
+            price: route.price.to_string(),
+        })
+        .collect();
+
+    // Only the routes covering this node's OWN addresses are consulted, which
+    // is the rule the retired announce used and the one the field means: a
+    // per-node scalar can only honestly describe the routes the node is
+    // addressed by.
+    let required_transport = agreed_required_transport(
+        state
+            .node
+            .ilp_addresses
+            .iter()
+            .filter_map(|address| state.connector.client_route(address))
+            .map(|route| route.transport_policy.name()),
+    );
+
+    Json(NodeSelfDescription::describe(
+        &state.node,
+        edge_identity,
+        routes,
+        required_transport,
+    ))
+    .into_response()
+}
+
+/// What a self-description request is budgeted against on the shaper's
+/// per-signer axis.
+///
+/// A `GET` carries no claim and so no declared signer. A constant puts every
+/// description request in one bucket, which is the honest shape: they are one
+/// kind of traffic, not one caller each. It cannot collide with a real
+/// signer's key -- those are hex, this is not.
+const SELF_DESCRIPTION_REQUESTER: &str = "self-description";
+
 #[derive(Deserialize)]
 struct RoutePriceQuery {
     destination: String,
@@ -560,26 +674,6 @@ pub use connector_domain::x402::{
     X402Resource, X402SettlementTerms, X402SolanaSettlementTerms, X402_VERSION,
 };
 
-/// This node's own ILP address(es) and BTP endpoint (issue #807): the
-/// facts a client needs to bootstrap against this edge directly when it
-/// has no other way to learn them -- a stale or missing genesis peer seed,
-/// the exact gap
-/// [toon#155](https://github.com/toon-protocol/toon/issues/155) republished
-/// its way out of for one seed rotation but not for the general case.
-/// Sourced from `[announce]`, the config section that already holds
-/// exactly these facts for `connector announce` (issue #784) -- never
-/// derived, for the same reason `AnnounceConfig::btp_endpoint` documents:
-/// a node behind TLS termination cannot introspect its own public name.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BootstrapIdentity {
-    /// Every ILP address this node answers to, primary first -- mirrors
-    /// `AnnounceConfig::addresses`.
-    pub ilp_addresses: Vec<String>,
-    /// Where clients pay this node over BTP -- mirrors
-    /// `AnnounceConfig::btp_endpoint`.
-    pub btp_endpoint: String,
-}
-
 /// Answer an unpaid request to `destination` with terms instead of doing
 /// the work (client-edge-spec.md §1.4, ADR 0022) -- this changes no state
 /// and is only ever a reply to the request that asked. Two shapes of
@@ -593,27 +687,11 @@ pub struct BootstrapIdentity {
 /// same way regardless of whether `destination` matches anything this node
 /// prices. The terms are byte-identical either way -- nothing in this
 /// shape names a route kind, and a client cannot tell, and has no reason
-/// to care, which case it hit. `settlement` is the node's legacy
-/// EVM-shaped channel-opening facts (issue #617), `settlements` is the
-/// additive per-chain list (issue #632); both are included exactly when
-/// the node has the relevant backend(s). `bootstrap_identity` is this
-/// node's own address(es)/BTP endpoint (issue #807), included exactly when
-/// `[announce]` configures them.
-fn payment_required(
-    destination: &str,
-    price: u64,
-    settlement: Option<&X402SettlementTerms>,
-    settlements: &[X402ChainSettlementTerms],
-    bootstrap_identity: Option<&BootstrapIdentity>,
-) -> Response {
-    x402_response(
-        destination,
-        price,
-        settlement,
-        settlements,
-        bootstrap_identity,
-        None,
-    )
+/// to care, which case it hit. `node` is this node's own facts -- the same
+/// value `GET /ilp` serves as its self-description, projected into `extra`
+/// rather than assembled a second time (ND-11).
+fn payment_required(destination: &str, price: u64, node: &NodeFacts) -> Response {
+    x402_response(destination, price, node, None)
 }
 
 /// Answer a request to `destination` that arrived over a transport its
@@ -630,36 +708,18 @@ fn wrong_transport_required(
     destination: &str,
     price: u64,
     required: TransportPolicy,
-    settlement: Option<&X402SettlementTerms>,
-    settlements: &[X402ChainSettlementTerms],
-    bootstrap_identity: Option<&BootstrapIdentity>,
+    node: &NodeFacts,
 ) -> Response {
-    x402_response(
-        destination,
-        price,
-        settlement,
-        settlements,
-        bootstrap_identity,
-        Some(required.name()),
-    )
+    x402_response(destination, price, node, Some(required.name()))
 }
 
 fn x402_response(
     destination: &str,
     price: u64,
-    settlement: Option<&X402SettlementTerms>,
-    settlements: &[X402ChainSettlementTerms],
-    bootstrap_identity: Option<&BootstrapIdentity>,
+    node: &NodeFacts,
     required_transport: Option<&str>,
 ) -> Response {
-    let body = x402_terms_body(
-        destination,
-        price,
-        settlement,
-        settlements,
-        bootstrap_identity,
-        required_transport,
-    );
+    let body = x402_terms_body(destination, price, node, required_transport);
     let header_value = BASE64.encode(&body);
     Response::builder()
         .status(StatusCode::PAYMENT_REQUIRED)
@@ -685,20 +745,13 @@ fn x402_response(
 fn x402_terms_body(
     destination: &str,
     price: u64,
-    settlement: Option<&X402SettlementTerms>,
-    settlements: &[X402ChainSettlementTerms],
-    bootstrap_identity: Option<&BootstrapIdentity>,
+    node: &NodeFacts,
     required_transport: Option<&str>,
 ) -> Vec<u8> {
     connector_domain::x402::terms_body(&connector_domain::x402::GreetingTerms {
         destination,
         price,
-        settlement,
-        settlements,
-        ilp_addresses: bootstrap_identity
-            .map(|identity| identity.ilp_addresses.as_slice())
-            .unwrap_or(&[]),
-        btp_endpoint: bootstrap_identity.map(|identity| identity.btp_endpoint.as_str()),
+        node: Some(node),
         required_transport,
         session_lease_ttl_ms: crate::session_registry::SESSION_LEASE_BACKSTOP_TTL.as_millis()
             as u64,
@@ -1125,25 +1178,12 @@ async fn handle_ilp(
     // -- and a forwarded route reports `Both`, so this never fires for one.
     if let Some(policy) = client_route.map(|route| route.transport_policy) {
         if !policy.accepts_http() {
-            return wrong_transport_required(
-                &prepare.destination,
-                price,
-                policy,
-                state.settlement_terms.as_ref(),
-                &state.settlements,
-                state.bootstrap_identity.as_ref(),
-            );
+            return wrong_transport_required(&prepare.destination, price, policy, &state.node);
         }
     }
 
     if !has_claim_header && (price > 0 || !condition_present) {
-        return payment_required(
-            &prepare.destination,
-            price,
-            state.settlement_terms.as_ref(),
-            &state.settlements,
-            state.bootstrap_identity.as_ref(),
-        );
+        return payment_required(&prepare.destination, price, &state.node);
     }
 
     // ADR 0028: refused *before* the claim is ingested, so a packet this
@@ -2303,8 +2343,10 @@ mod tests {
             test_signer(),
             None,
             test_gate(ClientChannelRegistry::new()),
-            Some(terms.clone()),
-            vec![X402ChainSettlementTerms::Evm(terms.clone())],
+            NodeFacts {
+                settlements: vec![X402ChainSettlementTerms::Evm(terms.clone())],
+                ..Default::default()
+            },
         );
 
         let request = Request::builder()
@@ -2369,11 +2411,13 @@ mod tests {
             test_signer(),
             None,
             test_gate(ClientChannelRegistry::new()),
-            Some(evm_terms.clone()),
-            vec![
-                X402ChainSettlementTerms::Evm(evm_terms.clone()),
-                X402ChainSettlementTerms::Solana(solana_terms.clone()),
-            ],
+            NodeFacts {
+                settlements: vec![
+                    X402ChainSettlementTerms::Evm(evm_terms.clone()),
+                    X402ChainSettlementTerms::Solana(solana_terms.clone()),
+                ],
+                ..Default::default()
+            },
         );
 
         let request = Request::builder()
@@ -2631,16 +2675,123 @@ mod tests {
         );
     }
 
-    /// Issue #807's second half: the greeting carries this node's own
-    /// ILP address(es) and BTP endpoint -- the same facts a kind:10032
-    /// announce carries as `ilpAddresses`/`btpEndpoint` -- when
-    /// [`BootstrapIdentity`] is configured, so a client whose genesis peer
-    /// seed is stale or missing can bootstrap from the answer alone. Unlike
-    /// the legacy `extra.ilpAddress`, which echoes back whatever
-    /// `destination` the probing PREPARE named, these are the node's own
-    /// authoritative facts regardless of what was probed.
+    // ── `GET /ilp`: the node self-description (ADR 0050, issue #1080) ─────
+
+    /// A router whose node facts are fully populated, over one priced route --
+    /// the shape every assertion below reads a document out of.
+    fn described_node() -> Router {
+        let route = StaticRoute::new_priced_with_transport(
+            "g.example.app",
+            "http://localhost:4000",
+            100,
+            TransportPolicy::Btp,
+        )
+        .unwrap();
+        let connector = Arc::new(Connector::new(
+            vec![route],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        router_with_node_facts(
+            connector,
+            test_signer(),
+            None,
+            Arc::new(test_gate(ClientChannelRegistry::new())),
+            NodeFacts {
+                ilp_addresses: vec!["g.example.app".to_string()],
+                http_endpoint: Some("https://node.example/ilp".to_string()),
+                btp_endpoint: Some("wss://node.example/ilp/btp".to_string()),
+                peer_carriages: vec!["btp".to_string()],
+                settlements: vec![X402ChainSettlementTerms::Evm(X402SettlementTerms {
+                    chain: "evm:84532".to_string(),
+                    settlement_address: "0xf29fd62c4848b9573c9b90adbf61b664f386d9cf".to_string(),
+                    token_network_registry: "0xcc9079ade929b168b54145f6d25262b64fab9d5b"
+                        .to_string(),
+                    token_network: "0x1e95493fef46707e034b4a1945f25a8c76a1823d".to_string(),
+                    token_address: "0x49bee1bca5d15fb0963117923403f9498119a9ce".to_string(),
+                    decimals: 6,
+                })],
+            },
+            DEFAULT_BTP_SESSION_WINDOW,
+            None,
+            Arc::from([]),
+        )
+    }
+
+    async fn self_description_of(app: Router) -> serde_json::Value {
+        let request = Request::builder()
+            .method("GET")
+            .uri("/ilp")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "GET /ilp is free and unauthenticated (ND-02)"
+        );
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        serde_json::from_slice(&bytes).expect("a JSON self-description")
+    }
+
+    /// ND-01/ND-05: a `GET` on this connector's own URL answers the facts a
+    /// stranger needs to transact with it -- no ILP packet, no encoder, no
+    /// protocol knowledge -- and every one of them is true of THIS node.
     #[tokio::test]
-    async fn the_greeting_carries_this_nodes_own_bootstrap_identity_when_configured() {
+    async fn a_get_on_the_connectors_own_url_returns_its_self_description() {
+        let document = self_description_of(described_node()).await;
+
+        assert_eq!(
+            document["ilpAddresses"],
+            serde_json::json!(["g.example.app"])
+        );
+        assert_eq!(
+            document["httpEndpoint"],
+            serde_json::json!("https://node.example/ilp")
+        );
+        assert_eq!(
+            document["btpEndpoint"],
+            serde_json::json!("wss://node.example/ilp/btp")
+        );
+        assert_eq!(document["peerCarriages"], serde_json::json!(["btp"]));
+        assert_eq!(
+            document["settlements"][0]["chain"],
+            serde_json::json!("evm:84532")
+        );
+        assert_eq!(
+            document["settlements"][0]["tokenNetworkRegistry"],
+            serde_json::json!("0xcc9079ade929b168b54145f6d25262b64fab9d5b"),
+            "the channel-opening facts come from the settlement backend that verified them \
+             against a chain at startup, never a second declaration (ND-07)"
+        );
+        assert_eq!(
+            document["routes"],
+            serde_json::json!([{ "prefix": "g.example.app", "price": "100" }])
+        );
+        assert_eq!(
+            document["requiredTransport"],
+            serde_json::json!("btp"),
+            "the route covering this node's own address is pinned to BTP, so the document says \
+             so -- the defect ADR 0050 closes by construction"
+        );
+        assert_eq!(document["supportedVersions"], serde_json::json!([1]));
+        assert_eq!(document["defaultVersion"], serde_json::json!(1));
+    }
+
+    /// ND-06: the edge identity -- the key a packet's payload is sealed to
+    /// (ADR 0018) -- must be published, because a route whose terminating
+    /// identity is unpublished cannot be delivered to at all. It is the same
+    /// key `GET /ilp/identity` has always answered with; what changes is that
+    /// it now rides the ONE document a stranger reads.
+    #[tokio::test]
+    async fn the_self_description_publishes_the_key_a_packet_is_sealed_to() {
+        let signer = test_signer();
+        let expected = format!(
+            "0x{}",
+            hex_encode(&signer.public_key().expect("public key"))
+        );
         let connector = Arc::new(Connector::new(
             vec![],
             vec![],
@@ -2648,19 +2799,251 @@ mod tests {
             Arc::new(InProcessPeerTransport::new()),
             test_clock(),
         ));
-        let app = router_with_bootstrap_identity(
+        let app = router_with_node_facts(
+            connector,
+            signer.clone(),
+            None,
+            Arc::new(test_gate(ClientChannelRegistry::new())),
+            NodeFacts::default(),
+            DEFAULT_BTP_SESSION_WINDOW,
+            None,
+            Arc::from([]),
+        );
+
+        let document = self_description_of(app).await;
+
+        assert_eq!(
+            document["edgeIdentity"]["publicKey"],
+            serde_json::json!(expected)
+        );
+        assert_eq!(
+            document["edgeIdentity"]["keyId"],
+            serde_json::json!(signer.key_id())
+        );
+    }
+
+    /// ND-08/ND-09, asserted on the bytes a client actually receives: nothing
+    /// about software BEHIND this connector, and nothing about who it peers
+    /// with or how far it trusts them. A `relayUrl` was the last place ADR
+    /// 0046's removed relay assumption survived; a cap is discovered by being
+    /// refused (ND-10), never by being published.
+    #[tokio::test]
+    async fn the_self_description_carries_no_relay_no_peer_and_no_cap() {
+        let peer_route = PeerRoute::new_priced("g.peer.somewhere", "a-counterparty", 7);
+        let connector = Connector::new(
+            vec![],
+            vec![peer_route],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        )
+        .with_peer_packet_caps([("a-counterparty".to_string(), 9_999u64)]);
+        let app = router_with_node_facts(
+            Arc::new(connector),
+            test_signer(),
+            None,
+            Arc::new(test_gate(ClientChannelRegistry::new())),
+            NodeFacts::default(),
+            DEFAULT_BTP_SESSION_WINDOW,
+            None,
+            Arc::from([]),
+        );
+
+        let document = self_description_of(app).await;
+        let rendered = serde_json::to_string(&document).unwrap();
+
+        assert!(
+            !rendered.contains("a-counterparty"),
+            "a forwarded route's price may be published; WHO carries it may not (ND-09): {rendered}"
+        );
+        assert!(
+            !rendered.contains("9999"),
+            "a cap is discovered by its T04 refusal, never by being published (ND-10): {rendered}"
+        );
+        for forbidden in ["relay", "ttl", "notice"] {
+            assert!(
+                !rendered.to_lowercase().contains(forbidden),
+                "the document must not carry '{forbidden}': {rendered}"
+            );
+        }
+        assert_eq!(
+            document["routes"],
+            serde_json::json!([{ "prefix": "g.peer.somewhere", "price": "7" }]),
+            "the forwarded route's own price is a fact about what THIS node charges, and is \
+             answered at GET /ilp/routes/price already"
+        );
+    }
+
+    /// ND-03, and the one prohibition ADR 0050 states rather than implies: the
+    /// document endpoint never accepts a write. `POST /ilp` is unchanged --
+    /// it is the packet endpoint -- so this asserts the shape of that
+    /// unchanged-ness rather than a 405: a POST is still an ILP exchange,
+    /// answered with terms, and never a request for peering.
+    #[tokio::test]
+    async fn a_post_to_the_same_url_is_still_the_packet_endpoint_and_never_a_write() {
+        let app = described_node();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(zero_condition_prepare("g.example.app").encode()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::PAYMENT_REQUIRED,
+            "POST /ilp answers an unpaid request with terms, exactly as it did before GET was \
+             mounted beside it"
+        );
+    }
+
+    /// ND-04: no caching contract and no TTL -- the answer is projected from
+    /// live state on each request. Asserted by changing the live state and
+    /// asking again: a route leased in between shows up without a restart,
+    /// which no cached or boot-time snapshot could do.
+    #[tokio::test]
+    async fn the_self_description_is_generated_from_live_state_on_each_request() {
+        let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+        let connector = Arc::new(Connector::new(
+            vec![route],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let facts = NodeFacts::default();
+        let first = self_description_of(router_with_node_facts(
+            connector.clone(),
+            test_signer(),
+            None,
+            Arc::new(test_gate(ClientChannelRegistry::new())),
+            facts.clone(),
+            DEFAULT_BTP_SESSION_WINDOW,
+            None,
+            Arc::from([]),
+        ))
+        .await;
+        assert_eq!(
+            first["routes"],
+            serde_json::json!([{ "prefix": "g.example.app", "price": "100" }])
+        );
+
+        connector
+            .upsert_runtime_peer("later", 0)
+            .expect("add a runtime peer");
+        connector
+            .upsert_runtime_peer_route("g.later", "later", 42)
+            .expect("add a runtime route");
+
+        let second = self_description_of(router_with_node_facts(
             connector,
             test_signer(),
             None,
             Arc::new(test_gate(ClientChannelRegistry::new())),
-            None,
-            Vec::new(),
+            facts,
             DEFAULT_BTP_SESSION_WINDOW,
             None,
-            Some(BootstrapIdentity {
+            Arc::from([]),
+        ))
+        .await;
+
+        assert_eq!(
+            second["routes"],
+            serde_json::json!([
+                { "prefix": "g.example.app", "price": "100" },
+                { "prefix": "g.later", "price": "42" },
+            ]),
+            "a route written after boot is in the next answer: nothing here is snapshotted"
+        );
+    }
+
+    /// ND-11: the greeting is a PROJECTION of the same source, so the two
+    /// cannot disagree. Read both surfaces off one router and compare the node
+    /// facts field by field -- which is the whole property, since the failure
+    /// this replaces was two descriptions of one node drifting apart.
+    #[tokio::test]
+    async fn the_greeting_projects_the_same_node_facts_the_document_publishes() {
+        let document = self_description_of(described_node()).await;
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(zero_condition_prepare("g.example.app").encode()))
+            .unwrap();
+        let response = described_node().oneshot(request).await.unwrap();
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let greeting: X402PaymentRequired = serde_json::from_slice(&bytes).unwrap();
+        let extra = &greeting.accepts[0].extra;
+
+        assert_eq!(
+            serde_json::to_value(&extra.ilp_addresses).unwrap(),
+            document["ilpAddresses"]
+        );
+        assert_eq!(
+            serde_json::to_value(&extra.btp_endpoint).unwrap(),
+            document["btpEndpoint"]
+        );
+        assert_eq!(
+            serde_json::to_value(&extra.settlements).unwrap(),
+            document["settlements"]
+        );
+        assert_eq!(
+            serde_json::to_value(extra.settlement.as_ref()).unwrap(),
+            document["settlements"][0],
+            "the greeting's legacy one-chain object is the list's own EVM entry, derived rather \
+             than carried beside it"
+        );
+    }
+
+    /// ND-12: the greeting keeps its own job. Fields that exist only to serve
+    /// an in-flight transaction stay there and are NOT promoted into the node
+    /// description -- `payTo`, the route's price and the session lease TTL are
+    /// terms for one specific priced route, in band, to a client that just
+    /// tried to use it.
+    #[tokio::test]
+    async fn the_documents_projection_does_not_swallow_the_greetings_own_terms() {
+        let document = self_description_of(described_node()).await;
+
+        for in_flight in ["payTo", "maxTimeoutSeconds", "sessionLeaseTtlMs"] {
+            assert!(
+                !serde_json::to_string(&document)
+                    .unwrap()
+                    .contains(in_flight),
+                "'{in_flight}' serves one transaction and belongs to the greeting alone"
+            );
+        }
+    }
+
+    /// Issue #807's second half, now ADR 0050's ND-11: the greeting carries
+    /// this node's own ILP address(es) and BTP endpoint when `[node]`
+    /// configures them, so a client whose genesis peer seed is stale or
+    /// missing can bootstrap from the answer alone. Unlike the legacy
+    /// `extra.ilpAddress`, which echoes back whatever `destination` the
+    /// probing PREPARE named, these are the node's own authoritative facts
+    /// regardless of what was probed -- and they are read off the very value
+    /// `GET /ilp` serves, never assembled beside it.
+    #[tokio::test]
+    async fn the_greeting_carries_this_nodes_own_facts_when_configured() {
+        let connector = Arc::new(Connector::new(
+            vec![],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router_with_node_facts(
+            connector,
+            test_signer(),
+            None,
+            Arc::new(test_gate(ClientChannelRegistry::new())),
+            NodeFacts {
                 ilp_addresses: vec!["g.toon.apex".to_string(), "g.toon.apex.alt".to_string()],
-                btp_endpoint: "wss://apex.example/ilp/btp".to_string(),
-            }),
+                btp_endpoint: Some("wss://apex.example/ilp/btp".to_string()),
+                ..Default::default()
+            },
+            DEFAULT_BTP_SESSION_WINDOW,
+            None,
             Arc::from([]),
         );
 
@@ -2687,13 +3070,13 @@ mod tests {
         assert_eq!(terms.accepts[0].extra.ilp_address, "g.whatever");
     }
 
-    /// The absence half of the test above: a node with no `[announce]`
-    /// section configured (`BootstrapIdentity: None`, [`router`]'s default)
-    /// keeps the pre-#807 shape exactly -- no `ilpAddresses`/`btpEndpoint`
-    /// key at all, not empty/null ones, so a parser written before this
-    /// field existed is unaffected.
+    /// The absence half of the test above: a node with no `[node]` section
+    /// configured ([`NodeFacts::default()`], [`router`]'s default) keeps the
+    /// pre-#807 shape exactly -- no `ilpAddresses`/`btpEndpoint` key at all,
+    /// not empty/null ones, so a parser written before those fields existed
+    /// is unaffected.
     #[tokio::test]
-    async fn the_greeting_omits_bootstrap_identity_when_not_configured() {
+    async fn the_greeting_omits_this_nodes_own_facts_when_not_configured() {
         let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
         let connector = Arc::new(Connector::new(
             vec![route],
@@ -4849,12 +5232,10 @@ mod tests {
                 signer: test_signer(),
                 claim_gate: claim_gate.into(),
                 wrap_receiver_secret: Some([2u8; 32]),
-                settlement_terms: None,
-                settlements: Vec::new(),
+                node: Arc::new(NodeFacts::default()),
                 btp_session_window: DEFAULT_BTP_SESSION_WINDOW,
                 session_registry: Arc::new(session_registry::SessionRegistry::new()),
                 peers: None,
-                bootstrap_identity: None,
                 identities: Arc::from([]),
             }
         }

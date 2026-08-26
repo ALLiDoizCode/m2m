@@ -671,9 +671,7 @@ async fn handle_frame(
             let terms = x402_terms_body(
                 &prepare.destination,
                 price,
-                state.settlement_terms.as_ref(),
-                &state.settlements,
-                state.bootstrap_identity.as_ref(),
+                &state.node,
                 Some(policy.name()),
             );
             let reject = Reject {
@@ -709,14 +707,7 @@ async fn handle_frame(
     // exactly as on HTTP -- unless the PREPARE itself carries no execution
     // condition (issue #807), the same broadening `handle_ilp` applies.
     if claim_json.is_none() && (price > 0 || !condition_present) {
-        let terms = x402_terms_body(
-            &prepare.destination,
-            price,
-            state.settlement_terms.as_ref(),
-            &state.settlements,
-            state.bootstrap_identity.as_ref(),
-            None,
-        );
+        let terms = x402_terms_body(&prepare.destination, price, &state.node, None);
         let reject = Reject {
             code: RejectCode::f06_unexpected_payment(),
             triggered_by: String::new(),
@@ -1137,12 +1128,10 @@ mod tests {
             signer: Arc::new(LocalSigner::generate("session-signer")),
             claim_gate: claim_gate.into(),
             wrap_receiver_secret: None,
-            settlement_terms: None,
-            settlements: Vec::new(),
+            node: Arc::new(connector_domain::NodeFacts::default()),
             btp_session_window: crate::DEFAULT_BTP_SESSION_WINDOW,
             session_registry: Arc::new(crate::session_registry::SessionRegistry::new()),
             peers: None,
-            bootstrap_identity: None,
             identities: Arc::from([]),
         }
     }

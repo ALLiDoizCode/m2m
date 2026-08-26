@@ -19,6 +19,13 @@
 //! anomaly rule engine. Those invariants are enforced elsewhere, by
 //! watermarks and signature verification on the packet plane.
 //!
+//! Also deliberately absent as of ADR 0046 (issue #1074): NIP-01 event
+//! signing. This crate held one function for it, `sign_ilp_peer_info`, and one
+//! event kind, `ILP_PEER_INFO_KIND` (10032) -- the connector's own announce.
+//! A connector answers when asked and never announces, so there is no event
+//! for it to author, and the BIP-340 Schnorr machinery that signed one is gone
+//! with it. `nip59` remains: wrapping a claim to a receiver is not announcing.
+//!
 //! ADR 0012 also named a treasury component (`Treasury`/`ChainClient`) that
 //! spends and reports a balance through a `Signer`. It never had a caller
 //! outside its own `#[cfg(test)]` module on any running node -- the real,
@@ -38,7 +45,6 @@ pub mod giftwrap;
 mod kms;
 mod local;
 pub mod nip59;
-pub mod nostr;
 mod signer;
 
 pub use address::{derive_evm_address, to_hex, Address};
@@ -56,7 +62,6 @@ pub use giftwrap::GiftWrapError;
 pub use kms::{InMemoryKmsBackend, KmsBackend, KmsSigner};
 pub use local::LocalSigner;
 pub use nip59::{unwrap_claim, wrap_claim, Nip59Error, WrappedClaim};
-pub use nostr::{sign_ilp_peer_info, NostrEvent, ILP_PEER_INFO_KIND};
 pub use signer::{verify, PublicKeyBytes, Signature, Signer};
 
 #[cfg(test)]

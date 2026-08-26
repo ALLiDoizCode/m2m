@@ -81,14 +81,30 @@ price = 0
     let mut child = spawn(config_file.path());
     let addr = wait_for_listen_addr(&mut child);
 
-    // GET isn't mounted (client-edge-spec.md only defines POST /ilp) --
-    // a 405 still proves a live axum router answered the request, which
-    // is all this test needs: the binary actually serves rather than
-    // exiting once its configuration is loaded.
+    // `GET /ilp` is this node's self-description (ADR 0050): free,
+    // unauthenticated, and the one request a stranger who has nothing but
+    // this URL can make. It answered `405` until issue #1080 -- a live
+    // router, but nothing to read -- and the shipped binary answering it with
+    // a real document is the end-to-end proof that the handler is mounted in
+    // the artefact, not merely in a unit test's router.
     let response = reqwest::get(format!("http://{addr}/ilp"))
         .await
         .expect("request the running connector");
-    assert_eq!(response.status(), reqwest::StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let document: serde_json::Value = response.json().await.expect("a JSON self-description");
+    assert_eq!(document["defaultVersion"], serde_json::json!(1));
+    assert!(
+        document["edgeIdentity"]["publicKey"]
+            .as_str()
+            .is_some_and(|key| key.starts_with("0x")),
+        "the edge identity is what a packet is sealed to (ADR 0018) and a route whose \
+         terminating identity is unpublished is unreachable (ND-06): {document}"
+    );
+    assert_eq!(
+        document["routes"][0]["prefix"],
+        serde_json::json!("g.example.app"),
+        "the configured route's price is published from the live route table: {document}"
+    );
 
     child.kill().expect("kill connector");
     child.wait().expect("wait for connector to exit");
@@ -852,4 +868,160 @@ endpoint = "wss://store.example/btp"
             && stderr.contains("docs/operators/btp-peer-transport-bringup.md"),
         "expected a named unbound-peering error pointing at the bring-up doc, got: {stderr}"
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// `[announce]` became `[node]`, and its announce-only keys are tombstones
+// (ADR 0050 / issue #1080, ADR 0046 / issue #1074)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Grouped together because they are one migration, and because the whole
+// point of ADR 0009's removed-key rule is that a stale committed file stops
+// the binary BY NAME rather than loading with a key silently dropped. The
+// devnet boxes bind-mount configs that lead this repo, so the message an
+// operator reads at 3am is the artifact these tests exist to pin.
+
+/// The section was RENAMED, not deleted -- two of its fields feed the packet
+/// path (the x402 greeting carries them so a client with a stale genesis seed
+/// can bootstrap, issue #807) -- so the error has to say `[node]`, not merely
+/// that `[announce]` is gone. An operator told only that something is removed
+/// has to go and find out what replaced it.
+#[test]
+fn exits_non_zero_when_a_stale_config_still_writes_the_announce_section() {
+    let key_file = write_raw_key_file();
+    let config_file = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+
+[announce]
+addresses = ["g.example.node"]
+http_endpoint = "https://node.example/ilp"
+btp_endpoint = "wss://node.example/ilp/btp"
+"#,
+        key_file.path().display()
+    ));
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[announce]") && stderr.contains("[node]"),
+        "the error must name BOTH the old heading and the new one -- this is a rename, and an \
+         operator reading it needs the replacement, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("ADR 0050"),
+        "and cite the record that made the decision, got: {stderr}"
+    );
+}
+
+/// The three surviving fields load under the new heading. The positive half:
+/// without it, "refuses `[announce]`" would also pass on a binary that
+/// refused everything.
+#[test]
+fn a_node_section_with_its_three_surviving_fields_serves() {
+    let key_file = write_raw_key_file();
+    let config_file = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+
+[node]
+addresses = ["g.example.node"]
+http_endpoint = "https://node.example/ilp"
+btp_endpoint = "wss://node.example/ilp/btp"
+"#,
+        key_file.path().display()
+    ));
+
+    let mut child = spawn(config_file.path());
+    let addr = wait_for_listen_addr(&mut child);
+    assert!(!addr.is_empty());
+    child.kill().expect("kill connector");
+    let _ = child.wait();
+}
+
+/// Every announce-only key, refused **by name** (ADR 0009). Driven as a table
+/// rather than fifteen tests because the property is identical for all of
+/// them, and a table is the only form in which "did we miss one?" is
+/// answerable by reading.
+///
+/// `relay_url` and `solana_chain_id` are the two worth naming individually.
+/// `relay_url` asserted that a Nostr relay for free reads sat behind this
+/// node -- an APPLICATION fact, and the last place ADR 0046's removed relay
+/// assumption survived (ND-08). `solana_chain_id` was a second declaration of
+/// a fact `[settlement.solana]` already held and had verified against a
+/// chain; it defaulted to `solana:devnet`, nothing compared the two, and a
+/// mainnet node therefore described itself as devnet (issue #981). Neither
+/// comes back.
+#[test]
+fn exits_non_zero_naming_each_announce_only_key_a_stale_config_still_sets() {
+    let removed: [(&str, &str); 15] = [
+        ("relay_url", r#"relay_url = "wss://relay.example""#),
+        ("publish_to", r#"publish_to = "g.toon.relay""#),
+        (
+            "publish_btp_url",
+            r#"publish_btp_url = "wss://relay.example/ilp/btp""#,
+        ),
+        (
+            "pay_channel",
+            r#"pay_channel = "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeadc0de""#,
+        ),
+        ("route_publish", r#"route_publish = "g.toon.relay""#),
+        ("route_store", r#"route_store = "g.toon.ario""#),
+        ("asset_code", r#"asset_code = "USDC""#),
+        ("asset_scale", "asset_scale = 6"),
+        ("solana_chain_id", r#"solana_chain_id = "solana:devnet""#),
+        ("ttl_secs", "ttl_secs = 600"),
+        (
+            "identity_key_file",
+            r#"identity_key_file = "/app/data/announce.key""#,
+        ),
+        ("notice_id", r#"notice_id = "2026-08-13-two-box-cutover""#),
+        ("notice_severity", r#"notice_severity = "info""#),
+        ("notice_summary", r#"notice_summary = "read the notes""#),
+        ("notice_url", r#"notice_url = "https://example.com/notice""#),
+    ];
+
+    for (name, line) in removed {
+        let key_file = write_raw_key_file();
+        let config_file = write_config(&format!(
+            r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{key}"
+
+[node]
+addresses = ["g.example.node"]
+http_endpoint = "https://node.example/ilp"
+btp_endpoint = "wss://node.example/ilp/btp"
+{line}
+"#,
+            key = key_file.path().display()
+        ));
+
+        let output = run(Some(config_file.path()));
+
+        assert!(
+            !output.status.success(),
+            "`{name}` was removed with the announce and must stop the binary, not load"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(name),
+            "the error must name `{name}` -- a removed key reported as merely an unknown field \
+             sends an operator reading a schema instead of a changelog, got: {stderr}"
+        );
+        assert!(
+            stderr.contains("ADR 0046") || stderr.contains("#1074"),
+            "and cite what removed it, got: {stderr}"
+        );
+    }
 }

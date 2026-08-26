@@ -109,18 +109,24 @@ intermediary can substitute.
 _Avoid_: discovery (for this — a connector answers, it does not discover)
 
 **Self-description**:
-The single document a connector's own URL resolves to: the facts a stranger needs to transact with
-it, in one place, with no packet and no protocol knowledge required. Its identity, where it can be
-reached, and per chain what a channel with it would be opened against. **Facts about this connector
-only** — never about what runs behind it — and it is read, never written to. It is what makes a URL
-a complete introduction, and so the whole of what one operator must give another to be peered with.
-_Avoid_: manifest, announcement, advertisement (nothing is pushed; it is answered)
+The one document a connector answers a `GET` on its own URL with: everything a stranger needs to
+transact with it, and everything in it true **of that connector** — a fact it either proved against a
+chain at startup or was configured with. Its addresses and public endpoints, the key a packet is
+sealed to, per chain what opening a channel takes, what its routes cost. Free, unauthenticated,
+generated from live configuration when asked, and never a place a write is accepted. It carries
+nothing about the software behind the connector, and nothing about who it peers with. Because it
+holds every public fact about a counterparty, it is the whole of what one operator must give another
+to be peered with.
+_Distinct from_: a **greeting**, which is terms for one priced route, in band, to a client that just
+tried to use it — and which is a projection of this, so the two cannot disagree.
+_Avoid_: manifest, announce, discovery document, node info
 
 **Greeting**:
 What a connector answers an unpaid request to a priced route with: that route's terms — what it
 costs and what is needed to pay it — instead of the work. This is what makes a connector that sells
 safe to be reachable at all, because the unpaid case gets a defined, useful, unpaid answer rather
-than free service.
+than free service. Its node facts are a projection of the **self-description**: one source, so a
+route's enforced behaviour can never run ahead of what is published about it.
 _Avoid_: 402, x402 (those name the carrier, not the thing)
 
 **Route termination**:

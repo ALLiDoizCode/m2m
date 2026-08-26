@@ -258,15 +258,16 @@ it is not. _The limit is law, the number is policy._
 Parsed **solely to be rejected by name**, per CF-35. Finding one of these identifiers in the tree is
 finding a tombstone, not a live mechanism.
 
-| key                                 | removed by                                                                                       |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `peer_wire_addr`                    | [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md) |
-| `ceiling`, `flush_interval_ms`      | [ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md)                        |
-| `[peer_sale]`                       | [ADR 0043](../adr/0043-purchasable-peering-is-removed.md)                                        |
-| `apex`, `[[children]]`              | [ADR 0009](../adr/0009-one-typed-config-file-no-environment-layer.md)'s update (#1057)           |
-| `claim_enforcement`                 | [ADR 0042](../adr/0042-a-packet-carries-its-claim.md) item 4 (#1062 decided, #1077 deleted)      |
-| a route's `fee`                     | [ADR 0061](../adr/0061-a-fee-attaches-to-a-peering-not-to-a-route.md) (#1159)                    |
-| the announce-only `[announce]` keys | [ADR 0046](../adr/0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md)         |
+| key                                     | removed by                                                                                                                                                                                                                            |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `peer_wire_addr`                        | [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md)                                                                                                                                      |
+| `ceiling`, `flush_interval_ms`          | [ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md)                                                                                                                                                             |
+| `[peer_sale]`                           | [ADR 0043](../adr/0043-purchasable-peering-is-removed.md)                                                                                                                                                                             |
+| `apex`, `[[children]]`                  | [ADR 0009](../adr/0009-one-typed-config-file-no-environment-layer.md)'s update (#1057)                                                                                                                                                |
+| `claim_enforcement`                     | [ADR 0042](../adr/0042-a-packet-carries-its-claim.md) item 4 (#1062 decided, #1077 deleted)                                                                                                                                           |
+| a peer's `credential`                   | [ADR 0060](../adr/0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md) (#1157) — a claim proves a peering, so there is no shared secret to write                                                                        |
+| a route's `fee`                         | [ADR 0061](../adr/0061-a-fee-attaches-to-a-peering-not-to-a-route.md) (#1159) — it moved to the `[[peers]]` row the route's `peer_id` names                                                                                           |
+| `[announce]` and its announce-only keys | [ADR 0046](../adr/0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md) (#1074); the section's three surviving fields are `[node]`, per [ADR 0050](../adr/0050-a-connectors-url-resolves-to-its-self-description.md) |
 
 ---
 
@@ -284,8 +285,9 @@ prose-normative **permanently**, not provisionally, and do not enter the debt le
 vectorable is the observable consequence of a configuration — a price answered, a `T04` refused — and
 that belongs to the documents where those are specified.
 
-**Not yet built**, and marked so rather than described in the present tense: `[node]` (§2.1) is
-[ADR 0050](../adr/0050-a-connectors-url-resolves-to-its-self-description.md)'s rename of `[announce]`
-(#1080); CF-33's load-time reconciliation is #1076; CF-20's runtime-settable cap is #1079; the
-`apex`/`[[children]]` tombstone is #1075. (`claim_enforcement`'s tombstone was #1077 and has
-landed.)
+**Not yet built**, and marked so rather than described in the present tense: CF-33's load-time
+reconciliation is #1076; CF-20's runtime-settable cap is #1079; the `apex`/`[[children]]` tombstone
+is #1075. (`claim_enforcement`'s tombstone was #1077 and has landed; `[node]` (§2.1) —
+[ADR 0050](../adr/0050-a-connectors-url-resolves-to-its-self-description.md)'s rename of
+`[announce]` — landed with #1080, and `[announce]` itself is now a tombstone refused by name
+alongside its keys.)

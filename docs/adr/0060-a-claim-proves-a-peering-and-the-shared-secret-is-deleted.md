@@ -215,9 +215,11 @@ connector for a verdict — `Verified`, `UnknownChannel` or `SignatureInvalid` �
 
 That is not merely an equivalent arrangement; it is the one `peer-carriage-spec.md` §1.3 requires.
 That section enumerates what MUST NOT enter the role decision, and a decision function holding
-verification keys is a decision function that can be tempted to verify.
+verification keys is a decision function that can be tempted to verify. Keeping `decide_role` over a
+channel id and a verdict is what makes §1.3 checkable by reading one signature.
 
 **The lesson for the next record: a falsifier must name a fact the decision forces, not a shape the
-author imagined the code would take.** A good one here would have named the retired symbol —
-`UnmetRequirement::ProvenCredential`, which the decision genuinely deletes — rather than a symbol
-the author guessed would appear.
+author imagined the code would take.** A good one for this record would have named the retired
+symbol — `UnmetRequirement::ProvenCredential`, which the decision genuinely deletes — rather than a
+symbol the author guessed would appear. The convention's own instruction says to pick a pattern the
+implementation cannot avoid; this one picked a pattern the implementation was right to avoid.

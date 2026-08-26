@@ -997,31 +997,29 @@ pub enum ConfigError {
     )]
     UnresolvableLookupWindowTooLong { window_secs: u64, max_secs: u64 },
 
-    // -- The `[announce]` section (issue #784) --
+    // -- The `[node]` section (ADR 0050, issue #1080) --
     //
-    // Every one of these refuses a value that would otherwise be
-    // BROADCAST to the whole network in a kind:10032 event. That is what
-    // makes them load errors rather than warnings: an announce is read by
-    // strangers, cached, and acted on, and the node that published it has
-    // no way to take it back before its NIP-40 expiry.
+    // Every one of these refuses a value this node would otherwise publish
+    // in its own self-description, which is read by strangers and acted on.
+    // That is what makes them load errors rather than warnings.
     #[error(
-        "[announce] names no addresses: an announce with no `addresses` describes no node at \
-         all. Set `addresses = [\"g.your.node\"]` (primary first) -- see \
-         docs/operators/announcing-a-node.md (issue #784)"
+        "[node] names no addresses: a section with no `addresses` describes no node at all. \
+         Set `addresses = [\"g.your.node\"]` (primary first) -- see \
+         docs/protocol/self-description-spec.md (ADR 0050, issue #1080)"
     )]
-    AnnounceNoAddresses,
+    NodeNoAddresses,
 
     #[error(
-        "[announce] {field} is not set: a node behind TLS termination cannot learn its own \
+        "[node] {field} is not set: a node behind TLS termination cannot learn its own \
          public name, so this is an operator fact and there is deliberately no default. The \
-         retired sidecar DID default it, and its compiled-in fallback still names a `/rust/ilp` \
-         path that answers 410 Gone on both devnet boxes -- a default here is how a node ends up \
-         broadcasting a dead URL to the network (issue #784)"
+         retired announcer sidecar DID default it, and its compiled-in fallback still names a \
+         `/rust/ilp` path that answers 410 Gone on both devnet boxes -- a default here is how a \
+         node ends up publishing a dead URL to whoever asks (ADR 0050)"
     )]
-    AnnounceMissingEndpoint { field: &'static str },
+    NodeMissingEndpoint { field: &'static str },
 
-    #[error("[announce] {field} '{value}' is not a URL: {source}")]
-    AnnounceInvalidUrl {
+    #[error("[node] {field} '{value}' is not a URL: {source}")]
+    NodeInvalidUrl {
         field: &'static str,
         value: String,
         #[source]
@@ -1029,51 +1027,59 @@ pub enum ConfigError {
     },
 
     #[error(
-        "[announce] {field} '{value}' has scheme '{scheme}', but this field must name one of: \
-         {allowed}. The three URLs an announce carries are different things and conflating any \
-         two is the bug: `http_endpoint`/`btp_endpoint` are where clients PAY this node, and \
-         `relay_url` is where they READ it for FREE over a Nostr WebSocket. An `http(s)://` \
-         `relay_url` in particular is the relay's PRIVATE write ingress -- announcing it \
-         publishes an unauthenticated write door to every client on the network (issue #784)"
+        "[node] {field} '{value}' has scheme '{scheme}', but this field must name one of: \
+         {allowed}. The two URLs a node publishes are where clients PAY it, over two different \
+         carriages: `http_endpoint` is ILP-over-HTTP (`https://`) and `btp_endpoint` is BTP \
+         (`wss://`). Conflating them publishes an address no client can reach (ADR 0050)"
     )]
-    AnnounceEndpointScheme {
+    NodeEndpointScheme {
         field: &'static str,
         value: String,
         scheme: String,
         allowed: String,
     },
 
+    /// A `[node]` (or a stale `[announce]`) key that died with the kind:10032
+    /// announce (ADR 0046, issue #1074).
+    ///
+    /// The removed-key trap [`ConfigError::PeerWireAddrRemoved`] and
+    /// [`ConfigError::PeerSaleRemoved`] already take, for the same reason: the
+    /// devnet boxes bind-mount configs that lead the repo copies, so a stale
+    /// file must stop the node **by name** rather than load with the key
+    /// silently dropped (ADR 0009).
+    ///
+    /// One variant covers all fifteen, because the fix is always the same --
+    /// delete the line. Nothing survives for any of them to be rewritten into:
+    /// what a node publishes about itself is now either one of `[node]`'s three
+    /// configured facts or derived from a settlement backend that proved it
+    /// against a chain.
     #[error(
-        "[announce] ttl_secs is 0: a NIP-40 `expiration` tag of `created_at + 0` is already \
-         expired when it is signed, so every relay honouring the tag drops the announce while \
-         this file reads as configured. Omit the field for the default, or set how many seconds \
-         the announce should stay live (issue #784)"
+        "'[node] {field}' was removed with the kind:10032 announce (ADR 0046, issue #1074): a \
+         connector answers when asked and never announces, so there is no event for this key to \
+         ride on. `[node]` keeps exactly three fields -- `addresses`, `http_endpoint` and \
+         `btp_endpoint` -- the facts a node cannot introspect about itself; everything else it \
+         publishes is derived from the settlement backends and the route table (ADR 0050). \
+         Delete the line. `relay_url` in particular described software BEHIND this connector, \
+         which a self-description never carries, and `solana_chain_id` was a second declaration \
+         of a fact `[settlement.solana]` already holds -- which is how a mainnet node came to \
+         describe itself as devnet (issue #981)"
     )]
-    AnnounceZeroTtl,
+    AnnounceKeyRemoved { field: &'static str },
 
+    /// The section itself, renamed rather than removed (ADR 0050).
+    ///
+    /// Two of `[announce]`'s fields feed the packet path -- they ride the x402
+    /// greeting so a client with a stale genesis seed can bootstrap -- so this
+    /// is a rename, not a deletion, and the error says so: an operator whose
+    /// file still writes the old heading needs the new one, not a eulogy.
     #[error(
-        "[announce] pay_channel '{value}' is not a 32-byte on-chain channel id: it must be 64 \
-         hex characters, optionally `0x`-prefixed. This is the channel this node PAYS an \
-         announce from as an ordinary client of the relay's connector -- not a \
-         [[client_channels]] row, which is a channel this node RECEIVES on (issue #784)"
+        "'[announce]' was renamed to '[node]' (ADR 0050, issue #1080): the section holds the \
+         facts a node cannot introspect about itself, and it is named for what they are rather \
+         than for a verb this connector no longer has (ADR 0046 removed the announce). Rename \
+         the heading and keep `addresses`, `http_endpoint` and `btp_endpoint`; every other key \
+         it used to carry is gone"
     )]
-    AnnounceInvalidPayChannel { value: String },
-
-    #[error("[announce] identity_key_file does not exist or is not a file: {0}")]
-    AnnounceIdentityKeyFileNotFound(PathBuf),
-
-    #[error(
-        "[announce] notice_id, notice_summary and notice_url must all be set together (or none \
-         at all) to configure an operator notice; notice_severity is optional and defaults to \
-         \"info\" (issue #912)"
-    )]
-    AnnounceNoticeIncomplete,
-
-    #[error(
-        "[announce] notice_severity must be \"info\" or \"action-required\", got \"{value}\" \
-         (issue #912)"
-    )]
-    AnnounceNoticeInvalidSeverity { value: String },
+    AnnounceSectionRenamed,
 
     /// The removed-section trap for purchasable peering (ADR 0043), the
     /// same shape [`ConfigError::PeerWireAddrRemoved`] and

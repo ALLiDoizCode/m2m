@@ -70,9 +70,10 @@
 # auto-redeploy without saying how to tell whether it is serving is the
 # omission this file exists to refuse.
 #
-# Today that discovers seven containers: `connector-rust`, `announce`, `relay`
-# and `swap-node` on the relay box, `connector-rust`, `announce` and `store`
-# on the store box.
+# Today that discovers five containers: `connector-rust`, `relay` and
+# `swap-node` on the relay box, `connector-rust` and `store` on the store box.
+# It was seven until issue #1074: each box also ran an `announce` loop
+# publisher, and ADR 0046 removed the announce outright.
 #
 # Two probe layers, because each catches what the other cannot:
 #
@@ -97,14 +98,8 @@
 #     so this is on-box only; there is no public swap health surface.
 #   * `relay` / `store` — these two DEFINE a container HEALTHCHECK, so Docker's
 #     own verdict is read instead of duplicating their probe here. The other
-#     three (`connector-rust`, `announce`, `swap-node`) define none, which is
-#     why they need explicit probes.
-#   * `announce` — a loop publisher with no port and no healthcheck: it
-#     publishes, prints a verdict line, sleeps 240s, repeats. The only honest
-#     "is it working" signal is that verdict line, so the probe greps the last
-#     15 minutes of its log for `[announce] OK` — three loop iterations' worth
-#     of chances, so one slow publish is not an alert. This is the same
-#     greppable verdict fleet-ops.yml's `announce` operation reads back.
+#     two (`connector-rust`, `swap-node`) define none, which is why they need
+#     explicit probes.
 #   * Public edges — `proxy.relay…/ilp/identity` and `proxy.ario…/ilp/identity`
 #     expect 200; `relay-ws…/` expects **426 Upgrade Required**, which is the
 #     honest liveness signal for a WebSocket-only endpoint (a 200 there would
@@ -459,17 +454,6 @@ jobs:
                   printf 'FAIL\t%s\tdocker healthcheck\tthis service used to define one and no longer does — probe is now blind\n' "$svc"
                 else
                   printf 'FAIL\t%s\tdocker healthcheck\t%s\n' "$svc" "$health"
-                fi
-                ;;
-              announce)
-                # A loop publisher: no port, no healthcheck. Its printed
-                # verdict line is the only honest signal. 15m covers ~3 of its
-                # 240s iterations, so one slow publish is not an alert.
-                if docker logs --since 15m "$n" 2>&1 | grep -q '\[announce\] OK'; then
-                  printf 'OK\t%s\t[announce] OK within 15m\tpublishing\n' "$svc"
-                else
-                  last=$(docker logs --tail 3 "$n" 2>&1 | tr '\n\t' '  ' | cut -c1-200)
-                  printf 'FAIL\t%s\t[announce] OK within 15m\tno success verdict in 15m; last: %s\n' "$svc" "$last"
                 fi
                 ;;
               *)

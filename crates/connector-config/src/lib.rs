@@ -15,11 +15,11 @@
 //! against and none to keep out of a `Debug` rendering. The key is parsed
 //! solely to be refused by name ([`ConfigError::PeerCredentialRemoved`]).
 
-mod announce;
 mod client_channel;
 mod config;
 mod error;
 mod identity;
+mod node;
 mod operator;
 mod pay_channel;
 mod peer;
@@ -28,11 +28,11 @@ mod route;
 mod secret;
 mod settlement;
 
-pub use announce::{AnnounceConfig, AnnounceNotice};
 pub use client_channel::{ClientChannelConfig, EvmClientChannelConfig, SolanaClientChannelConfig};
 pub use config::Config;
 pub use error::ConfigError;
 pub use identity::ClientIdentityConfig;
+pub use node::NodeConfig;
 pub use operator::OperatorConfig;
 pub use pay_channel::{EvmPayChannelConfig, PayChannelConfig, SolanaPayChannelConfig};
 pub use peer::{

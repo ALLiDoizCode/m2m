@@ -45,8 +45,8 @@
 # gates:
 #
 #   1. **Blast radius.** `connector-rust` is the client edge on BOTH boxes —
-#      every paid write on the devnet enters through it — and `announce` is
-#      the same image. A bad `swap:release` takes down one maker sidecar; a
+#      every paid write on the devnet enters through it. A bad
+#      `swap:release` takes down one maker sidecar; a
 #      bad `:rust-release` takes the whole devnet's money path dark on two
 #      machines at once. toon-meta#403's owner-accepted "a bad-but-green merge
 #      can reach production" trade-off was written about the opted-in
@@ -705,7 +705,7 @@ jobs:
             # prefix, no route, no peer, no price, no field name. The SHAPE of
             # the config -- which is what a schema change breaks -- is verbatim.
             mkdir -p "$WORK/data" "$WORK/state"
-            for k in signer settlement settlement-solana announce; do
+            for k in signer settlement settlement-solana; do
               openssl rand -hex 32 > "$WORK/data/$k.key"
             done
             chmod -R a+rX "$WORK"
@@ -771,7 +771,7 @@ jobs:
             echo "| Config applied by | ${{ inputs.config_applied_run }} |"
             echo "| Reason | ${{ inputs.reason }} |"
             echo ""
-            echo "Both boxes' label-scoped Watchtower recreates \`connector-rust\` and \`announce\` within ~60s."
+            echo "Both boxes' label-scoped Watchtower recreates \`connector-rust\` within ~60s."
             echo "The health job below probes them once they have had time to land."
             echo ""
             echo "To undo: re-dispatch with \`tag: ${{ steps.resolve.outputs.incumbent_sha }}\` (as a \`rust-sha-\` tag) and \`allow_rollback: true\`."
