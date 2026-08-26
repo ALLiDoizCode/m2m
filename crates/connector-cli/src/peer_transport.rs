@@ -221,8 +221,6 @@ key_file = "{key_file}"
 id = "{id}"
 endpoint = "{endpoint}"
 
-[peers.credential]
-secret = "a-real-peering-secret"
 
 [[peer_channels]]
 peer_id = "{id}"
@@ -326,8 +324,6 @@ token_network = "0x00000000000000000000000000000000000000bb"
 [[peers]]
 id = "dials-in"
 
-[peers.credential]
-secret = "a-real-peering-secret"
 
 [[peer_channels]]
 peer_id = "dials-in"

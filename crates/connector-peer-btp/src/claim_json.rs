@@ -233,14 +233,79 @@ pub fn protocol_data(json: &str) -> ProtocolData {
     }
 }
 
+/// More than one claim was presented on one frame or one request.
+///
+/// Refused, never resolved (§1.5). The connector MUST NOT pick the first,
+/// the last, or a concatenation: this is the smuggling defence, and its
+/// absence is how "which claim did we verify?" becomes unanswerable. The
+/// carriage maps it -- BTP: an ERROR frame (`code F00`, `name
+/// NotAcceptedError`); HTTP: `400` with no ILP body.
+///
+/// It is role-independent on purpose. An ambiguous claim is refused whether
+/// or not any of its candidates would have proven a peering, because
+/// deciding *which* to verify is the thing that cannot be done safely.
+/// Until ADR 0060 this rule guarded the `{peerId, secret}` credential; the
+/// defect it names is a property of duplicated authentication material
+/// rather than of the credential in particular, and the claim is now that
+/// material.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AmbiguousClaim {
+    /// How many were presented. Two or more, by construction.
+    pub presented: usize,
+}
+
+impl std::fmt::Display for AmbiguousClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "more than one claim presented on one interaction ({}): ambiguous claims are \
+             refused, not resolved (peer-carriage-spec.md §1.5)",
+            self.presented
+        )
+    }
+}
+
+impl std::error::Error for AmbiguousClaim {}
+
 /// The raw JSON of a frame's `payment-channel-claim` entry, if it carried
 /// one. A frame with no claim is legal on both carriages (§10.2 item 6),
 /// so `None` is an ordinary outcome and not a refusal.
+///
+/// **First-wins, and only safe behind [`present_from_protocol_data`].** A
+/// caller that reaches for this directly is answering "which claim did we
+/// verify?" with "whichever came first"; §1.5 requires the frame be refused
+/// instead. It stays public for the one caller that is genuinely only
+/// peeking -- the client edge's shared front door, deciding whether an
+/// arrival is peer handling's at all before the carriage that owns the rule
+/// applies it.
 pub fn from_protocol_data(protocol_data: &[ProtocolData]) -> Option<&[u8]> {
     protocol_data
         .iter()
         .find(|pd| pd.name == CLAIM_PROTOCOL)
         .map(|pd| pd.data.as_slice())
+}
+
+/// The claim a BTP frame presents, from every `payment-channel-claim` entry
+/// on it (§1.5).
+///
+/// Zero entries is `None` -- a frame that presents no claim is a client
+/// frame, which is an ordinary outcome and not an error. Two or more is
+/// [`AmbiguousClaim`], **counted before anything is parsed**, so a second
+/// undecodable entry cannot be quietly discarded to leave one unambiguous
+/// claim standing.
+pub fn present_from_protocol_data(
+    protocol_data: &[ProtocolData],
+) -> Result<Option<&[u8]>, AmbiguousClaim> {
+    let entries: Vec<&ProtocolData> = protocol_data
+        .iter()
+        .filter(|pd| pd.name == CLAIM_PROTOCOL)
+        .collect();
+    if entries.len() > 1 {
+        return Err(AmbiguousClaim {
+            presented: entries.len(),
+        });
+    }
+    Ok(entries.first().map(|pd| pd.data.as_slice()))
 }
 
 /// Parse a §4 claim into the in-process [`WireClaim`] the pipeline below

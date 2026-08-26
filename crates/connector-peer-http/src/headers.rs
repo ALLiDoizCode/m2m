@@ -11,7 +11,6 @@
 //! | claim | [`connector_peer_btp::claim_json`] -- the client edge's own claim validator (I4) |
 //! | claim ack | [`connector_peer_btp::ack`] -- the one `ClaimRejectReason` → JSON function (I3) |
 //! | `accumulatedCost` | [`connector_peer_btp::fields::accumulated_cost`] |
-//! | credential | [`connector_peer_auth::present_base64`] -- the same struct, the same JSON (§1.4) |
 //!
 //! Those functions take a `protocolData` entry, so this module builds one
 //! from the header value and hands it over. Doing it that way rather than
@@ -21,9 +20,15 @@
 //! header/entry *names* are never spelled here either -- they come from
 //! [`connector_btp::CARRIAGE_NAMES`]'s declared pairs.
 //!
-//! Base64 wraps the claim, the claim ack and the credential because base64
-//! is a header artifact and nothing else (§4). The value inside is the same
-//! JSON the BTP entry carries raw.
+//! Base64 wraps the claim and the claim ack because base64 is a header
+//! artifact and nothing else (§4). The value inside is the same JSON the BTP
+//! entry carries raw.
+//!
+//! There is no credential row, and there was one: `Toon-Peer-Auth` carried a
+//! `base64({peerId, secret})`. ADR 0060 deleted it. Nothing here reads that
+//! header, and a request still setting one is read exactly as one that does
+//! not -- ignored, never refused, so the two ends of a peering may be
+//! upgraded in either order.
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -143,9 +148,9 @@ impl PeerResponse {
         }
     }
 
-    /// A refusal with **no ILP body**: a malformed request, per §1.5 (an
-    /// ambiguous credential) and §6.2 (the statuses reserved for "there is
-    /// no ILP answer at all").
+    /// A refusal with **no ILP body**: §6.2's statuses, reserved for "there
+    /// is no ILP answer at all" -- an undecodable ILP packet, §1.5's
+    /// ambiguous claim, or §1.10's dedicated-listener `401`.
     #[must_use]
     pub fn refused(status: u16) -> Self {
         PeerResponse {
@@ -193,10 +198,15 @@ pub fn payment_required_header_value(terms: &[u8]) -> String {
 /// The claim JSON a request carries, if it carries one.
 ///
 /// A request with no claim is legal on both carriages (§10.2 item 6), so
-/// `None` is an ordinary outcome and not a refusal. Where more than one
-/// claim header is present the first is read, matching the BTP carriage's
-/// `find` over `protocolData` -- unlike the credential, a claim is judged on
-/// its own contents and cannot be smuggled past a check by a second copy.
+/// `None` is an ordinary outcome and not a refusal.
+///
+/// **First-wins, and only safe once §1.5's ambiguity check has run.** More
+/// than one claim header on one request is refused (`400`, no ILP body) by
+/// [`connector_peer_http::PeerHttpState::handle`] before this is reached,
+/// the twin of the BTP carriage's
+/// [`connector_peer_btp::claim_json::present_from_protocol_data`]; a caller
+/// reaching for this without that check answers "which claim did we
+/// verify?" with "whichever came first".
 ///
 /// **The privacy-wrapped carriage is not part of the peer carriage** (§4):
 /// `ILP-Payment-Channel-Claim-Wrapped` is not read here at all, and a

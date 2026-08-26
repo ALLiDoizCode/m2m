@@ -87,8 +87,8 @@ struct RawConfig {
     /// node.
     #[serde(default)]
     peer_allow_plaintext_endpoints: Option<bool>,
-    /// The peering relations this node has (issue #488; endpoint,
-    /// credential and per-relation terms, issue #677). What used to be a
+    /// The peering relations this node has (issue #488; endpoint and
+    /// per-relation terms, issue #677). What used to be a
     /// dialed `SocketAddr` is now an `endpoint` URL whose **scheme**
     /// selects the carriage -- `wss://` BTP, `https://` ILP-over-HTTP (ADR
     /// 0027) -- or no endpoint at all, for a peering that dials in.
@@ -813,11 +813,11 @@ impl Config {
         &self.peer_routes
     }
 
-    /// This node's peering relations. Every one is guaranteed to carry a
-    /// non-empty credential and at least one [`Config::peer_channels`] row
-    /// -- [`Config::load`] refuses to return a value where either is
-    /// missing, because a peering short of either can never take the peer
-    /// role (`peer-carriage-spec.md` §1.2).
+    /// This node's peering relations. Every one is guaranteed to carry at
+    /// least one [`Config::peer_channels`] row -- [`Config::load`] refuses
+    /// to return a value where one is missing, because a peering with no
+    /// channel bound can never take the peer role
+    /// (`peer-carriage-spec.md` §1.2, P2).
     pub fn peers(&self) -> &[PeerConfig] {
         &self.peers
     }
@@ -955,7 +955,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::peer::{PeerCarriage, PeerCredential, DEFAULT_MAX_PACKET_AMOUNT};
+    use crate::peer::{PeerCarriage, DEFAULT_MAX_PACKET_AMOUNT};
     use crate::route::TransportPolicy;
     use crate::settlement::SettlementChain;
     use std::io::Write;
@@ -1151,7 +1151,6 @@ key_file = "{key_file}"
 [[peers]]
 id = "store"
 endpoint = "wss://store.example:443/btp"
-credential = {{ secret = "shared-secret" }}
 fee = 3
 
 [[peer_channels]]
@@ -1204,8 +1203,8 @@ client_edge_url = "https://store.example/ilp"
 
     /// The whole surface round-trips from a real TOML file: the exposure
     /// set, the endpoint and the carriage its scheme selects, the
-    /// credential, the per-relation terms and their defaults, and the
-    /// channel binding that makes the peering a peering at all.
+    /// per-relation terms and their defaults, and the channel binding that
+    /// makes the peering a peering at all.
     #[test]
     fn loads_the_full_peer_and_peer_channels_shape() {
         let config = load_peering(|text| text).expect("load");
@@ -1222,8 +1221,6 @@ client_edge_url = "https://store.example/ilp"
             Some("wss://store.example/btp")
         );
         assert_eq!(peer.dial(), Some(PeerCarriage::Btp));
-        assert!(peer.credential().matches("shared-secret"));
-        assert!(!peer.credential().matches("wrong"));
         assert_eq!(peer.claim_ack_timeout_ms(), 30_000);
         assert_eq!(peer.peer_answer_timeout_ms(), 30_000);
         assert!(peer.can_originate());
@@ -1260,8 +1257,8 @@ client_edge_url = "https://store.example/ilp"
 
         let written = load_peering(|text| {
             text.replace(
-                "credential = { secret = \"shared-secret\" }",
-                "credential = { secret = \"shared-secret\" }\nmax_packet_amount = 250000",
+                "endpoint = \"wss://store.example:443/btp\"",
+                "endpoint = \"wss://store.example:443/btp\"\nmax_packet_amount = 250000",
             )
         })
         .expect("load");
@@ -1274,8 +1271,8 @@ client_edge_url = "https://store.example/ilp"
     fn rejects_a_max_packet_amount_of_zero() {
         let result = load_peering(|text| {
             text.replace(
-                "credential = { secret = \"shared-secret\" }",
-                "credential = { secret = \"shared-secret\" }\nmax_packet_amount = 0",
+                "endpoint = \"wss://store.example:443/btp\"",
+                "endpoint = \"wss://store.example:443/btp\"\nmax_packet_amount = 0",
             )
         });
 
@@ -1296,8 +1293,8 @@ client_edge_url = "https://store.example/ilp"
     fn rejects_a_negative_max_packet_amount() {
         let result = load_peering(|text| {
             text.replace(
-                "credential = { secret = \"shared-secret\" }",
-                "credential = { secret = \"shared-secret\" }\nmax_packet_amount = -1",
+                "endpoint = \"wss://store.example:443/btp\"",
+                "endpoint = \"wss://store.example:443/btp\"\nmax_packet_amount = -1",
             )
         });
 
@@ -1480,165 +1477,32 @@ client_edge_url = "https://store.example/ilp"
         assert!(message.contains("is a URL"), "got: {message}");
     }
 
-    /// §11 `PeerCredentialMissing`, both spellings: no credential at all,
-    /// and a credential whose secret is empty. The second is the sharper
-    /// one -- an empty secret matches nothing, so the peering would look
-    /// configured and admit its counterparty as an ordinary client.
+    /// ADR 0060: `credential` is a tombstone, refused by name from a real
+    /// TOML file -- every spelling of it, including the `secret_file` form
+    /// a deployed node used to write.
     #[test]
-    fn rejects_a_peer_with_no_credential() {
-        let result =
-            load_peering(|text| text.replace("credential = { secret = \"shared-secret\" }\n", ""));
+    fn rejects_a_peer_that_still_writes_a_credential() {
+        for written in [
+            "credential = { secret = \"shared-secret\" }",
+            "credential = { secret_file = \"/app/data/store-peer.secret\" }",
+            "credential = {}",
+        ] {
+            let result = load_peering(|text| {
+                text.replace(
+                    "endpoint = \"wss://store.example:443/btp\"",
+                    &format!("endpoint = \"wss://store.example:443/btp\"\n{written}"),
+                )
+            });
 
-        let message = expect_error(
-            result,
-            |error| matches!(error, ConfigError::PeerCredentialMissing { id } if id == "store"),
-        );
-        assert!(
-            message.contains("empty secret matches nothing") && message.contains(BRINGUP_DOC),
-            "got: {message}"
-        );
-    }
-
-    #[test]
-    fn rejects_a_peer_whose_configured_secret_is_empty() {
-        let result = load_peering(|text| text.replace("\"shared-secret\"", "\"\""));
-
-        assert!(matches!(
-            result,
-            Err(ConfigError::PeerCredentialMissing { ref id }) if id == "store"
-        ));
-    }
-
-    /// The literal in `peering_config`, rewritten as the `secret_file`
-    /// form a deployed node uses (issue #750) -- the whole peering comes
-    /// from a committed file, with only the secret on the box.
-    fn load_peering_with_secret_file(contents: &[u8]) -> Result<Config, ConfigError> {
-        let mut secret_file = tempfile::NamedTempFile::new().expect("temp secret file");
-        secret_file.write_all(contents).expect("write secret file");
-        secret_file.flush().expect("flush secret file");
-        let path = secret_file.path().to_path_buf();
-        load_peering(|text| {
-            text.replace(
-                "credential = { secret = \"shared-secret\" }",
-                &format!("credential = {{ secret_file = \"{}\" }}", path.display()),
-            )
-        })
-    }
-
-    /// The load-time equivalence #750 asks for: a peering whose secret
-    /// lives in a file loads into exactly the peering the literal
-    /// produced, and authenticates the same.
-    #[test]
-    fn loads_a_peer_credential_from_a_secret_file() {
-        let config = load_peering_with_secret_file(b"shared-secret\n").expect("load");
-
-        let peer = &config.peers()[0];
-        assert_eq!(peer.id(), "store");
-        assert!(peer.credential().matches("shared-secret"));
-        assert!(!peer.credential().matches("wrong"));
-        assert_eq!(peer.credential(), &PeerCredential::new("shared-secret"));
-
-        // And the whole config still redacts it, which is the property
-        // that made `PeerCredential`'s `Debug` hand-written in the first
-        // place -- a `Config` is logged whole at startup.
-        let rendered = format!("{config:?}");
-        assert!(!rendered.contains("shared-secret"), "got: {rendered}");
-    }
-
-    #[test]
-    fn rejects_a_peer_setting_both_secret_and_secret_file() {
-        let mut secret_file = tempfile::NamedTempFile::new().expect("temp secret file");
-        secret_file.write_all(b"from-the-file").expect("write");
-        secret_file.flush().expect("flush");
-        let path = secret_file.path().to_path_buf();
-        let result = load_peering(|text| {
-            text.replace(
-                "credential = { secret = \"shared-secret\" }",
-                &format!(
-                    "credential = {{ secret = \"shared-secret\", secret_file = \"{}\" }}",
-                    path.display()
-                ),
-            )
-        });
-
-        let message = expect_error(
-            result,
-            |error| matches!(error, ConfigError::PeerCredentialAmbiguous { id } if id == "store"),
-        );
-        assert!(
-            message.contains("exactly one") && message.contains(BRINGUP_DOC),
-            "got: {message}"
-        );
-    }
-
-    #[test]
-    fn rejects_a_peer_setting_neither_secret_nor_secret_file() {
-        let result = load_peering(|text| {
-            text.replace(
-                "credential = { secret = \"shared-secret\" }",
-                "credential = {}",
-            )
-        });
-
-        assert!(matches!(
-            result,
-            Err(ConfigError::PeerCredentialMissing { ref id }) if id == "store"
-        ));
-    }
-
-    #[test]
-    fn rejects_a_secret_file_that_does_not_exist() {
-        let result = load_peering(|text| {
-            text.replace(
-                "credential = { secret = \"shared-secret\" }",
-                "credential = { secret_file = \"/nonexistent/store-peer.secret\" }",
-            )
-        });
-
-        let message = expect_error(
-            result,
-            |error| matches!(error, ConfigError::PeerSecretFileNotFound { id, .. } if id == "store"),
-        );
-        assert!(
-            message.contains("store-peer.secret") && message.contains(BRINGUP_DOC),
-            "got: {message}"
-        );
-    }
-
-    #[test]
-    fn rejects_a_secret_file_that_is_not_readable_as_text() {
-        let result = load_peering_with_secret_file(&[0xff, 0xfe, 0xfd]);
-
-        let message = expect_error(
-            result,
-            |error| matches!(error, ConfigError::PeerSecretFileUnreadable { id, .. } if id == "store"),
-        );
-        assert!(message.contains(BRINGUP_DOC), "got: {message}");
-    }
-
-    #[test]
-    fn rejects_a_secret_file_that_is_empty() {
-        let result = load_peering_with_secret_file(b"\n   \n");
-
-        let message = expect_error(
-            result,
-            |error| matches!(error, ConfigError::PeerSecretFileEmpty { id, .. } if id == "store"),
-        );
-        assert!(
-            message.contains("matches nothing") && message.contains(BRINGUP_DOC),
-            "got: {message}"
-        );
-    }
-
-    /// `deny_unknown_fields` still holds on the credential subtable: a
-    /// mistyped `secret_fle` is a peering that authenticates nobody while
-    /// reading as configured, so it fails parse rather than falling
-    /// through to "neither field set".
-    #[test]
-    fn rejects_a_mistyped_credential_field() {
-        let result = load_peering(|text| text.replace("secret =", "secert ="));
-
-        assert!(matches!(result, Err(ConfigError::Parse { .. })));
+            let message = expect_error(
+                result,
+                |error| matches!(error, ConfigError::PeerCredentialRemoved { id } if id == "store"),
+            );
+            assert!(
+                message.contains("ADR 0060") && message.contains("verified claim"),
+                "{written}: got {message}"
+            );
+        }
     }
 
     /// §11 `PeerChannelUnbound`: P2 of the role rule. This is the exact
@@ -1656,8 +1520,7 @@ client_edge_url = "https://store.example/ilp"
             |error| matches!(error, ConfigError::PeerChannelUnbound { id } if id == "store"),
         );
         assert!(
-            message.contains("both a proven credential and a channel binding")
-                && message.contains(BRINGUP_DOC),
+            message.contains("a channel binding") && message.contains(BRINGUP_DOC),
             "got: {message}"
         );
     }
@@ -1727,7 +1590,6 @@ key_file = "{key_file}"
 [[peers]]
 id = "store"
 endpoint = "wss://store.example:443/btp"
-credential = {{ secret = "shared-secret" }}
 
 [[peer_channels]]
 peer_id = "store"
@@ -2422,8 +2284,8 @@ counterparty = "{SOLANA_COUNTERPARTY_KEY}"
     fn rejects_a_peering_that_still_sets_ceiling() {
         let result = load_peering(|text| {
             text.replace(
-                "credential = { secret = \"shared-secret\" }\n",
-                "credential = { secret = \"shared-secret\" }\nceiling = 1000000\n",
+                "endpoint = \"wss://store.example:443/btp\"\n",
+                "endpoint = \"wss://store.example:443/btp\"\nceiling = 1000000\n",
             )
         });
 
@@ -2442,8 +2304,8 @@ counterparty = "{SOLANA_COUNTERPARTY_KEY}"
     fn rejects_a_peering_that_still_sets_flush_interval_ms() {
         let result = load_peering(|text| {
             text.replace(
-                "credential = { secret = \"shared-secret\" }\n",
-                "credential = { secret = \"shared-secret\" }\nflush_interval_ms = 5000\n",
+                "endpoint = \"wss://store.example:443/btp\"\n",
+                "endpoint = \"wss://store.example:443/btp\"\nflush_interval_ms = 5000\n",
             )
         });
 
@@ -2483,7 +2345,7 @@ counterparty = "{SOLANA_COUNTERPARTY_KEY}"
         let result = load_peering(|text| {
             text.replace(
                 "[[peer_channels]]",
-                "[[peers]]\nid = \"store\"\nendpoint = \"wss://other.example/btp\"\ncredential = { secret = \"s\" }\n\n[[peer_channels]]",
+                "[[peers]]\nid = \"store\"\nendpoint = \"wss://other.example/btp\"\n\n[[peer_channels]]",
             )
         });
 
@@ -3353,7 +3215,6 @@ key_file = "{key_file}"
 [[peers]]
 id = "store"
 endpoint = "wss://store.example:443/btp"
-credential = {{ secret = "shared-secret" }}
 fee = 3
 
 [[peer_channels]]

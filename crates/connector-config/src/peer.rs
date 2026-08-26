@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::fmt;
-use std::path::PathBuf;
 
 use serde::Deserialize;
 use url::Url;
@@ -285,196 +284,6 @@ pub(crate) fn parse_peer_exposure(value: Option<String>) -> Result<PeerExposure,
     }
 }
 
-/// The `credential` subtable of a `[[peers]]` entry as written in the
-/// config file: **where the peering's shared secret comes from**, spelled
-/// as exactly one of two mutually exclusive fields.
-///
-/// * `secret_file` -- a path to a file holding it. This is the form a
-///   deployed node uses, and the reason this field exists (issue #750):
-///   this fleet's `connector-rust.toml` files are committed to a **public**
-///   repository, so a peering written with a literal cannot be committed at
-///   all, and the then-live apex↔store peering was configured on the boxes
-///   only -- exactly the untracked-config drift the Phase 0 reconciliation
-///   (#744) closed. (That peering, and the apex, are gone as of issue #872;
-///   the reason the field takes a path is unchanged for the next one.)
-///   Every other secret in those same files is already a file reference
-///   (`[signer] key_file`, `[settlement.*.key] key_file`); this makes the
-///   peering secret the same shape.
-/// * `secret` -- the literal. Still supported, and fine for a test fixture
-///   or a config that is never committed.
-///
-/// `deny_unknown_fields` (issue #556): both fields are optional and their
-/// absence is meaningful, so a mistyped `secert` or `secret_fle` would
-/// otherwise read as "neither is set" -- a peering that authenticates
-/// nobody while reading as configured.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RawPeerCredential {
-    #[serde(default)]
-    secret: Option<String>,
-    #[serde(default)]
-    secret_file: Option<PathBuf>,
-}
-
-/// The literal never reaches a [`fmt::Debug`] rendering, for the same
-/// reason [`PeerCredential`]'s does not: a raw config is a whole-value
-/// thing, and a derived `Debug` anywhere on the path from file to
-/// [`PeerCredential`] is enough to put a peering secret in a log
-/// aggregator.
-impl fmt::Debug for RawPeerCredential {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RawPeerCredential")
-            .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
-            .field("secret_file", &self.secret_file)
-            .finish()
-    }
-}
-
-impl RawPeerCredential {
-    /// Resolve this credential to the secret itself, reading `secret_file`
-    /// if that is the form the operator wrote.
-    ///
-    /// The file is read **here, at config load**, and not left as a
-    /// [`crate::SecretLocation`]-style pointer: a peering secret is
-    /// compared against on every arriving frame, and the alternative is a
-    /// node that starts, serves, and only discovers at the first peer
-    /// interaction that the file it was pointed at is not there. ADR 0009
-    /// puts that failure at load instead -- so a missing, unreadable or
-    /// empty file is a refuse-to-start error by name, exactly as
-    /// [`ConfigError::SignerKeyFileNotFound`] is for `[signer] key_file`,
-    /// and the path is resolved the same way that one is (by the OS,
-    /// against the process's working directory).
-    ///
-    /// The file's contents are **trimmed**. Operators write these with
-    /// `echo` and `openssl rand -hex 32 >`, both of which append a
-    /// newline, and a secret that failed to match because of one invisible
-    /// byte is the `P1` mismatch with no evidence at all
-    /// (`peer-carriage-spec.md` §1.6). The literal `secret` form is
-    /// deliberately **not** trimmed: it is byte-for-byte what it was
-    /// before this field existed.
-    fn resolve(self, id: &str) -> Result<PeerCredential, ConfigError> {
-        match (self.secret, self.secret_file) {
-            (Some(_), Some(_)) => Err(ConfigError::PeerCredentialAmbiguous { id: id.to_string() }),
-            (Some(secret), None) if !secret.is_empty() => Ok(PeerCredential { secret }),
-            (None, Some(path)) => {
-                if !path.is_file() {
-                    return Err(ConfigError::PeerSecretFileNotFound {
-                        id: id.to_string(),
-                        path,
-                    });
-                }
-                let contents = std::fs::read_to_string(&path).map_err(|source| {
-                    ConfigError::PeerSecretFileUnreadable {
-                        id: id.to_string(),
-                        path: path.clone(),
-                        source,
-                    }
-                })?;
-                let secret = contents.trim();
-                if secret.is_empty() {
-                    return Err(ConfigError::PeerSecretFileEmpty {
-                        id: id.to_string(),
-                        path,
-                    });
-                }
-                Ok(PeerCredential {
-                    secret: secret.to_string(),
-                })
-            }
-            // Neither field set, or `secret = ""`. One condition, because
-            // it is one outcome: a `[[peers]]` entry that names no secret
-            // to authenticate against.
-            (_, None) => Err(ConfigError::PeerCredentialMissing { id: id.to_string() }),
-        }
-    }
-}
-
-/// The shared secret a peering relation is authenticated by
-/// (`peer-carriage-spec.md` §1.4). One struct, one JSON shape
-/// (`{"peerId": …, "secret": …}`), two encodings -- the `auth`
-/// protocolData entry raw on BTP, `Toon-Peer-Auth: base64(JSON)` on HTTP.
-/// This crate carries only the secret; which bytes ride where is the
-/// carriages' business (issue #676).
-///
-/// The secret never appears in a [`fmt::Debug`] rendering: a `Config` is
-/// the kind of value that gets logged whole at startup, and a derived
-/// `Debug` is how a peering secret ends up in a log aggregator.
-#[derive(Clone, PartialEq, Eq)]
-pub struct PeerCredential {
-    secret: String,
-}
-
-impl PeerCredential {
-    /// A credential over `secret`, for a caller that is not
-    /// [`resolve_peers`] -- the dial side building what it will present, and
-    /// tests standing up a policy whose shape config load refuses to
-    /// produce (a peering with no `[[peer_channels]]` row, say, which is
-    /// [`ConfigError::PeerChannelUnbound`] at load but is exactly the P2
-    /// branch a role decision must still get right).
-    ///
-    /// It does **not** refuse an empty secret, and that is deliberate: the
-    /// refusal that matters is [`PeerCredential::matches`] returning `false`
-    /// for one, which holds for every credential however it was built. A
-    /// constructor that refused instead would move the guarantee to the
-    /// construction site, where a future caller can forget it.
-    pub fn new(secret: impl Into<String>) -> Self {
-        PeerCredential {
-            secret: secret.into(),
-        }
-    }
-
-    /// Whether `presented` is this peering's configured secret.
-    ///
-    /// Two properties, both load-bearing (`peer-carriage-spec.md` §1.2):
-    ///
-    /// * the comparison does not return early on the first differing byte,
-    ///   so it does not leak the secret's prefix by timing; and
-    /// * **an empty configured secret matches nothing**, including an empty
-    ///   presented secret. An empty secret is also refused at load
-    ///   ([`ConfigError::PeerCredentialMissing`]), so this is the second of
-    ///   two locks on one door -- the one that still holds if a
-    ///   [`PeerCredential`] is ever built by something other than
-    ///   [`resolve_peers`]. A credential that matched everything is exactly
-    ///   the `no-auth` quasi-peer regression §1.9 is named for.
-    pub fn matches(&self, presented: &str) -> bool {
-        if self.secret.is_empty() {
-            return false;
-        }
-        constant_time_eq(self.secret.as_bytes(), presented.as_bytes())
-    }
-
-    /// The secret this connector presents when it dials this peer.
-    pub fn secret(&self) -> &str {
-        &self.secret
-    }
-}
-
-impl fmt::Debug for PeerCredential {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PeerCredential")
-            .field("secret", &"<redacted>")
-            .finish()
-    }
-}
-
-/// Compare two byte strings without returning early on a mismatch.
-///
-/// The length difference is folded in rather than short-circuited on, so a
-/// wrong-length secret costs the same as a right-length one. `subtle`'s
-/// `ConstantTimeEq` is the idiomatic tool, but it wants equal-length slices
-/// and this crate has no other reason to take a cryptography dependency;
-/// the accumulate-then-compare shape below is the same one.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    let mut difference: u8 = u8::from(a.len() != b.len());
-    let width = a.len().max(b.len());
-    for index in 0..width {
-        let left = a.get(index).copied().unwrap_or(0);
-        let right = b.get(index).copied().unwrap_or(0);
-        difference |= left ^ right;
-    }
-    difference == 0
-}
-
 /// A `[[peers]]` entry as written in the config file: one peering
 /// relation, named so a `[[routes]]` entry can target it by `peer_id`.
 ///
@@ -488,6 +297,9 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// kept the same way (ADR 0031, ADR 0033, issue #882): the credit window
 /// they bounded is retired now that every peer PREPARE carries its own
 /// covering claim, and a devnet box's bind-mounted TOML still names them.
+/// `credential` joins them under ADR 0060: the `{peerId, secret}` bearer
+/// secret is deleted outright, and a peering is proven by a verified claim
+/// on one of its `[[peer_channels]]` rows instead.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawPeer {
@@ -498,8 +310,14 @@ pub(crate) struct RawPeer {
     addr: Option<toml::Value>,
     #[serde(default)]
     endpoint: Option<String>,
+    /// Deleted with the peer shared secret (ADR 0060, issue #1157): role
+    /// is P2 + P3 -- a channel binding and a verified claim signature --
+    /// and a bearer string decides nothing. Parsed as an opaque value only
+    /// so a config that still writes one is refused **by name**
+    /// ([`ConfigError::PeerCredentialRemoved`]) rather than dropped, the
+    /// posture ADR 0009 requires of every removed key.
     #[serde(default)]
-    credential: Option<RawPeerCredential>,
+    credential: Option<toml::Value>,
     /// Removed with the credit window (ADR 0031, ADR 0033, issue #882);
     /// there is no trailing exposure left for a ceiling to bound.
     #[serde(default)]
@@ -543,8 +361,8 @@ pub(crate) struct RawPeer {
 
 /// A fully validated peering relation. Constructed only by
 /// [`resolve_peers`], so a value that exists has a non-empty id unique
-/// among every other configured peer, a non-empty credential, and -- if it
-/// carries an endpoint at all -- one whose scheme names a real carriage.
+/// among every other configured peer and -- if it carries an endpoint at
+/// all -- one whose scheme names a real carriage.
 ///
 /// One value per **peering relation**, never per carriage and never per
 /// connection (`peer-carriage-spec.md` §2.5): the claim watermarks belong
@@ -555,7 +373,6 @@ pub struct PeerConfig {
     id: String,
     endpoint: Option<Url>,
     dial: Option<PeerCarriage>,
-    credential: PeerCredential,
     can_originate: bool,
     claim_ack_timeout_ms: u64,
     peer_answer_timeout_ms: u64,
@@ -566,7 +383,8 @@ pub struct PeerConfig {
 
 impl PeerConfig {
     /// This peering relation's id -- what a `[[routes]]` entry's `peer_id`
-    /// refers to, and what the credential JSON names as its `peerId`.
+    /// refers to, and the name every `[[peer_channels]]` row of this
+    /// relation binds its channels under.
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -582,11 +400,6 @@ impl PeerConfig {
     /// by the endpoint's scheme (§2.1). `None` for an accept-only peering.
     pub fn dial(&self) -> Option<PeerCarriage> {
         self.dial
-    }
-
-    /// The shared secret this peering is authenticated by (§1.4).
-    pub fn credential(&self) -> &PeerCredential {
-        &self.credential
     }
 
     /// Whether this connector can ever send a packet to this peer.
@@ -702,6 +515,14 @@ pub(crate) fn resolve_peers(
         if peer.claim_enforcement.is_some() {
             return Err(ConfigError::PeerClaimEnforcementRemoved { id: peer.id });
         }
+        // ADR 0060 (issue #1157): the `{peerId, secret}` bearer credential
+        // is deleted, not renamed. Refused by name rather than ignored,
+        // because an operator who still writes one believes this peering is
+        // authenticated by it, and a claim signature is what authenticates
+        // it now.
+        if peer.credential.is_some() {
+            return Err(ConfigError::PeerCredentialRemoved { id: peer.id });
+        }
         if !seen.insert(peer.id.clone()) {
             return Err(ConfigError::DuplicatePeerId { id: peer.id });
         }
@@ -728,20 +549,6 @@ pub(crate) fn resolve_peers(
                 // as `InvalidPeerEndpoint` above.
                 (Some(url), Some(carriage))
             }
-        };
-
-        // P1 can never be satisfied without a secret to compare against,
-        // and an empty one matches nothing by construction
-        // ([`PeerCredential::matches`]) -- so a peering configured with
-        // either is one that can only ever admit its counterparty as an
-        // ordinary client. Refused here rather than at the first frame,
-        // because the symptom otherwise is "peering configured, nothing
-        // peers, no error anywhere" (§1.6). A `secret_file` that cannot be
-        // read is the same refusal for the same reason
-        // ([`RawPeerCredential::resolve`]).
-        let credential = match peer.credential {
-            Some(written) => written.resolve(&peer.id)?,
-            None => return Err(ConfigError::PeerCredentialMissing { id: peer.id }),
         };
 
         // ADR 0042 (item 3): a mistyped `forwarded_claim_enforcement` is
@@ -786,7 +593,6 @@ pub(crate) fn resolve_peers(
             id: peer.id,
             endpoint,
             dial,
-            credential,
             can_originate,
             claim_ack_timeout_ms: peer.claim_ack_timeout_ms.unwrap_or(DEFAULT_PEER_TIMEOUT_MS),
             peer_answer_timeout_ms: peer
@@ -804,37 +610,13 @@ pub(crate) fn resolve_peers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-
-    /// A `credential` written as a literal -- the pre-#750 form, still the
-    /// shape most of these tests want.
-    fn literal(secret: &str) -> RawPeerCredential {
-        RawPeerCredential {
-            secret: Some(secret.to_string()),
-            secret_file: None,
-        }
-    }
-
-    /// A `credential` written as a `secret_file`, over a temp file holding
-    /// `contents` verbatim. The handle is returned so the caller keeps the
-    /// file alive across the resolve.
-    fn secret_file(contents: &str) -> (RawPeerCredential, tempfile::NamedTempFile) {
-        let mut file = tempfile::NamedTempFile::new().expect("temp secret file");
-        file.write_all(contents.as_bytes()).expect("write secret");
-        file.flush().expect("flush secret");
-        let credential = RawPeerCredential {
-            secret: None,
-            secret_file: Some(file.path().to_path_buf()),
-        };
-        (credential, file)
-    }
 
     fn raw(id: &str) -> RawPeer {
         RawPeer {
             id: id.to_string(),
             addr: None,
             endpoint: Some("wss://peer.example:443/btp".to_string()),
-            credential: Some(literal("shared-secret")),
+            credential: None,
             ceiling: None,
             flush_interval_ms: None,
             claim_ack_timeout_ms: None,
@@ -1128,236 +910,44 @@ mod tests {
         ));
     }
 
+    /// ADR 0060: the peering secret is deleted, not renamed. A config
+    /// that still writes one is refused **by name** -- never dropped and
+    /// never ignored -- because an operator who wrote it believes this
+    /// peering is authenticated by it, and a verified claim is what
+    /// authenticates it now.
     #[test]
-    fn an_empty_configured_secret_matches_nothing() {
-        let credential = PeerCredential {
-            secret: String::new(),
-        };
-
-        assert!(!credential.matches(""));
-        assert!(!credential.matches("anything"));
-    }
-
-    #[test]
-    fn a_configured_secret_matches_only_itself() {
-        let credential = PeerCredential {
-            secret: "shared-secret".to_string(),
-        };
-
-        assert!(credential.matches("shared-secret"));
-        assert!(!credential.matches("shared-secre"));
-        assert!(!credential.matches("shared-secret "));
-        assert!(!credential.matches(""));
-    }
-
-    #[test]
-    fn a_credential_never_debug_prints_its_secret() {
-        let credential = PeerCredential {
-            secret: "shared-secret".to_string(),
-        };
-
-        let rendered = format!("{credential:?}");
-
-        assert!(!rendered.contains("shared-secret"), "got: {rendered}");
-        assert!(rendered.contains("redacted"), "got: {rendered}");
-    }
-
-    // -- `secret_file` (issue #750). The peering secret is the one secret
-    // in these config files that could only ever be a literal, and these
-    // files are committed to a public repository.
-
-    /// The whole point: a peering whose secret came out of a file is the
-    /// same peering as one whose secret was a literal, and authenticates
-    /// identically -- same match, same non-matches.
-    #[test]
-    fn a_file_loaded_credential_authenticates_exactly_as_a_literal_one_does() {
-        let (credential, _file) = secret_file("shared-secret");
-        let mut entry = raw("peer-b");
-        entry.credential = Some(credential);
-
-        let peers = resolve_peers(vec![entry], PeerExposure::Neither, false).expect("resolve");
-
-        let from_file = peers[0].credential();
-        let from_literal = PeerCredential::new("shared-secret");
-        assert_eq!(from_file, &from_literal);
-        assert_eq!(from_file.secret(), "shared-secret");
-        assert!(from_file.matches("shared-secret"));
-        assert!(!from_file.matches("wrong"));
-        assert!(!from_file.matches(""));
-    }
-
-    /// `openssl rand -hex 32 > peer.secret` and `echo … > peer.secret`
-    /// both append a newline, and a peering that failed to establish over
-    /// one invisible byte is a `P1` mismatch with no evidence at all.
-    #[test]
-    fn a_secret_file_is_trimmed_of_its_trailing_newline_and_whitespace() {
-        let (credential, _file) = secret_file("  shared-secret \t\r\n\n");
-        let mut entry = raw("peer-b");
-        entry.credential = Some(credential);
-
-        let peers = resolve_peers(vec![entry], PeerExposure::Neither, false).expect("resolve");
-
-        assert!(peers[0].credential().matches("shared-secret"));
-    }
-
-    /// The literal form is *not* trimmed: it is byte-for-byte what it was
-    /// before `secret_file` existed.
-    #[test]
-    fn a_literal_secret_is_left_untrimmed() {
-        let mut entry = raw("peer-b");
-        entry.credential = Some(literal("shared-secret\n"));
-
-        let peers = resolve_peers(vec![entry], PeerExposure::Neither, false).expect("resolve");
-
-        assert!(peers[0].credential().matches("shared-secret\n"));
-        assert!(!peers[0].credential().matches("shared-secret"));
-    }
-
-    #[test]
-    fn setting_both_secret_and_secret_file_is_refused_by_name() {
-        let (mut credential, _file) = secret_file("from-the-file");
-        credential.secret = Some("from-the-literal".to_string());
-        let mut entry = raw("peer-b");
-        entry.credential = Some(credential);
-
-        let result = resolve_peers(vec![entry], PeerExposure::Neither, false);
-
-        assert!(matches!(
-            result,
-            Err(ConfigError::PeerCredentialAmbiguous { ref id }) if id == "peer-b"
-        ));
-    }
-
-    /// A `credential = {}` that names neither field is the same outcome as
-    /// no `credential` table at all: nothing to authenticate against.
-    #[test]
-    fn setting_neither_secret_nor_secret_file_is_refused_by_name() {
-        let mut entry = raw("peer-b");
-        entry.credential = Some(RawPeerCredential {
-            secret: None,
-            secret_file: None,
-        });
-
-        assert!(matches!(
-            resolve_peers(vec![entry], PeerExposure::Neither, false),
-            Err(ConfigError::PeerCredentialMissing { ref id }) if id == "peer-b"
-        ));
-
-        let mut entry = raw("peer-b");
-        entry.credential = None;
-
-        assert!(matches!(
-            resolve_peers(vec![entry], PeerExposure::Neither, false),
-            Err(ConfigError::PeerCredentialMissing { ref id }) if id == "peer-b"
-        ));
-    }
-
-    #[test]
-    fn a_missing_secret_file_is_refused_by_name() {
-        let mut entry = raw("peer-b");
-        entry.credential = Some(RawPeerCredential {
-            secret: None,
-            secret_file: Some(PathBuf::from("/nonexistent/peer.secret")),
-        });
-
-        assert!(matches!(
-            resolve_peers(vec![entry], PeerExposure::Neither, false),
-            Err(ConfigError::PeerSecretFileNotFound { ref id, .. }) if id == "peer-b"
-        ));
-    }
-
-    /// A *directory* at the path is the unreadable case this test can
-    /// produce portably and without root: it exists, so it is not
-    /// `PeerSecretFileNotFound` for the "does not exist" reason, and
-    /// `is_file()` is what separates the two.
-    #[test]
-    fn a_secret_file_that_is_a_directory_is_refused_by_name() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let mut entry = raw("peer-b");
-        entry.credential = Some(RawPeerCredential {
-            secret: None,
-            secret_file: Some(dir.path().to_path_buf()),
-        });
-
-        assert!(matches!(
-            resolve_peers(vec![entry], PeerExposure::Neither, false),
-            Err(ConfigError::PeerSecretFileNotFound { ref id, .. }) if id == "peer-b"
-        ));
-    }
-
-    /// A file that exists and passes `is_file()` but whose bytes are not
-    /// text: `read_to_string` fails, and that is the unreadable branch.
-    #[test]
-    fn a_secret_file_that_is_not_text_is_refused_by_name() {
-        let mut file = tempfile::NamedTempFile::new().expect("temp secret file");
-        file.write_all(&[0xff, 0xfe, 0xfd]).expect("write bytes");
-        file.flush().expect("flush");
-        let mut entry = raw("peer-b");
-        entry.credential = Some(RawPeerCredential {
-            secret: None,
-            secret_file: Some(file.path().to_path_buf()),
-        });
-
-        assert!(matches!(
-            resolve_peers(vec![entry], PeerExposure::Neither, false),
-            Err(ConfigError::PeerSecretFileUnreadable { ref id, .. }) if id == "peer-b"
-        ));
-    }
-
-    /// A truncated file is the silent non-peering `secret = ""` would be,
-    /// so it gets the same treatment: refused at load, by name.
-    #[test]
-    fn an_empty_or_whitespace_only_secret_file_is_refused_by_name() {
-        for contents in ["", "\n", "   \t\r\n"] {
-            let (credential, _file) = secret_file(contents);
+    fn a_credential_is_refused_as_a_removed_key() {
+        for written in [
+            toml::Value::Table(toml::map::Map::new()),
+            toml::Value::String("shared-secret".to_string()),
+            toml::Value::Table({
+                let mut table = toml::map::Map::new();
+                table.insert(
+                    "secret".to_string(),
+                    toml::Value::String("shared-secret".to_string()),
+                );
+                table
+            }),
+            toml::Value::Table({
+                let mut table = toml::map::Map::new();
+                table.insert(
+                    "secret_file".to_string(),
+                    toml::Value::String("/app/data/peer.secret".to_string()),
+                );
+                table
+            }),
+        ] {
             let mut entry = raw("peer-b");
-            entry.credential = Some(credential);
+            entry.credential = Some(written.clone());
 
             assert!(
                 matches!(
                     resolve_peers(vec![entry], PeerExposure::Neither, false),
-                    Err(ConfigError::PeerSecretFileEmpty { ref id, .. }) if id == "peer-b"
+                    Err(ConfigError::PeerCredentialRemoved { ref id }) if id == "peer-b"
                 ),
-                "contents {contents:?} should be PeerSecretFileEmpty"
+                "credential = {written:?} should be refused by name"
             );
         }
-    }
-
-    /// The redaction property has to hold for the file-loaded path too --
-    /// and for the raw config value the secret passes through on its way
-    /// there, which is the other whole-value thing that gets logged.
-    #[test]
-    fn a_file_loaded_credential_never_debug_prints_its_secret() {
-        let (credential, _file) = secret_file("shared-secret");
-        let rendered_raw = format!("{credential:?}");
-        assert!(
-            !rendered_raw.contains("shared-secret"),
-            "got: {rendered_raw}"
-        );
-
-        let mut entry = raw("peer-b");
-        entry.credential = Some(credential);
-        let rendered_peer = format!("{entry:?}");
-        assert!(
-            !rendered_peer.contains("shared-secret"),
-            "got: {rendered_peer}"
-        );
-
-        let peers = resolve_peers(vec![entry], PeerExposure::Neither, false).expect("resolve");
-        let rendered = format!("{:?}", peers[0]);
-
-        assert!(!rendered.contains("shared-secret"), "got: {rendered}");
-        assert!(rendered.contains("redacted"), "got: {rendered}");
-    }
-
-    /// And the literal form's raw value is redacted the same way -- the
-    /// leak this closes predates `secret_file`.
-    #[test]
-    fn a_raw_literal_credential_never_debug_prints_its_secret() {
-        let rendered = format!("{:?}", literal("shared-secret"));
-
-        assert!(!rendered.contains("shared-secret"), "got: {rendered}");
-        assert!(rendered.contains("redacted"), "got: {rendered}");
     }
 
     #[test]

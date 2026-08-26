@@ -145,8 +145,6 @@ price = 1100
 id = "a-b"
 forwarded_claim_enforcement = "enforce"
 
-[peers.credential]
-secret_file = "/app/data/peer-a-b-secret"
 
 # ── The Solana peering: we dial C, over ILP-over-HTTP ────────────────────────
 # `http://` ON PURPOSE, AND IT IS HALF OF WHAT ISSUE #1155 BOUGHT. Moving both
@@ -171,8 +169,6 @@ endpoint = "http://connector-c:3000/ilp"
 # routes back to A.
 fee = 50
 
-[peers.credential]
-secret_file = "/app/data/peer-b-c-secret"
 
 # The EVM row: A's claims, judged against the anvil channel A opened, under the
 # EIP-712 domain that channel's `TokenNetwork` verifies (ADR 0024).

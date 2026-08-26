@@ -142,10 +142,13 @@ secret defeats a valid claim". Under the amended rule it does not. Whether the c
 should exist at all is [issue #867](https://github.com/toon-protocol/connector/issues/867)'s
 question and is not decided here.
 
-**Implementation status.** This section states the rule for _role_, which is not yet the code as it
-stands today: `connector_peer_auth::decide_role` still implements the P1/P2 branch table
-(`crates/connector-peer-auth/src/decision.rs:186-221`), and role itself is not yet decided from a
-verified claim the way §1.2 describes -- that remains open work, not scoped to #880.
+**Implementation status.** This section's rule for _role_ **is** the code, as of issue #1157
+([ADR 0060](../adr/0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md)).
+`connector_peer_auth::decide_role` takes the presented claim and the peering's channel bindings, and
+answers `peer` only on P2 and a verified P3. It said otherwise here for six months: the P1/P2 branch
+table survived #868's amendment to this section, so the weaker check gated the stronger one in a
+tree whose spec already said it did not. That gap is closed and this paragraph records that it
+existed.
 `Connector::handle_peer_prepare` itself is unchanged and still accepts a `None` claim
 (`crates/connector-runtime/src/connector.rs:667-676`): issue #880 lands the _price-coverage_ half of
 this section (a `Terminated` route's own `price`, §3.1 — since joined by ADR 0042's
@@ -319,27 +322,29 @@ Role is decided by P2 and a verified claim, or it is `client`.
 
 ### 1.4 Presentation, on each carriage
 
-One credential, one JSON shape, two encodings — the same relationship `client-edge-spec.md` §1.9
-already establishes for a claim (raw JSON on BTP, base64 in an HTTP header, because base64 is a
-header artifact and nothing else).
+**There is nothing to present.** A peering carries no credential
+([ADR 0060](../adr/0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md), issue #1157).
+The `{peerId, secret}` object, the BTP `auth` protocolData entry as a **peer** credential, and the
+`Toon-Peer-Auth` request header are all deleted, on both carriages together — peer behaviour that
+exists on one carriage and not the other is a defect rather than a property of the carriage (§0.1,
+[ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md)).
 
-```json
-{ "peerId": "store-box", "secret": "…" }
-```
+What a peer presents is what every peer frame already carried: **its covering claim**
+([ADR 0042](../adr/0042-a-packet-carries-its-claim.md)), in the shapes `client-edge-spec.md` §1.9
+already pins. Role is read from those same bytes, on the same packet, every time — §1.2's P2 and P3.
 
-| Carriage | Presentation                                                                                                                                   |
-| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| BTP      | the `auth` protocolData entry, raw UTF-8 JSON, on the session's first MESSAGE — the same entry `client-edge-spec.md` §1.9 step 1 already reads |
-| HTTP     | the `Toon-Peer-Auth` request header (canonical lower-case `toon-peer-auth`), value `base64(JSON)` of the same object, on **every** request     |
+A connector MUST NOT refuse a request that still carries a `Toon-Peer-Auth` header or an `auth`
+protocolData entry naming a peer. It ignores the value. That is what lets the two ends of a peering
+be upgraded in either order, without the peering going dark mid-flight while one side still sends a
+field the other has stopped reading.
 
-The BTP `auth` entry is unchanged in shape and unchanged in what a client sends. What changes is
-that a connector now **evaluates P1 and P2 against it** instead of accepting its contents
-unverified. `client-edge-spec.md` §1.9 step 1's "the contents are not verified" and its documented
-permissionless empty-`secret` mirror remain true **of the client role only**: an unverifiable or
-empty credential still admits a client session, exactly as today, and can never admit a peer one.
+`client-edge-spec.md` §1.9 step 1's `auth` entry is untouched **as a client-edge mechanism**, along
+with its "the contents are not verified" and its permissionless empty-`secret` mirror. Nothing in
+this section constrains the client role, and an interaction that proves no peering is a client
+(§1.2).
 
-Because HTTP has no session, the credential MUST be presented on every peer request. A request
-without it is a client request, whatever the previous request from the same connection carried.
+Because HTTP has no session, a request is judged on its own claim. A request carrying none is a
+client request, whatever the previous request from the same connection carried.
 
 ### 1.5 Binding, and the anti-escalation rules
 
@@ -368,36 +373,45 @@ without it is a client request, whatever the previous request from the same conn
   as a client claim stays a client claim, and its effects on client watermarks stand. §1.8's
   namespace disjointness is what keeps that safe: the two namespaces can never describe the same
   channel, so a frame judged in one can never be re-judged in the other.
-- **A second `auth` entry on a session whose role is already bound MUST NOT be evaluated.** The
-  connector MUST answer that frame with a BTP ERROR (`code F00`, `name NotAcceptedError`) and MUST
-  leave the role unchanged.
-- **Ambiguous credentials are refused, not resolved.** More than one `auth` entry on a single BTP
-  frame, or more than one `Toon-Peer-Auth` header on a single HTTP request, MUST refuse the frame
-  or request — BTP: an ERROR frame as above; HTTP: `400`, with no ILP body. The connector MUST NOT
-  pick the first, the last, or a concatenation. This is the header-smuggling defence, and its
-  absence is how "which credential did we check?" becomes unanswerable.
+- **A second `auth` entry on a session MUST NOT be evaluated** — nor a first one. There is no
+  session-bound role left for one to escalate (bullet 2 above), and no credential left in the entry
+  to read ([ADR 0060](../adr/0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md));
+  §1.4 requires it be **ignored** rather than answered with an error, so that the two ends of a
+  peering can be upgraded in either order.
+- **Ambiguous claims are refused, not resolved.** More than one claim entry on a single BTP frame,
+  or more than one claim header on a single HTTP request, MUST refuse the frame or request — BTP:
+  an ERROR frame as above; HTTP: `400`, with no ILP body. The connector MUST NOT pick the first,
+  the last, or a concatenation. This is the smuggling defence, and its absence is how "which claim
+  did we verify?" becomes unanswerable.
 
-The last two bullets are retained as written and are **no longer role rules**. With P1 retired
-(§1.2) there is no credential-driven escalation left for them to close; they are hygiene on the
-credential surface, kept because an unanswerable "which credential did we check?" is a defect
-whatever the credential is used for. They are removed or kept on #867's disposition of that surface,
-not on this amendment's.
+> **Restated by [ADR 0060](../adr/0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md)
+> (issue #1157).** The ambiguity bullet used to protect the `auth` entry and the `Toon-Peer-Auth`
+> header, and #868 had already demoted it from a role rule to hygiene on a surface it expected #867
+> to dispose of. #867 never did; ADR 0060 deleted the surface instead. The rule survives because the
+> defect it names — an unanswerable "which one did we check?" — is a property of duplicated
+> authentication material, not of the credential in particular, and the claim is now that material.
 
 ### 1.6 An asserted role is not a proven one
 
-A credential that names a configured peer id but fails P1 or P2 is an **assertion**. The
-connector:
+A claim that names a channel a `[[peer_channels]]` row configures, but fails P2 or P3, is an
+**assertion**. The connector:
 
 - MUST treat the interaction as a client, per §1.2;
-- MUST NOT refuse it for the assertion alone — refusing would make the credential check an oracle
-  for which peer ids this connector has configured;
+- MUST NOT refuse it for the assertion alone — refusing would make the check an oracle for which
+  channels this connector has configured;
 - MUST NOT record, log, meter or expose it as a peer interaction anywhere (`ADR 0014`'s metric and
   log surfaces included); and
 - MUST emit a distinguishable, rate-limited operator-visible event — `peer_auth_refused`, carrying
-  the asserted peer id and which of P1/P2 failed — because the most likely real cause is a genuine
-  peer with a mistyped secret or a missing `[[peer_channels]]` row, and a silent downgrade to
-  client role would otherwise present to an operator as "peering configured, nothing peers, no
-  error anywhere."
+  the peering's configured peer id and which of P2/P3 failed — because the most likely real cause
+  is a genuine peer whose key was rotated on one side only, or a `[[peer_channels]]` row this node
+  holds no chain record for, and a silent downgrade to client role would otherwise present to an
+  operator as "peering configured, nothing peers, no error anywhere."
+
+The two failures are deliberately **not** one bucket, because they have different fixes. **P2**
+(`UnknownChannel`) means config names a channel the claim book has no record of — config and chain
+disagree, which is this node's wiring rather than the caller's. **P3** (`SignatureInvalid`) means a
+record exists and the signature did not recover to the counterparty key that row configures — a
+rotated key, or somebody else's claim. A shared secret gave one message for both.
 
 ### 1.7 What each role grants
 
@@ -446,13 +460,21 @@ quasi-peer (the ingress findings ADR 0027 cites).
 **Both carriages MUST carry a stop-ship regression test named for it**, asserting that each of the
 following is classified `client` and reaches no peer handling whatsoever:
 
-1. an interaction presenting no credential at all;
-2. an interaction presenting a credential with an empty `secret`;
-3. an interaction presenting a _correct_ `peerId` with a wrong `secret`;
-4. an interaction presenting a correct `peerId` and correct secret for a peer with **no**
-   `[[peer_channels]]` entry (P2 alone failing);
-5. an interaction presenting a syntactically valid credential naming a peer id that is not
-   configured.
+1. an interaction carrying no claim at all;
+2. an interaction carrying a claim on a channel no `[[peer_channels]]` row configures;
+3. an interaction carrying a claim on a configured channel whose signature does not recover to the
+   counterparty key that row configures (P3 failing);
+4. an interaction carrying a claim on a channel a `[[peer_channels]]` row configures but this node
+   holds no record of (P2 failing);
+5. an interaction carrying a claim on a `[[client_channels]]` channel — the namespace-disjointness
+   case of §1.8, which can never be read as a peering.
+
+> **Rewritten by [ADR 0060](../adr/0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md)
+> (issue #1157).** The list previously enumerated credential shapes — no credential, an empty
+> `secret`, a correct `peerId` with a wrong one, and a valid credential naming an unconfigured peer.
+> All five still classify `client`; three of them stopped being **expressible** when the credential
+> was deleted, so the cases are restated in terms of the claim that now decides. The invariant and
+> the reason for it are unchanged, and so is the requirement that both carriages carry the test.
 
 "Reaches no peer handling" is testable as: no peer watermark moved, nothing was appended to the
 peer claim ledger, and no `claim-ack` was emitted. (Before ADR 0033 this list also named
@@ -464,9 +486,9 @@ ADR 0027 names one escape hatch, and it is bounded here so it is not invented un
 role-by-auth cannot be shown safe on a shared listener, a connector MAY expose a **dedicated peer
 listener with mandatory authentication**. If it does:
 
-- role is **still** decided by P1 and P2 on that listener. The listener is defence in depth and
+- role is **still** decided by P2 and P3 on that listener. The listener is defence in depth and
   MUST NOT become the decider — §1.3 still holds in full;
-- an interaction on that listener that fails P1 or P2 MUST be **refused outright** (BTP: ERROR then
+- an interaction on that listener that fails P2 or P3 MUST be **refused outright** (BTP: ERROR then
   close; HTTP: `401`) rather than downgraded to client. This is the single place refusal replaces
   downgrade, and it is safe only because a dedicated peer listener serves no clients, so there is
   no client to downgrade to and no oracle to leak (the peer ids it protects are the ones already
@@ -563,7 +585,6 @@ ride on each carriage.
 | **FLUSH** (§3.3)                      | **TRANSFER** (type 7): `amount` = the claim's new cumulative, claim in `payment-channel-claim`, no `ilpPacket`                             | **POST with an empty body** plus the claim header — the standalone-claim shape of `client-edge-spec.md` §1.9 step 5 |
 | **CLAIM_ACK** (§3.4)                  | `claim-ack` protocolData entry on the RESPONSE that already answers the claim-bearing frame (§5)                                           | `Toon-Claim-Ack` response header on the response that already answers the claim-bearing request (§5)                |
 | `accumulatedCost` (§5.2)              | `toon-accumulated-cost` entry on the REJECT's RESPONSE, decimal-uint64 UTF-8 — **already implemented on the client edge, reused verbatim** | `Toon-Accumulated-Cost` response header — **already implemented on the client edge, reused verbatim**               |
-| peer credential (§1.4)                | `auth` protocolData entry, raw UTF-8 JSON                                                                                                  | `Toon-Peer-Auth` request header, `base64(JSON)`                                                                     |
 | flush prompt (§6.4)                   | _(none — the payee can originate on BTP)_                                                                                                  | `Toon-Flush-Requested` response header, optional (§6.4)                                                             |
 
 Header names are matched case-insensitively per RFC 9110; the canonical lower-case forms are the
@@ -1171,10 +1192,13 @@ than the documentation.
 Every item is required. An item marked _(pair)_ is one BTP vector and one HTTP vector over the same
 fixture.
 
-**Credential and role**
+**Role**
 
-1. `peer_auth` _(pair)_ — the credential JSON: raw UTF-8 as the BTP `auth` entry, `base64` as the
-   `Toon-Peer-Auth` header value.
+There is nothing to pin. Role is decided by the claim below, so the vectors that pin the claim pin
+role with it. The `peer_auth` _(pair)_ that stood here — the credential JSON, raw UTF-8 as the BTP
+`auth` entry and `base64` as the `Toon-Peer-Auth` header value — is deleted from the corpus by
+[ADR 0060](../adr/0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md) (issue #1157),
+and `schema_version` moves to **4** to announce it.
 
 **Claim**
 
@@ -1420,9 +1444,13 @@ Recorded explicitly so review can accept or overturn each, rather than discoveri
    client edge's header is `ilp-payment-channel-claim`, and the ADR's own governing rule is that the
    claim carriage is "reused verbatim" with one codec. A new header name would require a second
    decoder on the HTTP path, which is the drift I2 exists to prevent. §3 pins the deployed name.
-2. **The peer credential's HTTP presentation is named here.** ADR 0027 requires a credential and
-   §1.4 has to say what it looks like on HTTP; `Toon-Peer-Auth: base64(JSON)` was chosen to mirror
-   the BTP `auth` entry's existing JSON exactly, so the two carriages share one credential struct.
+2. **The peer credential's HTTP presentation was named here** — _superseded by
+   [ADR 0060](../adr/0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md) (issue
+   #1157); kept because it records why the spelling was what it was._ ADR 0027 required a credential
+   and §1.4 had to say what it looked like on HTTP; `Toon-Peer-Auth: base64(JSON)` was chosen to
+   mirror the BTP `auth` entry's existing JSON exactly, so the two carriages shared one credential
+   struct. The credential is now deleted on both carriages, and the mirroring argument transferred
+   intact to the claim, which was always carried in the same two shapes.
 3. **§6.4 restates the HTTP asymmetry more precisely than the ADR does.** ADR 0027 says the
    non-dialing side "cannot flush, and `flushIntervalMs` does not bound its trailing exposure at
    all." That is exactly true only in the residual case §6.4(2). In the ordinary accept-only

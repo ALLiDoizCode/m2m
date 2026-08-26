@@ -228,8 +228,8 @@ pub enum ConfigError {
     PeerIdEmpty,
 
     #[error(
-        "duplicate peer id '{id}': two '[[peers]]' entries name it, so which credential and \
-         endpoint apply to it is unanswerable -- see \
+        "duplicate peer id '{id}': two '[[peers]]' entries name it, so which endpoint, fee \
+         and cap apply to it is unanswerable -- see \
          docs/operators/btp-peer-transport-bringup.md"
     )]
     DuplicatePeerId { id: String },
@@ -297,61 +297,19 @@ pub enum ConfigError {
     },
 
     #[error(
-        "peer '{id}' configures no credential, or an empty one: role is decided by \
-         authentication (peer-carriage-spec.md §1.2), and an empty secret matches nothing -- \
-         so this peering could only ever admit its counterparty as an ordinary client, \
-         silently. Set exactly one of 'credential = {{ secret_file = \"/app/data/…\" }}' (what a \
-         deployed node should use -- this repository is public, so a committed config must not \
-         carry the literal) or 'credential = {{ secret = \"…\" }}'; see \
-         docs/operators/btp-peer-transport-bringup.md"
+        "peer '{id}' sets 'credential': the '{{peerId, secret}}' shared secret is deleted (ADR \
+         0060). A peering is proven by a verified claim on one of its '[[peer_channels]]' \
+         rows, not by a string both operators wrote into their own config files, and there is \
+         no replacement key -- not renamed, not optional. Delete the 'credential' table from \
+         this peer; see docs/protocol/peer-carriage-spec.md §1.2"
     )]
-    PeerCredentialMissing { id: String },
+    PeerCredentialRemoved { id: String },
 
     #[error(
-        "peer '{id}' sets both 'secret' and 'secret_file' on its credential: exactly one of \
-         them says where this peering's shared secret comes from, and two answers is not a \
-         merge -- it is an unanswerable question about which one authenticates the peering. \
-         Keep 'secret_file' (the deployed form) and delete the literal; see \
-         docs/operators/btp-peer-transport-bringup.md"
-    )]
-    PeerCredentialAmbiguous { id: String },
-
-    #[error(
-        "peer '{id}' sets 'secret_file = {path}', which does not exist or is not a file: a \
-         peering whose secret cannot be read authenticates nobody, so this is refused at load \
-         rather than becoming a peering that silently admits its counterparty as an ordinary \
-         client. The path is resolved the same way '[signer] key_file' is -- relative to the \
-         process's working directory, so write an absolute path; see \
-         docs/operators/btp-peer-transport-bringup.md"
-    )]
-    PeerSecretFileNotFound { id: String, path: PathBuf },
-
-    #[error(
-        "peer '{id}' sets 'secret_file = {path}', which could not be read as text: {source} -- \
-         check the file's permissions inside the container (a secret file is usually mode 600 \
-         and must be owned by the uid the connector runs as); see \
-         docs/operators/btp-peer-transport-bringup.md"
-    )]
-    PeerSecretFileUnreadable {
-        id: String,
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-
-    #[error(
-        "peer '{id}' sets 'secret_file = {path}', which is empty once trailing whitespace is \
-         trimmed: an empty secret matches nothing (peer-carriage-spec.md §1.2), so this is the \
-         same silent non-peering 'secret = \"\"' would be. A truncated file is the usual cause \
-         -- regenerate it, e.g. 'openssl rand -hex 32 > {path}'; see \
-         docs/operators/btp-peer-transport-bringup.md"
-    )]
-    PeerSecretFileEmpty { id: String, path: PathBuf },
-
-    #[error(
-        "peer '{id}' has no '[[peer_channels]]' entry: a peer role needs both a proven \
-         credential and a channel binding (peer-carriage-spec.md §1.2 P2), so without one this \
-         peering can never take the peer role and its claims would be judged as a stranger's. \
+        "peer '{id}' has no '[[peer_channels]]' entry: a peer role needs a channel binding \
+         and a verified claim on one of its channels (peer-carriage-spec.md §1.2 P2/P3), so \
+         without one this peering can never take the peer role and its claims would be judged \
+         as a stranger's. \
          This is the surface whose absence made ADR 0024 inert (issue #620); see \
          docs/operators/btp-peer-transport-bringup.md"
     )]

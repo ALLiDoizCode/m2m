@@ -673,6 +673,42 @@ key_file = "{}"
     );
 }
 
+/// ADR 0060's tombstone. `credential` was REQUIRED of every peering until
+/// this release and appears in every committed topology config, so a stale
+/// copy setting it is the common case rather than the exotic one. It has to
+/// stop the binary by name: a peering whose secret was silently ignored would
+/// look configured, start clean, and differ from a working one only in that
+/// the operator still believes a shared string is doing something.
+#[test]
+fn exits_non_zero_when_a_peer_sets_a_credential() {
+    let key_file = write_raw_key_file();
+    let config_file = write_config(&format!(
+        r#"
+client_edge_addr = "127.0.0.1:0"
+
+[signer]
+key_file = "{}"
+
+[[peers]]
+id = "peer-b"
+endpoint = "https://peer-b.example/ilp"
+
+[peers.credential]
+secret = "s3cret-peering-key"
+"#,
+        key_file.path().display()
+    ));
+
+    let output = run(Some(config_file.path()));
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("credential") && stderr.contains("peer-b"),
+        "expected the removed 'credential' key refused by name, got: {stderr}"
+    );
+}
+
 /// The `[[peers]]` half: a `SocketAddr`-shaped `addr` is the other thing a
 /// stale config carries, and it fails the same way.
 #[test]
@@ -723,7 +759,6 @@ key_file = "{}"
 [[peers]]
 id = "store"
 endpoint = "wss://store.example/btp"
-credential = {{ secret = "shared" }}
 claim_enforcement = "observe"
 "#,
         key_file.path().display()
@@ -745,11 +780,11 @@ claim_enforcement = "observe"
 
 /// The surviving half of the pair is still an accepted key: deleting one
 /// field must not have taken the other with it. This config is deliberately
-/// invalid for an unrelated reason (no `credential`), because a valid one
-/// would boot and serve forever -- and `deny_unknown_fields` rejects at
-/// *parse* time, before `resolve_peers` ever reaches the credential check,
-/// so reaching the credential error at all is the proof that
-/// `forwarded_claim_enforcement` parsed.
+/// invalid for an unrelated reason (a peering with no `[[peer_channels]]`
+/// row), because a valid one would boot and serve forever -- and
+/// `deny_unknown_fields` rejects at *parse* time, before `resolve_peers`
+/// ever reaches the channel-binding check, so reaching that error at all is
+/// the proof that `forwarded_claim_enforcement` parsed.
 #[test]
 fn forwarded_claim_enforcement_is_still_an_accepted_key() {
     let key_file = write_raw_key_file();
@@ -774,18 +809,24 @@ forwarded_claim_enforcement = "enforce"
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("credential") && !stderr.contains("forwarded_claim_enforcement"),
+        stderr.contains("[[peer_channels]]") && !stderr.contains("forwarded_claim_enforcement"),
         "expected forwarded_claim_enforcement to parse and the load to fail on the missing \
-         credential instead, got: {stderr}"
+         channel binding instead, got: {stderr}"
     );
 }
 
-/// A peering that names no credential can never take the peer role, so it
-/// would come up looking configured and admit its counterparty as an
-/// ordinary client. The whole point of issue #677's load-time checks is
-/// that this is loud.
+/// A peering with no `[[peer_channels]]` row can never take the peer role
+/// -- there is no channel for a claim to name and no counterparty key to
+/// verify one against (§1.2's P2) -- so it would come up looking configured
+/// and admit its counterparty as an ordinary client. The whole point of
+/// issue #677's load-time checks is that this is loud.
+///
+/// This test used to name the missing **credential**, which was the other
+/// way a peering could look configured and peer with nobody. ADR 0060
+/// deleted that surface; the channel binding is the whole of what a peering
+/// now needs, so it is the whole of what this asserts.
 #[test]
-fn exits_non_zero_when_a_peer_configures_no_credential() {
+fn exits_non_zero_when_a_peer_has_no_channel_binding() {
     let key_file = write_raw_key_file();
     let config_file = write_config(&format!(
         r#"
@@ -807,8 +848,8 @@ endpoint = "wss://store.example/btp"
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("credential")
+        stderr.contains("no '[[peer_channels]]' entry")
             && stderr.contains("docs/operators/btp-peer-transport-bringup.md"),
-        "expected a named missing-credential error pointing at the bring-up doc, got: {stderr}"
+        "expected a named unbound-peering error pointing at the bring-up doc, got: {stderr}"
     );
 }

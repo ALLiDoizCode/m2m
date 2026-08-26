@@ -43,16 +43,13 @@ key_file = "{key_file}"
 [[peers]]
 id = "over-http"
 endpoint = "https://peer.example:443/ilp"
-credential = {{ secret = "shared-secret" }}
 
 [[peers]]
 id = "over-btp"
 endpoint = "wss://peer.example:443/btp"
-credential = {{ secret = "shared-secret" }}
 
 [[peers]]
 id = "accept-only"
-credential = {{ secret = "shared-secret" }}
 
 [[peer_channels]]
 peer_id = "over-http"

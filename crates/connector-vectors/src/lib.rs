@@ -27,10 +27,6 @@ use connector_domain::{
     derive_condition, fulfillment_matches_condition, EnvelopeError, EnvelopeRequest,
     EnvelopeResponse, Fulfill, Prepare, Reject, RejectCode,
 };
-use connector_peer_auth::{
-    encode_base64 as auth_encode_base64, encode_raw as auth_encode_raw, present_base64,
-    present_raw, PresentedCredential,
-};
 use connector_peer_btp::{ack, claim_json, fields, AcceptedClaims, PeerClaimDomain};
 use connector_peer_http::headers::{
     accumulated_cost as http_accumulated_cost, claim_ack as http_claim_ack, claim_ack_header_value,
@@ -85,7 +81,23 @@ use serde::Serialize;
 /// a pinned vector, so `schema_version` -- which guards the bytes an SDK
 /// replays -- has nothing to announce, and bumping it would spend a cross-repo
 /// signal on a file that did not change.
-pub const SCHEMA_VERSION: u32 = 3;
+///
+/// **4** (issue #1157): the `{peerId, secret}` peer credential is deleted
+/// (ADR 0060). The `peer_carriage.credential` section is gone, and with it
+/// the `btp_raw_hex` and `http_base64` bytes an SDK replayed to build a
+/// dialer's `auth` protocolData entry and its `Toon-Peer-Auth` header. Both
+/// names leave the wire together, because peer behaviour on one carriage and
+/// not the other is a defect rather than a property of the carriage
+/// (ADR 0027). A replaying SDK that still sends either is sending a field no
+/// connector reads -- harmless, since a receiver ignores an arriving header
+/// rather than refusing it, which is what lets the two ends of a peering be
+/// upgraded in either order. What the SDK must NOT infer is that its peering
+/// is thereby unauthenticated: role is now decided by the covering claim's
+/// signature against the counterparty key `[[peer_channels]]` configures,
+/// which every peer frame already carried (ADR 0042) and which is strictly
+/// stronger than the string it replaces. A removal, which is what this number
+/// exists to announce.
+pub const SCHEMA_VERSION: u32 = 4;
 
 fn seq_bytes<const N: usize>(start: u8) -> [u8; N] {
     let mut out = [0u8; N];
@@ -644,17 +656,6 @@ fn generate_claim_vectors() -> (ClaimVectors, ClaimFixture) {
 // hand-rolled parallel encoder, so a vector this module emits is a vector
 // its own implementation would also accept.
 
-/// One BTP `auth` entry and its `Toon-Peer-Auth` HTTP twin, decoded back
-/// through the real carriage-facing parsers (§10.2 item 1).
-#[derive(Debug, Serialize)]
-pub struct PeerAuthCase {
-    pub name: &'static str,
-    pub peer_id: String,
-    pub secret: String,
-    pub btp_raw_hex: String,
-    pub http_base64: String,
-}
-
 /// A peer claim JSON and its two transfer encodings (§10.2 items 2, 4):
 /// raw UTF-8 on BTP, `base64` in the HTTP header -- the same JSON both
 /// ways (§4).
@@ -785,9 +786,13 @@ pub struct PeerForwardedDataCase {
     pub http_body_hex: String,
 }
 
+/// There is no `credential` entry, and there was one: a `{peerId, secret}`
+/// in a BTP `auth` entry and a `Toon-Peer-Auth` header, pinned as §10.2's
+/// item 1. ADR 0060 deleted the credential from both carriages, so there is
+/// no encoding left to pin -- a replayer that still has the old vector will
+/// find nothing to compare it against, which is the point.
 #[derive(Debug, Serialize)]
 pub struct PeerCarriageVectors {
-    pub credential: PeerAuthCase,
     pub claim_evm: PeerClaimCase,
     /// §10.2 item 3: pinned equal to [`ClaimCase::digest_hex`] of this same
     /// run's `claim` section -- demonstrating ADR 0024's digest is
@@ -826,35 +831,6 @@ fn prepare_fields(prepare: &Prepare) -> PreparePacketFields {
         execution_condition_hex: hex_of(&prepare.execution_condition),
         destination: prepare.destination.clone(),
         data_hex: hex_of(&prepare.data),
-    }
-}
-
-fn generate_peer_auth_case() -> PeerAuthCase {
-    let credential = PresentedCredential::new("store-box", "s3cret-peering-key");
-    let raw = auth_encode_raw(&credential);
-    let based = auth_encode_base64(&credential);
-
-    // I1: both encodings decode to the same asserted identity and prove
-    // the same configured secret, through the real carriage-facing
-    // decoders -- not a hand round trip of `encode`/`decode` alone.
-    let from_raw = present_raw(std::iter::once(raw.as_slice()))
-        .expect("one credential is never ambiguous")
-        .expect("a credential was presented");
-    let from_base64 = present_base64(std::iter::once(based.as_bytes()))
-        .expect("one credential is never ambiguous")
-        .expect("a credential was presented");
-    let configured = connector_config::PeerCredential::new("s3cret-peering-key");
-    assert_eq!(from_raw.asserted_peer_id(), "store-box");
-    assert_eq!(from_base64.asserted_peer_id(), "store-box");
-    assert!(from_raw.proves(&configured));
-    assert!(from_base64.proves(&configured));
-
-    PeerAuthCase {
-        name: "peer_auth",
-        peer_id: "store-box".to_string(),
-        secret: "s3cret-peering-key".to_string(),
-        btp_raw_hex: hex_of(&raw),
-        http_base64: based,
     }
 }
 
@@ -1522,7 +1498,6 @@ fn generate_peer_carriage_vectors(
     claim_fixture: &ClaimFixture,
     giftwrap: &GiftwrapVectors,
 ) -> PeerCarriageVectors {
-    let credential = generate_peer_auth_case();
     let claim_evm = generate_peer_claim_evm_case(claim_fixture);
     let claim_solana = generate_peer_claim_solana_case();
     let (prepare, prepare_no_claim) = generate_prepare_pair_cases(&claim_evm);
@@ -1542,7 +1517,6 @@ fn generate_peer_carriage_vectors(
 
     PeerCarriageVectors {
         claim_digest_hex: claim_fixture.digest_hex.clone(),
-        credential,
         claim_evm,
         claim_solana,
         prepare,

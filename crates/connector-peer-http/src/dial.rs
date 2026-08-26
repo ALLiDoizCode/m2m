@@ -53,7 +53,6 @@ use async_trait::async_trait;
 use connector_btp::CLAIM_HEADER;
 use connector_config::{PeerCarriage, PeerChannelConfig, PeerConfig};
 use connector_domain::{Fulfill, PacketResponse, Prepare, Reject, RejectCode};
-use connector_peer_auth::{encode_base64, PresentedCredential, PEER_AUTH_HEADER};
 use connector_peer_btp::claim_json::{self, PeerClaimDomain};
 use connector_runtime::{ClaimAckOutcome, Clock, PeerForward, PeerTransport, WireClaim};
 use url::Url;
@@ -120,14 +119,18 @@ pub trait PeerHttpClient: Send + Sync {
 
 /// One peering relation, as the dial side needs it.
 ///
-/// Per **relation**, never per connection (§2.5): the timeouts, the
-/// credential and the claim domains all belong to the relation, and
-/// splitting them per connection is a double-spend surface.
+/// Per **relation**, never per connection (§2.5): the timeouts and the
+/// claim domains belong to the relation, and splitting them per connection
+/// is a double-spend surface.
+///
+/// There is nothing here to present on the way in. ADR 0060 deleted the
+/// `{peerId, secret}` credential this used to carry and set on every
+/// request: what proves the peering at the far end is the claim covering
+/// each packet, which this transport already renders and sends.
 #[derive(Debug, Clone)]
 pub struct PeerRelation {
     peer_id: String,
     endpoint: Url,
-    credential: PresentedCredential,
     /// Canonical EVM channel id → the EIP-712 domain its claims are signed
     /// under, from that peering's EVM-shaped `[[peer_channels]]` rows.
     domains: HashMap<String, PeerClaimDomain>,
@@ -178,7 +181,6 @@ impl PeerRelation {
         Some(PeerRelation {
             peer_id: peer.id().to_string(),
             endpoint,
-            credential: PresentedCredential::new(peer.id(), peer.credential().secret()),
             domains,
             solana_program_ids,
             peer_answer_timeout: Duration::from_millis(peer.peer_answer_timeout_ms()),
@@ -192,7 +194,6 @@ impl PeerRelation {
     pub fn new(
         peer_id: impl Into<String>,
         endpoint: Url,
-        credential: PresentedCredential,
         domains: HashMap<String, PeerClaimDomain>,
         solana_program_ids: HashMap<String, String>,
         peer_answer_timeout: Duration,
@@ -201,7 +202,6 @@ impl PeerRelation {
         PeerRelation {
             peer_id: peer_id.into(),
             endpoint,
-            credential,
             domains,
             solana_program_ids,
             peer_answer_timeout,
@@ -316,14 +316,16 @@ impl HttpPeerTransport {
         hints
     }
 
-    /// The headers every peer request carries (§1.4): the credential, on
-    /// **every** request, because HTTP has no session to bind a role to. A
-    /// request without it is a client request, whatever the previous request
-    /// on the same connection carried.
-    fn base_headers(&self, state: &RelationState) -> Headers {
-        let mut headers = Headers::new();
-        headers.push(PEER_AUTH_HEADER, encode_base64(&state.relation.credential));
-        headers
+    /// The headers every peer request carries.
+    ///
+    /// None, now. This used to set `Toon-Peer-Auth` on every request --
+    /// HTTP has no session, so the credential had to ride each one. ADR
+    /// 0060 deleted it, and what identifies the peering on each request is
+    /// what already had to be there: `Toon-Payment-Channel-Claim`. The
+    /// function survives as the one place a per-request header would be
+    /// added, so a future one is added once rather than at each call site.
+    fn base_headers(&self, _state: &RelationState) -> Headers {
+        Headers::new()
     }
 
     /// The claim header for `claim`, reusing the exact bytes already emitted

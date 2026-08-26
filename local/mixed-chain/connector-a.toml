@@ -43,8 +43,8 @@ state_dir = "/app/state"
 #
 # It covers BOTH plaintext schemes and always did: `Config::plaintext_peerings`
 # matches `ws` and `http` alike, and `ws://` is exactly as plaintext as
-# `http://` -- a websocket that was never wrapped in TLS carries every claim,
-# credential and packet in the clear. Since issue #1155 this node's peering is
+# `http://` -- a websocket that was never wrapped in TLS carries every claim
+# and packet in the clear. Since issue #1155 this node's peering is
 # a `ws://` one, so the WARN this switch produces at startup names
 # `a-b` at `ws://connector-b:3000/ilp/btp` rather than an `http://` URL.
 # It also still allows the `http://` `client_edge_url` further down, which is
@@ -107,8 +107,8 @@ price = 1200
 # The path matters as well as the scheme. BTP rides THIS NODE'S ORDINARY
 # LISTENER (CF-17): B's `client_edge_addr` binds one port, `POST /ilp` serves
 # ILP-over-HTTP and `GET /ilp/btp` serves the websocket upgrade, and role is
-# decided by the `auth` frame's credential rather than by which port arrived
-# on (§1.3). So this change added no port, no service and no dependency to
+# decided by the covering claim the frame carries rather than by which port it
+# arrived on (§1.2, §1.3). So this change added no port, no service and no dependency to
 # `compose.yml`: A reaches B on the container port 3000 it always did, and
 # `POST /ilp/claim-state` further down still reaches the same listener.
 #
@@ -138,8 +138,6 @@ endpoint = "ws://connector-b:3000/ilp/btp"
 # the counterparty rather than of any prefix routed to it (ADR 0061).
 fee = 100
 
-[peers.credential]
-secret_file = "/app/data/peer-a-b-secret"
 
 # The EVM half of the boundary. `counterparty_key` is B's EVM settlement
 # address; B's own file names A's. `channel_id` is a real channel on the local

@@ -1158,7 +1158,16 @@ impl ClaimBook {
     /// ADR 0002 keeps Mina out entirely: [`ClaimSignature`] has no Mina
     /// variant, so a Mina claim is refused before it can reach here, at
     /// the carriage's own `parse`.
-    fn verify_signature(&self, claim: &WireClaim) -> Result<(), ClaimRejectReason> {
+    ///
+    /// Public because it is what decides **role** (`peer-carriage-spec.md`
+    /// §1.2's P3): a peer carriage asks this before it admits a frame as a
+    /// peer frame, and gets the two failures apart — `UnknownChannel` for a
+    /// channel this book holds no record of, `SignatureInvalid` for one
+    /// that does not recover to the configured key — because §1.6 owes an
+    /// operator a different sentence for each. It accepts nothing, advances
+    /// no watermark and journals nothing; [`ClaimBook::accept_inbound`] is
+    /// the arm that does.
+    pub fn verify_signature(&self, claim: &WireClaim) -> Result<(), ClaimRejectReason> {
         match &claim.signature {
             ClaimSignature::Evm(signature) => {
                 let Some(&(on_chain_id, domain)) = self.channel_domains.get(&claim.channel_id)

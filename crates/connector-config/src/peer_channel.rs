@@ -215,6 +215,23 @@ impl PeerChannelConfig {
         }
     }
 
+    /// The on-chain identifier a claim names this channel by, whichever
+    /// chain it is on: an EVM `channel_id` (lowercase `0x` hex) or a Solana
+    /// `channel_account` (base58). The two spellings are disjoint, so one
+    /// namespace over both chains cannot collide.
+    ///
+    /// This is the key `peer-carriage-spec.md` §1.2's P2 resolves a claim
+    /// through: a channel appears in at most one `[[peer_channels]]` row
+    /// ([`ConfigError::PeerChannelDuplicate`]) and never also in
+    /// `[[client_channels]]` ([`ConfigError::ChannelInBothNamespaces`]), so
+    /// it names exactly one peering relation.
+    pub fn channel_identifier(&self) -> &str {
+        match self {
+            PeerChannelConfig::Evm(evm) => evm.channel_id(),
+            PeerChannelConfig::Solana(solana) => solana.channel_account(),
+        }
+    }
+
     /// The chain this declared channel lives on.
     pub fn chain(&self) -> SettlementChain {
         match self {

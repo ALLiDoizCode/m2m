@@ -15,13 +15,15 @@
 //! address"* -- and §3.1 is what makes it cheap: a peer PREPARE is *"the
 //! same OER encodings `POST /ilp` already carries"*. So peer traffic arrives
 //! on the very `POST /ilp` and `GET /ilp/btp` a client uses, and what tells
-//! the two apart is [`connector_peer_auth::decide_role`] and nothing else.
+//! the two apart is [`connector_peer_btp::role_gate::decide`] and nothing
+//! else: the claim on the arrival, resolved against `[[peer_channels]]` and
+//! verified against the counterparty key that row configures.
 //!
 //! # What this module does, in order
 //!
-//! 1. **Decides role, before anything else happens** (§1.5) -- before a
-//!    claim is decoded, before a watermark is consulted, before a packet is
-//!    routed.
+//! 1. **Decides role from the arrival's own claim, before anything else
+//!    happens** (§1.5) -- before a watermark is consulted, before a packet
+//!    is routed, before a fee is taken.
 //! 2. **Dispatches a peer-role interaction** into
 //!    [`connector_peer_http::PeerHttpState::handle`] or
 //!    [`connector_peer_btp::PeerSession`], which own everything downstream.
@@ -34,11 +36,11 @@
 //! # The two carriages are exposed independently
 //!
 //! A carriage this node's `peer_expose` does not name is simply not built
-//! here, and an interaction arriving on it takes the client path whatever
-//! credential it presents. That is not role inference (§1.3): the role is
-//! still decided by P1 and P2 alone, and what `expose` decides is *whether
-//! this node offers peer handling on that wire at all* -- the same axis
-//! `peer_expose` has always been (§2.1).
+//! here, and an arrival on it takes the client path whatever claim it
+//! carries. That is not role inference (§1.3): the role is still decided by
+//! P2 and P3 alone, and what `expose` decides is *whether this node offers
+//! peer handling on that wire at all* -- the same axis `peer_expose` has
+//! always been (§2.1).
 
 use std::sync::{Arc, Mutex};
 
@@ -47,35 +49,31 @@ use axum::response::{IntoResponse, Response};
 
 use connector_btp::ProtocolData;
 use connector_config::{PeerCarriage, PeerChannelConfig, PeerConfig, PeerExposure};
-use connector_peer_auth::{
-    decide_role, present_base64, present_raw, PeerAuthPolicy, PeerAuthRefusal, PeerAuthRefusalLog,
-    PEER_AUTH_HEADER, PEER_AUTH_PROTOCOL_ENTRY,
-};
+use connector_peer_auth::{PeerAuthPolicy, PeerAuthRefusal, PeerAuthRefusalLog};
 use connector_peer_btp::{
-    AcceptedClaims, ClaimEnforcementPolicy, PeerAcceptPolicy, PeerCarriageState,
+    claim_json, role_gate, AcceptedClaims, ClaimEnforcementPolicy, PeerAcceptPolicy,
+    PeerCarriageState,
 };
 use connector_peer_http::{FlushHints, Headers, PeerHttpPolicy, PeerHttpState, PeerRequest};
 use connector_runtime::Connector;
 
-/// What a peeked `auth` entry says about a BTP session that is not yet a
+/// What a peeked frame's claim says about a BTP session that is not yet a
 /// peer session (§1.2, §1.5).
 ///
-/// A verdict, not a binding: the frame it was read from is **not**
-/// consumed, and the session that becomes a peer session is handed that
-/// same frame to bind its own role from. Deciding twice over one pure
-/// function is free; binding twice would not be, which is why the binding
-/// happens in exactly one place ([`connector_peer_btp::PeerSession`]).
+/// A verdict, not a decision the session inherits: the frame it was read
+/// from is **not** consumed, and the session that takes over is handed that
+/// same frame and decides its role from it again. Deciding twice over one
+/// pure function is free, and the peer session re-decides on every frame
+/// after it in any case -- role is a property of the frame.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum BtpAuthVerdict {
-    /// P1 and P2 both hold: hand this session, and this frame, to the peer
+pub(crate) enum BtpClaimVerdict {
+    /// P2 and P3 both hold: hand this session, and this frame, to the peer
     /// carriage.
     Peer,
-    /// The credential proves nothing (or there is none): the session is a
-    /// client and stays one, exactly as before this module existed.
+    /// The frame carries no claim, or one that proves no peering: the
+    /// session is a client's and stays one, exactly as before this module
+    /// existed.
     Client,
-    /// More than one `auth` entry on one frame (§1.5): refused, not
-    /// resolved -- never the first, never the last, never a concatenation.
-    Ambiguous,
 }
 
 /// The peer carriages this node exposes, and the one role policy both read.
@@ -86,6 +84,7 @@ pub(crate) enum BtpAuthVerdict {
 /// watermarks however many paths it has, and a ledger per carriage would be
 /// a double-spend surface.
 pub struct PeerCarriages {
+    connector: Arc<Connector>,
     auth: Arc<PeerAuthPolicy>,
     /// `Some` when `peer_expose` names `http`.
     http: Option<Arc<PeerHttpState>>,
@@ -114,10 +113,7 @@ impl PeerCarriages {
         if expose.is_empty() || peers.is_empty() {
             return None;
         }
-        let auth = Arc::new(PeerAuthPolicy::new(
-            peers.iter().map(|peer| (peer.id(), peer.credential())),
-            peer_channels.iter().map(PeerChannelConfig::peer_id),
-        ));
+        let auth = Arc::new(PeerAuthPolicy::from_config(peers, peer_channels));
         // §2.5/I6: one ledger, both carriages.
         let accepted = Arc::new(AcceptedClaims::new());
         // Issue #883 (B6): one migration state per peering, both carriages
@@ -143,7 +139,7 @@ impl PeerCarriages {
         });
         let btp = expose.exposes(PeerCarriage::Btp).then(|| {
             Arc::new(PeerCarriageState::new(
-                connector,
+                Arc::clone(&connector),
                 Arc::clone(&auth),
                 accepted,
                 enforcement,
@@ -154,6 +150,7 @@ impl PeerCarriages {
             ))
         });
         Some(Arc::new(PeerCarriages {
+            connector,
             auth,
             http,
             btp,
@@ -178,64 +175,49 @@ impl PeerCarriages {
     pub async fn handle_http(&self, headers: &HeaderMap, body: &[u8]) -> Option<Response> {
         // A carriage this node does not expose is not peer handling that
         // failed -- it is peer handling that is not offered here, so the
-        // request is a client's and the credential is never read.
+        // request is a client's and its claim is never read as a peering's.
         let http = self.http.as_ref()?;
-
-        // §1.5's header-smuggling defence, counted before anything is
-        // parsed: refused, not resolved.
-        let presented = match present_base64(
-            headers
-                .get_all(PEER_AUTH_HEADER)
-                .into_iter()
-                .map(axum::http::HeaderValue::as_bytes),
-        ) {
-            Ok(presented) => presented,
-            Err(_) => return Some(StatusCode::BAD_REQUEST.into_response()),
-        };
-
-        let (role, refusal) = decide_role(presented.as_ref(), &self.auth).into_parts();
-        self.log_refusal(refusal.as_ref());
-        if !role.is_peer() {
-            return None;
-        }
 
         let request = PeerRequest {
             headers: peer_headers(headers),
             body: body.to_vec(),
         };
+        // §1.2: the claim on this request, resolved and verified. The peer
+        // handler decides again from the same claim -- the decision is a
+        // pure function of it, so deciding twice costs nothing and lets
+        // that handler stand alone on its own listener (§1.10).
+        let claim = connector_peer_http::claim_on(&request);
+        let (role, refusal) =
+            role_gate::decide(&self.connector, &self.auth, claim.as_ref()).into_parts();
+        self.log_refusal(refusal.as_ref());
+        if !role.is_peer() {
+            return None;
+        }
+
         Some(into_axum(http.handle(request).await))
     }
 
-    /// What a BTP `auth` frame means for a session that is still a client
+    /// What a BTP frame's claim means for a session that is still a client
     /// (§1.2, §1.5). The frame is peeked, never consumed: see
-    /// [`BtpAuthVerdict`].
-    pub(crate) fn btp_auth_verdict(&self, protocol_data: &[ProtocolData]) -> BtpAuthVerdict {
+    /// [`BtpClaimVerdict`].
+    pub(crate) fn btp_claim_verdict(&self, protocol_data: &[ProtocolData]) -> BtpClaimVerdict {
         if self.btp.is_none() {
-            return BtpAuthVerdict::Client;
+            return BtpClaimVerdict::Client;
         }
-        let entries: Vec<&[u8]> = protocol_data
-            .iter()
-            .filter(|entry| entry.name == PEER_AUTH_PROTOCOL_ENTRY)
-            .map(|entry| entry.data.as_slice())
-            .collect();
-        if entries.is_empty() {
-            return BtpAuthVerdict::Client;
-        }
-        let presented = match present_raw(entries) {
-            Ok(presented) => presented,
-            Err(_) => return BtpAuthVerdict::Ambiguous,
-        };
-        let (role, refusal) = decide_role(presented.as_ref(), &self.auth).into_parts();
+        let claim = claim_json::from_protocol_data(protocol_data)
+            .and_then(|raw| claim_json::parse(raw).ok());
+        let (role, refusal) =
+            role_gate::decide(&self.connector, &self.auth, claim.as_ref()).into_parts();
         self.log_refusal(refusal.as_ref());
         if role.is_peer() {
-            BtpAuthVerdict::Peer
+            BtpClaimVerdict::Peer
         } else {
-            BtpAuthVerdict::Client
+            BtpClaimVerdict::Client
         }
     }
 
-    /// §1.6: a credential naming a configured peer that fails P1 or P2 is
-    /// an *assertion*. The interaction is a client and is **not** refused
+    /// §1.6: a claim naming a configured peer channel that fails P2 or P3
+    /// is an *assertion*. The arrival is a client's and is **not** refused
     /// for the assertion alone -- but a silent downgrade would present to
     /// an operator as "peering configured, nothing peers, no error
     /// anywhere", so the rate-limited event is what stops that.
@@ -254,7 +236,7 @@ impl PeerCarriages {
                 peer_id = %report.peer_id,
                 unmet = report.unmet.name(),
                 suppressed = report.suppressed,
-                "peer credential asserted but not proven; the interaction is a client"
+                "a peer channel's claim did not verify; the arrival is a client's"
             );
         }
     }
@@ -298,27 +280,107 @@ fn into_axum(response: connector_peer_http::PeerResponse) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use connector_runtime::{FakeAppClient, InProcessPeerTransport, SystemClock};
-
-    fn connector() -> Arc<Connector> {
-        Arc::new(Connector::new(
-            Vec::new(),
-            Vec::new(),
-            Arc::new(FakeAppClient::new()),
-            Arc::new(InProcessPeerTransport::new()),
-            Arc::new(SystemClock),
-        ))
-    }
+    use connector_runtime::{
+        ChannelDomain, ClaimSignature, FakeAppClient, InProcessPeerTransport, SystemClock,
+        WireClaim,
+    };
+    use connector_signer::{
+        derive_evm_address, evm_balance_proof_digest, EvmBalanceProof, LocalSigner, Signer,
+    };
 
     const PEER_ID: &str = "store";
-    const PEER_SECRET: &str = "a-real-peering-secret";
+    const CHAIN_ID: u64 = 31_337;
+    const TOKEN_NETWORK: [u8; 20] = [0xbb; 20];
+
+    /// The channel `[[peer_channels]]` binds, in both spellings the fixture
+    /// needs: the on-chain bytes a balance proof is signed over, and the
+    /// `0x` hex a claim names it by.
+    fn channel_bytes() -> [u8; 32] {
+        [0x11; 32]
+    }
+
+    fn channel_id() -> String {
+        format!("0x{}", hex::encode(channel_bytes()))
+    }
+
+    /// A connector that holds the peering's channel exactly as
+    /// `connector-cli` wires one from `[[peer_channels]]`: the counterparty
+    /// key its claims are verified against, and the EIP-712 domain they are
+    /// signed under. Without both, every claim is `unknown_channel` and no
+    /// interaction could ever take the peer role.
+    fn connector_holding(counterparty: [u8; 20]) -> Arc<Connector> {
+        Arc::new(
+            Connector::new(
+                Vec::new(),
+                Vec::new(),
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                Arc::new(SystemClock),
+            )
+            .with_channel_verification_key(channel_id(), counterparty)
+            .with_channel_domain(
+                channel_id(),
+                ChannelDomain {
+                    chain_id: CHAIN_ID,
+                    token_network_address: TOKEN_NETWORK,
+                },
+            )
+            .expect("a bytes32 channel id"),
+        )
+    }
+
+    /// A claim on that channel signed by `signer`, exactly as `ClaimBook`
+    /// signs one: ADR 0024's EIP-712 `BalanceProof` digest, with
+    /// `lockedAmount`/`locksRoot` as zeros.
+    fn sign_claim(signer: &dyn Signer, nonce: u64, cumulative_amount: u64) -> WireClaim {
+        let proof = EvmBalanceProof {
+            channel_id: channel_bytes(),
+            nonce,
+            transferred_amount: u128::from(cumulative_amount),
+            locked_amount: 0,
+            locks_root: [0u8; 32],
+            chain_id: CHAIN_ID,
+            token_network_address: TOKEN_NETWORK,
+        };
+        WireClaim {
+            channel_id: channel_id(),
+            nonce,
+            cumulative_amount,
+            signature: ClaimSignature::Evm(
+                signer
+                    .sign(&evm_balance_proof_digest(&proof))
+                    .expect("sign"),
+            ),
+        }
+    }
+
+    /// That claim as the §4 JSON both carriages carry, in the two encodings
+    /// §1.9 pins: raw on BTP, `base64` in the HTTP header.
+    fn claim_json(claim: &WireClaim, signer: &dyn Signer) -> String {
+        claim_json::encode(
+            claim,
+            &derive_evm_address(&signer.public_key().unwrap()),
+            None,
+            None,
+            Some(connector_peer_btp::PeerClaimDomain {
+                chain_id: CHAIN_ID,
+                token_network: TOKEN_NETWORK,
+            }),
+            "message-1",
+            "2030-01-01T00:00:00.000Z",
+        )
+    }
 
     /// A real loaded [`connector_config::Config`] carrying one correctly
     /// bound peering, rather than hand-built values: `PeerConfig` and
     /// `PeerChannelConfig` are constructible only by config load precisely
     /// so a value that exists is one the loader would produce, and a test
     /// that forged one would be testing a shape a node can never hold.
-    fn peering() -> connector_config::Config {
+    ///
+    /// `counterparty` is written into the `[[peer_channels]]` row, so the
+    /// key the config binds and the key a fixture signs with are one fact
+    /// rather than two that have to agree.
+    fn peering(counterparty: [u8; 20]) -> connector_config::Config {
         let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
         std::io::Write::write_all(&mut key_file, &[7u8; 32]).expect("write key file");
         let state_dir = tempfile::tempdir().expect("temp state dir");
@@ -337,15 +399,12 @@ key_file = "{key_file}"
 id = "{PEER_ID}"
 endpoint = "wss://peer.example:443/ilp/btp"
 
-[peers.credential]
-secret = "{PEER_SECRET}"
-
 [[peer_channels]]
 peer_id = "{PEER_ID}"
-channel_id = "0x{channel}"
-counterparty_key = "0x00000000000000000000000000000000000000aa"
-chain_id = 31337
-token_network = "0x00000000000000000000000000000000000000bb"
+channel_id = "{channel}"
+counterparty_key = "0x{counterparty}"
+chain_id = {CHAIN_ID}
+token_network = "0x{token_network}"
 
 # An EVM `[[peer_channels]]` row needs `[settlement.evm]` (issue #1138):
 # a peer claim is redeemed by the channel's on-chain participant, and that
@@ -361,7 +420,9 @@ key_file = "{key_file}"
 "#,
                 state_dir = state_dir.path().display(),
                 key_file = key_file.path().display(),
-                channel = "11".repeat(32),
+                channel = channel_id(),
+                counterparty = hex::encode(counterparty),
+                token_network = hex::encode(TOKEN_NETWORK),
             )
             .as_bytes(),
         )
@@ -369,15 +430,37 @@ key_file = "{key_file}"
         connector_config::Config::load(config_file.path()).expect("load the peering config")
     }
 
-    fn carriages(expose: PeerExposure) -> Option<Arc<PeerCarriages>> {
-        let config = peering();
-        PeerCarriages::from_config(connector(), config.peers(), config.peer_channels(), expose)
+    /// The carriages `expose` names, over a peering whose counterparty is
+    /// `payer` -- so a claim `payer` signs is the one thing that can take
+    /// the peer role here.
+    fn carriages(expose: PeerExposure, payer: &dyn Signer) -> Option<Arc<PeerCarriages>> {
+        let counterparty = derive_evm_address(&payer.public_key().unwrap());
+        let config = peering(counterparty);
+        PeerCarriages::from_config(
+            connector_holding(counterparty),
+            config.peers(),
+            config.peer_channels(),
+            expose,
+        )
     }
 
-    fn credential(peer_id: &str, secret: &str) -> String {
-        connector_peer_auth::encode_base64(&connector_peer_auth::PresentedCredential::new(
-            peer_id, secret,
-        ))
+    fn claim_headers(json: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            connector_btp::CLAIM_HEADER,
+            connector_peer_http::headers::claim_header_value(json)
+                .parse()
+                .expect("header value"),
+        );
+        headers
+    }
+
+    fn claim_entry(json: &str) -> ProtocolData {
+        ProtocolData {
+            name: connector_btp::CLAIM_PROTOCOL.to_string(),
+            content_type: connector_btp::CONTENT_TYPE_TEXT,
+            data: json.as_bytes().to_vec(),
+        }
     }
 
     /// §2.1: `peer_expose = "neither"` -- the default, and the NAT'd
@@ -385,58 +468,66 @@ key_file = "{key_file}"
     /// this node's listeners is a client's.
     #[test]
     fn a_node_that_exposes_nothing_mounts_no_peer_carriage() {
-        assert!(carriages(PeerExposure::Neither).is_none());
+        let payer = LocalSigner::generate("payer");
+        assert!(carriages(PeerExposure::Neither, &payer).is_none());
     }
 
     /// Expose and dial are separate axes (§2.1), and so is each carriage
     /// from the other: a node exposing only BTP offers no peer handling on
-    /// `POST /ilp`.
+    /// `POST /ilp`, whatever claim a request carries.
     #[tokio::test]
-    async fn a_carriage_this_node_does_not_expose_never_reads_a_credential() {
-        let carriages = carriages(PeerExposure::Btp).expect("btp is exposed");
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            PEER_AUTH_HEADER,
-            credential(PEER_ID, PEER_SECRET)
-                .parse()
-                .expect("header value"),
-        );
+    async fn a_carriage_this_node_does_not_expose_never_reads_a_claim_as_a_peerings() {
+        let payer = LocalSigner::generate("payer");
+        let carriages = carriages(PeerExposure::Btp, &payer).expect("btp is exposed");
+        let proven = claim_json(&sign_claim(&payer, 1, 500), &payer);
 
-        assert!(carriages.handle_http(&headers, b"").await.is_none());
-    }
-
-    /// §1.5: more than one credential on one request is refused, not
-    /// resolved -- never the first, never the last, never a concatenation.
-    #[tokio::test]
-    async fn two_peer_auth_headers_are_a_400_with_no_ilp_body() {
-        let carriages = carriages(PeerExposure::Http).expect("http is exposed");
-        let value = credential(PEER_ID, PEER_SECRET);
-        let mut headers = HeaderMap::new();
-        headers.append(PEER_AUTH_HEADER, value.parse().expect("header value"));
-        headers.append(PEER_AUTH_HEADER, value.parse().expect("header value"));
-
-        let response = carriages
-            .handle_http(&headers, b"")
+        assert!(carriages
+            .handle_http(&claim_headers(&proven), b"")
             .await
-            .expect("an ambiguous credential is answered here, not fallen through");
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            .is_none());
     }
 
-    /// §1.9's shape, at this seam: a credential that proves nothing is a
-    /// client request, and a client request is one this module declines to
-    /// answer at all -- so it reaches the client edge's own path and no
-    /// peer handling whatsoever.
+    /// §1.4, ADR 0060: a `Toon-Peer-Auth` header is **ignored**, never
+    /// refused. A request still setting one is read exactly as one that does
+    /// not -- the claim decides, and only the claim -- which is what lets the
+    /// two ends of a peering be upgraded in either order.
     #[tokio::test]
-    async fn a_credential_that_proves_nothing_falls_through_to_the_client_path() {
-        let carriages = carriages(PeerExposure::Both).expect("http is exposed");
+    async fn a_lingering_peer_auth_header_is_ignored_and_decides_nothing() {
+        let payer = LocalSigner::generate("payer");
+        let carriages = carriages(PeerExposure::Http, &payer).expect("http is exposed");
+        let proven = claim_json(&sign_claim(&payer, 1, 500), &payer);
+        let stale = "eyJwZWVySWQiOiJzdG9yZSIsInNlY3JldCI6ImFueXRoaW5nIn0=";
 
-        for (case, wrong) in refused_credentials() {
-            let mut headers = HeaderMap::new();
-            headers.insert(PEER_AUTH_HEADER, wrong.parse().expect("header value"));
+        let mut with_claim = claim_headers(&proven);
+        with_claim.insert("toon-peer-auth", stale.parse().expect("header value"));
+        let mut without_claim = HeaderMap::new();
+        without_claim.insert("toon-peer-auth", stale.parse().expect("header value"));
 
+        assert!(
+            carriages.handle_http(&with_claim, b"").await.is_some(),
+            "the header changes nothing about a request whose claim proves the peering"
+        );
+        assert!(
+            carriages.handle_http(&without_claim, b"").await.is_none(),
+            "and nothing about one whose claim does not: it is a client request"
+        );
+    }
+
+    /// §1.9's shape, at this seam: a claim that proves no peering is a
+    /// client request, and a client request is one this module declines to
+    /// answer at all -- so it reaches the client edge's own path and no peer
+    /// handling whatsoever.
+    #[tokio::test]
+    async fn a_claim_that_proves_no_peering_falls_through_to_the_client_path() {
+        let payer = LocalSigner::generate("payer");
+        let carriages = carriages(PeerExposure::Both, &payer).expect("http is exposed");
+
+        for (case, json) in refused_claims(&payer) {
             assert!(
-                carriages.handle_http(&headers, b"").await.is_none(),
+                carriages
+                    .handle_http(&claim_headers(&json), b"")
+                    .await
+                    .is_none(),
                 "{case} must be a client request"
             );
         }
@@ -447,54 +538,50 @@ key_file = "{key_file}"
     }
 
     /// The BTP twin: the same shapes §1.9 enumerates, peeked off a frame
-    /// rather than a header set. §9 makes a difference between the
-    /// carriages a defect, so both are asserted or neither is.
+    /// rather than a header set. §9 makes a difference between the carriages
+    /// a defect, so both are asserted or neither is.
     #[test]
-    fn the_btp_verdict_admits_only_a_credential_that_proves_p1_and_p2() {
-        let carriages = carriages(PeerExposure::Both).expect("btp is exposed");
-        let entry = |peer_id: &str, secret: &str| ProtocolData {
-            name: PEER_AUTH_PROTOCOL_ENTRY.to_string(),
-            content_type: connector_btp::CONTENT_TYPE_TEXT,
-            data: connector_peer_auth::encode_raw(&connector_peer_auth::PresentedCredential::new(
-                peer_id, secret,
-            )),
-        };
-        let proven = entry(PEER_ID, PEER_SECRET);
+    fn the_btp_verdict_admits_only_a_frame_whose_claim_proves_p2_and_p3() {
+        let payer = LocalSigner::generate("payer");
+        let carriages = carriages(PeerExposure::Both, &payer).expect("btp is exposed");
+        let proven = claim_entry(&claim_json(&sign_claim(&payer, 1, 500), &payer));
 
         assert_eq!(
-            carriages.btp_auth_verdict(std::slice::from_ref(&proven)),
-            BtpAuthVerdict::Peer
+            carriages.btp_claim_verdict(std::slice::from_ref(&proven)),
+            BtpClaimVerdict::Peer
         );
-        assert_eq!(carriages.btp_auth_verdict(&[]), BtpAuthVerdict::Client);
-        assert_eq!(
-            carriages.btp_auth_verdict(&[proven.clone(), proven]),
-            BtpAuthVerdict::Ambiguous
-        );
-        for (case, peer_id, secret) in [
-            ("an empty secret", PEER_ID, ""),
-            ("a correct peer id with a wrong secret", PEER_ID, "nope"),
-            ("an unconfigured peer id", "nobody", PEER_SECRET),
-        ] {
+        assert_eq!(carriages.btp_claim_verdict(&[]), BtpClaimVerdict::Client);
+        for (case, json) in refused_claims(&payer) {
             assert_eq!(
-                carriages.btp_auth_verdict(&[entry(peer_id, secret)]),
-                BtpAuthVerdict::Client,
-                "{case} must leave the session a client"
+                carriages.btp_claim_verdict(&[claim_entry(&json)]),
+                BtpClaimVerdict::Client,
+                "{case} must leave the frame a client frame"
             );
         }
     }
 
     /// §1.9's wire-presentable cases, shared so the two carriages cannot
     /// drift in *which* shapes they refuse -- the drift §9 warns about.
-    fn refused_credentials() -> Vec<(&'static str, String)> {
+    fn refused_claims(payer: &dyn Signer) -> Vec<(&'static str, String)> {
+        let stranger = LocalSigner::generate("stranger");
         vec![
-            ("an empty secret", credential(PEER_ID, "")),
             (
-                "a correct peer id with a wrong secret",
-                credential(PEER_ID, "not-the-secret"),
+                "a claim whose signature does not recover to the row's key",
+                claim_json(&sign_claim(&stranger, 1, 500), &stranger),
             ),
             (
-                "a valid credential naming an unconfigured peer id",
-                credential("nobody", PEER_SECRET),
+                "a claim on a channel no [[peer_channels]] row binds",
+                claim_json(
+                    &WireClaim {
+                        channel_id: format!("0x{:064x}", 99),
+                        ..sign_claim(payer, 1, 500)
+                    },
+                    payer,
+                ),
+            ),
+            (
+                "a claim header that is not a claim",
+                "not a claim".to_string(),
             ),
         ]
     }

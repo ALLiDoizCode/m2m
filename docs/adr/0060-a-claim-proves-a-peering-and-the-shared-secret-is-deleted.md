@@ -1,10 +1,8 @@
 # A claim proves a peering; the shared secret is deleted
 
-**Status:** Accepted, **not yet built**. Finishes what issue #868 decided on 2026-08-07 and only half landed: `peer-carriage-spec.md` §1.2 has said since then that the bearer credential does not decide role, and `connector-peer-auth` still decides role on it and never examines a claim. **Required by [0058](0058-a-peering-is-established-from-a-url.md)** — while a shared secret is mandatory, a public document can never be sufficient to establish a peering. Applies [0008](0008-operator-surface-splits-read-from-write.md)'s rule to the peer surface. Deletes a wire field, so it disturbs [0021](0021-vectors-are-normative-prose-is-not.md) and [0027](0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md).
+**Status:** Accepted — **built** (#1157). Finished what issue #868 decided on 2026-08-07 and only half landed: `peer-carriage-spec.md` §1.2 had said since then that the bearer credential does not decide role, while `connector-peer-auth` still decided on it and never examined a claim. **Required by [0058](0058-a-peering-is-established-from-a-url.md)** — while a shared secret is mandatory, a public document can never be sufficient to establish a peering. Applies [0008](0008-operator-surface-splits-read-from-write.md)'s rule to the peer surface. Deleted a wire field, so it disturbs [0021](0021-vectors-are-normative-prose-is-not.md) (`schema_version` is now **4**) and [0027](0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md).
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
-
-**Falsifier:** `crates/connector-peer-auth/src/**/*.rs` matching `\bcounterparty_key\b` — role decided by a verified claim requires the deciding crate to hold the key that claim is verified against, and today it holds a secret and a boolean (`policy.rs`). No implementation of this record can decide role without that key in that crate.
 
 **A peering is proven by a signature, not by a shared string.** The `{peerId, secret}` bearer
 credential is deleted — from the `Toon-Peer-Auth` header, from the BTP `auth` protocolData entry,
@@ -198,3 +196,28 @@ throughout — so the two ends may be upgraded in either order without a peering
 a peering needs about the counterparty is either in the public self-description or derivable from it
 ([0059](0059-a-channel-is-derived-from-its-participants.md)) — which is what makes a URL a complete
 answer rather than half of one.
+
+## Update (issue #1157) — this record's falsifier was mis-specified, and the build is better than it predicted
+
+The falsifier this record carried while unbuilt was:
+
+> `crates/connector-peer-auth/src/**/*.rs` matching `\bcounterparty_key\b` — role decided by a
+> verified claim requires the deciding crate to hold the key that claim is verified against.
+
+**It never fired, and it should not have.** `counterparty_key` appears nowhere in
+`connector-peer-auth`, and the record is still built. The premise was wrong: deciding role from a
+verified claim does **not** require the deciding crate to hold the key.
+
+What shipped instead is a two-line join, `connector_peer_btp::role_gate::decide`. It asks the
+connector for a verdict — `Verified`, `UnknownChannel` or `SignatureInvalid` — and hands
+`decide_role` a channel id and that verdict, nothing more. The counterparty key stays in
+`ClaimBook`, where `[[peer_channels]]` already put it.
+
+That is not merely an equivalent arrangement; it is the one `peer-carriage-spec.md` §1.3 requires.
+That section enumerates what MUST NOT enter the role decision, and a decision function holding
+verification keys is a decision function that can be tempted to verify.
+
+**The lesson for the next record: a falsifier must name a fact the decision forces, not a shape the
+author imagined the code would take.** A good one here would have named the retired symbol —
+`UnmetRequirement::ProvenCredential`, which the decision genuinely deletes — rather than a symbol
+the author guessed would appear.

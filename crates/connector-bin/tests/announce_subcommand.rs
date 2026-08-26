@@ -483,7 +483,7 @@ fn announcing_with_no_destination_refuses_and_says_where_the_address_comes_from(
 ///
 /// `client_edge_addr` names `port` so the guard's "is a connector already
 /// serving this config" question has something to find.
-fn forwarding_config(key_path: &Path, secret_path: &Path, state_dir: &Path, port: u16) -> String {
+fn forwarding_config(key_path: &Path, state_dir: &Path, port: u16) -> String {
     format!(
         r#"
 client_edge_addr = "127.0.0.1:{port}"
@@ -495,7 +495,6 @@ key_file = "{key_file}"
 [[peers]]
 id = "carrier"
 endpoint = "wss://carrier.test.example/ilp/btp"
-credential = {{ secret_file = "{secret_file}" }}
 # What this node retains for carrying one packet over this peering (ADR
 # 0010, ADR 0061). It rides here, not on the `[[routes]]` row below, and
 # `amount_to_pay` reads it through the route's `peer_id`.
@@ -546,7 +545,6 @@ key_file = "{key_file}"
 "#,
         state_dir = state_dir.display(),
         key_file = key_path.display(),
-        secret_file = secret_path.display(),
     )
 }
 
@@ -569,13 +567,7 @@ fn announcing_beside_a_serving_node_refuses_rather_than_forking_the_claim_journa
     let port = listener.local_addr().expect("addr").port();
     let state_dir = tempfile::tempdir().expect("temp state dir");
     let key_file = support::write_raw_key_file(19);
-    let secret = write("a-real-peering-secret");
-    let config = write(&forwarding_config(
-        key_file.path(),
-        secret.path(),
-        state_dir.path(),
-        port,
-    ));
+    let config = write(&forwarding_config(key_file.path(), state_dir.path(), port));
 
     let (ok, _stdout, stderr) = run_connector(&[
         "announce",
@@ -639,13 +631,7 @@ fn a_second_process_is_refused_before_it_can_fork_the_relocated_outbound_client_
     let before = std::fs::read(&ledger_path).expect("read the seeded ledger");
 
     let key_file = support::write_raw_key_file(19);
-    let secret = write("a-real-peering-secret");
-    let config = write(&forwarding_config(
-        key_file.path(),
-        secret.path(),
-        state_dir.path(),
-        port,
-    ));
+    let config = write(&forwarding_config(key_file.path(), state_dir.path(), port));
 
     let (ok, _stdout, stderr) = run_connector(&[
         "announce",

@@ -20,8 +20,14 @@
 //! | **FLUSH** | **POST with an empty ILP body** plus the claim header -- the standalone-claim shape of `client-edge-spec.md` §1.9 step 5 |
 //! | CLAIM_ACK | `Toon-Claim-Ack` response header on the response that already answers the claim-bearing request |
 //! | `accumulatedCost` | `Toon-Accumulated-Cost` response header, on a REJECT only |
-//! | peer credential | `Toon-Peer-Auth` request header, `base64(JSON)`, on **every** request |
 //! | flush prompt | `Toon-Flush-Requested` response header -- HTTP only, and only a hint (§6.4) |
+//!
+//! There is no row for a peer credential, and there was one: `Toon-Peer-Auth`
+//! carried a `base64({peerId, secret})` on every request. ADR 0060 deleted
+//! it -- the claim already in the table above is what proves the peering, so
+//! this carriage neither sets that header nor reads one. An arriving one is
+//! ignored rather than refused, which is what lets the two ends of a peering
+//! be upgraded in either order.
 //!
 //! **The claim header is `ILP-Payment-Channel-Claim`**, the deployed
 //! spelling. ADR 0027's table originally wrote `Payment-Channel-Claim`,
@@ -68,7 +74,8 @@
 //!    [`connector_peer_btp::claim_json`] parses the claim (I4, through the
 //!    client edge's own validator), [`connector_peer_btp::ack`] encodes and
 //!    decodes the verdict (I3, one refusal taxonomy), and
-//!    [`connector_peer_auth::decide_role`] decides role (I7). This crate
+//!    [`connector_peer_btp::role_gate::decide`] decides role (I7) -- the
+//!    same call the BTP carriage makes, over the same claim. This crate
 //!    calls them.
 //! 3. **Blur the two audiences.** The pipeline below the port is shared with
 //!    the client edge; **the admission is not**. See [`accept`] -- the devnet
@@ -104,7 +111,7 @@ pub mod client;
 pub mod dial;
 pub mod headers;
 
-pub use accept::{FlushHints, PeerHttpPolicy, PeerHttpState};
+pub use accept::{claim_on, FlushHints, PeerHttpPolicy, PeerHttpState};
 pub use client::ReqwestPeerClient;
 pub use dial::{HttpDialError, HttpPeerTransport, PeerHttpClient, PeerRelation, NAT_NOTE};
 pub use headers::{Headers, PeerRequest, PeerResponse};
