@@ -132,16 +132,21 @@ therefore names one channel, one row and one `peer_id`, with no ambiguity for a 
 and none for an attacker to manufacture. That config-enforced uniqueness is what makes deciding role
 from a claim safe, and it is why §1.3's former prohibition on doing so is withdrawn.
 
-**What is retired, and what is not.** P1 is retired **as a role requirement**. The credential
-surface itself is untouched by this amendment: `[[peers]].credential` still loads and is still
-required of a peering relation, a dialer still presents it (§1.4), a mismatch is still the
-`peer_auth_refused` operator event (§1.6), and §12(7)'s "both operators write the same string" still
-describes how a relation is named. §1.9's five regression cases all still classify `client`, because
-none of them carries a verifying claim on a configured peer channel — but the _reason_ changes, and
-case 3 in particular ("a correct `peerId` with a wrong `secret`") MUST NOT be read as "a wrong
-secret defeats a valid claim". Under the amended rule it does not. Whether the credential surface
-should exist at all is [issue #867](https://github.com/toon-protocol/connector/issues/867)'s
-question and is not decided here.
+**What is retired, and what is not.** P1 was retired **as a role requirement** by the amendment
+above, and the credential surface itself is retired with it by
+[ADR 0060](../adr/0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md) (issue #1157).
+`[[peers]].credential` does **not** load: it is parsed solely in order to be refused **by name**
+(`ConfigError::PeerCredentialRemoved`, `crates/connector-config/src/peer.rs`), so a node whose
+committed TOML still sets one stops at boot rather than peering without it. A dialer presents
+nothing (§1.4); `peer_auth_refused` names which of P2/P3 failed rather than a mismatched secret
+(§1.6); and §12(7)'s "both operators write the same string" is superseded there — `[[peers]].id` is
+a **local label**, and what the two operators MUST agree on is the channel. There is no replacement
+credential: not renamed, not demoted to a label, not kept as an optional discriminator. §1.9's five
+regression cases all still classify `client`, because none of them carries a verifying claim on a
+configured peer channel; three of them stopped being expressible when the credential was deleted,
+and are restated there in terms of the claim that now decides. Whether the credential surface
+should exist at all was [issue #867](https://github.com/toon-protocol/connector/issues/867)'s
+question, and ADR 0060 answers it: it should not.
 
 **Implementation status.** This section's rule for _role_ **is** the code, as of issue #1157
 ([ADR 0060](../adr/0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md)).
@@ -1482,20 +1487,34 @@ Recorded explicitly so review can accept or overturn each, rather than discoveri
 6. **`ChannelInBothNamespaces` (§1.8).** ADR 0027 requires separate roles; the double-counting risk
    of one channel in both namespaces is not addressed there. Enforcing disjointness in config is
    the cheapest safe answer.
-7. **The credential's `peerId` names the peering _relation_, so both operators write the same
-   string (§1.4, §1.2 P1).** §1.4's example shows one credential and does not say whose id is in
-   it, and P1 is stated from the accepting side ("a peer id `p` that appears in `[[peers]]`") —
-   which leaves "the dialing side's own id, as the accepting side configured it" and "the accepting
-   side's id, as the dialing side configured it" both readable. Issue #678 found the ambiguity the
-   expensive way: the first real dial presented the id it had configured for the _remote_, the
-   remote had no such entry, and the interaction was admitted as an ordinary client — correctly,
-   silently, and uselessly. The resolution costs no new configuration surface: `[[peers]].id` is
-   the relation's name on both sides, presented by the dialer and looked up by the accepter, so a
-   peering establishes only when the two files carry the same literal string. There is deliberately
-   no separate "the id this peer knows me by" field; a second name for one relation is a second
-   thing to keep in step, and this is a bilateral configuration either way (`peer-semantics-pre-868.md`
-   §4). **A mismatched id is invisible by design** (§1.6 keeps an unconfigured id silent), so it is
-   the first thing to check when a peering will not establish.
+7. **The credential's `peerId` named the peering _relation_, so both operators wrote the same
+   string (§1.4, §1.2 P1)** — _superseded by
+   [ADR 0060](../adr/0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md) (issue
+   #1157); kept because it records an ambiguity found the expensive way, and because refusing a
+   second name for one relation is why nothing replaced the field._ §1.4's example showed one
+   credential and did not say whose id was in it, and P1 was stated from the accepting side ("a
+   peer id `p` that appears in `[[peers]]`") — which left "the dialing side's own id, as the
+   accepting side configured it" and "the accepting side's id, as the dialing side configured it"
+   both readable. Issue #678 found the ambiguity the expensive way: the first real dial presented
+   the id it had configured for the _remote_, the remote had no such entry, and the interaction was
+   admitted as an ordinary client — correctly, silently, and uselessly. The resolution cost no new
+   configuration surface: `[[peers]].id` was the relation's name on both sides, presented by the
+   dialer and looked up by the accepter, so a peering established only when the two files carried
+   the same literal string. There was deliberately no separate "the id this peer knows me by"
+   field; a second name for one relation is a second thing to keep in step, and this is a bilateral
+   configuration either way (`peer-semantics-pre-868.md` §4).
+
+   **Nothing puts a peering id on the wire now, and the two operators need not agree on one.**
+   `[[peers]].id` is a **local label**: it names a peering to this node's own `[[routes]]`,
+   `[[peer_channels]]` and `[[pay_channels]]` rows, and the accepting side reads the peer id off
+   the `[[peer_channels]]` row the claim's channel resolves to, never off the interaction (§1.2).
+   A connector MUST NOT require the counterparty's file to spell the relation as its own file
+   does, and MUST NOT take an id from an interaction at all (§1.3). **What the two files MUST
+   agree on is the channel**: the on-chain channel the peering's claims are signed against and the
+   counterparty key it was opened against, as `[[peer_channels]]` configures them (§11). A
+   disagreement there is no longer invisible — it is P2 or P3, and §1.6 requires it be reported as
+   `peer_auth_refused`.
+
 8. **One node-wide, default-false opt-in may widen which endpoint _schemes_ resolve (§2.1).**
    §2.1's "any other scheme MUST be a load-time error" is kept as the default and as the only
    production configuration. A connector MAY offer a single explicit switch — this implementation's
