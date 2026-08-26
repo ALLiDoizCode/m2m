@@ -333,10 +333,20 @@ async fn a_paid_write_lands_on_the_app_with_the_claim_advanced_by_the_routes_pri
     // A second, separately funded channel that received real value below
     // the route's price -- proving the underpayment case is refused against
     // genuine on-chain funding too, not a synthetic shortfall.
+    //
+    // A SECOND BUYER IDENTITY, not the one above (ADR 0059, issue #1158): a
+    // channel id is now derived from its participant pair, so this node and
+    // one buyer have exactly one live channel between them and a second
+    // `openChannel` for the same pair reverts `ChannelAlreadyExists`. Two
+    // concurrently live channels means two payers, which is what a real
+    // deployment looks like anyway.
+    let underpaid_buyer_secret = SecretKey::parse(&[22u8; 32]).expect("valid secret key");
+    let underpaid_buyer_address =
+        derive_evm_address(&PublicKey::from_secret_key(&underpaid_buyer_secret).serialize());
     let underpaid_channel = backend
-        .open(buyer_address.to_vec(), ChronoDuration::hours(1))
+        .open(underpaid_buyer_address.to_vec(), ChronoDuration::hours(1))
         .await
-        .expect("open a second real channel");
+        .expect("open a second real channel, with a second buyer");
     let underpaid_state = backend
         .fund_counterparty(&underpaid_channel, ROUTE_PRICE / 2)
         .await
@@ -397,10 +407,11 @@ handler_url = "http://{app_addr}"
 price = {ROUTE_PRICE}
 
 # Issue #558: whose signature this node accepts on each of the two channels
-# opened above -- the buyer's address, the one the chain itself holds as
-# their counterparty. Without this the connector has a record of no channel
-# and refuses every claim, rather than believing what a claim says about its
-# own signer.
+# opened above -- each channel's own buyer address, the one the chain itself
+# holds as this node's counterparty there. Without this the connector has a
+# record of no channel and refuses every claim, rather than believing what a
+# claim says about its own signer. Two channels, two buyers: one live channel
+# per pair (ADR 0059).
 [[client_channels]]
 channel_id = "{paid_channel_id}"
 counterparty = "{buyer}"
@@ -409,7 +420,7 @@ token_network_address = "{token_network}"
 
 [[client_channels]]
 channel_id = "{underpaid_channel_id}"
-counterparty = "{buyer}"
+counterparty = "{underpaid_buyer}"
 chain_id = {ANVIL_CHAIN_ID}
 token_network_address = "{token_network}"
 "#,
@@ -420,6 +431,7 @@ token_network_address = "{token_network}"
         paid_channel_id = paid_channel.0,
         underpaid_channel_id = underpaid_channel.0,
         buyer = to_hex(&buyer_address),
+        underpaid_buyer = to_hex(&underpaid_buyer_address),
         token_network = to_hex(&token_network_address),
     ));
     let connector = spawn_connector(config.path());
@@ -528,7 +540,7 @@ token_network_address = "{token_network}"
         sealed_prepare_data(b"underpaid write attempt", &connector_identity);
     let underpaid_prepare = sample_prepare("g.example.app", underpaid_data, &underpaid_secret);
     let (underpaid_claim, _) = evm_claim_json(
-        &buyer_secret,
+        &underpaid_buyer_secret,
         &underpaid_channel.0,
         1,
         underpaid_state.counterparty_deposited,

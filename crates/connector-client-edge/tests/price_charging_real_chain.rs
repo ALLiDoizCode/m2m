@@ -101,8 +101,22 @@ fn counterparty_secret() -> SecretKey {
     SecretKey::parse(&[11u8; 32]).expect("valid secret key")
 }
 
+/// A **second** payer, for the second channel this file opens. Since ADR
+/// 0059 (issue #1158) a channel id is derived from its participant pair, so
+/// this node has at most one live channel with any one counterparty and a
+/// second `openChannel` for the same pair reverts `ChannelAlreadyExists`.
+/// Two concurrently live channels therefore means two payers -- which is
+/// what a real deployment looks like anyway.
+fn second_counterparty_secret() -> SecretKey {
+    SecretKey::parse(&[12u8; 32]).expect("valid secret key")
+}
+
+fn address_of(secret: &SecretKey) -> [u8; 20] {
+    derive_evm_address(&PublicKey::from_secret_key(secret).serialize())
+}
+
 fn counterparty_address() -> [u8; 20] {
-    derive_evm_address(&PublicKey::from_secret_key(&counterparty_secret()).serialize())
+    address_of(&counterparty_secret())
 }
 
 /// An EVM claim JSON with a genuine EIP-712 signature over its own fields
@@ -110,7 +124,24 @@ fn counterparty_address() -> [u8; 20] {
 /// (issue #558) -- a forged or unsigned claim would be refused before ever
 /// reaching the price check this file exists to prove.
 fn evm_claim_json(channel_id_hex: &str, nonce: u64, transferred_amount: u128) -> String {
+    evm_claim_json_signed_by(
+        &counterparty_secret(),
+        channel_id_hex,
+        nonce,
+        transferred_amount,
+    )
+}
+
+/// [`evm_claim_json`] from a named payer -- the second channel's own
+/// counterparty rather than the first's.
+fn evm_claim_json_signed_by(
+    secret: &SecretKey,
+    channel_id_hex: &str,
+    nonce: u64,
+    transferred_amount: u128,
+) -> String {
     evm_claim_json_under(
+        secret,
         channel_id_hex,
         nonce,
         transferred_amount,
@@ -124,14 +155,14 @@ fn evm_claim_json(channel_id_hex: &str, nonce: u64, transferred_amount: u128) ->
 /// the resolution reports the real deployment's own `chainId` and
 /// `verifyingContract` rather than this file's synthetic pair.
 fn evm_claim_json_under(
+    secret: &SecretKey,
     channel_id_hex: &str,
     nonce: u64,
     transferred_amount: u128,
     chain_id: u64,
     token_network: [u8; 20],
 ) -> String {
-    let secret = counterparty_secret();
-    let address = counterparty_address();
+    let address = address_of(secret);
 
     let mut channel_id = [0u8; 32];
     channel_id.copy_from_slice(
@@ -146,7 +177,7 @@ fn evm_claim_json_under(
         chain_id,
         token_network_address: token_network,
     };
-    let signature = sign_evm(&secret, &evm_balance_proof_digest(&proof));
+    let signature = sign_evm(secret, &evm_balance_proof_digest(&proof));
 
     format!(
         r#"{{
@@ -319,10 +350,13 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
         "a real transaction genuinely moved this value on chain"
     );
 
+    // A second channel, to a SECOND payer: one live channel per pair since
+    // ADR 0059, so reusing `counterparty` here would revert on chain.
+    let underpaid_counterparty = address_of(&second_counterparty_secret()).to_vec();
     let underpaid_channel = backend
-        .open(counterparty, Duration::hours(1))
+        .open(underpaid_counterparty, Duration::hours(1))
         .await
-        .expect("open a second real channel");
+        .expect("open a second real channel, to a second payer");
     let underpaid_state = backend
         .fund_counterparty(&underpaid_channel, 40)
         .await
@@ -382,7 +416,8 @@ async fn a_claim_backed_by_real_on_chain_funding_is_charged_the_routes_price() {
     let (status_two, bytes_two) = post_claim(
         connector_two,
         signer_two,
-        &evm_claim_json(
+        &evm_claim_json_signed_by(
+            &second_counterparty_secret(),
             &underpaid_channel.0,
             1,
             underpaid_state.counterparty_deposited,
@@ -458,7 +493,14 @@ async fn a_claim_above_the_real_on_chain_deposit_is_refused_until_a_real_deposit
     // One base unit above what the chain holds: fresh, well-formed,
     // correctly signed, and covering the route's price of 100 -- refused
     // purely because it could never be redeemed.
-    let over = evm_claim_json_under(&channel.0, 1, 1_001, chain_id, token_network);
+    let over = evm_claim_json_under(
+        &counterparty_secret(),
+        &channel.0,
+        1,
+        1_001,
+        chain_id,
+        token_network,
+    );
     let (status, bytes) = post_claim_to(app.clone(), signer.clone(), &over).await;
     assert_eq!(status, StatusCode::OK);
     let reject = Reject::decode(&bytes).expect("decode reject");
