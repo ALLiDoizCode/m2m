@@ -31,7 +31,8 @@ pub mod x402;
 pub use address::is_valid_ilp_address;
 pub use claim::{advance_watermark, validate_claim, validate_price, ClaimError, Watermark};
 pub use condition::{
-    condition_is_present, derive_condition, fulfillment_matches_condition, is_expired,
+    condition_is_present, derive_condition, forwarded_expiry, fulfillment_matches_condition,
+    is_expired, FORWARDING_MESSAGE_WINDOW,
 };
 pub use envelope::{EnvelopeError, EnvelopeRequest, EnvelopeResponse};
 pub use error::PacketError;

@@ -125,6 +125,10 @@ packet, never an accumulation.
 
 **PF-19** `[connector]` — A hop MUST decrease a packet's expiry when forwarding, by enough that a
 fulfilment arriving in time downstream can still be delivered upstream before its own expiry fires.
+A hop whose packet has no more time left than the window it must keep back MUST refuse it `R00`
+rather than forward one with a dead window — the same code, and the same fact one hop later, as
+PF-02's already-expired arrival. Shortening is unilateral: a peer handed a shorter expiry than the
+one that arrived here needs to agree to nothing, so this is not a wire change and never was.
 
 ---
 
