@@ -747,7 +747,6 @@ mod tests {
                 vec![connector_runtime::PeerRoute::new(
                     "g.example.peer",
                     "peer-a",
-                    0,
                 )],
                 Arc::new(FakeAppClient::new()),
                 Arc::new(InProcessPeerTransport::new()),

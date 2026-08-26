@@ -77,7 +77,7 @@ not change what anything else must do.
 | [0043](0043-purchasable-peering-is-removed.md)                                         | Purchasable peering is removed                                          | Accepted — **retires 0037, 0038, 0039**                  |
 | [0047](0047-the-configuration-schema-is-implementation-detail-capabilities-are-law.md) | The configuration schema is implementation detail; capabilities are law | Accepted — sharpens 0009                                 |
 | [0058](0058-a-peering-is-established-from-a-url.md)                                    | A peering is established from a URL; its identity is trust-on-first-use | Accepted — **not yet built**; completes 0034; needs 0050 |
-| [0061](0061-a-fee-attaches-to-a-peering-not-to-a-route.md)                             | A fee attaches to a peering, not to a route                             | Accepted — **not yet built**; amends 0010 and 0028       |
+| [0061](0061-a-fee-attaches-to-a-peering-not-to-a-route.md)                             | A fee attaches to a peering, not to a route                             | Accepted — **built** (#1159); amends 0010 and 0028       |
 
 ---
 

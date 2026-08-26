@@ -1555,13 +1555,12 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
         .peer_routes()
         .iter()
         // ADR 0028: a forwarded route carries the client-edge `price` its
-        // config entry names, alongside the `fee` this hop retains. Built
-        // with `new_priced` rather than `new` so a route that loses its
-        // price on the way into the runtime is a compile error, not a
-        // silently free gateway.
-        .map(|route| {
-            PeerRoute::new_priced(route.prefix(), route.peer_id(), route.fee(), route.price())
-        })
+        // config entry names. What this hop retains of it is the peering's
+        // own fee, wired below from `[[peers]]` (ADR 0061). Built with
+        // `new_priced` rather than `new` so a route that loses its price on
+        // the way into the runtime is a compile error, not a silently free
+        // gateway.
+        .map(|route| PeerRoute::new_priced(route.prefix(), route.peer_id(), route.price()))
         .collect();
     let mut connector = Connector::new(
         config.routes().to_vec(),
@@ -1590,6 +1589,18 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
             .peers()
             .iter()
             .map(|peer| (peer.id().to_string(), peer.max_packet_amount())),
+    )
+    // ADR 0010's flat per-packet fee, straight off each `[[peers]]` row
+    // (ADR 0061): what this node retains for carrying one packet to that
+    // counterparty, whichever prefix it was addressed to. Defaulted to zero
+    // at the config layer, so a row that writes nothing carries for free --
+    // and so does a peer this call never names, one added at runtime over
+    // the operator surface with a fee on its own row instead.
+    .with_peer_fees(
+        config
+            .peers()
+            .iter()
+            .map(|peer| (peer.id().to_string(), peer.fee())),
     );
     // `[[peer_channels]]` reaching `ClaimBook` at last (§11: "it MUST
     // actually wire `ClaimBook`'s signer, verification key and EIP-712
@@ -4257,6 +4268,7 @@ key_file = "{key_file}"
 id = "{PEER_ID}"
 endpoint = "wss://store.example:443/btp"
 credential = {{ secret = "shared-secret" }}
+fee = {PEER_FEE}
 
 [[peer_channels]]
 peer_id = "{PEER_ID}"
@@ -4268,7 +4280,6 @@ token_network = "{TOKEN_NETWORK}"
 [[routes]]
 prefix = "{ROUTE_PREFIX}"
 peer_id = "{PEER_ID}"
-fee = {PEER_FEE}
 price = {CLIENT_AMOUNT}
 {pay_channel}
 "#,
@@ -4305,14 +4316,7 @@ client_edge_url = "{url}"
             let peer_routes = config
                 .peer_routes()
                 .iter()
-                .map(|route| {
-                    PeerRoute::new_priced(
-                        route.prefix(),
-                        route.peer_id(),
-                        route.fee(),
-                        route.price(),
-                    )
-                })
+                .map(|route| PeerRoute::new_priced(route.prefix(), route.peer_id(), route.price()))
                 .collect();
             let (claim_signer, _) = peer_claim_identity(config)
                 .expect("read the settlement key")
@@ -4323,6 +4327,12 @@ client_edge_url = "{url}"
                 Arc::new(FakeAppClient::new()),
                 peer,
                 Arc::new(SystemClock),
+            )
+            .with_peer_fees(
+                config
+                    .peers()
+                    .iter()
+                    .map(|peer| (peer.id().to_string(), peer.fee())),
             )
             .with_signer(Arc::clone(&claim_signer));
             connector = wire_peer_channels(connector, config).expect("wire [[peer_channels]]");
@@ -4549,6 +4559,7 @@ key_file = "{key_file}"
 id = "{PEER_ID}"
 endpoint = "wss://store.example:443/btp"
 credential = {{ secret = "shared-secret" }}
+fee = {PEER_FEE}
 
 [[peer_channels]]
 peer_id = "{PEER_ID}"
@@ -4558,7 +4569,6 @@ counterparty_key = "{SOLANA_COUNTERPARTY}"
 [[routes]]
 prefix = "{ROUTE_PREFIX}"
 peer_id = "{PEER_ID}"
-fee = {PEER_FEE}
 price = {CLIENT_AMOUNT}
 
 [[pay_channels]]
@@ -4584,14 +4594,7 @@ client_edge_url = "{client_edge_url}"
             let peer_routes = config
                 .peer_routes()
                 .iter()
-                .map(|route| {
-                    PeerRoute::new_priced(
-                        route.prefix(),
-                        route.peer_id(),
-                        route.fee(),
-                        route.price(),
-                    )
-                })
+                .map(|route| PeerRoute::new_priced(route.prefix(), route.peer_id(), route.price()))
                 .collect();
             let claim_signer = peer_claim_identity_solana(config)
                 .expect("read the settlement key")
@@ -4602,6 +4605,12 @@ client_edge_url = "{client_edge_url}"
                 Arc::new(FakeAppClient::new()),
                 peer,
                 Arc::new(SystemClock),
+            )
+            .with_peer_fees(
+                config
+                    .peers()
+                    .iter()
+                    .map(|peer| (peer.id().to_string(), peer.fee())),
             )
             .with_solana_signer(Arc::clone(&claim_signer));
             connector = wire_peer_channels(connector, config).expect("wire [[peer_channels]]");

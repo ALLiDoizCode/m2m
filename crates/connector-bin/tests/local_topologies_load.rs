@@ -189,6 +189,22 @@ fn load(name: &str, raw: &str) -> Config {
     Config::load(&path).unwrap_or_else(|error| panic!("{name} must load: {error}"))
 }
 
+/// What `config` retains for carrying one packet over the peering `route`
+/// forwards to (ADR 0010, ADR 0061). Two tables, deliberately: the
+/// `[[routes]]` row says WHICH peering carries a prefix, and that peering's
+/// own `[[peers]]` row says what carrying it costs -- because this hop does
+/// the same work whichever prefix was addressed. A `[[routes]] fee` is a
+/// refuse-to-start tombstone, so a config that tried to write one here would
+/// not have loaded at all.
+fn fee_of(config: &Config, route: &connector_config::PeerRouteConfig) -> u64 {
+    config
+        .peers()
+        .iter()
+        .find(|peer| peer.id() == route.peer_id())
+        .unwrap_or_else(|| panic!("no [[peers]] row for peering '{}'", route.peer_id()))
+        .fee()
+}
+
 /// The one `[[peer_channels]]` row a node holds for `peer_id`. Every config
 /// here has exactly one per peering, and a second would mean two answers to
 /// "whose signature do we accept", so this asserts that rather than taking the
@@ -404,15 +420,18 @@ fn the_two_hop_topologys_committed_configs_load() {
         forward.price() > 0,
         "ADR 0028: a forwarded route with no price is the free gateway issue #620 exists for"
     );
+    let forward_fee = fee_of(&payer, forward);
     assert!(
-        forward.fee() > 0,
+        forward_fee > 0,
         "THE HOP MUST CHARGE (issue #1144). This was `0` for as long as `POST /packets` declared \
          `minimum_delivery = amount`, which made any non-zero fee an unmeetable floor; minimum \
          delivery is retired (ADR 0057, issue #1143) and the flat per-packet fee that is ADR \
          0010's whole \
          revenue model is exercised by a shipped image only here and in `mixed-chain`. A fee \
          quietly back at zero is a rehearsal that carries for free, and no container can see it: \
-         B's journal reads exactly as green either way."
+         B's journal reads exactly as green either way. Since ADR 0061 the figure rides on the \
+         `a-b` `[[peers]]` row, so this also holds the two tables together: a fee written on \
+         the route would not load, and a fee dropped from the peering reads as free carriage."
     );
 
     assert_eq!(payee.peer_routes().len(), 0, "B forwards nothing onward");
@@ -445,14 +464,14 @@ fn the_two_hop_topologys_committed_configs_load() {
     // value it collected and B never charging for it, and a rehearsal with
     // slack cannot tell a shortfall from a discount.
     assert_eq!(
-        forward.price() - forward.fee(),
+        forward.price() - forward_fee,
         payee.routes()[0].price(),
         "A collects {} and retains {}, so it forwards {} -- and B's route costs {}. Change one \
          of those figures without the other and the packet either arrives short (an `F03` at \
          `handle_peer_prepare`, ADR 0029) or arrives carrying value B never charged for.",
         forward.price(),
-        forward.fee(),
-        forward.price() - forward.fee(),
+        forward_fee,
+        forward.price() - forward_fee,
         payee.routes()[0].price()
     );
 
@@ -658,7 +677,7 @@ fn the_two_hop_configs_and_their_compose_file_agree() {
     );
 
     let price = payee.routes()[0].price();
-    let fee = payer.peer_routes()[0].fee();
+    let fee = fee_of(&payer, &payer.peer_routes()[0]);
     assert!(
         TWO_HOP_COMPOSE.contains(&format!("PRICE={price}")),
         "the sender charges its verdict against B's committed price ({price}): every accepted \
@@ -787,21 +806,22 @@ fn the_mixed_chain_path_is_one_prefix_per_hop_and_one_flat_fee_per_hop() {
     // configuration (ADR 0010), never a network-wide constant -- and two
     // identical fees on a three-node path cannot tell a hop charging its own
     // from a hop charging the one it was handed.
+    let first_fee = fee_of(&a, first);
+    let second_fee = fee_of(&b, second);
     assert!(
-        first.fee() > 0 && second.fee() > 0,
+        first_fee > 0 && second_fee > 0,
         "both hops must retain something, or the flat per-packet fee is exercised by no shipped \
          image on this path either. `mixed-chain`'s B is also the only node in this repository \
          that charges a fee on a PEER arrival rather than on an operator-originated packet."
     );
     assert_ne!(
-        first.fee(),
-        second.fee(),
+        first_fee, second_fee,
         "the two fees are deliberately different figures: a fee is one peering relation's \
          bilateral price for carriage, and equal fees would let a hop charging the wrong one \
          pass unnoticed"
     );
     assert_eq!(
-        first.price() - first.fee(),
+        first.price() - first_fee,
         second.price(),
         "STILL NOT A CONVERSION. What leaves A is what arrived minus A's own FLAT fee, and that \
          is exactly B's price -- the whole difference between the two figures is one hop's fee \
@@ -810,7 +830,7 @@ fn the_mixed_chain_path_is_one_prefix_per_hop_and_one_flat_fee_per_hop() {
          middle is exactly where somebody would be tempted to put one."
     );
     assert!(
-        second.price() - second.fee() >= app.price(),
+        second.price() - second_fee >= app.price(),
         "ADR 0028's path invariant, which no code enforces because a connector cannot know what \
          the next hop charges: every hop's `price - fee` must be at least the next hop's price. \
          Here the slack is deliberate and is the value delivered to C's unpriced termination -- \
@@ -971,7 +991,7 @@ fn the_mixed_chain_forwarded_arrival_is_enforced() {
     let to_b = &a.peer_routes()[0];
     let onward = &b.peer_routes()[0];
     assert_eq!(
-        to_b.price() - to_b.fee(),
+        to_b.price() - fee_of(&a, to_b),
         onward.price(),
         "what A covers on the crossing is `amount_after_fee(price, fee)`, and what B charges the \
          arrival against is the amount that arrives -- the same figure. Enforcing is only safe \

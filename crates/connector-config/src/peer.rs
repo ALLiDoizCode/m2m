@@ -534,6 +534,11 @@ pub(crate) struct RawPeer {
     /// there is no "unbounded" spelling, deliberately.
     #[serde(default)]
     max_packet_amount: Option<u64>,
+    /// ADR 0061's fee: the flat amount this connector retains for carrying
+    /// one packet to this peer. Omitted is zero -- free carriage, and the
+    /// value every config in this tree that never wrote one already had.
+    #[serde(default)]
+    fee: Option<u64>,
 }
 
 /// A fully validated peering relation. Constructed only by
@@ -556,6 +561,7 @@ pub struct PeerConfig {
     peer_answer_timeout_ms: u64,
     forwarded_claim_enforcement: ForwardedClaimEnforcement,
     max_packet_amount: u64,
+    fee: u64,
 }
 
 impl PeerConfig {
@@ -629,6 +635,26 @@ impl PeerConfig {
     /// wrote nothing is still bounded.
     pub fn max_packet_amount(&self) -> u64 {
         self.max_packet_amount
+    }
+
+    /// This peering's flat per-packet **fee** (ADR 0010, ADR 0061): what
+    /// this connector retains for carrying one packet to this counterparty,
+    /// realized on the wire as the difference between the amount that
+    /// arrived and the amount forwarded, and added to the accumulated cost
+    /// of a reject this peer itself decided on (ADR 0011).
+    ///
+    /// Flat, per packet, and independent of the amount carried. It attaches
+    /// here rather than to a `[[routes]]` entry because this hop does the
+    /// same work whichever prefix the packet was addressed to (ADR 0061);
+    /// `[[routes]] fee` is a refuse-to-start tombstone
+    /// ([`crate::ConfigError::RouteFeeRemoved`]).
+    ///
+    /// Defaults to zero -- free carriage. Unlike
+    /// [`Self::max_packet_amount`], which exists to bound a loss, a fee
+    /// bounds nothing, so "the operator wrote no number" can safely mean
+    /// "charge nothing" here.
+    pub fn fee(&self) -> u64 {
+        self.fee
     }
 }
 
@@ -768,6 +794,7 @@ pub(crate) fn resolve_peers(
                 .unwrap_or(DEFAULT_PEER_TIMEOUT_MS),
             forwarded_claim_enforcement,
             max_packet_amount,
+            fee: peer.fee.unwrap_or(0),
         });
     }
 
@@ -815,6 +842,7 @@ mod tests {
             claim_enforcement: None,
             forwarded_claim_enforcement: None,
             max_packet_amount: None,
+            fee: None,
         }
     }
 
@@ -970,6 +998,48 @@ mod tests {
 
         assert_eq!(peers[0].max_packet_amount(), 50);
         assert_eq!(peers[1].max_packet_amount(), 5_000_000);
+    }
+
+    /// ADR 0061: a peering that writes no fee carries for free. Unlike the
+    /// cap, a fee bounds nothing, so an unwritten one can safely mean
+    /// "charge nothing" -- and it is what every config in this tree that
+    /// never wrote a `[[routes]] fee` already meant.
+    #[test]
+    fn a_peering_that_configures_no_fee_carries_for_free() {
+        let peers =
+            resolve_peers(vec![raw("peer-b")], PeerExposure::Neither, false).expect("resolve");
+
+        assert_eq!(peers[0].fee(), 0);
+    }
+
+    /// The fee is per peering, so two rows in one file hold two different
+    /// fees -- what this connector charges to carry to each counterparty,
+    /// separately. It is emphatically not per prefix: that is the whole of
+    /// ADR 0061, and why `[[routes]] fee` is now a tombstone.
+    #[test]
+    fn each_peering_carries_its_own_fee() {
+        let mut cheap = raw("peer-cheap");
+        cheap.fee = Some(50);
+        let mut dear = raw("peer-dear");
+        dear.fee = Some(100);
+
+        let peers =
+            resolve_peers(vec![cheap, dear], PeerExposure::Neither, false).expect("resolve");
+
+        assert_eq!(peers[0].fee(), 50);
+        assert_eq!(peers[1].fee(), 100);
+    }
+
+    /// `fee = 0` written down is free carriage the operator chose, and
+    /// resolves exactly like the unwritten case: there is nothing to refuse
+    /// here, unlike a cap of zero below.
+    #[test]
+    fn a_fee_of_zero_is_deliberate_free_carriage() {
+        let mut entry = raw("peer-b");
+        entry.fee = Some(0);
+
+        let peers = resolve_peers(vec![entry], PeerExposure::Neither, false).expect("resolve");
+        assert_eq!(peers[0].fee(), 0);
     }
 
     /// `0` is refused by name: it would refuse every packet the peering

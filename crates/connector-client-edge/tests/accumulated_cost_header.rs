@@ -168,11 +168,12 @@ async fn a_reject_relayed_through_a_paying_hop_reports_that_hops_fee() {
     let connector = Arc::new(covering(
         Connector::new(
             vec![],
-            vec![PeerRoute::new("g.example", "second-hop", 7)],
+            vec![PeerRoute::new("g.example", "second-hop")],
             Arc::new(FakeAppClient::new()),
             Arc::new(peer_transport),
             test_clock(),
-        ),
+        )
+        .with_peer_fees([("second-hop".to_string(), 7)]),
         "second-hop",
     ));
 

@@ -11,11 +11,11 @@
 # in the middle of it.
 #
 # Nothing in this file converts anything. The amount that leaves for C is the
-# amount that arrived from A minus this hop's FLAT fee (`fee = 50`, see below)
-# -- a fixed number of base units subtracted once, never a share of what
-# arrived. There is no rate, and ADR 0010 deleted the spread that would have
-# implied one. What the two peerings disagree about is only which ledger a
-# claim is redeemable on.
+# amount that arrived from A minus this hop's FLAT fee (the `fee = 50` on the
+# `b-c` peering, see below) -- a fixed number of base units subtracted once,
+# never a share of what arrived. There is no rate, and ADR 0010 deleted the
+# spread that would have implied one. What the two peerings disagree about is
+# only which ledger a claim is redeemable on.
 #
 # The shape has no coverage anywhere else in this repository.
 # `two_ledgers_never_merge.rs` proves the two backends stay separate inside one
@@ -90,7 +90,9 @@ key_file = "/app/data/signer.key"
 #
 # 50 rather than A's 100 on purpose: a fee buys carriage over ONE peering
 # relation and is bilateral configuration (ADR 0010), so the two hops on this
-# path are deliberately not the same number.
+# path are deliberately not the same number. It is written on the `b-c`
+# `[[peers]]` row rather than here, because it is what carrying to C costs
+# whichever prefix is addressed (ADR 0061).
 #
 # WHAT THIS NODE PAYS C IS THE 1050 IT FORWARDS, not the 1100 it received:
 # `forward_via_peer_route` covers the next hop for `amount_after_fee`, and the
@@ -99,7 +101,6 @@ key_file = "/app/data/signer.key"
 [[routes]]
 prefix = "g.local.mixed.b.c"
 peer_id = "b-c"
-fee = 50
 price = 1100
 
 # ── The EVM peering: A dials in, over BTP ────────────────────────────────────
@@ -163,6 +164,12 @@ secret_file = "/app/data/peer-a-b-secret"
 [[peers]]
 id = "b-c"
 endpoint = "http://connector-c:3000/ilp"
+# The 50 in the arithmetic above: what this node retains for carrying one
+# packet onward to C. It sits on this peering and not on the `a-b` one, because
+# a fee is charged by the hop that FORWARDS -- and this node forwards to C
+# only. `a-b` carries none for the same reason it holds no route: nothing here
+# routes back to A.
+fee = 50
 
 [peers.credential]
 secret_file = "/app/data/peer-b-c-secret"

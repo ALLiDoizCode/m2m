@@ -1,10 +1,8 @@
 # A fee attaches to a peering, not to a route
 
-**Status:** Accepted, **not yet built**. Amends [0010](0010-flat-per-packet-fee-and-minimum-delivery.md)'s surviving half and [0028](0028-a-forwarded-route-is-priced-at-the-client-edge.md) — the fee stays flat and per-packet and is earned the same way; only where it is written changes. Lands with [0058](0058-a-peering-is-established-from-a-url.md), which puts it in the request that establishes a peering, beside the cap [0049](0049-the-cap-bounds-one-packet-is-discovered-by-t04-and-is-set-from-outside.md) requires there.
+**Status:** Accepted — **built** (#1159). `PeerConfig` carries `fee`; `PeerRouteConfig` does not; a route's `fee` is a refuse-to-start tombstone on any route, terminated or forwarded. Amends [0010](0010-flat-per-packet-fee-and-minimum-delivery.md)'s surviving half and [0028](0028-a-forwarded-route-is-priced-at-the-client-edge.md) — the fee stays flat and per-packet and is earned the same way; only where it is written changed. Lands beside the cap [0049](0049-the-cap-bounds-one-packet-is-discovered-by-t04-and-is-set-from-outside.md) requires there.
 
 **Scope:** connector architecture — internal to this codebase. What a fee _is_ and how it is earned is [0010](0010-flat-per-packet-fee-and-minimum-delivery.md)'s and is protocol law; which table holds the number is not. See the [ADR index](README.md).
-
-**Falsifier:** `crates/connector-config/src/peer.rs` matching `\bfee\b` — a peering that carries a fee must declare it in the struct that models a peering, and today `PeerConfig` has no such field. Its one current occurrence in that file is inside a doc comment, which the harness skips.
 
 **A fee is the price of using this hop, so it belongs to the peering.** `fee` moves from
 `[[routes]]` to `[[peers]]`, and from `POST /routes/peers` to `POST /peers`. A route keeps `price`.

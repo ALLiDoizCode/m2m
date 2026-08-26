@@ -168,18 +168,27 @@ pub enum ConfigError {
     )]
     RouteMissingPrice { prefix: String, handler_url: String },
 
+    /// ADR 0061's removed-field row. A fee attaches to a **peering**, not to
+    /// a route: what this hop retains is the same number whichever prefix
+    /// the packet was addressed to, so it belongs on the `[[peers]]` row
+    /// that names the counterparty. Refused on **any** route, terminated or
+    /// forwarded -- the narrower `TerminatedRouteHasFee` this replaces let a
+    /// forwarded route keep writing one, which is exactly the spelling ADR
+    /// 0061 moves.
     #[error(
-        "route '{prefix}' terminates locally and sets 'fee = {fee}', which only a route \
-         forwarding to a 'peer_id' can charge (ADR 0010) -- a terminating app's work is paid \
-         for by 'price'. Remove the 'fee', or write 'price = {fee}' if that is what was meant"
+        "route '{prefix}' sets 'fee', which moved to the '[[peers]]' row it was always about \
+         (ADR 0061): a fee is what this hop retains for carrying one packet to a counterparty, \
+         and that is the same number whichever prefix is addressed. Delete it here and write \
+         'fee' on the '[[peers]]' entry this route's 'peer_id' names -- a terminating route \
+         never had one to move, since an app's work is paid for by 'price'"
     )]
-    TerminatedRouteHasFee { prefix: String, fee: u64 },
+    RouteFeeRemoved { prefix: String },
 
     #[error(
         "route '{prefix}' forwards to peer '{peer_id}' but sets no 'price': a forwarded route \
          is never silently free either (ADR 0028) -- 'price' is what this connector's client \
-         edge charges a client for a packet to this prefix, and 'fee' is only what this hop \
-         retains of it. Set 'price = 0' if free carriage is deliberate"
+         edge charges a client for a packet to this prefix, and the peering's own 'fee' is \
+         only what this hop retains of it. Set 'price = 0' if free carriage is deliberate"
     )]
     PeerRouteMissingPrice { prefix: String, peer_id: String },
 

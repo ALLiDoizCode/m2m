@@ -8,17 +8,18 @@ use chrono::{DateTime, Utc};
 /// A route whose traffic this connector forwards to a peer's connector for
 /// the next hop, rather than terminating it at an app of its own.
 ///
-/// The two numbers answer different questions (ADR 0028). `fee` is this
-/// peering relation's flat per-packet fee (ADR 0010) -- what this hop
-/// *retains*, charged once per forwarded packet, agreed bilaterally, and
-/// never a share of the amount being carried. `price` is what this
-/// connector's own client edge charges a *client* for a packet to this
-/// prefix, out of which the rest of the path is paid.
+/// Carries **one** number: `price`, what this connector's own client edge
+/// charges a *client* for a packet to this prefix (ADR 0028), out of which
+/// the rest of the path is paid. What this hop retains of it is the
+/// peering's flat per-packet **fee** (ADR 0010), which is not here and
+/// never was a property of the prefix -- this hop does the same work
+/// whichever prefix the packet was addressed to, so the fee attaches to the
+/// peering `peer_id` names (ADR 0061) and the packet path reads it through
+/// `Connector::fee_for`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerRoute {
     prefix: String,
     peer_id: String,
-    fee: u64,
     price: u64,
 }
 
@@ -27,8 +28,8 @@ impl PeerRoute {
     /// -- `price` zero. The shape a leased route (which has no price field
     /// at all) always has, and the shorthand a test that is about carriage
     /// rather than charging wants.
-    pub fn new(prefix: impl Into<String>, peer_id: impl Into<String>, fee: u64) -> PeerRoute {
-        PeerRoute::new_priced(prefix, peer_id, fee, 0)
+    pub fn new(prefix: impl Into<String>, peer_id: impl Into<String>) -> PeerRoute {
+        PeerRoute::new_priced(prefix, peer_id, 0)
     }
 
     /// A forwarded route with an explicit client-edge price (ADR 0028) --
@@ -37,13 +38,11 @@ impl PeerRoute {
     pub fn new_priced(
         prefix: impl Into<String>,
         peer_id: impl Into<String>,
-        fee: u64,
         price: u64,
     ) -> PeerRoute {
         PeerRoute {
             prefix: prefix.into(),
             peer_id: peer_id.into(),
-            fee,
             price,
         }
     }
@@ -57,12 +56,6 @@ impl PeerRoute {
     /// an actual peer connection through the [`crate::PeerTransport`] port.
     pub fn peer_id(&self) -> &str {
         &self.peer_id
-    }
-
-    /// This peering relation's flat per-packet fee (ADR 0010) -- what this
-    /// hop retains, not what a client is charged.
-    pub fn fee(&self) -> u64 {
-        self.fee
     }
 
     /// The flat price this connector's client edge charges a client for a
@@ -92,11 +85,10 @@ impl LeasedRoute {
     pub fn new(
         prefix: impl Into<String>,
         peer_id: impl Into<String>,
-        fee: u64,
         expires_at: DateTime<Utc>,
     ) -> LeasedRoute {
         LeasedRoute {
-            route: PeerRoute::new(prefix, peer_id, fee),
+            route: PeerRoute::new(prefix, peer_id),
             expires_at,
         }
     }
@@ -107,10 +99,6 @@ impl LeasedRoute {
 
     pub fn peer_id(&self) -> &str {
         self.route.peer_id()
-    }
-
-    pub fn fee(&self) -> u64 {
-        self.route.fee()
     }
 
     /// The instant, as this connector's injected clock reports it, past
@@ -135,20 +123,19 @@ mod tests {
     use chrono::TimeZone;
 
     #[test]
-    fn exposes_prefix_peer_id_and_fee() {
-        let route = PeerRoute::new("g.example.remote", "peer-b", 5);
+    fn exposes_prefix_peer_id_and_price() {
+        let route = PeerRoute::new_priced("g.example.remote", "peer-b", 25);
         assert_eq!(route.prefix(), "g.example.remote");
         assert_eq!(route.peer_id(), "peer-b");
-        assert_eq!(route.fee(), 5);
+        assert_eq!(route.price(), 25);
     }
 
     #[test]
-    fn leased_route_exposes_prefix_peer_id_fee_and_expiry() {
+    fn leased_route_exposes_prefix_peer_id_and_expiry() {
         let expires_at = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
-        let route = LeasedRoute::new("g.example.remote", "peer-b", 5, expires_at);
+        let route = LeasedRoute::new("g.example.remote", "peer-b", expires_at);
         assert_eq!(route.prefix(), "g.example.remote");
         assert_eq!(route.peer_id(), "peer-b");
-        assert_eq!(route.fee(), 5);
         assert_eq!(route.expires_at(), expires_at);
     }
 }

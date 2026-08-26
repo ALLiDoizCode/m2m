@@ -43,14 +43,18 @@ key_file = "/app/data/signer.key"
 # Nothing on this node terminates `g.local.two-hop.b.app`, so a fulfilled
 # packet addressed there has exactly one explanation.
 #
-# ADR 0028's two numbers. `price` is what this node's own client edge charges a
-# client for a packet to this prefix -- greeted, claim-gated and journaled
-# exactly as a terminated route's price is. `fee` is only what this hop retains
-# of it. Before ADR 0028 a `price` here was a hard config error, which is
-# precisely why a forwarded route was a free gateway that also paid its own
-# peer (issue #620).
+# ADR 0028's `price` is what this node's own client edge charges a client for a
+# packet to this prefix -- greeted, claim-gated and journaled exactly as a
+# terminated route's price is. Before ADR 0028 a `price` here was a hard config
+# error, which is precisely why a forwarded route was a free gateway that also
+# paid its own peer (issue #620).
 #
-# `fee = 0` used to be THE ONLY VALUE THAT WORKED for a packet this topology
+# What this hop RETAINS of that price is the `fee` on the `[[peers]]` row
+# below, and not a key here: this hop does the same work whichever prefix the
+# packet was addressed to, so the fee belongs to the peering (ADR 0061).
+# `[[routes]] fee` is a refuse-to-start tombstone now.
+#
+# A fee of zero used to be THE ONLY VALUE THAT WORKED for a packet this topology
 # sends, and that was a property of the operator surface rather than of
 # peering: `POST /packets` passed `minimum_delivery = prepare.amount`, and
 # `amount_after_fee` refused when `amount - fee` fell below it, so an
@@ -91,7 +95,6 @@ key_file = "/app/data/signer.key"
 [[routes]]
 prefix = "g.local.two-hop.b"
 peer_id = "a-b"
-fee = 100
 price = 1100
 
 # ── The peering ──────────────────────────────────────────────────────────────
@@ -110,9 +113,16 @@ price = 1100
 # `secret_file`, not `secret`: a peering secret written into a committed config
 # is a credential in a public repository. Both nodes' copies are written by
 # `local/keys.sh` from one `openssl rand`.
+# `fee` is what this node retains for carrying ONE packet over this peering
+# (ADR 0010, ADR 0061) -- flat, per packet, never a share of the amount, and
+# the same figure whichever prefix `a-b` carries. It rides here rather than on
+# the `[[routes]]` row above because it is a fact about the counterparty, not
+# about the destination. It is the 100 in the arithmetic written out above the
+# route: A collects 1100, retains 100, forwards 1000.
 [[peers]]
 id = "a-b"
 endpoint = "http://connector-b:3000/ilp"
+fee = 100
 
 [peers.credential]
 secret_file = "/app/data/peer-a-b-secret"

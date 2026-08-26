@@ -308,7 +308,7 @@ async fn main() {
 
     let box_1 = Connector::new(
         vec![],
-        vec![PeerRoute::new("g.bench", DOWNSTREAM_PEER, 0)],
+        vec![PeerRoute::new("g.bench", DOWNSTREAM_PEER)],
         Arc::new(FakeAppClient::new()),
         Arc::new(transport),
         Arc::new(SystemClock),

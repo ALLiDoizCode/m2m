@@ -1735,7 +1735,7 @@ mod tests {
         let first_hop = Arc::new(covering(
             Connector::new(
                 vec![],
-                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
                 Arc::new(FakeAppClient::new()),
                 Arc::new(peer_transport),
                 test_clock(),
@@ -1804,11 +1804,12 @@ mod tests {
             covering(
                 Connector::new(
                     vec![],
-                    vec![PeerRoute::new("g.example.app", "second-hop", 3)],
+                    vec![PeerRoute::new("g.example.app", "second-hop")],
                     Arc::new(FakeAppClient::new()),
                     Arc::new(peer_transport),
                     test_clock(),
                 )
+                .with_peer_fees([("second-hop".to_string(), 3)])
                 .with_channel_domain(channel_a(), test_channel_domain())
                 .unwrap(),
                 "second-hop",
@@ -1866,7 +1867,7 @@ mod tests {
         let first_hop = Arc::new(covering(
             Connector::new(
                 vec![],
-                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
                 Arc::new(FakeAppClient::new()),
                 Arc::new(peer_transport),
                 test_clock(),
@@ -1928,7 +1929,7 @@ mod tests {
         let first_hop = Arc::new(covering(
             Connector::new(
                 vec![],
-                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
                 Arc::new(FakeAppClient::new()),
                 Arc::new(peer_transport),
                 test_clock(),
@@ -4238,13 +4239,13 @@ mod tests {
                     vec![PeerRoute::new_priced(
                         FORWARD_PREFIX,
                         PEER_ID,
-                        FORWARD_FEE,
                         FORWARD_PRICE,
                     )],
                     Arc::new(FakeAppClient::new()),
                     Arc::new(transport),
                     test_clock(),
                 )
+                .with_peer_fees([(PEER_ID.to_string(), FORWARD_FEE)])
                 .with_identity_signer(signer),
                 PEER_ID,
             ));
@@ -4418,7 +4419,7 @@ mod tests {
             let payer = Arc::new(covering(
                 Connector::new(
                     vec![],
-                    vec![PeerRoute::new_priced(FORWARD_PREFIX, PEER_ID, 0, 0)],
+                    vec![PeerRoute::new_priced(FORWARD_PREFIX, PEER_ID, 0)],
                     Arc::new(FakeAppClient::new()),
                     Arc::new(transport),
                     test_clock(),
@@ -4477,13 +4478,13 @@ mod tests {
                     vec![PeerRoute::new_priced(
                         FORWARD_PREFIX,
                         PEER_ID,
-                        FORWARD_FEE,
                         FORWARD_PRICE,
                     )],
                     Arc::new(FakeAppClient::new()),
                     Arc::new(transport),
                     test_clock(),
                 )
+                .with_peer_fees([(PEER_ID.to_string(), FORWARD_FEE)])
                 .with_identity_signer(signer.clone()),
                 PEER_ID,
             ));

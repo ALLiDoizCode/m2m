@@ -496,6 +496,10 @@ key_file = "{key_file}"
 id = "carrier"
 endpoint = "wss://carrier.test.example/ilp/btp"
 credential = {{ secret_file = "{secret_file}" }}
+# What this node retains for carrying one packet over this peering (ADR
+# 0010, ADR 0061). It rides here, not on the `[[routes]]` row below, and
+# `amount_to_pay` reads it through the route's `peer_id`.
+fee = 2
 
 [[peer_channels]]
 peer_id = "carrier"
@@ -508,7 +512,6 @@ token_network = "0x00000000000000000000000000000000000000bb"
 prefix = "g.test.relay"
 peer_id = "carrier"
 price = 1002
-fee = 2
 
 # ADR 0042, and required since issue #1145: a peering this node FORWARDS to
 # must name the channel it pays that hop from, because there is no postpay
