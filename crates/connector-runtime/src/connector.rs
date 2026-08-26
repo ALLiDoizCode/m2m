@@ -9,9 +9,9 @@ use chrono::{DateTime, Duration, Utc};
 use connector_config::{SettlementChain, StaticRoute, TransportPolicy, DEFAULT_MAX_PACKET_AMOUNT};
 use connector_domain::x402::X402PaymentRequired;
 use connector_domain::{
-    amount_after_fee, condition_is_present, fulfillment_matches_condition, is_expired,
-    is_valid_ilp_address, select_route, EnvelopeRequest, Fulfill, PacketResponse, Prepare, Reject,
-    RejectCode, Watermark,
+    amount_after_fee, condition_is_present, forwarded_expiry, fulfillment_matches_condition,
+    is_expired, is_valid_ilp_address, select_route, EnvelopeRequest, Fulfill, PacketResponse,
+    Prepare, Reject, RejectCode, Watermark, FORWARDING_MESSAGE_WINDOW,
 };
 use connector_settlement::{ChannelId, Claim, SettlementBackend, SettlementError};
 use connector_signer::giftwrap::{derive_fulfillment, open_request, seal_response};
@@ -1991,6 +1991,16 @@ impl Connector {
     /// to lose at once to a hop that takes the claim and does not carry --
     /// and never an accumulation.
     ///
+    /// # The message window (PF-19)
+    ///
+    /// The forwarded packet's expiry is the arriving one's less
+    /// [`FORWARDING_MESSAGE_WINDOW`], never the arriving one itself -- a
+    /// hop keeps time back for the return leg, and one with none left
+    /// refuses `R00` rather than forwarding a packet whose fulfilment could
+    /// not reach it in time (issue #1174). Unilateral, and not a wire
+    /// change: a shorter expiry needs no agreement from the peer receiving
+    /// it.
+    ///
     /// # Covering (issue #881), and the retry arm beside it
     ///
     /// [`Connector::cover_forward`] mints for exactly this packet's own
@@ -2100,8 +2110,52 @@ impl Connector {
             });
         }
 
+        // PF-19: the packet that goes out expires strictly before the one
+        // that arrived, by a whole [`FORWARDING_MESSAGE_WINDOW`]. This hop
+        // keeps that window back for the return leg -- the time a
+        // fulfilment answered just inside the downstream deadline needs to
+        // travel back here and be relayed on before *this* packet's own
+        // deadline fires. Copying `expires_at` through verbatim, which is
+        // what this did until issue #1174, handed the last hop the entire
+        // remaining budget and left every hop above it holding a paid-for
+        // crossing it could no longer be paid for.
+        //
+        // Nothing about this is a wire change and nothing downstream has to
+        // agree to it: shortening is unilateral, a receiver that would
+        // honour the longer expiry honours the shorter one too, and the
+        // field is the same field. It is done here rather than in a
+        // transport because it is a property of forwarding, not of HTTP or
+        // BTP, and both carriages must do it.
+        //
+        // A window that leaves nothing is `R00`, the same code PF-02 gives
+        // an already-expired arrival and the same reason: the packet has
+        // run out of time here, this hop's fee and route are beside the
+        // point, and the sender's move is a fresh packet with more budget
+        // rather than anything about this path. `packet-flow-spec.md` §5
+        // lists `R00` (expired) among the class-only codes -- there is no
+        // distinct action to bind, so the message carries the diagnosis and
+        // the code carries the class. `T00` would be a lie (this is not
+        // this connector's own configuration error) and `F02` a worse one
+        // (the path is fine; the clock is not).
+        let Some(outgoing_expires_at) = forwarded_expiry(prepare.expires_at, self.clock.now())
+        else {
+            return PacketResponse::Reject(Reject {
+                code: RejectCode::r00_transfer_timed_out(),
+                triggered_by: String::new(),
+                message: format!(
+                    "packet expires at {} and forwarding to peer '{peer_id}' keeps {}s back for \
+                     the return leg, which leaves no time to carry it",
+                    prepare.expires_at.to_rfc3339(),
+                    FORWARDING_MESSAGE_WINDOW.num_seconds(),
+                ),
+                data: Vec::new(),
+                accumulated_cost: 0,
+            });
+        };
+
         let outgoing = Prepare {
             amount: forwarded_amount,
+            expires_at: outgoing_expires_at,
             ..prepare
         };
 
@@ -4817,6 +4871,168 @@ mod tests {
             PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "F99"),
             other => panic!("expected a reject, got {other:?}"),
         }
+    }
+
+    /// A peer that carries whatever it is handed and keeps the packets it
+    /// carried, so a test can read back the PREPARE that actually went on
+    /// the wire rather than the one that arrived.
+    ///
+    /// It is a fake and not a mock (ADR 0007): it answers every forward the
+    /// way the port says a reachable peer answers -- with a REJECT it
+    /// genuinely decided on, `reached_peer` true -- and asserts nothing
+    /// about being called. What the tests below assert is the state it
+    /// accumulated, which is the packet itself.
+    #[derive(Default)]
+    struct CarriesAndRemembers {
+        carried: Mutex<Vec<Prepare>>,
+    }
+
+    impl CarriesAndRemembers {
+        fn carried(&self) -> Vec<Prepare> {
+            self.carried.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl PeerTransport for CarriesAndRemembers {
+        async fn forward(
+            &self,
+            _peer_id: &str,
+            prepare: Prepare,
+            _claim: Option<WireClaim>,
+        ) -> PeerForward {
+            self.carried.lock().unwrap().push(prepare);
+            PeerForward::answered(
+                PacketResponse::Reject(Reject {
+                    code: RejectCode::f02_unreachable(),
+                    triggered_by: "g.peer".to_string(),
+                    message: "carried, and the far end had nowhere to put it".to_string(),
+                    data: Vec::new(),
+                    accumulated_cost: 0,
+                }),
+                ClaimAckOutcome::NotSent,
+            )
+        }
+
+        async fn flush(&self, _peer_id: &str, _claim: WireClaim) -> ClaimAckOutcome {
+            ClaimAckOutcome::NotSent
+        }
+    }
+
+    fn forwards_to(peer: Arc<CarriesAndRemembers>, clock: Arc<TestClock>) -> Connector {
+        covering(
+            Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
+                Arc::new(FakeAppClient::new()),
+                peer,
+                clock,
+            ),
+            "second-hop",
+        )
+    }
+
+    /// PF-19, issue #1174: a hop decreases a packet's expiry when it
+    /// forwards. Until this landed `expires_at` was copied through
+    /// verbatim, so the last hop held the sender's entire remaining budget
+    /// and every hop above it could have its own deadline fire while the
+    /// fulfilment it had already paid for was still in flight.
+    #[tokio::test]
+    async fn a_forwarded_packet_expires_before_the_one_that_arrived() {
+        let peer = Arc::new(CarriesAndRemembers::default());
+        let clock = test_clock();
+        let connector = forwards_to(peer.clone(), clock.clone());
+        let expires_at = clock.now() + Duration::seconds(30);
+
+        connector
+            .handle_prepare(prepare_expiring_at("g.example.app", b"hello", expires_at))
+            .await;
+
+        let carried = peer.carried();
+        assert_eq!(carried.len(), 1, "the packet should have been forwarded");
+        assert!(
+            carried[0].expires_at < expires_at,
+            "a forwarded packet must expire strictly before the one that arrived: \
+             arrived {expires_at}, forwarded {}",
+            carried[0].expires_at
+        );
+        // The window is kept back whole, and off the arriving expiry rather
+        // than off `now` -- what a hop owes the return leg is a fixed
+        // amount of time, not a fraction of whatever budget it was handed.
+        assert_eq!(
+            carried[0].expires_at,
+            expires_at - FORWARDING_MESSAGE_WINDOW
+        );
+    }
+
+    /// PF-19's second half: a hop with less than a message window left does
+    /// not forward a packet with a dead or negative window -- it refuses
+    /// it. `R00`, the code PF-02 gives an already-expired arrival, because
+    /// this is the same fact one hop later: the packet has run out of time
+    /// here.
+    #[tokio::test]
+    async fn a_packet_with_no_time_left_for_the_return_leg_is_refused_rather_than_forwarded() {
+        let peer = Arc::new(CarriesAndRemembers::default());
+        let clock = test_clock();
+        let connector = forwards_to(peer.clone(), clock.clone());
+        // Alive on arrival -- PF-02 lets it through -- but with less than a
+        // whole window left, so there is no forward that could be answered
+        // in time.
+        let expires_at = clock.now() + FORWARDING_MESSAGE_WINDOW - Duration::milliseconds(1);
+
+        let response = connector
+            .handle_prepare(prepare_expiring_at("g.example.app", b"hello", expires_at))
+            .await;
+
+        match response {
+            PacketResponse::Reject(reject) => {
+                assert_eq!(reject.code.as_str(), "R00");
+                // A class-only code (`packet-flow-spec.md` §5) carries its
+                // diagnosis in the message or nowhere.
+                assert!(
+                    reject.message.contains("return leg"),
+                    "message should say what the time was needed for: {}",
+                    reject.message
+                );
+            }
+            other => panic!("expected a reject, got {other:?}"),
+        }
+        assert!(
+            peer.carried().is_empty(),
+            "a packet with no window left must never reach the wire"
+        );
+    }
+
+    /// The boundary is [`is_expired`]'s, one hop out: a shortened expiry
+    /// landing exactly on `now` is dead, and a packet is forwarded only
+    /// when strictly more than a window remains.
+    #[tokio::test]
+    async fn a_packet_with_exactly_one_window_left_is_refused_and_a_hair_more_is_carried() {
+        let peer = Arc::new(CarriesAndRemembers::default());
+        let clock = test_clock();
+        let connector = forwards_to(peer.clone(), clock.clone());
+
+        let response = connector
+            .handle_prepare(prepare_expiring_at(
+                "g.example.app",
+                b"hello",
+                clock.now() + FORWARDING_MESSAGE_WINDOW,
+            ))
+            .await;
+        match response {
+            PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "R00"),
+            other => panic!("expected a reject at exactly one window, got {other:?}"),
+        }
+        assert!(peer.carried().is_empty());
+
+        connector
+            .handle_prepare(prepare_expiring_at(
+                "g.example.app",
+                b"hello",
+                clock.now() + FORWARDING_MESSAGE_WINDOW + Duration::milliseconds(1),
+            ))
+            .await;
+        assert_eq!(peer.carried().len(), 1);
     }
 
     /// Issue #881: every packet forwarded to a hop configured for
