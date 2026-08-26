@@ -271,6 +271,14 @@ first, then move the tag.
 - `docs/operators/` — runbooks. `admin-api.md` and `load-testing-guide.md` document
   the **retired** TypeScript connector and are banner-marked as such.
 - `docs/agents/` — issue tracker, triage labels, domain docs conventions.
+- `docs/rfcs/` — the ten Interledger RFCs this connector implements, vendored verbatim
+  and pinned, each under a **TOON profile** recording where this connector departs and
+  which record governs the departure (ADR 0062). CC BY-SA 4.0, not MIT — see its README.
 
 When asked about Interledger protocol semantics, activate the relevant `rfc-*` skill
-rather than answering from memory.
+rather than answering from memory. Those skills read `docs/rfcs/`, so the answer comes
+from the pinned text and its profile rather than from recall or the network. Never edit
+an RFC body to match what this connector does: the alignment goes in the profile above
+the marker, and `vendored_rfcs_are_unmodified.rs` fails the build on a body edit. When
+the question is "what does Interledger specify" and "what does this connector do" have
+different answers — and for ILPv4 packet bytes they currently do (#1174) — give both.
