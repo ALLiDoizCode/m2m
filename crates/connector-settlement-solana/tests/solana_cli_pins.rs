@@ -84,22 +84,25 @@
 //!
 //! ## The two install sites aimed at a person
 //!
-//! `README.md`'s chain-binary table and `docs/operators/faucet-box-bringup.md`
-//! step 4 -- the two places here that tell a *human* to install this CLI with a
-//! command, and one lands on each pin.
+//! `CONTRIBUTING.md`'s chain-binary table and
+//! `docs/operators/faucet-box-bringup.md` step 4 -- the two places here that
+//! tell a *human* to install this CLI with a command, and one lands on each
+//! pin. The table was the README's until issue #1173 moved it: the README is
+//! an operator's guide now, and which CLI a contributor installs to run the
+//! gate is not something an operator needs.
 //!
 //! (`CLAUDE.md`'s "Install Foundry and the Solana CLI to run the full gate
 //! locally" is a third mention and is deliberately left unversioned: it is a
-//! one-line orientation sentence that gives no command and points at the README
-//! table below for the how. Pinning it would put a second copy of the same
-//! literal in a file nobody installs from. If it ever grows an actual command,
-//! it becomes a site and belongs in the walk like the rest.)
+//! one-line orientation sentence that gives no command and points at the
+//! table for the how. Pinning it would put a second copy of the same literal
+//! in a file nobody installs from. If it ever grows an actual command, it
+//! becomes a site and belongs in the walk like the rest.)
 //!
-//! The README row is [`RUST_GATE_CLI`], straightforwardly: it exists so a
-//! contributor can run `connector-settlement-solana`'s integration tier, which
-//! spawns `solana-test-validator`. That is [`RUST_GATE_CLI`]'s own definition,
-//! io_uring reason and all, and a local gate running a different CLI than
-//! `ci.yml`'s `rust-gate` is not the gate.
+//! The `CONTRIBUTING.md` row is [`RUST_GATE_CLI`], straightforwardly: it
+//! exists so a contributor can run `connector-settlement-solana`'s integration
+//! tier, which spawns `solana-test-validator`. That is [`RUST_GATE_CLI`]'s own
+//! definition, io_uring reason and all, and a local gate running a different
+//! CLI than `ci.yml`'s `rust-gate` is not the gate.
 //! [`the_readme_tells_a_contributor_to_install_the_cli_that_runs_the_program`]
 //! holds it there.
 //!
@@ -172,7 +175,7 @@ const SANDCASTLE_DOCKERFILE: &str = include_str!("../../../.sandcastle/Dockerfil
 const DEVBOX_JSON: &str = include_str!("../../../devbox.json");
 const DEPLOY_SCRIPT: &str = include_str!("../../../tools/solana/deploy.sh");
 const DEPLOY_RUNBOOK: &str = include_str!("../../../docs/solana-deployment.md");
-const README: &str = include_str!("../../../README.md");
+const CONTRIBUTING: &str = include_str!("../../../CONTRIBUTING.md");
 const FAUCET_RUNBOOK: &str = include_str!("../../../docs/operators/faucet-box-bringup.md");
 const FAUCET_TREASURY_SCRIPT: &str =
     include_str!("../../../infra/linode-faucet/generate-solana-treasury.sh");
@@ -343,13 +346,11 @@ fn the_repository_installs_the_solana_cli_from_exactly_the_known_places() {
         ".github/workflows/ci.yml",
         ".github/workflows/local-topologies.yml",
         ".sandcastle/Dockerfile",
-        // The contributor-facing copy of the run-side pin (issue #1173).
-        // `CONTRIBUTING.md` is where the chain-binary table lives now that the
-        // README is an operator's guide rather than a build reference, and it
-        // installs RUST_GATE_CLI for the reason this file's header gives: a
-        // local gate on a different CLI is not the gate.
+        // The contributor-facing copy of the run-side pin. It was the
+        // README's until issue #1173 made that file an operator's guide;
+        // the table moved rather than being deleted, and moved WITH its
+        // pin, which is the whole reason this set is asserted by name.
         "CONTRIBUTING.md",
-        "README.md",
         "devbox.json",
         "docs/operators/faucet-box-bringup.md",
     ]);
@@ -422,16 +423,17 @@ fn the_deploy_runbook_and_the_deploy_script_name_the_deploy_path_cli() {
 }
 
 #[test]
-fn the_readme_tells_a_contributor_to_install_the_cli_that_runs_the_program() {
+fn contributing_tells_a_contributor_to_install_the_cli_that_runs_the_program() {
     assert_eq!(
-        installed_versions(README),
+        installed_versions(CONTRIBUTING),
         BTreeSet::from([RUST_GATE_CLI.to_string()]),
-        "README.md's table of chain binaries the test gate needs must give a {RUST_GATE_CLI} \
-         install command for solana-test-validator. That row named `Solana CLI` with no version \
-         once, which sends a contributor to whatever `stable` is that day -- a v3 validator whose \
-         io_uring assertion this repository's own sandbox cannot satisfy, on a workspace pinned to \
-         the 2.1 crate line. A local gate on a different CLI than ci.yml's rust-gate is not the \
-         gate."
+        "CONTRIBUTING.md's table of chain binaries the test gate needs must give a \
+         {RUST_GATE_CLI} install command for solana-test-validator. That row named `Solana CLI` \
+         with no version once, which sends a contributor to whatever `stable` is that day -- a v3 \
+         validator whose io_uring assertion this repository's own sandbox cannot satisfy, on a \
+         workspace pinned to the 2.1 crate line. A local gate on a different CLI than ci.yml's \
+         rust-gate is not the gate.\n\nThe table lived in README.md until issue #1173; if it has \
+         moved again, move this check with it rather than deleting it."
     );
 }
 
