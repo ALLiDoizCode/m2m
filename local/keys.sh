@@ -644,11 +644,13 @@ for peering in $PEERINGS; do
       state="$(cast call "$token_network" "channels(bytes32)(uint256,uint8,uint256,uint256,address,address)" \
         "$channel_id" --rpc-url "$ANVIL_RPC" | sed -n 2p)"
       if [[ "$state" == "0" ]]; then
-        # `openChannel` derives the id as keccak(p1, p2, channelCounter) with
-        # the participants sorted, so it is deterministic ONLY on a chain
-        # whose counter is where this topology expects it. That is what the
-        # re-read below actually checks: a chain that has had other channels
-        # opened on it produces a different id and this fails naming both.
+        # `openChannel` derives the id as keccak(p1, p2, channelEpoch[p1][p2])
+        # with the participants sorted (ADR 0059), so it depends on THIS PAIR
+        # and nothing else: another pair's channels on the same TokenNetwork
+        # no longer move it. What still moves it is this pair settling a
+        # channel, which advances their epoch. That is what the re-read below
+        # actually checks -- and the committed ids are all epoch 0, since a
+        # local chain is torn down rather than settled.
         cast send --rpc-url "$ANVIL_RPC" --private-key "$payer_key" \
           "$token_network" "openChannel(address,uint256)" "$payee_address" 3600 >/dev/null
         state="$(cast call "$token_network" "channels(bytes32)(uint256,uint8,uint256,uint256,address,address)" \
@@ -657,9 +659,10 @@ for peering in $PEERINGS; do
           echo "ERROR: opened a channel between $payer_address and $payee_address on" >&2
           echo "       $token_network, and it did NOT land at the id the committed config names:" >&2
           echo "         $channel_id" >&2
-          echo "       That id is keccak(participant1, participant2, channelCounter), so this" >&2
-          echo "       means the chain is not fresh -- something else opened a channel on this" >&2
-          echo "       TokenNetwork first. 'make local-down && make local-up' resets it." >&2
+          echo "       That id is keccak(participant1, participant2, channelEpoch[p1][p2]) and the" >&2
+          echo "       committed configs all name the epoch-0 id, so this means this pair has" >&2
+          echo "       already SETTLED a channel on this TokenNetwork and their epoch has moved" >&2
+          echo "       on. 'make local-down && make local-up' resets it." >&2
           exit 1
         fi
         echo "'$id': opened channel $channel_id"

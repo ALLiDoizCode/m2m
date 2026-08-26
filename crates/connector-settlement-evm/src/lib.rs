@@ -24,6 +24,7 @@
 //! shape.
 
 mod bindings;
+mod channel_id;
 mod channel_index;
 pub mod channel_index_sync;
 // Also compiled for this crate's own `#[cfg(test)]` unit tests (none left
@@ -33,6 +34,7 @@ pub mod channel_index_sync;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support;
 
+pub use channel_id::{derive_channel_id, sort_participants};
 pub use channel_index::{
     ChannelIndexEvent, ChannelIndexLookup, EvmChannelIndex, EvmChannelIndexError,
     IndexedChannelStatus, OrderedChannelIndexEvent,
@@ -52,6 +54,8 @@ use ethers::types::{Address, BlockNumber, Bytes, TransactionReceipt, U256};
 use connector_settlement::{
     ChannelId, ChannelState, ChannelStatus, Claim, SettlementBackend, SettlementError,
 };
+
+use channel_id::{format_channel_id, parse_channel_id};
 
 use bindings::token_network::{
     BalanceProof, ChannelOpenedFilter, TokenNetwork as TokenNetworkContract,
@@ -348,6 +352,76 @@ impl EvmSettlementBackend {
             .await
             .map_err(backend_error)?;
         Ok(Some((counterparty, deposit)))
+    }
+
+    /// This node's current channel epoch with `counterparty`, read from
+    /// the chain: `TokenNetwork.channelEpoch(p1, p2)` over the sorted pair
+    /// (ADR 0059). One `eth_call`.
+    ///
+    /// Zero for a pair that has never settled a channel here -- including
+    /// a pair that has never opened one -- and one higher after each of
+    /// their channels settles. It is not a count of live channels: there
+    /// is at most one of those, and `openChannel` refuses a second
+    /// (`ChannelAlreadyExists`).
+    pub async fn channel_epoch(&self, counterparty: Address) -> Result<U256, SettlementError> {
+        let (p1, p2) = sort_participants(self.own_address, counterparty);
+        self.contract
+            .channel_epoch(p1, p2)
+            .call()
+            .await
+            .map_err(backend_error)
+    }
+
+    /// The channel id this node and `counterparty` derive **right now** --
+    /// [`channel_epoch`](Self::channel_epoch) plus
+    /// [`derive_channel_id`]. One `eth_call`.
+    ///
+    /// It names where their next channel will land, which is the same
+    /// place their current one already is if they have one. It says
+    /// nothing about whether anything is there: ask
+    /// [`channel_with`](Self::channel_with) for that.
+    pub async fn derived_channel_id(
+        &self,
+        counterparty: Address,
+    ) -> Result<ChannelId, SettlementError> {
+        let epoch = self.channel_epoch(counterparty).await?;
+        Ok(derive_channel_id(self.own_address, counterparty, epoch))
+    }
+
+    /// **"Do I already have a channel with this counterparty?"**, answered
+    /// from the chain (ADR 0059, issue #1158). `Ok(Some(id))` when one is
+    /// live, `Ok(None)` when the pair has none and
+    /// [`open`](SettlementBackend::open) is what to do next; `Err` only
+    /// when the chain could not be asked, so "there is no channel" is
+    /// never confused with "I could not find out". Two `eth_call`s:
+    /// `channelEpoch`, then `channels` at the id that derives from it.
+    ///
+    /// The read goes to the chain rather than to
+    /// [`EvmChannelIndex`]'s `lookup`, and deliberately: that index is a
+    /// projection of `ChannelOpened` logs and is only complete once
+    /// `channel_index_from_block` has been replayed, so a "none exists"
+    /// out of a half-built index opens a duplicate channel. A derivation
+    /// plus a point read has no such window -- ADR 0059 rejects building
+    /// a local participant index for exactly this reason.
+    ///
+    /// "Live" is `Opened` or `Closed`: a `Closed` channel is still in its
+    /// challenge window, still holds collateral and still occupies the
+    /// pair's id, so reporting it absent would hand the caller an
+    /// `openChannel` that reverts. `Settled` cannot appear at the current
+    /// epoch at all -- `settleChannel` advances the epoch in the same
+    /// transaction that sets that state
+    /// (`packages/contracts/test/TokenNetworkChannelDerivation.t.sol`) --
+    /// so it needs no case of its own here.
+    pub async fn channel_with(
+        &self,
+        counterparty: Address,
+    ) -> Result<Option<ChannelId>, SettlementError> {
+        let channel = self.derived_channel_id(counterparty).await?;
+        let (_, state, _, _, _, _) = self.fetch_channel(parse_channel_id(&channel)?).await?;
+        if state == CHANNEL_STATE_NONEXISTENT {
+            return Ok(None);
+        }
+        Ok(Some(channel))
     }
 
     /// Resolve `channel` to the on-chain id it names and confirm a channel
@@ -651,39 +725,6 @@ fn counterparty_address(counterparty: &[u8]) -> Result<Address, SettlementError>
         )));
     }
     Ok(Address::from_slice(counterparty))
-}
-
-/// `TokenNetwork`'s channel id is a `bytes32`
-/// (`keccak256(participant1, participant2, channelCounter)`,
-/// `TokenNetwork.sol:199`), formatted as `0x`-prefixed, zero-padded lowercase
-/// hex -- the same shape `connector_runtime::claim::parse_channel_id`
-/// already accepts for a peer channel id (issue #575's AC4), so an id
-/// this backend hands back is usable there unchanged.
-fn format_channel_id(id: [u8; 32]) -> ChannelId {
-    let mut hex = String::with_capacity(2 + 64);
-    hex.push_str("0x");
-    for byte in id {
-        hex.push_str(&format!("{byte:02x}"));
-    }
-    ChannelId(hex)
-}
-
-/// The inverse of [`format_channel_id`]. A channel id that does not parse
-/// as 32 bytes of hex is reported as [`SettlementError::ChannelNotFound`]
-/// rather than a distinct parse-error variant -- from this port's
-/// perspective a malformed id and one nothing was ever opened at mean the
-/// same thing: there is no channel to operate on.
-fn parse_channel_id(channel: &ChannelId) -> Result<[u8; 32], SettlementError> {
-    let hex_digits = channel.0.strip_prefix("0x").unwrap_or(channel.0.as_str());
-    if hex_digits.len() != 64 || !hex_digits.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(SettlementError::ChannelNotFound(channel.clone()));
-    }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex_digits[i * 2..i * 2 + 2], 16)
-            .map_err(|_| SettlementError::ChannelNotFound(channel.clone()))?;
-    }
-    Ok(out)
 }
 
 fn backend_error<E: std::fmt::Display>(error: E) -> SettlementError {

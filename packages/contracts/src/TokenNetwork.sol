@@ -31,9 +31,6 @@ contract TokenNetwork is ReentrancyGuard, EIP712, Pausable, Ownable, ERC2771Cont
     /// @notice Maximum channel lifetime before force-close allowed
     uint256 public immutable maxChannelLifetime;
 
-    /// @notice Monotonically increasing counter for unique channel IDs
-    uint256 public channelCounter;
-
     /// @notice Minimum settlement timeout (1 hour)
     uint256 public constant MIN_SETTLEMENT_TIMEOUT = 1 hours;
 
@@ -86,13 +83,23 @@ contract TokenNetwork is ReentrancyGuard, EIP712, Pausable, Ownable, ERC2771Cont
     /// @dev Tracks tokens already transferred out via claimFromChannel to prevent double-pay at settlement
     mapping(bytes32 => mapping(address => uint256)) public claimedAmounts;
 
+    /// @notice How many channels a sorted participant pair has already settled on this TokenNetwork
+    /// @dev Keyed by the SORTED pair -- `channelEpoch[min(a,b)][max(a,b)]`; the other order is
+    ///      never written and always reads zero. This is the third preimage of a channel id, so a
+    ///      pair's current channel is derivable from public data alone:
+    ///      `keccak256(abi.encodePacked(p1, p2, channelEpoch(p1, p2)))`. It advances only in
+    ///      `settleChannel`, which is what lets a pair close and start again; without it a settled
+    ///      channel would occupy its pair's only identifier forever. Public so an off-chain party
+    ///      can derive the same id without an event log or a reverse index (ADR 0059).
+    mapping(address => mapping(address => uint256)) public channelEpoch;
+
     /// @notice Thrown when participant address is invalid (zero address or same as caller)
     error InvalidParticipant();
 
     /// @notice Thrown when settlement timeout is below minimum
     error InvalidSettlementTimeout();
 
-    /// @notice Thrown when channel already exists between participants
+    /// @notice Thrown when the participant pair already has a live (Opened or Closed) channel
     error ChannelAlreadyExists();
 
     /// @notice Thrown when channel doesn't exist
@@ -210,7 +217,11 @@ contract TokenNetwork is ReentrancyGuard, EIP712, Pausable, Ownable, ERC2771Cont
     /// @param participant2 The address of the other channel participant
     /// @param settlementTimeout The challenge period duration in seconds (minimum 1 hour)
     /// @return channelId The unique identifier for the created channel
-    /// @dev Computes channelId as keccak256(p1, p2, channelCounter). Emits ChannelOpened event.
+    /// @dev Computes channelId as keccak256(p1, p2, channelEpoch[p1][p2]) with the participants
+    ///      sorted, so the id is derivable by anyone who knows the pair (ADR 0059) -- the same
+    ///      property `packages/solana-program`'s channel PDA already has. At most one LIVE channel
+    ///      per pair: the epoch only advances on settlement, so a second open against an Opened or
+    ///      Closed channel reverts with ChannelAlreadyExists. Emits ChannelOpened event.
     function openChannel(address participant2, uint256 settlementTimeout) external nonReentrant whenNotPaused returns (bytes32) {
         address sender = _msgSender();
 
@@ -224,11 +235,11 @@ contract TokenNetwork is ReentrancyGuard, EIP712, Pausable, Ownable, ERC2771Cont
         // Normalize participant order (p1 < p2 lexicographically)
         (address p1, address p2) = sender < participant2 ? (sender, participant2) : (participant2, sender);
 
-        // Compute unique channel ID
-        bytes32 channelId = keccak256(abi.encodePacked(p1, p2, channelCounter));
-        channelCounter++;
+        // Derive this pair's current channel ID from the pair itself
+        bytes32 channelId = keccak256(abi.encodePacked(p1, p2, channelEpoch[p1][p2]));
 
-        // Check channel doesn't already exist
+        // A live channel already occupies this pair's current epoch. Settle it first: settleChannel
+        // advances the epoch, which is what makes the next id free.
         if (channels[channelId].state != ChannelState.NonExistent) revert ChannelAlreadyExists();
 
         // Initialize channel state
@@ -419,8 +430,11 @@ contract TokenNetwork is ReentrancyGuard, EIP712, Pausable, Ownable, ERC2771Cont
         uint256 participant1FinalBalance = participant1Deposit - claimedFromP1;
         uint256 participant2FinalBalance = participant2Deposit - claimedFromP2;
 
-        // Update channel state to Settled
+        // Update channel state to Settled, and free this pair's identifier for a fresh channel:
+        // the id derived from (p1, p2, epoch) is now taken forever, so the epoch advances and the
+        // next openChannel for this pair derives an unused one (ADR 0059).
         channel.state = ChannelState.Settled;
+        channelEpoch[channel.participant1][channel.participant2]++;
 
         // Return remaining funds to each depositor
         if (participant1FinalBalance > 0) {

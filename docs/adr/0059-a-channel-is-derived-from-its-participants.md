@@ -1,10 +1,8 @@
 # A channel is derived from its participants, on both chains, by the same rule
 
-**Status:** Accepted, **not yet built**. Required by [0058](0058-a-peering-is-established-from-a-url.md) — a peering established from a URL has no channel id to be told, so it must be able to compute one. Changes a **deployed** contract and the identifier a claim signs, so it disturbs [0024](0024-peer-wire-claims-sign-the-eip-712-balance-proof.md), [0053](0053-a-solana-claim-binds-its-domain-the-way-an-evm-claim-does.md) and [0021](0021-vectors-are-normative-prose-is-not.md).
+**Status:** Accepted — **built** (#1158). `channelCounter` is gone; `TokenNetwork.channelEpoch` is public and `openChannel` derives `keccak256(p1, p2, epoch)`, with the epoch advancing in `settleChannel`. `ChannelAlreadyExists` is a live refusal. Required by [0058](0058-a-peering-is-established-from-a-url.md) — a peering established from a URL has no channel id to be told, so it must compute one. Disturbs [0024](0024-peer-wire-claims-sign-the-eip-712-balance-proof.md), [0053](0053-a-solana-claim-binds-its-domain-the-way-an-evm-claim-does.md) and [0021](0021-vectors-are-normative-prose-is-not.md). **The redeploy this needs has not happened**: the deployed Base Sepolia `TokenNetwork` still carries the counter.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
-
-**Falsifier:** `packages/contracts/src/TokenNetwork.sol` matching `\bchannelEpoch\b` — the per-pair epoch this record introduces in place of the global counter. A derivable channel id cannot be built without a readable per-pair value in that file, so its appearance means the record landed.
 
 **A channel's identifier is computed from its two participants, the token, and a public per-pair
 epoch — never from a global counter and never from an index.** Anyone holding the two participant
