@@ -45,12 +45,25 @@ non-canonical encodings, this one refuses them.
   `VarOctetString`, a 32-byte-only fixed octet string, and a fixed 19-byte
   GeneralizedTime exist. Canonicality is added nowhere else, because the other
   two have no length determinant to make canonical.
-- **⚠ The GeneralizedTime is 19 bytes, not RFC 0027's 17-byte Interledger
-  Timestamp**, and the ILP packet carries no outer type-length wrapper. That is
-  a departure from RFC 0027 rather than from this document, and it is unrecorded
-  and unguarded — see the
+- **⚠ The GeneralizedTime is a fixed 19 bytes, not RFC 0027's 17-byte
+  Interledger Timestamp**, and the ILP packet carries no outer type-length
+  wrapper. Those are departures from RFC 0027 rather than from this document,
+  and they are **recorded and pinned**:
+  [ADR 0063](../../adr/0063-the-ilp-packet-is-toons-dialect-not-rfc-0027s.md)
+  ratifies the packet dialect, and `vectors/wire-vectors.json`'s `peer_carriage`
+  fixtures carry complete packets in it, walked byte by byte in
+  [`vectors/README.md`](../../../vectors/README.md#the-ilp-packet-encoding). The
+  ⚠ stays for the consequence, not for a gap: an encoder written from this
+  document's §Fixed-length Timestamps will not produce bytes this connector
+  accepts. See the
   [RFC 0027 profile](../0027-interledger-protocol-4/0027-interledger-protocol-4.md)
-  and [#1174](https://github.com/toon-protocol/connector/issues/1174).
+  for the full table.
+
+  Note also that this connector's 19-byte form is not this document's own
+  §Variable-length Timestamps either: that one omits a zero millisecond part and
+  is length-prefixed, where `encode_generalized_time` always emits
+  `YYYYMMDDHHMMSS.fffZ` with no prefix, so its length is a constant the decoder
+  assumes rather than a determinant it reads.
 
 **Faithful:** VarUInt short form 0–127 and long form `0x80|len` big-endian;
 VarOctetString as a VarUInt length prefix plus bytes; big-endian throughout;

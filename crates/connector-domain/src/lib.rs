@@ -1,6 +1,8 @@
 //! Pure domain logic: no async, no I/O. See ADR 0001.
 //!
-//! ILPv4 packet types (RFC-0027) with their OER wire encoding (RFC-0030),
+//! ILPv4 packet types with their wire encoding -- RFC-0027's semantics in
+//! TOON's own encoding, which is not byte-compatible with it (ADR 0063;
+//! `packet.rs` has the table) -- over OER primitives (RFC-0030),
 //! ILP address validation (RFC-0015), longest-prefix route selection,
 //! flat per-packet fee arithmetic (ADR 0010),
 //! execution condition / fulfilment / expiry rules (RFC-0022, issue #417),

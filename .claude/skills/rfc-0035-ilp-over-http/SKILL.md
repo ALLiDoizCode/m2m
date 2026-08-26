@@ -14,9 +14,11 @@ It gives you the `https://` carriage and the shape of `POST /ilp`.
 ## How to read it
 
 1. **The TOON profile, at the top.** Every place this connector departs from the
-   RFC, each citing the ADR or `docs/protocol/` rule that governs it. Departures
-   marked ⚠ are unrecorded gaps or divergences nothing guards — say so plainly
-   when one is relevant.
+   RFC, each citing the ADR or `docs/protocol/` rule that governs it. A ⚠ marks
+   a departure that is easy to assume away — one a reader of the RFC would not
+   expect and would be wrong to guess at. Some are recorded and guarded, some are
+   open gaps; the bullet itself says which. Surface it plainly when it is
+   relevant, rather than reading the glyph as "unrecorded".
 2. **The body, below the `<!-- BEGIN VERBATIM UPSTREAM BODY -->` marker.** The
    standard as written. It is never edited to match this connector
    ([ADR 0062](../../../docs/adr/0062-an-rfc-is-vendored-verbatim-and-profiled-never-forked.md)),
