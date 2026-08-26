@@ -3413,3 +3413,168 @@ fn the_makers_leg_a_token_network_is_the_fleets_and_is_not_its_leg_b_channel() {
          rest of the fleet"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The public endpoints document (`infra/linode/endpoints.json`)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The hand-maintained document a third party configures itself from
+/// (`infra/linode/README.md`: "live and hand-maintained"). Not a connector
+/// config -- no binary loads it -- but it publishes the same Base Sepolia
+/// deployment the two box TOMLs settle on, and it publishes one thing they
+/// do not: the resolved `TokenNetwork` itself.
+///
+/// That extra field is why it needs a guard of its own. A connector is
+/// configured with the REGISTRY (`[settlement.evm] contract_address`) and
+/// resolves the `TokenNetwork` through it at boot, so
+/// [`FLEET_LIVE_REGISTRY`] is the whole of what
+/// [`every_fleet_configs_settlement_evm_leg_matches_the_live_identity`] has
+/// to hold the fleet to. This file states the DERIVED answer as a literal,
+/// and a literal cannot re-derive itself when the registry moves.
+///
+/// It did not. The 2026-08-06 ERC-2771 cutover (#695/#811,
+/// `docs/evm-deployment.md`) repointed `registryAddress` in both of this
+/// file's blocks and left `tokenNetworkUsdc` -- the next line down, in both
+/// -- naming `0x1E95493f…`, the 2026-07-18 contract the cutover replaced. It
+/// stood wrong for three weeks. Nothing broke on the fleet, because nothing
+/// on the fleet reads it; a third party that read it opened channels on a
+/// contract the live registry does not resolve.
+const ENDPOINTS_JSON: &str = include_str!("../../../infra/linode/endpoints.json");
+
+/// The two blocks of `endpoints.json` that describe this fleet's EVM chain.
+/// `baseSepolia` is a declared mirror of `evm` ("Mirror of the evm block",
+/// its own `_note`) kept for consumers that read that key -- so both are
+/// held to the same values, and neither is ever checked against the other.
+///
+/// Checking them against each other is the guard that would have passed:
+/// the cutover left BOTH copies stale, identically. Only a literal that the
+/// broadcast record moves can catch a value that stopped tracking the chain.
+const ENDPOINTS_EVM_BLOCKS: [&str; 2] = ["evm", "baseSepolia"];
+
+/// `endpoints.json`'s EVM blocks must name the fleet's live deployment, and
+/// `tokenNetworkUsdc` in particular must be the `TokenNetwork` that
+/// [`FLEET_LIVE_REGISTRY`] resolves [`EXPECTED_SETTLEMENT_TOKEN_ADDRESS`] to
+/// -- which is what [`FLEET_LIVE_TOKEN_NETWORK`] records.
+///
+/// **Deliberately offline.** The honest statement of this property is
+/// `registry.getTokenNetwork(token) == tokenNetworkUsdc`, and that is an
+/// `eth_call`. The workspace gate runs on every push and must not need a
+/// chain (ADR 0009's fail-closed boot is exactly the network dependency the
+/// verbatim cases above substitute away), so the chain half lives in
+/// `.github/workflows/base-sepolia-redeem-gate.yml`, whose dry run already
+/// resolves the registry against Base Sepolia and now compares that answer
+/// to this very file. The two halves compose: this test pins the document to
+/// the constant, and that job pins the constant to the chain. Either alone
+/// would have missed this -- a chain check nothing dispatches, or a document
+/// check with nothing behind the number.
+#[test]
+fn the_public_endpoints_document_names_the_fleets_live_evm_deployment() {
+    let endpoints: serde_json::Value =
+        serde_json::from_str(ENDPOINTS_JSON).expect("endpoints.json must be valid JSON");
+
+    for block in ENDPOINTS_EVM_BLOCKS {
+        let chain = endpoints
+            .get(block)
+            .unwrap_or_else(|| panic!("endpoints.json has no `{block}` block"));
+
+        let field = |name: &str| -> String {
+            chain
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("endpoints.json's `{block}` block has no `{name}`"))
+                .to_lowercase()
+        };
+
+        assert_eq!(
+            field("registryAddress"),
+            FLEET_LIVE_REGISTRY.to_lowercase(),
+            "endpoints.json's `{block}.registryAddress` is not the fleet's \
+             TokenNetworkRegistry {FLEET_LIVE_REGISTRY}. A payer configured \
+             from this document would open its channel through a different \
+             registry than the one both box TOMLs name in `[settlement.evm] \
+             contract_address`"
+        );
+
+        assert_eq!(
+            field("tokenNetworkUsdc"),
+            FLEET_LIVE_TOKEN_NETWORK.to_lowercase(),
+            "endpoints.json's `{block}.tokenNetworkUsdc` is not \
+             {FLEET_LIVE_TOKEN_NETWORK}, the TokenNetwork that \
+             {FLEET_LIVE_REGISTRY} resolves \
+             {EXPECTED_SETTLEMENT_TOKEN_ADDRESS} to on Base Sepolia. This \
+             field is DERIVED from the two above it and cannot re-derive \
+             itself: if the registry moved, this moves with it in the same \
+             commit. It did not on 2026-08-06, and this document advertised \
+             a retired contract for three weeks"
+        );
+
+        assert_eq!(
+            field("tokenAddress"),
+            EXPECTED_SETTLEMENT_TOKEN_ADDRESS.to_lowercase(),
+            "endpoints.json's `{block}.tokenAddress` is not the mock USDC \
+             this fleet settles in. The ERC-2771 cutover registered the SAME \
+             token through a new registry ({FLEET_LIVE_REGISTRY}), so a \
+             different token here is not a cutover -- it is a different \
+             currency"
+        );
+
+        assert_eq!(
+            chain
+                .get("tokenDecimals")
+                .and_then(serde_json::Value::as_u64),
+            Some(u64::from(EXPECTED_SETTLEMENT_DECIMALS)),
+            "endpoints.json's `{block}.tokenDecimals` is not \
+             {EXPECTED_SETTLEMENT_DECIMALS}. ADR 0010's uniform scale is what \
+             lets a claim's base units mean the same thing on every chain"
+        );
+
+        assert_eq!(
+            chain.get("chainId").and_then(serde_json::Value::as_u64),
+            Some(84_532),
+            "endpoints.json's `{block}.chainId` is not Base Sepolia's 84532. \
+             The chain id is half of the EIP-712 domain a claim is signed \
+             under, so a wrong one here produces signatures the fleet's \
+             TokenNetwork rejects"
+        );
+    }
+
+    assert!(
+        !ENDPOINTS_JSON.contains(SETTLEMENT_CONTRACT_ADDRESS_ROLLBACK_TARGET),
+        "endpoints.json names the retired pre-ERC-2771 registry \
+         {SETTLEMENT_CONTRACT_ADDRESS_ROLLBACK_TARGET}. That address is the \
+         rollback target in docs/evm-deployment.md and nothing this document \
+         should advertise -- a rollback repoints the boxes and this file \
+         together, in one commit, not this file on its own"
+    );
+}
+
+/// The retired `TokenNetwork` by name, so the failure says what came back
+/// rather than leaving a reader to recognise an address on sight -- the same
+/// service [`SETTLEMENT_CONTRACT_ADDRESS_ROLLBACK_TARGET`] does for the
+/// registry it replaced.
+///
+/// It is a separate case from the identity check above because it asks a
+/// different question. That one asks whether the live values are right;
+/// this asks whether the dead one is gone from the whole document, `_note`
+/// prose included -- except the one deliberate mention, the `_tokenNetworkNote`
+/// that records this exact defect. A stale address surviving in a comment is
+/// how the next reader gets it back.
+const RETIRED_PRE_CUTOVER_TOKEN_NETWORK: &str = "0x1E95493fEF46707E034b4a1945f25a8C76A1823D";
+
+#[test]
+fn the_public_endpoints_document_advertises_the_retired_token_network_nowhere() {
+    let mentions = ENDPOINTS_JSON
+        .to_lowercase()
+        .matches(&RETIRED_PRE_CUTOVER_TOKEN_NETWORK[..10].to_lowercase())
+        .count();
+
+    assert_eq!(
+        mentions, 1,
+        "endpoints.json mentions the retired pre-ERC-2771 TokenNetwork \
+         {RETIRED_PRE_CUTOVER_TOKEN_NETWORK} {mentions} times; exactly one is \
+         expected, the `_tokenNetworkNote` that records why this field went \
+         stale on 2026-08-06 and how to re-derive it. Zero means that note \
+         was deleted and the lesson with it; more than one means the address \
+         is being advertised again somewhere in the document"
+    );
+}
