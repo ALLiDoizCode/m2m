@@ -20,6 +20,118 @@ cargo run -p connector-vectors --bin generate-vectors
 regenerating it against an unchanged implementation is a no-op, so a diff here always means the
 wire actually changed.
 
+## The ILP packet encoding
+
+**This connector's ILPv4 packet is not byte-compatible with RFC 0027, and never has been.** The
+semantics are Interledger's; the encoding is TOON's own dialect, ratified by
+[ADR 0063](../docs/adr/0063-the-ilp-packet-is-toons-dialect-not-rfc-0027s.md). An encoder written
+from RFC 0027's §Packet Format will not produce bytes this connector accepts, and a packet this
+connector emits will not decode in a conforming ILPv4 implementation. Three things differ, and
+nothing else does:
+
+| RFC 0027 §Packet Format                                 | This connector                                 |
+| ------------------------------------------------------- | ---------------------------------------------- |
+| Outer type-length wrapper: `type` then a VarOctetString | Type byte, then fields inline — no wrapper     |
+| `amount` is a fixed `UInt64` (8 bytes)                  | VarUInt (the `envelope` section defines it)    |
+| `expiresAt` is a 17-byte Interledger Timestamp          | 19-byte GeneralizedTime, `YYYYMMDDHHMMSS.fffZ` |
+
+Everything else is RFC 0027's: the three type bytes, the field order and meanings,
+`condition = sha256(fulfilment)`, and the `F`/`T`/`R` error taxonomy. RFC 0027's reason for those
+two fields being fixed-length is that a forwarding connector can then rewrite them in place; this
+connector forgoes that and re-encodes (ADR 0063 D4).
+
+### Where it is pinned
+
+In the `peer_carriage` section below, which is where the packet bytes have lived since those
+vectors landed — the fixtures are a peer-carriage example, but the OER packet inside each one is
+this contract, and [ADR 0021](../docs/adr/0021-vectors-are-normative-prose-is-not.md) makes it
+binding:
+
+| Packet    | Fixture                                                                               |
+| --------- | ------------------------------------------------------------------------------------- |
+| `PREPARE` | `peer_carriage.prepare.http_body_hex` (and byte-identically inside `btp_message_hex`) |
+| `FULFILL` | `peer_carriage.fulfill_ack_accepted.packet_hex`                                       |
+| `REJECT`  | `peer_carriage.reject_with_cost.packet_hex`                                           |
+
+`prepare_no_claim` carries the same PREPARE bytes with the claim removed, and
+`forwarded_data_unchanged` carries a different PREPARE whose `data` is a real sealed gift wrap.
+There is no separate top-level `packet` section: replay these.
+
+### The grammar
+
+Written in the same style as the `envelope` production in the Schema section below, with `VarUInt`
+and `VarOctetString` as defined there:
+
+```text
+prepare = 0x0c || VarUInt(amount)
+             || GeneralizedTime(expires_at)      -- 19 ASCII bytes, no length prefix
+             || execution_condition (32 bytes, no length prefix)
+             || VarOctetString(destination)      -- UTF-8 ILP address
+             || VarOctetString(data)
+
+fulfill = 0x0d || fulfilment (32 bytes, no length prefix)
+             || VarOctetString(data)
+
+reject  = 0x0e || code (3 ASCII bytes, no length prefix)
+             || VarOctetString(triggered_by)     -- UTF-8, may be empty
+             || VarOctetString(message)          -- UTF-8
+             || VarOctetString(data)
+```
+
+There is no length prefix around the whole packet and no trailing anything: a decoder that has
+consumed the last field must be at the end of the buffer, or the packet is `trailing_bytes`
+(ADR 0023). A REJECT's `accumulated_cost` is **not** in these bytes — it rides beside the packet,
+as the `TOON-Accumulated-Cost` header or the `toon-accumulated-cost` protocol-data entry (ADR
+0011); see `reject_with_cost`'s own `accumulated_cost` field.
+
+### `peer_carriage.prepare.http_body_hex`, byte by byte
+
+108 bytes. The decoded values are `peer_carriage.prepare.prepare` in this file, so a replaying SDK
+can check both directions: that these bytes decode to those values, and that encoding those values
+reproduces these bytes exactly.
+
+```text
+0c                                 type 12 = PREPARE
+83                                 VarUInt determinant: long form, 0x80 | 3 -> 3 value bytes follow
+   03d090                          amount = 250000
+                                     (RFC 0027 would be 8 fixed bytes: 000000000003d090)
+32303330303130313030303130302e3030305a
+                                   expires_at, 19 ASCII bytes = "20300101000100.000Z"
+                                     = 2030-01-01T00:01:00.000Z
+                                     (RFC 0027 would be 17 bytes: "20300101000100000")
+f1f2f3f4f5f6f7f8f9fafbfcfdfeff00
+0102030405060708090a0b0c0d0e0f10   execution_condition, 32 bytes, no length prefix
+17                                 VarUInt determinant: short form, 23 bytes follow
+   672e746f6f6e2e73746f72652d626f782e736574746c65
+                                   destination = "g.toon.store-box.settle"
+1b                                 VarUInt determinant: short form, 27 bytes follow
+   766563746f722d666978747572652d707265706172652d64617461
+                                   data = "vector-fixture-prepare-data"
+```
+
+The fixture's `data` is plain ASCII so the walk stays readable. A **real** packet's `data` is a
+gift wrap sealed to the terminating connector (ADR 0018) and is opaque to every hop — see
+`forwarded_data_unchanged`, whose `sealed_data_hex` is a genuine one and must appear byte-for-byte
+inside its PREPARE.
+
+The other two, for completeness:
+
+```text
+0d                                 type 13 = FULFILL
+5152535455565758595a5b5c5d5e5f60
+6162636465666768696a6b6c6d6e6f70   fulfilment, 32 bytes, no length prefix
+1b 766563746f722d666978747572652d66756c66696c6c2d64617461
+                                   data = "vector-fixture-fulfill-data"   (61 bytes total)
+
+0e                                 type 14 = REJECT
+543034                             code = "T04", 3 ASCII bytes, no length prefix
+10 672e746f6f6e2e73746f72652d626f78
+                                   triggered_by = "g.toon.store-box"
+15 766563746f7220666978747572652072656a656374
+                                   message = "vector fixture reject"
+00                                 data, empty                            (44 bytes total)
+```
+
 ## Schema
 
 All byte fields are lowercase hex, no `0x` prefix. `schema_version` bumps only when a field's
@@ -239,7 +351,10 @@ btp_message_hex, http_headers, http_body_hex }`: a claim-bearing PREPARE.
   `payment-channel-claim` protocolData entry, then the OER PREPARE)
   and `http_body_hex` (the same OER bytes as a POST body) carry. `prepare_no_claim` is the same
   fixture with the claim entry/header removed -- "claimless is legal" pinned rather than assumed.
-  `claim_json` is `null` there.
+  `claim_json` is `null` there. **Those OER bytes are also this file's pin of the packet encoding
+  itself** -- not only of peer carriage: see [The ILP packet encoding](#the-ilp-packet-encoding)
+  above, which walks `http_body_hex` byte by byte and says where the encoding departs from
+  RFC 0027 ([ADR 0063](../docs/adr/0063-the-ilp-packet-is-toons-dialect-not-rfc-0027s.md)).
 - **`fulfill_ack_accepted`**, **`fulfill_ack_rejected`**, **`ack_rejected_reasons[]`**,
   **`reject_with_cost`**, **`ack_absent`**, **`flush_ack`** (items 7-11, 14) -- one shape,
   `{ name, packet ("fulfill"|"reject"|"none"), packet_hex, ack, accumulated_cost, btp_response_hex,

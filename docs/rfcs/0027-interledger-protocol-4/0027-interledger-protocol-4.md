@@ -14,14 +14,17 @@
 
 **This is the packet this connector routes, and the code set it rejects with.
 It is not, byte for byte, the packet this document specifies.** Read the
-encoding section below with the three divergences in the first bullet in mind;
-everything else here is a semantic departure of the ordinary kind, argued in a
-record.
+encoding section below with the three divergences in the first bullet in mind.
+Those three are an *encoding* departure and every other bullet here is a
+*semantic* one, but they are alike in the way that matters: each is a decision
+argued in a record, not a gap.
 
-- **⚠ The wire encoding diverges from §Packet Format in three ways, and none is
-  recorded in an ADR.** `crates/connector-domain/src/packet.rs` and `oer.rs`
-  were ported from the TypeScript prototype and never reconciled against this
-  text:
+- **⚠ The wire encoding diverges from §Packet Format in three ways. This is a
+  decision, and it is pinned.**
+  [ADR 0063](../../adr/0063-the-ilp-packet-is-toons-dialect-not-rfc-0027s.md)
+  ratifies the encoding `crates/connector-domain/src/packet.rs` and `oer.rs` have
+  always emitted — ported from the TypeScript prototype, which had already
+  diverged — and decides against becoming byte-compatible:
 
   | This RFC                                                | This connector                                 |
   | ------------------------------------------------------- | ---------------------------------------------- |
@@ -30,16 +33,29 @@ record.
   | `expiresAt` is a 17-byte Interledger Timestamp          | 19-byte GeneralizedTime, `YYYYMMDDHHMMSS.fffZ` |
 
   A packet from this connector will not decode in a conforming ILPv4
-  implementation, and vice versa. No committed vector pins ILP packet bytes —
-  `vectors/wire-vectors.json` covers the envelope, the gift wrap, the fulfilment
-  derivation and claims, but not the packet — so
-  [ADR 0021](../../adr/0021-vectors-are-normative-prose-is-not.md) has nothing to
-  say here and nothing guards it. **Treat interoperation with a non-TOON ILPv4
-  node as unproven.** Tracked in
-  [#1174](https://github.com/toon-protocol/connector/issues/1174).
+  implementation, and vice versa. The ⚠ stays because that consequence is the
+  one a reader of the body below is most likely to assume away — not because
+  the divergence is unrecorded or unguarded, neither of which it is any longer:
+  `vectors/wire-vectors.json`'s `peer_carriage` fixtures carry complete OER
+  `PREPARE`, `FULFILL` and `REJECT` packets in this encoding
+  (`prepare.http_body_hex`, `fulfill_ack_accepted.packet_hex`,
+  `reject_with_cost.packet_hex`), so
+  [ADR 0021](../../adr/0021-vectors-are-normative-prose-is-not.md) has bound
+  these bytes since those vectors landed;
+  [`vectors/README.md`](../../../vectors/README.md#the-ilp-packet-encoding)
+  walks the PREPARE byte by byte for an implementer in another language.
+
+  **Interoperation with a non-TOON ILPv4 node is not merely unproven — it does
+  not work, and encoding is the last of five reasons why.** The other four
+  (a sealed `data` and a derived fulfilment, no route discovery, no quoting, no
+  transport layer) are ADR 0063's argument for leaving the encoding alone;
+  correcting these three bytes would produce a node that still cannot
+  interoperate. "Speaks ILPv4" is retired as a description of this connector
+  (ADR 0063 D3); the accurate form is **ILPv4 semantics, TOON encoding**.
 
   Note the RFC's own reason for those two being fixed-length: so a connector can
-  rewrite them in place. Which leads to —
+  rewrite them in place. This connector forgoes that and re-encodes, which
+  ADR 0063 D4 accepts as a cost of the dialect. Which leads to —
 
 - **⚠ This connector does not decrease `expiresAt` when it forwards.**
   `packet-flow-spec.md` **PF-19** requires it and the forward path does not do

@@ -25,6 +25,17 @@ exactly the same digest. Nothing else about the peer semantics is in scope here:
 operator-to-operator on both ends (ADR 0003), already normative prose for a different reason, and
 the rest of it is out of this issue's scope.
 
+**The ILP packet's own encoding is in scope of the committed set, and was not in scope of this
+document.** That is worth saying because it has been misread three times: the `peer_carriage`
+fixtures added later carry complete OER `PREPARE`, `FULFILL` and `REJECT` packets
+(`prepare.http_body_hex`, `fulfill_ack_accepted.packet_hex`, `reject_with_cost.packet_hex`), so
+[ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md) has bound the packet bytes since
+those landed, even though no section is named for them and no invariant below is written about
+them. The encoding is **not** RFC 0027's — RFC 0027's semantics in TOON's own encoding
+([ADR 0063](../adr/0063-the-ilp-packet-is-toons-dialect-not-rfc-0027s.md)) — and
+[`vectors/README.md`](../../vectors/README.md#the-ilp-packet-encoding) is where a replaying SDK
+finds the three divergences, the grammar and a byte-by-byte walk of the pinned PREPARE.
+
 ## Invariants
 
 ### 1. An envelope round-trips
