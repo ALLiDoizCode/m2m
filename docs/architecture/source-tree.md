@@ -20,7 +20,6 @@ connector/
   deploy/          the image and the deployment recipe
   docs/            ADRs, protocol specs, operator runbooks, vendored RFCs
   vectors/         wire-vectors.json, the normative cross-repo contract (ADR 0021)
-  data/            72 JSON ledger fixtures from the deleted prototype; nothing reads them
   Cargo.toml       the workspace manifest — crates/* plus packages/solana-program
 ```
 

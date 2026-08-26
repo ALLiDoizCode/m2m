@@ -27,6 +27,38 @@ PATTERNS=(
   '*.secret'
   'deployer-wallet.json'
   'testnet-wallets.json'
+  # Added by issue #1179. `data/wallet/*/master-seed.enc` -- an AES-256-GCM
+  # encrypted BIP-39 mnemonic -- and its PBKDF2 salt sat tracked in a PUBLIC
+  # repository for seven months, and this guard reported green the whole time.
+  # Neither file matched anything above: `.enc` was not a pattern, and
+  # `encryption-salt` has no extension at all, so `is_solana_keypair_json`
+  # never looked at it either.
+  #
+  # The lesson is not "add master-seed.enc". It is that a name announcing
+  # ENCRYPTED KEY MATERIAL was not treated as key-shaped, because encryption
+  # reads like protection. It is not: the password was a string literal in the
+  # same repository's history, so the ciphertext, the salt and the key to both
+  # shipped together.
+  '*.enc'
+  '*-seed'
+  '*-seed.*'
+  '*mnemonic*'
+  '*-salt'
+  'encryption-salt'
+  # Conventional private-key and keystore names. None is tracked here today;
+  # they are listed so the first one to arrive fails the build rather than
+  # teaching us the same lesson a third time.
+  '*.pem'
+  '*.p8'
+  '*.p12'
+  '*.pfx'
+  '*.jks'
+  '*.asc'
+  '*.gpg'
+  '*.keystore'
+  'id_rsa'
+  'id_ecdsa'
+  'id_ed25519'
 )
 
 # Explicit allowlist for tracked files that are key-shaped -- by name or by
