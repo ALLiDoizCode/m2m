@@ -1,6 +1,6 @@
 # A runtime peer/route table never shadows the config file
 
-**Status:** Accepted. Extends [0009](0009-one-typed-config-file-no-environment-layer.md) and [0006](0006-the-connector-is-mechanism-not-policy.md). **Survives [0043](0043-purchasable-peering-is-removed.md) intact** — a durable runtime table is what an operator needs and was never about selling. Live: `connector-runtime/src/peer_route_store.rs`.
+**Status:** Accepted. Extends [0009](0009-one-typed-config-file-no-environment-layer.md) and [0006](0006-the-connector-is-mechanism-not-policy.md). **Survives [0043](0043-purchasable-peering-is-removed.md) intact** — a durable runtime table is what an operator needs and was never about selling. Live: `connector-runtime/src/peer_route_store.rs`. **Completed by [0058](0058-a-peering-is-established-from-a-url.md)** — until that record is built, the rules here govern a table that cannot hold a peering.
 
 **Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
 

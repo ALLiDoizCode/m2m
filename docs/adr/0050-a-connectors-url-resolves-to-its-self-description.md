@@ -1,6 +1,6 @@
 # A connector's URL resolves to its self-description
 
-**Status:** Accepted, **not yet built**. Completes [0022](0022-a-connector-answers-it-does-not-announce.md) by giving "answering" a single surface, and is what [0046](0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md) leaves behind when the announce is removed. Narrows [0003](0003-clean-room-peer-wire-versioned-client-edge.md)'s version-discovery mechanism onto this document.
+**Status:** Accepted, **not yet built**. Completes [0022](0022-a-connector-answers-it-does-not-announce.md) by giving "answering" a single surface, and is what [0046](0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md) leaves behind when the announce is removed. Narrows [0003](0003-clean-room-peer-wire-versioned-client-edge.md)'s version-discovery mechanism onto this document. **[0058](0058-a-peering-is-established-from-a-url.md) depends on it** — a peering established from a URL has nothing to read until this document exists.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 

@@ -1,6 +1,6 @@
 # The cap bounds one packet, is discovered by its own `T04`, and is never earned by the connector
 
-**Status:** Accepted, **partly not yet built** — the cap and its `T04` refusal are live; the message-carries-the-cap rule is live but unstated, and a runtime-settable cap does not exist. Corrects `CONTEXT.md`'s **Cap** entry, and corrects three documents that claim nothing emits `T04`.
+**Status:** Accepted, **partly not yet built** — the cap and its `T04` refusal are live; the message-carries-the-cap rule is live but unstated, and a runtime-settable cap does not exist. Corrects `CONTEXT.md`'s **Cap** entry, and corrects three documents that claim nothing emits `T04`. Both falsifiers below are answered by [0058](0058-a-peering-is-established-from-a-url.md), which puts the cap on the write that establishes a peering.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 

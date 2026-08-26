@@ -55,6 +55,15 @@ intended receiver. It proves delivery; it does not move value — a packet carri
 At a route termination the terminating connector produces it; every hop upstream checks it.
 _Avoid_: receipt, proof of payment, preimage (when the layer is already clear)
 
+**ILP address**:
+The name a connector answers to, and the thing a route's prefix matches against. **Self-asserted: a
+claim, not a grant.** Nothing allocates one, no registry records one, and no connector is given one
+by another — an operator writes down the address their node claims. An address means nothing until
+somebody else routes to it, so **reachability is the only registry**, and two nodes claiming the same
+address is resolved by whoever declines to carry for one of them. Choosing a name beneath a peer's
+address is a courtesy that keeps their table small, never a delegation that binds anyone.
+_Avoid_: allocated address, assigned address, address space (as though it were owned)
+
 **Route**:
 A mapping from a destination prefix to the next hop that should carry it.
 
@@ -75,7 +84,10 @@ being shadowed.
 
 **Controller**:
 Whatever decides the connector's leased routes and peering. Outside the connector by
-definition — the connector never learns, announces, or discovers.
+definition — the connector never learns, announces, or discovers. The line is about **deciding**,
+not about fetching: a connector told to reach a counterparty will read that counterparty's
+self-description to learn how, exactly as it dials a handler's URL. What it never does is choose
+whom to peer with, or find one it was not pointed at.
 
 **Operator**:
 The human or organisation that runs a connector. Owns the config file, the identity key and the
@@ -95,6 +107,14 @@ yours costs. Mechanism, not policy: it decides nothing, and reaches nobody who d
 sender asks directly and pays through the network, so what it learns by asking is not something an
 intermediary can substitute.
 _Avoid_: discovery (for this — a connector answers, it does not discover)
+
+**Self-description**:
+The single document a connector's own URL resolves to: the facts a stranger needs to transact with
+it, in one place, with no packet and no protocol knowledge required. Its identity, where it can be
+reached, and per chain what a channel with it would be opened against. **Facts about this connector
+only** — never about what runs behind it — and it is read, never written to. It is what makes a URL
+a complete introduction, and so the whole of what one operator must give another to be peered with.
+_Avoid_: manifest, announcement, advertisement (nothing is pushed; it is answered)
 
 **Greeting**:
 What a connector answers an unpaid request to a priced route with: that route's terms — what it
@@ -164,7 +184,11 @@ _Avoid_: control plane, admin
 The configured bilateral relationship between two connectors: a counterparty key, a carriage to
 reach it on, a fee, and a cap. Created by an **operator** — in the config file or through the
 operator surface — and by nothing else. It cannot be bought, learned, earned or announced into
-existence.
+existence. An operator establishes one by naming the other node's URL, so its **identity is
+trust-on-first-use**: whoever that URL answers as is who the peering is with, vouched for by nothing
+beyond the operator's own vetting of the URL. Never describe one as pinned, verified or attested.
+The fee and the cap are the operator's policy about that counterparty, and are held once by the
+peering rather than repeated on each route through it.
 
 **Peer semantics**:
 What a peer interaction _means_ — claim exchange, fees, reject codes,
@@ -186,11 +210,13 @@ The unit a role attaches to: one BTP session, from its websocket upgrade to its 
 HTTP request.
 
 **Peer role**:
-The authority of one interaction — `peer` or `client`. Decided by authentication, never by which
-listener the bytes arrived on: an interaction is a `peer` only if it is bound to a configured peer
-id and carries a claim on one of that peer's channels that verifies against the counterparty key
-that peering configures. There is no third role, no unroled state, and no fallthrough — anything
-that is not a proven peer is a client.
+The authority of one interaction — `peer` or `client`. Decided by a signature, never by which
+listener the bytes arrived on and never by a shared secret: an interaction is a `peer` only if it
+carries a claim on a channel one peering configures, whose signature verifies against the
+counterparty key that peering configures. **The claim names its own peering** — a channel belongs to
+at most one — so nothing has to be asserted alongside it and nothing weaker is consulted first.
+There is no third role, no unroled state, and no fallthrough — anything that is not a proven peer is
+a client.
 _Avoid_: peer wire, peer session (for the role rather than the connection)
 
 **Client edge**:
@@ -219,7 +245,11 @@ would let a stale config load with the key silently ignored.
 
 **Payment channel**:
 A two-party agreement, anchored on a chain, that lets value move between the parties many
-times while touching the chain only to open, top up, and close.
+times while touching the chain only to open, top up, and close. **Identified by its participants**,
+not by a name either party chose: both sides compute the same identifier from the two of them and
+the token, so either can ask the chain whether it already exists without being told anything. At
+most one is live per pair per token, on every chain — a pair that has settled starts a fresh one
+rather than holding several at once.
 _Avoid_: channel (when ambiguous with a route or a stream)
 
 **Claim**:
@@ -299,7 +329,9 @@ _Avoid_: payout, redemption (as a synonym for the whole act)
 
 **Fee**:
 What a connector charges to carry one packet across one peering relation. Flat per packet,
-not proportional to the amount carried.
+not proportional to the amount carried — and not varying with where the packet is headed, because
+it pays for this hop's work and that work is the same whatever the destination. One number per
+peering, held by the peering. What varies by destination is the **price**.
 _Avoid_: spread, commission, rate
 
 **Price**:
