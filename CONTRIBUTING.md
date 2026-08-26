@@ -48,6 +48,8 @@ After reading the documentation above:
 
 ### Prerequisites
 
+- **Rust** stable — the connector itself is Rust (ADR 0017), and CI pins nothing tighter than `dtolnay/rust-toolchain@stable`
+- **Chain binaries** — `anvil`, `forge` and `solana-test-validator`, for the tests that need a real chain. See [Chain-backed tests](#chain-backed-tests) for which tests need which, and how to install each
 - **Node.js** >= 22.11.0
 - **npm** 10.x or higher
 - **Git** 2.x
@@ -61,11 +63,16 @@ After reading the documentation above:
 ### Initial Setup
 
 1. Fork the repository on GitHub
-2. Clone your fork locally:
+2. Clone your fork locally, **with submodules**:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/connector.git
+   git clone --recurse-submodules https://github.com/YOUR_USERNAME/connector.git
    cd connector
    ```
+   `packages/contracts` vendors OpenZeppelin and forge-std as git submodules, and
+   `connector-settlement-evm`'s `abi_provenance` test shells out to a real `forge build` of
+   them — without the submodules that build fails on unresolved imports and the Rust gate
+   reports a failure that has nothing to do with the Rust code. An existing clone catches up
+   with `git submodule update --init --recursive`.
 3. Add upstream remote:
    ```bash
    git remote add upstream https://github.com/toon-protocol/connector.git
@@ -312,6 +319,11 @@ All pull requests must pass:
 - ✅ `cargo clippy --workspace --exclude payment-channel --all-targets -- -D warnings`
 - ✅ ESLint + Prettier over the remaining npm workspaces (devnet tooling)
 
+That is the order CI runs them in, and it is worth running locally in the same order — a
+formatting failure is cheaper to find than a clippy one. `make rust-build` and `make rust-test`
+are shorthands for the middle two; the `fmt` and `clippy` checks have no make target and are
+typed out.
+
 These run on a PR against **any** base branch, not only `main` (issue #1152).
 That was not always true: `ci.yml` used to filter on `branches: [main]`, so a
 PR stacked on another PR's branch ran none of the Rust gate and still showed
@@ -359,6 +371,52 @@ The connector's tests are Rust: unit tests in-module (`#[cfg(test)]`), integrati
 tests in each crate's `tests/`. See ADR 0007 for the testing doctrine (fakes yes,
 mocks no) — chain-touching tests run against a real `anvil` /
 `solana-test-validator` and hard-fail rather than skip under `CI`.
+
+### Chain-backed tests
+
+Some integration tests need a real chain, and they **skip locally when the binary is absent but
+panic when `CI` is set** — so the gate can never go green without one. A guard that returns early
+and reports `passed` in `0.00s` is worse than a missing test, which is what issue #471 closed:
+**never add a skip-when-unavailable branch that can go green in CI.**
+
+| Needs                   | Get it with                                                      | Tests                                                                                                       |
+| ----------------------- | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `anvil` (Foundry)       | `curl -L https://foundry.paradigm.xyz \| bash`                   | `connector-settlement-evm`, `connector-operator`, `connector-cli`, `connector-client-edge`, `connector-bin` |
+| `forge`                 | same                                                             | `connector-settlement-evm`'s `abi_provenance`, which rebuilds the contracts and diffs the committed ABI     |
+| `solana-test-validator` | `sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.21/install)"` | `connector-settlement-solana`, `connector-cli`, `connector-bin`                                             |
+
+**That Solana version is not `stable` and not arbitrary.** This repository installs exactly two
+Solana CLIs, for opposite reasons, and `crates/connector-settlement-solana/tests/solana_cli_pins.rs`
+records both with the evidence behind them and fails the build if either literal drifts: **v2.1.21
+wherever the program is run**, because v3's `solana-test-validator` hard-requires io_uring and
+because the workspace pins the Solana crates to `=2.1.0`; **v3.1.12 wherever a deployed artifact is
+built**. The row above is the run side, so it is the same CLI `ci.yml`'s `rust-gate` installs — a
+local gate on a different one is not the gate.
+
+**`cargo test` spawns its own chain.** This is the thing most often gotten wrong here. Every
+chain-backed test forks a **disposable** node of its own on its own port and tears it down on drop
+— `connector_settlement_evm::test_support::Anvil::spawn` for `anvil`, and
+`connector_settlement_solana::test_support::SolanaValidator::spawn` for `solana-test-validator`,
+which also loads `payment_channel.so` into genesis at a fixed program id. Nothing under `crates/`
+dials `localhost:8545` or `localhost:8899`, so running `make anvil-up` or `make solana-up` before
+`cargo test` changes nothing. The Docker chain profiles exist for running a node by hand, and for
+`local/` — not for the test gate.
+
+### What the workspace gate does not cover
+
+`cargo test --workspace --exclude payment-channel` is the connector's gate and nothing else's.
+Four things sit outside it:
+
+- **`packages/solana-program`** — the on-chain `payment-channel` crate, a Cargo workspace member
+  and the thing `--exclude payment-channel` excludes. It has its own `cargo test-sbf` job in CI,
+  and `make solana-test` locally.
+- **`packages/contracts`** — a separate Foundry job (`forge test`, `.github/workflows/contracts.yml`).
+  No make target runs it.
+- **`npm test`** (and `make test`) — the surviving npm workspaces, which are devnet tooling only:
+  the faucet, its Mina zkApp and the announcer sidecar. It does **not** test the connector.
+- **[`local/`](local/README.md)** — the shipped **image**, as uid 10001, on a mounted config,
+  against real containerised chains. A separate gate answering a question `cargo test`
+  structurally cannot: run one with `make local-verify LOCAL_TOPOLOGY=<solo|two-hop|mixed-chain>`.
 
 ### Test Writing Guidelines
 
