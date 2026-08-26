@@ -5544,6 +5544,16 @@ mod tests {
                     self.0
                 )))
             }
+
+            async fn live_channel_with(
+                &self,
+                _counterparty: Vec<u8>,
+            ) -> Result<Option<ChannelId>, SettlementError> {
+                Err(SettlementError::Backend(format!(
+                    "{}: live_channel_with",
+                    self.0
+                )))
+            }
         }
 
         fn bare_connector() -> Connector {
