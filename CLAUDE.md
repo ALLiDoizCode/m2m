@@ -1,10 +1,11 @@
 # CLAUDE.md
 
 A multi-chain ILP connector: one Rust binary that forwards packets for payment and
-settles on EVM and Solana. `README.md` is the map of the repository and `CONTEXT.md`
-is the vocabulary; this file covers what an agent working here needs that neither
-of those says — how to run things, where keys and money come from, and the rules
-that are easy to get wrong.
+settles on EVM and Solana. `docs/architecture/source-tree.md` is the map of the
+repository and `CONTEXT.md` is the vocabulary; `README.md` is the operator's guide
+and is written for someone deploying a node, not changing one. This file covers what
+an agent working here needs that none of those says — how to run things, where keys
+and money come from, and the rules that are easy to get wrong.
 
 Where this file and an ADR disagree, **the ADR wins**. Where an ADR and a spec
 disagree, the ADR wins too (`docs/adr/`).
@@ -261,7 +262,11 @@ first, then move the tag.
 
 ## Pointers
 
-- `README.md` — repository map, crate roles, how to run the gate.
+- `docs/architecture/source-tree.md` — the repository map: every crate, and what is
+  deliberately not the connector.
+- `README.md` — the operator's guide: run a node, put an app behind it, get paid, peer.
+  A journey, not a reference; do not add reference material back to it.
+- `CONTRIBUTING.md` — the workspace gate, the chain binaries the tests need, the doctrine.
 - `CONTEXT.md` — the vocabulary. Read before writing docs or naming anything.
 - `docs/adr/` — numbered decisions; the tiebreaker for everything above.
 - `vectors/wire-vectors.json` — the normative cross-repo wire contract for
