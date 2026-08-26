@@ -140,8 +140,13 @@ demonstrated good behaviour is a trust mechanism, and trust is policy.
 | **client channel** | which channel a client's claims are judged against                              |
 | **pay channel**    | a channel this connector pays _from_, as a client of another node               |
 
-**CF-22** `[connector]` — These books MUST NOT share ids. A channel in two roles is a namespace
-collision and MUST be refused at load.
+**CF-22** `[connector]` — The **client** book MUST NOT share an id with either of the others: one
+channel that is both a peer's and a client's, or both paid from and received on, is one channel
+counted as credit twice, and MUST be refused at load. The **peer** and **pay** books MAY share one,
+and a connector MUST NOT refuse it — holding a single channel with a single hop in both roles is the
+deployed shape, the peer role judging what arrives and the pay role covering what this connector
+sends, with exactly one book signing per packet. Ids are compared within a chain, and over each
+chain's canonical form rather than over the operator's spelling.
 
 **CF-36** `[connector]` — A row in **any** of the three books MUST be refused at load, by name, if
 the connector configures no settlement for that row's own chain. The settlement configuration is
@@ -157,6 +162,30 @@ does not reach it. ([issue #1138](https://github.com/toon-protocol/connector/iss
 of the channel** — a configured row, or a channel resolved from chain — and never against anything the
 claim declares about itself.
 ([ADR 0052](../adr/0052-permissionless-payment-is-guaranteed-and-a-claim-is-what-authorises.md))
+
+**CF-37** `[connector]` — A peering MUST be bound to at least one **peer channel**, and a
+configuration naming a peering with none MUST be refused at load. A peering with nothing to judge an
+arriving claim against can never take the peer role at all — its counterparty is admitted as an
+ordinary client instead, and the runtime symptom is silence, because the peering appears to work.
+See [`peer-carriage-spec.md` §1.2](peer-carriage-spec.md) for the role decision this binding is half
+of.
+
+**CF-38** `[connector]` — A peering a **route forwards to** MUST be bound to a **pay channel**, and a
+route naming a peering with none MUST be refused at load, naming both the route and the peering. A
+connector covers every PREPARE it sends ([ADR 0042](../adr/0042-a-packet-carries-its-claim.md)), so a
+forward with nothing to sign a covering claim from has no uncovered path left to fall back to and
+would reject every packet on that route. The rule is keyed on **routes** and no wider: a peering this
+connector only ever accepts from owes nothing and needs no pay channel.
+([issue #1145](https://github.com/toon-protocol/connector/issues/1145))
+
+**CF-39** `[connector]` — A connector that configures a channel in **any** of the three books MUST
+also be configured with a durable location for its claim watermarks, and MUST be refused at load if
+it is not. It MUST verify that location is writable at startup, naming the path when it is not; it
+MUST replay what is already there before it serves; and it MUST refuse to start on a record it cannot
+read or cannot decode, rather than starting at no watermarks. A watermark held only in process memory
+is not a replay defence: after a restart every spent nonce reads as fresh, every claim a client has
+already spent buys service again, and nothing in a log shows that it did.
+([issue #605](https://github.com/toon-protocol/connector/issues/605))
 
 ### 1.7 Settlement
 
@@ -237,7 +266,102 @@ spell it however it likes.
 | `[node]`                                   | table                                 | —        | CF-08, the facts a node cannot introspect            |
 | `peer_expose`                              | `"neither"`/`"btp"`/`"http"`/`"both"` | no       | CF-17                                                |
 | `peer_allow_plaintext_endpoints`           | bool                                  | no       | CF-18's node-wide opt-in                             |
-| `state_dir`                                | path                                  | no       | where durable state lives                            |
+| `state_dir`                                | path                                  | CF-39    | where durable state lives                            |
+
+**How the file is read.** Every table in it is `deny_unknown_fields`, so an unrecognised key — a typo,
+or one from a shape this build does not implement — is a load failure that names it rather than a line
+silently dropped. The only environment variable the binary reads is `RUST_LOG`, and it sets log
+verbosity and nothing else (CF-02). [`deploy/connector-rust/connector.toml`](../../deploy/connector-rust/connector.toml)
+is the annotated template. `*.toml` is the only configuration this binary has ever had: the retired
+TypeScript connector's `*.yaml` (`nodeId`, `btpServerPort`, `adminApi`) is gone from the repository
+entirely.
+
+**One listener.** `client_edge_addr` is where `POST /ilp` and `GET /ilp/btp` are served, where the
+operator surface is mounted when `[operator]` is configured, and where the peer carriages ride when
+`peer_expose` selects any. There is no second port and no second bind address.
+
+**`[signer]`, and every `key` table under `[settlement]`,** take exactly one of `key_file` or
+`kms_key_id` — a location, never a value (CF-04).
+
+**Routes.** A route is a `prefix` plus exactly one of `handler_url` or `peer_id`, and a price is
+required on **both** branches, each with its own named refusal ([ADR 0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md);
+CF-10, CF-11). Write `price = 0` where free is deliberate. `transport` is meaningful only alongside
+`handler_url` (CF-15).
+
+**Peerings.** A peer row carries an `id`, an optional `endpoint` whose scheme selects the carriage, a
+`max_packet_amount` (CF-19's cap — `0` is refused by name, and there is no disabling spelling) and a
+`fee` (CF-16). A row with no `endpoint` is accept-only; a row with neither an `endpoint` nor a
+`peer_expose` for it to be dialled into is refused, because it can never establish. Nothing on the row
+authenticates the peering: [ADR 0060](../adr/0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md)
+deleted the shared secret outright, and the role is proved by the peer-channel binding of CF-37 plus a
+verified claim signature. A peering may also be established while the process serves, from the
+counterparty's URL, over the operator surface
+([ADR 0058](../adr/0058-a-peering-is-established-from-a-url.md)); CF-32 and CF-33 govern what such a
+row may not take.
+
+**`peer_expose` opens no port.** It selects which peer carriages are handled on the listener this node
+already serves ([`peer-carriage-spec.md` §2.1](peer-carriage-spec.md)) — this connector has no
+dedicated peer listener. A node that leaves it at its `"neither"` default still serves clients over
+both client transports, and a node that sets it still serves an anonymous client that presents no
+identity at all (CF-27). It is also the one peering fact the node self-description publishes: which
+carriages exist, never who rides them.
+
+**The three channel books** (CF-21) are told apart by what each does with a claim. `[[peer_channels]]`
+is the channel a peering's claims are **judged against**, and names the `counterparty_key` whose
+signature is accepted on it; `[[client_channels]]` is a channel this node **receives** claims on, and
+names its `counterparty` the same way (CF-23); `[[pay_channels]]` is one this node **pays** from — the
+channel every PREPARE forwarded to that peer carries a covering claim on
+([ADR 0042](../adr/0042-a-packet-carries-its-claim.md)). An EVM row in any book names the channel by
+`channel_id` and its EIP-712 domain by `chain_id` and a token network
+([ADR 0024](../adr/0024-peer-wire-claims-sign-the-eip-712-balance-proof.md)); a Solana row names a
+`channel_account` instead and carries neither, because Solana has neither a numeric chain id nor a
+per-token verifying contract for a row to name. No row in any book names a `program_id`: the
+settlement program [ADR 0053](../adr/0053-a-solana-claim-binds-its-domain-the-way-an-evm-claim-does.md)
+binds into a Solana claim is `[settlement.solana]`'s and is read from nowhere else (CF-26), and the
+field survives on each Solana row solely to be refused by name. A Solana `[[pay_channels]]` row must
+additionally name a channel the same peering binds as a Solana `[[peer_channels]]` row, and is refused
+at load if it does not: `programId` is a required field of the Solana claim wire, where an EVM claim's
+domain fields ride optional, and both peer carriages render it from that peer-channel row.
+
+**A pay-from row's `client_edge_url`** is that peer's own `POST /ilp` — where this node arrives as an
+ordinary buyer, and where it asks `POST /ilp/claim-state` where its claims on the channel stand. The
+nonce and the cumulative amount are never remembered here and never guessed, because the receiver is
+the authority on its own watermark. The signing key is that row's chain's settlement key,
+`[settlement.evm]`'s or `[settlement.solana]`'s, and there is no second key to configure (CF-24,
+[ADR 0030](../adr/0030-an-operator-announces-a-node-the-node-still-does-not.md)).
+
+**Settlement has two shapes** (issue #628). The legacy flat one — `chain`, `rpc_url`,
+`contract_address`, `token_address`, `decimals` and a key table, all directly under `[settlement]` —
+is **frozen at `chain = "evm"`** and never accepts `"solana"`; a node settling on Solana, or on both
+chains at once, writes the keyed shape in §2.1's table instead. `contract_address` is the
+**`TokenNetworkRegistry`**, the contract `getTokenNetwork(token)` is called on, and not a channel
+contract; `[settlement.solana]` names the deployed `payment-channel` `program_id` in its place. Mina
+is not a settlement chain in either shape
+([ADR 0002](../adr/0002-drop-mina-from-the-rust-connector.md)). An absent `[settlement]` is legal, and
+every channel operation then answers `503`; a present but wrong one is a startup failure, because a
+real backend is constructed for every chain configured before the node serves anything (CF-25).
+
+**`decimals` is a declaration, not a conversion.** Nothing scales by it: every amount on the value path
+— a route's price, a claim's amount, a channel's deposit — is already in the settlement token's base
+units, and keeping those units uniform across chains is what leaves nothing to convert. It is checked
+instead, against the token's own `decimals()` at startup, and a disagreement names both and refuses to
+boot (CF-25). Zero is refused outright.
+
+**`[[client_identities]]`.** Each entry is an `id` a request presents in `ILP-Peer-Id` and the `secret`
+it must present in `Authorization: Bearer <secret>`; an empty or omitted secret makes that identity a
+name rather than a credential, and the header may then be absent (CF-29). An empty `id`, or a
+duplicated one, is refused at load. Configuring none of these is not a closed door: a request
+presenting no `ILP-Peer-Id` is anonymous, which is a first-class path (CF-27), and a node with no
+entries serves clients exactly as it did before the section existed. What the section changes is that
+an `ILP-Peer-Id` presented and _not_ authenticated is refused `401`, answered before the route is
+looked up ([`client-edge-spec.md` §1.2](client-edge-spec.md)).
+
+**`state_dir`** is CF-39's durable location. Two append-only journals live there:
+`client-edge-claims.log`, the claims accepted at `POST /ilp`, and `peer-claims.log`, the peer
+carriage's own claim book. In a container it MUST be a **mounted volume** rather than a path in the
+writable layer — a watermark that dies with the container is the same defect one indirection down. The
+image runs as uid `10001`, so a named volume, whose ownership follows, is simpler than a host bind
+mount, which has to be `chown 10001:10001`ed first.
 
 ### 2.2 Local operational knobs
 
@@ -248,6 +372,15 @@ use and belong in an operator's guide rather than a protocol specification.
 `unresolvable_lookup_budget_per_signer` · `unresolvable_lookup_budget_total` ·
 `unresolvable_lookup_budget_window_secs` · `unresolvable_lookup_budget_max_wait_ms` ·
 `btp_session_window`
+
+`[settlement.evm]` carries two more of the same kind (issue #661), for the local channel index a node
+builds from its own `TokenNetwork`'s logs so that resolving an unfamiliar channel is a map hit rather
+than an RPC call: `channel_index_from_block`, the block a cold start with no checkpoint backfills from
+— it defaults to `0`, so an operator who knows their `TokenNetwork`'s deploy block should set it
+rather than scan a public chain from genesis — and `channel_index_confirmations`, how many blocks
+behind head a log must be before the index applies it. That one defaults to `5`, and `0` is refused at
+load, since there is deliberately no reorg-unwind path. Omitting both changes no behaviour: a channel
+the index has not caught up to falls through to a direct chain read.
 
 `btp_session_window` splits, and shows the general shape: **the existence of an in-flight limit and
 what a connector does when it is exceeded are law** (client-edge specification); the number that sets
@@ -261,6 +394,8 @@ finding a tombstone, not a live mechanism.
 | key                                     | removed by                                                                                                                                                                                                                            |
 | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `peer_wire_addr`                        | [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md)                                                                                                                                      |
+| a peer's `addr`                         | [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md) (#679) — the `SocketAddr` form of the same removal; a peer is reached by `endpoint` now                                              |
+| a Solana channel row's `program_id`     | (#1082, #1128, #1146) — the program is `[settlement.solana]`'s, per CF-26; the field is spelled out on each Solana row only so writing one is named rather than lost in a shape mismatch                                              |
 | `ceiling`, `flush_interval_ms`          | [ADR 0033](../adr/0033-the-exposure-machinery-is-retired-not-restated.md)                                                                                                                                                             |
 | `[peer_sale]`                           | [ADR 0043](../adr/0043-purchasable-peering-is-removed.md)                                                                                                                                                                             |
 | `apex`, `[[children]]`                  | [ADR 0009](../adr/0009-one-typed-config-file-no-environment-layer.md)'s update (#1057)                                                                                                                                                |
@@ -278,7 +413,7 @@ This document uses exactly the vocabulary of [`CONTEXT.md`](../../CONTEXT.md) an
 [ADR 0034](../adr/0034-a-runtime-peer-route-table-never-shadows-the-config-file.md) and
 [ADR 0047](../adr/0047-the-configuration-schema-is-implementation-detail-capabilities-are-law.md).
 
-**Coverage:** none of CF-01 – CF-36 is vectored, and none ever will be. Configuration is not a wire
+**Coverage:** none of CF-01 – CF-39 is vectored, and none ever will be. Configuration is not a wire
 surface — you cannot express "this key is refused by name" as a byte fixture — so per
 [ADR 0045](../adr/0045-a-behavioural-rule-is-normative-prose-until-its-vector-lands.md) these rules are
 prose-normative **permanently**, not provisionally, and do not enter the debt ledger. What _is_
