@@ -869,25 +869,32 @@ over BTP is indistinguishable downstream from one that arrived over HTTP.
 **Peer sessions (ADR 0027).** This section previously stated that peers do not use this transport,
 so every BTP session was a client session by construction (ADR 0026). ADR 0027 reverses that: the
 raw-TCP transport is deleted and connectors peer over BTP on the same codec. A session is a **peer**
-session only if it presented a credential configured in `[[peers]]` _and_ has a `[[peer_channels]]`
-binding; anything else is a client session, with no fallthrough, and everything below in this section
-describes client sessions exactly as before. That credential admits nothing on its own: opening this
-transport is permissionless, a session presenting no credential at all is accepted and stays a
-client, and the credential only ever _upgrades_ an already-admitted session to peer role (see step 1
-below for what a client's `auth` entry is and is not). The peer sub-protocol entries — `claim-ack`
-beside the `payment-channel-claim` and `toon-accumulated-cost` entries this section already defines —
-are specified for the peer direction, not here. (`toon-minimum-delivery` was named here too; it is
+session only while a frame it carries presents a claim on a channel one of that peering's
+`[[peer_channels]]` rows configures, whose signature verifies against the counterparty key that row
+configures ([ADR 0060](../adr/0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md),
+issue #1157; `peer-carriage-spec.md` §1.2); anything else is a client session, with no fallthrough,
+and everything below in this section describes client sessions exactly as before. **There is no
+peering credential**, and nothing replaced it: opening this transport is permissionless, a session
+that proves no peering is accepted and stays a client, and role attaches to a frame's own evidence
+rather than to the session's greeting (see step 1 below for what a client's `auth` entry is and is
+not). The peer sub-protocol entries — `claim-ack` beside the `payment-channel-claim` and
+`toon-accumulated-cost` entries this section already defines — are specified for the peer
+direction, not here. (`toon-minimum-delivery` was named here too; it is
 retired with the field, [ADR 0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md).)
 
 > **Superseded** by [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md):
 > the raw-TCP transport is deleted (issue #679) and peers ride this same carriage, or
 > ILP-over-HTTP. A session is a _peer_ session if and only if it presented a configured peer
 > credential **and** has a `[[peer_channels]]` entry — role by authentication, not by transport
-> or port. "Every BTP session is a client session by construction" no longer holds, and the
-> classification it replaces is code, which is why it is a named stop-ship regression test on
-> both carriages. Everything else in this section — one gate, one journal, one refusal
-> taxonomy, indistinguishable downstream — is what ADR 0027 extends to peers rather than
-> changes. ADR 0026's carriage architecture stands; only its peer conclusion is superseded.
+> or port. (_The credential half was deleted by
+> [ADR 0060](../adr/0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md) (issue
+> #1157) and not replaced: role is the `[[peer_channels]]` binding plus a verified claim on one of
+> that peering's channels, decided per frame. ADR 0027's point here — role by authentication, not
+> by transport or port — is unchanged._) "Every BTP session is a client session by construction"
+> no longer holds, and the classification it replaces is code, which is why it is a named
+> stop-ship regression test on both carriages. Everything else in this section — one gate, one
+> journal, one refusal taxonomy, indistinguishable downstream — is what ADR 0027 extends to peers
+> rather than changes. ADR 0026's carriage architecture stands; only its peer conclusion is superseded.
 
 - **Method/path:** `GET /ilp/btp`, websocket upgrade. The `btp` subprotocol is selected when
   offered; an upgrade offering no subprotocol is accepted identically.
