@@ -111,7 +111,7 @@ services:
       - --to
       - g.local.solo
       - --seal-to
-      - http://connector:3000
+      - http://connector:3000/ilp
       - --target
       - /
       - --amount

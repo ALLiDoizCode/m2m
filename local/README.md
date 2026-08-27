@@ -178,10 +178,10 @@ from the fulfilment that wrap derives (ADR 0019), inside an RFC 9421-signed
 
 ```sh
 connector send \
-  --operator  http://127.0.0.1:3001 \   # whose /packets originates it (two-hop's A)
+  --operator  http://127.0.0.1:3001 \       # whose /packets originates it (two-hop's A)
   --operator-key local/.keys/two-hop/connector-a/operator-send.key \
-  --to        g.local.two-hop.b.app \   # the ILP destination
-  --seal-to   http://127.0.0.1:3002 \   # the connector that TERMINATES it (B)
+  --to        g.local.two-hop.b.app \       # the ILP destination
+  --seal-to   http://127.0.0.1:3002/ilp \   # the connector that TERMINATES it (B)
   --amount    1000 \
   --body      payload.json \
   --expect-fulfill
@@ -189,9 +189,11 @@ connector send \
 
 `--seal-to` is separate from `--operator` because a payload is sealed to the
 node that terminates it, which in a multi-hop topology is not the node the
-packet is handed to. There is no way to discover that node's identity from the
-destination address today; when ADR 0050 ships (`GET` on a connector's URL
-returns its self-description) this flag becomes optional.
+packet is handed to. It takes that node's self-description URL (ADR 0050) —
+the one whose `GET` answers with the identity to seal to, e.g.
+`http://127.0.0.1:3002/ilp` — never an origin. ADR 0050 publishes that
+identity; it does not yet let a client _discover_ which URL to ask, so the
+caller still names it directly.
 
 `--expect-fulfill` is what makes the rehearsal a gate. Without it a REJECT is
 reported and the process exits 0 — right for an operator probing what a route

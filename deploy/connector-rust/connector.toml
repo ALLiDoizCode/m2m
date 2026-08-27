@@ -51,6 +51,16 @@ client_edge_addr = "0.0.0.0:3000"
 # See README step 6.
 state_dir = "/app/state"
 
+# ── Peer exposure (issue #677, ADR 0027) ─────────────────────────────────
+# Whether this node opens a peer listener, and for which carriage(s) --
+# `peer_expose` is a root-level key (see "Peering" below for what each
+# value means and the full [[peers]] shape), and it MUST be set up here,
+# before the first [section] header: TOML has no way to write a root-table
+# key once a table header has appeared earlier in the file, so this line
+# cannot live down in "Peering" alongside the rest of that story.
+#
+# peer_expose = "btp"
+
 # ── Signer ───────────────────────────────────────────────────────────────
 # Where this node's signing key material lives -- a location, never the
 # key itself (ADR 0012). key_file must contain either 32 raw bytes or 64
@@ -116,22 +126,30 @@ write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STE
 #
 # There is NO peer port. A node that exposes a carriage serves it on the
 # paths its client edge already serves, on `client_edge_addr`:
-# BTP on `GET /ilp/btp`, ILP-over-HTTP on `POST /ilp`. Role is decided by
-# the credential, never by the listener, so there is nothing extra to open
-# and nothing extra to firewall.
+# BTP on `GET /ilp/btp`, ILP-over-HTTP on `POST /ilp`. Role is decided by a
+# verified claim signature on a configured `[[peer_channels]]` row, never by
+# the listener and never by a shared secret (ADR 0060) -- so there is
+# nothing extra to open and nothing extra to firewall.
 #
 # NOTE: uncommenting this block gives you a live peering as of issue #678 --
 # the dial side is built from these lines and the accept side rides the
-# listener above. Before #678 it validated and traversed nothing.
+# listener above. Before #678 it validated and traversed nothing. Also
+# uncomment `peer_expose` up near `state_dir` -- it cannot be set here; see
+# the comment there for why.
 #
-# peer_expose = "btp"
+# A peering can also be established at RUNTIME, without touching this file
+# at all: `POST /peers` (ADR 0058) writes the same relation an operator
+# would otherwise hand-write below. The rows here are the durable,
+# reviewed alternative -- use them for a peering this node should always
+# have; use `POST /peers` for one an operator wants to add or rotate
+# without a restart.
 #
 # [[peers]]
-# # The id a [[routes]] entry's peer_id names, and the peerId the
-# # credential JSON carries -- so BOTH operators must write the SAME
-# # string. The far side proves the credential by looking this id up in
-# # its own [[peers]] table; an id it does not have is admitted as an
-# # ordinary client, silently. It names the relation, not "the other guy".
+# # A LOCAL label: names this peering to this node's own [[routes]],
+# # [[peer_channels]] and [[pay_channels]] rows below. Nothing puts it on
+# # the wire and the counterparty's file need not spell it the same way --
+# # the accepting side reads the peer id off the [[peer_channels]] row the
+# # claim's channel resolves to, never off the interaction (ADR 0060).
 # id = "store"
 #
 # # The URL this node dials to reach the peer. The SCHEME selects the
@@ -142,29 +160,6 @@ write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STE
 # # test switch and must never be set here. Omit `endpoint` entirely for a
 # # peering that dials IN to this node instead.
 # endpoint = "wss://store.example.net:443/ilp/btp"
-#
-# # Where the shared secret this peering is authenticated by comes from.
-# # Role is decided by authentication and by nothing else: not the port,
-# # not the source address, not the carriage. An interaction that does not
-# # present this secret is a CLIENT, whatever else it looks like -- and an
-# # empty secret matches nothing, so an empty one is refused at load rather
-# # than becoming a peering anyone can claim.
-# #
-# # Exactly one of `secret_file` and `secret`; both, or neither, is refused
-# # at load by name. Use `secret_file` on any node whose config is
-# # committed -- the file stays off the repo (`*.secret` here is
-# # gitignored) while the peering itself gets tracked, the same way
-# # `[signer] key_file` and the settlement keys already work. It is read at
-# # startup, trimmed of trailing whitespace, and a missing, unreadable or
-# # empty file stops the node.
-# #
-# #   openssl rand -hex 32 > /app/data/store-peer.secret
-# #   chmod 600 /app/data/store-peer.secret
-# #
-# # Both operators must end up with the SAME bytes; share them out of band.
-# credential = { secret_file = "/app/data/store-peer.secret" }
-# # ...or, only for a config that is never committed, the literal:
-# # credential = { secret = "CHANGE-ME-generate-with-openssl-rand-hex-32" }
 #
 # # `ceiling`/`flush_interval_ms` used to be set here -- retired along with
 # # the credit window they bounded (ADR 0031, ADR 0033, issue #882): every
@@ -209,9 +204,10 @@ write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STE
 # # forwarded_claim_enforcement = "enforce"
 #
 # # Every peering needs at least one channel binding, or it can never take
-# # the peer role at all: the role rule needs BOTH a proven credential and
-# # a channel. This is the table whose absence left ADR 0024's peer-claim
-# # verification wired to nothing (issue #620).
+# # the peer role at all: the role rule needs BOTH this channel binding and
+# # a claim signature that verifies against it (ADR 0060). This is the
+# # table whose absence left ADR 0024's peer-claim verification wired to
+# # nothing (issue #620).
 # #
 # # A channel id here must NOT also appear in [[client_channels]]: peer and
 # # client claim watermarks are separate records, and one channel in both
