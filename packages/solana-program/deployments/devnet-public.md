@@ -146,12 +146,11 @@ changed in commit `cedd0170` (issue #581, "validate settlement destinations, bou
 deposit") after `eb5ecea` introduced this record, adding code (new error variants, the
 `validate_settlement_destination` check) that would grow the binary. The upgrade authority
 (`AEPoA5xTTJY9SR8c5CfsemFGC5TmxQBe6Xf6wewEtnYa`) ~~can upgrade in place without changing the
-program id~~ **could**, at the time this was written, have upgraded in place without changing the
-program id -- see "The program cannot be upgraded in place" under the Mint amendment below: that
-key is now lost, so this is no longer a live option, and this sentence describes what was true on
-2026-07-30, not what is true today. The size growth itself is still expected and not itself a
-discrepancy -- but it does mean the original 105,128-byte figure is **stale** and must not be
-treated as still describing the live program.
+program id~~ **could have, on 2026-07-30 when this amendment was written**; that key is now lost,
+so an in-place upgrade is no longer available -- see "The program cannot be upgraded in place"
+under the Mint amendment below. The size growth is still expected and not itself a discrepancy --
+but it does mean the original 105,128-byte figure is **stale** and must not be treated as still
+describing the live program.
 
 **Reproducible-build comparison against the live bytes (2026-07-30, issue #567).** `cargo
 build-sbf` had stopped resolving entirely -- crates.io supply-chain drift, not a source change:
