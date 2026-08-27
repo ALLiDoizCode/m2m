@@ -48,6 +48,16 @@ deliberately untouched and is exactly what a rollback points back at.
 > hold, exactly as the 2026-08-06 cutover did. This section is the checklist for the operator who
 > holds it. Nothing in it invalidates the 2026-08-06 record above -- that deployment is still the
 > live one and stays live until the repoint below.
+>
+> **Written before [ADR 0068](adr/0068-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md).**
+> `infra/linode-relay/connector-rust.toml` and `infra/linode-store/connector-rust.toml` are now
+> fixtures this repo's own tests boot, not what either box runs -- the relay and store boxes deploy
+> from `toon-protocol/relay`'s and `toon-protocol/store`'s own `deploy/` bundles. Every row below
+> naming one of those two files still has to change, because `devnet_configs_load.rs` still asserts
+> against them, but changing them alone no longer repoints a live box: the same address has to land
+> in the owning repo's own committed config too, and `:rust-release` is no longer moved from here at
+> all (ADR 0068 retired `promote-to-fleet.yml`). This callout is the flag for whoever executes this
+> runbook next; the checklist itself is not rewritten past it.
 
 [ADR 0059](adr/0059-a-channel-is-derived-from-its-participants.md) deleted `TokenNetwork`'s global
 `channelCounter` and derives `channelId = keccak256(p1, p2, channelEpoch[p1][p2])`, with the epoch
@@ -81,11 +91,15 @@ connector already spoke, so a stale box was merely pointed at the wrong deployme
   `openChannel` for a pair it already has a live channel with now reverts `ChannelAlreadyExists` — a
   refusal that could never fire before — and nothing in it knows why.
 
-So the order is forced, and it is
-[ADR 0055](adr/0055-a-release-is-one-dispatch-and-the-ordering-rides-as-data.md)'s
-`config-change-required` question answered **`true`**: land the config commit, run and verify
-`fleet-ops config-apply` for both boxes, and only then move `:rust-release`. A release dispatched for
-this change with `config-change-required: false` is the swap#134 shape.
+So the order is forced: land and apply the new registry address in both boxes' own configs
+**before** either box runs an image built from a `main` that derives the new channel id. Under
+[ADR 0055](adr/0055-a-release-is-one-dispatch-and-the-ordering-rides-as-data.md) that ordering rode
+as the release's `config-change-required` field and a `promote-to-fleet.yml` dispatch;
+[ADR 0068](adr/0068-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md)
+retired that mechanism, so the ordering is now enforced by whichever repo pins each box's
+connector tag — land the config in `toon-protocol/relay` / `toon-protocol/store` first, confirm it
+applied, and only then bump that repo's own pinned tag to a build carrying this cutover. Getting it
+backwards is the swap#134 shape regardless of which mechanism carries the ordering.
 
 **The deploy itself is additive and safe to broadcast early.** It touches no existing contract.
 Channels on the current `TokenNetwork` `0xa79C3b1d…` keep settling there with their counter-minted
@@ -138,12 +152,15 @@ Each line names the exact key in the exact file. Nothing here may be filled in a
 broadcast: an address written before it exists is a guess, and a guess in a fleet config boots a box
 pointed at nothing.
 
-**The two box configs — the only files that change what the fleet actually does.** Both MUST agree:
-a claim one box accepts against a channel on the new contract is unresolvable by a box still pointed
-at the old registry.
+**The two box configs.** Both MUST agree: a claim one box accepts against a channel on the new
+contract is unresolvable by a box still pointed at the old registry. Since ADR 0068, changing the
+files below is necessary but **not sufficient** — they are fixtures `devnet_configs_load.rs` boots,
+and the file that actually changes what a box runs is the matching one in `toon-protocol/relay` /
+`toon-protocol/store`'s own `deploy/` bundle. Change both.
 
 - [ ] `infra/linode-relay/connector-rust.toml` → `[settlement.evm] contract_address` = `<NEW REGISTRY>`
 - [ ] `infra/linode-store/connector-rust.toml` → `[settlement.evm] contract_address` = `<NEW REGISTRY>`
+- [ ] the matching field in `toon-protocol/relay`'s and `toon-protocol/store`'s own committed configs
 
 **Test literals that pin the live fleet identity.** These fail the Rust gate the moment the configs
 above change, which is the point — they are the gate that says the two boxes agree with each other
@@ -244,9 +261,11 @@ one does not have that property, for the reason stated in the ordering hazard ab
 configs alone leaves a derived-id image pointed at a counter-based contract, which is the broken
 combination.
 
-1. Revert `[settlement.evm] contract_address` to `0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1` in both
-   `infra/linode-*/connector-rust.toml`, and apply it.
-2. Move `:rust-release` back to the last pre-ADR-0059 digest.
+1. Revert `[settlement.evm] contract_address` to `0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1` in
+   both boxes' committed configs (`toon-protocol/relay`, `toon-protocol/store` — ADR 0068; this
+   repo's own `infra/linode-*/connector-rust.toml` fixtures too, so `devnet_configs_load.rs` keeps
+   asserting the live value), and apply it.
+2. Roll each box back to the last pre-ADR-0059 connector build, by that repo's own pin.
 
 Both, in that order, or the fleet is in the broken state either way round. There is still no on-chain
 action to undo: the new registry, `TokenNetwork` and forwarder simply stop being referenced, and the

@@ -3,59 +3,35 @@
 How a merge becomes a running devnet box, what stops a bad one, and how you find out when
 something is down.
 
-Decision record: [ADR 0041](../adr/0041-a-moving-tag-carries-the-fleets-committed-config-or-it-does-not-move.md).
+Decision records: [ADR 0041](../adr/0041-a-moving-tag-carries-the-fleets-committed-config-or-it-does-not-move.md),
+[ADR 0068](../adr/0068-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md).
 Epic: toon-meta#403.
 
 ---
 
 ## The shape of it
 
-Every TOON-owned container on both devnet boxes follows a **moving image tag**, and a label-scoped
-`containrrr/watchtower:1.7.1` on each box (`--label-enable --interval 60 --cleanup`,
-`DOCKER_API_VERSION=1.44`) recreates the container within ~60s of that tag's digest changing. Only
-containers carrying `com.centurylinklabs.watchtower.enable=true` are ever touched — `nginx` and
-`certbot` never are.
+The three boxes are no longer one shape. The **faucet** box still deploys from this repo
+(`infra/linode-faucet/`, built on-box) and this document's release/rollback sections apply to it
+only where noted. The **relay** and **store** (`ario`) boxes each deploy the connector from their
+own repository's `deploy/` bundle — `toon-protocol/relay`, `toon-protocol/store` — pinning it by
+release handle in exactly one place there. **Nothing in this repository moves a tag onto either
+box any more** (ADR 0068): `fleet-ops.yml` no longer offers `box=relay`/`box=ario`, and
+`promote-to-fleet.yml` is deleted.
 
-| Box            | Service          | Image                                 | Tag moves when                           |
-| -------------- | ---------------- | ------------------------------------- | ---------------------------------------- |
-| relay          | `connector-rust` | `ghcr.io/toon-protocol/connector`     | **a release or promotion is dispatched** |
-| relay          | `announce`       | `ghcr.io/toon-protocol/connector`     | **a release or promotion is dispatched** |
-| relay          | `relay`          | `ghcr.io/toon-protocol/relay:release` | green merge to `relay` main              |
-| relay          | `swap-node`      | `ghcr.io/toon-protocol/swap:release`  | green merge to `swap` main               |
-| store (`ario`) | `connector-rust` | `ghcr.io/toon-protocol/connector`     | **a release or promotion is dispatched** |
-| store (`ario`) | `announce`       | `ghcr.io/toon-protocol/connector`     | **a release or promotion is dispatched** |
-| store (`ario`) | `store`          | `ghcr.io/toon-protocol/store:release` | green merge to `store` main              |
+`swap`, `store` and `relay` (the apps, not the connector boxes) keep the auto-on-green regime
+toon-meta#403 accepted for devnet — a green merge in their own repos reaches the live box within
+about a minute, under a label-scoped `containrrr/watchtower:1.7.1` (`--label-enable --interval 60
+--cleanup`) each box runs. Watchtower does **no** health gating: it pulls, recreates, and
+considers itself done. Whether the process then stayed up, or served anything, is not a question
+it asks — which is why the health section below exists and is unaffected by any of this.
 
-Watchtower does **no** health gating. It pulls, recreates, and considers itself done. Whether the
-process then stayed up, or served anything, is not a question it asks — which is why the rest of
-this document exists.
+## Cutting a connector release
 
----
-
-## The connector is promoted, not auto-deployed
-
-`swap`, `store` and `relay` are auto-on-green: a green merge reaches the live box in about a minute.
-toon-meta#403 accepted that trade-off explicitly, for devnet.
-
-The connector is not, and never was meant to be. `connector-rust` is the client edge on **both**
-boxes — every paid write on the devnet enters through it — and `announce` runs the same image, so
-one bad digest takes the whole money path dark on two machines at once. toon-meta#403's own comments
-held it out of the auto-update set twice and settled the split as _"Connector = supervised promotion
-tag; swap/store/relay = auto-on-green"_.
-
-That design was recorded and then not implemented: connector#990 shipped a `:rust-release` tag that
-moved on every green main, no `promote-to-fleet` workflow was ever written, and both boxes were
-repointed to follow the tag anyway. The gap is closed now:
-
-- `publish-connector-rust-image.yml` publishes **candidates** — `rust-sha-<short>` (immutable) and
-  `rust-main` (floating). It no longer touches `rust-release`.
-- `promote-to-fleet.yml` moves `:rust-release`, and only it.
-
-### Cutting a release
-
-The ordinary path. One dispatch, and everything after it happens without you: the image is built,
-a release handle is cut, a GitHub Release is opened, the config-boot gate runs, `:rust-release`
-moves, and both boxes are probed.
+`release-connector.yml` still builds the image, cuts a dated release handle
+(`2026.08.21.1` — UTC date, then that day's ordinal, never semver: see
+[ADR 0055](../adr/0055-a-release-is-one-dispatch-and-the-ordering-rides-as-data.md)) and opens a
+GitHub Release naming the `rust-sha-<short>` tag to adopt. That is now the **whole** job:
 
 ```sh
 gh workflow run release-connector.yml \
@@ -63,185 +39,71 @@ gh workflow run release-connector.yml \
 ```
 
 Run it **on the commit you want released** — `gh workflow run --ref <branch-or-sha>` — and it must
-be on `main`. The `version` job checks that before spending ten minutes on a build.
+be on `main`. It is `workflow_dispatch`-only, and stays that way: adding an automatic trigger would
+reverse ADR 0041 Decision 3, which is still binding — `connector-rust` is the client edge on both
+boxes, so an unreviewed digest reaching either is still a real risk even with no promotion left
+here to guard against it.
 
-| Input                    | When you set it                                                                                                                                                                                                                                                                                                      |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `reason`                 | Always. Required. It lands in the release notes and both run summaries, and it is the only record of _why_ this digest.                                                                                                                                                                                              |
-| `config_change_required` | **Always** — it has no default. `yes` only when the build **cannot boot the committed box configs as they stand** (a new required key, a renamed field, a narrowed type); `no` for a price or endpoint edit the running binary also accepts. Leaving `-- select --` selected refuses the release before it is built. |
-| `config_applied_run`     | Whenever the answer above is `yes`. The URL(s) of the `fleet-ops.yml config-apply` run(s) that put the committed configs on the boxes — **one per box that changed**, space- or comma-separated. Verified, not taken on trust: see below.                                                                            |
-| `promote`                | Untick to cut a release and leave the fleet where it is — a named, published build that the boxes do not take yet.                                                                                                                                                                                                   |
+**Adopting the build is a node repository's own change, not a step here.** Open a PR in
+`toon-protocol/relay` or `toon-protocol/store` bumping its pinned connector tag to the `rust-sha-`
+tag (or the release's `rust-<handle>` alias) the release names. That repo's own guard — a test that
+fails if a second copy of the pin appears anywhere — is what keeps the pin singular; there is no
+config-compatibility boot gate here to run first, because the config that pin boots against no
+longer lives in this repository.
 
-The handle is `2026.08.21.1`: UTC date, then that day's ordinal. It is **not** semver and does not
-claim to be — every crate under `crates/` is `0.1.0` with no release process, so a version series
-here would promise a compatibility contract nobody has made ([ADR 0055](../adr/0055-a-release-is-one-dispatch-and-the-ordering-rides-as-data.md)).
-It is also an immutable image alias (`ghcr.io/toon-protocol/connector:rust-2026.08.21.1`) and the
-image's `org.opencontainers.image.version` label, so `docker inspect` on a box answers "which
-release is this?".
+`:rust-release` is **frozen**. It used to be a promotion tag moved only by an explicit
+`promote-to-fleet.yml` dispatch after booting the candidate against both boxes' committed
+`connector-rust.toml`; ADR 0068 retired that mechanism because there is nothing left in this repo
+for it to check. Do not wire anything to move it — a floating tag moving unsupervised shipped once
+(#990) and was reverted, and there is even less reason to repeat it now.
 
-**A release is dispatch-only, on purpose.** There is no trigger that cuts one on a green `main`, and
-adding one would reverse ADR 0041 Decision 3 rather than save anybody time — see the section above
-for why this image is the one held back. The workflow automates the labour after the decision; the
-decision stays yours.
+## Rolling the faucet back
 
-**If the promotion refuses, the release still exists.** The build is published, the handle is spent,
-and the boxes keep serving the previous build. That is the intended shape, not a half-failure. Fix
-the cause and then dispatch `promote-to-fleet.yml` directly with the `rust-sha-` tag the release
-body names — do **not** re-run `release-connector.yml`, which cuts a second handle for the same
-code.
-
-### Promoting a build directly
-
-Skipping the release: promote an existing `rust-sha-` build without cutting a handle. This is what
-a rollback uses, and what you use to finish a release whose promotion refused.
+The faucet is the one box this repo still redeploys directly:
 
 ```sh
-gh workflow run promote-to-fleet.yml \
-  -f tag=rust-sha-1204220 \
-  -f reason="claim-state fix, verified on the relay"
+gh workflow run fleet-ops.yml -f operation=deploy -f service=faucet -f apply=true
 ```
 
-It refuses unless all of the following hold, and says which one failed:
-
-1. The tag is an immutable `rust-sha-<7 hex>` — a floating tag may never be promoted, because
-   promoting `rust-main` is auto-on-green wearing a hat.
-2. Its commit exists here and is an ancestor of `origin/main`.
-3. Its commit is a **descendant** of the currently promoted build, so a promotion cannot silently
-   roll the fleet backwards. Override with `-f allow_rollback=true` when a rollback is what you
-   mean.
-4. The candidate image **boots both boxes' committed `connector-rust.toml`** (ADR 0041). Key
-   material is substituted — it is never committed — but nothing semantic is: no prefix, no route,
-   no peer, no price, no field name.
-5. **The deploy ordering holds**, if any release being crossed declares it. See below.
-
-Then it retags (`docker buildx imagetools create` — a retag of the validated manifest, never a
-rebuild), and calls `fleet-health.yml` after a 180s settle to prove both boxes came back. If they
-did not, the run is red and an alert issue is already open.
-
-### Rolling the connector back
-
-Same workflow, previous tag:
-
-```sh
-gh workflow run promote-to-fleet.yml -f tag=rust-sha-415531a -f allow_rollback=true \
-  -f reason="rolling back <what broke>"
-```
-
-Every build ever published keeps its immutable tag, so there is always something to name.
-
----
-
-## Rolling an auto-on-green service back
-
-`swap`, `store` and `relay` are not promoted, so a rollback is a retag done by hand. Move the
-moving tag back onto a known-good immutable tag and let Watchtower pick it up:
-
-```sh
-docker buildx imagetools create \
-  -t ghcr.io/toon-protocol/swap:release \
-     ghcr.io/toon-protocol/swap:sha-785b117
-```
-
-Within ~60s Watchtower recreates the container. To force it immediately instead:
-
-```sh
-gh workflow run fleet-ops.yml -f box=relay -f operation=deploy -f service=swap-node -f apply=true
-```
-
-Note the ordering trap that `fleet-ops.yml` documents at length and that applies here too: a
-bind-mounted config is **not** reloaded by `up -d`, and if the rollback target predates a field the
-box's committed config now sets, the config must be rolled back too — image first, config second.
+For relay, store, and the auto-on-green apps (`swap`, `store`, `relay`), a rollback is that repo's
+own concern: for an auto-on-green app, retag its own `:release` onto a known-good `sha-*` build and
+let that box's Watchtower pick it up; for the connector on relay/store, bump the pin in
+`toon-protocol/relay` / `toon-protocol/store` to an earlier `rust-sha-` build.
 
 ---
 
 ## What stops a config-breaking change
 
-This is the failure that motivated all of the above. On 2026-08-16 swap#134 added a **required**
-`chainProviders[].tokenNetworkAddress`. It merged green, `swap:release` moved, Watchtower recreated
-`swap-node`, and the maker crash-looped on `INVALID_CONFIG` — because the box's bind-mounted
-`swap.config.json` is not in the image and nobody had added the key. It was down until a human
-happened to look.
+This is the failure that motivated the connector's promotion regime in the first place, and it is
+still worth knowing even though the mechanism it produced is retired. On 2026-08-16 swap#134 added
+a **required** `chainProviders[].tokenNetworkAddress`. It merged green, `swap:release` moved,
+Watchtower recreated `swap-node`, and the maker crash-looped on `INVALID_CONFIG` — because the
+box's bind-mounted `swap.config.json` is not in the image and nobody had added the key. It was down
+until a human happened to look.
 
-The rule (ADR 0041) is enforced in three places, deliberately layered:
+For `swap` (still auto-on-green, still deployed via a config this repo commits), the rule (ADR 0041) is unchanged:
 
 | Where                                                      | Catches                                                              | When          |
 | ---------------------------------------------------------- | -------------------------------------------------------------------- | ------------- |
 | `swap`'s `publish-swap-image.yml`, before `:release` moves | a new required key, **in the PR that adds it** — the tag stays put   | pre-deploy    |
-| `promote-to-fleet.yml`, before `:rust-release` moves       | the same, for the connector image against both boxes' TOML           | pre-deploy    |
-| `promote-to-fleet.yml`'s **ordering** gate                 | a release that says it needs a config change, deployed out of order  | pre-deploy    |
 | `fleet-health.yml`'s `config-compat` job                   | a mismatch that got in anyway, or a bad edit to the committed config | ≤15 min, cron |
 
-The first two are the gate. The third is the backstop, and it is also what runs on a connector PR
-that edits `infra/linode-relay/swap.config.json`.
+**If you are adding a config key to an app that still deploys against a config this repo commits
+(today, only `swap`):** give it a default. If it genuinely has no safe default (swap#134's did not
+— defaulting it would have made the maker announce a contract that reverts for every client), then
+it is a **breaking deploy**: land the key in the committed config here first, apply it, and only
+then merge the app change.
 
-**If you are adding a config key to an app that runs on this fleet:** give it a default. If it
-genuinely has no safe default (swap#134's did not — defaulting it would have made the maker announce
-a contract that reverts for every client), then it is a **breaking deploy**: land the key in the
-committed box config here first, apply it with `fleet-ops.yml`, and only then merge the app change.
-
-### The ordering gate, for the connector image
-
-That last paragraph was the whole rule until now, and swap#134 shows what a paragraph is worth. Its
-own PR body said the same thing about its own key — _"needs one added key **before** the new image
-boots"_ — and the relay's maker crash-looped anyway, because a PR body is not read at the moment a
-tag moves.
-
-So for the connector image the ordering is a field rather than a sentence. Every release cut by
-`release-connector.yml` carries a machine-readable line in its body:
-
-```text
-config-change-required: true
-```
-
-`promote-to-fleet.yml` reads every release **being crossed** by a promotion — `(incumbent,
-candidate]` for a forward move, `(candidate, incumbent]` for a rollback, because a rollback undoes
-those config changes — and where any of them says `true` it demands both halves of ADR 0041 rule 2:
-
-1. **The committed box configs actually changed** across that range (`git diff` over
-   `infra/linode-relay/connector-rust.toml` and `infra/linode-store/connector-rust.toml`). A release
-   claiming a config change while those files sat untouched is the 2026-08-16 shape exactly: the fix
-   applied to the box and never committed here.
-2. **A `fleet-ops.yml config-apply` run is named and verified** (`config_applied_run`). Nothing in
-   CI can see the bytes on the box, and the bytes on the box are what Watchtower recreates against —
-   the boot gate above proves only that the image fits the config committed _here_. So the named run
-   is checked, five ways, each its own refusal:
-
-   | Checked                                               | Rejects                                                                                                                       |
-   | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-   | the run's `path` is `.github/workflows/fleet-ops.yml` | a run id from some other workflow, or one that does not exist                                                                 |
-   | `conclusion == success`                               | an apply that failed, and so applied nothing                                                                                  |
-   | `operation == config-apply`                           | `box-status`, `config-read`, `pin-verify`, `restart`, `deploy`, `announce`                                                    |
-   | `apply == true`                                       | **a dry run** — a real `config-apply` with `apply=false` reads the box, prints the diff, writes nothing, and still goes green |
-   | the run **started after** the config's commit         | an apply that predates the commit, and therefore applied the previous file                                                    |
-
-   Coverage is per box, so where both boxes' configs changed you must name both runs.
-
-   A `workflow_dispatch` run's inputs are nowhere on the run object, so the box, the operation and
-   the apply flag are recovered from one of two places. First choice is the run's **title**:
-   `fleet-ops.yml` carries a `run-name:` that renders as
-   `fleet-ops config-apply on relay (apply=true)`, and that lives on the run object for as long as
-   the run does. Runs cut before that landed have the bare title `fleet-ops`, and fall back to the
-   job-level `env:` echo in the run's **logs**. If neither can be read — the title says nothing and
-   the logs have aged out at 90 days — the promotion is **refused**, not waved through; re-run the
-   apply and name the new run, whose title will not expire.
-
-Neither half fires when `config-change-required` is `false`. The answer can no longer be _omitted_ —
-the dispatch input's first and preselected option is a `-- select --` sentinel the release refuses
-by name — but it can still be **wrong**, and a wrong `no` is only partly caught: a build that
-genuinely needs a key the committed files lack fails the boot gate with `missing field`, while a
-build that boots fine against the committed config but needs it _applied_ slips through, because
-that check is only reached when the answer is `yes`.
-
-A promotion of a build with no release at all — a rollback target from before this existed, or a
-hand-published `rust-sha-` — is not refused. That is a deliberate hole, and the boot gate still runs
-on every promotion.
+For the connector on relay and store, this discipline is now each node repository's own to keep —
+the config a build must boot against lives there, not here.
 
 ---
 
 ## Health checks and alerts
 
-`.github/workflows/fleet-health.yml` runs every 15 minutes, after every promotion, and on demand.
-It is strictly read-only on the boxes.
+`.github/workflows/fleet-health.yml` runs every 15 minutes and on demand — schedule or dispatch
+only (ADR 0068 removed the `workflow_call` trigger it used to fire after a promotion, along with
+the promotion itself). It is strictly read-only on the boxes.
 
 It does **not** take a hardcoded service list. It discovers "every container carrying the Watchtower
 enable label" — precisely the set that can change without a human. A labelled service with no probe

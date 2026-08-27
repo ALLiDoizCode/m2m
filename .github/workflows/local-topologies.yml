@@ -10,14 +10,14 @@ name: Local Topologies
 # `connector.toml`, mounted key files and a real volume at `/app/state`, boots
 # and moves a packet.
 #
-# `promote-to-fleet.yml` checks the first half of that against the fleet's own
-# committed configs, and can only WARN on the second -- its own comment says
-# why: "Most likely an unreachable settlement RPC from this runner (ADR 0009
-# refuses to start on one)". A GitHub runner has no chain to reach. Here it
-# does, so "did not reach a serving state" is an assertion rather than a
-# warning. The two checks are complementary and neither subsumes the other:
-# promotion proves image-matches-fleet-config, this proves
-# image-serves-and-settles.
+# `devnet_configs_load.rs` boots the fleet's own committed `connector-rust.toml`
+# fixtures through the real binary -- the first half, checkable with no chain
+# since ADR 0009 refuses to start on an unreachable settlement RPC. A GitHub
+# runner has no chain to reach; here there is one, so "did not reach a serving
+# state" is an assertion rather than a boot-only check. (There is no longer a
+# candidate-image-vs-fleet-config gate before a fleet deploy: ADR 0068 retired
+# `promote-to-fleet.yml`, since neither devnet box deploys the connector from
+# this repository any more.)
 #
 # Path-filtered rather than run on every PR: a docs-only change cannot break
 # this, and the image build is the expensive part.

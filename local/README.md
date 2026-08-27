@@ -38,15 +38,16 @@ on: that **the image**, running as uid 10001, with a mounted `connector.toml`,
 mounted key files and a real volume at `/app/state`, boots and moves a packet.
 That is this, and only this.
 
-`promote-to-fleet.yml` checks half of it — the candidate image against the
-fleet's own committed configs — and can only _warn_ on the other half, because
-a GitHub runner has no chain to reach and ADR 0009 makes an unreachable
-settlement RPC a refuse-to-start. Here there is a chain, so it is an assertion.
-The two are complementary: promotion proves image-matches-fleet-config, this
-proves image-serves-and-settles. Neither replaces the other, and this one
-deliberately does **not** use the fleet's configs — its own name local
-container URLs, which is exactly the substitution ADR 0041's gate exists to
-avoid making.
+`devnet_configs_load.rs` boots the fleet's own committed `connector-rust.toml` fixtures
+through the real binary, which is the half a GitHub runner can check without a
+chain — ADR 0009 makes an unreachable settlement RPC a refuse-to-start. Here
+there is a real chain, so this is an assertion rather than a boot-only check.
+This one deliberately does **not** use the fleet's configs — its own name
+local container URLs, which is exactly the substitution ADR 0041's config-boot
+doctrine exists to avoid making. (`promote-to-fleet.yml`, which used to run a
+config-compatibility check against a _candidate_ image before moving a fleet
+tag, is retired — ADR 0068: neither devnet box deploys the connector from this
+repository any more.)
 
 ## Connector layer only
 
