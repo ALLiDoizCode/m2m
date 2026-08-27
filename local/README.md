@@ -189,9 +189,9 @@ connector send \
 
 `--seal-to` is separate from `--operator` because a payload is sealed to the
 node that terminates it, which in a multi-hop topology is not the node the
-packet is handed to. It takes that node's self-description URL (ADR 0050) --
+packet is handed to. It takes that node's self-description URL (ADR 0050) —
 the one whose `GET` answers with the identity to seal to, e.g.
-`http://127.0.0.1:3002/ilp` -- never an origin. ADR 0050 publishes that
+`http://127.0.0.1:3002/ilp` — never an origin. ADR 0050 publishes that
 identity; it does not yet let a client _discover_ which URL to ask, so the
 caller still names it directly.
 

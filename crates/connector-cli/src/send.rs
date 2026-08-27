@@ -226,11 +226,12 @@ fn decode_key_bytes(raw: &[u8]) -> Option<[u8; 32]> {
 /// way a real sender learns it -- never reconstructed from a key file, so
 /// what gets sealed is genuinely what that process holds.
 ///
-/// `base_url` is the connector's self-description URL (ADR 0050), e.g.
-/// `http://host:3000/ilp`; the identity-only endpoint is `/identity`
-/// beneath it, so the actual request is `http://host:3000/ilp/identity`.
-async fn fetch_identity(base_url: &str) -> Result<PublicKeyBytes, SendError> {
-    let url = format!("{}/identity", base_url.trim_end_matches('/'));
+/// `connector_url` is that node's self-description URL (ADR 0050), e.g.
+/// `http://host:3000/ilp` -- never an origin. The identity-only endpoint is
+/// `/identity` beneath it, so the request made is
+/// `http://host:3000/ilp/identity`.
+async fn fetch_identity(connector_url: &str) -> Result<PublicKeyBytes, SendError> {
+    let url = format!("{}/identity", connector_url.trim_end_matches('/'));
     let fail = |reason: String| SendError::Identity {
         url: url.clone(),
         reason,
@@ -451,11 +452,11 @@ mod tests {
     #[tokio::test]
     async fn fetch_identity_composes_identity_beneath_the_self_description_url() {
         let public_key_hex = "0x04".to_owned() + &"cd".repeat(64);
-        let base_url = serve_identity(public_key_hex.clone());
+        let connector_url = serve_identity(public_key_hex.clone());
 
-        let identity = fetch_identity(&base_url)
+        let identity = fetch_identity(&connector_url)
             .await
-            .expect("the served /ilp/identity must be readable from the /ilp base URL");
+            .expect("the served /ilp/identity must be readable from the /ilp URL");
 
         let expected = decode_hex(&public_key_hex).expect("test fixture is valid hex");
         assert_eq!(identity.as_slice(), expected.as_slice());
@@ -466,8 +467,8 @@ mod tests {
     #[tokio::test]
     async fn fetch_identity_tolerates_a_trailing_slash() {
         let public_key_hex = "0x04".to_owned() + &"ab".repeat(64);
-        let base_url = serve_identity(public_key_hex.clone());
-        let with_slash = format!("{base_url}/");
+        let connector_url = serve_identity(public_key_hex.clone());
+        let with_slash = format!("{connector_url}/");
 
         let identity = fetch_identity(&with_slash)
             .await
@@ -487,9 +488,9 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
         drop(listener);
-        let base_url = format!("http://{addr}/ilp");
+        let connector_url = format!("http://{addr}/ilp");
 
-        let error = fetch_identity(&base_url)
+        let error = fetch_identity(&connector_url)
             .await
             .expect_err("nothing is listening on this port");
 
@@ -498,7 +499,7 @@ mod tests {
         };
         assert_eq!(
             url,
-            &format!("{base_url}/identity"),
+            &format!("{connector_url}/identity"),
             "the error must name the exact URL fetch_identity requested"
         );
         assert!(
