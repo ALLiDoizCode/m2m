@@ -516,6 +516,7 @@ fn establish_peering_error_response(error: EstablishPeeringError) -> Response {
         }
         EstablishPeeringError::SelfDescription(_)
         | EstablishPeeringError::NoDialableEndpoint { .. }
+        | EstablishPeeringError::NoDialableClientEdge { .. }
         | EstablishPeeringError::NoSharedChain { .. }
         | EstablishPeeringError::UnreadableSettlementAddress { .. } => {
             (StatusCode::BAD_GATEWAY, error.to_string()).into_response()
@@ -2055,6 +2056,16 @@ mod tests {
                     SettlementChain::Evm,
                     Arc::new(InMemorySettlementBackend::new()),
                 )
+                // Issue #1217: the settlement key `establish_peering` signs
+                // this node's outbound CLIENT-role claims with, the same key
+                // a real node's `[settlement.evm.key]` supplies. Without
+                // one, `POST /peers` still writes the peering row but
+                // registers no payable hop for it -- a node with no
+                // settlement signer cannot pay a client-role claim on any
+                // chain, matching how it cannot open a channel on one
+                // either -- and every route write below would be refused
+                // `PeerHasNoPayChannel`.
+                .with_signer(Arc::new(LocalSigner::generate("node-settlement")))
                 // Loopback is `http://`, so these tests are a node that
                 // opted into plaintext peer endpoints -- the same opt-in
                 // every `local/` topology takes for the same reason.
