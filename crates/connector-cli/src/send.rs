@@ -25,11 +25,14 @@
 //! # Why `--seal-to` is separate from `--operator`
 //!
 //! A payload is sealed to the connector that will *terminate* it, which in a
-//! multi-hop topology is not the node the packet is handed to. Until ADR 0050
-//! ships (`GET` on a connector's URL returns its self-description), there is
-//! no way to discover the terminating node's identity from the destination
-//! address alone, so the caller names it. When 0050 lands this flag becomes
-//! optional rather than another mechanism.
+//! multi-hop topology is not the node the packet is handed to. ADR 0050
+//! publishes that node's identity on its own URL, but a client still has no
+//! way to *discover* which URL that is from the destination address alone
+//! (that half is ADR 0054's, not built) -- so the caller names it directly.
+//!
+//! `--seal-to` takes that URL as ADR 0050 defines it: the one whose `GET`
+//! answers the self-description, e.g. `http://host:3000/ilp` -- the same
+//! spelling `POST /peers` takes for a peer's URL, never an origin.
 
 use std::path::Path;
 
@@ -67,8 +70,10 @@ pub struct SendOptions {
     /// price plus every fee on the way; the packet declares no floor of its
     /// own (ADR 0057).
     pub amount: u64,
-    /// Base URL of the connector that will TERMINATE this packet -- whose
-    /// `/ilp/identity` the payload is sealed to. See the module header.
+    /// The connector that will TERMINATE this packet, as its self-description
+    /// URL (ADR 0050) -- the one whose `GET` answers with the identity the
+    /// payload is sealed to, e.g. `http://host:3000/ilp`. See the module
+    /// header.
     pub seal_to: String,
     /// The envelope's request target, as the terminating app will see it.
     pub target: String,
@@ -152,9 +157,10 @@ impl std::fmt::Display for SendError {
             ),
             SendError::Identity { url, reason } => write!(
                 f,
-                "could not read the terminating connector's identity from {url}/ilp/identity: \
-                 {reason}. A payload is sealed to the connector that terminates it (ADR 0018), \
-                 so --seal-to must name that node's client edge -- not necessarily the node \
+                "could not read the terminating connector's identity from {url}: {reason}. A \
+                 payload is sealed to the connector that terminates it (ADR 0018), so --seal-to \
+                 must name that node's self-description URL -- the one whose GET answers with \
+                 its identity, e.g. http://host:3000/ilp (ADR 0050) -- not necessarily the node \
                  given to --operator."
             ),
             SendError::Seal(reason) => write!(f, "could not seal the payload: {reason}"),
@@ -219,13 +225,18 @@ fn decode_key_bytes(raw: &[u8]) -> Option<[u8; 32]> {
 /// The terminating connector's own identity, read from the running node the
 /// way a real sender learns it -- never reconstructed from a key file, so
 /// what gets sealed is genuinely what that process holds.
-async fn fetch_identity(base_url: &str) -> Result<PublicKeyBytes, SendError> {
-    let url = base_url.trim_end_matches('/').to_string();
+///
+/// `connector_url` is that node's self-description URL (ADR 0050), e.g.
+/// `http://host:3000/ilp` -- never an origin. The identity-only endpoint is
+/// `/identity` beneath it, so the request made is
+/// `http://host:3000/ilp/identity`.
+async fn fetch_identity(connector_url: &str) -> Result<PublicKeyBytes, SendError> {
+    let url = format!("{}/identity", connector_url.trim_end_matches('/'));
     let fail = |reason: String| SendError::Identity {
         url: url.clone(),
         reason,
     };
-    let body: serde_json::Value = reqwest::get(format!("{url}/ilp/identity"))
+    let body: serde_json::Value = reqwest::get(&url)
         .await
         .map_err(|error| fail(error.to_string()))?
         .json()
@@ -398,4 +409,102 @@ pub async fn send(options: &SendOptions) -> Result<SendOutcome, SendError> {
         keyid,
         outcome,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::routing::get;
+    use axum::{Json, Router};
+
+    use super::*;
+
+    /// A real socket answering `GET /ilp/identity` the way a node's client
+    /// edge does -- `fetch_identity` should ask this exact path when handed
+    /// this node's self-description URL, `http://{addr}/ilp`.
+    fn serve_identity(public_key_hex: String) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let app = Router::new().route(
+            "/ilp/identity",
+            get(move || {
+                let public_key_hex = public_key_hex.clone();
+                async move {
+                    Json(serde_json::json!({
+                        "keyId": "test-key",
+                        "publicKey": public_key_hex,
+                    }))
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::Server::from_tcp(listener)
+                .expect("serve the bound listener")
+                .serve(app.into_make_service())
+                .await;
+        });
+        format!("http://{addr}/ilp")
+    }
+
+    /// `--seal-to` names a connector's self-description URL (ADR 0050),
+    /// e.g. `http://host:3000/ilp` -- never an origin. `fetch_identity`
+    /// must compose `/identity` beneath exactly that URL, landing on the
+    /// same `/ilp/identity` route the client edge has always served.
+    #[tokio::test]
+    async fn fetch_identity_composes_identity_beneath_the_self_description_url() {
+        let public_key_hex = "0x04".to_owned() + &"cd".repeat(64);
+        let connector_url = serve_identity(public_key_hex.clone());
+
+        let identity = fetch_identity(&connector_url)
+            .await
+            .expect("the served /ilp/identity must be readable from the /ilp URL");
+
+        let expected = decode_hex(&public_key_hex).expect("test fixture is valid hex");
+        assert_eq!(identity.as_slice(), expected.as_slice());
+    }
+
+    /// A trailing slash on the self-description URL must not produce
+    /// `//identity` -- `fetch_identity` trims it before composing.
+    #[tokio::test]
+    async fn fetch_identity_tolerates_a_trailing_slash() {
+        let public_key_hex = "0x04".to_owned() + &"ab".repeat(64);
+        let connector_url = serve_identity(public_key_hex.clone());
+        let with_slash = format!("{connector_url}/");
+
+        let identity = fetch_identity(&with_slash)
+            .await
+            .expect("a trailing slash on --seal-to must still resolve");
+
+        let expected = decode_hex(&public_key_hex).expect("test fixture is valid hex");
+        assert_eq!(identity.as_slice(), expected.as_slice());
+    }
+
+    /// The error names the URL actually requested -- the composed
+    /// `.../identity`, not merely the `--seal-to` value handed in -- so an
+    /// operator can tell what was asked rather than guess at it.
+    #[tokio::test]
+    async fn identity_fetch_error_names_the_url_actually_requested() {
+        // Nothing is listening on this loopback port, so the request fails
+        // at connect and the error carries the URL fetch_identity composed.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        drop(listener);
+        let connector_url = format!("http://{addr}/ilp");
+
+        let error = fetch_identity(&connector_url)
+            .await
+            .expect_err("nothing is listening on this port");
+
+        let SendError::Identity { ref url, .. } = error else {
+            panic!("expected SendError::Identity, got {error:?}");
+        };
+        assert_eq!(
+            url,
+            &format!("{connector_url}/identity"),
+            "the error must name the exact URL fetch_identity requested"
+        );
+        assert!(
+            error.to_string().contains(url.as_str()),
+            "the rendered message must include the URL actually requested: {error}"
+        );
+    }
 }

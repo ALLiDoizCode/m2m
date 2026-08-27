@@ -1,6 +1,6 @@
 # A peering is established from a URL, and its identity is trust-on-first-use
 
-**Status:** Accepted — **built** (#1160). `POST /peers { id, url, fee, max_packet_amount }` reads the counterparty's self-description, derives the channel, opens it if absent and writes a durable runtime peering; `build_peer_transport` adds and removes a carriage while the process serves. Built on [0050](0050-a-connectors-url-resolves-to-its-self-description.md) (#1080), [0059](0059-a-channel-is-derived-from-its-participants.md) (#1158) and [0060](0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md) (#1157). Completes [0034](0034-a-runtime-peer-route-table-never-shadows-the-config-file.md), whose precedence rules governed a table that could not hold a peering. Satisfies both falsifiers of [0049](0049-the-cap-bounds-one-packet-is-discovered-by-t04-and-is-set-from-outside.md). Leaves [0043](0043-purchasable-peering-is-removed.md) and [0006](0006-the-connector-is-mechanism-not-policy.md) intact; **narrows** [0022](0022-a-connector-answers-it-does-not-announce.md), and says how below.
+**Status:** Accepted — **built** (#1160), and **corrected** (#1217): the written peering could accept a claim but not sign one until #1217, because nothing populated the outbound CLIENT hop `Connector::cover_forward` reads — see "Update (issue #1217)" below. `POST /peers { id, url, fee, max_packet_amount }` reads the counterparty's self-description, derives the channel, opens it if absent, registers both the PEER-role and the CLIENT-role halves of the channel binding, and writes a durable runtime peering; `build_peer_transport` adds and removes a carriage while the process serves. Built on [0050](0050-a-connectors-url-resolves-to-its-self-description.md) (#1080), [0059](0059-a-channel-is-derived-from-its-participants.md) (#1158) and [0060](0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md) (#1157). Completes [0034](0034-a-runtime-peer-route-table-never-shadows-the-config-file.md), whose precedence rules governed a table that could not hold a peering. Satisfies both falsifiers of [0049](0049-the-cap-bounds-one-packet-is-discovered-by-t04-and-is-set-from-outside.md). Leaves [0043](0043-purchasable-peering-is-removed.md) and [0006](0006-the-connector-is-mechanism-not-policy.md) intact; **narrows** [0022](0022-a-connector-answers-it-does-not-announce.md), and says how below.
 
 **Scope:** connector architecture — internal to this codebase. The document it reads is protocol law ([0050](0050-a-connectors-url-resolves-to-its-self-description.md)); the request that reads it is not. See the [ADR index](README.md).
 
@@ -73,7 +73,11 @@ the runtime row hollow; it must be able to add and remove a carriage while the p
 **Every load-time cross-table rule gains a runtime twin**, enforced continuously, exactly as
 [0034](0034-a-runtime-peer-route-table-never-shadows-the-config-file.md) did for `UnknownPeerId`: a
 peering with no channel binding is refused at write time rather than discovered at the first arriving
-frame, and a peer forwarded to with no pay-channel likewise.
+frame, and a peer forwarded to with no pay-channel likewise — checked, as of #1217, against the
+CLIENT-role hop this write registers (the thing that lets this node SIGN a covering claim), not
+against the PEER-role channel binding (the thing that lets it ACCEPT one), which is non-empty for
+every peering this write ever produces and so cannot by itself distinguish a payable peering from an
+accept-only one.
 
 ## What comes from the document, and what cannot
 
@@ -269,3 +273,37 @@ identity as pinned, verified or attested. The one thing the build does check is 
 published settlement address — 20 bytes on EVM, 32 base58 bytes on Solana — and that is not a check
 against anything the operator supplied. It is the refusal to coerce bytes into an address that names
 a participant no chain holds.
+
+## Update (issue #1217) — the runtime twin of the pay-channel rule was never wired
+
+`connector_config::pay_channel`'s own header calls a channel binding "the deployed shape": one
+channel, bound in **both** roles at once — the PEER role for what arrives, the CLIENT role for what
+this node sends. #1160's build bound only the first half. `establish_peering` called
+`bind_runtime_peer_channel` (peer role) and wrote a durable row whose `channels` field was therefore
+always non-empty, and `upsert_runtime_peer_route`'s guard tested exactly that field — so it accepted
+every peering `POST /peers` ever produced, never catching the one it exists to catch. The result: a
+peering answered `200` to `POST /peers`, `200` to `POST /routes/peers`, and `T00` to every packet
+originated over it, naming a `[[pay_channels]]` row the operator had been told they no longer needed
+to write (ADR 0042 item 2).
+
+**The fix adds the missing half**, not a new mechanism. `establish_peering` now also calls
+`register_outbound_client_hop` — the CLIENT-role counterpart of `bind_runtime_peer_channel`, and the
+runtime twin of what `wire_outbound_client_hops` does for a `[[pay_channels]]` row at boot — using the
+same `document.httpEndpoint` the durable row already carried as `client_edge_url` (`POST
+/ilp/claim-state` is always asked over plain HTTP, whichever carriage the packet itself rides). A
+document with no `httpEndpoint` is now refused at write time
+(`EstablishPeeringError::NoDialableClientEdge`) rather than silently producing an accept-only peering:
+such a peering could never be paid, so the write is not worth a channel being opened for. Boot
+rehydration (`with_runtime_peer_route_store`) re-arms both roles the same way establishing did, so a
+restart does not turn a payable peering back into an accept-only one. And the outbound client ledger
+(`OutboundClientLedger`) now opens for every node with a `state_dir`, not only one with
+`[[pay_channels]]` rows — a runtime peering can need one that no config table predicted.
+
+**`upsert_runtime_peer_route`'s guard now tests the CLIENT-role hop** (`outbound_client_hops`), not
+`RuntimePeering::channels` — the fix for the gap above, and the reason the guard could never have
+fired before it. `PeerHasNoPayChannel` still exists and still means the same thing operationally
+("this peering cannot be paid"); what changed is which fact it is computed from.
+
+None of this changes what the write asks an operator for, what it returns, or the idempotence and
+gas-spending properties above — a repeat of the same `POST /peers` still finds the same channel, and
+both roles are re-bound on every call the same way the channel-derivation logic already was.
