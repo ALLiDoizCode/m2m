@@ -2451,16 +2451,20 @@ impl Connector {
     async fn cover_forward(&self, peer_id: &str, amount: u64) -> Result<WireClaim, String> {
         let hops = self.outbound_client_hops.load_full();
         let Some(hop) = hops.get(peer_id) else {
-            // No `[[pay_channels]]` row for this peering, so there is
-            // nothing to pay it from -- and since issue #1145 there is no
-            // postpay path to fall through to either. `Config::load`
-            // refuses a configured route to an uncovered peering by name
-            // (`ConfigError::PayChannelUnbound`), so a file that loaded
-            // cannot reach this; a leased or runtime-installed route (ADR
-            // 0028) can, and is refused here rather than carried free.
+            // Neither populator of `outbound_client_hops` has armed this
+            // peering -- no `[[pay_channels]]` row at boot, and no
+            // `register_outbound_client_hop` from a runtime peering (issue
+            // #1217) -- so there is nothing to pay it from, and since issue
+            // #1145 there is no postpay path to fall through to either.
+            // `Config::load` refuses a configured route to an uncovered
+            // peering by name (`ConfigError::PayChannelUnbound`), so a file
+            // that loaded cannot reach this; a leased or runtime-installed
+            // route (ADR 0028) can, and is refused here rather than carried
+            // free.
             return Err(format!(
-                "no '[[pay_channels]]' row configures a channel to pay peer '{peer_id}' from, \
-                 and a connector covers every PREPARE it sends (ADR 0042)"
+                "no client-role channel is configured to pay peer '{peer_id}' from -- neither a \
+                 '[[pay_channels]]' row nor a runtime peering (ADR 0058) has bound one -- and a \
+                 connector covers every PREPARE it sends (ADR 0042)"
             ));
         };
         let Some(ledger) = self.outbound_client.as_ref() else {

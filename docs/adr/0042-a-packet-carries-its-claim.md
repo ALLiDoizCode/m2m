@@ -106,12 +106,13 @@ reason only — the third item is the one that can break a running fleet:
    `Connector::establish_peering` — [ADR
    0058](0058-a-peering-is-established-from-a-url.md)'s `POST /peers`, built after this record — now
    also registers a client-role hop, live, from the counterparty's own self-description; boot
-   rehydration re-arms one for every durable runtime peering the same way. A peering with no
-   `[[pay_channels]]` row and no runtime hop still behaves exactly as before (`NotConfigured`, postpay
-   `pending_claim`) — that half of the claim above is unchanged. What no longer holds is "no outbound
-   client ledger file is opened at all": the ledger now opens for every node with a `state_dir`,
-   `[[pay_channels]]` or not, because a runtime-established hop needs one too and nothing rebuilds a
-   running node's wiring when `POST /peers` adds one.
+   rehydration re-arms one for every durable runtime peering the same way. A peering with neither a
+   `[[pay_channels]]` row nor a runtime hop is untouched by this — it is as uncovered as it was, and
+   since #1145 retired the postpay fall-through named above, a forward to it is refused rather than
+   carried free. What no longer holds is "no outbound client ledger file is opened at all": the ledger
+   now opens for every node with a `state_dir`, `[[pay_channels]]` or not, because a
+   runtime-established hop needs one too and nothing rebuilds a running node's wiring when
+   `POST /peers` adds one.
 
 3. **Require a covering claim on forwarded arrivals.** ~~The price gate filters on
    `ClientRouteKind::Terminated`, so a packet this connector forwards onward is carried for free.~~

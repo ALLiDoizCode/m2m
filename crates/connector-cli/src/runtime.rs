@@ -1262,13 +1262,13 @@ const OUTBOUND_CLIENT_LEDGER: &str = "outbound-client.log";
 /// running node with no `[[pay_channels]]` row at all, and a hop with no
 /// ledger to sign from is accept-only exactly the way this issue is about.
 /// What *is* still additive and default-off is `outbound_client_hops`
-/// itself: with no `[[pay_channels]]` rows, no HTTP client is built for one
-/// and it stays whatever a runtime `POST /peers` write has put there, so a
-/// node that never establishes a runtime peering either keeps forwarding
-/// exactly as it did before this function existed (ADR 0004's postpay
-/// convention) -- the property
+/// itself: with no `[[pay_channels]]` rows this function builds no HTTP
+/// client and registers no hop, so the table holds exactly what a runtime
+/// `POST /peers` write has put there and nothing else -- a node that never
+/// establishes a runtime peering forwards exactly as it did before this
+/// function existed. The ledger's own presence is what
 /// `build_writes_an_outbound_client_ledger_even_for_a_node_with_no_pay_channels`
-/// pins, alongside the ledger's own presence.
+/// pins.
 ///
 /// Where each part of the claim comes from is ADR 0030's table, and every
 /// row of it is honoured here:
