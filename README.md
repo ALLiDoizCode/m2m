@@ -43,6 +43,17 @@ mkdir -p node/config node/data && cd node
 openssl rand -hex 32 > data/signer.key && chmod 600 data/signer.key
 ```
 
+> [!NOTE]
+> **The published image is `linux/amd64` only.** On Apple Silicon (or any other
+> arm64 host), pull and run it under emulation:
+>
+> ```bash
+> docker pull --platform linux/amd64 ghcr.io/toon-protocol/connector:rust-main
+> ```
+>
+> and add `platform: linux/amd64` next to `image:` on the `connector` service in
+> `compose.yml` below.
+
 `compose.yml`:
 
 ```yaml
