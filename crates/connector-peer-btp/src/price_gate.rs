@@ -68,7 +68,7 @@ use std::collections::BTreeMap;
 
 use connector_config::{ForwardedClaimEnforcement, PeerConfig};
 use connector_domain::x402::GreetingTerms;
-use connector_domain::{validate_price, Prepare, Reject, RejectCode, Watermark};
+use connector_domain::{validate_price, Prepare, Price, Reject, RejectCode, Watermark};
 use connector_runtime::{ClaimAckOutcome, ClientRouteKind, Connector, WireClaim};
 
 /// Each peering's [`ForwardedClaimEnforcement`], the rest reading as
@@ -206,12 +206,27 @@ pub fn payment_required(
     // A destination that resolves to no configured route -- unmatched, or
     // leased -- is not this gate's business and never has been.
     let route = connector.client_route(destination)?;
-    let (required, enforcing) = match route.kind {
+    // `greeted` is the schedule quoted back on the F06 below; `required` is
+    // that schedule evaluated at THIS packet, and is what the claim must
+    // cover. They are the same number for a flat route, which is every route
+    // that existed before ADR 0065.
+    let (greeted, required, enforcing) = match route.kind {
         // ADR 0029's rule has no escape hatch: since issue #1077 deleted
         // `claim_enforcement`, an uncovered arrival to a priced termination
         // is always refused.
-        ClientRouteKind::Terminated => (route.price.base(), true),
+        //
+        // ADR 0065: the schedule at this packet's own payload length. The
+        // wrap stays opaque here -- its *length* is all this gate reads,
+        // which is a property of carriage, and is the same figure the
+        // termination will charge for the same bytes.
+        ClientRouteKind::Terminated => (route.price, route.price.charge(prepare.data.len()), true),
+        // A forward quotes no schedule: what must be covered is the packet's
+        // own amount, which is one figure about one packet rather than a
+        // rule about a route. Flat, so the greeting's `amount` is that
+        // figure and its `pricePerKib` is absent -- byte-identical to what
+        // this arm emitted before schedules existed.
         ClientRouteKind::Forwarded => (
+            Price::flat(prepare.amount),
             prepare.amount,
             enforcement == ForwardedClaimEnforcement::Enforce,
         ),
@@ -299,7 +314,8 @@ pub fn payment_required(
         // node terminates, the packet's own amount where it forwards.
         terms: connector_domain::x402::terms_body(&GreetingTerms {
             destination,
-            price: required,
+            price: greeted,
+            payload_len: prepare.data.len(),
             ..Default::default()
         }),
     })

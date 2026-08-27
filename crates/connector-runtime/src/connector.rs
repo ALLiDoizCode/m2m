@@ -19,6 +19,7 @@ use connector_signer::giftwrap::{derive_fulfillment, open_request, seal_response
 use connector_signer::{Address, Ed25519Signer, Signer};
 use thiserror::Error;
 use tracing::Instrument;
+use url::Url;
 
 use crate::app_client::{AppClient, AppOutcome};
 use crate::attribution::{apply_payment_attribution, PaymentAttribution};
@@ -365,6 +366,23 @@ pub enum ClientRouteKind {
     /// A `peer_id` route: `price` buys the whole path, of which this hop
     /// retains `fee` (ADR 0028).
     Forwarded,
+}
+
+/// The two facts about a matched terminated route that finishing a delivery
+/// needs: where to send the request, and what this connector charged for the
+/// packet that carries it.
+///
+/// Bundled rather than passed loose for the same reason `btp.rs`'s
+/// `MatchedRoute` is -- one more loose parameter puts
+/// [`Connector::deliver_opened_envelope`] over clippy's argument-count lint.
+/// It carries the **charge** and not the route's `Price`, deliberately: the
+/// schedule was evaluated once, against the payload length of the packet that
+/// arrived, before the wrap that payload lives in was opened (ADR 0065). Past
+/// that point there is no length left to evaluate against and nothing here
+/// can quietly re-derive a different figure.
+struct PricedTermination<'a> {
+    handler_url: &'a Url,
+    charge: u64,
 }
 
 /// What the client edge needs to know about the configured route a
@@ -1640,18 +1658,19 @@ impl Connector {
         });
 
         if let Some(route) = self.client_route(&prepare.destination) {
-            if route.kind == ClientRouteKind::Terminated
-                && route.price.base() > 0
-                && prepare.amount < route.price.base()
-            {
+            // ADR 0029's per-packet coverage rule, read off the schedule at
+            // this packet's own payload length (ADR 0065): the peer measures
+            // the sealed wrap it was handed, which is the same figure the
+            // termination below will charge and the same one the sending
+            // hop's own edge collected against.
+            let charge = route.price.charge(prepare.data.len());
+            if route.kind == ClientRouteKind::Terminated && charge > 0 && prepare.amount < charge {
                 let reject = PacketResponse::Reject(Reject {
                     code: RejectCode::f03_invalid_amount(),
                     triggered_by: String::new(),
                     message: format!(
                         "'{}' costs {} but the peer arrival carried only {}",
-                        prepare.destination,
-                        route.price.base(),
-                        prepare.amount
+                        prepare.destination, charge, prepare.amount
                     ),
                     data: Vec::new(),
                     accumulated_cost: 0,
@@ -1810,12 +1829,19 @@ impl Connector {
             return Err(ProbeDenied::RateLimited);
         }
         if let Some(route) = self.client_route(&prepare.destination) {
+            // A probe learns what the path costs *for a packet like the one
+            // it sent* (ADR 0011, ADR 0065): the schedule is evaluated at the
+            // probe's own payload length, so a sender that probes with the
+            // body it means to send is told the figure it will be charged.
+            // What makes one probe still answer every size is that the
+            // schedule itself is published -- on the greeting and the node
+            // self-description -- rather than only its value here.
+            let price = route.price.charge(prepare.data.len());
             let answer_here = match route.kind {
                 ClientRouteKind::Terminated => true,
-                ClientRouteKind::Forwarded => route.price.base() > 0,
+                ClientRouteKind::Forwarded => price > 0,
             };
             if answer_here {
-                let price = route.price.base();
                 let disposition = match route.kind {
                     ClientRouteKind::Terminated => "terminates at this connector",
                     ClientRouteKind::Forwarded => "forwards from this connector",
@@ -2523,6 +2549,13 @@ impl Connector {
     ) -> PacketResponse {
         let condition = prepare.execution_condition;
         let expires_at = prepare.expires_at;
+        // What this packet costs, read off the schedule at its own payload
+        // length (ADR 0065) -- taken here because `open_termination_request`
+        // below is the last moment `prepare.data` is whole, and because the
+        // length that is charged must be the length that arrived rather than
+        // anything recovered from inside the wrap. The client edge and the
+        // peer gate computed the same figure from the same bytes.
+        let charge = route.price().charge(prepare.data.len());
 
         let (envelope_bytes, shared_secret) = match self.open_termination_request(&prepare.data) {
             Ok(opened) => opened,
@@ -2531,7 +2564,10 @@ impl Connector {
 
         let inner = self
             .deliver_opened_envelope(
-                route,
+                PricedTermination {
+                    handler_url: route.handler_url(),
+                    charge,
+                },
                 &condition,
                 expires_at,
                 &shared_secret,
@@ -2611,7 +2647,7 @@ impl Connector {
     /// perfectly well.
     async fn deliver_opened_envelope(
         &self,
-        route: &StaticRoute,
+        termination: PricedTermination<'_>,
         condition: &[u8; 32],
         expires_at: chrono::DateTime<Utc>,
         shared_secret: &[u8; 32],
@@ -2626,7 +2662,7 @@ impl Connector {
                     triggered_by: String::new(),
                     message: format!("envelope did not decode: {error}"),
                     data: Vec::new(),
-                    accumulated_cost: route.price().base(),
+                    accumulated_cost: termination.charge,
                 });
             }
         };
@@ -2639,7 +2675,7 @@ impl Connector {
             &mut request,
             client_channel_id.map(|channel_key| PaymentAttribution {
                 channel_key,
-                price: route.price().base(),
+                charge: termination.charge,
             }),
         );
 
@@ -2678,7 +2714,7 @@ impl Connector {
         let budget = budget
             .to_std()
             .unwrap_or(std::time::Duration::from_secs(u64::MAX));
-        let delivery = self.app_client.deliver(route.handler_url(), &request);
+        let delivery = self.app_client.deliver(termination.handler_url, &request);
         let Ok(outcome) = tokio::time::timeout(budget, delivery).await else {
             // PF-25's second half. Dropping the future is what abandons the
             // request: the socket to the app closes and this connector stops
@@ -2691,7 +2727,7 @@ impl Connector {
             // #545): a sender learns "your answer was too slow", not "this
             // path is free".
             tracing::info!(
-                handler_url = %route.handler_url(),
+                handler_url = %termination.handler_url,
                 expires_at = %expires_at.to_rfc3339(),
                 "the app did not answer within the packet's deadline -- abandoning the request"
             );
@@ -2704,7 +2740,7 @@ impl Connector {
                     expires_at.to_rfc3339(),
                 ),
                 data: Vec::new(),
-                accumulated_cost: route.price().base(),
+                accumulated_cost: termination.charge,
             });
         };
 
@@ -2724,7 +2760,7 @@ impl Connector {
                     fulfillment: derive_fulfillment(shared_secret),
                     data: response.encode(),
                 },
-                route.price().base(),
+                termination.charge,
             ),
             AppOutcome::Unreachable { message } => PacketResponse::Reject(Reject {
                 code: RejectCode::t01_peer_unreachable(),

@@ -23,6 +23,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::node::NodeFacts;
+use crate::Price;
 
 /// The x402 version this connector emits and reads.
 pub const X402_VERSION: u32 = 2;
@@ -63,11 +64,34 @@ impl X402PaymentRequired {
         self.accepts.first()
     }
 
-    /// What the offer costs, in the asset's base units. `None` when there
-    /// is no offer or its `amount` is not a decimal uint64 -- a greeting
-    /// [`parse_greeting`] accepted always answers `Some`.
+    /// What the **greeted packet** costs, in the asset's base units. `None`
+    /// when there is no offer or its `amount` is not a decimal uint64 -- a
+    /// greeting [`parse_greeting`] accepted always answers `Some`.
+    ///
+    /// For a flat route this is the route's whole price and always was. For
+    /// a route priced by size (ADR 0065) it is that schedule evaluated at the
+    /// payload length of the request being answered, so it is what *this*
+    /// request would have cost. To learn what a differently sized packet
+    /// costs, read [`Self::schedule`] instead of re-greeting.
     pub fn price(&self) -> Option<u64> {
         self.offer()?.amount.parse().ok()
+    }
+
+    /// The addressed route's whole price schedule (ADR 0065): its base, and
+    /// what each started kibibyte of payload adds. `None` when there is no
+    /// offer or either figure is not a decimal uint64.
+    ///
+    /// A greeting from a node that predates schedules carries no
+    /// `pricePerKib`, which reads back as a slope of zero -- a flat price,
+    /// which is exactly what such a node charges.
+    pub fn schedule(&self) -> Option<Price> {
+        let extra = &self.offer()?.extra;
+        let base = extra.price.parse().ok()?;
+        let per_kib = match extra.price_per_kib.as_deref() {
+            None => 0,
+            Some(text) => text.parse().ok()?,
+        };
+        Some(Price::scheduled(base, per_kib))
     }
 
     /// Who the payment is addressed to (the `exact` scheme's `payTo`).
@@ -135,8 +159,29 @@ pub struct X402ChannelExtra {
     pub ilp_address: String,
     #[serde(default)]
     pub endpoint: String,
+    /// The **base** of the addressed route's price schedule: what a packet
+    /// of any size to this destination costs before its payload is counted
+    /// (ADR 0065). Equal to `amount` above for a flat route, which is every
+    /// route that existed before schedules did -- so a reader written
+    /// against the flat greeting reads the same number it always did.
     #[serde(default)]
     pub price: String,
+    /// The **slope** of that schedule: what each started kibibyte of payload
+    /// adds (ADR 0065, issue #984). Absent -- not `"0"` -- on a flat route,
+    /// so a flat greeting is byte-identical to what it was before schedules
+    /// existed and a parser written before this field is unaffected.
+    ///
+    /// This field is what keeps ADR 0011's cacheability property true under
+    /// a schedule. `amount` answers only for a packet the size of the one
+    /// that was greeted; `price` and this together answer for **every**
+    /// size, so one greeting still tells a sender what any packet it might
+    /// send will cost, and it does not have to probe per size.
+    #[serde(
+        rename = "pricePerKib",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub price_per_kib: Option<String>,
     /// The emitting node's own ILP address(es) (issue #807) -- the
     /// authoritative list from `[announce]`, never an echo of the probed
     /// `destination` the way `ilp_address` above is. Present exactly when
@@ -345,6 +390,7 @@ pub fn terms_body(terms: &GreetingTerms<'_>) -> Vec<u8> {
     let GreetingTerms {
         destination,
         price,
+        payload_len,
         node,
         required_transport,
         session_lease_ttl_ms,
@@ -369,14 +415,15 @@ pub fn terms_body(terms: &GreetingTerms<'_>) -> Vec<u8> {
         accepts: vec![X402PaymentOption {
             scheme: "toon-channel".to_string(),
             network: destination.to_string(),
-            amount: price.to_string(),
+            amount: price.charge(payload_len).to_string(),
             pay_to: destination.to_string(),
             max_timeout_seconds: X402_MAX_TIMEOUT_SECONDS,
             http_endpoint: "/ilp".to_string(),
             extra: X402ChannelExtra {
                 ilp_address: destination.to_string(),
                 endpoint: "/ilp".to_string(),
-                price: price.to_string(),
+                price: price.base().to_string(),
+                price_per_kib: (!price.is_flat()).then(|| price.per_kib().to_string()),
                 ilp_addresses: ilp_addresses.to_vec(),
                 btp_endpoint: btp_endpoint.map(str::to_string),
                 settlement: settlement.cloned(),
@@ -401,8 +448,19 @@ pub struct GreetingTerms<'a> {
     /// `extra.ilpAddress` -- there is exactly one payment method and one
     /// party to pay, so all four name the same address.
     pub destination: &'a str,
-    /// What that address costs, quoted as both `amount` and `extra.price`.
-    pub price: u64,
+    /// What that address charges: the whole schedule (ADR 0065), quoted as
+    /// `extra.price` (its base) and `extra.pricePerKib` (its slope).
+    pub price: Price,
+    /// The payload length of the request being answered, in bytes -- what
+    /// `amount` is quoted for.
+    ///
+    /// x402's `amount` is what *this* request costs, so it is the schedule
+    /// evaluated here rather than the schedule's base. A carriage greeting a
+    /// request it has a `Prepare` for passes `prepare.data.len()`; one
+    /// greeting a request that never became a packet passes `0`, and gets
+    /// the base -- the cheapest true answer, and the exact figure a flat
+    /// route quotes either way.
+    pub payload_len: usize,
     /// The emitting node's own facts -- its addresses, its BTP endpoint and
     /// the chains it settles on ([`crate::node::NodeFacts`], ADR 0050).
     ///

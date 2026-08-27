@@ -42,8 +42,14 @@ use connector_domain::EnvelopeRequest;
 /// as the only form of it this connector can honestly assert.
 pub const PAYER_HEADER: &str = "X-TOON-Payer";
 
-/// What that claim had to advance by for this delivery: the route's own
-/// flat price (ADR 0020), in the settlement asset's base units.
+/// What that claim had to advance by for this delivery: what this connector
+/// charged for *this packet*, in the settlement asset's base units.
+///
+/// That is the route's price schedule evaluated at this packet's own payload
+/// length (ADR 0065) -- which for a flat route is the flat price ADR 0020
+/// fixed and ADR 0040 named here, unchanged. Never the arriving packet's
+/// `amount`, which is what the sender chose to carry rather than what this
+/// connector took.
 pub const AMOUNT_HEADER: &str = "X-TOON-Amount";
 
 /// The settlement chain the paying channel lives on -- read off the
@@ -62,9 +68,10 @@ pub(crate) struct PaymentAttribution<'a> {
     /// The chain-namespaced client channel key the covering claim was
     /// admitted under (`evm:0x<64 hex>` or `solana:<base58>`).
     pub channel_key: &'a str,
-    /// The route's flat price, which is exactly what that claim had to
-    /// cover (ADR 0020, ADR 0028).
-    pub price: u64,
+    /// What this connector charged for this packet -- the route's schedule
+    /// at this packet's own payload length -- which is exactly what that
+    /// claim had to cover (ADR 0020, ADR 0028, ADR 0065).
+    pub charge: u64,
 }
 
 /// The settlement chain a channel key names: the namespace ahead of its
@@ -99,9 +106,11 @@ pub(crate) fn apply_payment_attribution(
     let Some(attribution) = attribution else {
         return;
     };
-    // A zero price means nothing was charged for this delivery, so there
-    // is no payment to attribute even when a claim happened to ride along.
-    if attribution.price == 0 {
+    // Charging nothing for this delivery means there is no payment to
+    // attribute, even when a claim happened to ride along. A route with a
+    // slope and no base charges nothing only for an empty payload, which is
+    // not a shape a real sealed envelope has.
+    if attribution.charge == 0 {
         return;
     }
 
@@ -111,7 +120,7 @@ pub(crate) fn apply_payment_attribution(
     ));
     request
         .headers
-        .push((AMOUNT_HEADER.to_string(), attribution.price.to_string()));
+        .push((AMOUNT_HEADER.to_string(), attribution.charge.to_string()));
     if let Some(chain) = chain_of(attribution.channel_key) {
         request
             .headers
@@ -147,7 +156,7 @@ mod tests {
             &mut request,
             Some(PaymentAttribution {
                 channel_key: "evm:0xabc",
-                price: 1000,
+                charge: 1000,
             }),
         );
 
@@ -163,7 +172,7 @@ mod tests {
             &mut request,
             Some(PaymentAttribution {
                 channel_key: "solana:9xQeWv",
-                price: 7,
+                charge: 7,
             }),
         );
 
@@ -187,7 +196,7 @@ mod tests {
             &mut request,
             Some(PaymentAttribution {
                 channel_key: "evm:0xabc",
-                price: 0,
+                charge: 0,
             }),
         );
         assert!(request.headers.is_empty());
@@ -210,7 +219,7 @@ mod tests {
             &mut overwritten,
             Some(PaymentAttribution {
                 channel_key: "evm:0xreal",
-                price: 1000,
+                charge: 1000,
             }),
         );
         assert_eq!(header(&overwritten, PAYER_HEADER), Some("evm:0xreal"));

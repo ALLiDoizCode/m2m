@@ -78,7 +78,7 @@ use connector_domain::client_claim::ClientClaim;
 use connector_domain::identity::{anonymous_identity, resolve_identity, ConfiguredIdentity};
 use connector_domain::{
     agreed_required_transport, condition_is_present, EdgeIdentity, NodeFacts, NodeSelfDescription,
-    PacketResponse, Prepare, Reject, RejectCode, RoutePrice,
+    PacketResponse, Prepare, Price, Reject, RejectCode, RoutePrice,
 };
 use connector_runtime::{ClientRouteFacts, ClientRouteKind, Connector, ProbeDenied};
 use connector_signer::nip59::{unwrap_claim, WrappedClaim};
@@ -582,7 +582,8 @@ async fn self_description(State(state): State<Arc<ClientEdgeState>>) -> Response
         .into_iter()
         .map(|route| RoutePrice {
             prefix: route.prefix,
-            price: route.price.to_string(),
+            price: route.price.base().to_string(),
+            price_per_kib: (!route.price.is_flat()).then(|| route.price.per_kib().to_string()),
         })
         .collect();
 
@@ -634,6 +635,18 @@ struct RoutePriceQuery {
 struct RoutePriceView {
     destination: String,
     price: u64,
+    /// What each started kibibyte of payload adds (ADR 0065). Omitted on a
+    /// flat route, so this answer is byte-identical to what it was before
+    /// schedules existed -- `devnet-pricing.md`'s fleet check reads `price`
+    /// and is unaffected.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    price_per_kib: u64,
+}
+
+/// `skip_serializing_if` for a slope that is not there. A free function
+/// rather than a closure because that attribute takes a path.
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 async fn route_price(
@@ -644,6 +657,7 @@ async fn route_price(
         Some(price) => Json(RoutePriceView {
             destination: query.destination,
             price: price.base(),
+            price_per_kib: price.per_kib(),
         })
         .into_response(),
         None => (
@@ -690,8 +704,13 @@ pub use connector_domain::x402::{
 /// to care, which case it hit. `node` is this node's own facts -- the same
 /// value `GET /ilp` serves as its self-description, projected into `extra`
 /// rather than assembled a second time (ND-11).
-fn payment_required(destination: &str, price: u64, node: &NodeFacts) -> Response {
-    x402_response(destination, price, node, None)
+fn payment_required(
+    destination: &str,
+    price: Price,
+    payload_len: usize,
+    node: &NodeFacts,
+) -> Response {
+    x402_response(destination, price, payload_len, node, None)
 }
 
 /// Answer a request to `destination` that arrived over a transport its
@@ -706,20 +725,22 @@ fn payment_required(destination: &str, price: u64, node: &NodeFacts) -> Response
 /// payment at all.
 fn wrong_transport_required(
     destination: &str,
-    price: u64,
+    price: Price,
+    payload_len: usize,
     required: TransportPolicy,
     node: &NodeFacts,
 ) -> Response {
-    x402_response(destination, price, node, Some(required.name()))
+    x402_response(destination, price, payload_len, node, Some(required.name()))
 }
 
 fn x402_response(
     destination: &str,
-    price: u64,
+    price: Price,
+    payload_len: usize,
     node: &NodeFacts,
     required_transport: Option<&str>,
 ) -> Response {
-    let body = x402_terms_body(destination, price, node, required_transport);
+    let body = x402_terms_body(destination, price, payload_len, node, required_transport);
     let header_value = BASE64.encode(&body);
     Response::builder()
         .status(StatusCode::PAYMENT_REQUIRED)
@@ -744,13 +765,15 @@ fn x402_response(
 /// their own `F06` greeting rather than re-declaring the shape.
 fn x402_terms_body(
     destination: &str,
-    price: u64,
+    price: Price,
+    payload_len: usize,
     node: &NodeFacts,
     required_transport: Option<&str>,
 ) -> Vec<u8> {
     connector_domain::x402::terms_body(&connector_domain::x402::GreetingTerms {
         destination,
         price,
+        payload_len,
         node: Some(node),
         required_transport,
         session_lease_ttl_ms: crate::session_registry::SESSION_LEASE_BACKSTOP_TTL.as_millis()
@@ -878,7 +901,7 @@ impl AdmittedWatermark {
 /// same claim twice, not two different ones.
 async fn extract_and_validate_claim(
     headers: &HeaderMap,
-    price: u64,
+    charge: u64,
     state: &ClientEdgeState,
 ) -> Result<Option<AdmittedClaim>, ClaimIngestRejection> {
     let (header_value, wrapped) = if let Some(value) = headers.get(CLAIM_HEADER) {
@@ -894,7 +917,7 @@ async fn extract_and_validate_claim(
         wrapped,
         state.wrap_receiver_secret.as_ref(),
     )?;
-    let claim = state.claim_gate.ingest(&claim_json, price).await?;
+    let claim = state.claim_gate.ingest(&claim_json, charge).await?;
     let channel_key = claim.channel_key();
     let plaintext_signer = (!wrapped).then(|| claim.signer().to_string());
     let watermark = AdmittedWatermark::of(&claim);
@@ -948,7 +971,7 @@ fn packet_response(response: PacketResponse) -> Response {
 /// which is exactly what cost discovery exists to prevent. Every other
 /// refusal here is decided before any route price is in play and reports
 /// `0`: nothing was traversed and nothing terminated.
-fn claim_rejected_response(rejection: ClaimIngestRejection, price: u64) -> Response {
+fn claim_rejected_response(rejection: ClaimIngestRejection, charge: u64) -> Response {
     // Underpayment is a distinct ILP error (F03: Invalid Amount, issue
     // #522) from every other claim-ingest refusal above it (F01: Invalid
     // Packet) -- the claim is structurally and cryptographically fine, it
@@ -987,7 +1010,7 @@ fn claim_rejected_response(rejection: ClaimIngestRejection, price: u64) -> Respo
     // "retry, the node's endpoint hiccupped" from "back off, you are being
     // metered".
     packet_response(PacketResponse::Reject(claim_rejection_reject(
-        rejection, price,
+        rejection, charge,
     )))
 }
 
@@ -1025,27 +1048,27 @@ fn over_carried_reject(
     destination: &str,
     kind: ClientRouteKind,
     amount: u64,
-    price: u64,
+    charge: u64,
 ) -> Option<Reject> {
-    if kind != ClientRouteKind::Forwarded || price == 0 || amount <= price {
+    if kind != ClientRouteKind::Forwarded || charge == 0 || amount <= charge {
         return None;
     }
     Some(Reject {
         code: RejectCode::f03_invalid_amount(),
         triggered_by: String::new(),
         message: format!(
-            "packet to '{destination}' declares amount {amount}, more than the {price} this \
+            "packet to '{destination}' declares amount {amount}, more than the {charge} this \
              connector charges to forward it -- a forwarded packet never carries more value \
              than it was paid for"
         ),
         data: Vec::new(),
-        accumulated_cost: price,
+        accumulated_cost: charge,
     })
 }
 
-fn claim_rejection_reject(rejection: ClaimIngestRejection, price: u64) -> Reject {
+fn claim_rejection_reject(rejection: ClaimIngestRejection, charge: u64) -> Reject {
     let (code, accumulated_cost) = match rejection {
-        ClaimIngestRejection::Underpayment { .. } => (RejectCode::f03_invalid_amount(), price),
+        ClaimIngestRejection::Underpayment { .. } => (RejectCode::f03_invalid_amount(), charge),
         ClaimIngestRejection::Undercollateralized { .. } => (RejectCode::f03_invalid_amount(), 0),
         ClaimIngestRejection::NotDurable => (RejectCode::t00_internal_error(), 0),
         ClaimIngestRejection::ChannelLookupFailed(_) => (RejectCode::t00_internal_error(), 0),
@@ -1167,7 +1190,13 @@ async fn handle_ilp(
     // route by, so what is charged and where the packet goes cannot
     // disagree.
     let client_route = state.connector.client_route(&prepare.destination);
-    let price = client_route.map_or(0, |route| route.price.base());
+    // What this packet costs here: the schedule at its own payload length
+    // (ADR 0065). One figure, computed once, and everything below -- the
+    // greeting, the over-carry bound, the claim gate and the reject's
+    // accumulated cost -- is charged against it, so what is greeted and what
+    // is collected cannot disagree.
+    let schedule = client_route.map_or(Price::FREE, |route| route.price);
+    let charge = schedule.charge(prepare.data.len());
 
     // Transport policy (issue #701, toon-meta#262 decision 11) is checked
     // before payment is considered at all: a route restricted to BTP is
@@ -1178,12 +1207,23 @@ async fn handle_ilp(
     // -- and a forwarded route reports `Both`, so this never fires for one.
     if let Some(policy) = client_route.map(|route| route.transport_policy) {
         if !policy.accepts_http() {
-            return wrong_transport_required(&prepare.destination, price, policy, &state.node);
+            return wrong_transport_required(
+                &prepare.destination,
+                schedule,
+                prepare.data.len(),
+                policy,
+                &state.node,
+            );
         }
     }
 
-    if !has_claim_header && (price > 0 || !condition_present) {
-        return payment_required(&prepare.destination, price, &state.node);
+    if !has_claim_header && (charge > 0 || !condition_present) {
+        return payment_required(
+            &prepare.destination,
+            schedule,
+            prepare.data.len(),
+            &state.node,
+        );
     }
 
     // ADR 0028: refused *before* the claim is ingested, so a packet this
@@ -1192,7 +1232,7 @@ async fn handle_ilp(
     // must size its amount under rather than this refusal.
     if let Some(route) = client_route {
         if let Some(reject) =
-            over_carried_reject(&prepare.destination, route.kind, prepare.amount, price)
+            over_carried_reject(&prepare.destination, route.kind, prepare.amount, charge)
         {
             return packet_response(PacketResponse::Reject(reject));
         }
@@ -1230,8 +1270,8 @@ async fn handle_ilp(
     // claim is never looked at on this path, since nothing about it could
     // make this packet deliverable.
     if !state.connector.envelope_target_would_be_refused(&prepare) {
-        match extract_and_validate_claim(&headers, price, &state).await {
-            Err(rejection) => return claim_rejected_response(rejection, price),
+        match extract_and_validate_claim(&headers, charge, &state).await {
+            Err(rejection) => return claim_rejected_response(rejection, charge),
             // A claim that cleared the gate is this connector's evidence
             // that the sender holds the channel it names (issue #548),
             // which is what makes that sender eligible to probe at
@@ -1261,7 +1301,7 @@ async fn handle_ilp(
     // sources first, then whatever client session `state.session_registry`
     // has bound to this destination -- see `session_route::route_prepare`.
     let response =
-        session_route::route_prepare(&state, prepare, price, client_channel_id.as_deref()).await;
+        session_route::route_prepare(&state, prepare, charge, client_channel_id.as_deref()).await;
     roll_back_uncarried_forward(
         &state,
         is_forwarded_route(client_route),
@@ -1388,9 +1428,7 @@ mod tests {
     use axum::http::Request;
     use chrono::{TimeZone, Utc};
     use connector_config::StaticRoute;
-    use connector_domain::{
-        derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Price, Reject,
-    };
+    use connector_domain::{derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Reject};
     use connector_runtime::{
         AppOutcome, FakeAppClient, InMemoryJournal, InProcessPeerTransport, PeerRoute,
         RuntimePeerChannel, RuntimePeering, TestClock,
@@ -5023,6 +5061,7 @@ mod tests {
                 RoutePriceView {
                     destination: REMOTE_APP.to_string(),
                     price: FORWARD_PRICE,
+                    price_per_kib: 0,
                 }
             );
 

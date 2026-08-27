@@ -46,7 +46,11 @@ const BYTES_PER_KIB: u64 = 1024;
 ///
 /// Both fields are in the settlement asset's base units, like every other
 /// amount on the value path: nothing scales by `decimals`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// [`Default`] is [`Price::FREE`], both fields zero. That is the only honest
+/// default for a price -- and it is never how a *route* gets one, since
+/// config load refuses a route that names no price at all rather than
+/// falling back to this (ADR 0020's "never silently free").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Price {
     base: u64,
     per_kib: u64,
@@ -347,6 +351,11 @@ mod tests {
             Price::scheduled(u64::MAX, u64::MAX).charge(usize::MAX),
             u64::MAX
         );
+    }
+
+    #[test]
+    fn the_default_price_is_free() {
+        assert_eq!(Price::default(), Price::FREE);
     }
 
     #[test]
