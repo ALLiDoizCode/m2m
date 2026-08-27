@@ -193,6 +193,13 @@ not carriage. What makes that safe is authentication rather than payment — an 
 pay their own connector, so the credential is a **write key** and never a **covering claim**.
 _Avoid_: control plane, admin
 
+**Dashboard**:
+The page the operator surface serves at `/dashboard`: the surface's reads on one screen, and a
+form for each write that can be made at runtime, signed in the operator's browser. A client of
+the surface that the node happens to ship, with no authority of its own — the bearer token and
+the operator key it is fed are the operator's, and the key never leaves the browser.
+_Avoid_: admin panel, control panel, console
+
 ### Protocol surfaces
 
 **Peering**:

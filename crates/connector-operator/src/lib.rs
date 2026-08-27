@@ -36,6 +36,15 @@
 //! [`Connector`] method. Every read serializes its result as JSON except
 //! `GET /metrics`, which is Prometheus text exposition format (ADR 0014)
 //! -- the one format Prometheus itself can scrape.
+//!
+//! `GET /dashboard` is the operator dashboard (ADR 0066): one static page,
+//! embedded from `dashboard.html` at build time and served with no
+//! authentication, because it holds nothing. Every figure on it is
+//! fetched through the bearer-gated reads above, and every change it
+//! makes is an RFC 9421 write signed in the browser by an operator key
+//! that never leaves it. It is a client of this surface that happens to
+//! be shipped by it -- mounted with the surface, absent without it, and
+//! granting no authority the reads and writes do not already grant.
 
 mod rfc9421;
 mod write_auth;
@@ -154,7 +163,46 @@ pub fn router(
         .route("/channels/:id/settle", post(settle_channel))
         .route("/channels/:id/cooperative-close", post(cooperative_close));
 
-    reads.merge(writes).with_state(state)
+    // The dashboard page: served without a token because it is inert
+    // markup -- it holds no figure and no key, and only becomes anything
+    // once a browser feeds it the bearer token and an operator key, both of
+    // which stay on the operator's side (ADR 0066). Mounted alongside the
+    // surface it fronts, so a node with no `[operator]` has no page either.
+    let pages = Router::new().route("/dashboard", get(dashboard));
+
+    reads.merge(writes).merge(pages).with_state(state)
+}
+
+/// The operator dashboard, embedded at build time so the image ships it
+/// and there is nothing else to build, host or deploy (ADR 0066).
+const DASHBOARD_HTML: &str = include_str!("dashboard.html");
+
+/// `GET /dashboard`: the page itself. The Content-Security-Policy is the
+/// load-bearing header: `connect-src 'self'` means the page can talk to
+/// this origin and nowhere else, so an operator key pasted into it can
+/// sign for this node and cannot be carried off by anything the page might
+/// be tricked into loading -- it loads nothing at all (`default-src
+/// 'none'`), and a dashboard that renders API data builds DOM text rather
+/// than markup for the same reason. `no-store` because the page is served
+/// by the node it describes: after a release the browser should see the
+/// new page, not a cached one against a changed surface.
+async fn dashboard() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::REFERRER_POLICY, "no-referrer"),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; \
+                 connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'",
+            ),
+        ],
+        DASHBOARD_HTML,
+    )
+        .into_response()
 }
 
 /// Authenticate a write request against `state`'s [`WriteAuth`], returning
@@ -995,6 +1043,93 @@ mod tests {
         let app = test_router(vec![], "correct-token");
         let response = get(app, "/routes", Some("wrong-token")).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// ADR 0066: the dashboard page is served without a bearer token,
+    /// because it is inert -- markup that holds nothing, fetches every
+    /// figure through the gated reads and signs every write in the
+    /// browser. Serving it cannot leak what it does not contain, and the
+    /// CSP pins whatever it is fed to this origin.
+    #[tokio::test]
+    async fn the_dashboard_page_needs_no_token_and_talks_only_to_its_own_origin() {
+        let app = test_router(vec![], "correct-token");
+        let response = get(app, "/dashboard", None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8"
+        );
+        let csp = response
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .expect("the dashboard carries a CSP")
+            .to_str()
+            .unwrap();
+        assert!(csp.contains("default-src 'none'"), "{csp}");
+        assert!(csp.contains("connect-src 'self'"), "{csp}");
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        assert!(
+            !DASHBOARD_HTML.contains("correct-token"),
+            "the page is static and carries no credential"
+        );
+    }
+
+    /// The page is a client of this router and is held to it here: every
+    /// read this router mounts is one the page fetches, every write the
+    /// page makes is one this router mounts, and the signature base it
+    /// builds in the browser spells the covered components and algorithm
+    /// exactly as [`rfc9421`] verifies them. A path or parameter renamed
+    /// on one side without the other fails this test rather than 401ing
+    /// or 404ing in an operator's browser.
+    #[test]
+    fn the_dashboard_reads_the_whole_read_surface_and_signs_as_the_verifier_expects() {
+        for path in [
+            "/metrics",
+            "/identity",
+            "/peers",
+            "/channels",
+            "/claims",
+            "/routes",
+            "/routes/peers",
+            "/routes/leased",
+            "/audit-log",
+        ] {
+            assert!(
+                DASHBOARD_HTML.contains(&format!("read('{path}'")),
+                "the dashboard does not read {path}"
+            );
+        }
+        for write in [
+            "write('POST', '/peers'",
+            "write('POST', '/routes/peers'",
+            "write('POST', '/routes/leased'",
+            "write('DELETE', `/peers/${",
+            "write('DELETE', `/routes/peers/${",
+        ] {
+            assert!(
+                DASHBOARD_HTML.contains(write),
+                "the dashboard lacks {write}"
+            );
+        }
+
+        let components = rfc9421::COVERED_COMPONENTS
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            DASHBOARD_HTML.contains(&format!("({components});created=")),
+            "the browser signs over a different component set than the node verifies"
+        );
+        assert!(DASHBOARD_HTML.contains(&format!("alg=\"{}\"", rfc9421::SIGNATURE_ALG)));
+        assert!(DASHBOARD_HTML.contains("'Content-Digest': digest"));
+        assert!(
+            !DASHBOARD_HTML.contains("innerHTML"),
+            "API data is rendered as text, never as markup"
+        );
     }
 
     #[tokio::test]
