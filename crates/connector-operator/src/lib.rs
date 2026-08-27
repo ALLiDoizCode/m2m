@@ -60,6 +60,7 @@ pub mod test_support {
     pub use crate::signing::{compute_content_digest, keyid_hex, sign_request};
 }
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -242,8 +243,7 @@ async fn leased_routes(State(state): State<OperatorState>) -> Json<Vec<LeasedRou
 /// duplicated.
 async fn channels(State(state): State<OperatorState>) -> Json<Vec<ChannelView>> {
     let mut views = state.connector.channels().await;
-    let already_listed: std::collections::HashSet<String> =
-        views.iter().map(|view| view.id.clone()).collect();
+    let already_listed: HashSet<String> = views.iter().map(|view| view.id.clone()).collect();
     for channel_id in state.connector.recognized_channel_ids() {
         if already_listed.contains(&channel_id) {
             continue;
@@ -929,6 +929,21 @@ fn client_edge_channel_key(channel_id: &str) -> Option<String> {
     None
 }
 
+/// The claim the client edge's own book holds on `channel_id`, as a
+/// redeemable [`Claim`] (issue #1218). `None` for an id the client edge
+/// could never have journaled anything under ([`client_edge_channel_key`])
+/// as well as for one it simply has no claim on: neither is redeemable, and
+/// the two are the same answer to every caller here.
+fn client_edge_claim(state: &OperatorState, channel_id: &str) -> Option<Claim> {
+    let key = client_edge_channel_key(channel_id)?;
+    let (nonce, cumulative_amount, signature) = state.claim_gate.latest_inbound_claim(&key)?;
+    Some(Claim {
+        nonce,
+        cumulative_amount: u128::from(cumulative_amount),
+        signature,
+    })
+}
+
 /// The claim this connector holds on `channel_id`, from whichever book is
 /// that channel's actual authority (issue #1218): the peer semantics's own
 /// `ClaimBook`, consulted first exactly as `Connector::peer_channel_watermark`
@@ -937,15 +952,10 @@ fn client_edge_channel_key(channel_id: &str) -> Option<String> {
 /// (`ConfigError::ChannelInBothNamespaces`), so this never has two
 /// candidates to choose between.
 fn latest_claim(state: &OperatorState, channel_id: &str) -> Option<Claim> {
-    state.connector.peer_inbound_claim(channel_id).or_else(|| {
-        let key = client_edge_channel_key(channel_id)?;
-        let (nonce, cumulative_amount, signature) = state.claim_gate.latest_inbound_claim(&key)?;
-        Some(Claim {
-            nonce,
-            cumulative_amount: u128::from(cumulative_amount),
-            signature,
-        })
-    })
+    state
+        .connector
+        .peer_inbound_claim(channel_id)
+        .or_else(|| client_edge_claim(state, channel_id))
 }
 
 /// `POST /channels/:id/redeem-latest`: redeem the latest claim this node
@@ -1002,14 +1012,7 @@ async fn cooperative_close(
         return channel_operation_response(state.connector.cooperative_close(&channel_id).await);
     }
 
-    let Some(claim) = client_edge_channel_key(&channel_id)
-        .and_then(|key| state.claim_gate.latest_inbound_claim(&key))
-        .map(|(nonce, cumulative_amount, signature)| Claim {
-            nonce,
-            cumulative_amount: u128::from(cumulative_amount),
-            signature,
-        })
-    else {
+    let Some(claim) = client_edge_claim(&state, &channel_id) else {
         return channel_operation_response(state.connector.cooperative_close(&channel_id).await);
     };
     match state.connector.redeem_channel(&channel_id, claim).await {
