@@ -26,7 +26,11 @@ reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["sync", "rt", "net", "io-util"] }
+# `time`, for the one timer on the packet path: a termination waits for its
+# app no longer than the packet's own deadline allows (ADR 0064, PF-25). The
+# *decision* is `connector_domain::delivery_budget`, pure arithmetic over the
+# injected clock; this feature supplies only the mechanism that stops waiting.
+tokio = { version = "1", features = ["sync", "rt", "net", "io-util", "time"] }
 tracing = "0.1"
 url = "2"
 
