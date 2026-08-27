@@ -69,7 +69,12 @@ key_file = "/app/data/signer.key"
 # `price` is required on every terminated route (issue #520): a claim must
 # advance by at least this much to pay for the app's work. It is never
 # silently free -- write `price = 0` if that is deliberate. Denominated in
-# the smallest unit of whatever this node settles in (ADR 0010).
+# the smallest unit of whatever this node settles in (ADR 0010), the way a
+# card terminal counts in cents: with a 6-decimal token such as USDC there
+# are 1,000,000 units to one token, so `price = 100` is 0.0001 USDC, a
+# hundredth of a cent, and ten cents is `price = 100000`. A wallet shows the
+# whole-token figure; this file never does. `[settlement.*] decimals` below
+# is what fixes the scale, and it is checked against the token at boot.
 [[routes]]
 prefix = "g.example.connector.app"
 handler_url = "http://app:3100"

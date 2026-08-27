@@ -42,6 +42,63 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # A docs-only pull request does not pay for the chain-bound gate. Before
+  # this job existed a README edit cost the full Rust workspace gate, two
+  # Solana SBF builds and a devbox validation -- ten-plus minutes of runner
+  # time for a change nothing under crates/ could see. This job says what
+  # the PR touched, and `ci-status` at the bottom holds every heavy job to
+  # that verdict: a skip counts as a pass ONLY when this job said the gate
+  # had nothing to check, never because a job was cancelled or never ran.
+  #
+  # "Docs-only" is deliberately narrow -- every changed path is a Markdown
+  # file or lives under docs/ -- and it is NOT "test-free". Markdown is read
+  # by tests here: records_state_their_own_falsifier.rs walks all of docs/
+  # plus README.md, CONTEXT.md and CLAUDE.md; vendored_rfcs_are_unmodified.rs
+  # diffs docs/rfcs/; documented_config_keys.rs reads
+  # docs/protocol/configuration-spec.md; solana_program_ids.rs walks every
+  # tracked file. So a docs-only PR runs exactly those harnesses in
+  # `docs-gate` below, with no chain binary installed, instead of the whole
+  # workspace. Anything that is not Markdown -- a workflow, a TOML, a key
+  # file, a Makefile -- is code and gets the full gate.
+  #
+  # A `push` to main is never docs-only: the post-merge signal stays whole.
+  changes:
+    name: What changed
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+    steps:
+      - name: Classify the changed paths
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "not a pull request: full gate"
+            exit 0
+          fi
+          # The files API needs no checkout. Renames are classified by both
+          # names, so a file moved out of docs/ is code.
+          gh api --paginate "repos/${{ github.repository }}/pulls/${PR}/files" \
+            --jq '.[] | .filename, (.previous_filename // empty)' > changed.txt
+          echo "changed paths:"; sed 's/^/  /' changed.txt
+          # An empty list is an API failure, not an empty PR (the empty-PR
+          # guard runs elsewhere); 3000 is where that API stops listing.
+          if [ ! -s changed.txt ] || [ "$(wc -l < changed.txt)" -ge 3000 ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "could not classify every path: full gate"
+            exit 0
+          fi
+          if grep -vE '^(docs/|.*\.md$)' changed.txt; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "-> the paths above are not documentation: full gate"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "-> docs only: the record-reading tests, nothing chain-bound"
+          fi
+
   # The connector itself is Rust (ADR 0017) — `rust-gate` below is this repo's
   # real gate. The npm surface that remains is devnet tooling only (the faucet,
   # its Mina zkApp, the faucet dApp, and tools/fund-peers), so this job just
@@ -113,6 +170,8 @@ jobs:
   security:
     name: Security Audit
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     permissions:
       contents: read
       security-events: write
@@ -178,6 +237,8 @@ jobs:
   rust-gate:
     name: Rust Workspace Gate
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
 
     steps:
       # `submodules: recursive` (matching contracts.yml): connector-settlement-evm's
@@ -305,11 +366,67 @@ jobs:
       - name: Clippy (warnings denied)
         run: cargo clippy --workspace --exclude payment-channel --all-targets -- -D warnings
 
+  # The docs-only half of the gate (see `changes` above): the harnesses that
+  # read Markdown, and only those. No Foundry, no Solana CLI, no submodules --
+  # none of these tests touch a chain, and the EVM bindings build from the
+  # committed ABI. The `target` cache is restored from rust-gate's key and
+  # deliberately never saved from here, so a partial build can never become
+  # what the full gate restores.
+  docs-gate:
+    name: Docs Gate (record-reading tests)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'false'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Cargo registry and workspace target
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-gate-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            rust-gate-${{ runner.os }}-
+
+      - name: Run the tests that read Markdown
+        # `shell: bash` for the same reason as rust-gate: the pipe into tee
+        # must not swallow cargo's exit status (issue #652).
+        shell: bash
+        run: |
+          cargo test -p connector \
+            --test records_state_their_own_falsifier \
+            --test vendored_rfcs_are_unmodified \
+            --test documented_config_keys \
+            --test production_skeleton_is_inert 2>&1 | tee /tmp/cargo-test.log
+          cargo test -p connector-settlement-solana \
+            --test solana_program_ids 2>&1 | tee -a /tmp/cargo-test.log
+
+      - name: Assert no harness executed zero tests
+        # Same check as rust-gate (issue #471): a harness reporting
+        # `running 0 tests` is a broken harness, not a pass.
+        run: |
+          awk '
+            /^ *Running tests\// { harness = $0; next }
+            /^running 0 tests$/ && harness { print "EMPTY TEST HARNESS (reports success despite running nothing): " harness; found = 1; harness = "" }
+            /^running [0-9]/ { harness = "" }
+            END { if (found) exit 1 }
+          ' /tmp/cargo-test.log
+
   # Solana program tests (Rust/BPF) — packages/solana-program is the Cargo
   # crate `payment-channel`, a Cargo workspace member, not a TypeScript package.
   solana-program:
     name: Solana Program Tests (Rust)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
 
     steps:
       - name: Checkout code
@@ -388,6 +505,8 @@ jobs:
   solana-program-reproducibility:
     name: Solana Program Build Reproducibility (mainnet deploy path)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
 
     steps:
       - name: Checkout code
@@ -475,14 +594,20 @@ jobs:
           fi
           echo "Reproducible: both clean builds hash identically ($(cat /tmp/build1.sha256))."
 
-  # Summary job to provide clear CI status
+  # Summary job to provide clear CI status -- and the ONLY status branch
+  # protection requires, which is why it runs on every PR (`if: always()`)
+  # and why the docs-only skip is decided here and not by a workflow-level
+  # path filter: a path-filtered required check never reports, and the PR
+  # sits at "Expected" forever.
   ci-status:
     name: CI Status Summary
     runs-on: ubuntu-latest
     needs:
       [
+        changes,
         lint-and-format,
         rust-gate,
+        docs-gate,
         security,
         solana-program,
         solana-program-reproducibility,
@@ -494,45 +619,77 @@ jobs:
     steps:
       - name: Check CI Results
         run: |
+          CODE="${{ needs.changes.outputs.code }}"
           echo "=========================================="
           echo "CI/CD Pipeline Summary"
           echo "=========================================="
           echo ""
+          echo "Change classification: ${{ needs.changes.result }} (code=${CODE:-unset})"
+          echo ""
           echo "Job Results:"
           echo "  Lint & Format: ${{ needs.lint-and-format.result }}"
+          echo "  Tracked Key Guard: ${{ needs.tracked-secrets.result }}"
           echo "  Rust Workspace Gate: ${{ needs.rust-gate.result }}"
+          echo "  Docs Gate: ${{ needs.docs-gate.result }}"
           echo "  EVM Contracts: see Contracts workflow (.github/workflows/contracts.yml)"
           echo "  Solana Program: ${{ needs.solana-program.result }}"
           echo "  Solana Build Reproducibility: ${{ needs.solana-program-reproducibility.result }}"
           echo "  Devbox Validation: ${{ needs.devbox-validate.result }}"
-          echo "  Security: ${{ needs.security.result }}"
-          echo "  Tracked Key Guard: ${{ needs.tracked-secrets.result }}"
+          echo "  Security: ${{ needs.security.result }} (advisory)"
           echo ""
 
-          # Security is advisory (transitive dependency vulnerabilities), so it
-          # does not gate. Every other job must report SUCCESS — the fleet rule
-          # from toon-meta#279: a skipped or cancelled gating job must never
-          # read as a pass, so anything other than 'success' fails the summary.
-          if [[ "${{ needs.lint-and-format.result }}" != "success" ]] || \
-             [[ "${{ needs.rust-gate.result }}" != "success" ]] || \
-             [[ "${{ needs.solana-program.result }}" != "success" ]] || \
-             [[ "${{ needs.solana-program-reproducibility.result }}" != "success" ]] || \
-             [[ "${{ needs.devbox-validate.result }}" != "success" ]] || \
-             [[ "${{ needs.tracked-secrets.result }}" != "success" ]]; then
+          fail=0
+          # The fleet rule from toon-meta#279: a skipped or cancelled gating
+          # job must never read as a pass. `always` is a job that runs on
+          # every PR and must succeed. `heavy` is a job the `changes` verdict
+          # may skip: on a code change it must succeed; on a docs-only change
+          # it must have been skipped by that verdict (or, if it ran anyway,
+          # succeeded) -- a failure or a cancellation is a failure either way.
+          always() {
+            if [[ "$2" != "success" ]]; then echo "❌ $1: $2"; fail=1; else echo "✅ $1"; fi
+          }
+          heavy() {
+            if [[ "$CODE" == "true" ]]; then
+              always "$1" "$2"
+            elif [[ "$2" == "skipped" ]]; then
+              echo "⏭️  $1: skipped (docs-only change)"
+            else
+              always "$1" "$2"
+            fi
+          }
+
+          always "What changed" "${{ needs.changes.result }}"
+          if [[ "$CODE" != "true" && "$CODE" != "false" ]]; then
+            echo "❌ the change classification produced no verdict"; fail=1
+          fi
+          always "Lint & Format" "${{ needs.lint-and-format.result }}"
+          always "Tracked Key Guard" "${{ needs.tracked-secrets.result }}"
+          heavy "Rust Workspace Gate" "${{ needs.rust-gate.result }}"
+          heavy "Solana Program" "${{ needs.solana-program.result }}"
+          heavy "Solana Build Reproducibility" "${{ needs.solana-program-reproducibility.result }}"
+          heavy "Devbox Validation" "${{ needs.devbox-validate.result }}"
+          if [[ "$CODE" == "false" ]]; then
+            always "Docs Gate" "${{ needs.docs-gate.result }}"
+          elif [[ "${{ needs.docs-gate.result }}" != "skipped" && "${{ needs.docs-gate.result }}" != "success" ]]; then
+            always "Docs Gate" "${{ needs.docs-gate.result }}"
+          fi
+          # Security is advisory (transitive dependency vulnerabilities) and
+          # does not gate.
+
+          echo ""
+          if [[ "$fail" -ne 0 ]]; then
             echo "❌ CI Pipeline FAILED"
             echo ""
             echo "Please check the failed jobs above for details."
             exit 1
-          else
-            echo "✅ CI Pipeline PASSED"
-            echo ""
-            echo "All critical checks completed successfully!"
           fi
+          echo "✅ CI Pipeline PASSED"
 
   devbox-validate:
     name: Devbox Environment Validation
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && (github.event_name == 'push' || github.event_name == 'pull_request')
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

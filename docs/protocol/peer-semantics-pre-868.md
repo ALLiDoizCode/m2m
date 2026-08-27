@@ -75,7 +75,7 @@ connector receiving a PREPARE with an absent or all-zero condition MUST reject i
 is deleted, leaving one security model: a hop is paid only against a preimage it cannot forge.
 (The prototype's **legacy** class — an absent or all-zero condition auto-fulfilled without
 verification, recorded in
-[`docs/local-delivery-fulfillment-contract.md`](../local-delivery-fulfillment-contract.md), now
+`docs/local-delivery-fulfillment-contract.md` (deleted with the prototype; in git history), now
 superseded — has no counterpart here. `connector_domain::condition` defines presence as
 "not all-zero" and treats an absent condition as invalid on **both** wires, so there is no
 client-edge allowance left for this paragraph to carve out; a zero condition is refused at ingress

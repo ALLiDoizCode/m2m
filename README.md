@@ -3,19 +3,27 @@
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **A paid reverse proxy.** You put it in front of an ordinary HTTP app, you set a
-price, and it collects that price from whoever calls — in stablecoin, per
-request, without your app knowing payment exists.
+price, and it collects that price from whoever calls — in tokens, per request,
+without your app knowing payment exists.
 
 It does that by being an [Interledger](https://interledger.org) connector: value
 arrives wrapped in a protocol your app never speaks, and at the last hop this
 binary unwraps it, verifies it was paid for, and hands the app a plain HTTP
 request. **It terminates payments the way nginx terminates SSL.**
 
-The rest of this page is how to run one, in three steps — **run a node**, **put
-your app behind it**, **get paid** — then peering, the operator surface, and
-operating it. You do not need to know anything about Interledger. When you do
-want that, [`docs/rfcs/`](docs/rfcs/README.md) is the protocol, the ten RFCs it
-is built from, and where this connector departs from each.
+You do not need to know anything about Interledger to run one. This page is the
+journey, in three steps:
+
+|       | Step                                                | You end up with                                     |
+| ----- | --------------------------------------------------- | --------------------------------------------------- |
+| **1** | [Run a node](#1-run-a-node)                         | One binary, one config file, answering on a port.   |
+| **2** | [Put your app behind it](#2-put-your-app-behind-it) | Your app served through it, unchanged.              |
+| **3** | [Get paid](#3-get-paid)                             | A settlement chain, so anyone can pay what you ask. |
+
+Then [peering](#peering), [the operator surface](#the-operator-surface) for
+inspecting a node and moving its money, and [operating it](#operating-it) day to
+day. When you do want the protocol, [`docs/rfcs/`](docs/rfcs/README.md) is the ten
+RFCs it is built from and where this connector departs from each.
 
 ---
 
@@ -101,22 +109,33 @@ key_file = "/app/data/signer.key"   # 32 raw bytes, or 64 hex characters
 
 # One route per thing you serve. Longest matching prefix wins, so a more
 # specific prefix can sit beneath a broader one and take precedence.
+#
+# `price` is a whole number of the SMALLEST UNIT of the token you settle in
+# (step 3) — the way a card terminal counts in cents, never in dollars. How
+# many of those units make one token is the token's `decimals`. USDC has 6,
+# so 1,000,000 units are one USDC, and:
+#
+#     price = 1000        0.001 USDC   a tenth of a cent
+#     price = 100000      0.10  USDC   ten cents
+#     price = 1000000     1.00  USDC   one dollar
+#
+# A wallet or a dashboard shows the whole-token figure. This file never does.
 [[routes]]
 prefix      = "g.example.quotes"
 handler_url = "http://quotes:8080/"
-price       = 1000
+price       = 1000                       # 0.001 USDC per request
 
 [[routes]]
 prefix      = "g.example.search"
 handler_url = "http://search:8080/"
-price       = 2500
+price       = 2500                       # 0.0025 USDC
 
 # Same app, deeper prefix, different price. This wins over g.example.search
 # for g.example.search.bulk because it matches more labels.
 [[routes]]
 prefix      = "g.example.search.bulk"
 handler_url = "http://search:8080/bulk/"
-price       = 10000
+price       = 10000                      # 0.01 USDC, a cent
 ```
 
 Then ask the node what it is:
@@ -130,18 +149,20 @@ addresses, endpoints, identity key and settlement facts. A connector answers; it
 never announces. It is also the whole of what another operator needs to peer with
 you.
 
-**Three things about the config that bite people:**
-
-- **One TOML file, read once, immutable for the process lifetime.** There is no
-  environment-variable layer — `CONFIG_FILE` and friends do nothing, and the only
-  variable read is `RUST_LOG`. An unknown key is a hard load failure and a
-  removed key is refused **by name**, so a stale config says so at boot instead
-  of quietly doing nothing.
-- **Every key is a path, never a value.** No inline keys, no mnemonic, nowhere to
-  smuggle one through.
-- **`state_dir` is where this node records which claims it has already been
-  paid.** In a container it must be a mounted volume; a watermark that dies with
-  the container hands every payer their spent claims back as free service.
+> [!IMPORTANT]
+> **Three things about the config that bite people.**
+>
+> - **One TOML file, read once, immutable for the process lifetime.** There is
+>   no environment-variable layer — `CONFIG_FILE` and friends do nothing, and the
+>   only variable read is `RUST_LOG`. An unknown key is a hard load failure and a
+>   removed key is refused **by name**, so a stale config says so at boot instead
+>   of quietly doing nothing.
+> - **Every key is a path, never a value.** No inline keys, no mnemonic, nowhere
+>   to smuggle one through.
+> - **`state_dir` is where this node records which claims it has already been
+>   paid.** In a container it must be a mounted volume; a watermark that dies
+>   with the container hands every payer their spent claims back as free
+>   service.
 
 ## 2. Put your app behind it
 
@@ -177,12 +198,20 @@ anyone actually pay it.
 [settlement.evm]
 rpc_url          = "https://sepolia.base.org"
 contract_address = "0x…"          # the TokenNetworkRegistry, not a TokenNetwork
-token_address    = "0x…"
-decimals         = 6
+token_address    = "0x…"          # the token every price on this node is in
+decimals         = 6              # units per token: 6 means 1,000,000 = 1.00
 
 [settlement.evm.key]
 key_file = "/app/data/settlement.key"
 ```
+
+`decimals` is what turns a `price` into money. Every `price` in the config is a
+count of the token's smallest unit, and `decimals` says how many of those make
+one whole token — so with `decimals = 6`, `price = 1000` is 0.001 of the token,
+and a route meant to cost ten cents of USDC is `price = 100000`. The node reads
+the token's own decimals at boot and **refuses to start** if the config
+disagrees, because a wrong `decimals` is not a rounding error: it misprices
+every route by a factor of ten or more.
 
 That is all of it. **You do not list the channels your payers will use, and you
 could not** — a client's channel does not exist until that client opens it on
@@ -191,6 +220,7 @@ gives this node its on-chain identity, and it is where a claim naming a channel
 you have never heard of is **resolved from chain** and accepted. That resolution
 is what makes paying you permissionless rather than an arrangement.
 
+> [!WARNING]
 > **Fund the settlement key _before_ you start the node**, and know that
 > **booting a config is not a dry run**. A Solana backend submits a real
 > transaction at `connect`; with no gas the connector exits 1 on a chain error
@@ -199,13 +229,15 @@ is what makes paying you permissionless rather than an arrangement.
 
 You do not need to build the payer —
 [`toon-client`](https://github.com/toon-protocol/toon-client) is that — but two
-things help when debugging "why is nobody paying me". An ILP outcome is never an
-HTTP one: a `FULFILL` and a `REJECT` both come back at HTTP **200**. And a caller
-with no claim on a priced route gets **402** with an x402 document quoting the
-same price a real request would be charged.
+things help when debugging "why is nobody paying me":
+
+- **An ILP outcome is never an HTTP one.** A `FULFILL` and a `REJECT` both come
+  back at HTTP **200**.
+- **A caller with no claim on a priced route gets `402`**, with an x402 document
+  quoting the same price a real request would be charged.
 
 Claims are the truth; a balance is a projection of them. Turning them into money
-on chain is the operator surface's job — the next section but one.
+on chain is [the operator surface](#the-operator-surface)'s job.
 
 ---
 
@@ -237,17 +269,18 @@ A route sets **exactly one** of `handler_url` or `peer_id`. A forwarding route
 carries a `price` too — it is what the caller pays for the path — while the
 `fee` you keep for your own hop lives on the peering, not the route.
 
-Four things to know before you run it:
-
-- **It can spend gas**, because it may open a channel and wait for confirmation.
-  Safe to retry: the same request against an established peering finds the same
-  channel rather than opening a second one.
-- **`fee` and `max_packet_amount` are yours to choose.** No document can supply
-  them — they are your policy about this counterparty.
-- **A `502` is about them, a `400` is about you.** Unreachable, redirecting, or
-  describing a node you cannot peer with is `502` — go look at the URL.
-- **Their identity is trust-on-first-use over TLS, pinned by nothing.** You are
-  trusting whoever answers that URL today.
+> [!NOTE]
+> **Four things to know before you run it.**
+>
+> - **It can spend gas**, because it may open a channel and wait for
+>   confirmation. Safe to retry: the same request against an established
+>   peering finds the same channel rather than opening a second one.
+> - **`fee` and `max_packet_amount` are yours to choose.** No document can
+>   supply them — they are your policy about this counterparty.
+> - **A `502` is about them, a `400` is about you.** Unreachable, redirecting,
+>   or describing a node you cannot peer with is `502` — go look at the URL.
+> - **Their identity is trust-on-first-use over TLS, pinned by nothing.** You
+>   are trusting whoever answers that URL today.
 
 Every `PREPARE` you forward carries its own covering claim, so nothing is ever
 owed between packets — and equally, a hop can take your claim and decline to
@@ -259,8 +292,6 @@ The kill switch is `DELETE /peers/:id`.
 ## The operator surface
 
 The control plane: how you inspect a running node and how you move its money.
-(The retired TypeScript connector called this the "admin API" — that name, and
-`docs/operators/admin-api.md`, describe a surface this binary does not have.)
 
 It mounts **only** when `[operator]` is configured, and merges onto
 `client_edge_addr` — there is no second port and no second listener.
@@ -382,8 +413,9 @@ empty tier** — no machines, no mainnet contracts, no keys.
 | Path                                                                         | What it is                                                                              |
 | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
 | [`docs/rfcs/`](docs/rfcs/README.md)                                          | **The protocol.** Interledger, the ten vendored RFCs, and where TOON departs from each. |
-| [`docs/operators/`](docs/operators/)                                         | Runbooks: peering bring-up, key rotation, fleet release.                                |
 | [`docs/protocol/configuration-spec.md`](docs/protocol/configuration-spec.md) | Every config key, and what each one binds.                                              |
+| [`docs/protocol/operator-spec.md`](docs/protocol/operator-spec.md)           | The operator surface's rules, numbered.                                                 |
+| [`docs/operators/`](docs/operators/)                                         | Runbooks: peering bring-up, key rotation, fleet release and health.                     |
 | [`deploy/connector-rust/README.md`](deploy/connector-rust/README.md)         | The container path in full, including a hand-built image.                               |
 | [`local/`](local/README.md)                                                  | The shipped image against real chains — `make local-verify`.                            |
 | [`CONTEXT.md`](CONTEXT.md)                                                   | The vocabulary. Read before writing docs or naming anything.                            |

@@ -32,8 +32,9 @@ eventually does it.
 
 There is no third. What there is instead is a steady supply of language that assumes one. The
 promotion tag is called `:rust-release`; `promote-to-fleet.yml` quotes a design note about
-"validated before it hits production"; `CONNECTOR_RELEASE_CONTRACT.md` describes a supply-chain
-contract in the present tense for an image that is no longer published. None of that is wrong
+"validated before it hits production"; the prototype's `CONNECTOR_RELEASE_CONTRACT.md` (since
+deleted) described a supply-chain contract in the present tense for an image that is no longer
+published. None of that is wrong
 exactly, and all of it invites a reader to believe a production tier is somewhere nearby.
 
 The cost of leaving it unnamed is not confusion for its own sake. It is that every question

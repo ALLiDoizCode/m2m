@@ -30,7 +30,8 @@ batched.
 ## Why the reversal
 
 The old model is documented as deliberate in
-`docs/local-delivery-fulfillment-contract.md § Reject semantics`, and its argument is sound on
+the prototype's `docs/local-delivery-fulfillment-contract.md` (§ Reject semantics; deleted with
+the prototype, readable in git history), and its argument is sound on
 its own terms: the receiving connector is never exposed to an unpaid forward, and a claim
 already handed over cannot be voided unilaterally. But the second point is circular — the claim
 is unvoidable _because_ it was sent before the outcome was known.

@@ -59,7 +59,7 @@ instead is operator work in that repo, out of this document's scope.
 
 Steps 1, 4, 5 and 7 need SSH, key material or funds this environment does not have — same posture
 every other infra-touching ticket in this repo's history records when it applies
-(`relay-box-bringup.md`'s own table, `docs/operators/rust-cutover-runbook.md`).
+(`relay-box-bringup.md`'s own table).
 
 ## Preconditions
 

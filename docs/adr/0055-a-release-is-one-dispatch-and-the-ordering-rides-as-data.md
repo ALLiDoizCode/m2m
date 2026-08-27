@@ -66,8 +66,8 @@ rather than a reversal. So the constraint is stated here and asserted in the gat
 ### Why not semver
 
 The obvious version scheme is the one the retired TypeScript connector had:
-`semantic-release`, `X.Y.Z`, the contract in
-[`CONNECTOR_RELEASE_CONTRACT.md`](../../CONNECTOR_RELEASE_CONTRACT.md). It is the wrong scheme here,
+`semantic-release`, `X.Y.Z`, the contract in its `CONNECTOR_RELEASE_CONTRACT.md` (deleted with
+the rest of the prototype's records; in git history). It is the wrong scheme here,
 and `deploy/connector-rust/README.md` already said so about the image tags before this record
 existed:
 

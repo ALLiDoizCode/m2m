@@ -45,8 +45,8 @@ pub const DEFAULT_PEER_TIMEOUT_MS: u64 = 30_000;
 ///   `2`, and **1000** went over the peering (`docs/devnet-pricing.md`, "The
 ///   apex forward"; `docs/protocol/money-model-pre-868.md`'s worked example).
 /// * The largest single packet observed live on the fleet is **1998**
-///   (`docs/operators/parallel-fleet-comparison.md`'s
-///   `[write] … amount=1998`), and the retired TypeScript `announcePrice`
+///   (the parallel-fleet comparison's `[write] … amount=1998`, a record
+///   since deleted from `docs/operators/`; in git history), and the retired TypeScript `announcePrice`
 ///   buffer -- the biggest figure any devnet config ever named -- was
 ///   **2000**.
 ///
