@@ -584,6 +584,7 @@ async fn self_description(State(state): State<Arc<ClientEdgeState>>) -> Response
             prefix: route.prefix,
             price: route.price.base().to_string(),
             price_per_kib: (!route.price.is_flat()).then(|| route.price.per_kib().to_string()),
+            request: route.request,
         })
         .collect();
 
@@ -709,8 +710,9 @@ fn payment_required(
     price: Price,
     payload_len: usize,
     node: &NodeFacts,
+    request: Option<&serde_json::Value>,
 ) -> Response {
-    x402_response(destination, price, payload_len, node, None)
+    x402_response(destination, price, payload_len, node, None, request)
 }
 
 /// Answer a request to `destination` that arrived over a transport its
@@ -729,8 +731,16 @@ fn wrong_transport_required(
     payload_len: usize,
     required: TransportPolicy,
     node: &NodeFacts,
+    request: Option<&serde_json::Value>,
 ) -> Response {
-    x402_response(destination, price, payload_len, node, Some(required.name()))
+    x402_response(
+        destination,
+        price,
+        payload_len,
+        node,
+        Some(required.name()),
+        request,
+    )
 }
 
 fn x402_response(
@@ -739,8 +749,16 @@ fn x402_response(
     payload_len: usize,
     node: &NodeFacts,
     required_transport: Option<&str>,
+    request: Option<&serde_json::Value>,
 ) -> Response {
-    let body = x402_terms_body(destination, price, payload_len, node, required_transport);
+    let body = x402_terms_body(
+        destination,
+        price,
+        payload_len,
+        node,
+        required_transport,
+        request,
+    );
     let header_value = BASE64.encode(&body);
     Response::builder()
         .status(StatusCode::PAYMENT_REQUIRED)
@@ -769,6 +787,7 @@ fn x402_terms_body(
     payload_len: usize,
     node: &NodeFacts,
     required_transport: Option<&str>,
+    request: Option<&serde_json::Value>,
 ) -> Vec<u8> {
     connector_domain::x402::terms_body(&connector_domain::x402::GreetingTerms {
         destination,
@@ -778,6 +797,7 @@ fn x402_terms_body(
         required_transport,
         session_lease_ttl_ms: crate::session_registry::SESSION_LEASE_BACKSTOP_TTL.as_millis()
             as u64,
+        request,
     })
 }
 
@@ -1195,8 +1215,16 @@ async fn handle_ilp(
     // greeting, the over-carry bound, the claim gate and the reject's
     // accumulated cost -- is charged against it, so what is greeted and what
     // is collected cannot disagree.
-    let schedule = client_route.map_or(Price::FREE, |route| route.price);
+    let schedule = client_route
+        .as_ref()
+        .map_or(Price::FREE, |route| route.price);
     let charge = schedule.charge(prepare.data.len());
+    // Issue #1210: what a client should send to use this route, greeted
+    // alongside its price -- read off the same lookup, so the two cannot
+    // name different routes.
+    let request = client_route
+        .as_ref()
+        .and_then(|route| route.request.as_ref());
 
     // Transport policy (issue #701, toon-meta#262 decision 11) is checked
     // before payment is considered at all: a route restricted to BTP is
@@ -1205,7 +1233,7 @@ async fn handle_ilp(
     // like an unpaid one. A destination matching no configured route is
     // unaffected -- `None` here, same as an unmatched destination's price
     // -- and a forwarded route reports `Both`, so this never fires for one.
-    if let Some(policy) = client_route.map(|route| route.transport_policy) {
+    if let Some(policy) = client_route.as_ref().map(|route| route.transport_policy) {
         if !policy.accepts_http() {
             return wrong_transport_required(
                 &prepare.destination,
@@ -1213,6 +1241,7 @@ async fn handle_ilp(
                 prepare.data.len(),
                 policy,
                 &state.node,
+                request,
             );
         }
     }
@@ -1223,6 +1252,7 @@ async fn handle_ilp(
             schedule,
             prepare.data.len(),
             &state.node,
+            request,
         );
     }
 
@@ -1230,7 +1260,7 @@ async fn handle_ilp(
     // connector will not carry never spends the client's watermark. The
     // greeting above runs first, so an unpaying client learns the price it
     // must size its amount under rather than this refusal.
-    if let Some(route) = client_route {
+    if let Some(route) = client_route.as_ref() {
         if let Some(reject) =
             over_carried_reject(&prepare.destination, route.kind, prepare.amount, charge)
         {
@@ -2224,6 +2254,57 @@ mod tests {
         );
     }
 
+    /// Issue #1210: a route's `request` table rides on the HTTP 402
+    /// greeting, at the top level -- beside `resource`, not inside
+    /// `accepts[]` -- and a route with none is unaffected.
+    #[tokio::test]
+    async fn an_unpaid_request_to_a_route_with_a_request_table_is_greeted_with_it() {
+        let declared = serde_json::json!({"protocol": "nip90", "kinds": [5096, 5098]});
+        let route = StaticRoute::new_priced("g.toon.gas", "http://localhost:4000", 100)
+            .unwrap()
+            .with_request(declared.clone());
+        let plain_route =
+            StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+        let connector = Arc::new(Connector::new(
+            vec![route, plain_route],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router(connector, test_signer());
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(sample_prepare("g.toon.gas").encode()))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["request"], declared);
+        assert!(
+            value["accepts"][0].get("request").is_none(),
+            "request describes the resource, not a payment option"
+        );
+
+        let plain_request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(sample_prepare("g.example.app").encode()))
+            .unwrap();
+        let plain_response = app.oneshot(plain_request).await.unwrap();
+        let bytes = hyper::body::to_bytes(plain_response.into_body())
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            value.get("request").is_none(),
+            "a route with no request table must greet with no request key: {value}"
+        );
+    }
+
     /// Issue #803: an all-zero `executionCondition` addressed at a priced
     /// route is greeted (`402`), not `F01`-rejected -- the opposite of what
     /// issue #417's blanket "every PREPARE needs a real condition" rule
@@ -2850,6 +2931,44 @@ mod tests {
         );
         assert_eq!(document["supportedVersions"], serde_json::json!([1]));
         assert_eq!(document["defaultVersion"], serde_json::json!(1));
+    }
+
+    /// Issue #1210: a route's `request` table shows up on its own entry in
+    /// the self-description as JSON equal to the table, and a route with
+    /// none has no `request` key at all.
+    #[tokio::test]
+    async fn the_self_description_carries_each_routes_request_table() {
+        let declared = serde_json::json!({"protocol": "nip90", "kinds": [5096, 5098]});
+        let with_request = StaticRoute::new_priced("g.toon.gas", "http://localhost:4000", 100)
+            .unwrap()
+            .with_request(declared.clone());
+        let without_request =
+            StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+        let connector = Arc::new(Connector::new(
+            vec![with_request, without_request],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router(connector, test_signer());
+
+        let document = self_description_of(app).await;
+
+        let routes = document["routes"].as_array().unwrap();
+        let gas = routes
+            .iter()
+            .find(|route| route["prefix"] == "g.toon.gas")
+            .unwrap();
+        assert_eq!(gas["request"], declared);
+        let plain = routes
+            .iter()
+            .find(|route| route["prefix"] == "g.example.app")
+            .unwrap();
+        assert!(
+            plain.get("request").is_none(),
+            "a route with no request table must have no request key: {plain}"
+        );
     }
 
     /// ND-06: the edge identity -- the key a packet's payload is sealed to

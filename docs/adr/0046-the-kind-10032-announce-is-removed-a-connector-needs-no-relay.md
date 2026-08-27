@@ -1,6 +1,6 @@
 # The kind:10032 announce is removed: a connector must work with no relay in the world
 
-**Status:** Accepted — **built** (#1074). **Retires [0030](0030-an-operator-announces-a-node-the-node-still-does-not.md) in full.** Restores [0022](0022-a-connector-answers-it-does-not-announce.md) and [0006](0006-the-connector-is-mechanism-not-policy.md) without qualification: a connector answers, and does nothing else about being found. The `[announce]` section did **not** become a tombstone — two of its fields feed the packet path and were re-homed into `[node]` by [0050](0050-a-connectors-url-resolves-to-its-self-description.md) (#1080), which landed in the same change.
+**Status:** Accepted — **built** (#1074). **Retires [0030](0030-an-operator-announces-a-node-the-node-still-does-not.md) in full.** Restores [0022](0022-a-connector-answers-it-does-not-announce.md) and [0006](0006-the-connector-is-mechanism-not-policy.md) without qualification: a connector answers, and does nothing else about being found. The `[announce]` section did **not** become a tombstone — two of its fields feed the packet path and were re-homed into `[node]` by [0050](0050-a-connectors-url-resolves-to-its-self-description.md) (#1080), which landed in the same change. Extended by [0067](0067-a-route-declares-its-request-shape-and-the-connector-never-reads-it.md): the answer a connector gives now also says what to send a route.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
