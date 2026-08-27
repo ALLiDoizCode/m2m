@@ -193,7 +193,7 @@ connector boxes are still using the **old** mint.
    (`FLEET_SOLANA_USDC_MINT`) and `infra/linode/endpoints.json`.
 2. Land the same address in each box's OWN committed config — `toon-protocol/relay`'s and
    `toon-protocol/store`'s `deploy/connector.toml`. Step 1 alone moves nothing: since
-   [ADR 0066](../adr/0066-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md)
+   [ADR 0068](../adr/0068-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md)
    its files are fixtures this repo's tests boot, not what either box reads, and there is no
    `fleet-ops config-apply` any more. Config first, always: the binary and the box's bind-mounted
    TOML are a matched pair in both directions.

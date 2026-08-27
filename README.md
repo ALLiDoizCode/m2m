@@ -43,6 +43,17 @@ mkdir -p node/config node/data && cd node
 openssl rand -hex 32 > data/signer.key && chmod 600 data/signer.key
 ```
 
+> [!NOTE]
+> **The published image is `linux/amd64` only.** On Apple Silicon (or any other
+> arm64 host), pull and run it under emulation:
+>
+> ```bash
+> docker pull --platform linux/amd64 ghcr.io/toon-protocol/connector:rust-main
+> ```
+>
+> and add `platform: linux/amd64` next to `image:` on the `connector` service in
+> `compose.yml` below.
+
 `compose.yml`:
 
 ```yaml
@@ -163,7 +174,8 @@ curl http://localhost:3000/ilp
 That free, unauthenticated `GET` returns the node's self-description — its
 addresses, endpoints, identity key and settlement facts. A connector answers; it
 never announces. It is also the whole of what another operator needs to peer with
-you.
+you, once [`[node]` and `peer_expose`](#being-peerable) are set — this minimal
+config's own self-description has no endpoints and nothing to dial.
 
 > [!IMPORTANT]
 > **Three things about the config that bite people.**
@@ -315,17 +327,53 @@ on chain is [the operator surface](#the-operator-surface)'s job.
 ## Peering
 
 Terminating your own routes earns from callers who know your address. Peering
-puts you on paths that start somewhere else. It is one authenticated write:
+puts you on paths that start somewhere else.
+
+### Being peerable
+
+Step 1's config boots and serves, but nobody can peer _with_ it: its
+self-description has no endpoints and `"peerCarriages": []`, so a
+counterparty's `POST /peers` at it answers `502`. Three more keys, none of
+them shown above, close that gap:
+
+```toml
+# Top level, so it goes above every table — beside step 1's client_edge_addr.
+peer_expose = "http"             # "btp", "http", "both", or "neither" (default)
+
+[node]
+addresses     = ["g.your.node"]
+http_endpoint = "https://your-node.example/ilp"
+```
+
+`peer_expose` says which carriage(s) _this_ node opens a peer listener for.
+`[node]` publishes where clients reach it — both listeners are served
+whatever `peer_expose` says, so publishing either endpoint is always allowed.
+What `peer_expose` decides is what you may _omit_: `btp_endpoint` is required
+only when `"btp"` or `"both"` is exposed, and `http_endpoint` is required
+whenever anything is exposed, because a peer pays you by asking your client
+edge over HTTP whichever carriage its packets ride. So an HTTP-only node
+writes `http_endpoint` and simply leaves `btp_endpoint` out; a BTP node writes
+both; and with `"neither"` (the default) a `[node]` naming only `addresses` is
+legal and still answers `GET /ilp`, it is just not dialable.
+
+For a local or pre-TLS trial only, add `peer_allow_plaintext_endpoints = true`
+at the top level so `http://`/`ws://` endpoints are accepted too — every
+deployed config should stay on `https://`/`wss://`.
+
+With that in place, `GET /ilp` really is the whole of what another operator
+needs to peer with you. It is one authenticated write:
 
 ```
-POST /peers   { "id": "their-node", "url": "https://their-node.example",
+POST /peers   { "id": "their-node", "url": "https://their-node.example/ilp",
                 "fee": 100, "max_packet_amount": 1000000 }
 ```
 
-The node fetches their self-description, picks the carriage from their endpoint's
-scheme (`wss://` → BTP, `https://` → ILP-over-HTTP), finds the shared settlement
-chain, and derives the channel from the two participants — no channel identifier
-is ever exchanged, and there is no shared secret.
+`url` is their connector's self-description URL — the one whose `GET` answers
+with that description (ADR 0050) — not their origin. The node fetches it, picks
+the carriage from their endpoint's scheme (`wss://` → BTP, `https://` →
+ILP-over-HTTP), finds the shared settlement chain, and derives the channel from
+the two participants — no channel identifier is ever exchanged, and there is no
+shared secret.
 
 A route can then **forward** to that peering instead of terminating:
 
@@ -457,6 +505,10 @@ ed25519 public key in hex. `connector send` is a worked example: it signs a
 `POST /packets` this way, and `--expect-fulfill` makes a non-fulfilled packet a
 non-zero exit, which is what turns a rehearsal into a gate.
 
+For every other write — `POST /peers` above all —
+[`docs/operators/sign-write.sh`](docs/operators/sign-write.sh) is a shell-and-`openssl` signer with
+a worked example in [`docs/operators/signing-a-write.md`](docs/operators/signing-a-write.md).
+
 ---
 
 ## Operating it
@@ -468,7 +520,7 @@ connector that handled it. `RUST_LOG=debug` for more.
 
 **Releases.** A release is one dispatch of `release-connector.yml`: it builds the
 image, cuts a dated handle and opens a GitHub Release. It does not deploy, and
-nothing here moves a tag onto a box (ADR 0066) — a node repository pins the
+nothing here moves a tag onto a box (ADR 0068) — a node repository pins the
 connector image it runs, by release handle, in its own `deploy/` bundle. Because
 the binary and a box's mounted TOML are a matched pair in both directions,
 **adding a required config key is a breaking deploy**: land the config first, then

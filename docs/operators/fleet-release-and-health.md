@@ -4,7 +4,7 @@ How a merge becomes a running devnet box, what stops a bad one, and how you find
 something is down.
 
 Decision records: [ADR 0041](../adr/0041-a-moving-tag-carries-the-fleets-committed-config-or-it-does-not-move.md),
-[ADR 0066](../adr/0066-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md).
+[ADR 0068](../adr/0068-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md).
 Epic: toon-meta#403.
 
 ---
@@ -16,7 +16,7 @@ The three boxes are no longer one shape. The **faucet** box still deploys from t
 only where noted. The **relay** and **store** (`ario`) boxes each deploy the connector from their
 own repository's `deploy/` bundle — `toon-protocol/relay`, `toon-protocol/store` — pinning it by
 release handle in exactly one place there. **Nothing in this repository moves a tag onto either
-box any more** (ADR 0066): `fleet-ops.yml` no longer offers `box=relay`/`box=ario`, and
+box any more** (ADR 0068): `fleet-ops.yml` no longer offers `box=relay`/`box=ario`, and
 `promote-to-fleet.yml` is deleted.
 
 `swap`, `store` and `relay` (the apps, not the connector boxes) keep the auto-on-green regime
@@ -53,7 +53,7 @@ longer lives in this repository.
 
 `:rust-release` is **frozen**. It used to be a promotion tag moved only by an explicit
 `promote-to-fleet.yml` dispatch after booting the candidate against both boxes' committed
-`connector-rust.toml`; ADR 0066 retired that mechanism because there is nothing left in this repo
+`connector-rust.toml`; ADR 0068 retired that mechanism because there is nothing left in this repo
 for it to check. Do not wire anything to move it — a floating tag moving unsupervised shipped once
 (#990) and was reverted, and there is even less reason to repeat it now.
 
@@ -102,7 +102,7 @@ the config a build must boot against lives there, not here.
 ## Health checks and alerts
 
 `.github/workflows/fleet-health.yml` runs every 15 minutes and on demand — schedule or dispatch
-only (ADR 0066 removed the `workflow_call` trigger it used to fire after a promotion, along with
+only (ADR 0068 removed the `workflow_call` trigger it used to fire after a promotion, along with
 the promotion itself). It is strictly read-only on the boxes.
 
 It does **not** take a hardcoded service list. It discovers "every container carrying the Watchtower

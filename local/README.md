@@ -46,7 +46,7 @@ This one deliberately does **not** use the fleet's configs — its own name
 local container URLs, which is exactly the substitution ADR 0041's config-boot
 doctrine exists to avoid making. (`promote-to-fleet.yml`, which used to run a
 config-compatibility check against a _candidate_ image before moving a fleet
-tag, is retired — ADR 0066: neither devnet box deploys the connector from this
+tag, is retired — ADR 0068: neither devnet box deploys the connector from this
 repository any more.)
 
 ## Connector layer only
@@ -179,10 +179,10 @@ from the fulfilment that wrap derives (ADR 0019), inside an RFC 9421-signed
 
 ```sh
 connector send \
-  --operator  http://127.0.0.1:3001 \   # whose /packets originates it (two-hop's A)
+  --operator  http://127.0.0.1:3001 \       # whose /packets originates it (two-hop's A)
   --operator-key local/.keys/two-hop/connector-a/operator-send.key \
-  --to        g.local.two-hop.b.app \   # the ILP destination
-  --seal-to   http://127.0.0.1:3002 \   # the connector that TERMINATES it (B)
+  --to        g.local.two-hop.b.app \       # the ILP destination
+  --seal-to   http://127.0.0.1:3002/ilp \   # the connector that TERMINATES it (B)
   --amount    1000 \
   --body      payload.json \
   --expect-fulfill
@@ -190,9 +190,11 @@ connector send \
 
 `--seal-to` is separate from `--operator` because a payload is sealed to the
 node that terminates it, which in a multi-hop topology is not the node the
-packet is handed to. There is no way to discover that node's identity from the
-destination address today; when ADR 0050 ships (`GET` on a connector's URL
-returns its self-description) this flag becomes optional.
+packet is handed to. It takes that node's self-description URL (ADR 0050) —
+the one whose `GET` answers with the identity to seal to, e.g.
+`http://127.0.0.1:3002/ilp` — never an origin. ADR 0050 publishes that
+identity; it does not yet let a client _discover_ which URL to ask, so the
+caller still names it directly.
 
 `--expect-fulfill` is what makes the rehearsal a gate. Without it a REJECT is
 reported and the process exits 0 — right for an operator probing what a route

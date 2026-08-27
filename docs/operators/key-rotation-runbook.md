@@ -51,7 +51,7 @@ box, restart the service that reads it, confirm the old value is dead.
    `docs/operators/devnet-ssh-hardening.md` §2) at the exact path the config's `key_file`/
    `secret_file` already names. A change to a config file _field_ goes through whichever repo
    deploys that box — for relay and store, their own `deploy/` bundles, since
-   [ADR 0066](../adr/0066-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md)
+   [ADR 0068](../adr/0068-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md)
    retired this repo's `fleet-ops config-apply`. Set `chmod 600` and `chown 10001:10001` (the container's uid,
    `deploy/connector-rust/README.md` §1) — a key unreadable by that uid fails the service at
    startup, loudly, not silently.
@@ -62,7 +62,7 @@ box, restart the service that reads it, confirm the old value is dead.
 4. **Restart the service that reads it.** `docker compose restart <service>` on the box for
    anything the running connector reads (signer, settlement, peering) — `fleet-ops.yml`'s
    `restart` operation does this for the faucet box only, the one box this repo still deploys
-   (ADR 0066); the box's own gas-station tooling for that key, since it is not read by
+   (ADR 0068); the box's own gas-station tooling for that key, since it is not read by
    `connector-rust.toml` at all.
 5. **Verify** per §4 below before considering the rotation complete.
 6. **Confirm the peer side too**, for a peering secret — both ends hold the same bytes, so a
@@ -117,7 +117,7 @@ change on the box proves the box moved on, not that the old key is now safe to l
 git history or logs it may already be in.
 
 Reading the box's config back (by hand over ssh — `fleet-ops.yml`'s `config-read` was retired with
-its relay/store legs, ADR 0066) confirms the `key_file`/`secret_file` _path_ and nothing more: a
+its relay/store legs, ADR 0068) confirms the `key_file`/`secret_file` _path_ and nothing more: a
 bind-mounted key file's bytes are not in the config, so this is never a substitute for the digest
 comparison above.
 

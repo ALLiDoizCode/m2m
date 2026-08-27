@@ -10,7 +10,7 @@
 # `infra/linode-{relay,store}/connector-rust.toml` to `/root/connector` on
 # those boxes — a checkout neither box's running container reads any more —
 # and re-reading the same dead path back to "confirm" the write. It reported
-# success while the box was unchanged. ADR 0066 records the retirement this
+# success while the box was unchanged. ADR 0068 records the retirement this
 # file is now scoped to match: a node repo pins the connector; nothing here
 # moves a tag onto a relay or store box, and this file no longer offers to.
 #

@@ -18,7 +18,7 @@
 # crates/connector-bin/tests/fleet_release_gate.rs is the regression guard;
 # it fails the build if a trigger is ever added here.
 #
-# ── WHAT THIS IS NOT, AS OF ADR 0066 ────────────────────────────────────────
+# ── WHAT THIS IS NOT, AS OF ADR 0068 ────────────────────────────────────────
 # This workflow used to end by dispatching `promote-to-fleet.yml`, which
 # moved a `:rust-release` tag both the relay and store boxes' Watchtower
 # followed, gated on a hand-answered "does this build need a landed config
@@ -26,12 +26,12 @@
 # repos' `deploy/` bundles (`toon-protocol/relay`, `toon-protocol/store`),
 # each pinning the connector by release handle in exactly one place in that
 # repo. There is nothing left in THIS repo for a promotion to move a tag
-# onto — ADR 0066 retires the mechanism rather than repairing it.
+# onto — ADR 0068 retires the mechanism rather than repairing it.
 #
 # This workflow's job ends at the GitHub Release. Bumping a node repo's pin
 # to a new handle is that repo's own reviewed change, not a step here.
 #
-# The record for this workflow is ADR 0055 (superseded in part by ADR 0066).
+# The record for this workflow is ADR 0055 (superseded in part by ADR 0068).
 # ADR 0041 remains the record for why the image was supervised at all.
 #
 # ── THE RELEASE HANDLE IS A DATE AND A COUNTER, NOT A VERSION ───────────────
@@ -235,7 +235,7 @@ jobs:
 
           A node repository (\`toon-protocol/relay\`, \`toon-protocol/store\`) adopts
           this build by bumping its own pinned connector tag to \`${BUILD_TAG}\` in
-          its own reviewed change (ADR 0066) — nothing here deploys it.
+          its own reviewed change (ADR 0068) — nothing here deploys it.
 
           ${NOTES}
           BODY_EOF

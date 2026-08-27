@@ -22,7 +22,7 @@
 # `infra/linode-store/connector-rust.toml` are gate-checked fixtures:
 # `crates/connector-bin/tests/devnet_configs_load.rs` boots them through the
 # real binary and asserts over their contents on every `cargo test`, even
-# though neither box runs them any more (ADR 0066 — each box deploys from its
+# though neither box runs them any more (ADR 0068 — each box deploys from its
 # own repository's `deploy/` bundle now). A placeholder file in that
 # directory has exactly two futures: it breaks a gate, or somebody "fixes" it
 # into something real. `deploy/` is where this repository keeps recipes
@@ -52,7 +52,7 @@
 #               Disposable, funded from genesis, no shared state.
 #   devnet      Two Linode boxes. Public testnets (Base Sepolia, Solana
 #               devnet), faucet-funded, each box pinning its connector image
-#               by release handle in its OWN repository (ADR 0066).
+#               by release handle in its OWN repository (ADR 0068).
 #   production  This file. Nothing else.
 #
 # `CLAUDE.md`'s Environments table is the short version of the same thing.

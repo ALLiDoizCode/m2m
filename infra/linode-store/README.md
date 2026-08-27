@@ -13,4 +13,4 @@ real and worth keeping — it is just no longer a claim about what the box runs.
 
 Changing a file here changes nothing on the box. To change what the store box actually runs, open
 a change in `toon-protocol/store`. `.github/workflows/fleet-ops.yml` no longer offers `box=ario` —
-see [ADR 0066](../../docs/adr/0066-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md).
+see [ADR 0068](../../docs/adr/0068-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md).

@@ -120,7 +120,7 @@ real binary and can only assert that far, because a GitHub runner has no chain t
 reach. `local/` has chains, so serving is an assertion — but its configs necessarily
 name local container URLs, so it can never be the fleet check. There is no longer a
 promotion gate that boots a _candidate_ image against the fleet's configs before a
-deploy — ADR 0066 retired `promote-to-fleet.yml`, since neither devnet box deploys
+deploy — ADR 0068 retired `promote-to-fleet.yml`, since neither devnet box deploys
 the connector from this repository any more.
 
 `connector send` is the binary's second verb (serving is the other; `announce` was removed by
@@ -230,7 +230,7 @@ mint script and the local topology are devnet-and-below only.
 | Tier           | What it is                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **local**      | `docker-compose.yml` chain profiles, and the connector image run against them — that is `local/`. Disposable, funded from genesis, no shared state.                                                                                                                                                                                                                                                                                                                     |
-| **devnet**     | Two Linode boxes — relay and store (`ario`) — plus a connector-less faucet box. The relay and store boxes deploy the connector from their OWN repos' `deploy/` bundles (`toon-protocol/relay`, `toon-protocol/store`), each pinning it by release handle in one place (ADR 0066). `infra/linode-relay/` and `infra/linode-store/` are fixtures this repo's tests boot, not what either box runs. The faucet box still deploys from `infra/linode-faucet/` in this repo. |
+| **devnet**     | Two Linode boxes — relay and store (`ario`) — plus a connector-less faucet box. The relay and store boxes deploy the connector from their OWN repos' `deploy/` bundles (`toon-protocol/relay`, `toon-protocol/store`), each pinning it by release handle in one place (ADR 0068). `infra/linode-relay/` and `infra/linode-store/` are fixtures this repo's tests boot, not what either box runs. The faucet box still deploys from `infra/linode-faucet/` in this repo. |
 | **production** | **Named and empty** (ADR 0056). No machines, no mainnet contracts, no keys, no deploy. Its one artefact is `deploy/connector-rust/connector.production.toml`, a skeleton in which every value is invalid on purpose.                                                                                                                                                                                                                                                    |
 
 Production is blocked on two deployments, not on configuration: `packages/contracts`
@@ -242,7 +242,7 @@ do not put it under `infra/`: those are gate-checked fixtures, not a place to ad
 file that must never load.
 `crates/connector-bin/tests/production_skeleton_is_inert.rs` fails the build on either.
 
-**Nothing in this repository moves a tag onto the relay or store box (ADR 0066).**
+**Nothing in this repository moves a tag onto the relay or store box (ADR 0068).**
 `:rust-release` used to be a promotion tag, moved only by an explicit
 `promote-to-fleet.yml` dispatch after checking the candidate image still booted both
 boxes' committed configs. That mechanism is retired: neither box deploys the
@@ -256,7 +256,7 @@ and was reverted, and there is even less reason to repeat it now that nothing
 supervises the move at all.
 
 A **release** is one human dispatch of `release-connector.yml` (ADR 0055, amended by
-ADR 0066), after which build → handle → GitHub Release happen without further input.
+ADR 0068), after which build → handle → GitHub Release happen without further input.
 It is `workflow_dispatch` only, and must stay that way — adding any automatic trigger
 reverses ADR 0041 Decision 3. Releases are named by a monotonic handle
 (`2026.08.21.1`, UTC date plus that day's ordinal), never semver: every crate is

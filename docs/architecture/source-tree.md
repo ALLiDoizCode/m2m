@@ -222,7 +222,7 @@ through a running node's operator surface, because only a running node can submi
 
 `infra/` provisions machines. `linode-relay/` and `linode-store/` describe the two connector
 devnet boxes — bootstrap script, nginx and Let's Encrypt, compose overlays and
-`connector-rust.toml` — but are fixtures now (ADR 0066): each box actually deploys from its
+`connector-rust.toml` — but are fixtures now (ADR 0068): each box actually deploys from its
 own repository's `deploy/` bundle (`toon-protocol/relay`, `toon-protocol/store`), and these
 directories exist so `devnet_configs_load.rs` keeps booting realistic fleet-shaped configs.
 `linode-faucet/` is the faucet box, and is not a fixture — it still deploys from here.

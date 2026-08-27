@@ -2,7 +2,7 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TOON devnet lifecycle manager — provision, point DNS at, tear down, or probe
 # the devnet fleet: Store-DVM / Relay. It no longer deploys to either box; see
-# the ADR 0066 note below.
+# the ADR 0068 note below.
 #
 # The apex ("toon"/g.toon proxy box) is GONE (issue #872, toon-meta#310 /
 # toon-meta#313's live cutover): the fleet is two connector-bearing boxes now
@@ -28,7 +28,7 @@
 #   ./devnet-manage.sh ips       Print current box IPs
 #   ./devnet-manage.sh dns       Sync Porkbun A-records to current box IPs
 #
-# ADR 0066 (issue #1213): `up`/`store`/`relay` PROVISION the box and its DNS
+# ADR 0068 (issue #1213): `up`/`store`/`relay` PROVISION the box and its DNS
 # only. Neither box is deployed to FROM THIS SCRIPT any more — the store and
 # relay boxes each run their own repository's `deploy/` bundle
 # (`toon-protocol/store`, `toon-protocol/relay`), bootstrapped by that repo,
@@ -238,7 +238,7 @@ up)
   # (before that split landed) is gone entirely as of issue #872.
   update_dns "relay-ws.devnet"      "$RELAY_IP"
 
-  echo "Boxes provisioned. Deploy is no longer done from this script (ADR 0066):"
+  echo "Boxes provisioned. Deploy is no longer done from this script (ADR 0068):"
   echo "  store -> bootstrap from toon-protocol/store's own deploy/ bundle"
   echo "  relay -> bootstrap from toon-protocol/relay's own deploy/ bundle"
   "$0" status
@@ -253,7 +253,7 @@ store)
   echo "==> [2/2] Update DNS"
   update_dns "proxy.ario.devnet"  "$STORE_IP"
   update_dns "dvm.devnet"         "$STORE_IP"
-  echo "Provisioned at ${STORE_IP:-<not found>}. Deploy from toon-protocol/store's own deploy/ bundle (ADR 0066)."
+  echo "Provisioned at ${STORE_IP:-<not found>}. Deploy from toon-protocol/store's own deploy/ bundle (ADR 0068)."
   "$0" status
   ;;
 
@@ -268,7 +268,7 @@ relay)
   # relay-ws.devnet belongs to this box too, post-#820 — see the `up)` case's
   # comment for why it used to sit on the apex and what had to land first.
   update_dns "relay-ws.devnet"    "$RELAY_IP"
-  echo "Provisioned at ${RELAY_IP:-<not found>}. Deploy from toon-protocol/relay's own deploy/ bundle (ADR 0066)."
+  echo "Provisioned at ${RELAY_IP:-<not found>}. Deploy from toon-protocol/relay's own deploy/ bundle (ADR 0068)."
   "$0" status
   ;;
 

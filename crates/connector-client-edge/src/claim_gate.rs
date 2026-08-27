@@ -370,6 +370,18 @@ impl ClaimIngestRejection {
     }
 }
 
+/// A channel's live watermark together with the exact claim bytes that
+/// produced it (issue #1218): a watermark alone says what was spent, but
+/// only the signature is redeemable -- the same reason the peer semantics's
+/// own `connector_runtime::ClaimBook` (via `connector_domain::Projection`'s
+/// `inbound_claim_signature`) retains one alongside its watermark rather
+/// than discarding it once the acceptance decision is made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveClaim {
+    watermark: Watermark,
+    signature: Vec<u8>,
+}
+
 /// Per-channel watermark state for claims presented at the client edge,
 /// over the channels this connector has a record of -- durable across a
 /// restart, since a watermark that only lives in this process is not a
@@ -380,13 +392,14 @@ pub struct ClientClaimGate {
     /// counterparty is configuration, not something an arriving claim may
     /// teach this connector.
     channels: ClientChannelRegistry,
-    /// The live watermarks. Every acceptance is decided, advanced *and
-    /// enqueued for journaling* under this one write lock (issue #605,
-    /// #686), so the journal's entry order and the watermark order are the
-    /// same order -- what a replay reconstructs is exactly the state this
-    /// gate held. Shared with the committer thread, which needs the same
-    /// lock to roll a failed batch's advances back.
-    watermarks: Arc<RwLock<HashMap<String, Watermark>>>,
+    /// The live watermarks, each paired with the signature that earned it
+    /// (issue #1218). Every acceptance is decided, advanced *and enqueued
+    /// for journaling* under this one write lock (issue #605, #686), so the
+    /// journal's entry order and the watermark order are the same order --
+    /// what a replay reconstructs is exactly the state this gate held.
+    /// Shared with the committer thread, which needs the same lock to roll
+    /// a failed batch's advances back.
+    watermarks: Arc<RwLock<HashMap<String, LiveClaim>>>,
     /// What each channel in [`Self::watermarks`] held immediately before
     /// its *current* entry there -- i.e. exactly what [`Self::roll_back`]
     /// restores when the packet that advanced a channel to its current
@@ -402,7 +415,7 @@ pub struct ClientClaimGate {
     /// [`PendingAcceptance`], which undoes a *failed-durability* advance
     /// rather than a *reported-uncarried* one and is computed fresh for
     /// the batch it is undoing.
-    previous_watermarks: RwLock<HashMap<String, Option<Watermark>>>,
+    previous_watermarks: RwLock<HashMap<String, Option<LiveClaim>>>,
     /// The group-commit seam between an acceptance and its durability
     /// (issue #686): entries enqueued under the watermark lock, batched
     /// into one journal write + fsync outside it.
@@ -667,7 +680,42 @@ impl ClientClaimGate {
             .read()
             .expect("client claim watermarks lock poisoned")
             .get(&canonical_channel_key(channel_key))
-            .copied()
+            .map(|record| record.watermark)
+    }
+
+    /// The highest-nonce claim this gate has ever accepted on `channel_key`,
+    /// as `(nonce, cumulative_amount, signature)` -- exactly what an
+    /// on-chain redemption submits (issue #1218), mirroring
+    /// `connector_domain::Projection::latest_inbound_claim`, the peer
+    /// semantics's own equivalent read. `None` before any claim has been
+    /// accepted on this channel.
+    pub fn latest_inbound_claim(&self, channel_key: &str) -> Option<(u64, u64, Vec<u8>)> {
+        self.watermarks
+            .read()
+            .expect("client claim watermarks lock poisoned")
+            .get(&canonical_channel_key(channel_key))
+            .map(|record| {
+                (
+                    record.watermark.nonce,
+                    record.watermark.cumulative_amount,
+                    record.signature.clone(),
+                )
+            })
+    }
+
+    /// Every channel this gate has ever accepted a claim on, and that
+    /// claim's watermark (issue #1218): what `GET /claims` and
+    /// `GET /channels` need to enumerate the client-edge book, the same way
+    /// `connector_runtime::ClaimBook::views` enumerates the peer book.
+    /// Carries no signature -- nothing reads this list to redeem;
+    /// [`Self::latest_inbound_claim`] is the redeem path.
+    pub fn accepted_channels(&self) -> Vec<(String, Watermark)> {
+        self.watermarks
+            .read()
+            .expect("client claim watermarks lock poisoned")
+            .iter()
+            .map(|(channel_id, record)| (channel_id.clone(), record.watermark))
+            .collect()
     }
 
     /// The registry of channels this gate accepts a claim on -- their
@@ -828,7 +876,11 @@ impl ClientClaimGate {
                 .watermarks
                 .read()
                 .expect("client claim watermarks lock poisoned");
-            check_freshness_and_value(watermarks.get(&key).copied(), &claim, price)?;
+            check_freshness_and_value(
+                watermarks.get(&key).map(|record| record.watermark),
+                &claim,
+                price,
+            )?;
         }
 
         // Who a lookup for a channel this connector has never resolved is
@@ -863,7 +915,11 @@ impl ClientClaimGate {
         // claim on this same channel may have advanced the watermark while
         // the channel lookup was in flight, and accepting both would be
         // exactly the replay this gate exists to refuse.
-        check_freshness_and_value(watermarks.get(&key).copied(), &claim, price)?;
+        check_freshness_and_value(
+            watermarks.get(&key).map(|record| record.watermark),
+            &claim,
+            price,
+        )?;
 
         // Advance and enqueue under the same write lock the authoritative
         // re-check was decided under (ADR 0005, issue #605, #686): the
@@ -877,10 +933,13 @@ impl ClientClaimGate {
         // The signature is retained rather than discarded for the same
         // reason the peer semantics retains it (issue #425): a watermark says
         // what was spent, but only the claim itself is redeemable.
-        let previous = watermarks.get(&key).copied();
+        let previous = watermarks.get(&key).cloned();
         watermarks.insert(
             key.clone(),
-            advance_watermark(claim.nonce(), claim.transferred_amount()),
+            LiveClaim {
+                watermark: advance_watermark(claim.nonce(), claim.transferred_amount()),
+                signature: verified.signature.clone(),
+            },
         );
         let ticket = match self.committer.enqueue(PendingAcceptance {
             entry: JournalEntry::InboundClaimAccepted {
@@ -890,7 +949,7 @@ impl ClientClaimGate {
                 signature: verified.signature,
             },
             channel_key: key.clone(),
-            previous,
+            previous: previous.clone(),
         }) {
             Ok(ticket) => {
                 // Recorded only now the advance is actually queued for the
@@ -968,8 +1027,8 @@ impl ClientClaimGate {
                 .watermarks
                 .write()
                 .expect("client claim watermarks lock poisoned");
-            let current = watermarks.get(&key).copied();
-            if current
+            let current = watermarks.get(&key).cloned();
+            if current.as_ref().map(|record| record.watermark)
                 != Some(Watermark {
                     nonce,
                     cumulative_amount,
@@ -989,21 +1048,21 @@ impl ClientClaimGate {
                 );
                 return Ok(());
             };
-            let entry = match previous {
-                Some(watermark) => JournalEntry::InboundClaimRolledBack {
+            let entry = match &previous {
+                Some(record) => JournalEntry::InboundClaimRolledBack {
                     channel_id: key.clone(),
-                    nonce: watermark.nonce,
-                    cumulative_amount: watermark.cumulative_amount,
+                    nonce: record.watermark.nonce,
+                    cumulative_amount: record.watermark.cumulative_amount,
                 },
                 None => JournalEntry::InboundClaimWatermarkReset {
                     channel_id: key.clone(),
                 },
             };
-            restore_watermark(&mut watermarks, &key, previous);
+            restore_watermark(&mut watermarks, &key, previous.clone());
             match self.committer.enqueue(PendingAcceptance {
                 entry,
                 channel_key: key.clone(),
-                previous: current,
+                previous: current.clone(),
             }) {
                 Ok(ticket) => ticket,
                 Err(CommitterGone) => {
@@ -1059,7 +1118,7 @@ impl ClientClaimGate {
                     channel_id: key.clone(),
                 },
                 channel_key: key.clone(),
-                previous: Some(previous),
+                previous: Some(previous.clone()),
             }) {
                 Ok(ticket) => ticket,
                 Err(CommitterGone) => {
@@ -1195,7 +1254,7 @@ const GROUP_COMMIT_MAX_BATCH: usize = 4096;
 struct PendingAcceptance {
     entry: JournalEntry,
     channel_key: String,
-    previous: Option<Watermark>,
+    previous: Option<LiveClaim>,
 }
 
 /// The committer thread has exited, so nothing will ever journal this
@@ -1264,7 +1323,7 @@ struct GroupCommitter {
 impl GroupCommitter {
     fn spawn(
         journal: Arc<dyn Journal>,
-        watermarks: Arc<RwLock<HashMap<String, Watermark>>>,
+        watermarks: Arc<RwLock<HashMap<String, LiveClaim>>>,
     ) -> GroupCommitter {
         let (sender, receiver) = mpsc::channel();
         std::thread::Builder::new()
@@ -1297,7 +1356,7 @@ type QueuedAcceptance = (
 fn group_commit_loop(
     receiver: mpsc::Receiver<QueuedAcceptance>,
     journal: Arc<dyn Journal>,
-    watermarks: Arc<RwLock<HashMap<String, Watermark>>>,
+    watermarks: Arc<RwLock<HashMap<String, LiveClaim>>>,
 ) {
     while let Ok(first) = receiver.recv() {
         let mut batch = vec![first];
@@ -1347,7 +1406,7 @@ fn group_commit_loop(
                             restore_watermark(
                                 &mut watermarks,
                                 &pending.channel_key,
-                                pending.previous,
+                                pending.previous.clone(),
                             );
                         }
                     }
@@ -1363,13 +1422,13 @@ fn group_commit_loop(
 /// Put `channel_key` back to `previous` -- the inverse of one watermark
 /// advance, used only to unwind acceptances whose durable record failed.
 fn restore_watermark(
-    watermarks: &mut HashMap<String, Watermark>,
+    watermarks: &mut HashMap<String, LiveClaim>,
     channel_key: &str,
-    previous: Option<Watermark>,
+    previous: Option<LiveClaim>,
 ) {
     match previous {
-        Some(watermark) => {
-            watermarks.insert(channel_key.to_string(), watermark);
+        Some(record) => {
+            watermarks.insert(channel_key.to_string(), record);
         }
         None => {
             watermarks.remove(channel_key);
@@ -1440,63 +1499,87 @@ fn check_freshness_and_value(
 /// collapse into one key at the highest nonce and amount either of them
 /// ever reached, so the upgrade can only ever tighten what this gate will
 /// accept next, never loosen it.
-fn replay_watermarks(entries: &[JournalEntry]) -> HashMap<String, Watermark> {
-    let mut watermarks: HashMap<String, Watermark> = HashMap::new();
+///
+/// **Signature retention (issue #1218).** Each channel's fold keeps a
+/// stack of every [`LiveClaim`] it has pushed, not just the current one:
+/// [`JournalEntry::InboundClaimRolledBack`] carries the watermark it
+/// restores but -- unlike [`JournalEntry::InboundClaimAccepted`] -- no
+/// signature, so the only place that signature still exists once the
+/// rollback that undid its claim has been folded is the entry *before* it
+/// in this same stack. `Self::roll_back` (this gate's only writer of that
+/// entry kind) always journals it immediately after the acceptance it
+/// undoes, so popping the stack recovers exactly the claim being restored
+/// to, without needing to trust the rollback entry's own nonce/amount as
+/// anything more than a diagnostic. A reset clears the whole stack: it
+/// erases the channel outright rather than restoring an earlier claim.
+fn replay_watermarks(entries: &[JournalEntry]) -> HashMap<String, LiveClaim> {
+    let mut history: HashMap<String, Vec<LiveClaim>> = HashMap::new();
     for entry in entries {
         match entry {
             JournalEntry::InboundClaimAccepted {
                 channel_id,
                 nonce,
                 cumulative_amount,
-                ..
+                signature,
             } => {
-                let watermark = watermarks
+                let stack = history
                     .entry(canonical_channel_key(channel_id))
-                    .or_insert(Watermark {
+                    .or_default();
+                let previous = stack
+                    .last()
+                    .map(|record| record.watermark)
+                    .unwrap_or(Watermark {
                         nonce: 0,
                         cumulative_amount: 0,
                     });
-                watermark.nonce = watermark.nonce.max(*nonce);
-                watermark.cumulative_amount = watermark.cumulative_amount.max(*cumulative_amount);
+                stack.push(LiveClaim {
+                    watermark: Watermark {
+                        nonce: previous.nonce.max(*nonce),
+                        cumulative_amount: previous.cumulative_amount.max(*cumulative_amount),
+                    },
+                    signature: signature.clone(),
+                });
             }
             // Issue #977: a channel's deterministic on-chain address means
             // a reopened channel reuses its settled predecessor's key, so a
             // reset must be able to erase what was folded in *before* it in
             // this same replay, not merely refuse to add anything new.
             // Entries are folded in the order they were appended
-            // (`Journal::read_all`), so removing the key here and letting a
-            // later `InboundClaimAccepted` re-`or_insert` it from zero is
+            // (`Journal::read_all`), so clearing the whole stack here and
+            // letting a later `InboundClaimAccepted` start a fresh one is
             // exactly "this channel's watermark starts clean again from
             // this point on" -- the same effect the reset had when it was
             // first accepted, reproduced on every replay.
             JournalEntry::InboundClaimWatermarkReset { channel_id } => {
-                watermarks.remove(&canonical_channel_key(channel_id));
+                history.remove(&canonical_channel_key(channel_id));
             }
             // Issue #1012: a rollback exists precisely to move a
             // watermark DOWN, which componentwise `max` above would
             // silently undo -- so, like the reset above, this SETS the
-            // channel's watermark directly rather than folding into it.
-            // Sound for the same reason: `Self::roll_back` only ever
-            // writes this entry immediately after the `InboundClaimAccepted`
-            // it undoes, so replay sees the two in the same order they were
-            // decided in.
-            JournalEntry::InboundClaimRolledBack {
-                channel_id,
-                nonce,
-                cumulative_amount,
-            } => {
-                watermarks.insert(
-                    canonical_channel_key(channel_id),
-                    Watermark {
-                        nonce: *nonce,
-                        cumulative_amount: *cumulative_amount,
-                    },
-                );
+            // channel's watermark directly rather than folding into it, by
+            // popping the accepted claim it undoes off this channel's
+            // stack. Sound for the same reason: `Self::roll_back` only
+            // ever writes this entry immediately after the
+            // `InboundClaimAccepted` it undoes, so replay sees the two in
+            // the same order they were decided in, and the entry left on
+            // top of the stack afterward is exactly the claim being
+            // restored to.
+            JournalEntry::InboundClaimRolledBack { channel_id, .. } => {
+                let key = canonical_channel_key(channel_id);
+                if let Some(stack) = history.get_mut(&key) {
+                    stack.pop();
+                    if stack.is_empty() {
+                        history.remove(&key);
+                    }
+                }
             }
             _ => continue,
         }
     }
-    watermarks
+    history
+        .into_iter()
+        .filter_map(|(key, mut stack)| stack.pop().map(|record| (key, record)))
+        .collect()
 }
 
 /// Verify a claim's signature against the counterparty `channels` records
@@ -2109,6 +2192,52 @@ mod tests {
         let gate = gate();
         let result = gate.ingest(&evm_claim_json(&channel_id(), 1, 100), 0).await;
         assert!(result.is_ok());
+    }
+
+    /// Issue #1218: once a claim is accepted, its nonce, cumulative amount
+    /// and signature are readable back off the gate -- exactly what the
+    /// operator surface's `GET /claims` and `redeem-latest` need, and what
+    /// this gate could not previously answer at all.
+    #[tokio::test]
+    async fn an_accepted_claims_nonce_amount_and_signature_are_readable_back() {
+        let gate = gate();
+        let channel = channel_id();
+        gate.ingest(&evm_claim_json(&channel, 1, 100), 0)
+            .await
+            .expect("claim accepted");
+
+        let (nonce, cumulative_amount, signature) = gate
+            .latest_inbound_claim(&format!("evm:{channel}"))
+            .expect("an accepted claim is redeemable");
+        assert_eq!(nonce, 1);
+        assert_eq!(cumulative_amount, 100);
+        assert_eq!(
+            signature.len(),
+            65,
+            "the raw 65-byte EIP-712 signature, not its hex text"
+        );
+
+        let channels = gate.accepted_channels();
+        assert_eq!(
+            channels,
+            vec![(
+                format!("evm:{channel}"),
+                Watermark {
+                    nonce: 1,
+                    cumulative_amount: 100
+                }
+            )]
+        );
+    }
+
+    /// A channel this gate has never accepted a claim on has nothing to
+    /// redeem -- distinguishing "never claimed" from "claimed for zero" is
+    /// exactly what `Option::None` here is for.
+    #[tokio::test]
+    async fn a_channel_never_claimed_on_has_no_latest_inbound_claim() {
+        let gate = gate();
+        assert_eq!(gate.latest_inbound_claim("evm:0xnotachannel"), None);
+        assert!(gate.accepted_channels().is_empty());
     }
 
     #[tokio::test]
@@ -4995,8 +5124,8 @@ mod tests {
             }]);
 
             assert_eq!(
-                replayed.get("channel-a"),
-                Some(&Watermark {
+                replayed.get("channel-a").map(|record| record.watermark),
+                Some(Watermark {
                     nonce: 3,
                     cumulative_amount: 30
                 })
@@ -5241,7 +5370,7 @@ mod tests {
 
             let watermarks = replay_watermarks(&entries);
             assert_eq!(
-                watermarks.get("evm:0xabc").copied(),
+                watermarks.get("evm:0xabc").map(|record| record.watermark),
                 Some(Watermark {
                     nonce: 7,
                     cumulative_amount: 700
@@ -5297,7 +5426,7 @@ mod tests {
 
             let watermarks = replay_watermarks(&entries);
             assert_eq!(
-                watermarks.get("solana:abc").copied(),
+                watermarks.get("solana:abc").map(|record| record.watermark),
                 Some(Watermark {
                     nonce: 1,
                     cumulative_amount: 100
@@ -5355,12 +5484,50 @@ mod tests {
             ];
 
             assert_eq!(
-                replay_watermarks(&entries).get("evm:0xabc").copied(),
+                replay_watermarks(&entries)
+                    .get("evm:0xabc")
+                    .map(|record| record.watermark),
                 Some(Watermark {
                     nonce: 9,
                     cumulative_amount: 900
                 }),
                 "the rolled-back value, not the `max` of it and the claim it undoes"
+            );
+        }
+
+        /// The rollback restores not just the prior watermark but the
+        /// prior claim's own signature -- the whole point of #1218 -- since
+        /// the entry that undid the second claim carries no signature of
+        /// its own to fall back to.
+        #[test]
+        fn replay_watermarks_puts_a_rolled_back_channel_back_to_the_named_signature() {
+            let entries = vec![
+                JournalEntry::InboundClaimAccepted {
+                    channel_id: "evm:0xabc".to_string(),
+                    nonce: 9,
+                    cumulative_amount: 900,
+                    signature: vec![1],
+                },
+                JournalEntry::InboundClaimAccepted {
+                    channel_id: "evm:0xabc".to_string(),
+                    nonce: 10,
+                    cumulative_amount: 1_000,
+                    signature: vec![2],
+                },
+                JournalEntry::InboundClaimRolledBack {
+                    channel_id: "evm:0xabc".to_string(),
+                    nonce: 9,
+                    cumulative_amount: 900,
+                },
+            ];
+
+            assert_eq!(
+                replay_watermarks(&entries)
+                    .get("evm:0xabc")
+                    .map(|record| record.signature.clone()),
+                Some(vec![1]),
+                "the first claim's own signature, not the second claim's -- the second's \
+                 acceptance was undone by the rollback"
             );
         }
 
@@ -5390,7 +5557,9 @@ mod tests {
             ];
 
             assert_eq!(
-                replay_watermarks(&entries).get("evm:0xabc").copied(),
+                replay_watermarks(&entries)
+                    .get("evm:0xabc")
+                    .map(|record| record.watermark),
                 Some(Watermark {
                     nonce: 10,
                     cumulative_amount: 1_000

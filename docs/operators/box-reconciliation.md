@@ -1,6 +1,6 @@
 # Reconciling a devnet box's checkout with `main`
 
-> **Historical as of [ADR 0066](../adr/0066-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md)**
+> **Historical as of [ADR 0068](../adr/0068-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md)**
 > (issue #1213): this runbook's whole premise — a `/root/connector` checkout on the box, reconciled
 > against `main` and redeployed by `fleet-ops.yml` — no longer holds for either box. The relay and
 > store boxes each deploy the connector from their own repository's `deploy/` bundle now

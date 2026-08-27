@@ -15,7 +15,7 @@ name: Local Topologies
 # since ADR 0009 refuses to start on an unreachable settlement RPC. A GitHub
 # runner has no chain to reach; here there is one, so "did not reach a serving
 # state" is an assertion rather than a boot-only check. (There is no longer a
-# candidate-image-vs-fleet-config gate before a fleet deploy: ADR 0066 retired
+# candidate-image-vs-fleet-config gate before a fleet deploy: ADR 0068 retired
 # `promote-to-fleet.yml`, since neither devnet box deploys the connector from
 # this repository any more.)
 #

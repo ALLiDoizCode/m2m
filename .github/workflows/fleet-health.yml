@@ -622,7 +622,7 @@ jobs:
             echo '# Roll a service back to a known-good immutable tag (from a machine with docker + ghcr login):'
             echo 'docker buildx imagetools create -t ghcr.io/toon-protocol/<pkg>:<moving-tag> ghcr.io/toon-protocol/<pkg>:<known-good-sha-tag>'
             echo '# …then let Watchtower pick it up (~60s). connector-rust on relay/store is no longer'
-            echo '# deployed from here (ADR 0066) -- roll it back via that node repos own deploy/ pin.'
+            echo '# deployed from here (ADR 0068) -- roll it back via that node repos own deploy/ pin.'
             echo '# The faucet leg still deploys from this repo:'
             echo '#   gh workflow run fleet-ops.yml -f operation=deploy -f service=<svc> -f apply=true'
             echo '```'

@@ -49,14 +49,14 @@ deliberately untouched and is exactly what a rollback points back at.
 > holds it. Nothing in it invalidates the 2026-08-06 record above -- that deployment is still the
 > live one and stays live until the repoint below.
 >
-> **Written before [ADR 0066](adr/0066-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md).**
+> **Written before [ADR 0068](adr/0068-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md).**
 > `infra/linode-relay/connector-rust.toml` and `infra/linode-store/connector-rust.toml` are now
 > fixtures this repo's own tests boot, not what either box runs -- the relay and store boxes deploy
 > from `toon-protocol/relay`'s and `toon-protocol/store`'s own `deploy/` bundles. Every row below
 > naming one of those two files still has to change, because `devnet_configs_load.rs` still asserts
 > against them, but changing them alone no longer repoints a live box: the same address has to land
 > in the owning repo's own committed config too, and `:rust-release` is no longer moved from here at
-> all (ADR 0066 retired `promote-to-fleet.yml`). This callout is the flag for whoever executes this
+> all (ADR 0068 retired `promote-to-fleet.yml`). This callout is the flag for whoever executes this
 > runbook next; the checklist itself is not rewritten past it.
 
 [ADR 0059](adr/0059-a-channel-is-derived-from-its-participants.md) deleted `TokenNetwork`'s global
@@ -95,7 +95,7 @@ So the order is forced: land and apply the new registry address in both boxes' o
 **before** either box runs an image built from a `main` that derives the new channel id. Under
 [ADR 0055](adr/0055-a-release-is-one-dispatch-and-the-ordering-rides-as-data.md) that ordering rode
 as the release's `config-change-required` field and a `promote-to-fleet.yml` dispatch;
-[ADR 0066](adr/0066-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md)
+[ADR 0068](adr/0068-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md)
 retired that mechanism, so the ordering is now enforced by whichever repo pins each box's
 connector tag — land the config in `toon-protocol/relay` / `toon-protocol/store` first, confirm it
 applied, and only then bump that repo's own pinned tag to a build carrying this cutover. Getting it
@@ -153,7 +153,7 @@ broadcast: an address written before it exists is a guess, and a guess in a flee
 pointed at nothing.
 
 **The two box configs.** Both MUST agree: a claim one box accepts against a channel on the new
-contract is unresolvable by a box still pointed at the old registry. Since ADR 0066, changing the
+contract is unresolvable by a box still pointed at the old registry. Since ADR 0068, changing the
 files below is necessary but **not sufficient** — they are fixtures `devnet_configs_load.rs` boots,
 and the file that actually changes what a box runs is the matching one in `toon-protocol/relay` /
 `toon-protocol/store`'s own `deploy/` bundle. Change both.
@@ -262,7 +262,7 @@ configs alone leaves a derived-id image pointed at a counter-based contract, whi
 combination.
 
 1. Revert `[settlement.evm] contract_address` to `0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1` in
-   both boxes' committed configs (`toon-protocol/relay`, `toon-protocol/store` — ADR 0066; this
+   both boxes' committed configs (`toon-protocol/relay`, `toon-protocol/store` — ADR 0068; this
    repo's own `infra/linode-*/connector-rust.toml` fixtures too, so `devnet_configs_load.rs` keeps
    asserting the live value), and apply it.
 2. Roll each box back to the last pre-ADR-0059 connector build, by that repo's own pin.

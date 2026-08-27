@@ -14,7 +14,7 @@
 # fleet's own committed connector-rust.toml fixtures through the real binary,
 # which is the half a GitHub runner can check without a chain. Here there is
 # one, so this is an assertion rather than a boot-only check. (There is no
-# candidate-image-vs-fleet-config gate any more -- ADR 0066 retired
+# candidate-image-vs-fleet-config gate any more -- ADR 0068 retired
 # promote-to-fleet.yml, which used to run one before moving a fleet tag.)
 #
 # Every address below is deterministic, which is what lets this file be

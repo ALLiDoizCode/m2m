@@ -93,7 +93,7 @@ then, which is the whole of why the repoint half-finished.
 | Thing                                             | Where                                                               |
 | ------------------------------------------------- | ------------------------------------------------------------------- |
 | Devnet endpoints, tokens, program ids             | [`endpoints.json`](./endpoints.json)                                |
-| The two connector boxes (now fixtures — ADR 0066) | `infra/linode-relay/`, `infra/linode-store/`                        |
+| The two connector boxes (now fixtures — ADR 0068) | `infra/linode-relay/`, `infra/linode-store/`                        |
 | The faucet box                                    | `infra/linode-faucet/`, `docs/operators/faucet-box-bringup.md`      |
 | Fleet lifecycle (provision / DNS / destroy)       | `infra/devnet-manage.sh`                                            |
 | Fleet CI                                          | `.github/workflows/fleet-ops.yml` (faucet only), `fleet-health.yml` |

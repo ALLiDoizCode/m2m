@@ -5,14 +5,14 @@
 //! [ADR
 //! 0055](../../../docs/adr/0055-a-release-is-one-dispatch-and-the-ordering-rides-as-data.md)
 //! and [ADR
-//! 0066](../../../docs/adr/0066-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md).
+//! 0068](../../../docs/adr/0068-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md).
 //!
 //! Deliberately a SEPARATE harness from `devnet_configs_load.rs` rather than
 //! more cases appended to it. That file asserts what the committed fleet
 //! fixtures contain; this one asserts what the committed release *pipeline*
 //! does, and the two are edited by different work for different reasons.
 //!
-//! ADR 0066 retired the promotion half of this gate: `promote-to-fleet.yml`
+//! ADR 0068 retired the promotion half of this gate: `promote-to-fleet.yml`
 //! is gone, and with it every case that asserted its content (the deploy-
 //! ordering gate, the apply-run verification, the fleet tag retag). Neither
 //! devnet box deploys from this repository any more -- each pins the
@@ -61,7 +61,7 @@ fn raw_metadata_tags(raw: &str) -> BTreeSet<String> {
 /// Watchtower, so every green merge reached the live client edge on two
 /// machines inside a minute, unvalidated.
 ///
-/// ADR 0066 retired the mechanism that used to supervise this tag
+/// ADR 0068 retired the mechanism that used to supervise this tag
 /// (`promote-to-fleet.yml`) because neither box follows it from this repo any
 /// more -- each node repo pins the connector image by release handle in its
 /// own `deploy/` bundle. That makes this property MORE important, not less:
@@ -74,7 +74,7 @@ fn the_build_workflow_publishes_candidates_and_never_moves_the_promotion_tag() {
     assert!(
         !tags.contains("rust-release"),
         "publish-connector-rust-image.yml pushes `rust-release` again. Nothing \
-         in this repository supervises that tag any more (ADR 0066) -- a node \
+         in this repository supervises that tag any more (ADR 0068) -- a node \
          repo pins the connector by release handle in its own deploy/ bundle. \
          Re-adding it here would move a tag with no gate in front of it at \
          all. Tags found: {tags:?}"
@@ -121,7 +121,7 @@ fn workflow_triggers(raw: &str) -> BTreeSet<String> {
 }
 
 /// THE regression test for ADR 0041 Decision 3, restated by ADR 0055 and
-/// left standing by ADR 0066: a release is a human act.
+/// left standing by ADR 0068: a release is a human act.
 ///
 /// `release-connector.yml` builds, versions and publishes a GitHub Release --
 /// which is to say it is one `workflow_run:` away from firing on every green

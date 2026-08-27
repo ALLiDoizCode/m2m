@@ -25,12 +25,12 @@ name: Publish connector-rust image
 # shadows the config file". The release-gating record is ADR 0041. The
 # comments also named connector#972, an open pin PR, as the gate; it was
 # closed as superseded, because the supervised regime it argued for is what
-# `promote-to-fleet.yml` implemented, until ADR 0066 retired it.)
+# `promote-to-fleet.yml` implemented, until ADR 0068 retired it.)
 #
 # It was written for a while: `.github/workflows/promote-to-fleet.yml`. This
 # workflow published CANDIDATES; that one chose which candidate fronted the
 # fleet, after checking it still booted both boxes' committed
-# `connector-rust.toml` (ADR 0041). ADR 0066 retired it: neither devnet box
+# `connector-rust.toml` (ADR 0041). ADR 0068 retired it: neither devnet box
 # deploys the connector from this repository any more (each pins it by
 # release handle in its own repo's `deploy/` bundle), so there is nothing
 # left here for a promotion to check or move a tag onto. `swap`, `store` and
@@ -38,7 +38,7 @@ name: Publish connector-rust image
 # docs/operators/fleet-release-and-health.md.
 #
 # ── AND THIS FILE STILL DOES NOT DEPLOY ANYTHING ────────────────────────────
-# .github/workflows/release-connector.yml (ADR 0055, amended by ADR 0066) now
+# .github/workflows/release-connector.yml (ADR 0055, amended by ADR 0068) now
 # automates the mechanical half of cutting a release: it calls this workflow
 # to build, cuts a dated release handle, and opens a GitHub Release naming the
 # `rust-sha-` tag. What it does not do -- and must never be edited to do -- is
@@ -170,7 +170,7 @@ jobs:
           # `rust-` prefix keeps these disjoint from any TS-node tag that ever
           # lived in this package (semver X.Y.Z, latest, main). See header.
           # `rust-release` is DELIBERATELY ABSENT — see the header. Nothing in
-          # this repository moves it any more (ADR 0066); it is not a build
+          # this repository moves it any more (ADR 0068); it is not a build
           # output either way.
           #
           # The release handle (`rust-2026.08.21.1`) is deliberately absent

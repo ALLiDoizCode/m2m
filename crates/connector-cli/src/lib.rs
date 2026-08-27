@@ -378,9 +378,9 @@ fn parse_send_args(rest: &[&str]) -> Result<Invocation, CliError> {
             seal_to: required(
                 seal_to,
                 "--seal-to <url>",
-                "the client edge of the connector that TERMINATES this packet -- a payload is \
-             sealed to the terminating node (ADR 0018), which in a multi-hop topology is not \
-             the node given to --operator",
+                "the connector's URL, the one whose GET returns its self-description (ADR 0050) \
+             -- a payload is sealed to the terminating node (ADR 0018), which in a multi-hop \
+             topology is not the node given to --operator",
             )?,
             amount,
             target: target.unwrap_or_else(|| "/".to_string()),
@@ -582,6 +582,7 @@ key_file = "{}"
         let config_file = write_config(&format!(
             r#"
 client_edge_addr = "127.0.0.1:0"
+peer_expose = "both"
 
 [signer]
 key_file = "{}"

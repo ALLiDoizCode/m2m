@@ -1,6 +1,6 @@
 # A connector's URL resolves to its self-description
 
-**Status:** Accepted — **built** (#1080). `GET /ilp` serves the document, `[announce]` is now `[node]`, and the x402 greeting is a projection of the same source. Completes [0022](0022-a-connector-answers-it-does-not-announce.md) by giving "answering" a single surface, and is what [0046](0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md) left behind when the announce was removed (#1074). Narrows [0003](0003-clean-room-peer-wire-versioned-client-edge.md)'s version-discovery mechanism onto this document. **[0058](0058-a-peering-is-established-from-a-url.md) builds on it** — a peering established from a URL reads this document and nothing else.
+**Status:** Accepted — **built** (#1080). `GET /ilp` serves the document, `[announce]` is now `[node]`, and the x402 greeting is a projection of the same source. Completes [0022](0022-a-connector-answers-it-does-not-announce.md) by giving "answering" a single surface, and is what [0046](0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md) left behind when the announce was removed (#1074). Narrows [0003](0003-clean-room-peer-wire-versioned-client-edge.md)'s version-discovery mechanism onto this document. **[0058](0058-a-peering-is-established-from-a-url.md) builds on it** — a peering established from a URL reads this document and nothing else. Extended by [0067](0067-a-route-declares-its-request-shape-and-the-connector-never-reads-it.md), which adds one more fact to what both surfaces publish: what a route wants sent to it.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
@@ -141,3 +141,40 @@ is not built. Until it is, a forwarded route is reachable only when the client a
 terminating node's URL out of band. (`GET /ilp/identity` already published the same key before this
 change, on each node's own URL — so the gap #1026 describes was always the discovery half, not the
 publication half.)
+
+## Amendment (issue #1220): which endpoints a peerable node may omit is `peer_expose`'s call
+
+`[node]` required both `http_endpoint` and `btp_endpoint` unconditionally, with no way to say
+"this node opens only one listener". The README's own minimal config (step 1: `client_edge_addr`,
+`state_dir`, `[signer]`, `[[routes]]`) never mentions `[node]`, `peer_expose`
+([0027](0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md)) or
+`peer_allow_plaintext_endpoints` at all — a reader who followed it to the letter got a node that
+serves, but whose self-description carries no endpoints and `"peerCarriages": []`, so a
+counterparty's `POST /peers` at it answers `502`. An operator who then wanted to publish just the
+one endpoint they actually serve — the common HTTP-only shape behind a single TLS-terminating
+reverse proxy — had no honest way to do it: `btp_endpoint` was required even when no BTP listener
+was ever opened, so the only way past the loader was inventing a `ws://` line for a listener that
+does not exist and publishing that dead URL to whoever asks. That is exactly the lie this record's
+no-default rule exists to prevent, arriving by a second door the rule did not cover.
+
+The fix lets an operator omit what they do not serve, and names what a peerable node cannot omit.
+Two rules, both enforced **by name** at load, each naming the missing key and the `peer_expose`
+value that made it required:
+
+- `btp_endpoint` is required exactly when `peer_expose` opens a BTP peer listener (`"btp"` or
+  `"both"`). An HTTP-only node leaves it out and publishes no `btpEndpoint` — not `null`, absent.
+- `http_endpoint` is required whenever **any** carriage is exposed, BTP included. A peer covering a
+  forward to this node asks its client edge for claim-state over plain HTTP whichever carriage the
+  packet itself rides (`POST /ilp/claim-state`, [0058](0058-a-peering-is-established-from-a-url.md)'s
+  #1217 correction), so a peerable node with no `http_endpoint` is a node nobody can pay.
+
+A **declared** endpoint is never refused for being "unexposed". Both client-edge listeners are
+served whatever `peer_expose` says — `peer_expose` governs only the peer role on them — so an
+operator publishing where clients reach this node over a carriage is publishing a URL that answers.
+The devnet fixtures are exactly that shape (both endpoints, no peer carriage exposed) and keep
+loading unchanged; the symmetric rule first proposed here would have refused every deployed config
+until each node repo added a `peer_expose` line. With `peer_expose = "neither"` (the default) both
+endpoints may be omitted, and `[node]` may still exist for its `addresses` alone — a legitimate, if
+unpeerable, self-description. `docs/protocol/configuration-spec.md` CF-08 is amended to state the
+rule and cross-reference CF-17, which is what defines "carriage" and "exposed" here. The README
+gains a "Being peerable" step showing the three keys together.

@@ -1,7 +1,7 @@
 # Bringing the rolling-swap maker up on the relay box
 
 > **Its `fleet-ops` steps are historical as of
-> [ADR 0066](../adr/0066-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md)**
+> [ADR 0068](../adr/0068-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md)**
 > (issue #1213). `fleet-ops.yml` no longer offers `box=relay`, so every dispatch below naming that
 > box — `deploy`/`restart` of `swap-node` or `watchtower` — has to be the equivalent
 > `docker compose` command run on the box instead, which each step already spells out beside it.

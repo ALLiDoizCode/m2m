@@ -69,7 +69,15 @@ and MUST answer a termination it cannot open with an unsealed reject naming wher
 
 **CF-08** `[operator]` — A connector MUST be configurable with its own **public** ILP address(es) and
 its **public** client-edge endpoints, HTTP and BTP. A node cannot derive these: a container sees
-`0.0.0.0:4000` and a private network, never `https://proxy.example/ilp`.
+`0.0.0.0:4000` and a private network, never `https://proxy.example/ilp`. Either endpoint MAY be
+declared under any `peer_expose` (CF-17) — both listeners are served regardless, so a declared
+endpoint is never refused as unexposed. Which may be **omitted** is `peer_expose`'s call, and a
+connector MUST refuse to load, naming the key, when: `btp_endpoint` is absent and a BTP peer listener
+is exposed; or `http_endpoint` is absent and **any** peer carriage is exposed, because a peer
+covering a forward asks this node's client edge for claim-state over HTTP whichever carriage the
+packet rides. A connector whose `peer_expose` is `"neither"` (the default) MAY be configured with an
+address list and no endpoint at all — it still answers its self-description, unpeerable.
+([issue #1220](https://github.com/toon-protocol/connector/issues/1220))
 
 **CF-09** `[connector]` — These facts, and no others about software behind the connector, are what the
 node self-description publishes. A connector describes **itself**.
@@ -117,6 +125,14 @@ covering claim is banked.
 publishes a price: its self-description and its greeting carry the slope beside the base, so one free
 read answers every payload size ([ADR 0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md)'s
 cacheability). A greeting's own `amount` remains what the greeted request costs.
+
+**CF-13d** `[operator]` — A route MAY carry `request`, an arbitrary table naming what a client should
+send to use it. A connector MUST validate only that the value **is** a table — never a key inside
+it, and never `deny_unknown_fields` on its contents — and MUST publish it verbatim, unread, on that
+route's self-description entry and on the greeting for that destination, omitted (not `null`) where
+the operator wrote none. A connector MUST NOT fetch this fact from the app or any other source: an
+operator declares it, or it is absent.
+([ADR 0067](../adr/0067-a-route-declares-its-request-shape-and-the-connector-never-reads-it.md))
 
 **CF-14** `[connector]` — Two routes naming the same handler MUST agree on its price, comparing whole
 schedules: same base and same slope.
@@ -321,7 +337,10 @@ required on **both** branches, each with its own named refusal ([ADR 0028](../ad
 CF-10, CF-11). Write `price = 0` where free is deliberate. A price is either a whole number or a
 `{ base, per_kib }` table charging by payload length (CF-13a) — `price = { base = 1000, per_kib = 30 }`
 — and the two spellings are one value when the slope is zero. `transport` is meaningful only alongside
-`handler_url` (CF-15).
+`handler_url` (CF-15). `request` (CF-13d) is an optional arbitrary table, published unread wherever
+the route's price is published; unlike every other row in `[[routes]]`, its contents are not
+`deny_unknown_fields` — that guarantee stops at the row, not inside a blob whose keys are the app's
+business.
 
 **Peerings.** A peer row carries an `id`, an optional `endpoint` whose scheme selects the carriage, a
 `max_packet_amount` (CF-19's cap — `0` is refused by name, and there is no disabling spelling) and a
