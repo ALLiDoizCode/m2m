@@ -27,7 +27,12 @@ services:
       PORT: 3500
       # ── Solana — public devnet, USDC only ──────────────────────────────
       SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.devnet.solana.com}
-      SOLANA_USDC_MINT: ${SOLANA_USDC_MINT:-xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in}
+      # This box's OWN mint, created by ./create-devnet-usdc-mint.sh with the
+      # treasury below as its authority — so the leg MINTS on demand and can
+      # never run dry. No default: a box must name the mint it can actually
+      # mint, and inheriting another box's would be a leg that 503s with an
+      # authority mismatch. Unset → the Solana leg is disabled.
+      SOLANA_USDC_MINT: ${SOLANA_USDC_MINT:-}
       SOLANA_FAUCET_KEYPAIR: /keys/usdc-authority.json
       SOLANA_DRIP_COOLDOWN_MS: ${SOLANA_DRIP_COOLDOWN_MS:-86400000}
       # The native-SOL route (POST /api/solana/request) and its
@@ -47,11 +52,23 @@ services:
       # on any chain, ever, from this box.
       BASE_SEPOLIA_ETH_AMOUNT: '0'
     volumes:
-      # Fresh treasury keypair, generated ON THIS BOX (§4.4) — never copied
-      # from box 1's /root/keys/solana-usdc-treasury.json. A missing file
-      # disables only the Solana leg (createSolanaFaucet returns null); it
-      # does not fail the container.
-      - /root/keys/solana-usdc-treasury.json:/keys/usdc-authority.json:ro
+      # Fresh treasury keypair, generated ON THIS BOX (§4.4) by
+      # ./generate-solana-treasury.sh — never copied from another box. It is
+      # this box's mint AUTHORITY as well as its fee payer.
+      #
+      # Long syntax with create_host_path: false on purpose. Docker's default
+      # is to CREATE a missing bind source as an empty DIRECTORY, and that is
+      # exactly what happened here: the path below sat as a 0-byte directory
+      # for weeks, `createSolanaFaucet` saw no keypair file, and the leg
+      # quietly served 503s while every container reported healthy. Failing
+      # `up` outright is the honest behaviour — a box with no treasury cannot
+      # do this job, and should say so at the moment it is started.
+      - type: bind
+        source: /root/keys/solana-usdc-treasury.json
+        target: /keys/usdc-authority.json
+        read_only: true
+        bind:
+          create_host_path: false
     restart: unless-stopped
     healthcheck:
       test:

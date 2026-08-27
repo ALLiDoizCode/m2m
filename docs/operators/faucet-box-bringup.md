@@ -1,208 +1,212 @@
-# Bringing the faucet box up on its own Linode
+# The faucet box
 
-Operator runbook for [connector#898](https://github.com/toon-protocol/connector/issues/898), part
-of [toon-meta#310](https://github.com/toon-protocol/toon-meta/issues/310) (retire the devnet
-apex). The owner decision (2026-08-07 ~21:00Z, specified in toon-meta `docs/two-node-architecture.md`
-§4 — that doc lives in toon-meta, not this repo) moves the faucet off box 1 onto its own Linode,
-with **no connector on it**, dispensing **USDC only**. Modeled on
-[`relay-box-bringup.md`](relay-box-bringup.md)'s "Who does what" table format — the same class of
-move (a service moving to a new box) was done for the relay app.
+Operator runbook for `faucet.devnet.toonprotocol.dev` — the devnet USDC faucet. It is a Linode of
+its own, with **no connector on it** (toon-meta#310 §4.5, [connector#898](https://github.com/toon-protocol/connector/issues/898)):
+no signer key, no settlement key, no state dir, no payment channel, no `[[peers]]` row anywhere
+naming it. It is reached over plain HTTPS, by humans and by client bootstrap code; it is not a
+node on the network.
 
-## What is already done, repo-side
+This document covers bringing one up from nothing, and the two operations a live one needs.
+The migration story that first put the faucet here — the DNS cutover off the retired apex, and the
+Mina leg — is finished and is in git history.
 
-- `infra/linode-faucet/` — `docker-compose.faucet.yml` (the `faucet` service built from
-  `packages/faucet/Dockerfile` with the repo root as build context, plus `nginx` + `certbot`, no
-  connector service anywhere in the file), `bootstrap.sh`, `firewall.sh`, `init-letsencrypt.sh`,
-  `nginx/node.conf.template` + committed `nginx/conf.d/node.conf`, `.env.example`.
-- `packages/faucet/src/index.js` — USDC only (§4.6): `POST /api/request` (local-anvil EVM),
-  `POST /api/solana/request` (native SOL) and `POST /api/mina/request` (native MINA) are removed
-  from the service entirely (404, not merely 503-when-unconfigured), and `/api/info`'s capability
-  map and `packages/faucet/public/index.html`'s web UI stop advertising them. Every Mina route
-  went the same way with [ADR 0065](../adr/0065-mina-leaves-the-repository.md), the USDC one
-  included. The surviving USDC-only routes (`/api/solana/usdc-request`,
-  `/api/base-sepolia/request`) keep their request/response shapes, as do `GET /health` and
-  `GET /api/info` — only `/api/info`'s `chains` map changes (the `evm` and `mina` legs are gone
-  and the `solana` leg now advertises its `usdc-request` route).
-  `BASE_SEPOLIA_ETH_AMOUNT` is pinned to `'0'` in `docker-compose.faucet.yml` (the code's own
-  default — this box does not carry box 1's override to `0.001`, which went with the apex's own
-  compose file, connector#872).
-- `infra/devnet-manage.sh` — `NODE_LABELS`/`NODE_TYPES`/`NODE_PASSWORDS` know a `faucet` key; a
-  targeted `faucet` case provisions the Linode (mirrors the `relay`/`store` cases, minus a
-  `deploy_*_node` call — see "Who does what" below for why); a separate `faucet-cutover` case
-  repoints the DNS record once the box has cleared the gates below.
-- `infra/linode-faucet/generate-solana-treasury.sh` (issue #919) — step 4's fresh-key
-  generation, scripted and reviewed rather than ad hoc. It never prints a private key, and also
-  airdrops devnet SOL for tx fees (public, permissionless). Executing it still needs a human on
-  the box (see "Who does what" below) — what moved repo-side is the tool, not the act of running
-  it.
+## What it serves
 
-## What this runbook does not yet cover
+|          |                                                                                    |
+| -------- | ---------------------------------------------------------------------------------- |
+| Host     | `faucet.devnet.toonprotocol.dev` (Linode label `faucet`, `us-east`)                |
+| Plan     | `g6-nanode-1` — 1 vCPU, 1 GB, 25 GB                                                |
+| Services | `faucet` (Node, port 3500, not published), `nginx` (80/443), `certbot`             |
+| Image    | built **on the box** from `packages/faucet/Dockerfile`; nothing pushes or pulls it |
 
-The **live cutover** — repointing `faucet.devnet.toonprotocol.dev` at this box and retiring box 1's
-copy — is toon-meta#313's job (destroying box 1), which this issue explicitly gates: "the faucet
-lives on the apex today, so #898 is a precondition of the teardown, not a step of it." toon-meta#313's
-current step 3 names the **relay** box as the DNS cutover target; amending it to name this box
-instead is operator work in that repo, out of this document's scope.
+Two legs, both **USDC only** (§4.6 — no native gas of any chain, ever, from this box):
+
+| Route                            | Chain                  | What happens                                         |
+| -------------------------------- | ---------------------- | ---------------------------------------------------- |
+| `POST /api/base-sepolia/request` | Base Sepolia (`84532`) | calls the mock USDC's **ungated `mint()`**           |
+| `POST /api/solana/usdc-request`  | Solana devnet          | **mints**, because this box holds the mint authority |
+| `GET /health`, `GET /api/info`   | —                      | liveness and the capability map                      |
+
+Both legs coin fresh tokens rather than spending a balance, so **neither can run dry and neither
+needs topping up**. That is the point of the Solana arrangement, and it is new: until 2026-08 that
+leg transferred from a treasury, and it died because the mint's authority key was lost — no one
+could refill the treasury and no one could mint. A box that owns its own mint has no such state.
+
+The faucet key holds **no USDC on either chain**. It needs only gas: Base Sepolia ETH, and devnet
+SOL for transaction fees and its recipients' ATA rent.
+
+Retired routes answer **404**, not 503: `POST /api/request` (local-anvil EVM),
+`POST /api/solana/request` (native SOL), `POST /api/mina/request` and `POST /api/mina/usdc-request`
+(the whole Mina leg, [ADR 0065](../adr/0065-mina-leaves-the-repository.md)). 404 vs 503 is the
+difference between "removed" and "unconfigured", and `packages/faucet/test/routes.test.js` pins it.
 
 ## Who does what
 
-| Step                            |       Repo-side (PR, reviewable)       |        Human-only (SSH, key material, funds)         |
-| ------------------------------- | :------------------------------------: | :--------------------------------------------------: |
-| 1. Provision                    |     ✅ `./devnet-manage.sh faucet`     |             runs it, holds the API token             |
-| 2. DNS (initial — not yet live) |                                        |               nothing yet — see step 8               |
-| 3. Certs                        |        ✅ `init-letsencrypt.sh`        |                 runs it, on the box                  |
-| 4. Key generation (§4.4)        |    ✅ `generate-solana-treasury.sh`    |   runs them, on THIS box — never copied from box 1   |
-| 5. Funding                      |                                        |         ✅ devnet faucet / a human transfer          |
-| 6. Standalone verification      |     ✅ `bootstrap.sh`, curl checks     |             runs them, reads the output              |
-| 7. Mint-authority transfer      |                                        | ✅ transfer or fund fresh, before box 1 is destroyed |
-| 8. DNS cutover (§6.2 step 9)    | ✅ `./devnet-manage.sh faucet-cutover` |          runs it, only once gate (c) passes          |
-| 9. Rollback                     |        ✅ one `update_dns` call        |      repoints back at box 1, no restart needed       |
+| Step                |        Repo-side (PR, reviewable)        | Human-only (SSH, key material, funds) |
+| ------------------- | :--------------------------------------: | :-----------------------------------: |
+| 1. Provision        |      ✅ `./devnet-manage.sh faucet`      |     runs it, holds the API token      |
+| 2. Certs            | ✅ `bootstrap.sh`, `init-letsencrypt.sh` |         runs them, on the box         |
+| 3. Solana CLI       |       ✅ the pinned command below        |          runs it, on the box          |
+| 4. Treasury key     |     ✅ `generate-solana-treasury.sh`     |  runs it, on THIS box — never copied  |
+| 5. The mint         |     ✅ `create-devnet-usdc-mint.sh`      |         runs it, on THIS box          |
+| 6. EVM key + `.env` |                                          |       ✅ generates and funds it       |
+| 7. Gates            |         ✅ the curl checks below         |      runs them, reads the output      |
+| 8. Resize           |  ✅ `./devnet-manage.sh faucet-resize`   |                runs it                |
+| 9. Fleet cutover    |          ✅ the mint-pinning PR          |     runs `fleet-ops config-apply`     |
 
-Steps 1, 4, 5 and 7 need SSH, key material or funds this environment does not have — same posture
-every other infra-touching ticket in this repo's history records when it applies
-(`relay-box-bringup.md`'s own table).
+Steps 1, 4, 5, 6 and 8 need SSH, key material, funds or an API token. Every key this box holds is
+generated **on it** and never leaves it; nothing here is ever committed.
 
-## Preconditions
+## Bringing one up
 
-- `infra/linode-faucet/` config, compose file and scripts exist and are reviewed (this issue).
-- Box 1's `faucet` service (`infra/linode-node/docker-compose.node.yml`) keeps serving and is
-  untouched by this change — nothing here strips it. It is removed only as part of connector#872's
-  apex teardown, and only after step 8 below. Note that it is _built from this repo_, so the next
-  `./devnet-manage.sh redeploy` retires box 1's three native-token routes too — that is §4.6
-  applied to the service itself, not to this box, and it is why box 1 must not be redeployed at a
-  moment when someone still depends on those legs.
-  **Since satisfied:** step 8 ran, and connector#872 then destroyed box 1 and deleted that compose
-  file along with the rest of `infra/linode-node/`. Read this bullet as the ordering constraint it
-  was, not as a live precondition.
-- A funded devnet faucet / on-chain path exists to fund THIS box's fresh keys (§4.4) — there is no
-  legacy identity to reproduce here, every key is new material.
+### 1. Provision
 
-## Order — provision through cutover, in order
+`./devnet-manage.sh faucet` creates the Linode (label `faucet`, `NODE_TYPES[faucet]`). No DNS
+change: `faucet-cutover` is a separate, deliberate verb.
 
-1. **Provision.** `./devnet-manage.sh faucet` creates the Linode (label `faucet`,
-   `g6-standard-2`, matching the other three boxes' type). Repo-side; no DNS change yet.
+### 2. Bootstrap and certs
 
-2. **DNS — not yet.** Deliberately absent from step 1: `faucet.devnet.toonprotocol.dev` keeps
-   resolving to box 1 until step 8 below. Flipping it before the new box is live, funded and
-   proven serving would prescribe the outage this ordering exists to prevent (mirrors the relay
-   box's own adopted-identity cutover reasoning, [connector#905](https://github.com/toon-protocol/connector/pull/905)).
+```sh
+cd /root && git clone https://github.com/toon-protocol/connector.git && cd connector
+cd infra/linode-faucet && cp .env.example .env && $EDITOR .env   # DOMAIN, LETSENCRYPT_EMAIL
+./bootstrap.sh
+```
 
-3. **Certs.** `cd infra/linode-faucet && cp .env.example .env && $EDITOR .env` (set `DOMAIN`,
-   `LETSENCRYPT_EMAIL`, and `LETSENCRYPT_STAGING=1` until DNS is confirmed reachable at this box's
-   IP by other means — a direct curl by IP with `Host:` header, since the public name still points
-   elsewhere), then `./bootstrap.sh`. It hardens the box first — firewall to 22/80/443 only, then
-   key-only sshd (`infra/harden-box.sh`), ahead of everything that can fail, and it refuses to
-   finish quietly if that did not take — pulls the `nginx`/
-   `certbot` base images, builds the faucet image, renders `nginx/conf.d/node.conf` from the
-   template for `${DOMAIN}`, starts the compose stack, and runs `init-letsencrypt.sh`. Because the
-   public name does not point here yet, the issuance attempt this step makes will fail ACME's
-   HTTP-01 challenge — expected; it falls back to the self-signed cert and logs a warning. Re-run
-   `init-letsencrypt.sh` after step 8 flips DNS.
+`bootstrap.sh` hardens the box first (firewall to 22/80/443, then key-only sshd via
+`infra/harden-box.sh`) ahead of anything that can fail, pulls `nginx`/`certbot`, builds the faucet
+image, renders `nginx/conf.d/node.conf` for `${DOMAIN}`, starts the stack and runs
+`init-letsencrypt.sh`. Set `LETSENCRYPT_STAGING=1` until the public name resolves here, or issuance
+fails HTTP-01 and falls back to a self-signed cert; re-run `init-letsencrypt.sh` after DNS moves.
 
-4. **Key generation (§4.4).** Three secrets, all fresh material generated ON THIS BOX, never
-   copied from box 1:
-   - `BASE_SEPOLIA_FAUCET_KEY` — a fresh EVM `0x…` private key, funded with a little Base Sepolia
-     ETH for gas (the mock USDC mint itself is ungated).
-   - A fresh Solana keypair written to `/root/keys/solana-usdc-treasury.json` (the path
-     `docker-compose.faucet.yml` bind-mounts read-only) — this is a **file**, not an env var.
-     `./generate-solana-treasury.sh` (this directory) generates it in that exact spot and
-     airdrops devnet SOL for tx fees in one step; the private key is never printed, only the
-     resulting public key. USDC funding (step 5) is a separate, human step it does not attempt.
-     The script refuses to overwrite an existing key, so a re-run against a box that already has a
-     treasury is a safe no-op error, not a silent second key. Its tooling is not installed by
-     `bootstrap.sh` (which installs docker, git, jq, gettext-base, openssl, ufw, curl, iptables and
-     nothing else), so install it by hand on the box first.
+### 3. Install the Solana CLI
 
-   `generate-solana-treasury.sh` needs `solana` and `solana-keygen`. Install **v3.1.12** — not
-   `stable`, and not whatever a package manager offers:
+`bootstrap.sh` installs docker, git, jq, gettext-base, openssl, ufw, curl and iptables — no Solana
+CLI. Steps 4 and 5 need one. Install **v3.1.12**, not `stable` and not a package manager's build:
 
-   ```sh
-   sh -c "$(curl -sSfL https://release.anza.xyz/v3.1.12/install)"
-   export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
-   ```
+```sh
+sh -c "$(curl -sSfL https://release.anza.xyz/v3.1.12/install)"
+export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+```
 
-   That version is a choice, not a default. This repository installs exactly two Solana CLIs and
-   `crates/connector-settlement-solana/tests/solana_cli_pins.rs` records both with their reasons;
-   a case in that file fails the build if this line names a third. v3.1.12 is the one a human
-   following a runbook here installs — `docs/solana-deployment.md`'s prerequisites and
-   `devbox.json`'s `init_hook` already put exactly it on a person's PATH. The other pin, v2.1.21,
-   is held to the 2.1 line by two things that do not exist on this box: `solana-test-validator`'s
-   io_uring requirement and the workspace's `=2.1.0` crate pins. This box runs no validator and
-   compiles no Rust — the faucet service itself reaches Solana through `@solana/web3.js` and
-   `@solana/spl-token` inside its container and never shells out to the CLI, so the CLI is a
-   bringup tool only and nothing here needs it again after step 4.
+That version is a choice, not a default. This repository installs exactly two Solana CLIs and
+`crates/connector-settlement-solana/tests/solana_cli_pins.rs` records both with their reasons; a
+case there fails the build if this line names a third. The other pin, v2.1.21, is held to the 2.1
+line by `solana-test-validator`'s io_uring requirement and the workspace's `=2.1.0` crate pins —
+neither of which exists on this box. It runs no validator and compiles no Rust: the faucet reaches
+Solana through `@solana/web3.js` inside its container and never shells out. The CLI is a bringup
+tool only, and nothing needs it again after step 5.
 
-   The script checks for its binaries up front and exits with a clear error rather than
-   half-doing the work.
+### 4. The treasury key
 
-   Write `BASE_SEPOLIA_FAUCET_KEY` into this box's `.env` and restart the `faucet` service
-   (`docker compose -f infra/linode-faucet/docker-compose.faucet.yml up -d --build faucet`) to
-   pick it up. Record how each key was generated somewhere off this box — there is no legacy
-   identity to fall back to if it is lost.
+```sh
+./generate-solana-treasury.sh          # writes /root/keys/solana-usdc-treasury.json, 0600
+```
 
-   The Solana USDC mint needs no equivalent recording: `SOLANA_USDC_MINT` already defaults (in
-   `docker-compose.faucet.yml`) to `xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in`, the same public
-   Solana-devnet mock-USDC mint recorded in `packages/solana-program/deployments/devnet-public.md`
-   and used fleet-wide — it is not apex-specific and needs no separate extraction before #313.
+It generates a fresh keypair at the exact path the compose file bind-mounts, airdrops 2 devnet SOL
+for fees, prints only the **public** key, and refuses to overwrite an existing treasury. Never copy
+this key from another box: a copied key exists in two places for as long as both do.
 
-5. **Funding.** Fund the Base Sepolia EVM address (a little ETH for gas — the mock USDC mint is
-   ungated) and the Solana treasury (USDC on the public Solana devnet; SOL only for tx fees — this
-   box airdrops no SOL, §4.6). SOL is a public, permissionless devnet airdrop —
-   `generate-solana-treasury.sh` (step 4) already does that airdrop as part of key generation, so
-   SOL needs nothing further here. The USDC transfer is not permissionless:
-   `xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in`'s mint authority is the deployer key recorded in
-   `packages/solana-program/deployments/devnet-public.md` ("Keypairs used for this deploy live
-   outside the repo"), so funding this box's fresh treasury needs whoever holds that key to mint or
-   transfer to it. `infra/solana/fund-solana.sh` does **not** reach this mint — it signs with the
-   committed `infra/solana/usdc-authority.json`, which is the authority for the _local-validator_
-   mint `H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H` (deleted per `infra/linode/README.md`) — a
-   different key for a different, no-longer-live mint.
+### 5. The mint
 
-6. **Standalone verification.** With `./bootstrap.sh` already run in step 3:
+```sh
+./create-devnet-usdc-mint.sh           # prints the new mint address
+```
 
-   ```sh
-   # Pre-cutover the public name still resolves to box 1, so pin it to THIS box's IP.
-   # -k because port 80 only 301s to https and the cert here is still the self-signed seed.
-   curl -ksf --resolve faucet.devnet.toonprotocol.dev:443:<box IP> https://faucet.devnet.toonprotocol.dev/health
-   curl -sf https://faucet.devnet.toonprotocol.dev/api/info   # once a real cert issues, post-cutover
-   ```
+This creates a 6-decimal mock USDC mint whose **mint authority is the treasury from step 4**, then
+reads the authority back off the chain to prove it. No initial supply and no freeze authority:
+every token that ever circulates will have been dripped.
 
-   and that each configured leg's `POST` route succeeds: `/api/base-sepolia/request`,
-   `/api/solana/usdc-request`. Confirm the retired legs answer **404**, not 503:
-   `POST /api/request`, `POST /api/solana/request`, `POST /api/mina/request`,
-   `POST /api/mina/usdc-request`.
+It refuses to run twice — a second mint would strand every channel opened against the first, and
+the fleet configs pin exactly one address.
 
-7. **Mint-authority transfer.** Before box 1 is destroyed (toon-meta#313), either transfer minting/
-   treasury authority to this box's fresh keys or fund this box's keys directly from box 1's — a
-   live, human step, ordered here because toon-meta#310 §4.4/§6 requires it to happen before the
-   old box's keys become unreachable.
+Put the address it prints into this box's `.env`:
 
-8. **DNS cutover.** Once gate (c) below passes: `./devnet-manage.sh faucet-cutover` repoints
-   `faucet.devnet.toonprotocol.dev` at this box. Re-run `init-letsencrypt.sh` afterward if step 3's
-   first issuance fell back to the self-signed cert. Stop box 1's `faucet` service only after this
-   box has served real traffic under the new record — do not stop both at once.
+```sh
+echo "SOLANA_USDC_MINT=<the address>" >> .env
+```
 
-9. **Rollback.** `./devnet-manage.sh dns` (or a direct `update_dns "faucet.devnet" "<box 1 IP>"`)
-   repoints the record back at box 1. No restart needed on either box — box 1's `faucet` service
-   is untouched by this runbook and keeps running until connector#872's teardown.
+### 6. The EVM key, and `.env`
 
-## Gates — in order, and do not reorder (c)
+`BASE_SEPOLIA_FAUCET_KEY` is a fresh EVM private key funded with a little Base Sepolia ETH for gas
+— the mock USDC's `mint()` is ungated, so it needs no USDC. Write it into `.env`, then:
 
-- **(a) Standalone up.** The faucet container is healthy, and `GET /health` / `GET /api/info`
-  answer through this box's own nginx.
-- **(b) Retired legs are gone.** `POST /api/request`, `POST /api/solana/request`,
-  `POST /api/mina/request` and `POST /api/mina/usdc-request` 404 — proving the removal is
-  unconditional, not merely "disabled because unconfigured" (which would 503).
-- **(c) Each configured USDC leg drips end to end.** A real `POST` against every leg this box's
-  `.env` configures succeeds and the drip lands on-chain. **This is the gate to stop the cutover
-  on if it fails** — DNS should not move to a box that cannot actually dispense funds.
-- **(d) Cert renewal survives.** `certbot renew --dry-run` succeeds on this box's own lineage
-  after step 8 — its own independent lineage (§4.3), not a SAN shared with anything else.
+```sh
+docker compose -f infra/linode-faucet/docker-compose.faucet.yml up -d --build faucet
+docker compose -f infra/linode-faucet/docker-compose.faucet.yml logs faucet | tail -20
+```
 
-If (c) cannot be demonstrated, stay on step 7 and do not run step 8.
+The log must say `Mint authority confirmed`. If this box is pointed at a mint it does not own, it
+says so at boot naming **both** keys, and the Solana route answers 503 rather than failing per
+request with an SPL error that names no address.
+
+Record how each key was generated somewhere off this box. There is no legacy identity to fall back
+on, and no way to recover a lost mint authority — that is the failure this arrangement exists to
+avoid repeating.
+
+## Gates
+
+Run in order. **(c) is the one to stop on.**
+
+- **(a) Standalone up.** All three containers healthy, and `GET /health` and `GET /api/info` answer
+  through this box's own nginx. Pre-cutover the public name still resolves elsewhere, so pin it:
+
+  ```sh
+  curl -ksf --resolve faucet.devnet.toonprotocol.dev:443:<box IP> \
+    https://faucet.devnet.toonprotocol.dev/health
+  ```
+
+- **(b) Retired legs are gone.** Each of `POST /api/request`, `/api/solana/request`,
+  `/api/mina/request` and `/api/mina/usdc-request` returns **404**, not 503.
+
+- **(c) Each configured leg drips, on chain.** Not "returns a signature" — _lands_:
+
+  ```sh
+  curl -sf -X POST https://faucet.devnet.toonprotocol.dev/api/solana/usdc-request \
+    -H 'content-type: application/json' -d '{"address":"<a throwaway pubkey>"}'
+  spl-token balance <mint> --owner <that pubkey> --url https://api.devnet.solana.com   # 1000
+  ```
+
+  and the same for `/api/base-sepolia/request`, checked on Basescan. A faucet that answers `200`
+  but delivers nothing is the exact failure this gate exists for.
+
+- **(d) Cert renewal survives.** `certbot renew --dry-run`, on this box's own lineage — one
+  certificate per name, never a SAN shared with another host.
+
+## Resizing
+
+`./devnet-manage.sh faucet-resize` moves the box to `NODE_TYPES[faucet]`. It refuses any other box,
+checks the disk layout can be auto-resized and that the data fits the target plan, then resizes and
+waits for `running`.
+
+Linode resizes by shutting the box down, migrating it and booting it: **the faucet is offline for
+roughly 10–20 minutes.** The stack comes back on its own (`restart: unless-stopped`); nothing needs
+redeploying. Re-run gates (a)–(c) afterwards.
+
+## Cutting the fleet over to a new mint
+
+Only after gate (c) passes on the new mint. The fleet settles against whatever
+`[settlement.solana] token_address` its committed config names, so until this lands the two
+connector boxes are still using the **old** mint.
+
+1. Land the PR pinning the new address in `infra/linode-relay/connector-rust.toml`,
+   `infra/linode-store/connector-rust.toml`, `crates/connector-bin/tests/devnet_configs_load.rs`
+   (`FLEET_SOLANA_USDC_MINT`) and `infra/linode/endpoints.json`.
+2. `fleet-ops.yml` → `config-apply` for `relay`, then `ario`. Config first, always: the binary and
+   the box's bind-mounted TOML are a matched pair in both directions.
+3. Drip USDC from this faucet to each box's `[settlement.solana]` address, and check each holds
+   SOL for ATA rent.
+4. `fleet-health.yml`.
+
+A Solana channel's PDA is seeded with the token mint, so channels opened against the old mint are
+invisible to a node configured for the new one. Neither fleet config commits `[[peer_channels]]`,
+so there is nothing fleet-side to re-open; client-side channels stay on the old mint until the
+consuming repos re-pin, which is why those follow-ups are filed before the cutover lands.
 
 ## Rollback
 
-Covered as step 9 above: repoint `faucet.devnet` back at box 1 and, if the mint authority was
-transferred in step 7, transfer or fund it back. Box 1's own `faucet` service needs no restart —
-it was never stopped by this runbook.
+**The plan** is reversible: `faucet-resize` back up, same downtime.
+
+**The mint is not.** Pointing `SOLANA_USDC_MINT` back at the old mint restores nothing — nobody can
+mint it, which is why it was replaced. Fleet-side rollback is `config-apply` of the previous
+committed TOML, which returns the boxes to a mint the faucet cannot dispense. In practice: fix
+forward.

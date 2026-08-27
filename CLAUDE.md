@@ -211,8 +211,14 @@ keypair and has no mainnet-shaped mode. In tests, funding is
 `test_support::fund()`, a plain `request_airdrop`.
 
 **Devnet** settles on _public_ chains — Base Sepolia and Solana devnet — and is
-funded by the faucet box (`infra/linode-faucet/`) and its treasuries, not by any of
-the above. The faucet is a separate service and is not part of the connector.
+funded by the faucet box (`infra/linode-faucet/`), not by any of the above. The
+faucet **mints** on both legs rather than paying out of a balance: Base Sepolia's
+mock USDC has an ungated `mint()`, and on Solana the faucet's own keypair is the
+mint authority of a mint that box created for itself
+(`infra/linode-faucet/create-devnet-usdc-mint.sh`). So neither leg can run dry, and
+there is no separate deployer key to lose — which is what happened to the mint used
+before 2026-08, killing that leg with no repair path. The faucet is a separate
+service and is not part of the connector.
 
 **Mainnet.** Nothing here funds it and no mainnet deployment exists. The Solana
 mint script and the local topology are devnet-and-below only.

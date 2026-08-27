@@ -21,6 +21,7 @@
 #   ./devnet-manage.sh relay     Provision + deploy ONLY the relay box
 #   ./devnet-manage.sh faucet    Provision ONLY the faucet box (no connector — connector#898)
 #   ./devnet-manage.sh faucet-cutover  Repoint faucet.devnet at the faucet box (run AFTER it's live)
+#   ./devnet-manage.sh faucet-resize   Resize the faucet box to its NODE_TYPES plan (brief downtime)
 #   ./devnet-manage.sh down      Stop containers (boxes stay, restart is fast)
 #   ./devnet-manage.sh destroy   Delete all Linode boxes (loses chain state)
 #   ./devnet-manage.sh status    Probe every public HTTPS endpoint
@@ -86,15 +87,25 @@ PORKBUN_API="https://api.porkbun.com/api/json/v3"
 declare -A NODE_LABELS=( [store]=ario [relay]=relay [faucet]=faucet )
 # Sizing: the store box was measured on 2026-08-27 using ~125MB of RAM across
 # all six of its containers, on a 4GB plan. g6-nanode-1 (1GB, 1 vCPU, 25GB) is
-# ample for it and costs $5/mo against $24. The relay and faucet have NOT been
-# measured and stay on g6-standard-2 until they are.
+# ample for it and costs $5/mo against $24.
+#
+# The faucet is a nanode for the same reason and on the same evidence: it runs
+# no connector, no chain and no validator — nginx, certbot and a Node process
+# serving two HTTP drip routes, measured the same day at 99MB resident and
+# 6.2GB of disk. It was sized to match the connector boxes only because its
+# Mina leg compiled zk circuits at boot and needed the memory to do it; ADR
+# 0065 deleted that leg, and the plan with it. The relay has NOT been measured
+# and stays on g6-standard-2 until it is.
 #
 # NOTE: create_box returns early if a box with the label already exists, so
-# changing a value here does NOT resize a live box — there is no resize path in
-# this file. Resizing is a Linode API call (POST /linode/instances/<id>/resize
-# with allow_auto_disk_resize) against a box whose disk usage already fits the
-# smaller plan.
-declare -A NODE_TYPES=(  [store]=g6-nanode-1 [relay]=g6-standard-2 [faucet]=g6-standard-2 )
+# changing a value here does NOT resize a live box. `./devnet-manage.sh
+# faucet-resize` is the path for the FAUCET — deliberately that box only, since
+# store and relay each run the connector, which is the client edge on both
+# machines (ADR 0041), and resizing one of those is not a thing to reach for a
+# generic command to do. Resizing the store is still a hand-made Linode API
+# call (POST /linode/instances/<id>/resize with allow_auto_disk_resize) against
+# a box whose disk usage already fits the smaller plan.
+declare -A NODE_TYPES=(  [store]=g6-nanode-1 [relay]=g6-standard-2 [faucet]=g6-nanode-1 )
 # Root passwords are GENERATED PER CREATE and thrown away — never committed,
 # never printed, never reused. Nothing needs them: every path into a box in this
 # file is `ssh -i "$SSH_KEY"` (see ssh_run below), and infra/harden-ssh.sh turns
@@ -356,6 +367,60 @@ faucet-cutover)
   FAUCET_IP=$(get_box_ip "${NODE_LABELS[faucet]}")
   [ -n "$FAUCET_IP" ] || { echo "ERROR: faucet box not found — run './devnet-manage.sh faucet' first." >&2; exit 1; }
   update_dns "faucet.devnet" "$FAUCET_IP"
+  ;;
+
+faucet-resize)
+  # Move the LIVE faucet box onto NODE_TYPES[faucet]. Deliberately its own
+  # verb and faucet-only: `store` and `relay` run the connector, which is the
+  # client edge on both machines (ADR 0041), and resizing one of those is not a
+  # thing to do by reaching for a generic command.
+  #
+  # Linode resizes by shutting the box down, migrating it and booting it again
+  # — the faucet is OFFLINE for the duration, typically 10-20 minutes. The
+  # compose stack comes back on its own (`restart: unless-stopped`); nothing
+  # here needs to redeploy it.
+  TARGET_TYPE="${NODE_TYPES[faucet]}"
+  FAUCET_LABEL="${NODE_LABELS[faucet]}"
+  FAUCET_ID=$(get_box_id "$FAUCET_LABEL")
+  [ -n "$FAUCET_ID" ] || { echo "ERROR: faucet box not found." >&2; exit 1; }
+
+  CURRENT_TYPE=$(linode_get "linode/instances/$FAUCET_ID" | jq -r '.type')
+  if [ "$CURRENT_TYPE" = "$TARGET_TYPE" ]; then
+    echo "==> faucet is already $TARGET_TYPE — nothing to do."
+    exit 0
+  fi
+
+  # allow_auto_disk_resize below can only shrink a SINGLE ext filesystem (plus
+  # swap). On any other layout Linode either refuses or leaves the disk at its
+  # old size and the resize fails late; check first and say so, rather than
+  # discovering it mid-migration with the box already down.
+  DISKS=$(linode_get "linode/instances/$FAUCET_ID/disks")
+  EXT_COUNT=$(echo "$DISKS" | jq '[.data[] | select(.filesystem != "swap")] | length')
+  if [ "$EXT_COUNT" != "1" ]; then
+    echo "ERROR: faucet has $EXT_COUNT non-swap disks; automatic disk resize handles exactly 1." >&2
+    echo "Resize its disks by hand in the Linode UI first, then re-run." >&2
+    exit 1
+  fi
+
+  # A shrink cannot succeed if the data does not fit the target plan's disk.
+  TARGET_DISK=$(curl -sf "$LINODE_API/linode/types/$TARGET_TYPE" | jq -r '.disk')
+  USED_DISK=$(echo "$DISKS" | jq '[.data[].size] | add')
+  if [ -n "$TARGET_DISK" ] && [ "$USED_DISK" -gt "$TARGET_DISK" ]; then
+    echo "ERROR: allocated disk is ${USED_DISK}MB but $TARGET_TYPE provides ${TARGET_DISK}MB." >&2
+    exit 1
+  fi
+
+  echo "==> Resizing $FAUCET_LABEL ($FAUCET_ID): $CURRENT_TYPE -> $TARGET_TYPE"
+  echo "    The faucet will be DOWN for roughly 10-20 minutes."
+  linode_post "linode/instances/$FAUCET_ID/resize" \
+    -d "{\"type\": \"$TARGET_TYPE\", \"allow_auto_disk_resize\": true}" >/dev/null
+  wait_box_running "$FAUCET_LABEL"
+
+  NEW_TYPE=$(linode_get "linode/instances/$FAUCET_ID" | jq -r '.type')
+  echo "==> $FAUCET_LABEL is now $NEW_TYPE"
+  echo "    Containers restart themselves; give them a moment, then:"
+  probe "https://faucet.$DOMAIN/health" "faucet health"
+  echo "    Re-check the drip legs too — /api/info must still report them ready."
   ;;
 
 down)
