@@ -34,7 +34,8 @@ use crate::operator_view::{
     ChannelView, ClaimView, LeasedRouteView, PeerRouteView, PeerView, RouteSource, RouteView,
 };
 use crate::outbound_client::{
-    ClaimStateSource, EvmDomain, OutboundClaimBinding, OutboundClientLedger, SolanaDomain,
+    ClaimStateChallengeSigner, ClaimStateSource, EvmDomain, OutboundClaimBinding,
+    OutboundClientLedger, OwnedHttpClaimState, SolanaDomain,
 };
 use crate::peer_route_store::{
     PeerRouteStore, PeerRouteStoreError, RuntimePeerChannel, RuntimePeering, RuntimePeers,
@@ -520,7 +521,15 @@ pub struct Connector {
     /// greeted forward is relayed as the refusal it is rather than covered
     /// -- the same "degrade to just empty" shape `settlements` and
     /// `leased_routes` take.
-    outbound_client_hops: HashMap<String, OutboundClientHop>,
+    ///
+    /// Held as an atomically-swapped immutable snapshot, like
+    /// `runtime_peers` (issue #1217): `POST /peers` (ADR 0058) registers a
+    /// hop live, from a handler running concurrently with the packet path,
+    /// so a plain `HashMap` behind `&self` was never soundly writable here
+    /// -- only construction-time `with_outbound_client_hop` ever wrote it
+    /// before this, which is exactly why a runtime peering could accept but
+    /// never pay.
+    outbound_client_hops: ArcSwap<HashMap<String, OutboundClientHop>>,
     /// Peer ids this node's config file names (`[[peers]]`), threaded in
     /// via [`Connector::with_config_peer_ids`) purely as a reservation
     /// list (issue #884): the routing table IS the relationship set
@@ -637,6 +646,7 @@ pub struct Connector {
 /// same channel: a node that opened this channel already knows which
 /// `TokenNetwork` -- or which settlement program -- it was deployed under,
 /// so this is a configured input, not a guess.
+#[derive(Clone, Copy)]
 enum OutboundClientDomain {
     /// The channel's EIP-712 domain (issue #881). Used to COVER a forward
     /// proactively, before any greeting exists to read a domain off of;
@@ -653,6 +663,7 @@ enum OutboundClientDomain {
 }
 
 /// One next hop this connector can pay as a client (issue #875).
+#[derive(Clone)]
 struct OutboundClientHop {
     /// The channel this node's settlement address holds with the hop, as
     /// its raw on-chain 32 bytes -- an EVM `bytes32` channel id or a Solana
@@ -714,7 +725,7 @@ impl Connector {
             ),
             recognized_channels: RwLock::new(HashSet::new()),
             outbound_client: None,
-            outbound_client_hops: HashMap::new(),
+            outbound_client_hops: ArcSwap::from_pointee(HashMap::new()),
             config_peer_ids: HashSet::new(),
             runtime_peers: ArcSwap::from_pointee(RuntimePeers::new()),
             runtime_peer_routes: ArcSwap::from_pointee(HashMap::new()),
@@ -804,11 +815,16 @@ impl Connector {
     /// book, so a claim on it is judged from the moment the peering is
     /// established rather than from the next boot.
     ///
-    /// The channel is bound in **both** roles with one call, which is the
-    /// deployed shape (`connector_config::pay_channel`'s own header): the
-    /// peer role for what arrives -- a counterparty key and a signing
-    /// domain -- and the client role for what this node sends, which is the
-    /// outbound channel for this peer id.
+    /// **PEER role only** -- a counterparty key and a signing domain for
+    /// what arrives on this channel. It also names this channel as the one
+    /// `ClaimBook`'s own (now inbound-only, issue #1145) `outbound_channel`
+    /// bookkeeping tracks for `peer_id`, but that is not the CLIENT role
+    /// ADR 0042 needs to pay a forward: this call alone leaves a runtime
+    /// peering able to accept a claim and unable to sign one. See
+    /// [`Connector::register_outbound_client_hop`] for the client-role half
+    /// (issue #1217) -- `establish_peering` and boot rehydration both call
+    /// this and that together, the same way `connector_config::pay_channel`
+    /// documents the deployed shape as both roles on one channel.
     ///
     /// A binding whose identifiers do not parse is skipped rather than
     /// coerced: an unparseable channel id names no channel, and a book
@@ -861,6 +877,131 @@ impl Connector {
                 self.claims.set_outbound_channel(peer_id, channel_account);
             }
         }
+    }
+
+    /// Register a runtime peering's channel binding as an outbound CLIENT
+    /// hop (issue #1217, ADR 0042/0058): the missing counterpart of
+    /// [`Connector::bind_runtime_peer_channel`] that lets
+    /// [`Connector::cover_forward`] actually pay `peer_id` for a forward,
+    /// live from the moment the peering is established rather than only
+    /// after the next boot rewires `[[pay_channels]]` from a config file.
+    ///
+    /// `client_edge_url` is [`RuntimePeering::client_edge_url`] --
+    /// `POST /ilp/claim-state` is always asked over plain HTTP (issue
+    /// #1146's `OwnedHttpClaimState`), whichever carriage the packet
+    /// itself rides.
+    ///
+    /// Skipped -- with the reason logged, never silently -- for exactly the
+    /// failure modes `bind_runtime_peer_channel` already tolerates (an
+    /// address or channel id this node cannot read), plus one of its own:
+    /// no settlement signer configured for this binding's chain. A node
+    /// with no `[settlement.<chain>]` table cannot pay a next hop on that
+    /// chain as a client, the same way it cannot open a channel on it
+    /// either -- the peering is left accept-only on that chain rather than
+    /// refused outright, since the peer role this call does not touch may
+    /// still be perfectly usable.
+    pub(crate) fn register_outbound_client_hop(
+        &self,
+        peer_id: &str,
+        binding: &RuntimePeerChannel,
+        client_edge_url: &str,
+    ) {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(
+                connector_config::DEFAULT_PEER_TIMEOUT_MS,
+            ))
+            .build()
+            .expect("a reqwest client with only a timeout set always builds");
+        let hop = match binding {
+            RuntimePeerChannel::Evm {
+                channel_id,
+                chain_id,
+                token_network,
+                ..
+            } => {
+                let Some(signer) = self.claims.signer().cloned() else {
+                    tracing::warn!(
+                        peer_id,
+                        "no EVM settlement signer configured; cannot pay this peer as a client"
+                    );
+                    return;
+                };
+                let Some(token_network) = crate::peering::parse_evm_address(token_network) else {
+                    tracing::warn!(
+                        peer_id,
+                        "peering's token network is not an address this node can read; its \
+                         outbound client hop is not registered"
+                    );
+                    return;
+                };
+                let Ok(channel) = crate::claim::parse_channel_id(channel_id) else {
+                    tracing::warn!(
+                        peer_id,
+                        "peering's channel id is not bindable; its outbound client hop is not \
+                         registered"
+                    );
+                    return;
+                };
+                OutboundClientHop {
+                    channel,
+                    channel_id: channel_id.clone(),
+                    claim_state: Arc::new(OwnedHttpClaimState::new(
+                        client,
+                        client_edge_url,
+                        ClaimStateChallengeSigner::Evm(signer),
+                    )),
+                    domain: OutboundClientDomain::Evm(EvmDomain {
+                        chain_id: *chain_id,
+                        token_network,
+                    }),
+                }
+            }
+            RuntimePeerChannel::Solana {
+                channel_account,
+                program_id,
+                ..
+            } => {
+                let Some(signer) = self.claims.solana_signer().cloned() else {
+                    tracing::warn!(
+                        peer_id,
+                        "no Solana settlement signer configured; cannot pay this peer as a client"
+                    );
+                    return;
+                };
+                let Ok(channel) = crate::claim::parse_base58_32("channel account", channel_account)
+                else {
+                    tracing::warn!(
+                        peer_id,
+                        "peering's Solana channel account is not bindable; its outbound client \
+                         hop is not registered"
+                    );
+                    return;
+                };
+                let Ok(program_id) = crate::claim::parse_base58_32("program id", program_id) else {
+                    tracing::warn!(
+                        peer_id,
+                        "peering's Solana program id is not bindable; its outbound client hop \
+                         is not registered"
+                    );
+                    return;
+                };
+                OutboundClientHop {
+                    channel,
+                    channel_id: channel_account.clone(),
+                    claim_state: Arc::new(OwnedHttpClaimState::new(
+                        client,
+                        client_edge_url,
+                        ClaimStateChallengeSigner::Solana(signer),
+                    )),
+                    domain: OutboundClientDomain::Solana(SolanaDomain { program_id }),
+                }
+            }
+        };
+        self.outbound_client_hops.rcu(|current| {
+            let mut next = (**current).clone();
+            next.insert(peer_id.to_string(), hop.clone());
+            next
+        });
     }
 
     /// Make a runtime peering dialable, if this node holds a registrar.
@@ -961,6 +1102,15 @@ impl Connector {
     /// one restart later. Call this after
     /// [`Connector::with_peer_registrar`], or the carriages replay
     /// nowhere.
+    ///
+    /// Also re-registers each binding's outbound CLIENT hop (issue #1217),
+    /// so a restart does not turn a payable runtime peering back into an
+    /// accept-only one -- the same "everything establishing it did" claim
+    /// this doc already makes, extended to the role `establish_peering`
+    /// only started arming here. A row with channels but no
+    /// `client_edge_url` -- the shape every row written before issue #1217
+    /// has -- replays exactly as it always did: peer role bound, client
+    /// role absent, accept-only until re-peered.
     pub fn with_runtime_peer_route_store(
         mut self,
         store: PeerRouteStore,
@@ -970,6 +1120,9 @@ impl Connector {
         for (id, peering) in &peers {
             for binding in &peering.channels {
                 self.bind_runtime_peer_channel(id, binding);
+                if let Some(client_edge_url) = &peering.client_edge_url {
+                    self.register_outbound_client_hop(id, binding, client_edge_url);
+                }
             }
             self.register_runtime_peering(id, peering);
         }
@@ -1027,7 +1180,7 @@ impl Connector {
     /// unaffected: it keeps riding `pending_claim` exactly as before this
     /// method existed.
     pub fn with_outbound_client_hop(
-        mut self,
+        self,
         peer_id: impl Into<String>,
         channel_id: impl Into<String>,
         domain: EvmDomain,
@@ -1035,7 +1188,8 @@ impl Connector {
     ) -> Result<Self, InvalidChannelId> {
         let channel_id = channel_id.into();
         let channel = crate::claim::parse_channel_id(&channel_id)?;
-        self.outbound_client_hops.insert(
+        let mut hops = (*self.outbound_client_hops.load_full()).clone();
+        hops.insert(
             peer_id.into(),
             OutboundClientHop {
                 channel,
@@ -1047,6 +1201,7 @@ impl Connector {
                 domain: OutboundClientDomain::Evm(domain),
             },
         );
+        self.outbound_client_hops.store(Arc::new(hops));
         Ok(self)
     }
 
@@ -1072,7 +1227,7 @@ impl Connector {
     /// crossing n rode crossing n + 1, which is the model ADR 0042 exists to
     /// retire.
     pub fn with_solana_outbound_client_hop(
-        mut self,
+        self,
         peer_id: impl Into<String>,
         channel_account: impl Into<String>,
         program_id: &str,
@@ -1081,7 +1236,8 @@ impl Connector {
         let channel_account = channel_account.into();
         let channel = crate::claim::parse_base58_32("channel account", &channel_account)?;
         let program_id = crate::claim::parse_base58_32("program id", program_id)?;
-        self.outbound_client_hops.insert(
+        let mut hops = (*self.outbound_client_hops.load_full()).clone();
+        hops.insert(
             peer_id.into(),
             OutboundClientHop {
                 channel,
@@ -1094,6 +1250,7 @@ impl Connector {
                 domain: OutboundClientDomain::Solana(SolanaDomain { program_id }),
             },
         );
+        self.outbound_client_hops.store(Arc::new(hops));
         Ok(self)
     }
 
@@ -1430,9 +1587,14 @@ impl Connector {
     /// A **runtime** peering is additionally required to have a channel to
     /// pay from ([`PeerRouteTableError::PeerHasNoPayChannel`]) -- the
     /// runtime twin of ADR 0042's `[[pay_channels]]` load rule, which ADR
-    /// 0058 requires enforced continuously rather than once at boot. A
-    /// config-file peering is not re-checked here: `Config::load` already
-    /// refused to start without the row, and this table cannot see it.
+    /// 0058 requires enforced continuously rather than once at boot. That
+    /// checks the CLIENT-role hop (`outbound_client_hops`, issue #1217),
+    /// not `peering.channels` -- the PEER-role bindings, which are
+    /// non-empty for every peering `establish_peering` ever writes and so
+    /// never caught the gap this guard exists for: a peering that can
+    /// accept a claim but hold nothing to sign one with. A config-file
+    /// peering is not re-checked here: `Config::load` already refused to
+    /// start without the row, and this table cannot see it.
     pub fn upsert_runtime_peer_route(
         &self,
         prefix: impl Into<String>,
@@ -1454,7 +1616,7 @@ impl Connector {
         if !self.config_peer_ids.contains(&peer_id) {
             match self.runtime_peers_snapshot().get(&peer_id) {
                 None => return Err(PeerRouteTableError::UnknownPeerId { prefix, peer_id }),
-                Some(peering) if peering.channels.is_empty() => {
+                Some(_) if !self.outbound_client_hops.load_full().contains_key(&peer_id) => {
                     return Err(PeerRouteTableError::PeerHasNoPayChannel { prefix, peer_id })
                 }
                 Some(_) => {}
@@ -2287,7 +2449,8 @@ impl Connector {
     /// locally, which is exactly what lets this run proactively rather
     /// than only once a refusal has already taught this node a price.
     async fn cover_forward(&self, peer_id: &str, amount: u64) -> Result<WireClaim, String> {
-        let Some(hop) = self.outbound_client_hops.get(peer_id) else {
+        let hops = self.outbound_client_hops.load_full();
+        let Some(hop) = hops.get(peer_id) else {
             // No `[[pay_channels]]` row for this peering, so there is
             // nothing to pay it from -- and since issue #1145 there is no
             // postpay path to fall through to either. `Config::load`
@@ -2409,7 +2572,8 @@ impl Connector {
             );
             return None;
         };
-        let Some(hop) = self.outbound_client_hops.get(peer_id) else {
+        let hops = self.outbound_client_hops.load_full();
+        let Some(hop) = hops.get(peer_id) else {
             tracing::warn!(
                 peer_id,
                 "peer quoted x402 terms but no client-role channel is configured for it"
@@ -8064,12 +8228,15 @@ mod tests {
         /// lease, so it belongs in `client_route`'s answer.
         #[test]
         fn client_route_prices_a_runtime_peer_route() {
-            let connector = Connector::new(
-                vec![],
-                vec![],
-                Arc::new(FakeAppClient::new()),
-                Arc::new(InProcessPeerTransport::new()),
-                test_clock(),
+            let connector = covering(
+                Connector::new(
+                    vec![],
+                    vec![],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                ),
+                "runtime-hop",
             );
             connector
                 .upsert_runtime_peer("runtime-hop", peering(0))
@@ -8196,12 +8363,15 @@ mod tests {
         /// instead.
         #[test]
         fn removing_a_runtime_peer_still_referenced_by_a_runtime_route_is_refused() {
-            let connector = Connector::new(
-                vec![],
-                vec![],
-                Arc::new(FakeAppClient::new()),
-                Arc::new(InProcessPeerTransport::new()),
-                test_clock(),
+            let connector = covering(
+                Connector::new(
+                    vec![],
+                    vec![],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                ),
+                "runtime-hop",
             );
             connector
                 .upsert_runtime_peer("runtime-hop", peering(0))
@@ -8305,12 +8475,15 @@ mod tests {
             let path = dir.path().join("runtime_peers.json");
 
             let (store, peers, routes) = PeerRouteStore::open(&path).expect("open");
-            let before_restart = Connector::new(
-                vec![],
-                vec![],
-                Arc::new(FakeAppClient::new()),
-                Arc::new(InProcessPeerTransport::new()),
-                test_clock(),
+            let before_restart = covering(
+                Connector::new(
+                    vec![],
+                    vec![],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                ),
+                "apex-relay-2",
             )
             .with_runtime_peer_route_store(store, peers, routes);
             before_restart
@@ -8371,12 +8544,15 @@ mod tests {
         /// something an operator can actually verify rather than infer.
         #[test]
         fn peers_and_peer_routes_report_config_and_runtime_rows_with_their_source() {
-            let connector = Connector::new(
-                vec![],
-                vec![PeerRoute::new("g.example.configured", "configured-peer")],
-                Arc::new(FakeAppClient::new()),
-                Arc::new(InProcessPeerTransport::new()),
-                test_clock(),
+            let connector = covering(
+                Connector::new(
+                    vec![],
+                    vec![PeerRoute::new("g.example.configured", "configured-peer")],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                ),
+                "runtime-peer",
             )
             .with_peer_fees([("configured-peer".to_string(), 1)])
             .with_config_peer_ids(["configured-peer".to_string()]);

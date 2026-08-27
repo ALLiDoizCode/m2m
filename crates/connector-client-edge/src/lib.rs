@@ -2977,12 +2977,18 @@ mod tests {
     #[tokio::test]
     async fn the_self_description_is_generated_from_live_state_on_each_request() {
         let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
-        let connector = Arc::new(Connector::new(
-            vec![route],
-            vec![],
-            Arc::new(FakeAppClient::new()),
-            Arc::new(InProcessPeerTransport::new()),
-            test_clock(),
+        // Issue #1217: `upsert_runtime_peer_route` below now checks for a
+        // CLIENT-role hop, not merely a peer-role channel binding -- `covering`
+        // gives this peering one, the same way a `[[pay_channels]]` row would.
+        let connector = Arc::new(covering(
+            Connector::new(
+                vec![route],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ),
+            "later",
         ));
         let facts = NodeFacts::default();
         let first = self_description_of(router_with_node_facts(
