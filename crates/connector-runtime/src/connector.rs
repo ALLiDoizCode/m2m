@@ -7723,6 +7723,119 @@ mod tests {
             assert_eq!(app_client.deliveries().len(), 0);
         }
 
+        /// ADR 0065: a probe learns what the path costs **for a packet like
+        /// the one it sent**, so two probes of different sizes to one
+        /// schedule route come back with two figures.
+        ///
+        /// This is the half ADR 0011 was worried about -- a probe answering
+        /// only for its own size. It is answered not here but on the
+        /// greeting and the self-description, which publish the schedule
+        /// itself, so one free read still covers every size. What this test
+        /// pins is that the figure a probe does report is the true one for
+        /// its own packet rather than the route's base.
+        #[tokio::test]
+        async fn a_probe_to_a_schedule_route_reports_the_cost_of_its_own_packet() {
+            let route = StaticRoute::new_scheduled(
+                "g.example.app",
+                "http://localhost:4000",
+                Price::scheduled(25, 4),
+            )
+            .unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(
+                route.handler_url(),
+                answered(b"work the app should never do"),
+            );
+            let connector = connector_with(vec![route], app_client.clone(), test_clock());
+            connector.recognize_channel(CHANNEL);
+
+            let (small, _) = sealed_prepare(b"hi");
+            let (large, _) = sealed_prepare(&vec![b'x'; 4096]);
+            let small_len = small.data.len();
+            let large_len = large.data.len();
+
+            let small_cost = match connector.handle_probe(CHANNEL, small).await {
+                Ok(PacketResponse::Reject(reject)) => reject.accumulated_cost,
+                other => panic!("expected a priced reject, got {other:?}"),
+            };
+            let large_cost = match connector.handle_probe(CHANNEL, large).await {
+                Ok(PacketResponse::Reject(reject)) => reject.accumulated_cost,
+                other => panic!("expected a priced reject, got {other:?}"),
+            };
+
+            let schedule = Price::scheduled(25, 4);
+            assert_eq!(small_cost, schedule.charge(small_len));
+            assert_eq!(large_cost, schedule.charge(large_len));
+            assert!(
+                large_cost > small_cost,
+                "a bigger probe must be quoted a bigger figure: {small_cost} vs {large_cost}"
+            );
+            // And neither probe bought any of the app's work.
+            assert_eq!(app_client.deliveries().len(), 0);
+        }
+
+        /// ADR 0029 read through ADR 0065: a peer arrival carrying enough for
+        /// the route's **base** but not for the packet it actually brought is
+        /// refused `F03`, and the app never sees it.
+        ///
+        /// The failure this rules out is the one a partial implementation
+        /// would have: charging the base at the peer gate and the full
+        /// schedule at the termination, so a large packet is admitted across
+        /// the peering and then refused after the claim was already banked.
+        #[tokio::test]
+        async fn a_peer_arrival_covering_only_the_base_is_refused_for_a_large_packet() {
+            let route = StaticRoute::new_scheduled(
+                "g.example.app",
+                "http://localhost:4000",
+                Price::scheduled(100, 10),
+            )
+            .unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"never"));
+            let connector = connector_with(vec![route], app_client.clone(), test_clock());
+
+            let (large, _) = sealed_prepare(&vec![b'x'; 3000]);
+            let charge = Price::scheduled(100, 10).charge(large.data.len());
+            assert!(charge > 100, "the test packet must cost more than the base");
+
+            // Carries the base exactly -- what a sender reading only
+            // `extra.price` would send.
+            let (response, _ack) = connector
+                .handle_peer_prepare(
+                    Prepare {
+                        amount: 100,
+                        ..large.clone()
+                    },
+                    None,
+                )
+                .await;
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "F03");
+                    assert!(
+                        reject.message.contains(&charge.to_string()),
+                        "the refusal must name what this packet costs, got: {}",
+                        reject.message
+                    );
+                }
+                other => panic!("expected F03, got {other:?}"),
+            }
+            assert_eq!(app_client.deliveries().len(), 0);
+
+            // Carrying the packet's own charge is admitted and delivered.
+            let (response, _ack) = connector
+                .handle_peer_prepare(
+                    Prepare {
+                        amount: charge,
+                        ..large
+                    },
+                    None,
+                )
+                .await;
+            assert!(matches!(response, PacketResponse::Fulfill(_)));
+            assert_eq!(app_client.deliveries().len(), 1);
+        }
+
         /// The same packet sent through the ordinary entry point still
         /// fulfils and still reaches the app: the rule above belongs to the
         /// probe ingress, not to routing, so ADR 0011's "probes are not a

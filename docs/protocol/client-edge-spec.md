@@ -649,8 +649,9 @@ because this claim gate understands one payment method and an `exact` scheme ent
 second. **Not** because settlement facts are unavailable — they have been in the greeting's `extra`
 since issue #617, and are per-chain since #632 (corrected, issue #1073). `extra` is limited to
 what the code actually sets — `ilpAddress`, `endpoint`, `price` and `sessionLeaseTtlMs` on every
-greeting, plus whichever of `ilpAddresses`/`btpEndpoint`/`settlement`/`settlements`/
-`requiredTransport` this node has configured (below) — and carries nothing else.
+greeting, plus `pricePerKib` where the addressed route prices by size, plus whichever of
+`ilpAddresses`/`btpEndpoint`/`settlement`/`settlements`/`requiredTransport` this node has
+configured (below) — and carries nothing else.
 
 **`extra.ilpAddresses`/`extra.btpEndpoint`** ([issue
 #807](https://github.com/toon-protocol/connector/issues/807)): this node's own ILP address(es) and
@@ -662,9 +663,24 @@ these are this node's own authoritative facts regardless of what was probed; a c
 `ilpAddress` as a confirmation of a _guessed_ destination should prefer `ilpAddresses` when it is
 present, since the guess is exactly what a stale-or-missing-genesis-seed client cannot rely on.
 
-`price` (both the top-level `amount` and `extra.price`, always equal) is read from the same
-longest-prefix route lookup that §1.3's value binding and §1.7's `GET /ilp/routes/price` charge
-and answer against, so this response never states a price a real request wouldn't also be charged.
+`amount` and `extra.price` are read from the same longest-prefix route lookup that §1.3's value
+binding and §1.7's `GET /ilp/routes/price` charge and answer against, so this response never states
+a price a real request wouldn't also be charged.
+
+They are **equal for a flat route, and that is every route that predates
+[ADR 0065](../adr/0065-a-price-is-a-schedule-over-payload-length.md)**. Where a route's price
+carries a slope the two answer different questions and must not be conflated:
+
+- **`amount`** is what the request being answered would cost — the route's schedule evaluated at
+  that request's own payload length. This is x402's meaning of the field: what to pay for _this_.
+- **`extra.price`** is the schedule's **base**, and **`extra.pricePerKib`** its slope, in the same
+  decimal-string spelling. Together they let a client compute the cost of a packet it has not sent
+  yet, which is what keeps [ADR 0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md)'s
+  cacheability true: one greeting answers every size, rather than one greeting per size.
+
+`extra.pricePerKib` is **absent**, not `"0"`, on a flat route, so a flat route's greeting is
+byte-identical to what it was before schedules existed and a parser written against that greeting
+is unaffected.
 
 **Transport policy** (issue #701, `toon-meta#262` decision 11): which transport(s) a terminated
 route accepts is per-connector config, not a protocol constant — `both` by default, so no deployed
@@ -811,6 +827,14 @@ state, and is never pushed into a network unprompted.
   ```json
   { "destination": "g.example.app", "price": 100 }
   ```
+  A route priced by payload length ([ADR
+  0065](../adr/0065-a-price-is-a-schedule-over-payload-length.md)) answers with its slope beside
+  its base, so one read still tells a caller what any packet will cost:
+  ```json
+  { "destination": "g.example.store", "price": 1000, "price_per_kib": 30 }
+  ```
+  `price_per_kib` is **omitted** on a flat route, so this answer is unchanged for every route
+  that predates schedules.
   `404` when no route this connector serves matches `destination` — this endpoint never fabricates
   a price for a route it does not serve. It answered `404` for a forwarded destination before ADR
   0028, which was correct only while such a destination was also uncharged; answering it now is

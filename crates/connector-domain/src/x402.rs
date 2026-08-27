@@ -556,6 +556,67 @@ mod tests {
         assert_eq!(terms.offer().unwrap().extra.session_lease_ttl_ms, 300_000);
     }
 
+    /// ADR 0065: a flat route's greeting is byte-identical to what it was
+    /// before schedules existed. This is the compatibility claim the record
+    /// makes, and it is the one every existing reader depends on.
+    #[test]
+    fn a_flat_routes_greeting_carries_no_slope_at_all() {
+        let body = terms_body(&GreetingTerms {
+            destination: "g.toon.relay",
+            price: Price::flat(1000),
+            payload_len: 4096,
+            ..Default::default()
+        });
+        let text = String::from_utf8(body.clone()).unwrap();
+        assert!(
+            !text.contains("pricePerKib"),
+            "a flat greeting must not carry the field at all, got: {text}"
+        );
+        let terms = parse_greeting(&body).expect("well-formed");
+        // The payload length changes nothing for a flat route.
+        assert_eq!(terms.price(), Some(1000));
+        assert_eq!(terms.schedule(), Some(Price::flat(1000)));
+    }
+
+    /// A schedule route's greeting answers both questions: what THIS request
+    /// costs (`amount`), and what any request would cost (the schedule).
+    #[test]
+    fn a_schedule_greeting_quotes_this_packet_and_publishes_the_rule() {
+        let price = Price::scheduled(1000, 30);
+        let body = terms_body(&GreetingTerms {
+            destination: "g.toon.ario",
+            price,
+            payload_len: 100 * 1024,
+            ..Default::default()
+        });
+        let terms = parse_greeting(&body).expect("well-formed");
+
+        // `amount` is what the greeted request costs.
+        assert_eq!(terms.price(), Some(4_000));
+        // ...and the schedule rides beside it, so a reader can price a
+        // packet it has not sent yet without greeting again. This is what
+        // keeps ADR 0011's cacheability true under a slope.
+        let schedule = terms
+            .schedule()
+            .expect("a schedule route publishes its schedule");
+        assert_eq!(schedule, price);
+        assert_eq!(schedule.charge(2 * 1024 * 1024), 62_440);
+        assert_eq!(terms.offer().unwrap().extra.price, "1000");
+        assert_eq!(
+            terms.offer().unwrap().extra.price_per_kib.as_deref(),
+            Some("30")
+        );
+    }
+
+    /// A greeting from a node that predates schedules reads back as the flat
+    /// price it is, rather than failing to parse.
+    #[test]
+    fn a_pre_schedule_greeting_reads_as_a_flat_schedule() {
+        let terms = parse_greeting(well_formed().as_bytes()).expect("well-formed");
+        assert_eq!(terms.schedule(), Some(Price::flat(1000)));
+        assert!(terms.schedule().unwrap().is_flat());
+    }
+
     #[test]
     fn bytes_that_are_not_json_are_their_own_error() {
         let error = parse_greeting(b"\xff\xfe not json").expect_err("unreadable");

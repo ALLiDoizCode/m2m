@@ -20,8 +20,10 @@ The terminating connector answers with a `FULFILL` carrying the preimage of that
 condition, or a `REJECT` carrying a code. That answer travels back along the
 same path.
 
-What each hop keeps is a flat **fee**; what the caller pays for the whole path is
-a flat **price**. Neither is a percentage and neither is per byte.
+What each hop keeps is a flat **fee**; what the caller pays for the work at the
+end of the path is a **price**. Neither is a percentage. A fee is flat per
+packet; a price may carry a per-kibibyte slope over the packet's sealed payload
+length, and is flat when that slope is zero.
 
 Money does not move inside the packet. Each hop is backed by a payment channel,
 and a packet carries a signed **claim** on that channel — an off-chain IOU whose

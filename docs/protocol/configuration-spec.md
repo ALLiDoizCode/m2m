@@ -96,9 +96,30 @@ and peer routes share one prefix namespace.
 
 **CF-13** `[operator]` — A price attaches to a **handler**, and an operator charges differently for
 different work by publishing a route per handler. A connector MUST NOT let one route's price vary with
-what a packet carries — that is how it prices without ever interpreting what it carries.
+what a packet **carries** — that is how it prices without ever interpreting what it carries. It MAY
+vary with how **long** the packet's sealed payload is, which every hop can measure without opening it
+([ADR 0065](../adr/0065-a-price-is-a-schedule-over-payload-length.md)).
 
-**CF-14** `[connector]` — Two routes naming the same handler MUST agree on its price.
+**CF-13a** `[operator]` — A price MAY be written as a whole number, or as a table
+`{ base = <n>, per_kib = <n> }` charging `base + per_kib × ceil(payload_len / 1024)` where
+`payload_len` is the packet's own `data` length. The two spellings mean the same thing when the slope
+is zero. A table MUST carry both keys: a connector MUST refuse one naming only `base`, by name, rather
+than defaulting the slope to zero — a schedule meant to charge by size going out flat is silent
+mispricing (ADR 0065, ADR 0009).
+
+**CF-13b** `[connector]` — A connector MUST charge one figure per packet, computed from the arriving
+`data` length, at every gate that charges: the client edge on either carriage, a peer arrival's
+coverage check (CF-29), a probe's reject, and the termination. Computing a different figure at two
+gates for one packet admits a packet across a peering that its termination then refuses, after the
+covering claim is banked.
+
+**CF-13c** `[connector]` — A connector that prices by size MUST publish the whole schedule wherever it
+publishes a price: its self-description and its greeting carry the slope beside the base, so one free
+read answers every payload size ([ADR 0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md)'s
+cacheability). A greeting's own `amount` remains what the greeted request costs.
+
+**CF-14** `[connector]` — Two routes naming the same handler MUST agree on its price, comparing whole
+schedules: same base and same slope.
 
 **CF-15** `[operator]` — A route MAY require a specific client transport. A connector that pins one
 MUST publish the requirement in its self-description; enforcing a requirement it does not advertise is
@@ -297,7 +318,9 @@ operator surface is mounted when `[operator]` is configured, and where the peer 
 
 **Routes.** A route is a `prefix` plus exactly one of `handler_url` or `peer_id`, and a price is
 required on **both** branches, each with its own named refusal ([ADR 0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md);
-CF-10, CF-11). Write `price = 0` where free is deliberate. `transport` is meaningful only alongside
+CF-10, CF-11). Write `price = 0` where free is deliberate. A price is either a whole number or a
+`{ base, per_kib }` table charging by payload length (CF-13a) — `price = { base = 1000, per_kib = 30 }`
+— and the two spellings are one value when the slope is zero. `transport` is meaningful only alongside
 `handler_url` (CF-15).
 
 **Peerings.** A peer row carries an `id`, an optional `endpoint` whose scheme selects the carriage, a

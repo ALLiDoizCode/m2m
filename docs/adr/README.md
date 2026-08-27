@@ -1,6 +1,6 @@
 # Architecture decision records
 
-64 records. **Every one now carries a `**Status:**` line under its title** — that line, not this
+65 records. **Every one now carries a `**Status:**` line under its title** — that line, not this
 index, is the authority for whether a record is live. This page is the map: what is live, grouped
 by area; what is dead, grouped by what killed it; and what the folder still says that the code no
 longer does.
@@ -96,10 +96,11 @@ outside this repository.
 | [0042](0042-a-packet-carries-its-claim.md)                                             | A packet carries its claim                                                           | Accepted — **built** (#1145); supersedes 0031                                                           |
 | [0004](0004-value-moves-on-fulfilment.md)                                              | Value moves on fulfilment, one claim per packet                                      | Partly superseded by 0042 — its model no longer runs anywhere (#1145); one claim per packet still binds |
 | [0010](0010-flat-per-packet-fee-and-minimum-delivery.md)                               | A hop charges a flat per-packet fee; packets declare a minimum delivery              | Accepted, amended by 0042 and #1072                                                                     |
-| [0011](0011-rejects-accumulate-fees-and-probes-discover-cost.md)                       | Rejects accumulate fees; a probe is how cost is discovered                           | Accepted, amended by 0042; extended by 0044                                                             |
+| [0011](0011-rejects-accumulate-fees-and-probes-discover-cost.md)                       | Rejects accumulate fees; a probe is how cost is discovered                           | Accepted, amended by 0042; extended by 0044 and 0065                                                    |
 | [0051](0051-a-reject-code-binds-where-a-sender-must-act-differently.md)                | A reject code binds where a sender must act differently, and only there              | Accepted — extends 0011                                                                                 |
 | [0044](0044-a-probe-answers-what-a-route-costs-and-what-it-does.md)                    | A probe answers what a route costs **and what it does**                              | Accepted — **not yet built**                                                                            |
-| [0020](0020-a-price-is-flat-and-attaches-to-a-handler.md)                              | A price is flat, attaches to a handler, and buys an answer                           | Accepted, narrowed by 0040; amended by 0064                                                             |
+| [0020](0020-a-price-is-flat-and-attaches-to-a-handler.md)                              | A price is flat, attaches to a handler, and buys an answer                           | Accepted, narrowed by 0040; amended by 0064 and 0065                                                    |
+| [0065](0065-a-price-is-a-schedule-over-payload-length.md)                              | A price is a schedule over payload length                                            | Accepted — **built** (#984); amends 0020, extends 0011                                                  |
 | [0024](0024-peer-wire-claims-sign-the-eip-712-balance-proof.md)                        | Peer claims sign the EIP-712 balance-proof digest                                    | Accepted — amended by #1136                                                                             |
 | [0053](0053-a-solana-claim-binds-its-domain-the-way-an-evm-claim-does.md)              | A Solana claim binds its domain, the way an EVM claim already does                   | Accepted — **built** (#1082); the wire change has landed                                                |
 | [0059](0059-a-channel-is-derived-from-its-participants.md)                             | A channel is derived from its participants, on both chains, by the same rule         | Accepted — **built** (#1158); the redeploy has not happened                                             |
