@@ -98,9 +98,21 @@ echo "    (creating a mint costs a fraction of a SOL in rent + fees)"
 echo "==> Creating a 6-decimal mock USDC mint, authority = the treasury"
 # No --enable-freeze: a freeze authority on a faucet token is a footgun with no
 # use here. No initial supply: the faucet mints per drip.
-MINT_ADDR="$(spl --output json create-token --decimals "$DECIMALS" | jq -r '.commandOutput.address')"
-if [ -z "$MINT_ADDR" ] || [ "$MINT_ADDR" = "null" ]; then
-    echo "Error: could not read the new mint address out of spl-token's JSON output." >&2
+#
+# The address is dug out of the JSON tolerantly. spl-token's envelope has moved
+# between major versions -- 4.x wraps a create in `.commandOutput`, and nothing
+# in this repository pins which spl-token an operator has on PATH (the CLI is a
+# bringup tool, installed by hand per the runbook). Reading only one shape would
+# make this script fail on a version bump AFTER creating the mint, which is the
+# one failure that loses track of a token that already exists. So: try both
+# shapes, and if neither matches, print the raw output rather than swallowing
+# the address of a mint that is now live on chain.
+CREATE_OUT="$(spl --output json create-token --decimals "$DECIMALS")"
+MINT_ADDR="$(printf '%s' "$CREATE_OUT" | jq -r '.commandOutput.address // .address // empty')"
+if [ -z "$MINT_ADDR" ]; then
+    echo "Error: the mint was CREATED but its address could not be read from:" >&2
+    printf '%s\n' "$CREATE_OUT" >&2
+    echo "Find it with: solana -C \"$SOLCFG\" transaction-history $TREASURY_ADDR" >&2
     exit 1
 fi
 
