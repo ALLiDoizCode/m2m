@@ -1,6 +1,6 @@
 # A price is flat, attaches to a handler, and buys an answer
 
-**Status:** Accepted, narrowed by [0040](0040-a-verified-payment-is-stated-to-the-app.md) — a delivery whose covering client claim this connector verified itself now states `X-TOON-Payer` / `X-TOON-Amount` / `X-TOON-Chain`. Everything else stands, and [0044](0044-a-probe-answers-what-a-route-costs-and-what-it-does.md) extends handler granularity from price to description.
+**Status:** Accepted, narrowed by [0040](0040-a-verified-payment-is-stated-to-the-app.md) — a delivery whose covering client claim this connector verified itself now states `X-TOON-Payer` / `X-TOON-Amount` / `X-TOON-Chain`. Everything else stands, and [0044](0044-a-probe-answers-what-a-route-costs-and-what-it-does.md) extends handler granularity from price to description. Amended by [0064](0064-a-deadline-bounds-the-wait-for-an-app-not-the-answer.md) (#1183): “value moves whenever the app answered” now reads “and answered in time” — an app that does not answer within the packet’s own deadline is abandoned and the packet refused `R00`. Every answer that does arrive in time is untouched, a `404` included.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
@@ -60,6 +60,14 @@ accumulates (`connector.rs:719`) and every reject raised at a termination hardco
 is renamed `accumulated_fee` → `accumulated_cost`; it does not ride the OER encoding, so the rename
 is internal. `CONTEXT.md` gains **Cost** for the sum — what a caller must send, and the only figure
 ever returned.
+
+> **Amended by [ADR 0064](0064-a-deadline-bounds-the-wait-for-an-app-not-the-answer.md) (issue
+> #1183).** The paragraph below gains one word: _in time_. A packet's expiry bounds how long a
+> termination waits for its app, so an answer that never arrives before the deadline is abandoned
+> and the packet refused `R00` — which is not a new kind of app failure but the existing
+> "timed out" case, previously unenforced. Nothing about _which_ answer is untouched: a `404`
+> still rides home on a FULFILL, and lateness is the only property of an answer that has ever
+> changed a packet's outcome.
 
 **Value moves whenever the app answered**, whatever it answered. An HTTP status is envelope content,
 never a packet outcome: a 404 rides home inside a response envelope on a FULFILL. Only the _absence_

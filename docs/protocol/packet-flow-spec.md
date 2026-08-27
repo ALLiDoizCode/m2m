@@ -4,10 +4,12 @@
 §3.1 (a real execution condition), which were the live remnants of a document frozen as history by
 issue #1065, and states the routing and reject rules that had never been written in one place.
 PF-14 – PF-17 are amended or retired by
-[ADR 0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md) (issue #1143); the
+[ADR 0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md) (issue #1143), and
+PF-02 and PF-23 are amended in place by
+[ADR 0064](../adr/0064-a-deadline-bounds-the-wait-for-an-app-not-the-answer.md) (issue #1183); the
 rule numbers are kept and never reused.
 
-**Coverage:** none of PF-01 – PF-24 is vectored. This is a wire surface, so these rules enter
+**Coverage:** none of PF-01 – PF-25 is vectored. This is a wire surface, so these rules enter
 [ADR 0045](../adr/0045-a-behavioural-rule-is-normative-prose-until-its-vector-lands.md)'s debt ledger;
 issue #1084 owns the burn-down order.
 
@@ -22,6 +24,11 @@ condition is refused before any route is selected, any fee taken, or any app tou
 zero-condition path anywhere in this protocol.
 
 **PF-02** `[connector]` — A packet whose expiry has already passed MUST be refused before routing.
+
+> **Amended by [ADR 0064](../adr/0064-a-deadline-bounds-the-wait-for-an-app-not-the-answer.md)
+> (issue #1183).** This check on arrival is necessary and was never sufficient. PF-25 states what
+> the same fact requires at the moment of delivery and for as long as an app is being waited on;
+> "before routing" is now the first of three places the deadline is honoured, not the only one.
 
 ---
 
@@ -155,10 +162,36 @@ a **FULFILL**: the app answered, and the answer is what was paid for. Only an ap
 > This is the rule most likely to be got wrong by a second implementer, because turning an error status
 > into a reject looks like the honest thing to do. It refunds work that was performed.
 
+> **Amended by [ADR 0064](../adr/0064-a-deadline-bounds-the-wait-for-an-app-not-the-answer.md)
+> (issue #1183).** "The app answered" now means _answered in time_: an app that does not answer
+> within PF-25's budget is abandoned, and the packet is refused `R00` rather than fulfilled on an
+> answer that arrives afterwards. The rule above is untouched for every answer that does arrive in
+> time — a `404` still rides home on a FULFILL, and lateness is the only property of an answer that
+> has ever changed the packet's outcome.
+
 **PF-24** `[connector]` — A reject raised **at** a termination is sealed back to the sender — unless
 that termination never recovered the shared secret, in which case it is plaintext and carries **where
 to ask** for the identity. **Sealed identifies the destination; unsealed identifies nobody.**
 ([ADR 0054](../adr/0054-an-unsealed-termination-reject-answers-where-to-ask.md))
+
+**PF-25** `[connector]` — **A packet's expiry bounds how long a termination waits for its app, and
+nothing else.** A terminating connector MUST NOT deliver a packet whose expiry has already fired
+when delivery is reached, and MUST NOT wait for an app past that expiry: the request is abandoned
+and the packet refused `R00` — PF-02's fact and PF-19's code, at the moment the app is called and
+for as long as it is awaited. An answer the app produced **within** that budget MUST be answered
+for, whatever the clock says afterwards; a termination MUST NOT re-check expiry against work already
+done. Unlike a forwarding hop (PF-19) a termination keeps **no** message window back: the hop above
+already kept one, and a second would be spent on a return leg that is already paid for. Both
+refusals are raised with the shared secret in hand and so are sealed, per PF-24.
+([ADR 0064](../adr/0064-a-deadline-bounds-the-wait-for-an-app-not-the-answer.md))
+
+> The temptation is to reject a late-but-real answer so the payer is not charged for it. It does not
+> work, and it is worth knowing why before proposing it again: **the claim was taken before the app
+> was called** — at the client edge on ingest, on a peer arrival on receipt — and only a _forwarded_
+> route's terminal reject gives one back. Rejecting refunds nobody; it destroys an answer the payer
+> has already paid for, and denies a delivery that
+> [ADR 0042](../adr/0042-a-packet-carries-its-claim.md) says a fulfilment merely receipts. The
+> deadline is enforced by not waiting, never by disowning the answer.
 
 ---
 
@@ -199,8 +232,9 @@ Uses exactly the vocabulary of [`CONTEXT.md`](../../CONTEXT.md) and implements
 [0048](../adr/0048-routing-precedence-is-length-then-rank-and-a-lease-cannot-capture-a-termination.md),
 [0049](../adr/0049-the-cap-bounds-one-packet-is-discovered-by-t04-and-is-set-from-outside.md),
 [0051](../adr/0051-a-reject-code-binds-where-a-sender-must-act-differently.md),
-[0054](../adr/0054-an-unsealed-termination-reject-answers-where-to-ask.md) and
-[0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md).
+[0054](../adr/0054-an-unsealed-termination-reject-answers-where-to-ask.md),
+[0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md) and
+[0064](../adr/0064-a-deadline-bounds-the-wait-for-an-app-not-the-answer.md).
 
 **Not yet built:** PF-06's terminated-subtree protection (#1078) and PF-24's URL (#1083). PF-18's cap
 is live; its runtime settability is #1079.
