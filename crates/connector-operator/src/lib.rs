@@ -71,13 +71,14 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
+use connector_client_edge::ClientClaimGate;
 use connector_domain::{PacketResponse, Prepare, Price};
 use connector_runtime::{
-    ChannelOperationError, ChannelView, ClaimView, Connector, EstablishPeeringError,
-    LeaseRouteError, LeasedRouteView, PeerRouteTableError, PeerRouteView, PeerView, RouteView,
-    SettlementChain,
+    ChannelOperationError, ChannelView, ClaimBookKind, ClaimDirection, ClaimView, Connector,
+    EstablishPeeringError, LeaseRouteError, LeasedRouteView, PeerRouteTableError, PeerRouteView,
+    PeerView, RouteView, SettlementChain,
 };
-use connector_settlement::Claim;
+use connector_settlement::{Claim, SettlementError};
 use connector_signer::{derive_evm_address, to_hex, Signer, SignerError};
 use url::Url;
 use write_auth::{authenticate_write, AuditRecord, WriteAuth};
@@ -95,6 +96,18 @@ pub struct NodeIdentity {
 #[derive(Clone)]
 struct OperatorState {
     connector: Arc<Connector>,
+    /// The client edge's own claim book (issue #1218): money accepted at
+    /// `POST /ilp` -- ADR 0058's peering flow, or any ordinary paying
+    /// client on a chain-resolved channel -- lands here, not in
+    /// [`Connector`]'s peer-semantics `ClaimBook`, and before this field
+    /// existed nothing on this surface could see it: `GET /claims` and
+    /// `GET /channels` answered empty and `redeem-latest` refused while
+    /// the client edge's own journal held the claim. Reads and redeems
+    /// below now consult whichever book is the channel's actual authority
+    /// -- peer book first, this one otherwise -- the same doctrine
+    /// `Connector::peer_channel_watermark` already established for
+    /// `POST /ilp/claim-state` (issue #1102/#1103).
+    claim_gate: Arc<ClientClaimGate>,
     signer: Arc<dyn Signer>,
     bearer_token: Arc<str>,
     write_auth: Arc<WriteAuth>,
@@ -106,15 +119,20 @@ struct OperatorState {
 /// `bearer_token` and nothing more (ADR 0008). `write_keys` is the
 /// allowlist of ed25519 public keys permitted to sign a write once a
 /// write endpoint lands (issue #421); removing a key from this list and
-/// restarting revokes it, with no other change.
+/// restarting revokes it, with no other change. `claim_gate` is the same
+/// client-edge claim book `connector_client_edge::router_with_node_facts`
+/// (or its callers) already built for `POST /ilp` -- this surface never
+/// constructs its own, so the two never drift (issue #1218).
 pub fn router(
     connector: Arc<Connector>,
+    claim_gate: Arc<ClientClaimGate>,
     signer: Arc<dyn Signer>,
     bearer_token: impl Into<String>,
     write_keys: Vec<[u8; 32]>,
 ) -> Router {
     let state = OperatorState {
         connector,
+        claim_gate,
         signer,
         bearer_token: Arc::from(bearer_token.into()),
         write_auth: Arc::new(WriteAuth::new(write_keys)),
@@ -215,12 +233,49 @@ async fn leased_routes(State(state): State<OperatorState>) -> Json<Vec<LeasedRou
     Json(state.connector.leased_routes())
 }
 
+/// `GET /channels`: every channel this node opened itself
+/// ([`Connector::channels`]) plus every client channel it has merely
+/// recognized (issue #1218) -- a channel the counterparty opened, which
+/// [`Connector::channels`] structurally cannot list, since nothing about
+/// it is in [`Connector`]'s own `known_channels`. A recognized channel this
+/// node also happens to have opened (unusual, but not impossible) is not
+/// duplicated.
 async fn channels(State(state): State<OperatorState>) -> Json<Vec<ChannelView>> {
-    Json(state.connector.channels().await)
+    let mut views = state.connector.channels().await;
+    let already_listed: std::collections::HashSet<String> =
+        views.iter().map(|view| view.id.clone()).collect();
+    for channel_id in state.connector.recognized_channel_ids() {
+        if already_listed.contains(&channel_id) {
+            continue;
+        }
+        if let Ok(view) = state.connector.channel_view(&channel_id).await {
+            views.push(view);
+        }
+    }
+    Json(views)
 }
 
+/// `GET /claims`: every claim the peer semantics's own book holds
+/// ([`Connector::claims`]) plus every claim the client edge's own book
+/// holds (issue #1218) -- money a payer proved at `POST /ilp` and this
+/// node journaled to `client-edge-claims.log`, invisible here before this
+/// endpoint also read that book. `book` on each row says which one it came
+/// from; a client-edge entry is always inbound and never pending, the same
+/// as an inbound peer-book entry.
 async fn claims(State(state): State<OperatorState>) -> Json<Vec<ClaimView>> {
-    Json(state.connector.claims())
+    let mut views = state.connector.claims();
+    views.extend(state.claim_gate.accepted_channels().into_iter().map(
+        |(channel_id, watermark)| ClaimView {
+            peer_id: None,
+            channel_id,
+            direction: ClaimDirection::Inbound,
+            nonce: watermark.nonce,
+            cumulative_amount: watermark.cumulative_amount,
+            pending: false,
+            book: ClaimBookKind::Client,
+        },
+    ));
+    Json(views)
 }
 
 async fn audit_log(State(state): State<OperatorState>) -> Json<Vec<AuditRecord>> {
@@ -849,11 +904,56 @@ async fn settle_channel(
     channel_operation_response(state.connector.settle_channel(&channel_id).await)
 }
 
+/// The key `ClientClaimGate` would have journaled `channel_id` under, could
+/// it be a client channel at all -- `"evm:"` or `"solana:"` plus the id,
+/// exactly what `connector_domain::client_claim::ClientClaim::channel_key`
+/// produces from a parsed claim. This surface is handed a bare path
+/// parameter, not a parsed claim, so the chain has to be guessed from the
+/// id's own shape first: the same rule `connector_runtime::Connector`'s own
+/// (private) channel-id dispatch uses -- an EVM id is `0x`-optional 64 hex
+/// characters, a Solana one is base58 decoding to exactly 32 bytes -- and
+/// provably disjoint, so at most one of the two ever matches. `None` for an
+/// id in neither shape, which the client edge could never have journaled
+/// anything under either.
+fn client_edge_channel_key(channel_id: &str) -> Option<String> {
+    let hex = channel_id.strip_prefix("0x").unwrap_or(channel_id);
+    if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Some(format!("evm:0x{}", hex.to_ascii_lowercase()));
+    }
+    if bs58::decode(channel_id)
+        .into_vec()
+        .is_ok_and(|bytes| bytes.len() == 32)
+    {
+        return Some(format!("solana:{channel_id}"));
+    }
+    None
+}
+
+/// The claim this connector holds on `channel_id`, from whichever book is
+/// that channel's actual authority (issue #1218): the peer semantics's own
+/// `ClaimBook`, consulted first exactly as `Connector::peer_channel_watermark`
+/// already does for `POST /ilp/claim-state`, or -- only once that book has
+/// nothing -- the client edge's `ClientClaimGate`. A channel cannot be both
+/// (`ConfigError::ChannelInBothNamespaces`), so this never has two
+/// candidates to choose between.
+fn latest_claim(state: &OperatorState, channel_id: &str) -> Option<Claim> {
+    state.connector.peer_inbound_claim(channel_id).or_else(|| {
+        let key = client_edge_channel_key(channel_id)?;
+        let (nonce, cumulative_amount, signature) = state.claim_gate.latest_inbound_claim(&key)?;
+        Some(Claim {
+            nonce,
+            cumulative_amount: u128::from(cumulative_amount),
+            signature,
+        })
+    })
+}
+
 /// `POST /channels/:id/redeem-latest`: redeem the latest claim this node
 /// has itself verified and accepted on the channel named by the path
 /// (issue #425) -- unlike `POST /channels/:id/redeem`, the caller supplies
-/// no claim; the connector submits whichever one it already holds. No
-/// request body.
+/// no claim; the connector submits whichever one it already holds, from
+/// whichever of its two books is that channel's authority (issue #1218,
+/// [`latest_claim`]). No request body.
 async fn redeem_latest_claim(
     State(state): State<OperatorState>,
     Path(channel_id): Path<String>,
@@ -866,13 +966,26 @@ async fn redeem_latest_claim(
         return error.into_response();
     }
 
-    channel_operation_response(state.connector.redeem_latest_claim(&channel_id).await)
+    let result = match latest_claim(&state, &channel_id) {
+        Some(claim) => state.connector.redeem_channel(&channel_id, claim).await,
+        None => Err(ChannelOperationError::NoClaimToRedeem),
+    };
+    channel_operation_response(result)
 }
 
 /// `POST /channels/:id/cooperative-close`: redeem whatever claim this node
 /// last accepted on the channel named by the path, then close it -- one
 /// write instead of two, and no dispute window to wait out (issue #425,
 /// story 37). No request body.
+///
+/// A peer channel delegates entirely to [`Connector::cooperative_close`],
+/// unchanged (issue #1218's peer-book behaviour stays byte for byte the
+/// same). Only once the peer book has no claim on this channel does this
+/// handler consult the client edge's own book itself: redeem what it
+/// holds, tolerating an already-redeemed claim exactly as
+/// [`Connector::cooperative_close`] does for its own book, then close --
+/// or, if the client edge has nothing either, close directly, the same
+/// no-claim path `Connector::cooperative_close` would have taken anyway.
 async fn cooperative_close(
     State(state): State<OperatorState>,
     Path(channel_id): Path<String>,
@@ -885,7 +998,27 @@ async fn cooperative_close(
         return error.into_response();
     }
 
-    channel_operation_response(state.connector.cooperative_close(&channel_id).await)
+    if state.connector.peer_inbound_claim(&channel_id).is_some() {
+        return channel_operation_response(state.connector.cooperative_close(&channel_id).await);
+    }
+
+    let Some(claim) = client_edge_channel_key(&channel_id)
+        .and_then(|key| state.claim_gate.latest_inbound_claim(&key))
+        .map(|(nonce, cumulative_amount, signature)| Claim {
+            nonce,
+            cumulative_amount: u128::from(cumulative_amount),
+            signature,
+        })
+    else {
+        return channel_operation_response(state.connector.cooperative_close(&channel_id).await);
+    };
+    match state.connector.redeem_channel(&channel_id, claim).await {
+        Ok(_)
+        | Err(ChannelOperationError::Settlement(SettlementError::StaleClaim { .. }))
+        | Err(ChannelOperationError::Settlement(SettlementError::StaleNonce { .. })) => {}
+        Err(error) => return channel_operation_response(Err(error)),
+    }
+    channel_operation_response(state.connector.close_channel(&channel_id).await)
 }
 
 async fn identity(State(state): State<OperatorState>) -> Response {
@@ -907,10 +1040,12 @@ fn node_identity(signer: &dyn Signer) -> Result<NodeIdentity, SignerError> {
 mod tests {
     use super::*;
     use axum::body::Body;
+    use connector_client_edge::ClientChannelRegistry;
     use connector_config::StaticRoute;
     use connector_runtime::{
         ClaimStateDomain, ClaimStateSource, ClaimWatermark, EvmDomain, FakeAppClient,
-        InProcessPeerTransport, OutboundClientError, OutboundClientLedger, RouteSource, TestClock,
+        InMemoryJournal, InProcessPeerTransport, OutboundClientError, OutboundClientLedger,
+        RouteSource, TestClock,
     };
     use connector_signer::LocalSigner;
     use tower::ServiceExt;
@@ -958,6 +1093,20 @@ mod tests {
             .expect("a valid on-chain channel id")
     }
 
+    /// A client-edge claim book over no declared channels, journaling
+    /// nowhere durable -- the operator-surface tests below that are not
+    /// specifically about the client-edge book (most of them) need a
+    /// `ClientClaimGate` to satisfy `router`'s signature and nothing more.
+    fn empty_claim_gate() -> Arc<ClientClaimGate> {
+        Arc::new(
+            ClientClaimGate::restore(
+                ClientChannelRegistry::new(),
+                Arc::new(InMemoryJournal::new()),
+            )
+            .expect("a fresh in-memory journal has nothing to replay"),
+        )
+    }
+
     fn test_router(routes: Vec<StaticRoute>, bearer_token: &str) -> Router {
         let app_client = Arc::new(FakeAppClient::new());
         let clock = Arc::new(TestClock::new(
@@ -971,7 +1120,13 @@ mod tests {
             clock,
         ));
         let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
-        router(connector, signer, bearer_token.to_string(), vec![])
+        router(
+            connector,
+            empty_claim_gate(),
+            signer,
+            bearer_token.to_string(),
+            vec![],
+        )
     }
 
     async fn get(app: Router, path: &str, bearer_token: Option<&str>) -> Response {
@@ -1053,7 +1208,13 @@ mod tests {
         ));
         let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
         let expected = node_identity(signer.as_ref()).unwrap();
-        let app = router(connector, signer, "correct-token".to_string(), vec![]);
+        let app = router(
+            connector,
+            empty_claim_gate(),
+            signer,
+            "correct-token".to_string(),
+            vec![],
+        );
 
         let response = get(app, "/identity", Some("correct-token")).await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -1152,7 +1313,13 @@ mod tests {
                 clock,
             ));
             let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
-            router(connector, signer, "correct-token".to_string(), write_keys)
+            router(
+                connector,
+                empty_claim_gate(),
+                signer,
+                "correct-token".to_string(),
+                write_keys,
+            )
         }
 
         #[tokio::test]
@@ -1455,6 +1622,7 @@ mod tests {
             let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
             let app = router(
                 connector,
+                empty_claim_gate(),
                 signer,
                 "correct-token".to_string(),
                 vec![keypair.public.to_bytes()],
@@ -1546,7 +1714,13 @@ mod tests {
                 "peer-1",
             ));
             let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
-            router(connector, signer, "correct-token".to_string(), write_keys)
+            router(
+                connector,
+                empty_claim_gate(),
+                signer,
+                "correct-token".to_string(),
+                write_keys,
+            )
         }
 
         #[tokio::test]
@@ -1869,7 +2043,13 @@ mod tests {
                 .with_peer_allow_plaintext_endpoints(true),
             );
             let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
-            router(connector, signer, "correct-token".to_string(), write_keys)
+            router(
+                connector,
+                empty_claim_gate(),
+                signer,
+                "correct-token".to_string(),
+                write_keys,
+            )
         }
 
         fn signed(keypair: &Keypair, method: &str, path: &str, body: Vec<u8>) -> Request<Body> {
@@ -2294,6 +2474,7 @@ mod tests {
             let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
             let app = router(
                 connector,
+                empty_claim_gate(),
                 signer,
                 "correct-token".to_string(),
                 vec![allowed.public.to_bytes()],
@@ -2352,6 +2533,7 @@ mod tests {
             let keypair = keypair();
             let app = router(
                 connector,
+                empty_claim_gate(),
                 signer,
                 "correct-token".to_string(),
                 vec![keypair.public.to_bytes()],
@@ -2520,6 +2702,7 @@ mod tests {
             let keypair = keypair();
             let app = router(
                 connector.clone(),
+                empty_claim_gate(),
                 signer,
                 "correct-token".to_string(),
                 vec![keypair.public.to_bytes()],
@@ -2632,6 +2815,281 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(no_claim_response.status(), StatusCode::BAD_REQUEST);
+        }
+
+        /// Issue #1218, end to end against a real chain: money accepted at
+        /// the client edge -- never `Connector::handle_peer_claim`, which is
+        /// the peer-book path the test above already covers -- is what
+        /// `GET /claims`, `GET /channels` and `redeem-latest` could not see
+        /// before this ticket. Here it is verified, journaled by a real
+        /// [`ClientClaimGate`], accepted, and channel-verification-key-free:
+        /// this channel has no `[[peer_channels]]` row at all, so the peer
+        /// book (`Connector::peer_inbound_claim`) genuinely has nothing on
+        /// it and every read below can only be answering from the client
+        /// edge's own book.
+        #[tokio::test]
+        async fn a_client_edge_claim_is_redeemable_survives_a_restart_and_is_listed() {
+            if !require_anvil() {
+                return;
+            }
+
+            let anvil = Anvil::spawn().await;
+            let token = EvmSettlementBackend::deploy_mock_token(
+                &anvil.rpc_url,
+                DEPLOYER_PRIVATE_KEY,
+                1_000_000,
+            )
+            .await
+            .expect("deploy mock USDC");
+            let settlement = Arc::new(
+                EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
+                    .await
+                    .expect("deploy a TokenNetwork through a fresh registry"),
+            );
+
+            let payer_signer = LocalSigner::generate("client-edge-payer");
+            let payer_address = derive_evm_address(&payer_signer.public_key().unwrap());
+            let channel_id = settlement
+                .open(payer_address.to_vec(), chrono::Duration::hours(1))
+                .await
+                .expect("open a real channel");
+            // The payer's own side -- what a claim the payer signs is
+            // redeemed out of (issue #1118). No `[[peer_channels]]` row and
+            // no `with_channel_verification_key` anywhere in this test: the
+            // peer book has no record of this channel at all.
+            settlement
+                .fund_counterparty(&channel_id, 1_000)
+                .await
+                .expect("fund the payer's own side with real ERC-20 value");
+
+            fn client_claim_json(
+                signer: &LocalSigner,
+                channel_id_hex: &str,
+                nonce: u64,
+                transferred_amount: u128,
+                chain_id: u64,
+                token_network: [u8; 20],
+            ) -> String {
+                let mut on_chain_id = [0u8; 32];
+                let hex_digits = channel_id_hex.trim_start_matches("0x");
+                for (i, byte) in on_chain_id.iter_mut().enumerate() {
+                    *byte = u8::from_str_radix(&hex_digits[i * 2..i * 2 + 2], 16)
+                        .expect("channel id is 0x-prefixed 64-hex");
+                }
+                let proof = EvmBalanceProof {
+                    channel_id: on_chain_id,
+                    nonce,
+                    transferred_amount,
+                    locked_amount: 0,
+                    locks_root: [0u8; 32],
+                    chain_id,
+                    token_network_address: token_network,
+                };
+                let signature = signer.sign(&evm_balance_proof_digest(&proof)).unwrap();
+                let address = derive_evm_address(&signer.public_key().unwrap());
+                let signature_hex: String = signature
+                    .to_bytes()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                format!(
+                    r#"{{
+                        "version": "1.0",
+                        "blockchain": "evm",
+                        "messageId": "msg-{nonce}",
+                        "timestamp": "2026-02-02T12:00:00.000Z",
+                        "senderId": "client-edge-test-payer",
+                        "channelId": "{channel_id_hex}",
+                        "nonce": {nonce},
+                        "transferredAmount": "{transferred_amount}",
+                        "lockedAmount": "0",
+                        "locksRoot": "0x{zeros}",
+                        "signature": "0x{signature_hex}",
+                        "signerAddress": "{address}",
+                        "chainId": {chain_id},
+                        "tokenNetworkAddress": "{token_network_address}"
+                    }}"#,
+                    zeros = "0".repeat(64),
+                    address = to_hex(&address),
+                    token_network_address = to_hex(&token_network),
+                )
+            }
+
+            fn channels_recording(
+                channel_id: &str,
+                counterparty: connector_client_edge::EvmChannel,
+            ) -> ClientChannelRegistry {
+                let mut channels = ClientChannelRegistry::new();
+                channels
+                    .record_evm(channel_id, counterparty)
+                    .expect("a real on-chain channel id is a 32-byte hex identifier");
+                channels
+            }
+
+            let evm_channel = connector_client_edge::EvmChannel {
+                counterparty: payer_address,
+                chain_id: settlement.chain_id(),
+                token_network_address: settlement.address().to_fixed_bytes(),
+                deposit_floor: connector_client_edge::DepositFloor::Unknown,
+            };
+
+            let journal_dir = tempfile::tempdir().expect("temp journal dir");
+            let journal_path = journal_dir.path().join("client-edge-claims.log");
+
+            let claim_json = client_claim_json(
+                &payer_signer,
+                &channel_id.0,
+                1,
+                1_000,
+                settlement.chain_id(),
+                settlement.address().to_fixed_bytes(),
+            );
+
+            // The claim is admitted directly through the gate rather than a
+            // real `POST /ilp` -- ADR 0058's peering flow (or an ordinary
+            // paying client) is what puts a claim through that endpoint in
+            // production, and `ClientClaimGate::ingest` is the exact
+            // boundary it crosses to do it; this test's subject is what the
+            // operator surface does with what lands there, not that wire.
+            // Deliberately NOT redeemed yet -- that happens only after the
+            // "restart" below, so the redemption there can only succeed if
+            // the replayed gate genuinely recovered this claim's signature,
+            // not a fresh one this test admitted a second time.
+            {
+                let gate = ClientClaimGate::restore(
+                    channels_recording(&channel_id.0, evm_channel),
+                    Arc::new(connector_runtime::FileJournal::open(&journal_path).unwrap()),
+                )
+                .expect("a fresh journal has nothing to replay");
+                gate.ingest(&claim_json, 0)
+                    .await
+                    .expect("a genuine, on-chain-covered claim is accepted");
+
+                let connector = Arc::new(
+                    Connector::new(
+                        vec![],
+                        vec![],
+                        Arc::new(FakeAppClient::new()),
+                        Arc::new(InProcessPeerTransport::new()),
+                        Arc::new(TestClock::new(chrono::Utc::now())),
+                    )
+                    .with_settlement(SettlementChain::Evm, settlement.clone()),
+                );
+                assert_eq!(
+                    connector.peer_inbound_claim(&channel_id.0),
+                    None,
+                    "this channel has no peer-book record at all -- every read below can only \
+                     be answering from the client edge's own book"
+                );
+                // What `connector-client-edge`'s own `POST /ilp` handler
+                // does the instant a claim clears this gate (issue #548) --
+                // done by hand here since the claim above was admitted
+                // directly through the gate, not through that wire.
+                connector.recognize_channel(&channel_id.0);
+                let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
+                let app = router(
+                    connector,
+                    Arc::new(gate),
+                    signer,
+                    "correct-token".to_string(),
+                    vec![],
+                );
+
+                // `GET /claims` sees the client-edge claim, tagged as such.
+                let claims_response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("GET")
+                            .uri("/claims")
+                            .header(header::AUTHORIZATION, "Bearer correct-token")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(claims_response.status(), StatusCode::OK);
+                let bytes = hyper::body::to_bytes(claims_response.into_body())
+                    .await
+                    .unwrap();
+                let claims: Vec<ClaimView> = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(claims.len(), 1);
+                assert_eq!(claims[0].book, ClaimBookKind::Client);
+                assert_eq!(claims[0].direction, ClaimDirection::Inbound);
+                assert_eq!(claims[0].nonce, 1);
+                assert_eq!(claims[0].cumulative_amount, 1_000);
+
+                // `GET /channels` lists it too, even though this node never
+                // itself opened it -- it only recognized it, the moment the
+                // claim above cleared this gate.
+                let channels_response = app
+                    .oneshot(
+                        Request::builder()
+                            .method("GET")
+                            .uri("/channels")
+                            .header(header::AUTHORIZATION, "Bearer correct-token")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(channels_response.status(), StatusCode::OK);
+                let bytes = hyper::body::to_bytes(channels_response.into_body())
+                    .await
+                    .unwrap();
+                let channels: Vec<ChannelView> = serde_json::from_slice(&bytes).unwrap();
+                assert!(
+                    channels.iter().any(|view| view.id == channel_id.0),
+                    "the client channel must be listed even though this node never opened it: \
+                     {channels:?}"
+                );
+            }
+
+            // Same claim, after a restart: a brand-new `ClientClaimGate`,
+            // built only by replaying `journal_path` -- never `ingest`ed
+            // into directly -- still redeems it (issue #1218's AC2). Before
+            // this ticket the gate's in-memory watermark dropped the
+            // signature on replay, so this redemption is exactly the case
+            // that could not have worked.
+            let gate = ClientClaimGate::restore(
+                channels_recording(&channel_id.0, evm_channel),
+                Arc::new(connector_runtime::FileJournal::open(&journal_path).unwrap()),
+            )
+            .expect("replays the claim admitted above");
+            let connector = Arc::new(
+                Connector::new(
+                    vec![],
+                    vec![],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(InProcessPeerTransport::new()),
+                    Arc::new(TestClock::new(chrono::Utc::now())),
+                )
+                .with_settlement(SettlementChain::Evm, settlement.clone()),
+            );
+            let signer: Arc<dyn Signer> = Arc::new(LocalSigner::generate("operator-test-key"));
+            let keypair = keypair();
+            let app = router(
+                connector,
+                Arc::new(gate),
+                signer,
+                "correct-token".to_string(),
+                vec![keypair.public.to_bytes()],
+            );
+
+            let redeem_path = format!("/channels/{}/redeem-latest", channel_id.0);
+            let response = app
+                .oneshot(signed_post(&keypair, &redeem_path, Vec::new()))
+                .await
+                .unwrap();
+            let status = response.status();
+            let body_bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "a freshly restarted gate, replaying only the journal file, still redeems"
+            );
+            let redeemed: ChannelView = serde_json::from_slice(&body_bytes).unwrap();
+            assert_eq!(redeemed.redeemed, 1_000);
         }
     }
 }
