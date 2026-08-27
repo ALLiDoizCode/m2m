@@ -15,6 +15,7 @@
 //! accounting it reported.
 
 use chrono::{DateTime, Utc};
+use connector_domain::Price;
 use connector_settlement::{ChannelState, ChannelStatus};
 use serde::{Deserialize, Serialize};
 
@@ -30,15 +31,20 @@ pub enum RouteSource {
     Runtime,
 }
 
-/// A static route as seen by the operator surface. `price` is the flat
-/// per-packet amount a claim must advance by to pay for this route (issue
-/// #520) -- always present, since a terminated route is never silently
-/// free.
+/// A static route as seen by the operator surface. `price` is the schedule a
+/// claim must advance by to pay for this route (issue #520, ADR 0065) --
+/// always present, since a terminated route is never silently free.
+///
+/// It rides in the operator's own spelling: a bare integer for a flat price,
+/// a `{ base, per_kib }` object for one with a slope, exactly as the config
+/// file writes it. So this row is byte-identical to what it was before
+/// schedules existed for every flat route, and an operator reading one back
+/// sees the shape they would write.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteView {
     pub prefix: String,
     pub handler_url: String,
-    pub price: u64,
+    pub price: Price,
 }
 
 /// A leased route (issue #427) as seen by the operator surface -- only
@@ -88,7 +94,7 @@ pub struct PeerView {
 pub struct PeerRouteView {
     pub prefix: String,
     pub peer_id: String,
-    pub price: u64,
+    pub price: Price,
     pub source: RouteSource,
 }
 

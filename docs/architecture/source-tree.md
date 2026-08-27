@@ -47,6 +47,9 @@ connector-domain                 pure logic: no async, no I/O, no clock, no keys
   │                               encoding (RFC-0030, ADR 0023)
   ├─ address.rs, route.rs        ILP address validation (RFC-0015); longest-prefix selection
   ├─ fee.rs                      flat per-packet fee arithmetic (ADR 0010)
+  ├─ price.rs                    what a terminated route charges for one packet: a
+  │                               schedule over payload length, flat when its slope
+  │                               is zero (ADR 0065)
   ├─ condition.rs                condition / fulfilment / expiry rules
   ├─ claim.rs, client_claim.rs   nonce, watermark and value rules (ADR 0004, ADR 0005)
   ├─ projection.rs               balances folded from journal entries (ADR 0005)

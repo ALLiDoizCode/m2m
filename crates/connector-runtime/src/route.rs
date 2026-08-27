@@ -4,13 +4,17 @@
 //! most specific prefix across both kinds without caring which one it is.
 
 use chrono::{DateTime, Utc};
+use connector_domain::Price;
 
 /// A route whose traffic this connector forwards to a peer's connector for
 /// the next hop, rather than terminating it at an app of its own.
 ///
-/// Carries **one** number: `price`, what this connector's own client edge
+/// Carries **one** figure: `price`, what this connector's own client edge
 /// charges a *client* for a packet to this prefix (ADR 0028), out of which
-/// the rest of the path is paid. What this hop retains of it is the
+/// the rest of the path is paid. A schedule since ADR 0065, evaluated at the
+/// packet's own payload length exactly as a termination's is -- the edge
+/// measures the sealed wrap it was handed, which needs no more of the packet
+/// than forwarding it does. What this hop retains of it is the
 /// peering's flat per-packet **fee** (ADR 0010), which is not here and
 /// never was a property of the prefix -- this hop does the same work
 /// whichever prefix the packet was addressed to, so the fee attaches to the
@@ -20,7 +24,7 @@ use chrono::{DateTime, Utc};
 pub struct PeerRoute {
     prefix: String,
     peer_id: String,
-    price: u64,
+    price: Price,
 }
 
 impl PeerRoute {
@@ -29,7 +33,7 @@ impl PeerRoute {
     /// at all) always has, and the shorthand a test that is about carriage
     /// rather than charging wants.
     pub fn new(prefix: impl Into<String>, peer_id: impl Into<String>) -> PeerRoute {
-        PeerRoute::new_priced(prefix, peer_id, 0)
+        PeerRoute::new_scheduled(prefix, peer_id, Price::FREE)
     }
 
     /// A forwarded route with an explicit client-edge price (ADR 0028) --
@@ -39,6 +43,17 @@ impl PeerRoute {
         prefix: impl Into<String>,
         peer_id: impl Into<String>,
         price: u64,
+    ) -> PeerRoute {
+        PeerRoute::new_scheduled(prefix, peer_id, Price::flat(price))
+    }
+
+    /// A forwarded route charging a whole schedule (ADR 0065) -- what
+    /// `connector-cli` builds from a `[[routes]]` entry's own `price`, of
+    /// which [`PeerRoute::new_priced`] above is the flat case.
+    pub fn new_scheduled(
+        prefix: impl Into<String>,
+        peer_id: impl Into<String>,
+        price: Price,
     ) -> PeerRoute {
         PeerRoute {
             prefix: prefix.into(),
@@ -58,11 +73,12 @@ impl PeerRoute {
         &self.peer_id
     }
 
-    /// The flat price this connector's client edge charges a client for a
-    /// packet to this prefix (ADR 0028), greeted and gated on exactly the
-    /// path a terminated route's price is. Zero on a leased route, which
+    /// The price schedule this connector's client edge charges a client for
+    /// a packet to this prefix (ADR 0028), greeted and gated on exactly the
+    /// path a terminated route's price is, and evaluated at that packet's own
+    /// payload length the same way (ADR 0065). Free on a leased route, which
     /// has no price field to carry.
-    pub fn price(&self) -> u64 {
+    pub fn price(&self) -> Price {
         self.price
     }
 }
@@ -127,7 +143,7 @@ mod tests {
         let route = PeerRoute::new_priced("g.example.remote", "peer-b", 25);
         assert_eq!(route.prefix(), "g.example.remote");
         assert_eq!(route.peer_id(), "peer-b");
-        assert_eq!(route.price(), 25);
+        assert_eq!(route.price(), Price::flat(25));
     }
 
     #[test]

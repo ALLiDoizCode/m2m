@@ -49,7 +49,7 @@ use connector_btp::{
     PAYMENT_REQUIRED_PROTOCOL, PAYOUT_CLAIM_PROTOCOL,
 };
 use connector_domain::client_claim::{ClientClaim, EVM_NAMESPACE};
-use connector_domain::{condition_is_present, PacketResponse, Prepare, Reject, RejectCode};
+use connector_domain::{condition_is_present, PacketResponse, Prepare, Price, Reject, RejectCode};
 use connector_signer::{verify_evm_claim_state_challenge, EvmClaimStateChallenge};
 
 use crate::channels::decode_hex_bytes;
@@ -650,7 +650,12 @@ async fn handle_frame(
     // One lookup serves every fact (issue #701, ADR 0028): see
     // `handle_ilp`'s mirror of this on the HTTP carriage.
     let client_route = state.connector.client_route(&prepare.destination);
-    let price = client_route.map_or(0, |route| route.price);
+    // The schedule at this packet's own payload length (ADR 0065), exactly
+    // as `handle_ilp` computes it on the HTTP carriage -- one rule, so a
+    // sender is charged the same for the same packet whichever transport it
+    // arrives on.
+    let schedule = client_route.map_or(Price::FREE, |route| route.price);
+    let charge = schedule.charge(prepare.data.len());
     // Issue #807: see `handle_ilp`'s mirror of this on the HTTP carriage --
     // a condition-less PREPARE is structurally a bootstrap/greeting probe,
     // never a real payment attempt, regardless of destination.
@@ -670,7 +675,8 @@ async fn handle_frame(
         if !policy.accepts_btp() {
             let terms = x402_terms_body(
                 &prepare.destination,
-                price,
+                schedule,
+                prepare.data.len(),
                 &state.node,
                 Some(policy.name()),
             );
@@ -706,8 +712,14 @@ async fn handle_frame(
     // A claimless PREPARE to an unpriced route falls through unchanged,
     // exactly as on HTTP -- unless the PREPARE itself carries no execution
     // condition (issue #807), the same broadening `handle_ilp` applies.
-    if claim_json.is_none() && (price > 0 || !condition_present) {
-        let terms = x402_terms_body(&prepare.destination, price, &state.node, None);
+    if claim_json.is_none() && (charge > 0 || !condition_present) {
+        let terms = x402_terms_body(
+            &prepare.destination,
+            schedule,
+            prepare.data.len(),
+            &state.node,
+            None,
+        );
         let reject = Reject {
             code: RejectCode::f06_unexpected_payment(),
             triggered_by: String::new(),
@@ -736,7 +748,7 @@ async fn handle_frame(
     // client's watermark on either carriage (§9's no-drift invariant).
     if let Some(route) = client_route {
         if let Some(reject) =
-            crate::over_carried_reject(&prepare.destination, route.kind, prepare.amount, price)
+            crate::over_carried_reject(&prepare.destination, route.kind, prepare.amount, charge)
         {
             return reply(
                 replies,
@@ -761,14 +773,14 @@ async fn handle_frame(
     // itself.
     let admitted = match claim_json {
         Some(json) if !state.connector.envelope_target_would_be_refused(&prepare) => {
-            match state.claim_gate.admit(&json, price).await {
+            match state.claim_gate.admit(&json, charge).await {
                 Ok(accepted) => Some(accepted),
                 Err(rejection) => {
                     return reply(
                         replies,
                         reject_response(
                             frame.request_id,
-                            claim_rejection_reject(rejection, price),
+                            claim_rejection_reject(rejection, charge),
                             Vec::new(),
                         ),
                     )
@@ -790,7 +802,7 @@ async fn handle_frame(
         admitted,
         MatchedRoute {
             prepare,
-            price,
+            charge,
             is_forwarded_route,
         },
         frame.request_id,
@@ -810,7 +822,10 @@ async fn handle_frame(
 /// growing a ninth loose parameter for issue #1012.
 struct MatchedRoute {
     prepare: Prepare,
-    price: u64,
+    /// What this connector charges for **this** packet: the route's schedule
+    /// evaluated at its own payload length (ADR 0065), which for a flat route
+    /// is the flat price it always was.
+    charge: u64,
     /// Whether `prepare`'s destination matched a *forwarded* route --
     /// see [`roll_back_uncarried_forward`](crate::roll_back_uncarried_forward)'s
     /// own doc for why `finish_frame` needs to know.
@@ -834,7 +849,7 @@ async fn finish_frame(
 ) {
     let MatchedRoute {
         prepare,
-        price,
+        charge,
         is_forwarded_route,
     } = matched;
     // Issue #535/ADR 0036: the channel a covering claim admitted this
@@ -861,7 +876,7 @@ async fn finish_frame(
                     &replies,
                     reject_response(
                         request_id,
-                        claim_rejection_reject(rejection, price),
+                        claim_rejection_reject(rejection, charge),
                         Vec::new(),
                     ),
                 )
@@ -875,7 +890,7 @@ async fn finish_frame(
     // uses -- a configured route first, then whatever client session
     // `state.session_registry` has bound to this destination.
     let packet_response =
-        crate::session_route::route_prepare(&state, prepare, price, client_channel_id.as_deref())
+        crate::session_route::route_prepare(&state, prepare, charge, client_channel_id.as_deref())
             .await;
     crate::roll_back_uncarried_forward(
         &state,

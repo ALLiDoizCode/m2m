@@ -992,6 +992,7 @@ mod tests {
     use crate::peer::{PeerCarriage, DEFAULT_MAX_PACKET_AMOUNT};
     use crate::route::TransportPolicy;
     use crate::settlement::SettlementChain;
+    use connector_domain::Price;
     use std::io::Write;
     use std::path::PathBuf;
 
@@ -1063,8 +1064,128 @@ price = 0
             prefixes,
             vec!["g.example.other", "g.example.connector.billing"]
         );
-        let prices: Vec<u64> = config.routes().iter().map(|r| r.price()).collect();
-        assert_eq!(prices, vec![25, 0]);
+        let prices: Vec<Price> = config.routes().iter().map(|r| r.price()).collect();
+        assert_eq!(prices, vec![Price::flat(25), Price::FREE]);
+    }
+
+    /// ADR 0065 (issue #984): a route's `price` may be written as a table
+    /// carrying a slope, and survives a real TOML file through
+    /// `Config::load` -- the shape an operator actually writes, which the
+    /// `resolve_routes` tests in `route.rs` cannot reach because they start
+    /// from an already-parsed `Price`.
+    #[test]
+    fn loads_a_route_priced_by_a_schedule() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[[routes]]
+prefix = "g.example.store"
+handler_url = "http://localhost:5000"
+price = {{ base = 1000, per_kib = 30 }}
+
+[[routes]]
+prefix = "g.example.quotes"
+handler_url = "http://localhost:5001"
+price = 1000
+"#,
+                key_path.display()
+            )
+        })
+        .expect("load");
+
+        assert_eq!(config.routes()[0].price(), Price::scheduled(1000, 30));
+        assert_eq!(config.routes()[0].price().charge(100 * 1024), 4_000);
+        // The flat spelling is untouched and still means what it meant.
+        assert_eq!(config.routes()[1].price(), Price::flat(1000));
+        assert!(config.routes()[1].price().is_flat());
+    }
+
+    /// A price table exists only to carry a slope, so omitting `per_kib` is
+    /// refused **by name** rather than defaulted to zero: defaulting would
+    /// let a route an operator meant to charge by size go out flat, losing
+    /// exactly the money issue #984 is about, and silently.
+    #[test]
+    fn a_price_table_with_no_slope_is_refused_by_name() {
+        let error = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[[routes]]
+prefix = "g.example.store"
+handler_url = "http://localhost:5000"
+price = {{ base = 1000 }}
+"#,
+                key_path.display()
+            )
+        })
+        .expect_err("a slopeless price table is refused");
+
+        let message = error.to_string();
+        assert!(message.contains("per_kib"), "got: {message}");
+    }
+
+    /// `deny_unknown_fields` closes the mistyped-key hole on the route row;
+    /// the price table closes its own, and names the key it did not know.
+    #[test]
+    fn an_unknown_key_in_a_price_table_is_refused_by_name() {
+        let error = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[[routes]]
+prefix = "g.example.store"
+handler_url = "http://localhost:5000"
+price = {{ base = 1000, per_byte = 1 }}
+"#,
+                key_path.display()
+            )
+        })
+        .expect_err("an unknown price key is refused");
+
+        let message = error.to_string();
+        assert!(message.contains("per_byte"), "got: {message}");
+    }
+
+    /// A `[[children]]` entry takes the same spelling, so the convenience
+    /// form is not a second price grammar to keep in step. (The forwarded
+    /// branch is covered at `resolve_routes` in `route.rs`, which does not
+    /// need a whole peering and its channel to say the same thing.)
+    #[test]
+    fn a_child_takes_the_same_schedule_spelling_a_route_does() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+apex = "g.example.connector"
+
+[signer]
+key_file = "{}"
+
+[[children]]
+name = "billing"
+handler_url = "http://localhost:4000"
+price = {{ base = 7, per_kib = 3 }}
+"#,
+                key_path.display()
+            )
+        })
+        .expect("load");
+
+        assert_eq!(config.routes()[0].prefix(), "g.example.connector.billing");
+        assert_eq!(config.routes()[0].price(), Price::scheduled(7, 3));
     }
 
     /// Issue #701: a route's `transport` field survives a real TOML file
@@ -1274,7 +1395,7 @@ client_edge_url = "https://store.example/ilp"
 
         assert_eq!(config.peer_routes().len(), 1);
         assert_eq!(config.peer_routes()[0].peer_id(), "store");
-        assert_eq!(config.peer_routes()[0].price(), 1000);
+        assert_eq!(config.peer_routes()[0].price(), Price::flat(1000));
         // ADR 0061: the fee rode in on the `[[peers]]` row, not the route.
         assert_eq!(config.peers()[0].fee(), 3);
     }

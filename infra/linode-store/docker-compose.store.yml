@@ -1,4 +1,19 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# SUPERSEDED — the store box deploys from the STORE repo (store#103)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# The store box (`ario`) now runs `toon-protocol/store`'s own deploy/ bundle,
+# brought up by `deploy/bootstrap.sh` from a checkout at /root/store. That
+# bundle carries all six containers this directory used to spread across four
+# overlay files — nginx/TLS, connector, store, announce, certbot and the
+# label-scoped Watchtower — plus the connector.toml, as committed templates.
+#
+# These files are RETAINED, not live: crates/connector-bin/tests/
+# devnet_configs_load.rs still include_str!()s them, so deleting them breaks
+# that suite. Treat them as a fixture. Anything you change here has to be
+# changed in the store repo to reach the box, and `fleet-ops.yml box=ario`
+# still targets /root/connector paths that no longer drive the deployment.
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TOON store (Arweave DVM) node — DVM + TLS. The connector that proxies
 # g.toon.ario -> store:3300 is the Rust node in the sibling
 # docker-compose.store.rust.yml overlay (issue #901 deleted this file's own

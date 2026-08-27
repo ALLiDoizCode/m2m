@@ -5,6 +5,8 @@
 //! `packet.rs` has the table) -- over OER primitives (RFC-0030),
 //! ILP address validation (RFC-0015), longest-prefix route selection,
 //! flat per-packet fee arithmetic (ADR 0010),
+//! what a terminated route charges for one packet -- a schedule over the
+//! packet's payload length, flat when its slope is zero (ADR 0065, [`price`]) --
 //! execution condition / fulfilment / expiry rules (RFC-0022, issue #417),
 //! claim nonce / watermark rules (ADR 0004, ADR 0005, issue #423), and the
 //! structured envelope a packet carries to and from the app behind a
@@ -26,6 +28,7 @@ pub mod identity;
 pub mod node;
 mod oer;
 mod packet;
+pub mod price;
 mod projection;
 mod route;
 pub mod x402;
@@ -47,5 +50,6 @@ pub use node::{
     CLIENT_EDGE_DEFAULT_VERSION, CLIENT_EDGE_SUPPORTED_VERSIONS,
 };
 pub use packet::{Fulfill, PacketResponse, Prepare, Reject, RejectCode};
+pub use price::Price;
 pub use projection::{JournalEntry, Projection};
 pub use route::select_route;

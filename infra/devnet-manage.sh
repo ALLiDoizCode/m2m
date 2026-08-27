@@ -84,7 +84,17 @@ PORKBUN_API="https://api.porkbun.com/api/json/v3"
 # "ario", not "toon-devnet-store" — get_box_ip would find nothing under the
 # old name and `create_box` would stand up a SECOND store box.
 declare -A NODE_LABELS=( [store]=ario [relay]=relay [faucet]=faucet )
-declare -A NODE_TYPES=(  [store]=g6-standard-2 [relay]=g6-standard-2 [faucet]=g6-standard-2 )
+# Sizing: the store box was measured on 2026-08-27 using ~125MB of RAM across
+# all six of its containers, on a 4GB plan. g6-nanode-1 (1GB, 1 vCPU, 25GB) is
+# ample for it and costs $5/mo against $24. The relay and faucet have NOT been
+# measured and stay on g6-standard-2 until they are.
+#
+# NOTE: create_box returns early if a box with the label already exists, so
+# changing a value here does NOT resize a live box — there is no resize path in
+# this file. Resizing is a Linode API call (POST /linode/instances/<id>/resize
+# with allow_auto_disk_resize) against a box whose disk usage already fits the
+# smaller plan.
+declare -A NODE_TYPES=(  [store]=g6-nanode-1 [relay]=g6-standard-2 [faucet]=g6-standard-2 )
 # Root passwords are GENERATED PER CREATE and thrown away — never committed,
 # never printed, never reused. Nothing needs them: every path into a box in this
 # file is `ssh -i "$SSH_KEY"` (see ssh_run below), and infra/harden-ssh.sh turns

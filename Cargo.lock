@@ -1169,6 +1169,7 @@ name = "connector-config"
 version = "0.1.0"
 dependencies = [
  "bs58",
+ "connector-domain",
  "serde",
  "tempfile",
  "thiserror 2.0.19",

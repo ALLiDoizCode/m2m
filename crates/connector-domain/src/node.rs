@@ -129,10 +129,26 @@ pub struct EdgeIdentity {
 /// spelling the greeting's `amount`/`extra.price` already use -- a `u64`
 /// price is not representable in a JSON number a JavaScript reader can be
 /// trusted with.
+///
+/// Two figures since ADR 0065, because a price is a schedule: `price` is what
+/// a packet of any size costs, and `price_per_kib` is what each started
+/// kibibyte of payload adds. This is the surface that keeps ADR 0011's
+/// cacheability property true under a schedule -- a reader learns the whole
+/// rule from one free document and computes any packet's cost itself, instead
+/// of having to probe once per size.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RoutePrice {
     pub prefix: String,
     pub price: String,
+    /// Absent -- not `"0"` -- on a flat route, so a node serving only flat
+    /// routes publishes exactly the document it published before schedules
+    /// existed, and a reader written against that document is unaffected.
+    #[serde(
+        rename = "pricePerKib",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub price_per_kib: Option<String>,
 }
 
 /// The document itself, as it goes on the wire.
@@ -349,6 +365,7 @@ mod tests {
             vec![RoutePrice {
                 prefix: "g.toon.ario".to_string(),
                 price: "1000".to_string(),
+                price_per_kib: None,
             }],
             Some("btp".to_string()),
         );
@@ -376,6 +393,7 @@ mod tests {
             vec![RoutePrice {
                 prefix: "g.toon.ario".to_string(),
                 price: u64::MAX.to_string(),
+                price_per_kib: None,
             }],
             None,
         );
@@ -415,6 +433,7 @@ mod tests {
             vec![RoutePrice {
                 prefix: "g.toon.ario".to_string(),
                 price: "1000".to_string(),
+                price_per_kib: None,
             }],
             Some("btp".to_string()),
         );
