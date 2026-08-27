@@ -51,7 +51,7 @@ client_edge_addr = "0.0.0.0:3000"
 # See README step 6.
 state_dir = "/app/state"
 
-# ── Peer exposure (issue #677, ADR 0027) ──────────────────────────────────
+# ── Peer exposure (issue #677, ADR 0027) ─────────────────────────────────
 # Whether this node opens a peer listener, and for which carriage(s) --
 # `peer_expose` is a root-level key (see "Peering" below for what each
 # value means and the full [[peers]] shape), and it MUST be set up here,

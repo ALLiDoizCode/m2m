@@ -11,15 +11,14 @@
 //! This test takes the template's commented peering block verbatim -- only
 //! the leading `# ` comment markers come off -- and supplies the two things
 //! the template itself deliberately leaves unconfigured: real (if
-//! content-free) key files, and an `[settlement.evm]` table, which the
+//! content-free) key files, and a `[settlement.evm]` table, which the
 //! example's EVM `[[peer_channels]]` row requires since issue #1138 and
 //! which is out of this example's scope to teach. If a future edit
 //! reintroduces a removed key -- a credential, a `ceiling`, a
 //! `claim_enforcement` -- `Config::load` refuses it by name and this test
 //! fails with that exact message.
 
-use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use connector_config::Config;
 
@@ -37,6 +36,11 @@ const PEERING_EXAMPLE_MARKER: &str = "\n# [[peers]]\n";
 /// Uncommented here the same way the template's own prose tells an
 /// operator to.
 const PEER_EXPOSE_LINE: &str = "# peer_expose = \"btp\"";
+
+/// The peering example's dial endpoint, named once because two tests key
+/// off it: one loads the example that contains it, the other reintroduces a
+/// `credential` next to it.
+const PEER_ENDPOINT_LINE: &str = "endpoint = \"wss://store.example.net:443/ilp/btp\"";
 
 /// Strip exactly one leading `#`, and the space after it if there is one,
 /// from every line of a comment block -- the shape the template's own
@@ -65,17 +69,10 @@ fn uncomment(block: &str) -> String {
         .join("\n")
 }
 
-fn file_with(dir: &Path, name: &str, contents: &str) -> std::path::PathBuf {
-    let path = dir.join(name);
-    let mut handle = std::fs::File::create(&path).expect("create sandbox file");
-    handle
-        .write_all(contents.as_bytes())
-        .expect("write sandbox file");
-    path
-}
-
-#[test]
-fn the_templates_peering_example_loads() {
+/// The template cut at [`PEERING_EXAMPLE_MARKER`]: everything above the
+/// peering example, and the example itself with one level of comment marker
+/// removed.
+fn preamble_and_peering_example() -> (&'static str, String) {
     let start = TEMPLATE.find(PEERING_EXAMPLE_MARKER).unwrap_or_else(|| {
         panic!(
             "deploy/connector-rust/connector.toml no longer has a '# [[peers]]' line -- if the \
@@ -83,7 +80,18 @@ fn the_templates_peering_example_loads() {
              deleting it"
         )
     });
-    let peering_example = uncomment(&TEMPLATE[start..]);
+    (&TEMPLATE[..start], uncomment(&TEMPLATE[start..]))
+}
+
+fn file_with(dir: &Path, name: &str, contents: &str) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, contents).expect("write sandbox file");
+    path
+}
+
+#[test]
+fn the_templates_peering_example_loads() {
+    let (preamble, peering_example) = preamble_and_peering_example();
 
     let dir = tempfile::tempdir().expect("tempdir");
     let signer_key = file_with(dir.path(), "signer.key", "");
@@ -91,12 +99,23 @@ fn the_templates_peering_example_loads() {
     let state_dir = dir.path().join("state");
     std::fs::create_dir_all(&state_dir).expect("create sandbox state dir");
 
-    let mut doc = TEMPLATE[..start].to_string();
+    let mut doc = preamble.to_string();
+    let peer_expose_at = doc.find(PEER_EXPOSE_LINE).unwrap_or_else(|| {
+        panic!(
+            "deploy/connector-rust/connector.toml no longer has a commented '{PEER_EXPOSE_LINE}' \
+             line above its peering example -- see issue #1221 for why it must stay a root-level \
+             key"
+        )
+    });
+    // Root scope ends at the first table header (`\n[`): a `peer_expose`
+    // written after one parses as that table's key, not the connector's, and
+    // `deny_unknown_fields` refuses it. Uncommenting the line has to work
+    // where the template puts it, so pin that it is still above the headers.
+    let first_table_header_at = doc.find("\n[").unwrap_or(doc.len());
     assert!(
-        doc.contains(PEER_EXPOSE_LINE),
-        "deploy/connector-rust/connector.toml's commented 'peer_expose' line moved out of the \
-         part of the template this test treats as root-scope config (before the '[[peers]]' \
-         marker) -- see issue #1221 for why it must stay a root-level key"
+        peer_expose_at < first_table_header_at,
+        "deploy/connector-rust/connector.toml's commented 'peer_expose' line moved below a \
+         [table] header -- uncommenting it there is a load failure (issue #1221)"
     );
     doc = doc.replace(PEER_EXPOSE_LINE, "peer_expose = \"btp\"");
     doc = doc.replace(
@@ -114,7 +133,7 @@ fn the_templates_peering_example_loads() {
     );
 
     // Not part of the template: the example's EVM `[[peer_channels]]` row
-    // requires an `[settlement.evm]` table to bind against (issue #1138),
+    // requires a `[settlement.evm]` table to bind against (issue #1138),
     // and the template names no settlement chain at all -- rightly, since
     // which chain an operator settles on is theirs to pick. Supplied here
     // so this test proves the PEERING example loads, not that the template
@@ -149,23 +168,18 @@ fn the_templates_peering_example_loads() {
 /// regression #1221 fixed, not just that today's file happens to load.
 #[test]
 fn the_harness_would_catch_a_reintroduced_credential() {
-    let start = TEMPLATE
-        .find(PEERING_EXAMPLE_MARKER)
-        .expect("marker must resolve -- see the_templates_peering_example_loads");
-    let peering_example = uncomment(&TEMPLATE[start..]);
-    assert!(
-        peering_example.contains("[[peers]]") && peering_example.contains("id = \"store\""),
-        "uncommenting produced text that doesn't look like the peering example: \
-         {peering_example}"
-    );
+    let (_, peering_example) = preamble_and_peering_example();
+    for expected in ["[[peers]]", "id = \"store\"", PEER_ENDPOINT_LINE] {
+        assert!(
+            peering_example.contains(expected),
+            "uncommenting produced text with no {expected:?} in it, so it is not the peering \
+             example this control means to spoil: {peering_example}"
+        );
+    }
 
     let spoiled = peering_example.replace(
-        "endpoint = \"wss://store.example.net:443/ilp/btp\"",
-        "endpoint = \"wss://store.example.net:443/ilp/btp\"\ncredential = { secret = \"x\" }",
-    );
-    assert_ne!(
-        spoiled, peering_example,
-        "expected to find the endpoint line to reintroduce a credential next to"
+        PEER_ENDPOINT_LINE,
+        &format!("{PEER_ENDPOINT_LINE}\ncredential = {{ secret = \"x\" }}"),
     );
 
     // The reintroduced-credential doc is missing state_dir, settlement and
