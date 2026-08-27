@@ -118,6 +118,14 @@ publishes a price: its self-description and its greeting carry the slope beside 
 read answers every payload size ([ADR 0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md)'s
 cacheability). A greeting's own `amount` remains what the greeted request costs.
 
+**CF-13d** `[operator]` — A route MAY carry `request`, an arbitrary table naming what a client should
+send to use it. A connector MUST validate only that the value **is** a table — never a key inside
+it, and never `deny_unknown_fields` on its contents — and MUST publish it verbatim, unread, on that
+route's self-description entry and on the greeting for that destination, omitted (not `null`) where
+the operator wrote none. A connector MUST NOT fetch this fact from the app or any other source: an
+operator declares it, or it is absent.
+([ADR 0066](../adr/0066-a-route-declares-its-request-shape-and-the-connector-never-reads-it.md))
+
 **CF-14** `[connector]` — Two routes naming the same handler MUST agree on its price, comparing whole
 schedules: same base and same slope.
 
@@ -321,7 +329,10 @@ required on **both** branches, each with its own named refusal ([ADR 0028](../ad
 CF-10, CF-11). Write `price = 0` where free is deliberate. A price is either a whole number or a
 `{ base, per_kib }` table charging by payload length (CF-13a) — `price = { base = 1000, per_kib = 30 }`
 — and the two spellings are one value when the slope is zero. `transport` is meaningful only alongside
-`handler_url` (CF-15).
+`handler_url` (CF-15). `request` (CF-13d) is an optional arbitrary table, published unread wherever
+the route's price is published; unlike every other row in `[[routes]]`, its contents are not
+`deny_unknown_fields` — that guarantee stops at the row, not inside a blob whose keys are the app's
+business.
 
 **Peerings.** A peer row carries an `id`, an optional `endpoint` whose scheme selects the carriage, a
 `max_packet_amount` (CF-19's cap — `0` is refused by name, and there is no disabling spelling) and a

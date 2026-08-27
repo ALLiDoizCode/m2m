@@ -1520,7 +1520,10 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
         // gateway -- and it carries the whole schedule (ADR 0065), so a
         // forwarded route's slope survives the trip into the runtime the way
         // its base always has.
-        .map(|route| PeerRoute::new_scheduled(route.prefix(), route.peer_id(), route.price()))
+        .map(|route| {
+            PeerRoute::new_scheduled(route.prefix(), route.peer_id(), route.price())
+                .with_request(route.request().cloned())
+        })
         .collect();
     let mut connector = Connector::new(
         config.routes().to_vec(),

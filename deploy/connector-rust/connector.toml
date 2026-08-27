@@ -80,6 +80,22 @@ prefix = "g.example.connector.app"
 handler_url = "http://app:3100"
 price = 100
 
+# `request` is optional (ADR 0066, issue #1210): an arbitrary table naming
+# what a client should send to use this route, for an app whose payload is
+# more than "an amount". This connector validates only that it IS a table --
+# it never reads a key out of it, never fetches anything to produce or check
+# it, and publishes it verbatim on this route's self-description entry and
+# on the greeting for this destination. Uncomment and replace with whatever
+# shape your own app actually expects; the example below is illustrative,
+# not a shape this connector understands or enforces.
+#
+# [routes.request]
+# protocol = "nip90"
+# kinds = [5096, 5098]
+#
+# [routes.request.params]
+# chain = ["evm:84532"]
+
 # ── Operator surface (ADR 0008) ─────────────────────────────────────────
 # Reads (peers, routes, channels, claims, exposure, identity, the write
 # audit log, and GET /metrics) require this bearer token and nothing else.

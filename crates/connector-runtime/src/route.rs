@@ -25,6 +25,7 @@ pub struct PeerRoute {
     prefix: String,
     peer_id: String,
     price: Price,
+    request: Option<serde_json::Value>,
 }
 
 impl PeerRoute {
@@ -59,7 +60,19 @@ impl PeerRoute {
             prefix: prefix.into(),
             peer_id: peer_id.into(),
             price,
+            request: None,
         }
+    }
+
+    /// Attach what a client should send to use this route (issue #1210) --
+    /// `connector-cli` calls this with the config-file row's own
+    /// `connector_config::PeerRouteConfig::request` when it builds this
+    /// route from `[[routes]]`. A route built any other way -- a lease, or
+    /// a test that does not care -- keeps `None`, the value every
+    /// constructor above already gives it.
+    pub fn with_request(mut self, request: Option<serde_json::Value>) -> PeerRoute {
+        self.request = request;
+        self
     }
 
     /// The destination prefix this route forwards.
@@ -80,6 +93,13 @@ impl PeerRoute {
     /// has no price field to carry.
     pub fn price(&self) -> Price {
         self.price
+    }
+
+    /// What a client should send to use this route (issue #1210). `None`
+    /// on a route built with no [`PeerRoute::with_request`] call -- every
+    /// route before this issue, and every leased route today.
+    pub fn request(&self) -> Option<&serde_json::Value> {
+        self.request.as_ref()
     }
 }
 

@@ -622,6 +622,7 @@ byte-for-byte, base64-encoded, in a `Payment-Required` response header:
 {
   "x402Version": 2,
   "resource": { "url": "g.example.app" },
+  "request": { "protocol": "nip90", "kinds": [5096, 5098] },
   "accepts": [
     {
       "scheme": "toon-channel",
@@ -652,6 +653,17 @@ what the code actually sets — `ilpAddress`, `endpoint`, `price` and `sessionLe
 greeting, plus `pricePerKib` where the addressed route prices by size, plus whichever of
 `ilpAddresses`/`btpEndpoint`/`settlement`/`settlements`/`requiredTransport` this node has
 configured (below) — and carries nothing else.
+
+**`request`** ([issue #1210](https://github.com/toon-protocol/connector/issues/1210), [ADR
+0066](../adr/0066-a-route-declares-its-request-shape-and-the-connector-never-reads-it.md)) — a
+top-level member, present exactly when the addressed route's `[[routes]] request` table is
+configured, absent (not `null`) otherwise. It sits **beside** `resource`, not inside `accepts[]`:
+it describes what a client should send to use the addressed route — the resource itself — not a
+property of one particular payment method, and applies whichever entry in `accepts[]` a payer ends
+up satisfying. The value is the operator's table converted to JSON verbatim; this connector never
+reads a key out of it, never fetches it from anywhere, and never varies its behaviour on what it
+contains. A reader that predates this field ignores it, the same as any other addition to this
+forgiving-deserialization document.
 
 **`extra.ilpAddresses`/`extra.btpEndpoint`** ([issue
 #807](https://github.com/toon-protocol/connector/issues/807)): this node's own ILP address(es) and
