@@ -1232,7 +1232,16 @@ const SETTLEMENT_CONTRACT_ADDRESS_ROLLBACK_TARGET: &str =
 /// [`EXPECTED_STORE_PRICE`], so that reading the expected values back out of the
 /// file under test cannot make this pass on a file that drifted.
 const FLEET_SOLANA_PROGRAM_ID: &str = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip";
-const FLEET_SOLANA_USDC_MINT: &str = "xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in";
+/// The mint moved on 2026-08-27, and the reason is worth keeping next to the
+/// literal. The 2026-07-18 mint (`xyc5J8Mg...`) is still on chain and still
+/// holds its supply, but its MINT AUTHORITY was a key that lived outside the
+/// repository and is lost -- so nobody can mint it and nobody can refill a
+/// treasury holding it, which is what left the devnet faucet's Solana leg
+/// dead with no repair path. This mint's authority is the faucet box's own
+/// treasury (`infra/linode-faucet/create-devnet-usdc-mint.sh`), so the faucet
+/// mints per drip and there is no irreplaceable key anywhere in the design.
+/// See `packages/solana-program/deployments/devnet-public.md`'s mint amendment.
+const FLEET_SOLANA_USDC_MINT: &str = "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU";
 
 /// The settlement asset's scale on every chain this fleet settles on: ADR
 /// 0010's "6 decimals everywhere" (docs/usdc-cross-chain-settlement.md).

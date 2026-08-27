@@ -16,7 +16,7 @@
     "rpcUrl": "https://api.devnet.solana.com",
     "wsUrl": "wss://api.devnet.solana.com",
     "programId": "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip",
-    "tokenMint": "xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in",
+    "tokenMint": "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU",
     "tokenDecimals": 6,
     "_fund": "https://faucet.devnet.toonprotocol.dev (web UI) or POST /api/solana/usdc-request → drips USDC on the PUBLIC Solana devnet (USDC only since connector#898 — the SOL leg is retired; get SOL from https://faucet.solana.com)",
     "_chainNote": "PUBLIC Solana devnet — the self-hosted test validator (mint H8HSreUF…) is deleted."

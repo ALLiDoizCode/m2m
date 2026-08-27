@@ -3982,7 +3982,7 @@ key_file = "{key_file}"
 [settlement.solana]
 rpc_url = "http://127.0.0.1:8899"
 program_id = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
-token_address = "xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in"
+token_address = "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU"
 decimals = 6
 
 [settlement.solana.key]
