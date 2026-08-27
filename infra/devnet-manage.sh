@@ -12,7 +12,7 @@
 #
 # The self-hosted EVM/Solana/Mina chain boxes this script once managed were
 # deleted 2026-07-19 — the devnet settles on PUBLIC chains now (Base Sepolia,
-# public Solana devnet, public Mina devnet); see infra/linode/endpoints.json's
+# public Solana devnet); see infra/linode/endpoints.json's
 # own note. Recreating them here would be a live footgun (issue #819), not a
 # restoration, so they are gone from this file too.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -291,7 +291,7 @@ up)
 store)
   # Targeted: provision + deploy ONLY the store (DVM) box. Use this to add the
   # store node without `up` re-running bootstrap on the live chain/toon boxes
-  # (which would re-pull images and re-provision the Mina lightnet).
+  # (which would re-pull images and re-provision the chain services).
   TOON_MNEMONIC="${TOON_MNEMONIC:-giant goat guide develop boy wolf target embody leave sunny paddle neutral}"
   echo "==> [1/3] Provision store box"
   create_box store

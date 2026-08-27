@@ -6,9 +6,10 @@
 # not a node on the network, so it has no `[[peers]]` row naming it anywhere,
 # no signer key, no settlement key, no state directory, no payment channel.
 #
-# USDC only (§4.6): the local-anvil EVM leg and the native-SOL/native-MINA legs
-# are retired from the faucet app itself (packages/faucet/src/index.js); this
-# box's env below configures only the surviving USDC-only legs.
+# USDC only (§4.6): the local-anvil EVM leg and the native-SOL leg are retired
+# from the faucet app itself (packages/faucet/src/index.js), and the Mina leg
+# left with Mina (ADR 0065). This box's env below configures only the two
+# surviving USDC legs, Base Sepolia and Solana devnet.
 #
 # Run from the CONNECTOR REPO ROOT:
 #   docker compose -f infra/linode-faucet/docker-compose.faucet.yml up -d
@@ -16,9 +17,9 @@
 
 services:
   faucet:
-    # Build context is the REPO ROOT (not packages/faucet): the multi-stage
-    # Dockerfile builds the mina-zkapp ESM bundle the USDC mint path imports,
-    # so it needs packages/mina-zkapp/ in context. See packages/faucet/Dockerfile.
+    # Build context is the REPO ROOT (not packages/faucet): the Dockerfile
+    # COPYs packages/faucet/ by its repo-relative path. See
+    # packages/faucet/Dockerfile.
     build:
       context: ../..
       dockerfile: packages/faucet/Dockerfile
@@ -32,27 +33,6 @@ services:
       # The native-SOL route (POST /api/solana/request) and its
       # SOLANA_SOL_AMOUNT config are retired entirely (issue #945, §4.6) —
       # only the USDC-only drip runs on this box.
-      #
-      # ── Mina — public devnet, USDC only ────────────────────────────────
-      # MINA_FAUCET_KEY / MINA_DRIP_AMOUNT are deliberately NOT set — the
-      # native-MINA route (POST /api/mina/request) is retired (§4.6); this
-      # faucet has no native-MINA leg at all, so the treasury key that would
-      # fund it is not part of this box's secret set.
-      # PUBLIC Mina devnet, matching this block's heading and the faucet code's
-      # own default (packages/faucet/src/mina-usdc.mjs). NOT the self-hosted
-      # `https://mina.${DOMAIN}/graphql` that infra/linode-node/docker-compose.node.yml
-      # still carries: that lightnet host was DELETED 2026-07-19 with the rest of
-      # the self-hosted chain boxes (infra/devnet-manage.sh's header; issue #819),
-      # so the name now resolves to registrar parking and fails TLS — a box
-      # shipped with it would have its Mina USDC leg dead on arrival.
-      MINA_GRAPHQL_URL: ${MINA_GRAPHQL_URL:-https://api.minascan.io/node/devnet/v1/graphql}
-      # USDC transfer-drip (o1js proving) — set by the human on this box after
-      # generating a FRESH treasury key (§4.4; never copied from box 1).
-      # Unset → POST /api/mina/usdc-request 503s.
-      MINA_USDC_TREASURY_KEY: ${MINA_USDC_TREASURY_KEY:-}
-      MINA_USDC_TOKEN: ${MINA_USDC_TOKEN:-}
-      MINA_USDC_ADMIN_CONTRACT: ${MINA_USDC_ADMIN_CONTRACT:-}
-      MINA_TX_FEE: ${MINA_TX_FEE:-0.2}
       # ── Base Sepolia — PUBLIC Base testnet (chainId 84532) ─────────────
       # Mints the ungated mock USDC (mint() needs no faucet USDC balance); the
       # faucet key only needs Base Sepolia ETH for gas. Unset key → route 503s.

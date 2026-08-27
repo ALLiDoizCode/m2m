@@ -17,11 +17,12 @@ move (a service moving to a new box) was done for the relay app.
 - `packages/faucet/src/index.js` — USDC only (§4.6): `POST /api/request` (local-anvil EVM),
   `POST /api/solana/request` (native SOL) and `POST /api/mina/request` (native MINA) are removed
   from the service entirely (404, not merely 503-when-unconfigured), and `/api/info`'s capability
-  map and `packages/faucet/public/index.html`'s web UI stop advertising them. The surviving
-  USDC-only routes (`/api/solana/usdc-request`, `/api/mina/usdc-request`,
+  map and `packages/faucet/public/index.html`'s web UI stop advertising them. Every Mina route
+  went the same way with [ADR 0065](../adr/0065-mina-leaves-the-repository.md), the USDC one
+  included. The surviving USDC-only routes (`/api/solana/usdc-request`,
   `/api/base-sepolia/request`) keep their request/response shapes, as do `GET /health` and
-  `GET /api/info` — only `/api/info`'s `chains` map changes (the `evm` leg is gone and the
-  `solana`/`mina` legs now advertise their `usdc-request` route).
+  `GET /api/info` — only `/api/info`'s `chains` map changes (the `evm` and `mina` legs are gone
+  and the `solana` leg now advertises its `usdc-request` route).
   `BASE_SEPOLIA_ETH_AMOUNT` is pinned to `'0'` in `docker-compose.faucet.yml` (the code's own
   default — this box does not carry box 1's override to `0.001`, which went with the apex's own
   compose file, connector#872).
@@ -29,11 +30,11 @@ move (a service moving to a new box) was done for the relay app.
   targeted `faucet` case provisions the Linode (mirrors the `relay`/`store` cases, minus a
   `deploy_*_node` call — see "Who does what" below for why); a separate `faucet-cutover` case
   repoints the DNS record once the box has cleared the gates below.
-- `infra/linode-faucet/generate-solana-treasury.sh` / `generate-mina-treasury.sh` (issue #919) —
-  step 4's fresh-key generation, scripted and reviewed rather than ad hoc. Neither ever prints a
-  private key; the Solana one also airdrops devnet SOL for tx fees (public, permissionless).
-  Executing them still needs a human on the box (see "Who does what" below) — what moved repo-side
-  is the tool, not the act of running it.
+- `infra/linode-faucet/generate-solana-treasury.sh` (issue #919) — step 4's fresh-key
+  generation, scripted and reviewed rather than ad hoc. It never prints a private key, and also
+  airdrops devnet SOL for tx fees (public, permissionless). Executing it still needs a human on
+  the box (see "Who does what" below) — what moved repo-side is the tool, not the act of running
+  it.
 
 ## What this runbook does not yet cover
 
@@ -45,17 +46,17 @@ instead is operator work in that repo, out of this document's scope.
 
 ## Who does what
 
-| Step                            |       Repo-side (PR, reviewable)        |        Human-only (SSH, key material, funds)         |
-| ------------------------------- | :-------------------------------------: | :--------------------------------------------------: |
-| 1. Provision                    |     ✅ `./devnet-manage.sh faucet`      |             runs it, holds the API token             |
-| 2. DNS (initial — not yet live) |                                         |               nothing yet — see step 8               |
-| 3. Certs                        |        ✅ `init-letsencrypt.sh`         |                 runs it, on the box                  |
-| 4. Key generation (§4.4)        | ✅ `generate-{solana,mina}-treasury.sh` |   runs them, on THIS box — never copied from box 1   |
-| 5. Funding                      |                                         |         ✅ devnet faucet / a human transfer          |
-| 6. Standalone verification      |     ✅ `bootstrap.sh`, curl checks      |             runs them, reads the output              |
-| 7. Mint-authority transfer      |                                         | ✅ transfer or fund fresh, before box 1 is destroyed |
-| 8. DNS cutover (§6.2 step 9)    | ✅ `./devnet-manage.sh faucet-cutover`  |          runs it, only once gate (c) passes          |
-| 9. Rollback                     |        ✅ one `update_dns` call         |      repoints back at box 1, no restart needed       |
+| Step                            |       Repo-side (PR, reviewable)       |        Human-only (SSH, key material, funds)         |
+| ------------------------------- | :------------------------------------: | :--------------------------------------------------: |
+| 1. Provision                    |     ✅ `./devnet-manage.sh faucet`     |             runs it, holds the API token             |
+| 2. DNS (initial — not yet live) |                                        |               nothing yet — see step 8               |
+| 3. Certs                        |        ✅ `init-letsencrypt.sh`        |                 runs it, on the box                  |
+| 4. Key generation (§4.4)        |    ✅ `generate-solana-treasury.sh`    |   runs them, on THIS box — never copied from box 1   |
+| 5. Funding                      |                                        |         ✅ devnet faucet / a human transfer          |
+| 6. Standalone verification      |     ✅ `bootstrap.sh`, curl checks     |             runs them, reads the output              |
+| 7. Mint-authority transfer      |                                        | ✅ transfer or fund fresh, before box 1 is destroyed |
+| 8. DNS cutover (§6.2 step 9)    | ✅ `./devnet-manage.sh faucet-cutover` |          runs it, only once gate (c) passes          |
+| 9. Rollback                     |        ✅ one `update_dns` call        |      repoints back at box 1, no restart needed       |
 
 Steps 1, 4, 5 and 7 need SSH, key material or funds this environment does not have — same posture
 every other infra-touching ticket in this repo's history records when it applies
@@ -107,16 +108,10 @@ every other infra-touching ticket in this repo's history records when it applies
      `./generate-solana-treasury.sh` (this directory) generates it in that exact spot and
      airdrops devnet SOL for tx fees in one step; the private key is never printed, only the
      resulting public key. USDC funding (step 5) is a separate, human step it does not attempt.
-   - `MINA_USDC_TREASURY_KEY` — a fresh base58 Mina private key.
-     `./generate-mina-treasury.sh` (this directory) generates it and appends
-     `MINA_USDC_TREASURY_KEY=…` to a target `.env` file directly, again without ever printing the
-     key. It uses `mina-signer` (already a faucet dependency), not `o1js` — key generation needs
-     no zkApp circuit, so this avoids the faucet's own lazy ~3-minute circuit compile.
-
-   Both scripts refuse to overwrite an existing key/env line, so a re-run against a box that
-   already has a treasury is a safe no-op error, not a silent second key. Neither one's tooling is
-   installed by `bootstrap.sh` (it installs docker, git, jq, gettext-base, openssl, ufw, curl,
-   iptables and nothing else), so install each by hand on the box first.
+     The script refuses to overwrite an existing key, so a re-run against a box that already has a
+     treasury is a safe no-op error, not a silent second key. Its tooling is not installed by
+     `bootstrap.sh` (which installs docker, git, jq, gettext-base, openssl, ufw, curl, iptables and
+     nothing else), so install it by hand on the box first.
 
    `generate-solana-treasury.sh` needs `solana` and `solana-keygen`. Install **v3.1.12** — not
    `stable`, and not whatever a package manager offers:
@@ -137,48 +132,18 @@ every other infra-touching ticket in this repo's history records when it applies
    `@solana/spl-token` inside its container and never shells out to the CLI, so the CLI is a
    bringup tool only and nothing here needs it again after step 4.
 
-   `generate-mina-treasury.sh` needs `node` plus this repo's `node_modules` (`npm ci` at the repo
-   root — that is where `mina-signer` resolves from).
+   The script checks for its binaries up front and exits with a clear error rather than
+   half-doing the work.
 
-   Each script checks for its binaries up front and exits with a clear error rather than
-   half-doing the work. A `.env` copied from `.env.example` already carries an _empty_
-   `MINA_USDC_TREASURY_KEY=` line — which is why the overwrite check only trips on a non-empty
-   one — so delete that empty line after running the script and leave exactly one definition.
-
-   Write `BASE_SEPOLIA_FAUCET_KEY` / `MINA_USDC_TREASURY_KEY` (+ `MINA_USDC_TOKEN` /
-   `MINA_USDC_ADMIN_CONTRACT`, the deployed USDC token's addresses) into this box's `.env` and
-   restart the `faucet` service (`docker compose -f infra/linode-faucet/docker-compose.faucet.yml
-up -d --build faucet`) to pick them up. Record how each key was generated somewhere off this
-   box — there is no legacy identity to fall back to if it is lost.
-
-   `MINA_USDC_TOKEN` / `MINA_USDC_ADMIN_CONTRACT` are **not secrets** — they identify the shared,
-   already-deployed devnet USDC token, the same one box 1 (the apex) carries and every other devnet
-   consumer (the relay/store boxes, `packages/mina-usdc-faucet-web`) already targets. Reuse the
-   values verbatim; only the treasury _key_ must be fresh (issue #919, which records these here
-   before toon-meta#313 destroys the apex and they become unrecoverable from it):
-
-   ```
-   MINA_USDC_TOKEN=B62qqN1Pu3kF2KGmqLA8EwpqfWrnFTVZJGDSDHQuQRoVt5BCFjhNz3d
-   MINA_USDC_ADMIN_CONTRACT=B62qpeGPgEhz6Vbd9E11PoTzz2EZZCJjqhwALxJ2BnkdozFm2rZtmRB
-   ```
-
-   Cross-checked against `packages/mina-usdc-faucet-web/README.md`'s "Live token (devnet)" table
-   (canonical as of 2026-07-19) and against the truncated values issue #919 itself quotes off the
-   apex — both agree. `packages/faucet/src/mina-usdc.mjs` doc: the admin contract is
-   `RateLimitedUsdcAdmin`, mint is **permissionless** (capped 1,000 USDC/address/~24h) and requires
-   no admin key at all — so the fresh treasury key needs no authority transfer from the apex, only
-   ~1.2 devnet MINA of its own for proving-tx fees (see step 5). `infra/mina/usdc-token.json`'s
-   `B62qnZnmV3jAD…` token is a **stale, pre-2026-07-19 identity** — do not use it here.
+   Write `BASE_SEPOLIA_FAUCET_KEY` into this box's `.env` and restart the `faucet` service
+   (`docker compose -f infra/linode-faucet/docker-compose.faucet.yml up -d --build faucet`) to
+   pick it up. Record how each key was generated somewhere off this box — there is no legacy
+   identity to fall back to if it is lost.
 
    The Solana USDC mint needs no equivalent recording: `SOLANA_USDC_MINT` already defaults (in
    `docker-compose.faucet.yml`) to `xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in`, the same public
    Solana-devnet mock-USDC mint recorded in `packages/solana-program/deployments/devnet-public.md`
    and used fleet-wide — it is not apex-specific and needs no separate extraction before #313.
-
-   No Mina endpoint needs setting: `MINA_GRAPHQL_URL` defaults to the public Mina devnet
-   (`api.minascan.io`), the same node the faucet code defaults to. `.env.example` carries it
-   commented out as an override only — do not point it at `mina.$DOMAIN`, the self-hosted
-   lightnet box deleted 2026-07-19.
 
 5. **Funding.** Fund the Base Sepolia EVM address (a little ETH for gas — the mock USDC mint is
    ungated) and the Solana treasury (USDC on the public Solana devnet; SOL only for tx fees — this
@@ -191,15 +156,7 @@ up -d --build faucet`) to pick them up. Record how each key was generated somewh
    transfer to it. `infra/solana/fund-solana.sh` does **not** reach this mint — it signs with the
    committed `infra/solana/usdc-authority.json`, which is the authority for the _local-validator_
    mint `H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H` (deleted per `infra/linode/README.md`) — a
-   different key for a different, no-longer-live mint. The Mina USDC leg self-mints its own
-   replenishment on-chain (rate-limited, ≤1,000 USDC/~24h — see `packages/faucet/src/mina-usdc.mjs`),
-   so it needs no privileged funding step, only ~1.2 devnet MINA of its own for tx fees (the public
-   `faucet.minaprotocol.com`, same as any other devnet account). That MINA faucet has no
-   unauthenticated API to automate this against — confirmed live (2026-08-14): a plain HTTPS
-   request to `faucet.minaprotocol.com` returns Vercel's bot-detection "Security Checkpoint" page,
-   not MINA, matching `infra/mina/provision-mina.sh`'s own conclusion ("We can't auto-fund these on
-   public devnet"). Funding this key is a human, browser-driven step; `generate-mina-treasury.sh`
-   (step 4) prints the address to paste in.
+   different key for a different, no-longer-live mint.
 
 6. **Standalone verification.** With `./bootstrap.sh` already run in step 3:
 
@@ -211,8 +168,9 @@ up -d --build faucet`) to pick them up. Record how each key was generated somewh
    ```
 
    and that each configured leg's `POST` route succeeds: `/api/base-sepolia/request`,
-   `/api/solana/usdc-request`, `/api/mina/usdc-request`. Confirm the retired legs answer **404**,
-   not 503: `POST /api/request`, `POST /api/solana/request`, `POST /api/mina/request`.
+   `/api/solana/usdc-request`. Confirm the retired legs answer **404**, not 503:
+   `POST /api/request`, `POST /api/solana/request`, `POST /api/mina/request`,
+   `POST /api/mina/usdc-request`.
 
 7. **Mint-authority transfer.** Before box 1 is destroyed (toon-meta#313), either transfer minting/
    treasury authority to this box's fresh keys or fund this box's keys directly from box 1's — a
@@ -232,9 +190,9 @@ up -d --build faucet`) to pick them up. Record how each key was generated somewh
 
 - **(a) Standalone up.** The faucet container is healthy, and `GET /health` / `GET /api/info`
   answer through this box's own nginx.
-- **(b) Retired legs are gone.** `POST /api/request`, `POST /api/solana/request` and
-  `POST /api/mina/request` 404 — proving the removal is unconditional, not merely
-  "disabled because unconfigured" (which would 503).
+- **(b) Retired legs are gone.** `POST /api/request`, `POST /api/solana/request`,
+  `POST /api/mina/request` and `POST /api/mina/usdc-request` 404 — proving the removal is
+  unconditional, not merely "disabled because unconfigured" (which would 503).
 - **(c) Each configured USDC leg drips end to end.** A real `POST` against every leg this box's
   `.env` configures succeeds and the drip lands on-chain. **This is the gate to stop the cutover
   on if it fails** — DNS should not move to a box that cannot actually dispense funds.

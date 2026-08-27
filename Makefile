@@ -1,7 +1,7 @@
 # Development workflow commands for Connector
 # Run 'make help' to see all available commands
 
-.PHONY: help build test lint clean contracts-libs local-build local-preflight local-up local-down local-logs local-rehearse local-verify rust-build rust-test anvil-up anvil-down anvil-logs solana-up solana-down solana-logs solana-mint-usdc solana-build solana-test solana-deploy-devnet infra-up infra-down mina-build mina-test mina-deploy-devnet
+.PHONY: help build test lint contracts-libs local-build local-preflight local-up local-down local-logs local-rehearse local-verify rust-build rust-test anvil-up anvil-down anvil-logs solana-up solana-down solana-logs solana-mint-usdc solana-build solana-test solana-deploy-devnet infra-up infra-down
 
 # Who the `anvil` compose service runs as. That service bind-mounts
 # ./packages/contracts READ-WRITE and forge writes out/, cache/, broadcast/ and
@@ -52,11 +52,6 @@ help:
 	@echo "  make solana-test          Run Solana program tests"
 	@echo "  make solana-deploy-devnet Deploy Solana program to devnet"
 	@echo ""
-	@echo "Mina zkApp (NOT a connector settlement chain -- ADR 0002):"
-	@echo "  make mina-build           Build Mina payment channel zkApp"
-	@echo "  make mina-test            Run Mina zkApp tests"
-	@echo "  make mina-deploy-devnet   Deploy Mina zkApp to devnet"
-	@echo ""
 	@echo "Local topologies (the shipped image against real chains):"
 	@echo "  make local-up             Build the image, start the chains, provision keys, run it"
 	@echo "  make local-rehearse       Send a real packet through it; non-zero unless fulfilled"
@@ -67,7 +62,6 @@ help:
 	@echo "  LOCAL_TOPOLOGY=<name>     Which topology: solo (default), two-hop, mixed-chain"
 	@echo ""
 	@echo "Maintenance:"
-	@echo "  make clean                Remove build artifacts"
 
 # Build the Rust connector workspace — the connector itself (ADR 0017).
 rust-build:
@@ -92,10 +86,6 @@ test:
 # Run linter
 lint:
 	npm run lint
-
-# Remove build artifacts
-clean:
-	rm -rf packages/mina-zkapp/dist
 
 # packages/contracts' two git submodules, at the revisions this repository
 # pins, before anything compiles them.
@@ -181,12 +171,8 @@ solana-mint-usdc:
 
 # Local Blockchain — every chain the Rust connector actually settles on.
 #
-# There is no Mina profile. ADR 0002 drops Mina from the Rust connector (o1js
-# proof generation is JavaScript-only and a Node sidecar was refused), so a
-# local Mina node has no connector to serve -- the `mina-lightnet` service that
-# used to live here was dialled by nothing in this repository, and the faucet's
-# Mina leg points at PUBLIC devnet, not at it. `packages/mina-zkapp` is the
-# separately deployed zkApp and keeps its own build/test/deploy targets below.
+# There is no Mina profile: ADR 0065 removed Mina from this repository outright
+# (ADR 0002 had already dropped it from the connector).
 #
 # infra-down intentionally does NOT pass -v (preserves existing per-profile volumes).
 infra-up: contracts-libs solana-build
@@ -439,16 +425,3 @@ endif
 	./tools/solana/deploy.sh --network devnet --keypair $(DEPLOYER_KEYPAIR) \
 		$(if $(UPGRADE_AUTHORITY),--upgrade-authority $(UPGRADE_AUTHORITY)) \
 		$(if $(PROGRAM_ID),--program-id $(PROGRAM_ID))
-
-# Mina Payment Channel zkApp
-mina-build:
-	npm run build --workspace=packages/mina-zkapp
-
-mina-test:
-	npm run test --workspace=packages/mina-zkapp
-
-mina-deploy-devnet:
-ifndef DEPLOYER_KEY
-	$(error DEPLOYER_KEY is not set. Usage: make mina-deploy-devnet DEPLOYER_KEY=<base58-private-key>)
-endif
-	MINA_DEPLOYER_KEY=$(DEPLOYER_KEY) npx ts-node tools/mina/deploy-zkapp.ts --network https://api.minascan.io/node/devnet/v1/graphql

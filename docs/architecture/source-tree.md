@@ -155,20 +155,21 @@ There is no separate test tree for unit tests. Following Rust convention:
 
 ### `packages/`
 
-| Directory              | What it is                                                                                                                                                                                                                                                                                                                                                                                                             |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `contracts`            | Solidity, Foundry. `TokenNetwork`, `TokenNetworkRegistry`, `RollingSwapChannel` — what `connector-settlement-evm` binds to. Its own `forge test` job (`.github/workflows/contracts.yml`); no `make` target runs it. The repository's only git submodules (OpenZeppelin, forge-std) live here.                                                                                                                          |
-| `solana-program`       | The SPL-token, PDA-addressed payment-channel program `connector-settlement-solana` drives. Crate name `payment-channel`; a Cargo workspace member **excluded** from the workspace test gate, with its own `cargo test-sbf` CI job and a separate build-reproducibility job.                                                                                                                                            |
-| `faucet`               | Devnet token faucet service (plain JavaScript).                                                                                                                                                                                                                                                                                                                                                                        |
-| `mina-zkapp`           | The deployed Mina payment-channel zkApp (TypeScript, o1js).                                                                                                                                                                                                                                                                                                                                                            |
-| `mina-usdc-faucet-web` | Mina devnet mock-USDC faucet browser dApp (TypeScript, Vite).                                                                                                                                                                                                                                                                                                                                                          |
-| `announcer`            | A standalone `kind:10032` announcer sidecar. It is not the connector and never was: it never links against connector crates, never reads connector config and never runs in the connector process. It only asks the client edge's already-public answers and republishes them ([ADR 0022](../adr/0022-a-connector-answers-it-does-not-announce.md), [ADR 0006](../adr/0006-the-connector-is-mechanism-not-policy.md)). |
+| Directory        | What it is                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `contracts`      | Solidity, Foundry. `TokenNetwork`, `TokenNetworkRegistry`, `RollingSwapChannel` — what `connector-settlement-evm` binds to. Its own `forge test` job (`.github/workflows/contracts.yml`); no `make` target runs it. The repository's only git submodules (OpenZeppelin, forge-std) live here.                                                                                                                          |
+| `solana-program` | The SPL-token, PDA-addressed payment-channel program `connector-settlement-solana` drives. Crate name `payment-channel`; a Cargo workspace member **excluded** from the workspace test gate, with its own `cargo test-sbf` CI job and a separate build-reproducibility job.                                                                                                                                            |
+| `faucet`         | Devnet token faucet service (plain JavaScript).                                                                                                                                                                                                                                                                                                                                                                        |
+| `announcer`      | A standalone `kind:10032` announcer sidecar. It is not the connector and never was: it never links against connector crates, never reads connector config and never runs in the connector process. It only asks the client edge's already-public answers and republishes them ([ADR 0022](../adr/0022-a-connector-answers-it-does-not-announce.md), [ADR 0006](../adr/0006-the-connector-is-mechanism-not-policy.md)). |
 
-**Mina is out of scope for the Rust connector.**
-[ADR 0002](../adr/0002-drop-mina-from-the-rust-connector.md): the zkApp's methods need proof
-generation through o1js, which exists only in JavaScript, and a Node sidecar beside the binary
-was refused. The Cargo workspace has no Mina crate. `packages/mina-zkapp` is the separately
-deployed zkApp and this record never touched it.
+**Mina is not in this repository at all.**
+[ADR 0002](../adr/0002-drop-mina-from-the-rust-connector.md) dropped it as a settlement chain —
+the zkApp's methods need proof generation through o1js, which exists only in JavaScript, and a
+Node sidecar beside the binary was refused — and
+[ADR 0065](../adr/0065-mina-leaves-the-repository.md) then deleted the zkApp, the browser faucet
+dApp and the Mina tooling that record had left standing. The Cargo workspace has no Mina crate
+and the npm workspaces have no Mina package. What remains is the connector refusing a `mina`
+claim by name, which is wire behaviour, not Mina support.
 
 ### `tools/`
 
@@ -179,19 +180,19 @@ Scripts, none of them part of the binary.
 - `contracts/init-libs.sh` — the Foundry submodules.
 - `solana/build-sbf.sh`, `solana/deploy.sh` — building and deploying the payment-channel
   program.
-- `mina/`, `fund-peers/` — devnet Mina and peer funding tooling (TypeScript).
+- `fund-peers/` — devnet peer funding tooling (TypeScript).
 - `bench/peer-claim-journal-fsyncs.sh` — a one-off measurement script.
 - `vendor-rfc.sh` — re-vendors an Interledger RFC into `docs/rfcs/`
   ([ADR 0062](../adr/0062-an-rfc-is-vendored-verbatim-and-profiled-never-forked.md)).
 
 ### Why npm still exists
 
-`packages/announcer`, `packages/faucet`, `packages/mina-usdc-faucet-web`,
-`packages/mina-zkapp` and `tools/fund-peers` are the npm workspaces named in
-`package.json`, and they are the only reason npm, Jest and `package.json` are still in this
-repository. **`npm test` does not test the connector** — it runs those packages, and
-`jest.config.js` names exactly one project, `packages/mina-zkapp`. The connector's gate is
-`cargo test --workspace --exclude payment-channel`.
+`packages/announcer`, `packages/faucet` and `tools/fund-peers` are the npm workspaces named in
+`package.json`, and they are the only reason npm and `package.json` are still in this
+repository. **`npm test` does not test the connector** — it runs those packages, each with its
+own runner (`node --test` for the faucet, `tsx --test` for the announcer; the one Jest project
+went with `packages/mina-zkapp`, [ADR 0065](../adr/0065-mina-leaves-the-repository.md)). The
+connector's gate is `cargo test --workspace --exclude payment-channel`.
 
 ## `local/` — the shipped image against real chains
 
@@ -223,8 +224,8 @@ through a running node's operator surface, because only a running node can submi
 each with a bootstrap script, nginx and Let's Encrypt, compose overlays and the
 bind-mounted `connector-rust.toml` the box actually runs. `linode-faucet/` is the faucet box.
 `linode/` is a retired chain box that now holds one live artefact, `endpoints.json`.
-`solana/` and `mina/` provision chain-side state: the deterministic mock USDC mint, treasury
-funding, the local validator entrypoint.
+`solana/` provisions chain-side state: the deterministic mock USDC mint, treasury funding, the
+local validator entrypoint.
 
 `deploy/` is the recipe: `connector-rust/` holds the `Dockerfile`, a commented
 `connector.toml` to fill in, and a README walking the key material and the first `up -d`.
@@ -249,8 +250,7 @@ there".
 | `architecture/` | This page, plus [`tech-stack.md`](tech-stack.md) (languages, runtimes, pinned versions) and [`coding-standards.md`](coding-standards.md) (what the gate enforces, in the order it enforces it).                                                            |
 
 Loose files under `docs/` are chain-deployment notes and one-off design records
-(`evm-deployment.md`, `solana-deployment.md`, `mina-deployment.md`, `devnet-pricing.md` and
-similar). They are point-in-time; the ADRs are not.
+(`evm-deployment.md`, `solana-deployment.md`, `devnet-pricing.md` and similar). They are point-in-time; the ADRs are not.
 
 Nothing under `docs/` describes the retired TypeScript connector any more
 ([ADR 0017](../adr/0017-the-typescript-connector-is-a-prototype.md)): its admin-API reference,

@@ -1,7 +1,7 @@
 {
   "name": "@toon-protocol/faucet",
   "version": "1.0.0",
-  "description": "Token faucet for local development",
+  "description": "Devnet USDC faucet — Base Sepolia and Solana devnet",
   "main": "src/index.js",
   "type": "module",
   "scripts": {
@@ -14,16 +14,12 @@
     "ethers": "^6.9.0",
     "cors": "^2.8.5",
     "@solana/web3.js": "^1.95.3",
-    "@solana/spl-token": "^0.4.8",
-    "mina-signer": "^4.0.0",
-    "o1js": "2.14.0",
-    "mina-fungible-token": "1.1.0"
+    "@solana/spl-token": "^0.4.8"
   },
   "keywords": [
     "faucet",
     "ethereum",
-    "solana",
-    "mina"
+    "solana"
   ],
   "license": "MIT"
 }

@@ -27,7 +27,7 @@ contract DeployLocalScript is Script {
         vm.startBroadcast(deployerPrivateKey);
 
         // Deploy MockERC20 token (USDC - 6 decimals, matching real USDC and the
-        // Solana SPL mint / Mina USDC so claim amounts are one scale across chains)
+        // Solana SPL mint so claim amounts are one scale across chains)
         MockERC20 usdcToken = new MockERC20("USD Coin", "USDC", 6);
         console.log("USDC Token deployed to:", address(usdcToken));
 

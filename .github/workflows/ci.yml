@@ -101,8 +101,8 @@ jobs:
 
   # The connector itself is Rust (ADR 0017) — `rust-gate` below is this repo's
   # real gate. The npm surface that remains is devnet tooling only (the faucet,
-  # its Mina zkApp, the faucet dApp, and tools/fund-peers), so this job just
-  # keeps it lint-clean and formatted.
+  # the announcer, and tools/fund-peers), so this job just keeps it lint-clean
+  # and formatted.
   lint-and-format:
     name: Lint and Format Check
     runs-on: ubuntu-latest

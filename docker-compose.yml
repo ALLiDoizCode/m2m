@@ -244,15 +244,10 @@ services:
   # Token Faucet - Provides ETH and USDC tokens for testing
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   faucet:
-    # Build context is the repo ROOT (not packages/faucet): the image builds the
-    # mina-zkapp ESM bundle for the Mina USDC drip path (treasury self-mint +
-    # transfer), so the Dockerfile COPYs packages/mina-zkapp + packages/faucet.
-    # See packages/faucet/Dockerfile.
     build:
-      # Build context is the repo ROOT (not packages/faucet): the multi-stage
-      # Dockerfile compiles the mina-zkapp ESM bundle from packages/mina-zkapp/
-      # so the faucet's USDC admin-mint shares ONE o1js instance. See the
-      # Dockerfile header and infra/linode-faucet/docker-compose.faucet.yml.
+      # Build context is the repo ROOT (not packages/faucet) so the Dockerfile
+      # can COPY packages/faucet/ by its repo-relative path, matching
+      # infra/linode-faucet/docker-compose.faucet.yml. See packages/faucet/Dockerfile.
       context: .
       dockerfile: packages/faucet/Dockerfile
     # Runs under BOTH evm and solana so a single host can drip every chain.
@@ -280,46 +275,12 @@ services:
       TOKEN_AMOUNT: '10000'
 
       # ── Solana (only active under the `solana` profile) ──
-      # Treasury authority keypair mounted below; deterministic devnet USDC mint
-      # from infra/solana/create-usdc-mint.sh. Drips SOL via airdrop + USDC from
-      # the treasury. Defaults: 2 SOL + 1000 USDC per request.
+      # Mint authority keypair mounted below; deterministic local-validator USDC
+      # mint from infra/solana/create-usdc-mint.sh, whose authority IS that
+      # keypair. USDC only (no SOL): 1000 USDC per request.
       SOLANA_RPC_URL: http://solana-validator:8899
       SOLANA_USDC_MINT: H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H
       SOLANA_FAUCET_KEYPAIR: /keys/usdc-authority.json
-
-      # ── Mina (native-MINA treasury drip) — RETIRED, this var is inert ──
-      # The faucet is USDC only since connector#898 (toon-meta#310 §4.6): there
-      # is no `POST /api/mina/request` in the service any more, so nothing reads
-      # MINA_FAUCET_KEY. It is left declared (never hardcoded — a SECRET passed
-      # through from the host environment) only so redeploys of a box whose .env
-      # still carries it do not error; drop it with the rest of the apex's faucet
-      # config in connector#872. MINA_GRAPHQL_URL below IS still read — the USDC
-      # leg reads and submits through it.
-      MINA_FAUCET_KEY: ${MINA_FAUCET_KEY:-}
-      MINA_GRAPHQL_URL: ${MINA_GRAPHQL_URL:-https://api.minascan.io/node/devnet/v1/graphql}
-      MINA_DRIP_AMOUNT: ${MINA_DRIP_AMOUNT:-5}
-
-      # ── Mina USDC drip: treasury self-mint + transfer (o1js zk-proving) ──
-      # The public-devnet USDC token is gated by RateLimitedUsdcAdmin: mints are
-      # permissionless but capped (1,000 USDC/address/~24h) and require the
-      # RECIPIENT's signature — so the faucet cannot mint to users. Instead, when
-      # MINA_USDC_TREASURY_KEY + MINA_USDC_TOKEN + MINA_USDC_ADMIN_CONTRACT are
-      # all set, /api/mina/usdc-request drips USDC by plain TRANSFER from the
-      # treasury, which lazily SELF-MINTS its own daily allowance when below
-      # MINA_USDC_LOW_WATER (≤1,000 USDC/day ceiling).
-      # MINA_USDC_TREASURY_KEY is the FUNDED treasury base58 PRIVATE key (a
-      # SECRET — pass through from the host env, never hardcoded; the legacy
-      # MINA_USDC_ADMIN_KEY name is still accepted as a fallback). When unset,
-      # the route 503s — there is no native-MINA leg to fall back to any more.
-      # Reuses MINA_GRAPHQL_URL above.
-      MINA_USDC_TREASURY_KEY: ${MINA_USDC_TREASURY_KEY:-}
-      MINA_USDC_ADMIN_KEY: ${MINA_USDC_ADMIN_KEY:-} # legacy name (treasury fallback)
-      MINA_USDC_TOKEN: ${MINA_USDC_TOKEN:-}
-      MINA_USDC_ADMIN_CONTRACT: ${MINA_USDC_ADMIN_CONTRACT:-}
-      MINA_USDC_DRIP_AMOUNT: ${MINA_USDC_DRIP_AMOUNT:-50}
-      MINA_USDC_LOW_WATER: ${MINA_USDC_LOW_WATER:-500}
-      MINA_USDC_COOLDOWN_HOURS: ${MINA_USDC_COOLDOWN_HOURS:-24}
-      MINA_TX_FEE: ${MINA_TX_FEE:-}
 
     volumes:
       # Committed throwaway devnet treasury authority (mint authority + USDC

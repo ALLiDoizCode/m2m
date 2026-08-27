@@ -1,4 +1,4 @@
-// Per-address off-chain cooldown for the Mina USDC drip leg (drip-limiter.js).
+// Per-address off-chain cooldown shared by every drip leg (drip-limiter.js).
 // Uses an injected clock so the tests are deterministic and instant.
 
 import { test } from 'node:test';

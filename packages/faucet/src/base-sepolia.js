@@ -17,7 +17,7 @@
 // Everything here is OPTIONAL: with BASE_SEPOLIA_FAUCET_KEY unset,
 // `createBaseSepoliaFaucet` returns null and the route answers a clear 503, so
 // deploys that don't want the Base Sepolia leg still boot fine (mirrors the
-// Solana/Mina legs).
+// Solana leg).
 import { ethers, NonceManager } from 'ethers';
 import { createDripLimiter } from './drip-limiter.js';
 
@@ -170,7 +170,7 @@ export function createBaseSepoliaFaucet() {
     },
 
     // Per-address cooldown wrappers (route claims before enqueue, releases on
-    // failure — mirrors the Mina USDC leg's concurrency-safe reservation).
+    // failure — mirrors the Solana leg's concurrency-safe reservation).
     claim(address) {
       return limiter.claim(ethers.getAddress(address));
     },

@@ -1,5 +1,5 @@
 {
-  "_note": "Public TOON devnet endpoints. As of 2026-07-19 the devnet settles on PUBLIC chains (Base Sepolia, public Solana devnet, public Mina devnet) — the self-hosted Linode chain boxes (evm-rpc/solana-rpc/solana-ws/mina.<DOMAIN>) are DELETED. Peers point a TOON node/SDK at these URLs (chainRpcUrls / EVM_RPC_URL). Faucet (3-chain web UI): https://faucet.devnet.toonprotocol.dev",
+  "_note": "Public TOON devnet endpoints. As of 2026-07-19 the devnet settles on PUBLIC chains (Base Sepolia, public Solana devnet) — the self-hosted Linode chain boxes (evm-rpc/solana-rpc/solana-ws/mina.<DOMAIN>) are DELETED, and Mina itself left the repository with ADR 0065. Peers point a TOON node/SDK at these URLs (chainRpcUrls / EVM_RPC_URL). Faucet (2-chain web UI): https://faucet.devnet.toonprotocol.dev",
   "evm": {
     "rpcUrl": "https://sepolia.base.org",
     "chainId": 84532,
@@ -30,16 +30,6 @@
     "tokenNetworkUsdc": "0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478",
     "faucetUrl": "https://faucet.devnet.toonprotocol.dev",
     "_note": "Mirror of the evm block — since the 2026-07-19 cutover the devnet's EVM chain IS Base Sepolia. Kept for consumers that read this key. Every address here MUST equal the evm block's, tokenNetworkUsdc included: see that block's _tokenNetworkNote, and note that the miss it records was a miss in BOTH copies at once — a mirror check would not have caught it, which is why crates/connector-bin/tests/devnet_configs_load.rs pins both copies to FLEET_LIVE_REGISTRY and FLEET_LIVE_TOKEN_NETWORK rather than to each other."
-  },
-  "mina": {
-    "graphqlUrl": "https://api.minascan.io/node/devnet/v1/graphql",
-    "tokenAddress": "B62qqN1Pu3kF2KGmqLA8EwpqfWrnFTVZJGDSDHQuQRoVt5BCFjhNz3d",
-    "tokenId": "9497120696276615621907376728658022802954262638363646162765282600447713419198",
-    "adminContractAddress": "B62qpeGPgEhz6Vbd9E11PoTzz2EZZCJjqhwALxJ2BnkdozFm2rZtmRB",
-    "channelZkApp": "B62qmgPhv2Xo6QVEtwjLja8UZJUtu8yapRFAR6gaoGtbM9zE5hG7Tkf",
-    "tokenDecimals": 6,
-    "_fund": "https://faucet.devnet.toonprotocol.dev (web UI) or POST /api/mina/usdc-request → drips USDC by treasury transfer (USDC only since connector#898 — the native-MINA leg is retired; get MINA from https://faucet.minaprotocol.com)",
-    "_note": "PUBLIC Mina devnet (the mina.<DOMAIN> passthrough proxy is deleted — use the minascan URL directly). CANONICAL devnet USDC token: B62qqN1Pu… (tokenId above, admin contract B62qpeGPgEhz…) — this is the token the live faucet drips and both apex+store kind:10032 announces advertise. A previous revision of this file claimed the permissionless-admin token B62qnZnmV3jAD… superseded B62qqN1Pu…; that was BACKWARDS — B62qqN1Pu… is the live token. PaymentChannel zkApp: B62qmgPhv2… (client-build vk)."
   },
   "_decimalsNote": "USDC is 6-decimal on every chain, so claim base units are uniform — no cross-chain normalization needed."
 }
