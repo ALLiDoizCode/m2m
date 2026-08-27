@@ -2929,8 +2929,8 @@ mod tests {
             "a forwarded route's price may be published; WHO carries it may not (ND-09): {rendered}"
         );
         assert!(
-            !rendered.contains("9999"),
-            "a cap is discovered by its T04 refusal, never by being published (ND-10): {rendered}"
+            !json_contains_number(&document, 9_999),
+            "a cap is discovered by its T04 refusal, never by being published (ND-10): {document}"
         );
         for forbidden in ["relay", "ttl", "notice"] {
             assert!(
@@ -2944,6 +2944,66 @@ mod tests {
             "the forwarded route's own price is a fact about what THIS node charges, and is \
              answered at GET /ilp/routes/price already"
         );
+    }
+
+    /// Regression for #1206: the cap check above must fail on a leaked
+    /// **field**, never on the edge signer's public key incidentally
+    /// spelling the same digits. `test_signer()` generates a fresh
+    /// secp256k1 key per run, and a 130-hex-char string contains "9999"
+    /// about 1 run in 540 -- rare enough to pass a normal gate run yet
+    /// common enough to have flaked this suite. Rather than wait on that
+    /// odds, generate keys until one actually collides and prove the
+    /// document still passes with it installed.
+    #[tokio::test]
+    async fn the_no_cap_assertion_survives_a_signer_key_that_spells_the_cap() {
+        let colliding_signer = (0..10_000)
+            .map(|generation| LocalSigner::generate(format!("test-signer-{generation}")))
+            .find(|signer| hex_encode(&signer.public_key().expect("public key")).contains("9999"))
+            .expect("10,000 random keys should turn up at least one '9999' collision");
+
+        let peer_route = PeerRoute::new_priced("g.peer.somewhere", "a-counterparty", 7);
+        let connector = Connector::new(
+            vec![],
+            vec![peer_route],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        )
+        .with_peer_packet_caps([("a-counterparty".to_string(), 9_999u64)]);
+        let app = router_with_node_facts(
+            Arc::new(connector),
+            Arc::new(colliding_signer),
+            None,
+            Arc::new(test_gate(ClientChannelRegistry::new())),
+            NodeFacts::default(),
+            DEFAULT_BTP_SESSION_WINDOW,
+            None,
+            Arc::from([]),
+        );
+
+        let document = self_description_of(app).await;
+
+        assert!(
+            !json_contains_number(&document, 9_999),
+            "the signer's public key spelling '9999' must not trip the cap assertion: {document}"
+        );
+    }
+
+    /// Walks a parsed JSON document for a `9999`-valued number at any depth,
+    /// so the no-leaked-cap assertion inspects the document's shape rather
+    /// than its rendered bytes -- a hex string (a public key, an address)
+    /// can spell the same digits without being that field.
+    fn json_contains_number(value: &serde_json::Value, target: u64) -> bool {
+        match value {
+            serde_json::Value::Number(n) => n.as_u64() == Some(target),
+            serde_json::Value::Array(items) => {
+                items.iter().any(|item| json_contains_number(item, target))
+            }
+            serde_json::Value::Object(map) => {
+                map.values().any(|item| json_contains_number(item, target))
+            }
+            _ => false,
+        }
     }
 
     /// ND-03, and the one prohibition ADR 0050 states rather than implies: the
