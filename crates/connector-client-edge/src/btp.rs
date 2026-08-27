@@ -654,8 +654,16 @@ async fn handle_frame(
     // as `handle_ilp` computes it on the HTTP carriage -- one rule, so a
     // sender is charged the same for the same packet whichever transport it
     // arrives on.
-    let schedule = client_route.map_or(Price::FREE, |route| route.price);
+    let schedule = client_route
+        .as_ref()
+        .map_or(Price::FREE, |route| route.price);
     let charge = schedule.charge(prepare.data.len());
+    // Issue #1210: see `handle_ilp`'s mirror of this on the HTTP carriage --
+    // what a client should send to use this route, read off the same lookup
+    // its price and transport policy come from.
+    let request = client_route
+        .as_ref()
+        .and_then(|route| route.request.as_ref());
     // Issue #807: see `handle_ilp`'s mirror of this on the HTTP carriage --
     // a condition-less PREPARE is structurally a bootstrap/greeting probe,
     // never a real payment attempt, regardless of destination.
@@ -671,7 +679,7 @@ async fn handle_frame(
     // `payment-required` protocolData slot the §1.4 greeting below uses,
     // self-diagnosing via `extra.requiredTransport` rather than a second
     // mechanism.
-    if let Some(policy) = client_route.map(|route| route.transport_policy) {
+    if let Some(policy) = client_route.as_ref().map(|route| route.transport_policy) {
         if !policy.accepts_btp() {
             let terms = x402_terms_body(
                 &prepare.destination,
@@ -679,6 +687,7 @@ async fn handle_frame(
                 prepare.data.len(),
                 &state.node,
                 Some(policy.name()),
+                request,
             );
             let reject = Reject {
                 code: RejectCode::f02_unreachable(),
@@ -719,6 +728,7 @@ async fn handle_frame(
             prepare.data.len(),
             &state.node,
             None,
+            request,
         );
         let reject = Reject {
             code: RejectCode::f06_unexpected_payment(),
@@ -746,7 +756,7 @@ async fn handle_frame(
     // in the same place -- after the greeting, before the claim is admitted
     // -- so a packet this connector will not carry never spends the
     // client's watermark on either carriage (§9's no-drift invariant).
-    if let Some(route) = client_route {
+    if let Some(route) = client_route.as_ref() {
         if let Some(reject) =
             crate::over_carried_reject(&prepare.destination, route.kind, prepare.amount, charge)
         {
@@ -1719,5 +1729,76 @@ mod tests {
         let terms: X402PaymentRequired =
             serde_json::from_slice(&terms_bytes).expect("valid x402 terms JSON");
         assert_eq!(terms.accepts[0].amount, "0");
+    }
+
+    /// Issue #1210: a route's `request` table rides the BTP
+    /// `payment-required` REJECT's protocolData exactly as it rides the
+    /// HTTP 402 body -- both carriages share the one emitter
+    /// (`x402_terms_body`), so this is that shared assertion's BTP half.
+    #[tokio::test]
+    async fn an_unpaid_prepare_over_btp_to_a_route_with_a_request_table_is_greeted_with_it() {
+        use chrono::TimeZone;
+        use connector_config::StaticRoute;
+        use connector_runtime::{Connector, FakeAppClient, InProcessPeerTransport, TestClock};
+        use connector_signer::LocalSigner;
+
+        let declared = serde_json::json!({"protocol": "nip90", "kinds": [5096, 5098]});
+        let route = StaticRoute::new_priced("g.toon.gas", "http://localhost:4000", 100)
+            .unwrap()
+            .with_request(declared.clone());
+        let clock = Arc::new(TestClock::new(
+            chrono::Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+        ));
+        let gate = crate::claim_gate::ClientClaimGate::restore(
+            Default::default(),
+            Arc::new(connector_runtime::InMemoryJournal::new()),
+        )
+        .expect("a fresh in-memory journal has nothing to replay");
+        let state = Arc::new(ClientEdgeState {
+            connector: Arc::new(Connector::new(
+                vec![route],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                clock,
+            )),
+            signer: Arc::new(LocalSigner::generate("session-signer")),
+            claim_gate: gate.into(),
+            wrap_receiver_secret: None,
+            node: Arc::new(connector_domain::NodeFacts::default()),
+            btp_session_window: crate::DEFAULT_BTP_SESSION_WINDOW,
+            session_registry: Arc::new(crate::session_registry::SessionRegistry::new()),
+            peers: None,
+            identities: Arc::from([]),
+        });
+
+        let prepare = Prepare {
+            amount: 0,
+            expires_at: chrono::Utc.with_ymd_and_hms(2031, 1, 1, 0, 0, 0).unwrap(),
+            execution_condition: [1u8; 32],
+            destination: "g.toon.gas".to_string(),
+            data: Vec::new(),
+        };
+        let frame = connector_btp::encode_message(1, &[], &prepare.encode());
+
+        let (replies, mut reply_rx) = mpsc::channel::<Vec<u8>>(REPLY_QUEUE_DEPTH);
+        let window = Arc::new(Semaphore::new(4));
+        let outbound = Arc::new(OutboundRequests::new());
+        let mut binding = None;
+        handle_frame(&frame, &state, &window, &replies, &outbound, &mut binding)
+            .await
+            .expect("the reply channel has a live receiver");
+
+        let sent = reply_rx.recv().await.expect("a reply was sent");
+        let decoded = decode_frame(&sent).expect("the connector's own encoder");
+        let terms_bytes = decoded
+            .protocol_data
+            .iter()
+            .find(|pd| pd.name == PAYMENT_REQUIRED_PROTOCOL)
+            .expect("the greeting's terms ride as payment-required protocolData")
+            .data
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&terms_bytes).unwrap();
+        assert_eq!(value["request"], declared);
     }
 }

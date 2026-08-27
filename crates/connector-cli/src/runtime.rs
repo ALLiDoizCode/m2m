@@ -1540,7 +1540,10 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
         // gateway -- and it carries the whole schedule (ADR 0065), so a
         // forwarded route's slope survives the trip into the runtime the way
         // its base always has.
-        .map(|route| PeerRoute::new_scheduled(route.prefix(), route.peer_id(), route.price()))
+        .map(|route| {
+            PeerRoute::new_scheduled(route.prefix(), route.peer_id(), route.price())
+                .with_request(route.request().cloned())
+        })
         .collect();
     let mut connector = Connector::new(
         config.routes().to_vec(),
@@ -2108,8 +2111,12 @@ fn node_facts(config: &Config, runtime: &Runtime) -> connector_domain::NodeFacts
         ilp_addresses: node
             .map(|node| node.addresses().to_vec())
             .unwrap_or_default(),
-        http_endpoint: node.map(|node| node.http_endpoint().to_string()),
-        btp_endpoint: node.map(|node| node.btp_endpoint().to_string()),
+        http_endpoint: node
+            .and_then(|node| node.http_endpoint())
+            .map(str::to_string),
+        btp_endpoint: node
+            .and_then(|node| node.btp_endpoint())
+            .map(str::to_string),
         // Every carriage this node exposes a listener for, in the operator's
         // own spelling. `"neither"` -- the default -- is an empty list rather
         // than the word: a reader asks "can I peer over BTP?", and an empty
@@ -2680,6 +2687,7 @@ secret = "s3cr3t"
             format!(
                 r#"
 client_edge_addr = "127.0.0.1:0"
+peer_expose = "both"
 
 [signer]
 key_file = "{}"

@@ -390,24 +390,37 @@ struct PricedTermination<'a> {
 /// destination resolves to, from a single lookup (issue #701, ADR 0028):
 /// the price to greet and charge, the transport policy to enforce, and
 /// which kind of route answered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Copy` since issue #1210: `request` carries an owned JSON value when
+/// the route configured one, so a caller that needs this more than once
+/// borrows it (`.as_ref()`) rather than relying on an implicit copy.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClientRouteFacts {
     pub price: Price,
     pub transport_policy: TransportPolicy,
     pub kind: ClientRouteKind,
+    /// What a client should send to use this route (issue #1210) -- the
+    /// matching route's `request` table, converted to JSON. `None` when the
+    /// route configured none.
+    pub request: Option<serde_json::Value>,
 }
 
 /// One priced prefix, as [`Connector::client_route_prices`] enumerates them
 /// for the node self-description (ADR 0050).
 ///
-/// Prefix and price only. What else a route has -- where it terminates, which
-/// peer it forwards to, what that peering costs this node -- is either an app
-/// fact or an operator-private one, and neither belongs in a document a
-/// stranger reads.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Prefix, price and `request` only. What else a route has -- where it
+/// terminates, which peer it forwards to, what that peering costs this node
+/// -- is either an app fact or an operator-private one, and neither belongs
+/// in a document a stranger reads.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClientRoutePrice {
     pub prefix: String,
     pub price: Price,
+    /// What a client should send to use this route (issue #1210), read back
+    /// through the same [`Connector::client_route`] lookup `price` is, so a
+    /// prefix that appears in more than one source is quoted with the
+    /// request table a real request to it would resolve.
+    pub request: Option<serde_json::Value>,
 }
 
 /// The connector's packet plane: a fixed set of terminated routes and peer
@@ -3067,16 +3080,23 @@ impl Connector {
                     price: self.routes[index].price(),
                     transport_policy: self.routes[index].transport_policy(),
                     kind: ClientRouteKind::Terminated,
+                    request: self.routes[index].request().cloned(),
                 },
                 ConfiguredTarget::Peer(index) => ClientRouteFacts {
                     price: self.peer_routes[index].price(),
                     transport_policy: TransportPolicy::Both,
                     kind: ClientRouteKind::Forwarded,
+                    request: self.peer_routes[index].request().cloned(),
                 },
+                // A runtime-pushed peer route (issue #884) carries no
+                // `request` table: it is written through the operator
+                // surface, not `[[routes]]`, so there is no config-file row
+                // for one to live on.
                 ConfiguredTarget::RuntimePeer(route) => ClientRouteFacts {
                     price: route.price(),
                     transport_policy: TransportPolicy::Both,
                     kind: ClientRouteKind::Forwarded,
+                    request: None,
                 },
             })
     }
@@ -3100,9 +3120,10 @@ impl Connector {
     /// across a runtime write that happens to land in a different map slot --
     /// a document whose field order wanders is a document nobody can diff.
     ///
-    /// Deliberately carries **prefix and price and nothing else**. A
-    /// terminated route's `handler_url` describes software behind this
-    /// connector (ND-08); a forwarded route's peer id and per-peering fee are
+    /// Deliberately carries **prefix, price and the route's `request`
+    /// declaration, and nothing else** (ADR 0067 for the last). A terminated
+    /// route's `handler_url` describes software behind this connector
+    /// (ND-08); a forwarded route's peer id and per-peering fee are
     /// operator-private (ND-09). Leased routes are absent for the reason
     /// [`Self::client_route`] gives: a lease carries no price at all.
     pub fn client_route_prices(&self) -> Vec<ClientRoutePrice> {
@@ -3123,6 +3144,7 @@ impl Connector {
                 self.client_route(&prefix).map(|facts| ClientRoutePrice {
                     prefix,
                     price: facts.price,
+                    request: facts.request,
                 })
             })
             .collect()
@@ -5748,6 +5770,7 @@ mod tests {
                 resource: X402Resource {
                     url: "g.example.app".to_string(),
                 },
+                request: None,
                 accepts: vec![X402PaymentOption {
                     scheme: "toon-channel".to_string(),
                     network: "g.example.app".to_string(),

@@ -928,6 +928,7 @@ fn a_node_section_with_its_three_surviving_fields_serves() {
     let config_file = write_config(&format!(
         r#"
 client_edge_addr = "127.0.0.1:0"
+peer_expose = "both"
 
 [signer]
 key_file = "{}"

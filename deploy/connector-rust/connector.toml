@@ -90,6 +90,22 @@ prefix = "g.example.connector.app"
 handler_url = "http://app:3100"
 price = 100
 
+# `request` is optional (ADR 0067, issue #1210): an arbitrary table naming
+# what a client should send to use this route, for an app whose payload is
+# more than "an amount". This connector validates only that it IS a table --
+# it never reads a key out of it, never fetches anything to produce or check
+# it, and publishes it verbatim on this route's self-description entry and
+# on the greeting for this destination. Uncomment and replace with whatever
+# shape your own app actually expects; the example below is illustrative,
+# not a shape this connector understands or enforces.
+#
+# [routes.request]
+# protocol = "nip90"
+# kinds = [5096, 5098]
+#
+# [routes.request.params]
+# chain = ["evm:84532"]
+
 # ── Operator surface (ADR 0008) ─────────────────────────────────────────
 # Reads (peers, routes, channels, claims, exposure, identity, the write
 # audit log, and GET /metrics) require this bearer token and nothing else.
@@ -106,6 +122,33 @@ bearer_token = "CHANGE-ME-generate-with-openssl-rand-hex-32"
 # to load until you replace it with a real key from README step 3 --
 # removing a key from this list and restarting is how you revoke it.
 write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STEP-3"]
+
+# ── Being peerable ([node], ADR 0050, issue #1220) ───────────────────────
+# The facts this node cannot introspect about itself: which ILP addresses
+# it answers to, and where each peer carriage it opens a listener for is
+# publicly reachable. Absent entirely, as this file leaves it, the node
+# still serves -- GET /ilp just answers with no endpoints and
+# "peerCarriages": [] -- so a counterparty's POST /peers at it gets a 502
+# rather than a peering: there is nothing published to dial.
+#
+# Either endpoint may always be declared -- both listeners are served
+# whatever `peer_expose` (in the Peering block below) says. What
+# peer_expose decides is what you may leave OUT: `btp_endpoint` is required
+# only when it exposes "btp" or "both", and `http_endpoint` whenever it
+# exposes anything at all, because a peer pays this node by asking its
+# client edge for claim-state over HTTP whichever carriage a packet rides.
+# A missing required endpoint is refused at load, by name.
+#
+# CHANGE ME and uncomment for an HTTP-only node -- the common shape behind
+# a single TLS-terminating reverse proxy:
+#
+# [node]
+# addresses     = ["g.example.connector"]
+# http_endpoint = "https://connector.example.com/ilp"
+#
+# ...and set `peer_expose = "http"` below to match. A node exposing BTP
+# (`peer_expose = "btp"` or `"both"`) sets BOTH endpoints here -- the BTP
+# one to be dialled, the HTTP one to be paid.
 
 # ── Peering (issue #677, ADR 0027, docs/protocol/peer-carriage-spec.md) ──
 # Two independent axes. `peer_expose` says which peer carriages THIS node
