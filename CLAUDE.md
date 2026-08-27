@@ -20,14 +20,16 @@ binary. Nothing else in this repository is the connector:
 - `packages/solana-program` — the payment-channel program the Solana backend drives.
   A Cargo workspace member, excluded from the workspace test gate; it has its own
   `cargo test-sbf` job.
-- `packages/faucet`, `packages/mina-zkapp`, `packages/mina-usdc-faucet-web`,
-  `packages/announcer` — devnet tooling and a standalone announcer sidecar. These
-  are the only reason npm, Jest and `package.json` still exist here. `npm test`
-  runs them; it does not test the connector.
+- `packages/faucet`, `packages/announcer` — devnet tooling and a standalone
+  announcer sidecar. These are the only reason npm and `package.json` still exist
+  here. `npm test` runs them; it does not test the connector.
 
-Mina is **not** a settlement chain for the Rust connector (ADR 0002 — o1js proof
-generation is JavaScript-only and a Node sidecar was refused). `packages/mina-zkapp`
-is the separately deployed zkApp and is out of scope for connector work.
+Mina is **gone from this repository** (ADR 0065). ADR 0002 had already dropped it as a
+settlement chain — o1js proof generation is JavaScript-only and a Node sidecar was
+refused — and 0065 deleted what that record left standing: the zkApp, the browser
+faucet dApp, the Mina tooling and the faucet's Mina leg. What survives is the
+connector's refusal of a `mina` claim **by name**, which is wire behaviour owed to
+`toon-client`, not Mina support. Do not reintroduce an o1js dependency.
 
 The **app** (or **handler**, for the HTTP endpoint specifically) is the payment-oblivious
 service behind a route's `handler_url`. Composition of a connector with an app lives
@@ -40,7 +42,7 @@ Do not use "terminator", "BLS", or "agent runtime"; all three are retired names.
 make rust-build     # cargo build --workspace
 make rust-test      # cargo test --workspace --exclude payment-channel  (the gate)
 make solana-test    # cargo test-sbf, the on-chain program
-make test           # npm/Jest: faucet, mina-zkapp, announcer — NOT the connector
+make test           # npm: the faucet and the announcer — NOT the connector
 make lint           # ESLint only. CI also runs cargo fmt --check and clippy -D warnings.
 
 make local-verify   # the shipped IMAGE against real chains: up, send a packet, down

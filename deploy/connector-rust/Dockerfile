@@ -22,9 +22,9 @@
 # file, so that was undetected until #465.
 #
 # One static binary, one config file, no JavaScript runtime anywhere in the
-# final image -- contrast the TypeScript connector's root ./Dockerfile, whose
-# Node >= 22.12 pin exists solely for Mina/o1js's ESM packaging (a dependency
-# ADR 0002 drops entirely from this rewrite).
+# final image -- contrast the TypeScript connector's root ./Dockerfile, which
+# pinned Node >= 22.12 solely for Mina/o1js's ESM packaging (a dependency
+# ADR 0002 dropped from this rewrite and ADR 0065 removed from the repository).
 #
 # Build (single platform, from the repository root so the build context
 # includes crates/ and packages/solana-program/):

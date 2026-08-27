@@ -18,8 +18,8 @@
 #
 # That boundary is unchanged here. The secret reaches a GitHub-hosted runner
 # executing THIS file — reviewed, committed, deterministic — and never reaches
-# a container running agent-authored code. Same shape as
-# `mina-treasury-info.yml`, which is the precedent this follows.
+# a container running agent-authored code. Same shape as `fleet-ops.yml`,
+# which is the precedent this follows.
 #
 # ── THE IDEMPOTENCE RULE (toon-meta#312 / connector#907) ────────────────────
 # `POST /channels` and `POST /channels/:id/fund` have been observed returning

@@ -64,7 +64,7 @@ not change what anything else must do.
 | #                                                                                      | Decision                                                                | Status                                                   |
 | -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- | -------------------------------------------------------- |
 | [0001](0001-rust-workspace-library-first.md)                                           | The connector is a Rust library first, a binary second                  | Accepted                                                 |
-| [0002](0002-drop-mina-from-the-rust-connector.md)                                      | Settles on EVM and Solana only; Mina is dropped                         | Accepted                                                 |
+| [0002](0002-drop-mina-from-the-rust-connector.md)                                      | Settles on EVM and Solana only; Mina is dropped                         | Accepted — extended by 0065                              |
 | [0005](0005-claims-are-truth-balances-are-a-projection.md)                             | Claims are the source of truth; balances are a projection               | Accepted, amended by 0033                                |
 | [0006](0006-the-connector-is-mechanism-not-policy.md)                                  | The connector is mechanism; discovery and route policy live outside it  | Accepted — restored in full by 0043                      |
 | [0007](0007-testing-doctrine-fakes-yes-mocks-no.md)                                    | Property tests over a pure core; fakes are allowed, mocks are not       | Accepted                                                 |
@@ -155,13 +155,14 @@ This is the group that spells out the nginx sentence at the top of this page.
 Neither connector-internal nor wire law: decisions about how the fleet is run, migrated, or
 how another repository is regarded.
 
-| #                                                                                    | Decision                                                                | Status                                    |
-| ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- | ----------------------------------------- |
-| [0017](0017-the-typescript-connector-is-a-prototype.md)                              | The TypeScript connector is a prototype, not a reference implementation | Accepted — a judgement about another repo |
-| [0041](0041-a-moving-tag-carries-the-fleets-committed-config-or-it-does-not-move.md) | A moving tag carries the fleet's committed config, or it does not move  | Accepted                                  |
-| [0055](0055-a-release-is-one-dispatch-and-the-ordering-rides-as-data.md)             | A release is one dispatch, and the deploy ordering rides as data        | **Proposed** — extends 0041               |
-| [0056](0056-production-is-a-named-empty-tier.md)                                     | Production is a named, empty tier                                       | **Proposed** — describes an absence       |
-| [0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)                   | Minimum delivery is retired; a claim bounds erosion                     | Accepted — **built** (#1143)              |
+| #                                                                                    | Decision                                                                | Status                                     |
+| ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- | ------------------------------------------ |
+| [0017](0017-the-typescript-connector-is-a-prototype.md)                              | The TypeScript connector is a prototype, not a reference implementation | Accepted — a judgement about another repo  |
+| [0041](0041-a-moving-tag-carries-the-fleets-committed-config-or-it-does-not-move.md) | A moving tag carries the fleet's committed config, or it does not move  | Accepted                                   |
+| [0055](0055-a-release-is-one-dispatch-and-the-ordering-rides-as-data.md)             | A release is one dispatch, and the deploy ordering rides as data        | **Proposed** — extends 0041                |
+| [0056](0056-production-is-a-named-empty-tier.md)                                     | Production is a named, empty tier                                       | **Proposed** — describes an absence        |
+| [0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)                   | Minimum delivery is retired; a claim bounds erosion                     | Accepted — **built** (#1143)               |
+| [0065](0065-mina-leaves-the-repository.md)                                           | Mina leaves the repository                                              | Accepted — **built** (#1203); extends 0002 |
 
 ---
 
@@ -201,13 +202,14 @@ reasoning will mislead you.
 
 ## Where a record names something the tree no longer has
 
-Checked against `crates/` and `packages/` on 2026-08-19. A record is not wrong for naming a
+Checked against `crates/` and `packages/` on 2026-08-27. A record is not wrong for naming a
 deleted thing — it is a record of a decision, made at a time. This table exists so a reader
 does not go looking.
 
 | Record | Names                                                                   | State in the tree                                                                                                                                                                                                                                                                                                     |
 | ------ | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 0001   | `connector-api`, `connector-admin`                                      | Shipped as `connector-client-edge` and `connector-operator`. `ConnectorNode` deleted (#457).                                                                                                                                                                                                                          |
+| 0002   | `packages/mina-zkapp`                                                   | **Deleted** (0065), with the rest of the Mina surface. The zkApp deployed on Mina devnet is unaffected; the source is in git history.                                                                                                                                                                                 |
 | 0003   | the raw-TCP peer wire, `POST /ilp/v{N}`                                 | Wire deleted (0027). The versioned edge path was never built; the edge serves `/ilp`.                                                                                                                                                                                                                                 |
 | 0005   | `connector-core`, ceiling arithmetic                                    | The crate shipped as `connector-domain`. Exposure/ceiling retired (0033).                                                                                                                                                                                                                                             |
 | 0007   | `connector-core`                                                        | Shipped as `connector-domain`.                                                                                                                                                                                                                                                                                        |

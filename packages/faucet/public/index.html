@@ -349,7 +349,7 @@
       </div>
       <p class="subtitle">
         Free public-testnet <strong>USDC</strong> for building on TOON — Base Sepolia · Solana
-        devnet · Mina devnet. This faucet drips the exact tokens the TOON devnet settles in.
+        devnet. This faucet drips the exact tokens the TOON devnet settles in.
       </p>
 
       <div id="notReady" class="not-ready">⚠️ Waiting for token contract deployment...</div>
@@ -366,9 +366,6 @@
         </div>
         <div class="chain-tile" data-chain="solana" role="radio" aria-checked="false" tabindex="0">
           Solana devnet<small>mock USDC</small>
-        </div>
-        <div class="chain-tile" data-chain="mina" role="radio" aria-checked="false" tabindex="0">
-          Mina devnet<small>USDC</small>
         </div>
       </div>
 
@@ -425,11 +422,7 @@
         >
         · SOL via
         <a href="https://faucet.solana.com" target="_blank" rel="noopener">faucet.solana.com</a>
-        · MINA via
-        <a href="https://faucet.minaprotocol.com" target="_blank" rel="noopener"
-          >faucet.minaprotocol.com</a
-        >
-        (choose <em>Devnet</em>) · devnet ARIO for
+        · devnet ARIO for
         <a href="https://docs.ar.io/arns" target="_blank" rel="noopener">ArNS names</a>
         via
         <a href="https://faucet.services.ar-io.dev/" target="_blank" rel="noopener"
@@ -455,8 +448,9 @@
 
       // Per-chain UI config. `route` matches the server endpoints. USDC only
       // (toon-meta#310 §4.6, connector#898): the old local anvil EVM leg
-      // (/api/request) and the native-SOL/native-MINA legs are retired, so every
-      // route below is a USDC-only drip. `gas` links point at the chains' own
+      // (/api/request) and the native-SOL leg are retired, and the Mina leg
+      // went with Mina itself (ADR 0065), so every route below is a USDC-only
+      // drip. `gas` links point at the chains' own
       // upstream native-coin faucets — this faucet dispenses no gas itself.
       const CHAINS = {
         baseSepolia: {
@@ -475,13 +469,6 @@
           placeholder: 'Base58 pubkey...',
           validate: (a) => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(a),
           gas: [['SOL — faucet.solana.com', 'https://faucet.solana.com']],
-        },
-        mina: {
-          route: '/api/mina/usdc-request',
-          addressLabel: 'Your Mina Address (B62…)',
-          placeholder: 'B62q...',
-          validate: (a) => /^B62q[1-9A-HJ-NP-Za-km-z]{48,55}$/.test(a),
-          gas: [['MINA — faucet.minaprotocol.com (Devnet)', 'https://faucet.minaprotocol.com']],
         },
       };
 
@@ -565,18 +552,6 @@
             notReady.style.display = 'block';
             submitBtn.disabled = true;
           }
-        } else if (chain === 'mina') {
-          a1L.textContent = 'USDC per request:';
-          a1.textContent = c.enabled ? `${c.drips.usdc} USDC` : 'disabled';
-          a2L.textContent = 'Cooldown:';
-          a2.textContent = c.enabled ? `${c.usdcCooldownHours}h per address` : '-';
-          cL.textContent = 'Treasury:';
-          cV.textContent = c.treasury || 'not configured';
-          if (!c.enabled) {
-            notReady.textContent = '⚠️ Mina USDC drip not configured on this host.';
-            notReady.style.display = 'block';
-            submitBtn.disabled = true;
-          }
         }
       }
 
@@ -651,15 +626,6 @@
             showMessage(
               `✅ Sent ${t.usdc.amount} USDC to ${address}<br/>` +
                 `<small>USDC sig: ${t.usdc.signature}</small>`,
-              'success'
-            );
-            addressInput.value = '';
-          } else if (chain === 'mina') {
-            const u = data.usdc || {};
-            // A treasury TRANSFER (the rate-limited token has no admin-mint).
-            showMessage(
-              `✅ Sent ${u.amount} USDC (treasury transfer) to ${address}<br/>` +
-                `<small>transfer hash: ${u.transferHash || '-'}</small>`,
               'success'
             );
             addressInput.value = '';

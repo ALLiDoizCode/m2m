@@ -11,7 +11,7 @@ For the mechanism these numbers are plugged into — who pays whom, on which cha
 
 All prices are in **base units of 6-decimal USDC** (ADR 0010;
 `docs/usdc-cross-chain-settlement.md`'s "6 decimals everywhere" is canonical
-across EVM/Solana/Mina, not a TypeScript-only asset config). So `1000` is
+across every chain the connector settles on, not a TypeScript-only asset config). So `1000` is
 0.001 USDC and `1` is 1 µUSDC.
 
 **The apex is retired (issue #872, toon-meta#310 / toon-meta#313's live

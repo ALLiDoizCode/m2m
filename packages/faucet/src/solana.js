@@ -161,7 +161,7 @@ export function createSolanaFaucet() {
     },
 
     // Per-address cooldown wrappers (route claims before enqueue, releases on
-    // failure — mirrors the Base Sepolia / Mina USDC legs). Addresses are
+    // failure — mirrors the Base Sepolia leg). Addresses are
     // base58 Solana pubkeys, used as-is (unlike EVM's checksum normalization).
     claim(address) {
       return limiter.claim(address);
@@ -173,8 +173,7 @@ export function createSolanaFaucet() {
     // USDC-only drip: a plain treasury→recipient token transfer. The
     // TREASURY (not the recipient) pays the tx fee + ATA rent, so this works
     // even if the recipient currently holds 0 SOL — recipients get SOL for
-    // gas from the chain's own faucet (mirrors the Mina
-    // `/api/mina/usdc-request` USDC-only leg).
+    // gas from the chain's own faucet.
     async drip(address) {
       // Fail fast (~1.5–3s) with an honest VALIDATOR_STALLED error when the
       // validator is wedged, instead of burning 30–90s in confirmation waits

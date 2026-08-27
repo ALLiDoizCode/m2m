@@ -372,7 +372,8 @@ chains at once, writes the keyed shape in §2.1's table instead. `contract_addre
 **`TokenNetworkRegistry`**, the contract `getTokenNetwork(token)` is called on, and not a channel
 contract; `[settlement.solana]` names the deployed `payment-channel` `program_id` in its place. Mina
 is not a settlement chain in either shape
-([ADR 0002](../adr/0002-drop-mina-from-the-rust-connector.md)). An absent `[settlement]` is legal, and
+([ADR 0002](../adr/0002-drop-mina-from-the-rust-connector.md)), and is no longer in this
+repository at all ([ADR 0065](../adr/0065-mina-leaves-the-repository.md)). An absent `[settlement]` is legal, and
 every channel operation then answers `503`; a present but wrong one is a startup failure, because a
 real backend is constructed for every chain configured before the node serves anything (CF-25).
 

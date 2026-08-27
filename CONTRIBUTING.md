@@ -173,7 +173,7 @@ The scope specifies which package or component is affected:
 
 - `connector` - Changes to the Rust connector crates (`crates/*`)
 - `contracts` - Changes to the EVM payment channel contracts
-- `faucet` - Changes to the devnet faucet and its Mina zkApp
+- `faucet` - Changes to the devnet faucet
 - `monorepo` - Changes affecting the entire monorepo
 - `btp` - BTP protocol implementation
 - `routing` - Routing logic
@@ -410,7 +410,7 @@ Four things sit outside it:
 - **`packages/contracts`** — a separate Foundry job (`forge test`, `.github/workflows/contracts.yml`).
   No make target runs it.
 - **`npm test`** (and `make test`) — the surviving npm workspaces, which are devnet tooling only:
-  the faucet, its Mina zkApp and the announcer sidecar. It does **not** test the connector.
+  the faucet and the announcer sidecar. It does **not** test the connector.
 - **[`local/`](local/README.md)** — the shipped **image**, as uid 10001, on a mounted config,
   against real containerised chains. A separate gate answering a question `cargo test`
   structurally cannot: run one with `make local-verify LOCAL_TOPOLOGY=<solo|two-hop|mixed-chain>`.

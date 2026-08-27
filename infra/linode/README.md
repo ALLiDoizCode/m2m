@@ -17,7 +17,7 @@ provisions the faucet.
 That box was deleted in the public-chain cutover — commit `44b15bdc`,
 2026-07-19, "docs: public-chain cutover — retire self-hosted devnet chain
 endpoints (#374)". Devnet settles on **public chains** now: Base Sepolia
-(`evm:84532`), public Solana devnet and public Mina devnet. The subdomains it
+(`evm:84532`) and public Solana devnet. The subdomains it
 answered on are gone; `*.devnet.toonprotocol.dev` is a wildcard A-record to the
 registrar's parking host, so `evm-rpc.` and `mina.` return a 301 to
 `toonprotocol.dev` and fail TLS.
@@ -47,15 +47,12 @@ mint only.
 [`endpoints.json`](./endpoints.json) is **live and hand-maintained**. It records
 the public devnet's chain endpoints, token addresses and program ids, and is the
 canonical answer to "what does a TOON node point at on devnet". It is read at
-runtime by `infra/mina/provision-mina.sh` (via `jq`, for the Mina USDC token and
-admin-contract addresses) and cited as the source of truth by
-`docs/usdc-cross-chain-settlement.md`, `docs/operators/peer-channel-migration.md`,
-`tools/mina/deploy-usdc-token.mts`, `infra/mina/fund-mina-usdc.sh` and
-`packages/mina-zkapp/src/usdc-faucet.ts`.
+cited as the source of truth by `docs/usdc-cross-chain-settlement.md` and
+`docs/operators/peer-channel-migration.md`. Its readers used to include a pile of
+Mina tooling; that went with Mina itself (ADR 0065), and so did its `mina` block.
 
 Nothing generates it any more — `devnet.sh endpoints`, which used to, is gone
-with the box. **Edit it by hand** when a devnet address changes; a new Mina USDC
-deploy prints the values to pin (`tools/mina/deploy-usdc-token.mts`).
+with the box. **Edit it by hand** when a devnet address changes.
 
 A second copy of that generator outlived the first, and this paragraph did not
 know about it: `infra/devnet-manage.sh` kept an `endpoints` verb until issue

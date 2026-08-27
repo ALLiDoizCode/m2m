@@ -3,14 +3,13 @@
 # line here. The stock node:22 image already ships npm, which is all connector
 # needs (`npm ci` in the onSandboxReady hook).
 #
-# mina-zkapp NATIVE DEPS: connector's `packages/mina-zkapp` (o1js) and its
-# transitive native modules (e.g. bigint-buffer's `node-gyp rebuild`) need a C
-# toolchain + python3. We verified empirically that the FULL `node:22-bookworm`
-# image already provides them — it is built on `buildpack-deps:bookworm`, which
-# bundles build-essential (gcc/g++/make) and python3. Inside this image `npm ci`
-# and the ordered `shared → mina-zkapp` build both succeed with NO extra apt
-# packages, so none are added. (If you ever switch this FROM to a `-slim`
-# variant, you MUST add `build-essential python3` before the USER switch.)
+# NATIVE DEPS: the FULL `node:22-bookworm` image is built on
+# `buildpack-deps:bookworm`, which bundles build-essential (gcc/g++/make) and
+# python3, so `npm ci` succeeds here with NO extra apt packages and none are
+# added. The o1js toolchain this paragraph was originally written for went with
+# Mina (ADR 0065), but a native module can reappear in any dependency. (If you
+# ever switch this FROM to a `-slim` variant, you MUST add
+# `build-essential python3` before the USER switch.)
 FROM node:22-bookworm
 
 # Links the published GHCR package (ghcr.io/toon-protocol/sandcastle-connector,

@@ -1,7 +1,8 @@
 // Boots the REAL faucet server (child process, no mocks) and proves the
 // USDC-only route set from toon-meta#310 §4.6 / connector#898:
 //   - the local-anvil EVM leg (`/api/request`) and the native-SOL/native-MINA
-//     legs are GONE from the service (404, not merely 503-when-unconfigured)
+//     legs are GONE from the service (404, not merely 503-when-unconfigured),
+//     as is the whole Mina leg, USDC route included (ADR 0065)
 //   - the surviving USDC-only routes are still mounted
 //   - /api/info's capability map stops advertising the dropped legs
 //
@@ -31,8 +32,6 @@ function startFaucet() {
       TOKEN_ADDRESS: '',
       SOLANA_USDC_MINT: '',
       BASE_SEPOLIA_FAUCET_KEY: '',
-      MINA_USDC_TREASURY_KEY: '',
-      MINA_USDC_ADMIN_KEY: '',
     },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
@@ -69,21 +68,25 @@ test('the dropped native-token routes 404; the USDC routes and /health survive',
       body: JSON.stringify({ address }),
     });
 
-  // DROP (toon-meta#310 §4.6): the local-anvil EVM leg and both native-token
-  // legs are gone entirely — 404, not just unconfigured. Body content is
-  // irrelevant here: a removed route 404s before any handler runs.
-  for (const route of ['/api/request', '/api/solana/request', '/api/mina/request']) {
+  // DROP: the local-anvil EVM leg and both native-token legs (toon-meta#310
+  // §4.6), plus every Mina route including the USDC one (ADR 0065). Gone
+  // entirely — 404, not just unconfigured. Body content is irrelevant here: a
+  // removed route 404s before any handler runs.
+  for (const route of [
+    '/api/request',
+    '/api/solana/request',
+    '/api/mina/request',
+    '/api/mina/usdc-request',
+  ]) {
     const res = await postJson(route, 'x');
     assert.equal(res.status, 404, `${route} must be gone from the service, got ${res.status}`);
   }
 
   // KEEP: the USDC-only legs are still mounted — unconfigured means 503, not
   // 404. A well-formed-but-unconfigured address is used so the "not
-  // configured" check is what answers, not address validation (the mina
-  // route validates the address before checking configuration).
+  // configured" check is what answers, not address validation.
   const surviving = [
     ['/api/solana/usdc-request', '11111111111111111111111111111111'],
-    ['/api/mina/usdc-request', 'B62qqEMaUpm1aZ5M2weUoGXQRGbF3j6VjEtaEdzfM1NAWmeHnywiC2P'],
     ['/api/base-sepolia/request', 'x'],
   ];
   for (const [route, address] of surviving) {
@@ -100,7 +103,6 @@ test('the dropped native-token routes 404; the USDC routes and /health survive',
   assert.equal(info.chains.evm, undefined, '/api/info must not advertise the retired evm leg');
   assert.equal(info.chains.solana.route, '/api/solana/usdc-request');
   assert.equal(info.chains.solana.enabled, false);
-  assert.equal(info.chains.mina.route, '/api/mina/usdc-request');
-  assert.equal(info.chains.mina.enabled, false);
+  assert.equal(info.chains.mina, undefined, '/api/info must not advertise a Mina leg (ADR 0065)');
   assert.ok(info.chains.baseSepolia);
 });

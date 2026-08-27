@@ -58,12 +58,9 @@ that as a failure, not a pass.
 TS2307 errors from unresolved project references:
 
 - lint: `npm run lint --workspaces --if-present`
-- build (ordered): `npm run build` (exactly `shared` → `mina-zkapp` → the rest; do not
-  reorder)
+- build: `npm run build`
 - typecheck: `npm run typecheck`
-- test: `npm run test --workspaces --if-present` (the `mina-zkapp` o1js jest suite is
-  WASM-heavy: `NODE_OPTIONS='--max-old-space-size=8192' npm test
---workspace=packages/mina-zkapp -- --runInBand` or it OOMs)
+- test: `npm run test --workspaces --if-present`
 
 Other PR checks: `CI / lint-and-format` (`npm run lint`, `npm run format:check`),
 `Contracts` (only on PRs touching `packages/contracts/**`), and `Agent image` (only on

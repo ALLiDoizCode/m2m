@@ -13,7 +13,7 @@
 # file needs to land two directories above this package inside the image too
 # (see the COPY below). Deliberately standalone otherwise (no npm-workspaces
 # linking in the image) — this package has no dependency on any other
-# workspace member, unlike packages/faucet's mina-zkapp cross-build.
+# workspace member.
 # ---------------------------------------------------------------------------
 
 FROM node:22-bookworm-slim AS build
