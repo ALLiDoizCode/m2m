@@ -96,25 +96,121 @@ absences to notice — each is deliberate, and none is vendored:
 
 ## 2. Run a node
 
-The binary is one static executable that reads one TOML file. Pull it:
+**Run it as a container.** The connector is one static binary that reads one
+TOML file, and the published image is how it is meant to be deployed — it runs
+as uid `10001`, creates `/app/state` owned by that uid, and carries no runtime
+of its own.
 
 ```bash
 docker pull ghcr.io/toon-protocol/connector:rust-main
 ```
 
 Pin an exact `rust-sha-<short>` tag for anything you care about; `rust-main`
-moves. Or build it — Rust stable, and clone with submodules because
-`packages/contracts` vendors OpenZeppelin and forge-std:
+moves. A third tag, `rust-release`, is a **promotion** tag and not a build
+output — see stage 6.
+
+### A node, start to finish
+
+Three files: a config, a key, a compose file.
+
+```bash
+mkdir -p node/config node/data && cd node
+openssl rand -hex 32 > data/signer.key && chmod 600 data/signer.key
+```
+
+`config/connector.toml` — the smallest file that serves:
+
+```toml
+client_edge_addr = "0.0.0.0:3000"
+
+# Where this node writes down which claims it has already been paid.
+# Read stage 4 before you leave this out.
+state_dir = "/app/state"
+
+[signer]
+key_file = "/app/data/signer.key"   # 32 raw bytes, or 64 hex characters
+
+[[routes]]
+prefix      = "g.example.app"
+handler_url = "http://app:3100/"
+price       = 0                     # free, on purpose — priced in stage 4
+```
+
+`compose.yml`:
+
+```yaml
+services:
+  connector:
+    image: ghcr.io/toon-protocol/connector:rust-main
+    command: ['/app/config/connector.toml']
+    volumes:
+      - ./config/connector.toml:/app/config/connector.toml:ro
+      - ./data:/app/data:ro
+      # A NAMED volume, not a bind mount. The image creates /app/state owned by
+      # uid 10001, so a fresh named volume inherits that ownership. A host bind
+      # mount arrives root-owned and the connector refuses to start.
+      - connector-state:/app/state
+    ports:
+      # Loopback only to begin with. The client edge is the paid surface; put a
+      # TLS-terminating reverse proxy in front of it before it faces the world.
+      - '127.0.0.1:3000:3000'
+    restart: unless-stopped
+    healthcheck:
+      # Free and unauthenticated, and answering it means the config loaded, every
+      # configured settlement backend connected, and the router is serving.
+      # `docker ps` showing "Up" proves none of that.
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:3000/ilp/identity']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  app:
+    image: your-app:latest # anything that answers HTTP — stage 3
+
+volumes:
+  connector-state:
+```
+
+```bash
+docker compose up -d
+docker compose logs -f connector
+```
+
+Three things about this file are load-bearing, and each is a real failure people
+hit:
+
+- **`/app/state` is a named volume.** A watermark that dies with the container is
+  the same defect one indirection down. A host bind mount arrives root-owned and
+  the node refuses to start; `chown 10001:10001` it first if you must use one.
+- **Keys are mounted read-only, and by path.** Key material is referenced by
+  location, never by value
+  ([ADR 0009](docs/adr/0009-one-typed-config-file-no-environment-layer.md),
+  [ADR 0012](docs/adr/0012-a-signer-and-a-treasury-not-a-wallet.md)). There is no
+  environment-variable layer to smuggle one through, and no mnemonic anywhere in
+  this binary.
+- **The healthcheck asks the node a question.** `GET /ilp/identity` is free and
+  unauthenticated. A container that is "Up" but refused its config is a container
+  that answers nothing.
+
+### Build it instead
+
+Only if you are changing the connector. Rust stable, and clone with submodules
+because `packages/contracts` vendors OpenZeppelin and forge-std:
 
 ```bash
 git clone --recurse-submodules https://github.com/toon-protocol/connector.git
 cd connector && cargo build --workspace   # target/debug/connector
+connector path/to/connector.toml
 ```
 
-### The fastest honest first packet
+[`CONTRIBUTING.md`](CONTRIBUTING.md) has the test gate and the chain binaries it
+needs.
 
-`local/` runs the shipped image against real containerised chains, provisions
-its keys and channels, and sends a real packet through it. It needs Docker.
+### Prove it moves a packet
+
+The compose file above serves, but it does not prove value moves. `local/` does:
+it runs this same image against real containerised chains, provisions the keys
+and channels, and sends a real packet through it.
 
 ```bash
 make local-up        # build the image, start anvil + solana, provision, run
@@ -146,36 +242,19 @@ facts. A connector answers; it never announces
 This is also how another operator peers with you in stage 5 — the URL is the
 whole of what they need.
 
-### Your own config
+### About that config file
 
 One typed TOML file, read once at boot, fully validated, immutable for the
 process lifetime. There is **no environment-variable override layer**
 ([ADR 0009](docs/adr/0009-one-typed-config-file-no-environment-layer.md)) —
 `CONFIG_FILE` and friends do nothing, and the only variable read is `RUST_LOG`.
 An unknown key is a hard load failure, and a removed key is refused **by name**
-rather than ignored. The minimum:
+rather than ignored — a config that named a key we retired tells you so at boot
+instead of quietly doing nothing.
 
-```toml
-client_edge_addr = "0.0.0.0:3000"
-
-[signer]
-key_file = "/app/data/signer.key"   # 32 raw bytes, or 64 hex characters
-
-[[routes]]
-prefix      = "g.example.app"
-handler_url = "http://app:3100/"
-price       = 0
-```
-
-```bash
-connector /path/to/connector.toml
-```
-
-Generate the signer with `openssl rand -hex 32 > signer.key`. Every key is
-referenced **by path, never by value**
-([ADR 0009](docs/adr/0009-one-typed-config-file-no-environment-layer.md),
-[ADR 0012](docs/adr/0012-a-signer-and-a-treasury-not-a-wallet.md)); there is no
-inline key and no mnemonic anywhere in this binary.
+There is one consequence worth planning around: because the binary and the file
+are a matched pair in both directions, **adding a required key is a breaking
+deploy**. Land the config first, then move the image.
 
 [`docs/protocol/configuration-spec.md`](docs/protocol/configuration-spec.md) is
 the full key reference, and
@@ -240,23 +319,16 @@ deliberate, because it is never silently free.
 
 ## 4. Get paid
 
-Three things turn a serving node into an earning one: a price, a record of the
-channels you accept claims on, and somewhere durable to remember what you have
-already been paid.
+Two things turn a serving node into an earning one: **a price**, and **a
+settlement backend**. Add the whole of it to the config from stage 2:
 
 ```toml
-state_dir = "/app/state"          # required once you accept claims
+state_dir = "/app/state"          # read the warning below
 
 [[routes]]
 prefix      = "g.example.app"
 handler_url = "http://your-app:8080/"
 price       = 1000                # base units of the settlement token
-
-[[client_channels]]
-channel_id            = "0x…"     # the on-chain 32-byte identifier
-counterparty          = "0x…"     # whose signature you accept on it
-chain_id              = 84532
-token_network_address = "0x…"
 
 [settlement.evm]
 rpc_url          = "https://sepolia.base.org"
@@ -268,13 +340,34 @@ decimals         = 6
 key_file = "/app/data/settlement.key"
 ```
 
-`state_dir` is not optional once `[[client_channels]]` is set, and config load
-refuses a file that omits it. Without it the replay watermarks live only in
-memory, so a restart resets every channel to "no claim ever seen" — and a
-channel with no watermark accepts any nonce, which hands a payer every claim
-they have already spent back as free service. In a container it must be a
-**mounted volume**; the image runs as uid 10001 and creates `/app/state` so a
-fresh named volume inherits that ownership.
+That is the whole of it. **You do not list the channels your payers will use,
+and you could not** — a client's channel does not exist until that client opens
+it on chain, which happens long after your node booted. The settlement section
+is doing double duty: it gives this node its on-chain identity, and it is also
+where a claim naming a channel you have never heard of gets **resolved from
+chain** and accepted
+([ADR 0052](docs/adr/0052-permissionless-payment-is-guaranteed-and-a-claim-is-what-authorises.md),
+`configuration-spec.md` **CF-27**). That resolution is what makes paying you
+permissionless rather than an arrangement.
+
+`[[client_channels]]` exists, and this guide leaves it out on purpose. It
+**declares** a channel and its counterparty key up front, and a declared channel
+is answered from memory with no chain read at all. It is an optimisation for a
+counterparty you already know — not a registry, not a gate, and never something
+you can fill in ahead of your first customer. A node with an empty one is not a
+node that refuses payment.
+
+> ⚠ **Set `state_dir` even though the parser will not make you.** Config load
+> only demands it when a channel _book_ is configured — and the permissionless
+> shape above has no book, so this file loads with watermarks held in process
+> memory alone. Every restart then reads every spent nonce as fresh, and every
+> claim a payer has already spent buys service again. Nothing in a log shows
+> that it did. Tracked as
+> [#1186](https://github.com/toon-protocol/connector/issues/1186); until it is
+> fixed, the config is trusting you to remember.
+
+In a container `state_dir` must be a **mounted volume** — the named volume in
+stage 2's compose file, not a path in the writable layer.
 
 `decimals` is a **declaration, not a conversion**. Nothing scales by it — every
 amount on the value path is already in the token's base units. Startup reads the
@@ -310,12 +403,11 @@ pays for a route without ever meeting the operator
 What authorises a write is the claim, never a session or a token
 ([ADR 0008](docs/adr/0008-operator-surface-splits-read-from-write.md)).
 
-A claim naming a channel you never declared is **not** automatically refused —
-it is resolved from the chain
-([ADR 0052](docs/adr/0052-permissionless-payment-is-guaranteed-and-a-claim-is-what-authorises.md),
-`configuration-spec.md` **CF-27**), which is what makes paying you
-permissionless. `[[client_channels]]` is how you record a counterparty key you
-already know; it is not the gate.
+One thing a claim can never do is vouch for itself. A signature is checked
+against the counterparty this node resolved for that channel — declared or read
+from chain — and never against the signer the claim declares. "Unverifiable" is
+never "accepted": an unreachable RPC endpoint refuses the claim it was asked
+about, distinguishably, rather than letting it through.
 
 ### Turning claims into money
 
