@@ -52,6 +52,15 @@ further along.
    still terminate — it simply cannot verify a claim against a chain, so it serves only channels its
    configuration names.
 
+**Fund the settlement key _before_ you configure the backend.** The third item reads as a
+configuration step and it is not one. A Solana backend's `connect` **submits** a transaction — a
+`create_associated_token_account_idempotent` for its own key — and then simulates an
+`InitializeChannel` against a throwaway counterparty to prove the configured `program_id` really is
+the payment-channel program. Both need that key to hold native SOL. Against an unfunded key the node
+stops with **exit 1** on an RPC error that names no configuration key at all, so it reads like an
+unreachable endpoint or a typo rather than an empty account. The EVM backend only reads at `connect`,
+so this is the Solana leg specifically. (From the only third-party bring-up, issue #1098.)
+
 Everything else — peerings, an operator surface, client identities — is added when there is a reason.
 
 ### 1.2 The smallest configuration that serves
@@ -104,18 +113,30 @@ The last two are the ones that surprise operators. A settlement block that canno
 whose token reports different decimals than configured, stops the node — deliberately, because the
 alternative is a node that looks healthy and cannot be paid.
 
+**Boot is not a dry run.** Everything above makes it tempting to start a node purely to find out
+whether a configuration is good, and that habit is safe right up to the point where a **funded**
+settlement key is in the file. It is not safe then: the Solana backend proves itself by submitting a
+transaction, not by reading (§1.1), so an ephemeral container started to see whether a TOML parsed
+pays a real fee on a real chain and leaves a real transaction behind. The bring-up behind issue #1098
+lost 15,000 lamports to exactly that check. There is no dry-run verb to reach for instead — the binary
+serves or it sends — so a settlement-bearing configuration can only be validated by booting it, and
+booting it spends. Rehearse one against a disposable chain, not against the chain it will settle on.
+
 ### 1.4 Confirming it works, in order
 
-1. **`GET /ilp`** — the node's self-description. If this answers, the node is up, its configuration
-   loaded, and everything a stranger needs to pay it is in one document
-   ([ADR 0050](../adr/0050-a-connectors-url-resolves-to-its-self-description.md)).
+1. **`GET /ilp`** — the node's self-description, and a plain `curl` is the whole of the test: it is
+   free, unauthenticated, and needs no packet, encoder or protocol knowledge. If it answers, the node
+   is up, its configuration loaded, and everything a stranger needs to pay it is in one document
+   ([ADR 0050](../adr/0050-a-connectors-url-resolves-to-its-self-description.md),
+   [`self-description-spec.md`](self-description-spec.md)).
 2. **`POST /ilp` with no claim**, to a priced route — the greeting. Confirms the route exists, is
    priced, and quotes terms.
 3. **A paid packet** end to end. Confirms the claim gate, the app delivery and the fulfilment.
 4. **`GET /metrics`** on the operator surface, if one is configured.
 
 Step 1 before step 2 is deliberate: a greeting tells you about one route, and the self-description
-tells you about the node.
+tells you about the node. It is also the step that carries over to §1.5 — the URL you just curled is
+the entire thing you hand a counterparty who wants to peer with you.
 
 ### 1.5 Adding a peering
 
@@ -135,6 +156,17 @@ and its per-chain settlement address and chain facts. It then derives the paymen
 two settlement addresses, opens it on chain if it is absent, and writes the peering down
 ([ADR 0059](../adr/0059-a-channel-is-derived-from-its-participants.md)). Both operators do this,
 each with the other's URL, and they land on the same channel without exchanging an identifier.
+
+**There is nothing else to exchange out of band, and there is no shared secret.** Both halves an
+earlier bring-up had to hand over by hand are gone rather than merely documented. The **channel** is
+derived from the two settlement addresses, so it is not published by either node beforehand and no
+address is copied between operators — which is what makes an exchange that could not have worked
+before ADR 0059 work now. The **peer credential** that had to be byte-identical in both data dirs is
+**deleted, with nothing replacing it**: a peer's role is proved per frame by its `[[peer_channels]]`
+binding and its claim signature
+([ADR 0060](../adr/0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md)).
+`[[peers]].credential` is a tombstone, so a configuration copied from an older runbook is refused by
+name at boot rather than quietly ignored.
 
 **What you supply, and why only these three.** `id` is your own **local label** — never derived from
 the peer's ILP address, which is self-asserted, and never from the URL host. `fee` and
@@ -288,15 +320,24 @@ Uses exactly the vocabulary of [`CONTEXT.md`](../../CONTEXT.md) and implements
 [ADR 0008](../adr/0008-operator-surface-splits-read-from-write.md),
 [ADR 0022](../adr/0022-a-connector-answers-it-does-not-announce.md),
 [ADR 0034](../adr/0034-a-runtime-peer-route-table-never-shadows-the-config-file.md),
-[ADR 0046](../adr/0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md) and
-[ADR 0058](../adr/0058-a-peering-is-established-from-a-url.md).
+[ADR 0046](../adr/0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md),
+[ADR 0050](../adr/0050-a-connectors-url-resolves-to-its-self-description.md),
+[ADR 0058](../adr/0058-a-peering-is-established-from-a-url.md),
+[ADR 0059](../adr/0059-a-channel-is-derived-from-its-participants.md) and
+[ADR 0060](../adr/0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md).
 
 **Coverage:** none of OP-01 – OP-07 is vectored and none will be. The operator surface is not a wire
 surface; per [ADR 0045](../adr/0045-a-behavioural-rule-is-normative-prose-until-its-vector-lands.md)
 these are prose-normative permanently and do not enter the debt ledger.
 
 **Not yet built**, and marked rather than narrated: §2.1's boot-time deletion of a colliding runtime
-row is #1076. `GET /ilp` returning the self-description (§1.4) landed in #1080, and the
-runtime-settable cap (§1.5) in #1160, which put it on the write that establishes a peering. The
-sixteen task-runbooks in `docs/operators/` remain what they are — procedures for specific boxes and
-specific migrations — and several describe a fleet topology that no longer exists.
+row is #1076, and it is now the only one in this document.
+
+**Since built**, and therefore described above as procedures to follow today rather than intentions:
+`GET /ilp` returning the self-description (§1.4) landed in #1080, and the runtime-settable cap (§1.5)
+in #1160, which put it on the write that establishes a peering. Issue #1098 is why both are called
+out here — an operator reading §1.4 as a procedure and finding a not-yet-built marker in §5 lost a
+round trip, and the reverse would waste one now.
+
+The sixteen task-runbooks in `docs/operators/` remain what they are — procedures for specific boxes
+and specific migrations — and several describe a fleet topology that no longer exists.
