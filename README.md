@@ -174,7 +174,8 @@ curl http://localhost:3000/ilp
 That free, unauthenticated `GET` returns the node's self-description — its
 addresses, endpoints, identity key and settlement facts. A connector answers; it
 never announces. It is also the whole of what another operator needs to peer with
-you.
+you, once [`[node]` and `peer_expose`](#being-peerable) are set — this minimal
+config's own self-description has no endpoints and nothing to dial.
 
 > [!IMPORTANT]
 > **Three things about the config that bite people.**
@@ -326,7 +327,38 @@ on chain is [the operator surface](#the-operator-surface)'s job.
 ## Peering
 
 Terminating your own routes earns from callers who know your address. Peering
-puts you on paths that start somewhere else. It is one authenticated write:
+puts you on paths that start somewhere else.
+
+### Being peerable
+
+Step 1's config boots and serves, but nobody can peer _with_ it: its
+self-description has no endpoints and `"peerCarriages": []`, so a
+counterparty's `POST /peers` at it answers `502`. Three more keys, none of
+them shown above, close that gap:
+
+```toml
+client_edge_addr = "0.0.0.0:3000"
+peer_expose      = "http"        # "btp", "http", "both", or "neither" (default)
+
+[node]
+addresses     = ["g.your.node"]
+http_endpoint = "https://your-node.example/ilp"
+```
+
+`peer_expose` says which carriage(s) _this_ node opens a peer listener for.
+`[node]` publishes where each is reachable, and the two must agree exactly: an
+endpoint for a carriage `peer_expose` does not name is refused at load, and an
+exposed carriage with no endpoint is too. So `peer_expose = "http"` takes
+`http_endpoint` and no `btp_endpoint`; `"btp"` is the reverse; `"both"` takes
+both; and `"neither"` (the default) takes neither — a `[node]` naming only
+`addresses` is legal and still answers `GET /ilp`, it is just not dialable.
+
+For a local or pre-TLS trial only, add `peer_allow_plaintext_endpoints = true`
+at the top level so `http://`/`ws://` endpoints are accepted too — every
+deployed config should stay on `https://`/`wss://`.
+
+With that in place, `GET /ilp` really is the whole of what another operator
+needs to peer with you. It is one authenticated write:
 
 ```
 POST /peers   { "id": "their-node", "url": "https://their-node.example",
@@ -467,6 +499,10 @@ The signature covers exactly three components — `@method`, `@path` and
 ed25519 public key in hex. `connector send` is a worked example: it signs a
 `POST /packets` this way, and `--expect-fulfill` makes a non-fulfilled packet a
 non-zero exit, which is what turns a rehearsal into a gate.
+
+For every other write — `POST /peers` above all —
+[`docs/operators/sign-write.sh`](docs/operators/sign-write.sh) is a shell-and-`openssl` signer with
+a worked example in [`docs/operators/signing-a-write.md`](docs/operators/signing-a-write.md).
 
 ---
 

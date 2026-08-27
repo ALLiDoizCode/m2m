@@ -582,6 +582,7 @@ key_file = "{}"
         let config_file = write_config(&format!(
             r#"
 client_edge_addr = "127.0.0.1:0"
+peer_expose = "both"
 
 [signer]
 key_file = "{}"

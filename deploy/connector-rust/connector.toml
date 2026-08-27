@@ -97,6 +97,32 @@ bearer_token = "CHANGE-ME-generate-with-openssl-rand-hex-32"
 # removing a key from this list and restarting is how you revoke it.
 write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STEP-3"]
 
+# ── Being peerable ([node], ADR 0050, issue #1220) ───────────────────────
+# The facts this node cannot introspect about itself: which ILP addresses
+# it answers to, and where each peer carriage it opens a listener for is
+# publicly reachable. Absent entirely, as this file leaves it, the node
+# still serves -- GET /ilp just answers with no endpoints and
+# "peerCarriages": [] -- so a counterparty's POST /peers at it gets a 502
+# rather than a peering: there is nothing published to dial.
+#
+# Each endpoint is legal exactly when `peer_expose` (in the Peering block
+# below) opens a listener for its carriage: `http_endpoint` needs
+# peer_expose to include "http", `btp_endpoint` needs "btp". Declaring one
+# for a carriage peer_expose does not expose is refused at load, by name --
+# a published endpoint nobody serves is the exact lie the no-default rule
+# below exists to prevent, arriving by a different door.
+#
+# CHANGE ME and uncomment for an HTTP-only node -- the common shape behind
+# a single TLS-terminating reverse proxy:
+#
+# [node]
+# addresses     = ["g.example.connector"]
+# http_endpoint = "https://connector.example.com/ilp"
+#
+# ...and set `peer_expose = "http"` below to match. A BTP-only node instead
+# sets `btp_endpoint` here and `peer_expose = "btp"` below; a node exposing
+# both carriages sets both endpoints and `peer_expose = "both"`.
+
 # ── Peering (issue #677, ADR 0027, docs/protocol/peer-carriage-spec.md) ──
 # Two independent axes. `peer_expose` says which peer carriages THIS node
 # opens a listener for; each peer's `endpoint` says which carriage this

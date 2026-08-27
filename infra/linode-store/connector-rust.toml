@@ -199,11 +199,21 @@ state_dir = "/app/state"
 # forwarded `g.toon.ario` across it at a `price`/`fee` split
 # (docs/devnet-pricing.md). The apex is gone (toon-meta#310 /
 # toon-meta#313's live cutover) and with it the only counterparty that ever
-# dialed this peering, so `peer_expose` and both tables are removed rather
-# than left pointing at nothing. With no hop, there is no fee and no peer
-# arrival, so the F03 peer-arrival case this table used to make possible
-# cannot arise on this box any more. See the header's "No `peer_wire_addr`"
-# section above for the fuller history.
+# dialed this peering, so both tables are removed rather than left pointing
+# at nothing. With no hop, there is no fee and no peer arrival, so the F03
+# peer-arrival case this table used to make possible cannot arise on this box
+# any more. See the header's "No `peer_wire_addr`" section above for the
+# fuller history.
+#
+# `peer_expose` itself is back below, as `"both"` rather than the old
+# `"btp"` -- not to reopen the apex peering (there is still no `[[peers]]`
+# row for `PeerCarriages::from_config` to act on), but because issue #1220
+# made it required: `[node]` below publishes `http_endpoint` AND
+# `btp_endpoint`, and `Config::load` now refuses a published endpoint for a
+# carriage `peer_expose` opens no listener for, by name. Both listeners it
+# names have been reachable at these URLs the whole time; this only makes
+# the self-description say so.
+peer_expose = "both"
 
 [signer]
 key_file = "/app/data/signer.key"

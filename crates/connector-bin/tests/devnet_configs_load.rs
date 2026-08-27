@@ -871,14 +871,14 @@ fn the_store_devnet_config_describes_g_toon_ario_under_its_own_identity() {
     assert_eq!(node.primary_address(), "g.toon.ario");
     assert_eq!(
         node.http_endpoint(),
-        "https://proxy.ario.devnet.toonprotocol.dev/ilp",
+        Some("https://proxy.ario.devnet.toonprotocol.dev/ilp"),
         "the store must publish ITS OWN public edge, not the apex's -- \
          publishing the apex's endpoint here would just relocate the \
          mismatch from identity to endpoint"
     );
     assert_eq!(
         node.btp_endpoint(),
-        "wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp"
+        Some("wss://proxy.ario.devnet.toonprotocol.dev/ilp/btp")
     );
 }
 
@@ -996,12 +996,12 @@ fn the_relay_devnet_config_describes_only_prefixes_it_terminates() {
 
     assert_eq!(
         node.http_endpoint(),
-        "https://proxy.relay.devnet.toonprotocol.dev/ilp",
+        Some("https://proxy.relay.devnet.toonprotocol.dev/ilp"),
         "the relay must publish ITS OWN public edge"
     );
     assert_eq!(
         node.btp_endpoint(),
-        "wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp"
+        Some("wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp")
     );
 }
 

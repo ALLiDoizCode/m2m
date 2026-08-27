@@ -43,6 +43,7 @@
 use serde::Deserialize;
 
 use crate::error::ConfigError;
+use crate::peer::{PeerCarriage, PeerExposure};
 use crate::route::is_valid_ilp_address;
 
 /// The `[node]` section exactly as written. `deny_unknown_fields` for the
@@ -99,13 +100,20 @@ pub(crate) struct RawNodeConfig {
 
 /// The facts a node cannot introspect about itself, fully validated.
 /// Constructed only by [`resolve_node`], so a value that exists has at least
-/// one syntactically valid ILP address (primary first) and two endpoints whose
-/// schemes match what they are for.
+/// one syntactically valid ILP address (primary first), and each endpoint
+/// that is present has a scheme that matches what it is for.
+///
+/// An endpoint is present **exactly when `peer_expose` exposes that
+/// carriage** (issue #1220's owner decision): a node that opens no BTP peer
+/// listener has no `btp_endpoint` to publish, and one that opens no HTTP peer
+/// listener has no `http_endpoint`. `[node]` may still be `Some` with both
+/// endpoints absent -- `peer_expose = "neither"` and an address list is a
+/// legitimate, if unpeerable, self-description.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeConfig {
     addresses: Vec<String>,
-    http_endpoint: String,
-    btp_endpoint: String,
+    http_endpoint: Option<String>,
+    btp_endpoint: Option<String>,
 }
 
 impl NodeConfig {
@@ -119,15 +127,16 @@ impl NodeConfig {
         &self.addresses[0]
     }
 
-    /// Where clients **pay this node** over ILP-over-HTTP. Never inferred: a
-    /// node behind TLS termination cannot know its own public name.
-    pub fn http_endpoint(&self) -> &str {
-        &self.http_endpoint
+    /// Where clients **pay this node** over ILP-over-HTTP. `None` unless
+    /// `peer_expose` includes `"http"`.
+    pub fn http_endpoint(&self) -> Option<&str> {
+        self.http_endpoint.as_deref()
     }
 
-    /// Where clients **pay this node** over BTP.
-    pub fn btp_endpoint(&self) -> &str {
-        &self.btp_endpoint
+    /// Where clients **pay this node** over BTP. `None` unless `peer_expose`
+    /// includes `"btp"`.
+    pub fn btp_endpoint(&self) -> Option<&str> {
+        self.btp_endpoint.as_deref()
     }
 }
 
@@ -155,11 +164,42 @@ fn validate_endpoint(
     Ok(value)
 }
 
-/// Validate an optional `[node]` section. Absence means this node was told
-/// none of the three facts it cannot introspect: it still serves, and its
-/// self-description simply omits them, exactly as an absent `[operator]`
-/// section means the operator surface is not started.
-pub(crate) fn resolve_node(raw: Option<RawNodeConfig>) -> Result<Option<NodeConfig>, ConfigError> {
+/// Resolve one endpoint field against whether `peer_expose` exposes the
+/// carriage it names (issue #1220). A carriage this node opens a listener
+/// for must publish where it lives; a carriage it does not is refused a
+/// published endpoint by name, rather than silently carrying a URL nobody
+/// serves (ADR 0050's no-default rule, extended to no-orphan-either).
+fn resolve_endpoint(
+    carriage: PeerCarriage,
+    field: &'static str,
+    value: Option<String>,
+    peer_expose: PeerExposure,
+    allowed_schemes: &[&str],
+) -> Result<Option<String>, ConfigError> {
+    let exposed = peer_expose.exposes(carriage);
+    match (value, exposed) {
+        (Some(_), false) => Err(ConfigError::NodeEndpointNotExposed {
+            field,
+            peer_expose: peer_expose.name(),
+        }),
+        (Some(value), true) => Ok(Some(validate_endpoint(field, value, allowed_schemes)?)),
+        (None, true) => Err(ConfigError::NodeMissingEndpoint {
+            field,
+            peer_expose: peer_expose.name(),
+        }),
+        (None, false) => Ok(None),
+    }
+}
+
+/// Validate an optional `[node]` section against the carriages
+/// `peer_expose` opens a listener for. Absence of the whole section means
+/// this node was told none of the three facts it cannot introspect: it
+/// still serves, and its self-description simply omits them, exactly as an
+/// absent `[operator]` section means the operator surface is not started.
+pub(crate) fn resolve_node(
+    raw: Option<RawNodeConfig>,
+    peer_expose: PeerExposure,
+) -> Result<Option<NodeConfig>, ConfigError> {
     let Some(raw) = raw else {
         return Ok(None);
     };
@@ -202,23 +242,25 @@ pub(crate) fn resolve_node(raw: Option<RawNodeConfig>) -> Result<Option<NodeConf
         }
     }
 
-    // Both endpoints are required rather than defaulted. The retired sidecar
-    // defaulted them and those compiled-in literals still named `/rust/ilp`, a
-    // path that answers 410 Gone on both devnet boxes. A default here would
-    // reintroduce exactly that: a node publishing a dead URL to whoever asks,
-    // the day somebody drops an env line.
-    let http_endpoint = validate_endpoint(
+    // Neither endpoint is ever defaulted. The retired sidecar defaulted them
+    // and those compiled-in literals still named `/rust/ilp`, a path that
+    // answers 410 Gone on both devnet boxes. A default here would reintroduce
+    // exactly that: a node publishing a dead URL to whoever asks, the day
+    // somebody drops an env line. Which endpoints are even LEGAL to declare
+    // is `peer_expose`'s call, not this section's own -- required exactly
+    // when the carriage is exposed, refused by name otherwise (issue #1220).
+    let http_endpoint = resolve_endpoint(
+        PeerCarriage::Http,
         "http_endpoint",
-        raw.http_endpoint.ok_or(ConfigError::NodeMissingEndpoint {
-            field: "http_endpoint",
-        })?,
+        raw.http_endpoint,
+        peer_expose,
         &["https", "http"],
     )?;
-    let btp_endpoint = validate_endpoint(
+    let btp_endpoint = resolve_endpoint(
+        PeerCarriage::Btp,
         "btp_endpoint",
-        raw.btp_endpoint.ok_or(ConfigError::NodeMissingEndpoint {
-            field: "btp_endpoint",
-        })?,
+        raw.btp_endpoint,
+        peer_expose,
         &["wss", "ws"],
     )?;
 
@@ -258,49 +300,118 @@ mod tests {
 
     #[test]
     fn the_three_surviving_fields_load() {
-        let node = resolve_node(Some(raw())).expect("load").expect("present");
+        let node = resolve_node(Some(raw()), PeerExposure::Both)
+            .expect("load")
+            .expect("present");
 
         assert_eq!(node.addresses(), ["g.toon.ario".to_string()]);
         assert_eq!(node.primary_address(), "g.toon.ario");
-        assert_eq!(node.http_endpoint(), "https://proxy.ario.example/ilp");
-        assert_eq!(node.btp_endpoint(), "wss://proxy.ario.example/ilp/btp");
+        assert_eq!(node.http_endpoint(), Some("https://proxy.ario.example/ilp"));
+        assert_eq!(
+            node.btp_endpoint(),
+            Some("wss://proxy.ario.example/ilp/btp")
+        );
     }
 
     /// Neither endpoint defaults, unlike the retired sidecar's -- whose
     /// compiled-in fallbacks still name a `/rust/ilp` prefix that answers 410.
+    /// Exercised with `peer_expose = "both"` so a missing endpoint is the
+    /// only thing wrong -- the exposed-but-undeclared case, not the
+    /// unexposed-but-declared one below.
     #[test]
-    fn both_pay_endpoints_are_required_rather_than_defaulted() {
+    fn an_exposed_carriage_with_no_endpoint_is_refused_naming_it() {
         let mut without_http = raw();
         without_http.http_endpoint = None;
         assert!(matches!(
-            resolve_node(Some(without_http)),
-            Err(ConfigError::NodeMissingEndpoint { field }) if field == "http_endpoint"
+            resolve_node(Some(without_http), PeerExposure::Both),
+            Err(ConfigError::NodeMissingEndpoint { field, peer_expose })
+                if field == "http_endpoint" && peer_expose == "both"
         ));
 
         let mut without_btp = raw();
         without_btp.btp_endpoint = None;
         assert!(matches!(
-            resolve_node(Some(without_btp)),
-            Err(ConfigError::NodeMissingEndpoint { field }) if field == "btp_endpoint"
+            resolve_node(Some(without_btp), PeerExposure::Both),
+            Err(ConfigError::NodeMissingEndpoint { field, peer_expose })
+                if field == "btp_endpoint" && peer_expose == "both"
         ));
+    }
+
+    /// The other half of issue #1220's rule: a carriage `peer_expose` does
+    /// NOT open a listener for gets no endpoint published for it either,
+    /// even though the value itself would otherwise be a perfectly valid
+    /// URL -- a node with `peer_expose = "http"` has nothing to dial its
+    /// BTP endpoint over, so publishing one is a URL nobody serves.
+    #[test]
+    fn an_unexposed_carriage_with_an_endpoint_is_refused_naming_it() {
+        assert!(matches!(
+            resolve_node(Some(raw()), PeerExposure::Http),
+            Err(ConfigError::NodeEndpointNotExposed { field, peer_expose })
+                if field == "btp_endpoint" && peer_expose == "http"
+        ));
+        assert!(matches!(
+            resolve_node(Some(raw()), PeerExposure::Btp),
+            Err(ConfigError::NodeEndpointNotExposed { field, peer_expose })
+                if field == "http_endpoint" && peer_expose == "btp"
+        ));
+
+        let mut both_but_neither_exposed = raw();
+        both_but_neither_exposed.http_endpoint = None;
+        assert!(matches!(
+            resolve_node(Some(both_but_neither_exposed), PeerExposure::Neither),
+            Err(ConfigError::NodeEndpointNotExposed { field, peer_expose })
+                if field == "btp_endpoint" && peer_expose == "neither"
+        ));
+    }
+
+    /// The two carriages resolve independently: an HTTP-only node (issue
+    /// #1220's motivating case) publishes exactly `http_endpoint`, and its
+    /// `btp_endpoint` is simply absent -- not an error, not a default.
+    #[test]
+    fn an_http_only_node_publishes_only_its_http_endpoint() {
+        let mut http_only = raw();
+        http_only.btp_endpoint = None;
+        let node = resolve_node(Some(http_only), PeerExposure::Http)
+            .expect("load")
+            .expect("present");
+
+        assert_eq!(node.http_endpoint(), Some("https://proxy.ario.example/ilp"));
+        assert_eq!(node.btp_endpoint(), None);
+    }
+
+    /// `peer_expose = "neither"` (the default) is the NAT'd operator: a
+    /// `[node]` section may still exist, for the addresses alone, with
+    /// both endpoints simply absent.
+    #[test]
+    fn a_node_exposing_neither_carriage_may_omit_both_endpoints() {
+        let mut neither = raw();
+        neither.http_endpoint = None;
+        neither.btp_endpoint = None;
+        let node = resolve_node(Some(neither), PeerExposure::Neither)
+            .expect("load")
+            .expect("present");
+
+        assert_eq!(node.http_endpoint(), None);
+        assert_eq!(node.btp_endpoint(), None);
     }
 
     /// A `wss://` in the HTTP slot -- or an `https://` in the BTP slot -- is
     /// caught at load rather than handed to whoever asks for this node's
-    /// description.
+    /// description. Checked once both carriages are exposed, so the scheme
+    /// is the only thing wrong with either field.
     #[test]
     fn each_endpoint_field_refuses_the_other_field_s_scheme() {
         let mut swapped = raw();
         swapped.http_endpoint = Some("wss://proxy.example/ilp/btp".to_string());
         assert!(matches!(
-            resolve_node(Some(swapped)),
+            resolve_node(Some(swapped), PeerExposure::Both),
             Err(ConfigError::NodeEndpointScheme { field, .. }) if field == "http_endpoint"
         ));
 
         let mut swapped = raw();
         swapped.btp_endpoint = Some("https://proxy.example/ilp".to_string());
         assert!(matches!(
-            resolve_node(Some(swapped)),
+            resolve_node(Some(swapped), PeerExposure::Both),
             Err(ConfigError::NodeEndpointScheme { field, .. }) if field == "btp_endpoint"
         ));
     }
@@ -310,7 +421,7 @@ mod tests {
         let mut empty = raw();
         empty.addresses = Vec::new();
         assert!(matches!(
-            resolve_node(Some(empty)),
+            resolve_node(Some(empty), PeerExposure::Both),
             Err(ConfigError::NodeNoAddresses)
         ));
     }
@@ -320,7 +431,7 @@ mod tests {
         let mut bad = raw();
         bad.addresses = vec!["g.toon..ario".to_string()];
         assert!(matches!(
-            resolve_node(Some(bad)),
+            resolve_node(Some(bad), PeerExposure::Both),
             Err(ConfigError::InvalidAddress { field, .. }) if field == "node.addresses"
         ));
     }
@@ -387,7 +498,7 @@ mod tests {
         for (name, set) in removed {
             let mut written = raw();
             set(&mut written);
-            let error = resolve_node(Some(written)).expect_err(name);
+            let error = resolve_node(Some(written), PeerExposure::Both).expect_err(name);
             assert!(
                 matches!(error, ConfigError::AnnounceKeyRemoved { field } if field == name),
                 "{name} must be refused by its own name, got: {error}"
@@ -404,7 +515,7 @@ mod tests {
         written.ttl_secs = Some(toml::Value::String("600".into()));
 
         assert!(matches!(
-            resolve_node(Some(written)),
+            resolve_node(Some(written), PeerExposure::Both),
             Err(ConfigError::AnnounceKeyRemoved { field }) if field == "ttl_secs"
         ));
     }
@@ -419,7 +530,7 @@ mod tests {
         written.relay_url = Some(toml::Value::String("wss://relay.example".into()));
 
         assert!(matches!(
-            resolve_node(Some(written)),
+            resolve_node(Some(written), PeerExposure::Both),
             Err(ConfigError::AnnounceKeyRemoved { field }) if field == "relay_url"
         ));
     }

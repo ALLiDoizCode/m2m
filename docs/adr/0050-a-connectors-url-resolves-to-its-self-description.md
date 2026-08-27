@@ -141,3 +141,29 @@ is not built. Until it is, a forwarded route is reachable only when the client a
 terminating node's URL out of band. (`GET /ilp/identity` already published the same key before this
 change, on each node's own URL — so the gap #1026 describes was always the discovery half, not the
 publication half.)
+
+## Amendment (issue #1220): an endpoint is required exactly when its carriage is exposed
+
+`[node]` required both `http_endpoint` and `btp_endpoint` unconditionally, with no way to say
+"this node opens only one listener". The README's own minimal config (step 1: `client_edge_addr`,
+`state_dir`, `[signer]`, `[[routes]]`) never mentions `[node]`, `peer_expose`
+([0027](0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md)) or
+`peer_allow_plaintext_endpoints` at all — a reader who followed it to the letter got a node that
+serves, but whose self-description carries no endpoints and `"peerCarriages": []`, so a
+counterparty's `POST /peers` at it answers `502`. An operator who then wanted to publish just the
+one endpoint they actually serve — the common HTTP-only shape behind a single TLS-terminating
+reverse proxy — had no honest way to do it: `btp_endpoint` was required even when no BTP listener
+was ever opened, so the only way past the loader was inventing a `ws://` line for a listener that
+does not exist and publishing that dead URL to whoever asks. That is exactly the lie this record's
+no-default rule exists to prevent, arriving by a second door the rule did not cover.
+
+The fix makes the two facts agree by construction rather than by operator discipline: an endpoint
+is present exactly when `peer_expose` opens a listener for its carriage. `peer_expose = "http"`
+requires `http_endpoint` and refuses a declared `btp_endpoint`; `"btp"` is the reverse; `"both"`
+requires both; `"neither"` (the default) requires neither, and `[node]` may still exist for its
+`addresses` alone — a legitimate, if unpeerable, self-description. Both directions are refused **by
+name** at load: a carriage exposed with no endpoint names the missing key and the `peer_expose`
+value that made it required; a carriage not exposed with an endpoint declared names the stray key
+and the `peer_expose` value that makes it illegal. `docs/protocol/configuration-spec.md` CF-08 is
+amended to state the rule and cross-reference CF-17, which is what defines "carriage" and "exposed"
+here. The README gains a "Being peerable" step showing the three keys together.

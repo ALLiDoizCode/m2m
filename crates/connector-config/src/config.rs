@@ -393,7 +393,7 @@ impl Config {
         if raw.announce.is_some() {
             return Err(ConfigError::AnnounceSectionRenamed);
         }
-        let node = resolve_node(raw.node)?;
+        let node = resolve_node(raw.node, peer_expose)?;
         let client_channels = resolve_client_channels(raw.client_channels, settlement_tables)?;
         let client_identities = resolve_client_identities(raw.client_identities)?;
         // Namespace disjointness (`peer-carriage-spec.md` §1.8). Peer and

@@ -419,7 +419,7 @@ async fn whatever_the_url_serves_is_who_the_peering_is_with() {
         return;
     }
 
-    let anvil = Anvil::spawn(ANVIL_BASE_PORT + 2).await;
+    let anvil = Anvil::spawn(ANVIL_BASE_PORT + 10).await;
     let token =
         EvmSettlementBackend::deploy_mock_token(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, 1_000_000)
             .await
@@ -557,4 +557,196 @@ key_file = "{key_path}"
         address_of(DEPLOYER_PRIVATE_KEY),
         "and never from this node's own address either"
     );
+}
+
+/// Issue #1220, limb 2's motivating case: an HTTP-only node --
+/// `peer_expose = "http"`, `[node] http_endpoint` set and `btp_endpoint`
+/// simply absent -- publishes a self-description a stranger can actually
+/// dial, and a peering established against it lands over that one
+/// carriage.
+///
+/// Node A here is a REAL config-driven node bound to a real socket, not
+/// the hand-built fixture [`serve_self_description`] serves for the two
+/// tests above: this is the exact shape issue #1220 reported broken (the
+/// README's minimal config publishes no endpoint at all), so the
+/// self-description under test is the one `connector_cli` itself produces
+/// from a loaded `[node]` section, not one assembled by hand in this file.
+#[tokio::test]
+async fn an_http_only_nodes_self_description_is_dialable_and_a_counterparty_peers_with_it() {
+    if !require_anvil() {
+        return;
+    }
+
+    let anvil = Anvil::spawn(ANVIL_BASE_PORT + 20).await;
+    let token =
+        EvmSettlementBackend::deploy_mock_token(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, 1_000_000)
+            .await
+            .expect("deploy mock USDC");
+    let deployed = EvmSettlementBackend::deploy(&anvil.rpc_url, DEPLOYER_PRIVATE_KEY, token)
+        .await
+        .expect("deploy a TokenNetwork through a fresh registry");
+    let registry_address = deployed.registry_address();
+    drop(deployed);
+
+    // ── Node A: HTTP-only, on a real socket, describing itself for real ──
+    let mut node_a_key_file = tempfile::NamedTempFile::new().expect("temp key file");
+    node_a_key_file
+        .write_all(COUNTERPARTY_PRIVATE_KEY.as_bytes())
+        .expect("write key file");
+    let node_a_state_dir = tempfile::tempdir().expect("temp state dir");
+    let node_a_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let node_a_addr = node_a_listener.local_addr().expect("local addr");
+
+    let mut node_a_config_file = tempfile::NamedTempFile::new().expect("temp config file");
+    write!(
+        node_a_config_file,
+        r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+peer_expose = "http"
+
+[signer]
+key_file = "{key_path}"
+
+[node]
+addresses     = ["g.example.nodea"]
+http_endpoint = "http://{node_a_addr}/ilp"
+
+[settlement.evm]
+rpc_url = "{rpc_url}"
+contract_address = "{registry_address:?}"
+token_address = "{token:?}"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "{key_path}"
+"#,
+        state_dir = node_a_state_dir.path().display(),
+        key_path = node_a_key_file.path().display(),
+        rpc_url = anvil.rpc_url,
+    )
+    .expect("write config file");
+
+    let command = connector_cli::run(&[
+        "connector".to_string(),
+        node_a_config_file.path().display().to_string(),
+    ])
+    .await
+    .expect("run: an HTTP-only, config-driven node");
+    let connector_cli::Command::Serve(node_a) = command else {
+        panic!("a config path must produce a servable node");
+    };
+
+    let node_a_router = node_a.router.clone();
+    tokio::spawn(async move {
+        let _ = axum::Server::from_tcp(node_a_listener)
+            .expect("serve node A's bound listener")
+            .serve(node_a_router.into_make_service())
+            .await;
+    });
+
+    // Node A's own self-description, read straight off its router: exactly
+    // `httpEndpoint`, no `btpEndpoint` at all, and `peerCarriages` naming
+    // only the one carriage `peer_expose = "http"` opened.
+    let description_response = node_a
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/ilp")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(description_response.status(), StatusCode::OK);
+    let document = body_json(description_response).await;
+    assert_eq!(
+        document["httpEndpoint"],
+        serde_json::json!(format!("http://{node_a_addr}/ilp"))
+    );
+    assert!(
+        document.get("btpEndpoint").is_none(),
+        "an HTTP-only node must publish no btpEndpoint at all, not a null one: {document}"
+    );
+    assert_eq!(document["peerCarriages"], serde_json::json!(["http"]));
+
+    // ── Node B: the counterparty, making the one authenticated write ─────
+    let mut node_b_key_file = tempfile::NamedTempFile::new().expect("temp key file");
+    node_b_key_file
+        .write_all(DEPLOYER_PRIVATE_KEY.as_bytes())
+        .expect("write key file");
+    let node_b_state_dir = tempfile::tempdir().expect("temp state dir");
+    let keypair = Keypair::generate(&mut OsRng);
+    let write_key_hex = keypair
+        .public
+        .to_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+
+    let mut node_b_config_file = tempfile::NamedTempFile::new().expect("temp config file");
+    write!(
+        node_b_config_file,
+        r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+peer_allow_plaintext_endpoints = true
+
+[signer]
+key_file = "{key_path}"
+
+[operator]
+bearer_token = "operator-secret"
+write_keys = ["{write_key_hex}"]
+
+[settlement.evm]
+rpc_url = "{rpc_url}"
+contract_address = "{registry_address:?}"
+token_address = "{token:?}"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "{key_path}"
+"#,
+        state_dir = node_b_state_dir.path().display(),
+        key_path = node_b_key_file.path().display(),
+        rpc_url = anvil.rpc_url,
+    )
+    .expect("write config file");
+
+    let command = connector_cli::run(&[
+        "connector".to_string(),
+        node_b_config_file.path().display().to_string(),
+    ])
+    .await
+    .expect("run: the counterparty node");
+    let connector_cli::Command::Serve(node_b) = command else {
+        panic!("a config path must produce a servable node");
+    };
+
+    let peer_body = serde_json::to_vec(&serde_json::json!({
+        "id": "node-a",
+        "url": format!("http://{node_a_addr}/ilp"),
+        "fee": 50,
+        "max_packet_amount": 2_000,
+    }))
+    .unwrap();
+
+    let response = node_b
+        .router
+        .oneshot(signed(&keypair, Method::POST, "/peers", peer_body))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a counterparty's POST /peers against an HTTP-only node's real, \
+         dialed self-description must succeed over HTTP"
+    );
+    let established = body_json(response).await;
+    assert_eq!(established["id"], "node-a");
+    assert_eq!(established["channel"]["status"], "created");
+    assert_eq!(established["channel"]["chain"], "evm");
 }
