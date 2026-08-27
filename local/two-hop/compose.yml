@@ -195,7 +195,7 @@ services:
             --operator     http://connector-a:3000 \
             --operator-key /app/data/operator-send.key \
             --to           g.local.two-hop.b.app \
-            --seal-to      http://connector-b:3000 \
+            --seal-to      http://connector-b:3000/ilp \
             --target       / \
             --amount       "$$AMOUNT" \
             --body         /app/data/payload.json \

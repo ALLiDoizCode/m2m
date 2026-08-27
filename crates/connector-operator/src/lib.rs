@@ -75,7 +75,7 @@ use connector_domain::{PacketResponse, Prepare, Price};
 use connector_runtime::{
     ChannelOperationError, ChannelView, ClaimView, Connector, EstablishPeeringError,
     LeaseRouteError, LeasedRouteView, PeerRouteTableError, PeerRouteView, PeerView, RouteView,
-    SettlementChain,
+    SelfDescriptionError, SettlementChain,
 };
 use connector_settlement::Claim;
 use connector_signer::{derive_evm_address, to_hex, Signer, SignerError};
@@ -443,8 +443,24 @@ struct UpsertPeerRequest {
 /// here.
 fn establish_peering_error_response(error: EstablishPeeringError) -> Response {
     match error {
-        EstablishPeeringError::SelfDescription(_)
-        | EstablishPeeringError::NoDialableEndpoint { .. }
+        EstablishPeeringError::SelfDescription(ref inner) => {
+            let mut message = error.to_string();
+            // A URL that does not end in `/ilp` is the single near-miss ADR
+            // 0050 has a name for: an origin, where this endpoint takes the
+            // connector's own self-description URL. Named here rather than
+            // guessed at by following a redirect (this module reads a URL
+            // literally, deliberately -- see connector_runtime's own doc).
+            if let SelfDescriptionError::Status { url, .. } = inner {
+                if !url.trim_end_matches('/').ends_with("/ilp") {
+                    message.push_str(
+                        " -- POST /peers takes a connector's self-description URL (ADR 0050), \
+                         e.g. .../ilp, not an origin; did you mean this URL with /ilp appended?",
+                    );
+                }
+            }
+            (StatusCode::BAD_GATEWAY, message).into_response()
+        }
+        EstablishPeeringError::NoDialableEndpoint { .. }
         | EstablishPeeringError::NoSharedChain { .. }
         | EstablishPeeringError::UnreadableSettlementAddress { .. } => {
             (StatusCode::BAD_GATEWAY, error.to_string()).into_response()

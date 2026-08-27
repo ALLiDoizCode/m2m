@@ -287,7 +287,7 @@ services:
             --operator     http://connector-a:3000 \
             --operator-key /app/data/operator-send.key \
             --to           g.local.mixed.b.c.app \
-            --seal-to      http://connector-c:3000 \
+            --seal-to      http://connector-c:3000/ilp \
             --target       / \
             --amount       1200 \
             --body         /app/data/payload.json \

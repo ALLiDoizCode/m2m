@@ -318,14 +318,15 @@ Terminating your own routes earns from callers who know your address. Peering
 puts you on paths that start somewhere else. It is one authenticated write:
 
 ```
-POST /peers   { "id": "their-node", "url": "https://their-node.example",
+POST /peers   { "id": "their-node", "url": "https://their-node.example/ilp",
                 "fee": 100, "max_packet_amount": 1000000 }
 ```
 
-The node fetches their self-description, picks the carriage from their endpoint's
-scheme (`wss://` → BTP, `https://` → ILP-over-HTTP), finds the shared settlement
-chain, and derives the channel from the two participants — no channel identifier
-is ever exchanged, and there is no shared secret.
+`url` is the connector's self-description URL — the one whose `GET` answers with
+it (ADR 0050), not their origin. The node fetches it, picks the carriage from
+their endpoint's scheme (`wss://` → BTP, `https://` → ILP-over-HTTP), finds the
+shared settlement chain, and derives the channel from the two participants — no
+channel identifier is ever exchanged, and there is no shared secret.
 
 A route can then **forward** to that peering instead of terminating:
 
