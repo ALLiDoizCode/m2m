@@ -9,9 +9,9 @@ use chrono::{DateTime, Duration, Utc};
 use connector_config::{SettlementChain, StaticRoute, TransportPolicy, DEFAULT_MAX_PACKET_AMOUNT};
 use connector_domain::x402::X402PaymentRequired;
 use connector_domain::{
-    amount_after_fee, condition_is_present, forwarded_expiry, fulfillment_matches_condition,
-    is_expired, is_valid_ilp_address, select_route, EnvelopeRequest, Fulfill, PacketResponse,
-    Prepare, Reject, RejectCode, Watermark, FORWARDING_MESSAGE_WINDOW,
+    amount_after_fee, condition_is_present, delivery_budget, forwarded_expiry,
+    fulfillment_matches_condition, is_expired, is_valid_ilp_address, select_route, EnvelopeRequest,
+    Fulfill, PacketResponse, Prepare, Reject, RejectCode, Watermark, FORWARDING_MESSAGE_WINDOW,
 };
 use connector_settlement::{ChannelId, Claim, SettlementBackend, SettlementError};
 use connector_signer::giftwrap::{derive_fulfillment, open_request, seal_response};
@@ -2504,6 +2504,14 @@ impl Connector {
     /// packet that reached here across another hop states no payer at all
     /// rather than naming the hop it arrived from, the failure ADR 0017
     /// found in the TypeScript prototype's own header.
+    ///
+    /// `prepare.expires_at` travels down with it (ADR 0064, PF-25, issue
+    /// #1183): the packet's deadline bounds how long this termination waits
+    /// for the app, so a slow handler is abandoned rather than waited on
+    /// past the instant the sender said to stop. It is read here rather
+    /// than left behind with the rest of the `Prepare` because
+    /// [`Self::deliver_opened_envelope`] is where the app call is made, and
+    /// the deadline has to be in scope at the call it bounds.
     async fn deliver_to_app(
         &self,
         route: &StaticRoute,
@@ -2511,6 +2519,7 @@ impl Connector {
         client_channel_id: Option<&str>,
     ) -> PacketResponse {
         let condition = prepare.execution_condition;
+        let expires_at = prepare.expires_at;
 
         let (envelope_bytes, shared_secret) = match self.open_termination_request(&prepare.data) {
             Ok(opened) => opened,
@@ -2521,6 +2530,7 @@ impl Connector {
             .deliver_opened_envelope(
                 route,
                 &condition,
+                expires_at,
                 &shared_secret,
                 &envelope_bytes,
                 client_channel_id,
@@ -2549,13 +2559,58 @@ impl Connector {
 
     /// The part of [`Self::deliver_to_app`] that runs once the gift wrap has
     /// been opened: decode the envelope it carried and, if that succeeds,
-    /// make the request it describes. Split out so the caller can seal
-    /// every return path uniformly with the one shared secret the wrap
-    /// carried, including this method's own envelope-decode failure.
+    /// make the request it describes -- bounded by the packet's own
+    /// deadline. Split out so the caller can seal every return path
+    /// uniformly with the one shared secret the wrap carried, including
+    /// this method's own envelope-decode failure.
+    ///
+    /// # The deadline bounds the wait, and nothing else (ADR 0064, PF-25)
+    ///
+    /// Until issue #1183 nothing here read `expires_at` at all. Expiry was
+    /// checked once on arrival ([`Self::reject_ineligible`], PF-02) and
+    /// never again, so an app that took longer than the packet's whole
+    /// budget was still answered for: this connector derived the fulfilment
+    /// (ADR 0019) and returned a FULFILL for a packet whose deadline had
+    /// already fired, to an upstream that had given up and, if it was
+    /// another connector, moved on. That is the termination-side twin of
+    /// the forwarding race PF-19 closed one release earlier.
+    ///
+    /// The rule is that the deadline bounds the *wait*, not the *answer*.
+    /// [`connector_domain::delivery_budget`] says how long there is, and
+    /// the app call is abandoned when that runs out; an app that answers
+    /// inside the budget is answered for, however close to the line it
+    /// came, and no second expiry check is applied to work already done.
+    /// That asymmetry is deliberate and is the whole of ADR 0064: the claim
+    /// paying for this packet was taken *before* the app was called -- at
+    /// the client edge by `ClientClaimGate::ingest`, or on a peer arrival by
+    /// `ClaimBook`, in both cases with the watermark advanced and journalled
+    /// before routing began -- and only a forwarded route's terminal reject
+    /// gives one back (`roll_back_uncarried_forward`, issue #1012). So the
+    /// verdict returned here decides nothing about who is out of pocket.
+    /// Rejecting a late-but-real answer would destroy work the payer has
+    /// already been charged for, refund nobody, and say something false
+    /// besides: under ADR 0042 a fulfilment is a delivery receipt, not a
+    /// payment trigger, and the delivery genuinely happened.
+    ///
+    /// Both refusals are `R00` -- the code PF-02 gives an already-dead
+    /// arrival and PF-19 a forward with no window left, for the same reason
+    /// in all three places: the packet ran out of time, the sender's move is
+    /// a fresh packet with more budget, and nothing about this route or this
+    /// connector's configuration is at fault. `T01` would be the available
+    /// lie -- the app was reachable, it was simply slower than the sender
+    /// allowed -- and would send a sender looking for another path.
+    ///
+    /// Both are also raised *here*, below [`Self::open_termination_request`],
+    /// so they ride home sealed to the sender's own shared secret like every
+    /// other verdict a termination reaches (ADR 0018, PF-24). Checking
+    /// before the wrap was open would have been marginally cheaper and would
+    /// have leaked an unsealed reject for a packet this connector could read
+    /// perfectly well.
     async fn deliver_opened_envelope(
         &self,
         route: &StaticRoute,
         condition: &[u8; 32],
+        expires_at: chrono::DateTime<Utc>,
         shared_secret: &[u8; 32],
         envelope_bytes: &[u8],
         client_channel_id: Option<&str>,
@@ -2585,7 +2640,72 @@ impl Connector {
             }),
         );
 
-        match self.app_client.deliver(route.handler_url(), &request).await {
+        // PF-25's first half: a packet with nothing left is not delivered at
+        // all. `accumulated_cost` is zero because the app was never asked --
+        // the same figure, for the same reason, as `Unreachable` and
+        // `Refused` below, and unlike the envelope-decode failure above,
+        // which reached the termination and is charged this route's price
+        // (issue #545).
+        let Some(budget) = delivery_budget(expires_at, self.clock.now()) else {
+            return PacketResponse::Reject(Reject {
+                code: RejectCode::r00_transfer_timed_out(),
+                triggered_by: String::new(),
+                message: format!(
+                    "packet expired at {} before it could be delivered -- the app was not asked",
+                    expires_at.to_rfc3339(),
+                ),
+                data: Vec::new(),
+                accumulated_cost: 0,
+            });
+        };
+
+        // The wait itself is real time, not the injected clock, and that
+        // split is on purpose: what to do is a decision (`delivery_budget`,
+        // pure, deterministic, property-tested in `connector-domain`), while
+        // when to stop waiting is a mechanism only a real timer can perform.
+        // A test drives the decision through the clock port and the
+        // abandonment through a genuinely slow fake app, which is what those
+        // two things actually are.
+        //
+        // `to_std` cannot fail here -- `delivery_budget` returns a strictly
+        // positive span or nothing -- and the saturating arm is a far-future
+        // timer rather than a panic, so a sender naming a preposterous
+        // expiry gets a wait it will never see the end of instead of taking
+        // the packet path down with it.
+        let budget = budget
+            .to_std()
+            .unwrap_or(std::time::Duration::from_secs(u64::MAX));
+        let delivery = self.app_client.deliver(route.handler_url(), &request);
+        let Ok(outcome) = tokio::time::timeout(budget, delivery).await else {
+            // PF-25's second half. Dropping the future is what abandons the
+            // request: the socket to the app closes and this connector stops
+            // waiting. The app may well finish the work anyway -- that is
+            // between an operator and its own handler, both inside one trust
+            // domain (ADR 0019), and not a protocol question. What is a
+            // protocol question is that the packet reached its termination
+            // and the priced work was set in motion, so unlike the arm
+            // above this reject carries the route's price (ADR 0011, issue
+            // #545): a sender learns "your answer was too slow", not "this
+            // path is free".
+            tracing::info!(
+                handler_url = %route.handler_url(),
+                expires_at = %expires_at.to_rfc3339(),
+                "the app did not answer within the packet's deadline -- abandoning the request"
+            );
+            return PacketResponse::Reject(Reject {
+                code: RejectCode::r00_transfer_timed_out(),
+                triggered_by: String::new(),
+                message: format!(
+                    "the app did not answer before this packet's expiry at {}; the request was \
+                     abandoned rather than answered late",
+                    expires_at.to_rfc3339(),
+                ),
+                data: Vec::new(),
+                accumulated_cost: route.price(),
+            });
+        };
+
+        match outcome {
             // ADR 0020: an HTTP status is envelope content, never a packet
             // outcome, so any complete answer -- whatever its status --
             // rides home as a response envelope on a FULFILL. ADR
@@ -5033,6 +5153,289 @@ mod tests {
             ))
             .await;
         assert_eq!(peer.carried().len(), 1);
+    }
+
+    /// ADR 0064 / PF-25 (issue #1183): the packet's own deadline bounds how
+    /// long a termination waits for its app.
+    ///
+    /// Before this landed, `deliver_opened_envelope` never read
+    /// `expires_at`. Expiry was checked once on arrival (PF-02) and never
+    /// again, so an app that took an hour over a thirty-second packet was
+    /// still answered for: the fulfilment was derived (ADR 0019) and a
+    /// FULFILL went back to an upstream that had long since given up. Every
+    /// test here fails against that tree.
+    ///
+    /// The two doubles are the real things, not expectation-checking stubs
+    /// (ADR 0007). [`SlowAppClient`] is an app that genuinely takes time and
+    /// then genuinely answers -- upholding the [`AppClient`] contract
+    /// exactly as [`FakeAppClient`] does, only later -- which is the whole
+    /// situation under test and cannot be faked by asserting on calls.
+    /// [`ClockThatMovesAfterArrival`] is the other half of the same
+    /// situation: a clock that has moved on by the time delivery is reached,
+    /// which is what every real clock does and what a frozen [`TestClock`]
+    /// structurally cannot.
+    mod termination_deadline {
+        use super::*;
+        use crate::app_client::AppClient;
+        use crate::clock::Clock;
+        use connector_domain::EnvelopeResponse;
+        use connector_signer::giftwrap::looks_like_sealed_response;
+        use url::Url;
+
+        /// An app that answers -- after `delay` of real elapsed time. The
+        /// delay is real because what is under test is a timer: the budget
+        /// is decided from the injected clock by
+        /// `connector_domain::delivery_budget` (proven exhaustively over
+        /// there), and the only thing left for this side to prove is that
+        /// the connector stops waiting when it runs out.
+        struct SlowAppClient {
+            delay: std::time::Duration,
+            response: EnvelopeResponse,
+            deliveries: std::sync::atomic::AtomicUsize,
+        }
+
+        impl SlowAppClient {
+            fn new(delay: std::time::Duration, body: &[u8]) -> SlowAppClient {
+                SlowAppClient {
+                    delay,
+                    response: EnvelopeResponse {
+                        status: 200,
+                        headers: vec![],
+                        body: body.to_vec(),
+                    },
+                    deliveries: std::sync::atomic::AtomicUsize::new(0),
+                }
+            }
+
+            fn deliveries(&self) -> usize {
+                self.deliveries.load(std::sync::atomic::Ordering::SeqCst)
+            }
+        }
+
+        #[async_trait]
+        impl AppClient for SlowAppClient {
+            async fn deliver(&self, _handler_url: &Url, _request: &EnvelopeRequest) -> AppOutcome {
+                self.deliveries
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(self.delay).await;
+                AppOutcome::Answered {
+                    response: self.response.clone(),
+                }
+            }
+        }
+
+        /// A clock reporting one instant to its first reader and a much
+        /// later one to every reader after it: the smallest fake that puts a
+        /// packet's arrival check and its delivery on opposite sides of the
+        /// same deadline. A century is not realism, it is margin -- the
+        /// packet must be alive for `reject_ineligible` (the first read on
+        /// this path) and unambiguously dead by the time delivery asks,
+        /// however many reads the router makes in between. If a future
+        /// change ever reads the clock *before* the arrival check, this test
+        /// fails loudly on the wrong reject message rather than passing for
+        /// the wrong reason.
+        struct ClockThatMovesAfterArrival {
+            arrival: DateTime<Utc>,
+            reads: std::sync::atomic::AtomicUsize,
+        }
+
+        impl ClockThatMovesAfterArrival {
+            fn new(arrival: DateTime<Utc>) -> ClockThatMovesAfterArrival {
+                ClockThatMovesAfterArrival {
+                    arrival,
+                    reads: std::sync::atomic::AtomicUsize::new(0),
+                }
+            }
+        }
+
+        impl Clock for ClockThatMovesAfterArrival {
+            fn now(&self) -> DateTime<Utc> {
+                if self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    self.arrival
+                } else {
+                    self.arrival + Duration::days(365 * 100)
+                }
+            }
+        }
+
+        const PRICE: u64 = 1000;
+
+        fn priced_route() -> StaticRoute {
+            StaticRoute::new_priced("g.example.app", "http://localhost:4000", PRICE).unwrap()
+        }
+
+        fn connector_with_clock(
+            route: StaticRoute,
+            app_client: Arc<dyn AppClient>,
+            clock: Arc<dyn Clock>,
+        ) -> Connector {
+            Connector::new(
+                vec![route],
+                vec![],
+                app_client,
+                Arc::new(InProcessPeerTransport::new()),
+                clock,
+            )
+            .with_identity_signer(identity_signer())
+        }
+
+        /// A packet expiring in 100ms, handed to an app that takes two
+        /// seconds. The old tree derived the fulfilment and returned a
+        /// FULFILL two seconds after the sender's deadline; this one
+        /// abandons the request at the deadline and says so.
+        #[tokio::test]
+        async fn an_app_slower_than_the_deadline_is_abandoned_rather_than_answered_late() {
+            let route = priced_route();
+            let app_client = Arc::new(SlowAppClient::new(
+                std::time::Duration::from_secs(2),
+                b"far too late",
+            ));
+            let clock = test_clock();
+            let expires_at = clock.now() + Duration::milliseconds(100);
+            let connector =
+                connector_with_clock(route, app_client.clone(), clock as Arc<dyn Clock>);
+            let (mut sealed, _shared_secret) = sealed_prepare(b"hello app");
+            sealed.expires_at = expires_at;
+
+            let response = connector.handle_prepare(sealed).await;
+
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "R00");
+                    assert!(
+                        reject.message.contains("did not answer"),
+                        "{}",
+                        reject.message
+                    );
+                    assert!(
+                        reject.message.contains(&expires_at.to_rfc3339()),
+                        "the reject names the deadline it fired on: {}",
+                        reject.message
+                    );
+                    // The app was asked and the priced work was set in
+                    // motion, so unlike an unreachable app this reject
+                    // carries the route's price (ADR 0011, issue #545).
+                    assert_eq!(reject.accumulated_cost, PRICE);
+                }
+                other => panic!("expected an R00 reject, got {other:?}"),
+            }
+            assert_eq!(
+                app_client.deliveries(),
+                1,
+                "the app is still asked -- this packet was alive when it arrived"
+            );
+        }
+
+        /// The rule is that the deadline bounds the *wait*, not the answer.
+        /// An app that takes real time and comes back inside the budget is
+        /// answered for exactly as a prompt one is -- there is no second
+        /// expiry check applied to work already done (ADR 0064).
+        #[tokio::test]
+        async fn an_app_answering_inside_the_deadline_still_fulfils() {
+            let route = priced_route();
+            let app_client = Arc::new(SlowAppClient::new(
+                std::time::Duration::from_millis(50),
+                b"app said yes",
+            ));
+            let clock = test_clock();
+            let expires_at = clock.now() + Duration::seconds(5);
+            let connector =
+                connector_with_clock(route, app_client.clone(), clock as Arc<dyn Clock>);
+            let (mut sealed, shared_secret) = sealed_prepare(b"hello app");
+            sealed.expires_at = expires_at;
+
+            let response = connector.handle_prepare(sealed).await;
+
+            match response {
+                PacketResponse::Fulfill(fulfill) => {
+                    assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
+                    assert_eq!(
+                        open_sealed_envelope(&shared_secret, &fulfill.data),
+                        fulfill_envelope(b"app said yes")
+                    );
+                }
+                other => panic!("expected a fulfill, got {other:?}"),
+            }
+            assert_eq!(app_client.deliveries(), 1);
+        }
+
+        /// PF-25's first half: a packet whose deadline has fired between
+        /// arriving and reaching delivery is not handed to the app at all.
+        /// Nothing was asked of it, so nothing is charged for the attempt --
+        /// the same figure `Unreachable` and `Refused` carry, and a
+        /// different message from the abandoned case above, so a sender can
+        /// tell "too late to ask" from "your app was too slow".
+        #[tokio::test]
+        async fn a_packet_whose_deadline_fires_before_delivery_never_reaches_the_app() {
+            let route = priced_route();
+            let app_client = Arc::new(SlowAppClient::new(
+                std::time::Duration::ZERO,
+                b"never reached",
+            ));
+            let arrival = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+            let expires_at = arrival + Duration::seconds(30);
+            let connector = connector_with_clock(
+                route,
+                app_client.clone(),
+                Arc::new(ClockThatMovesAfterArrival::new(arrival)),
+            );
+            let (mut sealed, _shared_secret) = sealed_prepare(b"hello app");
+            sealed.expires_at = expires_at;
+
+            let response = connector.handle_prepare(sealed).await;
+
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "R00");
+                    assert!(
+                        reject.message.contains("the app was not asked"),
+                        "{}",
+                        reject.message
+                    );
+                    assert_eq!(reject.accumulated_cost, 0);
+                }
+                other => panic!("expected an R00 reject, got {other:?}"),
+            }
+            assert_eq!(
+                app_client.deliveries(),
+                0,
+                "a packet with no time left is never handed to the app"
+            );
+        }
+
+        /// Both refusals are raised below the gift wrap, so they ride home
+        /// sealed to the sender's own shared secret like every other verdict
+        /// a termination reaches (ADR 0018, PF-24) -- readable by the sender
+        /// who holds that secret and by nobody else.
+        #[tokio::test]
+        async fn an_abandoned_deliverys_reject_is_sealed_to_the_sender() {
+            let route = priced_route();
+            let app_client = Arc::new(SlowAppClient::new(
+                std::time::Duration::from_secs(2),
+                b"far too late",
+            ));
+            let clock = test_clock();
+            let expires_at = clock.now() + Duration::milliseconds(100);
+            let connector = connector_with_clock(route, app_client, clock as Arc<dyn Clock>);
+            let (mut sealed, shared_secret) = sealed_prepare(b"hello app");
+            sealed.expires_at = expires_at;
+
+            let response = connector.handle_prepare(sealed).await;
+
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "R00");
+                    assert!(looks_like_sealed_response(&reject.data));
+                    connector_signer::giftwrap::open_response(&shared_secret, &reject.data)
+                        .expect("an abandoned delivery's reject opens with the request's secret");
+                    assert!(
+                        connector_signer::giftwrap::open_response(&[0xffu8; 32], &reject.data)
+                            .is_err()
+                    );
+                }
+                other => panic!("expected an R00 reject, got {other:?}"),
+            }
+        }
     }
 
     /// Issue #881: every packet forwarded to a hop configured for
