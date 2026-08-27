@@ -903,6 +903,24 @@ pub enum ConfigError {
     )]
     ClientChannelsWithoutStateDir,
 
+    /// A settlement table is what registers the `ClientChannelSource` that
+    /// resolves an undeclared channel from chain (ADR 0052, CF-27), so a
+    /// node configuring one accepts claims from strangers whether or not it
+    /// declares a single `[[client_channels]]` row -- and therefore has
+    /// watermarks to lose. Issue #1186: this arm did not exist, so the
+    /// permissionless shape, which is the one an operator should be running,
+    /// was the one shape that could boot with its watermarks in memory.
+    #[error(
+        "a settlement backend is configured but 'state_dir' is not: this node resolves an \
+         undeclared channel from chain and accepts the claim (ADR 0052), so it takes payment \
+         from senders it has never been configured for -- and would keep their replay \
+         watermarks only in memory. Every claim any of them has already spent becomes \
+         spendable again the next time this process restarts, and nothing in a log shows \
+         that it did (issue #605, issue #1186). Set a top-level state_dir to a directory \
+         this node can write, and mount it so it outlives the container"
+    )]
+    SettlementWithoutStateDir,
+
     #[error("state_dir '{path}' exists but is not a directory")]
     StateDirNotADirectory { path: PathBuf },
 
