@@ -70,8 +70,10 @@
 # auto-redeploy without saying how to tell whether it is serving is the
 # omission this file exists to refuse.
 #
-# Today that discovers five containers: `connector-rust`, `relay` and
-# `swap-node` on the relay box, `connector-rust` and `store` on the store box.
+# Today that discovers five containers: `connector`, `relay` and
+# `swap-node` on the relay box, `connector` and `store` on the store box.
+# (Both boxes' connector service dropped its `-rust` suffix when each moved to
+# its own repo's deploy bundle; the probe matches either name.)
 # It was seven until issue #1074: each box also ran an `announce` loop
 # publisher, and ADR 0046 removed the announce outright.
 #
@@ -88,7 +90,8 @@
 #      in front of it is broken. Only an off-box request crosses nginx.
 #
 # ── PROBE CHOICES (measured live 2026-08-16, both boxes) ────────────────────
-#   * `connector-rust` — `GET /ilp/identity` → 200. The Rust connector has NO
+#   * `connector` — `GET /ilp/identity` → 200, at whichever address that box
+#     actually exposes it on. The Rust connector has NO
 #     `/health`: `/health`, `/healthz`, `/status` and `/` all 404, and
 #     `/metrics` is 404 on the relay but 401 on the store, so neither is a
 #     uniform probe. `/ilp/identity` 200s only once the process is serving AND
@@ -431,11 +434,30 @@ jobs:
             # service opted into auto-redeploy without a probe is the exact
             # omission this file refuses.
             case "$svc" in
-              connector-rust)
-                if curl -sf --max-time 10 http://127.0.0.1:4000/ilp/identity >/dev/null 2>&1; then
-                  printf 'OK\t%s\tGET :4000/ilp/identity\t200\n' "$svc"
+              connector|connector-rust)
+                # Both boxes' connector service is now named `connector`: the
+                # store box's bundle moved to toon-protocol/store (store#103)
+                # and the relay's to its own repo, and both dropped the
+                # `-rust` suffix that distinguished the Rust node from the
+                # retired TypeScript one. `connector-rust` stays matched so a
+                # box that has not been rebuilt is still probed.
+                #
+                # The client edge is NOT at the same address on both. The
+                # store box publishes it on 127.0.0.1:4000; the relay box
+                # publishes no host port at all and is reached over the
+                # compose network by its own reverse proxy. Resolve the
+                # address from the container instead of hardcoding one that
+                # is only right on one box.
+                edge=$(docker inspect -f '{{range $p, $b := .NetworkSettings.Ports}}{{if $b}}{{(index $b 0).HostIp}}:{{(index $b 0).HostPort}}{{end}}{{end}}' "$n" 2>/dev/null | head -1)
+                if [ -z "$edge" ]; then
+                  cip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' "$n" 2>/dev/null | awk '{print $1}')
+                  cport=$(docker inspect -f '{{range $p, $b := .NetworkSettings.Ports}}{{$p}} {{end}}' "$n" 2>/dev/null | awk '{print $1}' | cut -d/ -f1)
+                  edge="${cip}:${cport}"
+                fi
+                if [ -n "$edge" ] && curl -sf --max-time 10 "http://${edge}/ilp/identity" >/dev/null 2>&1; then
+                  printf 'OK\t%s\tGET %s/ilp/identity\t200\n' "$svc" "$edge"
                 else
-                  printf 'FAIL\t%s\tGET :4000/ilp/identity\tno 200 — up but not serving\n' "$svc"
+                  printf 'FAIL\t%s\tGET %s/ilp/identity\tno 200 — up but not serving\n' "$svc" "$edge"
                 fi
                 ;;
               swap-node)
