@@ -244,7 +244,6 @@ there".
 | `operators/`    | Runbooks: box bringup, key rotation, fleet release and health, peer-channel migration, BTP peer bringup.                                                                                                                                                   |
 | `agents/`       | Conventions for agents working here: the issue tracker, triage labels, how to consume the domain docs.                                                                                                                                                     |
 | `architecture/` | This page, plus [`tech-stack.md`](tech-stack.md) (languages, runtimes, pinned versions) and [`coding-standards.md`](coding-standards.md) (what the gate enforces, in the order it enforces it).                                                            |
-| `stories/`      | Historical planning artefacts. Not a description of the code.                                                                                                                                                                                              |
 
 Loose files under `docs/` are chain-deployment notes and one-off design records
 (`evm-deployment.md`, `solana-deployment.md`, `mina-deployment.md`, `devnet-pricing.md` and
