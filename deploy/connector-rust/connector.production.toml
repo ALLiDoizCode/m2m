@@ -51,8 +51,8 @@
 #   local       docker-compose chain profiles + `local/` (issue #1099).
 #               Disposable, funded from genesis, no shared state.
 #   devnet      Two Linode boxes. Public testnets (Base Sepolia, Solana
-#               devnet), faucet-funded, `:rust-release` moved by a human
-#               dispatch (ADR 0041, ADR 0055).
+#               devnet), faucet-funded, each box pinning its connector image
+#               by release handle in its OWN repository (ADR 0066).
 #   production  This file. Nothing else.
 #
 # `CLAUDE.md`'s Environments table is the short version of the same thing.

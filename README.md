@@ -466,12 +466,13 @@ packet carries the same `correlation_id` — the packet's execution condition �
 because that value is invariant across hops, the same id appears in every
 connector that handled it. `RUST_LOG=debug` for more.
 
-**Releases.** `:rust-release` is a **promotion** tag, not a build output. A green
-merge does not reach any box; the tag moves only by an explicit dispatch that
-first checks the candidate image still boots the fleet's committed configs.
-Because the binary and a box's mounted TOML are a matched pair in both
-directions, **adding a required config key is a breaking deploy**: land the
-config first, then move the tag.
+**Releases.** A release is one dispatch of `release-connector.yml`: it builds the
+image, cuts a dated handle and opens a GitHub Release. It does not deploy, and
+nothing here moves a tag onto a box (ADR 0066) — a node repository pins the
+connector image it runs, by release handle, in its own `deploy/` bundle. Because
+the binary and a box's mounted TOML are a matched pair in both directions,
+**adding a required config key is a breaking deploy**: land the config first, then
+bump that pin.
 
 **Devnet** settles on Base Sepolia and Solana devnet; test funds come from the
 [devnet faucet](https://faucet.devnet.toonprotocol.dev). **Production is a named,

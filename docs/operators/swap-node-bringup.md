@@ -1,5 +1,13 @@
 # Bringing the rolling-swap maker up on the relay box
 
+> **Its `fleet-ops` steps are historical as of
+> [ADR 0066](../adr/0066-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md)**
+> (issue #1213). `fleet-ops.yml` no longer offers `box=relay`, so every dispatch below naming that
+> box — `deploy`/`restart` of `swap-node` or `watchtower` — has to be the equivalent
+> `docker compose` command run on the box instead, which each step already spells out beside it.
+> (Its `announce` steps were already dead: ADR 0046 / #1074 removed the announce outright.) The
+> compose, nginx and config work described here is unchanged.
+
 Operator runbook for [connector#983](https://github.com/toon-protocol/connector/issues/983)
 (connector-infra half of [toon-meta#402](https://github.com/toon-protocol/toon-meta/issues/402),
 itself a child of toon-meta#394). Modeled on

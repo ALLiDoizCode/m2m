@@ -52,7 +52,7 @@ difference between "removed" and "unconfigured", and `packages/faucet/test/route
 | 6. EVM key + `.env` |                                          |       ✅ generates and funds it       |
 | 7. Gates            |         ✅ the curl checks below         |      runs them, reads the output      |
 | 8. Resize           |  ✅ `./devnet-manage.sh faucet-resize`   |                runs it                |
-| 9. Fleet cutover    |          ✅ the mint-pinning PR          |     runs `fleet-ops config-apply`     |
+| 9. Fleet cutover    |          ✅ the mint-pinning PR          |    lands the pin in each node repo    |
 
 Steps 1, 4, 5, 6 and 8 need SSH, key material, funds or an API token. Every key this box holds is
 generated **on it** and never leaves it; nothing here is ever committed.
@@ -191,8 +191,12 @@ connector boxes are still using the **old** mint.
 1. Land the PR pinning the new address in `infra/linode-relay/connector-rust.toml`,
    `infra/linode-store/connector-rust.toml`, `crates/connector-bin/tests/devnet_configs_load.rs`
    (`FLEET_SOLANA_USDC_MINT`) and `infra/linode/endpoints.json`.
-2. `fleet-ops.yml` → `config-apply` for `relay`, then `ario`. Config first, always: the binary and
-   the box's bind-mounted TOML are a matched pair in both directions.
+2. Land the same address in each box's OWN committed config — `toon-protocol/relay`'s and
+   `toon-protocol/store`'s `deploy/connector.toml`. Step 1 alone moves nothing: since
+   [ADR 0066](../adr/0066-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md)
+   its files are fixtures this repo's tests boot, not what either box reads, and there is no
+   `fleet-ops config-apply` any more. Config first, always: the binary and the box's bind-mounted
+   TOML are a matched pair in both directions.
 3. Drip USDC from this faucet to each box's `[settlement.solana]` address, and check each holds
    SOL for ATA rent.
 4. `fleet-health.yml`.
@@ -207,6 +211,6 @@ consuming repos re-pin, which is why those follow-ups are filed before the cutov
 **The plan** is reversible: `faucet-resize` back up, same downtime.
 
 **The mint is not.** Pointing `SOLANA_USDC_MINT` back at the old mint restores nothing — nobody can
-mint it, which is why it was replaced. Fleet-side rollback is `config-apply` of the previous
-committed TOML, which returns the boxes to a mint the faucet cannot dispense. In practice: fix
-forward.
+mint it, which is why it was replaced. Fleet-side rollback is reverting the previous address in
+each node repo's own committed config, which returns the boxes to a mint the faucet cannot
+dispense. In practice: fix forward.

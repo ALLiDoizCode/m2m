@@ -45,22 +45,24 @@ box, restart the service that reads it, confirm the old value is dead.
    a settlement account you want a fresh address for (a new EVM/Solana keypair, not just new bytes
    at the same address — rotating the key at the _same_ address does not stop a party who already
    has the old key from continuing to sign for it before the sweep in step 3 completes).
-2. **Put it on the box.** Prefer `.github/workflows/fleet-ops.yml`'s `config-apply` when the
-   change is to a config file field; for a bind-mounted key _file_ (signer/settlement/peering,
-   and since issue #1003 the operator bearer token and write-key allowlist too — never
-   committed, so `config-apply` does not touch it), copy it directly onto the box (`scp`,
-   matching the pattern in
+2. **Put it on the box.** A key _file_ (signer/settlement/peering, and since issue #1003 the
+   operator bearer token and write-key allowlist too) is never committed, so no workflow here has
+   ever written one: copy it directly onto the box (`scp`, matching the pattern in
    `docs/operators/devnet-ssh-hardening.md` §2) at the exact path the config's `key_file`/
-   `secret_file` already names. Set `chmod 600` and `chown 10001:10001` (the container's uid,
+   `secret_file` already names. A change to a config file _field_ goes through whichever repo
+   deploys that box — for relay and store, their own `deploy/` bundles, since
+   [ADR 0066](../adr/0066-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md)
+   retired this repo's `fleet-ops config-apply`. Set `chmod 600` and `chown 10001:10001` (the container's uid,
    `deploy/connector-rust/README.md` §1) — a key unreadable by that uid fails the service at
    startup, loudly, not silently.
 3. **Sweep funded material before rotating a settlement/gas-station key**, not after: send the
    balance to the new address first, so there is no window where the old address is both known-bad
    and still holding value. `connector#659`'s gas-station rotation is the precedent — balance swept
    to a freshly generated address, then the key file replaced.
-4. **Restart the service that reads it.** `fleet-ops.yml`'s `restart` operation
-   (`docker compose restart <service>`) for anything the running connector reads (signer,
-   settlement, peering); the box's own gas-station tooling for that key, since it is not read by
+4. **Restart the service that reads it.** `docker compose restart <service>` on the box for
+   anything the running connector reads (signer, settlement, peering) — `fleet-ops.yml`'s
+   `restart` operation does this for the faucet box only, the one box this repo still deploys
+   (ADR 0066); the box's own gas-station tooling for that key, since it is not read by
    `connector-rust.toml` at all.
 5. **Verify** per §4 below before considering the rotation complete.
 6. **Confirm the peer side too**, for a peering secret — both ends hold the same bytes, so a
@@ -114,10 +116,10 @@ For material with an on-chain address (settlement, gas-station), also confirm on
 change on the box proves the box moved on, not that the old key is now safe to leave in whatever
 git history or logs it may already be in.
 
-`fleet-ops.yml`'s `config-read` redacts secret-shaped config _values_ but only ever reads the
-committed config file itself — it cannot see a bind-mounted key file's bytes (they aren't in the
-config), so it is not a substitute for the digest comparison above; use it only to confirm the
-`key_file`/`secret_file` _path_ on the box still matches what's committed.
+Reading the box's config back (by hand over ssh — `fleet-ops.yml`'s `config-read` was retired with
+its relay/store legs, ADR 0066) confirms the `key_file`/`secret_file` _path_ and nothing more: a
+bind-mounted key file's bytes are not in the config, so this is never a substitute for the digest
+comparison above.
 
 ---
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# TOON devnet lifecycle manager — provision, deploy, tear down, or probe the
-# devnet fleet: Store-DVM / Relay.
+# TOON devnet lifecycle manager — provision, point DNS at, tear down, or probe
+# the devnet fleet: Store-DVM / Relay. It no longer deploys to either box; see
+# the ADR 0066 note below.
 #
 # The apex ("toon"/g.toon proxy box) is GONE (issue #872, toon-meta#310 /
 # toon-meta#313's live cutover): the fleet is two connector-bearing boxes now
@@ -191,15 +192,6 @@ update_dns() {  # subdomain → ip
 
 ssh_run() {   # ip, command
   ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=30 "root@$1" "$2"
-}
-
-wait_ssh() {
-  local ip=$1
-  for _ in $(seq 1 30); do
-    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=5 "root@$ip" true 2>/dev/null && return 0
-    sleep 5
-  done
-  echo "ERROR: can't SSH to $ip" >&2; return 1
 }
 
 probe() {  # url, label

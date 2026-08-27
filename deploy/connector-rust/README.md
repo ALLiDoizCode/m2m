@@ -92,8 +92,8 @@ below is identical whether you built the image locally or pulled it.
 
 ### Cutting a release
 
-One dispatch, and everything after it is automated — build, handle, GitHub
-Release, the config-boot gate, the `:rust-release` move, the fleet probe:
+One dispatch, and everything after it is automated — build, handle, image tags,
+GitHub Release:
 
 ```bash
 gh workflow run release-connector.yml \
@@ -101,23 +101,19 @@ gh workflow run release-connector.yml \
 ```
 
 It is `workflow_dispatch` **only**, and must stay that way. A green merge to
-`main` does not reach the boxes and that is deliberate: the connector is the
-client edge on both machines and `announce` is the same image, so one bad
-digest takes the whole devnet's paid-write path dark at once (ADR 0041
-Decision 3). Auto-on-green for this image shipped once (#990) and was
-reverted.
+`main` reaches GHCR and stops there: the connector is the client edge on both
+devnet boxes, so one bad digest reaching either unreviewed takes that box's
+paid-write path dark (ADR 0041 Decision 3). Auto-on-green for this image
+shipped once (#990) and was reverted.
 
-`config_change_required` has **no default** — its first and preselected option
-is a `-- select --` sentinel the workflow refuses by name, so the ordering
-question has to be answered rather than skipped. Answer `yes` only when the
-build cannot boot the committed box configs as they stand (a new required key,
-a renamed field, a narrowed type); a price or endpoint edit the running binary
-also accepts is `no`. On `yes`, land the config here, apply it with
-`fleet-ops.yml config-apply`, and pass that run's URL as `config_applied_run` —
-one per box that changed. The promotion **verifies** it: right workflow, green
-conclusion, `operation=config-apply`, `apply=true` (a dry run is refused), the
-right box, and started after the config's commit.
-`docs/operators/fleet-release-and-health.md` is the procedure.
+**A release does not deploy.** It ends at the GitHub Release, which names the
+`rust-sha-<short-sha>` tag and its `rust-<handle>` alias. A node repository
+(`toon-protocol/relay`, `toon-protocol/store`) adopts a build by bumping its
+own pinned connector tag, in one place in its own `deploy/` bundle, as its own
+reviewed change ([ADR 0066](../../docs/adr/0066-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md)).
+That is also where the deploy ordering lives now: when a build needs a config
+key the box does not yet have, the node repo lands the config and bumps the pin
+in that order. `docs/operators/fleet-release-and-health.md` is the procedure.
 
 ## 1. Generate a signer key
 
