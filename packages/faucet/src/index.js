@@ -45,6 +45,22 @@ let tokenDecimals = 18;
 // Solana faucet (null when not configured — EVM-only deploys still work).
 const solanaFaucet = createSolanaFaucet();
 
+// Read the mint's authority once, in the BACKGROUND, at boot. The leg mints on
+// demand, so it can only serve a mint this faucet is the authority of; that is
+// an on-chain fact `createSolanaFaucet` cannot check without dialling (it is
+// synchronous by design). Doing it here means a box wired to the wrong mint
+// says so in its logs at startup instead of at the first drip request hours
+// later. Non-fatal: the drip path awaits the same memoised check and answers
+// 503, and a failure caused by an unreachable RPC is not cached.
+if (solanaFaucet) {
+  solanaFaucet
+    .assertMintAuthority()
+    .then(() =>
+      console.log('   Mint authority confirmed: this faucet can mint its configured USDC.')
+    )
+    .catch((err) => console.error('⚠️  Solana USDC leg will refuse drips:', err.message));
+}
+
 // Base Sepolia faucet (null when BASE_SEPOLIA_FAUCET_KEY unset — route 503s).
 // Mints the ungated public mock USDC on the PUBLIC Base Sepolia testnet
 // (chainId 84532) + best-effort ETH gas. Mirrors createSolanaFaucet's shape.
@@ -154,6 +170,7 @@ app.get('/api/info', async (req, res) => {
               cooldownHours: String(solanaFaucet.cooldownMs / 3_600_000),
               usdcMint: solanaFaucet.mint,
               rpcUrl: solanaFaucet.rpcUrl,
+              mintMode: solanaFaucet.mintMode,
             }
           : { enabled: false, route: '/api/solana/usdc-request', ready: false },
         baseSepolia: baseSepoliaInfo(baseSepoliaFaucet),
@@ -191,8 +208,10 @@ app.post('/api/solana/usdc-request', (req, res) => {
     return;
   }
 
-  // Per-address cooldown: this route still spends treasury SOL (tx fee + a
-  // possible ATA-rent payment), it just never transfers SOL to the recipient.
+  // Per-address cooldown: minting is unbounded on-chain (this faucet holds the
+  // authority), so this window is the only limit. The drip also spends the
+  // faucet's own SOL on the tx fee and a possible ATA rent, but never sends
+  // SOL to the recipient.
   const claim = solanaFaucet.claim(address);
   if (!claim.allowed) {
     res
@@ -226,6 +245,17 @@ app.post('/api/solana/usdc-request', (req, res) => {
         if (error.code === 'VALIDATOR_STALLED') {
           res.status(503).json({
             error: 'Solana validator not producing blocks',
+            message: error.message,
+          });
+          return;
+        }
+        // Misconfiguration, not a failed request: this box cannot mint the
+        // token it is pointed at, and no retry will change that. 503 (not 500)
+        // for the same reason an unconfigured leg 503s — the fault is the
+        // deploy's, and the message names both keys.
+        if (error.code === 'MINT_AUTHORITY_MISMATCH') {
+          res.status(503).json({
+            error: "Solana faucet is not this mint's authority",
             message: error.message,
           });
           return;

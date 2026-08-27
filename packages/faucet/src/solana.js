@@ -2,22 +2,33 @@
 // Solana faucet drip
 // ---------------------------------------------------------------------------
 // USDC only (owner decision, issue #945 — supersedes #691 and #258/#379's SOL
-// leg entirely, not just hardens it): transfer mock USDC from the committed
-// devnet treasury authority (usdc-authority.json), auto-creating the
-// recipient's associated token account (ATA) if it does not exist yet.
+// leg entirely, not just hardens it): MINT mock USDC straight to the recipient,
+// auto-creating their associated token account (ATA) if it does not exist yet.
 // Treasury SOL is scarce and not self-replenishing (toon-meta#258); gas
 // provisioning is not this faucet's job — recipients get SOL for fees from
 // the chain's own faucet.
 //
-// The treasury keypair + USDC mint are the SAME deterministic devnet identities
-// seeded by infra/solana/create-usdc-mint.sh, so peers can hardcode them.
+// MINT, not transfer. This faucet's keypair is the mint's own MINT AUTHORITY,
+// so a drip coins fresh tokens rather than spending a finite balance, exactly
+// like the Base Sepolia leg's ungated `mint()` (see base-sepolia.js). The
+// keypair still pays every fee and the recipient's ATA rent, so it needs SOL —
+// but it never needs USDC, and no one has to remember to top it up. The
+// previous transfer-from-treasury shape is why the devnet leg sat dead: the
+// 2026-07-18 mint's authority key was lost, so nobody could refill the
+// treasury and nobody could mint. Whoever runs a box now creates the mint with
+// `infra/linode-faucet/create-devnet-usdc-mint.sh`, which makes that box's own
+// treasury the authority.
+//
+// Locally the same code path works unchanged: infra/solana/create-usdc-mint.sh
+// seeds the deterministic local-validator mint with usdc-authority.json as its
+// authority, and docker-compose.yml mounts exactly that keypair.
 //
 // Everything here is OPTIONAL: if SOLANA_FAUCET_KEYPAIR / the RPC are not
 // configured (e.g. an EVM-only deploy), `createSolanaFaucet` returns null and
 // the route answers a clear 503 instead of crashing the whole service.
 import fs from 'fs';
 import { Connection, Keypair, PublicKey } from '@solana/web3.js';
-import { getOrCreateAssociatedTokenAccount, transfer } from '@solana/spl-token';
+import { getMint, getOrCreateAssociatedTokenAccount, mintTo } from '@solana/spl-token';
 import { createDripLimiter } from './drip-limiter.js';
 
 const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || 'http://solana-validator:8899';
@@ -26,9 +37,10 @@ const SOLANA_FAUCET_KEYPAIR = process.env.SOLANA_FAUCET_KEYPAIR || '/keys/usdc-a
 // 6 decimals — real-USDC standard, matches infra/solana/create-usdc-mint.sh.
 const SOLANA_USDC_DECIMALS = Number(process.env.SOLANA_USDC_DECIMALS || '6');
 const SOLANA_USDC_AMOUNT = Number(process.env.SOLANA_USDC_AMOUNT || '1000'); // USDC per drip
-// Per-address cooldown (default 24h) — protects the treasury's USDC balance
-// from being drained by repeat requests from a single address. Mirrors
-// BASE_SEPOLIA_COOLDOWN_MS / MINA_USDC_COOLDOWN_HOURS.
+// Per-address cooldown (default 24h). Nothing on-chain bounds a mint whose
+// authority we hold, so this service-side window is the only thing standing
+// between one address and unlimited mock USDC. Mirrors BASE_SEPOLIA_COOLDOWN_MS,
+// which bounds the equally ungated Base Sepolia mint.
 const SOLANA_DRIP_COOLDOWN_MS = Number(
   process.env.SOLANA_DRIP_COOLDOWN_MS || String(24 * 60 * 60 * 1000)
 );
@@ -53,8 +65,8 @@ const SOLANA_DRIP_COOLDOWN_MS = Number(
 // within one 1.5s probe interval essentially always; two intervals (3s) before
 // declaring a stall is already very conservative.
 const SLOT_PROBE_INTERVAL_MS = Number(process.env.SOLANA_SLOT_PROBE_INTERVAL_MS || '1500');
-// Deadline: a healthy USDC drip (up to 3 treasury txs — source ATA creation,
-// recipient ATA creation, the transfer itself — at 'confirmed' commitment,
+// Deadline: a healthy USDC drip (up to 2 txs — recipient ATA creation and the
+// mint itself, plus a one-off `getMint` authority read — at 'confirmed' commitment,
 // ~2.3 slots/s) completes in well under 15s; a single blockhash validity
 // window (150 blocks) is ~65s. 90s ≥ one full window + margin, so the deadline
 // can only fire when the chain genuinely stalls mid-drip.
@@ -138,9 +150,56 @@ export function createSolanaFaucet() {
 
   console.log(`✅ Solana faucet enabled: RPC ${SOLANA_RPC_URL}`);
   console.log(`   USDC mint:   ${mint.toBase58()}`);
-  console.log(`   Treasury:    ${authority.publicKey.toBase58()}`);
-  console.log(`   Per drip:    ${SOLANA_USDC_AMOUNT} USDC`);
+  console.log(`   Mint authority (this faucet): ${authority.publicKey.toBase58()}`);
+  console.log(`   Per drip:    ${SOLANA_USDC_AMOUNT} USDC (freshly minted)`);
   console.log(`   Cooldown:    ${SOLANA_DRIP_COOLDOWN_MS / 3_600_000}h per address`);
+
+  // Memoised result of the one on-chain check this leg cannot do at
+  // construction: that `mint`'s authority really is our keypair, and that its
+  // decimals match what we price a drip in. Deliberately NOT done in the
+  // factory — `createSolanaFaucet` is synchronous and dials nothing, which is
+  // what lets routes.test.js boot the whole server against an unreachable RPC
+  // and lets solana-treasury.test.js point at 127.0.0.1:1. index.js kicks this
+  // off once in the background at boot so a misconfigured box says so in its
+  // logs immediately; a drip awaits it either way.
+  let authorityCheck = null;
+
+  async function assertMintAuthority() {
+    if (!authorityCheck) {
+      authorityCheck = (async () => {
+        const info = await getMint(connection, mint);
+        const actual = info.mintAuthority?.toBase58() ?? null;
+        const ours = authority.publicKey.toBase58();
+        if (actual !== ours) {
+          const err = new Error(
+            `${mint.toBase58()}'s mint authority is ${actual ?? 'none (minting is disabled forever)'}, ` +
+              `not this faucet's keypair ${ours}. This leg mints on demand, so it can only serve a ` +
+              'mint it is the authority of — create one with ' +
+              'infra/linode-faucet/create-devnet-usdc-mint.sh and set SOLANA_USDC_MINT to it.'
+          );
+          err.code = 'MINT_AUTHORITY_MISMATCH';
+          throw err;
+        }
+        if (info.decimals !== SOLANA_USDC_DECIMALS) {
+          const err = new Error(
+            `${mint.toBase58()} has ${info.decimals} decimals, but this faucet is configured for ` +
+              `${SOLANA_USDC_DECIMALS} (SOLANA_USDC_DECIMALS). A drip would be off by ` +
+              `10^${Math.abs(info.decimals - SOLANA_USDC_DECIMALS)}.`
+          );
+          err.code = 'MINT_AUTHORITY_MISMATCH';
+          throw err;
+        }
+        return info;
+      })().catch((error) => {
+        // Never cache a failure caused by an unreachable RPC: that would pin a
+        // transient outage as a permanent misconfiguration until restart. A
+        // real mismatch is re-read on the next drip and fails again, cheaply.
+        authorityCheck = null;
+        throw error;
+      });
+    }
+    return authorityCheck;
+  }
 
   return {
     rpcUrl: SOLANA_RPC_URL,
@@ -148,6 +207,11 @@ export function createSolanaFaucet() {
     treasury: authority.publicKey.toBase58(),
     usdcAmount: SOLANA_USDC_AMOUNT,
     cooldownMs: SOLANA_DRIP_COOLDOWN_MS,
+    // Mirrors base-sepolia.js's `mintMode: 'ungated-mint'`: says in /api/info
+    // WHY this leg can never run dry, so an operator reading the capability map
+    // does not go looking for a treasury balance that is not the mechanism.
+    mintMode: 'faucet-is-mint-authority',
+    assertMintAuthority,
 
     isValidAddress(address) {
       try {
@@ -170,11 +234,15 @@ export function createSolanaFaucet() {
       limiter.release(address);
     },
 
-    // USDC-only drip: a plain treasury→recipient token transfer. The
-    // TREASURY (not the recipient) pays the tx fee + ATA rent, so this works
-    // even if the recipient currently holds 0 SOL — recipients get SOL for
-    // gas from the chain's own faucet.
+    // USDC-only drip: fresh tokens minted straight to the recipient. THIS
+    // FAUCET (not the recipient) pays the tx fee + ATA rent, so it works even
+    // if the recipient holds 0 SOL — they get SOL for gas from the chain's own
+    // faucet.
     async drip(address) {
+      // Refuse before touching the chain if we are not this mint's authority:
+      // every `mintTo` below would fail anyway, and the SPL error for it names
+      // no address. Memoised, so this is one RPC read per process.
+      await assertMintAuthority();
       // Fail fast (~1.5–3s) with an honest VALIDATOR_STALLED error when the
       // validator is wedged, instead of burning 30–90s in confirmation waits
       // that end in a misleading "not confirmed in 30.00 seconds" 500.
@@ -199,16 +267,11 @@ export function createSolanaFaucet() {
     },
   };
 
-  // Transfer USDC from the treasury to the recipient, auto-creating the recipient
-  // ATA (the treasury is the fee payer + rent payer, so the recipient needs no
-  // SOL for this leg). Returns the `usdc` result object.
-  async function transferUsdc(recipient) {
-    const sourceAta = await getOrCreateAssociatedTokenAccount(
-      connection,
-      authority, // fee payer
-      mint,
-      authority.publicKey
-    );
+  // Mint fresh USDC to the recipient, auto-creating their ATA (this faucet is
+  // the fee payer + rent payer, so the recipient needs no SOL for this leg).
+  // There is no source ATA: the tokens do not exist until this call, which is
+  // why the leg cannot run dry. Returns the `usdc` result object.
+  async function mintUsdc(recipient) {
     const destAta = await getOrCreateAssociatedTokenAccount(
       connection,
       authority, // fee payer creates the recipient ATA if missing
@@ -217,15 +280,15 @@ export function createSolanaFaucet() {
     );
 
     const rawAmount = BigInt(Math.round(SOLANA_USDC_AMOUNT * 10 ** SOLANA_USDC_DECIMALS));
-    const usdcSig = await transfer(
+    const usdcSig = await mintTo(
       connection,
       authority, // fee payer
-      sourceAta.address,
+      mint,
       destAta.address,
-      authority, // source token-account owner
+      authority, // mint authority
       rawAmount
     );
-    console.log(`  📤 Transferred ${SOLANA_USDC_AMOUNT} USDC: ${usdcSig}`);
+    console.log(`  📤 Minted ${SOLANA_USDC_AMOUNT} USDC: ${usdcSig}`);
     return {
       signature: usdcSig,
       amount: String(SOLANA_USDC_AMOUNT),
@@ -234,10 +297,10 @@ export function createSolanaFaucet() {
     };
   }
 
-  // Drip body — a treasury→recipient USDC transfer, no other on-chain action.
+  // Drip body — one mint to the recipient, no other on-chain action.
   async function dripInner(address) {
     const recipient = new PublicKey(address);
-    const usdc = await transferUsdc(recipient);
+    const usdc = await mintUsdc(recipient);
     return { usdc };
   }
 }
