@@ -11,6 +11,7 @@ license.workspace = true
 # pure and depends on no workspace crate, so this edge adds no cycle.
 connector-domain = { path = "../connector-domain" }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
 url = "2"
 thiserror = "2"

@@ -43,6 +43,17 @@ attaches — one handler, one description — comes from the connector's own con
 nowhere else, and rides both the greeting and a probe's reject. A menu, not a warranty: whoever
 reads one is reading text from a stranger. _(Decided and not yet built — ADR 0044.)_
 
+**Request**:
+The operator-declared table naming what a client must send to use a route — protocol, parameters,
+whatever the app behind it expects. Written as `[[routes]] request = { ... }`, converted to JSON at
+load and published verbatim on that route's self-description entry and on the greeting for that
+destination; the connector confirms only that it **is** a table and reads none of its keys. Sourced
+by the operator writing it down, never by asking the app — matching the declaration against what the
+app actually registered is the app's own repository's problem, not this one's (ADR 0067). Absent,
+not empty, on a route that configured none.
+_Distinct from_: a route's **description** above — free text about what the work **is**; `request`
+is structured and says what to **send**, and building it does not build ADR 0044.
+
 **Packet**:
 The unit of forwarding: a destination, an amount, an expiry, and a payload that is opaque to
 every hop that carries it. Every packet terminates in either fulfilment or rejection. Its

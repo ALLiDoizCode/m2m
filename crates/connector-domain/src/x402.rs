@@ -53,6 +53,15 @@ pub struct X402PaymentRequired {
     #[serde(rename = "x402Version")]
     pub x402_version: u32,
     pub resource: X402Resource,
+    /// What a client should send to use the addressed route (issue #1210):
+    /// the matching `[[routes]] request` table, converted to JSON verbatim.
+    /// Sits beside `resource` rather than inside `accepts[]` -- it describes
+    /// the *resource*, not a payment option, and applies whichever payment
+    /// method a payer ends up satisfying. Absent -- not `null` -- when the
+    /// route configured none, so this greeting is byte-identical to what it
+    /// was before this issue; a reader that predates the field ignores it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub request: Option<serde_json::Value>,
     pub accepts: Vec<X402PaymentOption>,
 }
 
@@ -394,6 +403,7 @@ pub fn terms_body(terms: &GreetingTerms<'_>) -> Vec<u8> {
         node,
         required_transport,
         session_lease_ttl_ms,
+        request,
     } = *terms;
     // ND-11: every node fact in `extra` is read off the SAME value the node
     // self-description is projected from. There is no second assembly of
@@ -412,6 +422,7 @@ pub fn terms_body(terms: &GreetingTerms<'_>) -> Vec<u8> {
         resource: X402Resource {
             url: destination.to_string(),
         },
+        request: request.cloned(),
         accepts: vec![X402PaymentOption {
             scheme: "toon-channel".to_string(),
             network: destination.to_string(),
@@ -485,6 +496,13 @@ pub struct GreetingTerms<'a> {
     /// carriages) leaves it `0`, which is otherwise never a real
     /// deployment's value.
     pub session_lease_ttl_ms: u64,
+    /// What a client should send to use the addressed route (issue #1210):
+    /// the matching `[[routes]] request` table, converted to JSON at config
+    /// load and handed in by reference here so quoting one costs a clone
+    /// only when there is something to clone. `None` when the route
+    /// configured none, or for a carriage addressing no configured route at
+    /// all.
+    pub request: Option<&'a serde_json::Value>,
 }
 
 /// Read a `payment-required` greeting's terms.
@@ -576,6 +594,48 @@ mod tests {
         // The payload length changes nothing for a flat route.
         assert_eq!(terms.price(), Some(1000));
         assert_eq!(terms.schedule(), Some(Price::flat(1000)));
+    }
+
+    /// Issue #1210: a route's `request` table rides at the top level of the
+    /// greeting, beside `resource` -- it describes the resource, not one of
+    /// the payment options in `accepts[]`.
+    #[test]
+    fn a_routes_request_table_rides_beside_resource() {
+        let request = serde_json::json!({"protocol": "nip90", "kinds": [5096, 5098]});
+        let body = terms_body(&GreetingTerms {
+            destination: "g.toon.gas",
+            price: Price::flat(1000),
+            payload_len: 0,
+            request: Some(&request),
+            ..Default::default()
+        });
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["request"], request);
+        assert!(
+            value["accepts"][0].get("request").is_none(),
+            "request describes the resource, not a payment option"
+        );
+
+        let terms = parse_greeting(&body).expect("well-formed");
+        assert_eq!(terms.request, Some(request));
+    }
+
+    /// A route with no `request` table publishes a greeting with no
+    /// `request` key at all -- byte-identical to what it was before this
+    /// issue, and a reader written before the field existed is unaffected.
+    #[test]
+    fn a_route_with_no_request_table_greets_with_no_request_key() {
+        let body = terms_body(&GreetingTerms {
+            destination: "g.toon.relay",
+            price: Price::flat(1000),
+            payload_len: 0,
+            ..Default::default()
+        });
+        let text = String::from_utf8(body).unwrap();
+        assert!(
+            !text.contains("\"request\""),
+            "a route with no request table must not carry the key at all, got: {text}"
+        );
     }
 
     /// A schedule route's greeting answers both questions: what THIS request

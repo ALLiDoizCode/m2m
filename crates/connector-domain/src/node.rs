@@ -149,6 +149,14 @@ pub struct RoutePrice {
         default
     )]
     pub price_per_kib: Option<String>,
+    /// What a client should send to use this route (issue #1210): the
+    /// operator's `[[routes]] request` table, converted to JSON and
+    /// published verbatim -- this connector never reads a key out of it.
+    /// Absent, not `null`, on a route that configured none, so a node with
+    /// no `request` anywhere publishes exactly the document it published
+    /// before this issue.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub request: Option<serde_json::Value>,
 }
 
 /// The document itself, as it goes on the wire.
@@ -366,6 +374,7 @@ mod tests {
                 prefix: "g.toon.ario".to_string(),
                 price: "1000".to_string(),
                 price_per_kib: None,
+                request: None,
             }],
             Some("btp".to_string()),
         );
@@ -394,6 +403,7 @@ mod tests {
                 prefix: "g.toon.ario".to_string(),
                 price: u64::MAX.to_string(),
                 price_per_kib: None,
+                request: None,
             }],
             None,
         );
@@ -402,6 +412,42 @@ mod tests {
         assert_eq!(
             json["routes"][0]["price"],
             serde_json::json!("18446744073709551615")
+        );
+    }
+
+    /// Issue #1210: a route's `request` table rides as JSON equal to what
+    /// the operator wrote, and a route that configured none has no
+    /// `request` key at all -- not `null`.
+    #[test]
+    fn a_routes_request_table_rides_as_the_equivalent_json() {
+        let document = NodeSelfDescription::describe(
+            &facts(),
+            None,
+            vec![
+                RoutePrice {
+                    prefix: "g.toon.gas".to_string(),
+                    price: "1000".to_string(),
+                    price_per_kib: None,
+                    request: Some(serde_json::json!({"protocol": "nip90", "kinds": [5096, 5098]})),
+                },
+                RoutePrice {
+                    prefix: "g.toon.ario".to_string(),
+                    price: "1000".to_string(),
+                    price_per_kib: None,
+                    request: None,
+                },
+            ],
+            None,
+        );
+        let json = serde_json::to_value(&document).expect("serializes");
+
+        assert_eq!(
+            json["routes"][0]["request"],
+            serde_json::json!({"protocol": "nip90", "kinds": [5096, 5098]})
+        );
+        assert!(
+            json["routes"][1].get("request").is_none(),
+            "a route with no request table must publish no 'request' key at all"
         );
     }
 
@@ -434,6 +480,7 @@ mod tests {
                 prefix: "g.toon.ario".to_string(),
                 price: "1000".to_string(),
                 price_per_kib: None,
+                request: None,
             }],
             Some("btp".to_string()),
         );
