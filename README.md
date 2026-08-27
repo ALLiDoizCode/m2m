@@ -3,8 +3,8 @@
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **A paid reverse proxy.** You put it in front of an ordinary HTTP app, you set a
-price, and it collects that price from whoever calls — in stablecoin, per
-request, without your app knowing payment exists.
+price, and it collects that price from whoever calls — in tokens, per request,
+without your app knowing payment exists.
 
 It does that by being an [Interledger](https://interledger.org) connector: value
 arrives wrapped in a protocol your app never speaks, and at the last hop this
@@ -109,22 +109,33 @@ key_file = "/app/data/signer.key"   # 32 raw bytes, or 64 hex characters
 
 # One route per thing you serve. Longest matching prefix wins, so a more
 # specific prefix can sit beneath a broader one and take precedence.
+#
+# `price` is a whole number of the SMALLEST UNIT of the token you settle in
+# (step 3) — the way a card terminal counts in cents, never in dollars. How
+# many of those units make one token is the token's `decimals`. USDC has 6,
+# so 1,000,000 units are one USDC, and:
+#
+#     price = 1000        0.001 USDC   a tenth of a cent
+#     price = 100000      0.10  USDC   ten cents
+#     price = 1000000     1.00  USDC   one dollar
+#
+# A wallet or a dashboard shows the whole-token figure. This file never does.
 [[routes]]
 prefix      = "g.example.quotes"
 handler_url = "http://quotes:8080/"
-price       = 1000
+price       = 1000                       # 0.001 USDC per request
 
 [[routes]]
 prefix      = "g.example.search"
 handler_url = "http://search:8080/"
-price       = 2500
+price       = 2500                       # 0.0025 USDC
 
 # Same app, deeper prefix, different price. This wins over g.example.search
 # for g.example.search.bulk because it matches more labels.
 [[routes]]
 prefix      = "g.example.search.bulk"
 handler_url = "http://search:8080/bulk/"
-price       = 10000
+price       = 10000                      # 0.01 USDC, a cent
 ```
 
 Then ask the node what it is:
@@ -187,12 +198,20 @@ anyone actually pay it.
 [settlement.evm]
 rpc_url          = "https://sepolia.base.org"
 contract_address = "0x…"          # the TokenNetworkRegistry, not a TokenNetwork
-token_address    = "0x…"
-decimals         = 6
+token_address    = "0x…"          # the token every price on this node is in
+decimals         = 6              # units per token: 6 means 1,000,000 = 1.00
 
 [settlement.evm.key]
 key_file = "/app/data/settlement.key"
 ```
+
+`decimals` is what turns a `price` into money. Every `price` in the config is a
+count of the token's smallest unit, and `decimals` says how many of those make
+one whole token — so with `decimals = 6`, `price = 1000` is 0.001 of the token,
+and a route meant to cost ten cents of USDC is `price = 100000`. The node reads
+the token's own decimals at boot and **refuses to start** if the config
+disagrees, because a wrong `decimals` is not a rounding error: it misprices
+every route by a factor of ten or more.
 
 That is all of it. **You do not list the channels your payers will use, and you
 could not** — a client's channel does not exist until that client opens it on
