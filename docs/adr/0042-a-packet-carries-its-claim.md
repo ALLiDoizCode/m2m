@@ -362,7 +362,7 @@ no `[[peer_channels]]` row. A peering this node only ever _receives_ from needs 
 why the check is keyed on routes rather than on peerings.
 
 Load-time rather than packet-time because the alternative is precisely what
-[ADR 0009](0009-typed-configuration-with-fail-fast-validation.md) exists to prevent: the node would
+[ADR 0009](0009-one-typed-config-file-no-environment-layer.md) exists to prevent: the node would
 boot cleanly and then refuse every packet on that route. And a newly required key is a **breaking
 deploy** by 0009's own definition — the binary and the box's bind-mounted TOML are a matched pair in
 both directions, so the config lands first and the tag moves second. Nothing deployed is affected
