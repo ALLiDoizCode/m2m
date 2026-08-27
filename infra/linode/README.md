@@ -90,11 +90,11 @@ then, which is the whole of why the repoint half-finished.
 
 ## Where the live devnet is documented
 
-| Thing                                          | Where                                                                         |
-| ---------------------------------------------- | ----------------------------------------------------------------------------- |
-| Devnet endpoints, tokens, program ids          | [`endpoints.json`](./endpoints.json)                                          |
-| The two connector boxes                        | `infra/linode-relay/`, `infra/linode-store/`                                  |
-| The faucet box                                 | `infra/linode-faucet/`, `docs/operators/faucet-box-bringup.md`                |
-| Fleet lifecycle (provision / deploy / destroy) | `infra/devnet-manage.sh`                                                      |
-| Fleet CI                                       | `.github/workflows/fleet-ops.yml`, `fleet-health.yml`, `promote-to-fleet.yml` |
-| Disposable local chains                        | `docker-compose.yml`, `local/`, `local/README.md`                             |
+| Thing                                             | Where                                                               |
+| ------------------------------------------------- | ------------------------------------------------------------------- |
+| Devnet endpoints, tokens, program ids             | [`endpoints.json`](./endpoints.json)                                |
+| The two connector boxes (now fixtures — ADR 0068) | `infra/linode-relay/`, `infra/linode-store/`                        |
+| The faucet box                                    | `infra/linode-faucet/`, `docs/operators/faucet-box-bringup.md`      |
+| Fleet lifecycle (provision / DNS / destroy)       | `infra/devnet-manage.sh`                                            |
+| Fleet CI                                          | `.github/workflows/fleet-ops.yml` (faucet only), `fleet-health.yml` |
+| Disposable local chains                           | `docker-compose.yml`, `local/`, `local/README.md`                   |

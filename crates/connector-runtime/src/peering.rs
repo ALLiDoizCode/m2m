@@ -146,6 +146,15 @@ pub enum EstablishPeeringError {
         "{url} publishes no endpoint this connector can dial (its schemes select no carriage)"
     )]
     NoDialableEndpoint { url: String },
+    /// The document published no `httpEndpoint` (issue #1217): every
+    /// covering claim's `POST /ilp/claim-state` ask is made over plain
+    /// HTTP regardless of which carriage the packet itself rides
+    /// (`OwnedHttpClaimState`), so a document with no `httpEndpoint` gives
+    /// this node nowhere to ask and this peering could never be paid.
+    /// Refused by name rather than written as an accept-only peering that
+    /// answers every packet it originates with a T00.
+    #[error("{url} publishes no httpEndpoint, so a claim covering a forward to it can never be asked for")]
+    NoDialableClientEdge { url: String },
     /// This node and the counterparty settle on no chain in common, so no
     /// channel can exist between them and no claim could ever be paid.
     #[error("this connector and {url} settle on no chain in common, so no channel can be derived")]
@@ -209,6 +218,14 @@ impl Connector {
                 url: url.to_string(),
             }
         })?;
+        // Checked before any chain operation (channel-opening gas
+        // included), on a fact the document already answered: a peering
+        // that can never be paid is not worth a channel being opened for.
+        let client_edge_url = document.http_endpoint.clone().ok_or_else(|| {
+            EstablishPeeringError::NoDialableClientEdge {
+                url: url.to_string(),
+            }
+        })?;
 
         let terms = self.shared_settlement(&document, chain, url)?;
         let counterparty = counterparty_bytes(&terms, url)?;
@@ -242,15 +259,21 @@ impl Connector {
                 .edge_identity
                 .as_ref()
                 .map(|identity| identity.public_key.clone()),
-            client_edge_url: document.http_endpoint.clone(),
+            client_edge_url: Some(client_edge_url.clone()),
             channels: vec![binding.clone()],
         };
 
-        // Bind the channel and the carriage before the durable write, so a
-        // row that lands is a row this node can already act on; and write
-        // the row last, so the durable table never names a peering the
-        // running process has not wired up.
+        // Bind the channel in both roles and the carriage before the
+        // durable write, so a row that lands is a row this node can
+        // already act on; and write the row last, so the durable table
+        // never names a peering the running process has not wired up.
+        // Both `bind_runtime_peer_channel` (peer role: can ACCEPT a claim)
+        // and `register_outbound_client_hop` (client role: can SIGN one,
+        // issue #1217) run here -- without the second, `POST /peers`
+        // leaves the node able to accept a claim over the peering it just
+        // established but never to pay one, which is the whole of #1217.
         self.bind_runtime_peer_channel(&id, &binding);
+        self.register_outbound_client_hop(&id, &binding, &client_edge_url);
         self.register_runtime_peering(&id, &peering);
         let peer = self.upsert_runtime_peer(id, peering)?;
 

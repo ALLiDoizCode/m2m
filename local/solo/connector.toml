@@ -10,9 +10,12 @@
 # it structurally cannot check is the thing every deploy depends on: that the
 # image, running as uid 10001, with this file mounted at
 # /app/config/connector.toml, key files under /app/data and a real volume at
-# /app/state, boots and serves a packet. `promote-to-fleet.yml` checks half of
-# that against the fleet's own configs and can only WARN on the other half,
-# because a GitHub runner has no chain to reach. Here there is one.
+# /app/state, boots and serves a packet. `devnet_configs_load.rs` boots the
+# fleet's own committed connector-rust.toml fixtures through the real binary,
+# which is the half a GitHub runner can check without a chain. Here there is
+# one, so this is an assertion rather than a boot-only check. (There is no
+# candidate-image-vs-fleet-config gate any more -- ADR 0068 retired
+# promote-to-fleet.yml, which used to run one before moving a fleet tag.)
 #
 # Every address below is deterministic, which is what lets this file be
 # committed rather than generated. Secrets are not: every key is a PATH

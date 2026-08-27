@@ -186,6 +186,14 @@ pub struct ClaimView {
     /// always `false` for an inbound claim, which is accepted or rejected
     /// the instant it is received, never left pending.
     pub pending: bool,
+    /// Which of this node's two claim books this entry came from (issue
+    /// #1218): [`ClaimBookKind::Peer`] for everything above, which is
+    /// always `crate::ClaimBook`'s own -- `connector-operator` is the one
+    /// caller that also merges in [`ClaimBookKind::Client`] entries, read
+    /// from `connector_client_edge::ClientClaimGate`, a second book this
+    /// crate has no dependency on and so cannot tag itself. An additive
+    /// field: every row this crate itself produces is `Peer`.
+    pub book: ClaimBookKind,
 }
 
 /// Which side of a peering relation a [`ClaimView`] reports on.
@@ -194,4 +202,18 @@ pub struct ClaimView {
 pub enum ClaimDirection {
     Outbound,
     Inbound,
+}
+
+/// Which claim book a [`ClaimView`] was read out of (issue #1218): the
+/// peer semantics's own `crate::ClaimBook`, journaled to
+/// `peer-claims.log`, or the client edge's
+/// `connector_client_edge::ClientClaimGate`, journaled separately to
+/// `client-edge-claims.log`. The two never merge (`two_ledgers_never_merge.rs`);
+/// this field says which one a given row answers for, since `GET /claims`
+/// now reads both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClaimBookKind {
+    Peer,
+    Client,
 }

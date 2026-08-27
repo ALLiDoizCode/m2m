@@ -328,6 +328,14 @@ green checks from the workflows that had no branch filter. If you are looking
 at a PR with no `Rust Workspace Gate` check at all, that is a trigger bug, not
 a passing build — say so rather than merging it.
 
+Beside the gate, `.github/workflows/codeql.yml` runs CodeQL's default query suite
+over the Actions workflows, the JavaScript/TypeScript packages, the Python
+scripts and the Rust workspace, filtered by `.github/codeql/codeql-config.yml`,
+which excludes exactly one query (a literal claim `nonce` in a test is a
+counter, not a key — see the comment there). A new alert of a shape that config
+already excludes is a question about the config, to be answered in a PR that
+also updates `fleet_release_gate.rs`, never a dismissal by hand.
+
 ### Merging, and Stacked PRs
 
 Prefer basing a PR on `main`. When you do stack one PR on another's branch,

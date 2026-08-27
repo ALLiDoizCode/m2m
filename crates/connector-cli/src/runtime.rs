@@ -1255,12 +1255,19 @@ const OUTBOUND_CLIENT_LEDGER: &str = "outbound-client.log";
 /// forwarded, and "a connector covers every PREPARE it sends" could not
 /// happen. It happens for a peering with a row here, and for no other.
 ///
-/// **Additive, and default-off.** A file with no `[[pay_channels]]` table
-/// returns here having done nothing at all: no ledger file is opened, no
-/// HTTP client is built, `outbound_client_hops` stays empty, and every
-/// forward keeps riding the peer ledger's `pending_claim` exactly as it did
-/// before this function existed (ADR 0004's postpay convention). That is the
-/// property `a_peering_with_no_pay_channels_row_forwards_exactly_as_before`
+/// **The ledger opens unconditionally (issue #1217).** A file with no
+/// `[[pay_channels]]` table still gets a real, `state_dir`-backed
+/// [`OutboundClientLedger`] -- or, absent a `state_dir`, the in-memory form
+/// -- because `POST /peers` (ADR 0058) can register a client-role hop on a
+/// running node with no `[[pay_channels]]` row at all, and a hop with no
+/// ledger to sign from is accept-only exactly the way this issue is about.
+/// What *is* still additive and default-off is `outbound_client_hops`
+/// itself: with no `[[pay_channels]]` rows this function builds no HTTP
+/// client and registers no hop, so the table holds exactly what a runtime
+/// `POST /peers` write has put there and nothing else -- a node that never
+/// establishes a runtime peering forwards exactly as it did before this
+/// function existed. The ledger's own presence is what
+/// `build_writes_an_outbound_client_ledger_even_for_a_node_with_no_pay_channels`
 /// pins.
 ///
 /// Where each part of the claim comes from is ADR 0030's table, and every
@@ -1287,33 +1294,46 @@ fn wire_outbound_client_hops(
     claim_signer: Option<Arc<dyn Signer>>,
     claim_signer_solana: Option<Arc<dyn Ed25519Signer>>,
 ) -> Result<Connector, RuntimeError> {
-    if config.pay_channels().is_empty() {
-        return Ok(connector);
-    }
     let unwirable = |pay_channel: &PayChannelConfig, missing| RuntimeError::PayChannelUnwirable {
         peer_id: pay_channel.peer_id().to_string(),
         missing,
     };
-    let first = &config.pay_channels()[0];
-    let Some(state_dir) = config.state_dir() else {
+    // A `[[pay_channels]]` row still needs a `state_dir` of its own -- its
+    // nonce floor must survive a restart. A node with none at all does not:
+    // the ledger below simply degrades to the in-memory form, the same
+    // "no state_dir, no durability, still mutable" shape every other
+    // `state_dir`-scoped store on this connector takes.
+    if let (Some(first), None) = (config.pay_channels().first(), config.state_dir()) {
         return Err(unwirable(first, "state_dir to keep its nonce floor in"));
-    };
+    }
 
-    // The FILE-BACKED form, as `with_outbound_client_ledger` requires of a
-    // serving node: a restart that reissued a nonce would fork this node's
-    // own outbound nonce line. `open_journal` has not run yet on this path,
-    // so the directory is created here the same way it creates it.
-    std::fs::create_dir_all(state_dir).map_err(|source| RuntimeError::StateDirUnusable {
-        path: state_dir.to_path_buf(),
-        source,
-    })?;
-    let ledger_path = state_dir.join(OUTBOUND_CLIENT_LEDGER);
-    let ledger = OutboundClientLedger::open(&ledger_path).map_err(|source| {
-        RuntimeError::OutboundClientLedgerUnusable {
-            path: ledger_path,
-            source,
+    // The ledger opens regardless of `[[pay_channels]]` (issue #1217): a
+    // runtime peering established over `POST /peers` (ADR 0058) can
+    // register a client-role hop with no such row ever having existed, and
+    // a hop with no ledger to sign from is accept-only, which is this
+    // issue verbatim. FILE-BACKED where `state_dir` exists, as
+    // `with_outbound_client_ledger` requires of a serving node -- a restart
+    // that reissued a nonce would fork this node's own outbound nonce line.
+    // `open_journal` has not run yet on this path, so the directory is
+    // created here the same way it creates it.
+    let ledger = match config.state_dir() {
+        Some(state_dir) => {
+            std::fs::create_dir_all(state_dir).map_err(|source| {
+                RuntimeError::StateDirUnusable {
+                    path: state_dir.to_path_buf(),
+                    source,
+                }
+            })?;
+            let ledger_path = state_dir.join(OUTBOUND_CLIENT_LEDGER);
+            OutboundClientLedger::open(&ledger_path).map_err(|source| {
+                RuntimeError::OutboundClientLedgerUnusable {
+                    path: ledger_path,
+                    source,
+                }
+            })?
         }
-    })?;
+        None => OutboundClientLedger::in_memory(),
+    };
     connector = connector.with_outbound_client_ledger(Arc::new(ledger));
 
     for pay_channel in config.pay_channels() {
@@ -1520,7 +1540,10 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
         // gateway -- and it carries the whole schedule (ADR 0065), so a
         // forwarded route's slope survives the trip into the runtime the way
         // its base always has.
-        .map(|route| PeerRoute::new_scheduled(route.prefix(), route.peer_id(), route.price()))
+        .map(|route| {
+            PeerRoute::new_scheduled(route.prefix(), route.peer_id(), route.price())
+                .with_request(route.request().cloned())
+        })
         .collect();
     let mut connector = Connector::new(
         config.routes().to_vec(),
@@ -2088,8 +2111,12 @@ fn node_facts(config: &Config, runtime: &Runtime) -> connector_domain::NodeFacts
         ilp_addresses: node
             .map(|node| node.addresses().to_vec())
             .unwrap_or_default(),
-        http_endpoint: node.map(|node| node.http_endpoint().to_string()),
-        btp_endpoint: node.map(|node| node.btp_endpoint().to_string()),
+        http_endpoint: node
+            .and_then(|node| node.http_endpoint())
+            .map(str::to_string),
+        btp_endpoint: node
+            .and_then(|node| node.btp_endpoint())
+            .map(str::to_string),
         // Every carriage this node exposes a listener for, in the operator's
         // own spelling. `"neither"` -- the default -- is an empty list rather
         // than the word: a reader asks "can I peer over BTP?", and an empty
@@ -2144,7 +2171,7 @@ pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError
         connector.clone(),
         signer.clone(),
         wrap_receiver_secret,
-        claim_gate,
+        claim_gate.clone(),
         node_facts(config, runtime),
         config
             .btp_session_window()
@@ -2177,6 +2204,7 @@ pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError
     Ok(match config.operator() {
         Some(operator) => app.merge(connector_operator::router(
             connector,
+            claim_gate,
             signer,
             operator.bearer_token().to_string(),
             operator.write_keys().to_vec(),
@@ -2659,6 +2687,7 @@ secret = "s3cr3t"
             format!(
                 r#"
 client_edge_addr = "127.0.0.1:0"
+peer_expose = "both"
 
 [signer]
 key_file = "{}"
@@ -4032,7 +4061,7 @@ key_file = "{key_file}"
 [settlement.solana]
 rpc_url = "http://127.0.0.1:8899"
 program_id = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
-token_address = "xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in"
+token_address = "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU"
 decimals = 6
 
 [settlement.solana.key]
@@ -4794,13 +4823,14 @@ client_edge_url = "{client_edge_url}"
             );
         }
 
-        /// The whole production build chain, not just the wiring function:
-        /// a config with no `[[pay_channels]]` table builds a node that
-        /// writes no outbound client ledger at all -- which is what makes
-        /// this change safe to land on a running fleet, where every
-        /// committed config today has no such table.
+        /// Issue #1217: the whole production build chain, not just the
+        /// wiring function -- a config with no `[[pay_channels]]` table
+        /// still opens a real, `state_dir`-backed outbound client ledger,
+        /// because a runtime peering established later over `POST /peers`
+        /// (ADR 0058) needs one to ever be payable, and nothing rebuilds
+        /// this node's wiring when that happens.
         #[tokio::test]
-        async fn build_writes_no_outbound_client_ledger_for_a_node_with_no_pay_channels() {
+        async fn build_writes_an_outbound_client_ledger_even_for_a_node_with_no_pay_channels() {
             let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
             key_file
                 .write_all(&[7u8; 32])
@@ -4819,11 +4849,19 @@ key_file = "{key_file}"
                 key_file = key_path.display(),
             ));
 
-            build(&config).await.expect("build");
+            let runtime = build(&config).await.expect("build");
 
+            // Not file existence: `OutboundClientLedger::open` writes nothing
+            // until a claim is actually issued ("a missing file is an empty
+            // ledger, not an error"), so an empty file would prove nothing
+            // either way. `outbound_client_ledger()` is the direct answer to
+            // "is one wired at all" -- `None` is exactly what let issue
+            // #1217's peering accept a claim and sign none.
             assert!(
-                !state_dir.path().join(OUTBOUND_CLIENT_LEDGER).exists(),
-                "the ledger file is created only for a node that actually signs client-role                  claims"
+                runtime.connector.outbound_client_ledger().is_some(),
+                "a node with a state_dir must have an outbound client ledger wired, whether or \
+                 not it has a `[[pay_channels]]` row -- a runtime peering (ADR 0058) may still \
+                 need it"
             );
         }
     }

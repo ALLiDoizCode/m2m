@@ -145,9 +145,12 @@ consistent with an upgrade having landed since the 2026-07-18 deploy: `packages/
 changed in commit `cedd0170` (issue #581, "validate settlement destinations, bound claims by
 deposit") after `eb5ecea` introduced this record, adding code (new error variants, the
 `validate_settlement_destination` check) that would grow the binary. The upgrade authority
-(`AEPoA5xTTJY9SR8c5CfsemFGC5TmxQBe6Xf6wewEtnYa`) can upgrade in place without changing the program
-id, so this is expected and not itself a discrepancy -- but it does mean the original 105,128-byte
-figure is **stale** and must not be treated as still describing the live program.
+(`AEPoA5xTTJY9SR8c5CfsemFGC5TmxQBe6Xf6wewEtnYa`) ~~can upgrade in place without changing the
+program id~~ **could have, on 2026-07-30 when this amendment was written**; that key is now lost,
+so an in-place upgrade is no longer available -- see "The program cannot be upgraded in place"
+under the Mint amendment below. The size growth is still expected and not itself a discrepancy --
+but it does mean the original 105,128-byte figure is **stale** and must not be treated as still
+describing the live program.
 
 **Reproducible-build comparison against the live bytes (2026-07-30, issue #567).** `cargo
 build-sbf` had stopped resolving entirely -- crates.io supply-chain drift, not a source change:
@@ -180,3 +183,48 @@ row shows). So the provenance chain now says: the live
 deploy-time lockfile and build path, which were not preserved; what closes the gap functionally
 is `crates/connector-settlement-solana`'s integration tests, which load the artifact this source
 builds into a real validator and prove the Rust backend's claims redeem against it.
+
+---
+
+## Mint amendment (2026-08-27) — the mock USDC mint moved, and why
+
+**The mint above is retired.** `xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in` is still on chain
+and still holds its 100M supply, but **its mint authority is lost.** This record said from the
+start that "keypairs used for this deploy live outside the repo (scratchpad, not committed)"; the
+scratchpad is gone. `AEPoA5xTTJY9SR8c5CfsemFGC5TmxQBe6Xf6wewEtnYa` is in no repository, on no
+machine, and in no scratchpad that survives. Nobody can mint that token, and nobody can refill a
+treasury holding it — which is what left the devnet faucet's Solana leg answering `503` from the
+day the faucet moved to its own box (#919) with no repair path.
+
+The fix was to change the mechanism rather than hunt for the key. The faucet now **mints on
+demand** from a mint it is itself the authority of, exactly as its Base Sepolia leg already did
+through an ungated `mint()`. Nothing about the arrangement depends on a key that only one place
+holds.
+
+### The live devnet settlement token
+
+| Item                  | Value                                                                                                     |
+| --------------------- | --------------------------------------------------------------------------------------------------------- |
+| Mock USDC mint (6 dp) | `34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU`                                                            |
+| Mint authority        | `Bg5YF6nCKe8aeJwoyovYpGr7Qj9ViGSXiH9JHE7tH98F` — the faucet box's own treasury                            |
+| Freeze authority      | none                                                                                                      |
+| Initial supply        | 0 — every token in circulation has been dripped                                                           |
+| Created               | 2026-08-27, tx `3D5gX28jrXAA7ohr67XbTH3GGtvDsqejugLgegi7WAtoPWPUUd87dJ3wZBPaRmssa13M4d2pnahv3Vb3KaQxnrJy` |
+
+Created by `infra/linode-faucet/create-devnet-usdc-mint.sh`, run on the faucet box, against the
+treasury `infra/linode-faucet/generate-solana-treasury.sh` had generated there. The private half
+has never left that box. If the box is lost, the recovery is to run both scripts again on its
+replacement and re-pin the new address — cheap, and the reason this shape was chosen.
+
+Explorer: <https://explorer.solana.com/address/34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU?cluster=devnet>
+
+### The program cannot be upgraded in place
+
+The lost key is also this program's **upgrade authority** (see "On-chain addresses" above:
+`Upgrade authority: AEPoA5x… (deployer)`). So any change to `packages/solana-program/src` —
+[#1036](https://github.com/toon-protocol/connector/issues/1036)'s lock, preimage release and
+expiry refund among them — is a **fresh deploy at a new program id**, not an upgrade of this one.
+That is not a small consequence: [ADR 0053](../../../docs/adr/0053-a-solana-claim-binds-its-domain-the-way-an-evm-claim-does.md)
+binds the settlement program into a claim's signed message, so a new program id is a new claim
+domain and every open channel on the old one has to be drained or abandoned first. Plan that
+deploy as a migration, not as a release.

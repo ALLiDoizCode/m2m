@@ -221,9 +221,12 @@ through a running node's operator surface, because only a running node can submi
 
 ## `infra/` and `deploy/`
 
-`infra/` provisions machines. `linode-relay/` and `linode-store/` are the two devnet boxes —
-each with a bootstrap script, nginx and Let's Encrypt, compose overlays and the
-bind-mounted `connector-rust.toml` the box actually runs. `linode-faucet/` is the faucet box.
+`infra/` provisions machines. `linode-relay/` and `linode-store/` describe the two connector
+devnet boxes — bootstrap script, nginx and Let's Encrypt, compose overlays and
+`connector-rust.toml` — but are fixtures now (ADR 0068): each box actually deploys from its
+own repository's `deploy/` bundle (`toon-protocol/relay`, `toon-protocol/store`), and these
+directories exist so `devnet_configs_load.rs` keeps booting realistic fleet-shaped configs.
+`linode-faucet/` is the faucet box, and is not a fixture — it still deploys from here.
 `linode/` is a retired chain box that now holds one live artefact, `endpoints.json`.
 `solana/` provisions chain-side state: the deterministic mock USDC mint, treasury funding, the
 local validator entrypoint.

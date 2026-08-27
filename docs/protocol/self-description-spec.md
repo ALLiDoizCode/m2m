@@ -68,15 +68,16 @@ either proved at startup or was configured with, about itself.
 
 The document carries:
 
-| fact                                                                                                                                                                                                                                                   | why a stranger needs it                                                            |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------- |
-| ILP address(es)                                                                                                                                                                                                                                        | what to address                                                                    |
-| public HTTP and BTP endpoints, and which carriages are exposed                                                                                                                                                                                         | where to reach it, and how                                                         |
-| **edge identity** — the key a packet is sealed to                                                                                                                                                                                                      | without it a packet cannot be sealed, so it cannot be delivered                    |
-| per chain: chain id, settlement address, token network and its registry, token address, decimals                                                                                                                                                       | what a buyer needs to **open a channel**                                           |
-| route prices — the whole schedule, base and per-KiB slope ([ADR 0065](../adr/0065-a-price-is-a-schedule-over-payload-length.md)) — and their descriptions once [ADR 0044](../adr/0044-a-probe-answers-what-a-route-costs-and-what-it-does.md) is built | what a route costs **at any size**, and what it does                               |
-| the client transport its routes require, when they agree on one                                                                                                                                                                                        | the `requiredTransport` failure, closed by construction                            |
-| supported client-edge versions, and which one unversioned `POST /ilp` resolves to                                                                                                                                                                      | [ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md), issue #1054 |
+| fact                                                                                                                                                                                                                                                   | why a stranger needs it                                                             |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| ILP address(es)                                                                                                                                                                                                                                        | what to address                                                                     |
+| public HTTP and BTP endpoints, and which carriages are exposed                                                                                                                                                                                         | where to reach it, and how                                                          |
+| **edge identity** — the key a packet is sealed to                                                                                                                                                                                                      | without it a packet cannot be sealed, so it cannot be delivered                     |
+| per chain: chain id, settlement address, token network and its registry, token address, decimals                                                                                                                                                       | what a buyer needs to **open a channel**                                            |
+| route prices — the whole schedule, base and per-KiB slope ([ADR 0065](../adr/0065-a-price-is-a-schedule-over-payload-length.md)) — and their descriptions once [ADR 0044](../adr/0044-a-probe-answers-what-a-route-costs-and-what-it-does.md) is built | what a route costs **at any size**, and what it does                                |
+| a route's declared **request** shape, where the operator wrote one ([ADR 0067](../adr/0067-a-route-declares-its-request-shape-and-the-connector-never-reads-it.md))                                                                                    | what to **send** to use the route, for a route whose app expects a specific payload |
+| the client transport its routes require, when they agree on one                                                                                                                                                                                        | the `requiredTransport` failure, closed by construction                             |
+| supported client-edge versions, and which one unversioned `POST /ilp` resolves to                                                                                                                                                                      | [ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md), issue #1054  |
 
 **ND-06** `[connector]` — The **edge identity** MUST be published. A route whose terminating identity
 is unpublished is unreachable: a sender cannot seal to it, so it can never be delivered to.
@@ -84,6 +85,14 @@ is unpublished is unreachable: a sender cannot seal to it, so it can never be de
 **ND-07** `[connector]` — Per-chain settlement facts MUST be derived from the settlement backend the
 connector verified against a chain at startup, and MUST NOT be separately declared. **Two declarations
 of one fact is how a mainnet node comes to announce itself as devnet.**
+
+**ND-07a** `[connector]` — A route's `request` table is the one exception to ND-07's "derived, never
+declared" rule, and deliberately so: there is no backend this connector can ask what an arbitrary
+app's payload looks like, so declaration is the only mechanism available at all
+([ADR 0067](../adr/0067-a-route-declares-its-request-shape-and-the-connector-never-reads-it.md)). A
+connector MUST NOT inspect a key inside it, MUST NOT fetch it from anywhere, and MUST publish it
+byte-for-byte as the operator wrote it, converted to JSON. Omitted — not `null` — on a route that
+configured none.
 
 ### 1.3 What it does not carry
 
@@ -95,6 +104,12 @@ paid reverse proxy; what runs behind it is the app's business.
 > [ADR 0046](../adr/0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md)'s removed
 > relay assumption survived. Keeping it would have mixed facts the node **proved** with a claim about
 > software it does not run, and mixing those provenances is how `requiredTransport` happened.
+
+> ND-07a's `request` table is not an exception to this rule, even though it names an app fact.
+> `relayUrl` **asserted** — this node claimed a relay existed, mixed in among facts it had proved.
+> `request` is never asserted by the connector at all: it is an operator's opaque declaration, carried
+> unread, and the connector claims nothing about whether the app behind it matches. See
+> [ADR 0067](../adr/0067-a-route-declares-its-request-shape-and-the-connector-never-reads-it.md).
 
 **ND-09** `[connector]` — It MUST NOT carry **per-peer** facts: peer identities, per-peering fees, or
 caps. Publishing them discloses who this node peers with and how far it trusts each — an

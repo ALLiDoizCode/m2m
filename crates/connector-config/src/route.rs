@@ -80,6 +80,16 @@ pub(crate) struct RawRoute {
     price: Option<Price>,
     #[serde(default)]
     transport: Option<String>,
+    /// What a client should send to use this route (issue #1210): an
+    /// operator-declared table the connector parses only far enough to
+    /// confirm it IS a table, and never reads a key out of -- the app that
+    /// registered those keys is the only authority on what they mean, and
+    /// the app's **own** repository, where app and connector are composed,
+    /// is where a declaration here is checked against what actually runs
+    /// (ADR 0067). Not `deny_unknown_fields`: that guarantee belongs to
+    /// this row, not to a blob whose keys are the app's business.
+    #[serde(default)]
+    request: Option<toml::Table>,
 }
 
 /// A `[[children]]` entry: a convenience form that desugars into a
@@ -186,6 +196,7 @@ pub struct StaticRoute {
     handler_url: Url,
     price: Price,
     transport_policy: TransportPolicy,
+    request: Option<serde_json::Value>,
 }
 
 impl StaticRoute {
@@ -206,6 +217,7 @@ impl StaticRoute {
             handler_url.into(),
             Some(Price::FREE),
             TransportPolicy::Both,
+            None,
         )
     }
 
@@ -232,6 +244,7 @@ impl StaticRoute {
             handler_url.into(),
             Some(price),
             TransportPolicy::Both,
+            None,
         )
     }
 
@@ -264,6 +277,7 @@ impl StaticRoute {
             handler_url.into(),
             Some(price),
             transport_policy,
+            None,
         )
     }
 
@@ -297,6 +311,22 @@ impl StaticRoute {
     pub fn transport_policy(&self) -> TransportPolicy {
         self.transport_policy
     }
+
+    /// What a client should send to use this route (issue #1210) -- the
+    /// operator's `request` table, converted to JSON and published verbatim
+    /// in the node self-description and the x402 greeting. `None` when the
+    /// operator wrote nothing, which is every route before this issue.
+    pub fn request(&self) -> Option<&serde_json::Value> {
+        self.request.as_ref()
+    }
+
+    /// Attach a request declaration to a route built directly rather than
+    /// from a config file (issue #1210) -- a fixture's shorthand for what
+    /// `[[routes]] request = { ... }` gives a config-loaded route.
+    pub fn with_request(mut self, request: serde_json::Value) -> StaticRoute {
+        self.request = Some(request);
+        self
+    }
 }
 
 /// A route whose traffic this connector forwards to a peer rather than
@@ -310,6 +340,7 @@ pub struct PeerRouteConfig {
     prefix: String,
     peer_id: String,
     price: Price,
+    request: Option<serde_json::Value>,
 }
 
 impl PeerRouteConfig {
@@ -333,6 +364,13 @@ impl PeerRouteConfig {
     pub fn price(&self) -> Price {
         self.price
     }
+
+    /// What a client should send to use this route (issue #1210) -- see
+    /// [`StaticRoute::request`]; same meaning, same opacity, on the
+    /// forwarded branch.
+    pub fn request(&self) -> Option<&serde_json::Value> {
+        self.request.as_ref()
+    }
 }
 
 /// Validate a route's `prefix` field, shared by [`build_route`] and
@@ -353,6 +391,7 @@ fn build_route(
     handler_url: String,
     price: Option<Price>,
     transport_policy: TransportPolicy,
+    request: Option<toml::Table>,
 ) -> Result<StaticRoute, ConfigError> {
     let prefix = validate_prefix(prefix)?;
     let url = Url::parse(&handler_url).map_err(|source| ConfigError::InvalidHandlerUrl {
@@ -375,7 +414,17 @@ fn build_route(
         handler_url: url,
         price,
         transport_policy,
+        request: request.map(request_to_json),
     })
+}
+
+/// Convert a parsed `request` table into the JSON value the self-description
+/// and the x402 greeting actually publish (issue #1210) -- once, at load,
+/// rather than on every request answered. A `toml::Table` that parsed at all
+/// always converts: its keys are already `String`s, and nothing JSON cannot
+/// represent survives a `[[routes]]` entry an operator would plausibly write.
+fn request_to_json(table: toml::Table) -> serde_json::Value {
+    serde_json::to_value(table).expect("a parsed TOML table always converts to JSON")
 }
 
 /// Parse a `[[routes]]`/`[[children]]` entry's `transport` field (issue
@@ -436,6 +485,7 @@ fn build_peer_route(
     prefix: String,
     peer_id: String,
     price: Option<Price>,
+    request: Option<toml::Table>,
 ) -> Result<PeerRouteConfig, ConfigError> {
     let prefix = validate_prefix(prefix)?;
     if peer_id.trim().is_empty() {
@@ -449,6 +499,7 @@ fn build_peer_route(
         prefix,
         peer_id,
         price,
+        request: request.map(request_to_json),
     })
 }
 
@@ -490,7 +541,13 @@ pub(crate) fn resolve_routes(
         match (raw.handler_url, raw.peer_id) {
             (Some(handler_url), None) => {
                 let transport_policy = parse_transport_policy(&raw.prefix, raw.transport)?;
-                let route = build_route(raw.prefix, handler_url, raw.price, transport_policy)?;
+                let route = build_route(
+                    raw.prefix,
+                    handler_url,
+                    raw.price,
+                    transport_policy,
+                    raw.request,
+                )?;
                 insert_unique_prefix(&mut seen, route.prefix())?;
                 insert_consistent_handler_price(&mut handler_prices, &route)?;
                 routes.push(route);
@@ -511,7 +568,7 @@ pub(crate) fn resolve_routes(
                         value,
                     });
                 }
-                let route = build_peer_route(raw.prefix, peer_id, raw.price)?;
+                let route = build_peer_route(raw.prefix, peer_id, raw.price, raw.request)?;
                 insert_unique_prefix(&mut seen, route.prefix())?;
                 peer_routes.push(route);
             }
@@ -542,7 +599,13 @@ pub(crate) fn resolve_routes(
         }
         let prefix = format!("{apex}.{}", child.name);
         let transport_policy = parse_transport_policy(&prefix, child.transport)?;
-        let route = build_route(prefix, child.handler_url, child.price, transport_policy)?;
+        let route = build_route(
+            prefix,
+            child.handler_url,
+            child.price,
+            transport_policy,
+            None,
+        )?;
         insert_unique_prefix(&mut seen, route.prefix())?;
         insert_consistent_handler_price(&mut handler_prices, &route)?;
         routes.push(route);
@@ -567,6 +630,7 @@ mod tests {
             fee: None,
             price: Some(Price::flat(price)),
             transport: None,
+            request: None,
         }
     }
 
@@ -582,6 +646,7 @@ mod tests {
             fee: None,
             price: Some(Price::flat(price)),
             transport: None,
+            request: None,
         }
     }
 
@@ -638,6 +703,7 @@ mod tests {
                 fee: None,
                 price: None,
                 transport: None,
+                request: None,
             }],
             vec![],
         );
@@ -659,6 +725,7 @@ mod tests {
                 fee: Some(toml::Value::Integer(5)),
                 price: Some(Price::flat(100)),
                 transport: None,
+                request: None,
             }],
             vec![],
         );
@@ -682,6 +749,7 @@ mod tests {
                 fee: Some(toml::Value::Integer(0)),
                 price: Some(Price::flat(100)),
                 transport: None,
+                request: None,
             }],
             vec![],
         );
@@ -704,6 +772,7 @@ mod tests {
                 fee: Some(toml::Value::Integer(3)),
                 price: Some(Price::flat(100)),
                 transport: None,
+                request: None,
             }],
             vec![],
         );
@@ -777,6 +846,7 @@ mod tests {
                 fee: None,
                 price: None,
                 transport: None,
+                request: None,
             }],
             vec![],
         );
@@ -868,6 +938,7 @@ mod tests {
             fee: None,
             price: Some(price),
             transport: None,
+            request: None,
         }
     }
 
@@ -903,6 +974,7 @@ mod tests {
                 fee: None,
                 price: Some(Price::scheduled(100, 5)),
                 transport: None,
+                request: None,
             }],
             vec![],
         )
@@ -1062,6 +1134,7 @@ mod tests {
                 fee: None,
                 price: None,
                 transport: None,
+                request: None,
             }],
             vec![],
         );
@@ -1082,6 +1155,7 @@ mod tests {
                 fee: None,
                 price: None,
                 transport: None,
+                request: None,
             }],
             vec![],
         );
@@ -1220,6 +1294,7 @@ mod tests {
                 fee: None,
                 price: Some(Price::flat(1000)),
                 transport: Some("btp".to_string()),
+                request: None,
             }],
             vec![],
         )
@@ -1238,6 +1313,7 @@ mod tests {
                 fee: None,
                 price: Some(Price::flat(10)),
                 transport: Some("http".to_string()),
+                request: None,
             }],
             vec![],
         )
@@ -1256,6 +1332,7 @@ mod tests {
                 fee: None,
                 price: Some(Price::flat(10)),
                 transport: Some("both".to_string()),
+                request: None,
             }],
             vec![],
         )
@@ -1278,6 +1355,7 @@ mod tests {
                 fee: None,
                 price: Some(Price::flat(10)),
                 transport: Some("carrier-pigeon".to_string()),
+                request: None,
             }],
             vec![],
         );
@@ -1303,6 +1381,7 @@ mod tests {
                 fee: None,
                 price: None,
                 transport: Some("btp".to_string()),
+                request: None,
             }],
             vec![],
         );
@@ -1359,5 +1438,100 @@ mod tests {
         )
         .unwrap();
         assert_eq!(route.transport_policy(), TransportPolicy::Btp);
+    }
+
+    // --- issue #1210: a route declares its request shape --------------
+
+    fn table(pairs: &[(&str, toml::Value)]) -> toml::Table {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.clone()))
+            .collect()
+    }
+
+    /// A route's `request` table survives resolution verbatim, converted to
+    /// the JSON value the self-description and the x402 greeting publish --
+    /// arrays, nested tables, integers and strings all round-trip.
+    #[test]
+    fn a_routes_request_table_resolves_to_the_equivalent_json() {
+        let request = table(&[
+            ("protocol", toml::Value::String("nip90".to_string())),
+            (
+                "kinds",
+                toml::Value::Array(vec![toml::Value::Integer(5096), toml::Value::Integer(5098)]),
+            ),
+            (
+                "params",
+                toml::Value::Table(table(&[(
+                    "chain",
+                    toml::Value::Array(vec![toml::Value::String("evm:84532".to_string())]),
+                )])),
+            ),
+        ]);
+        let (routes, _) = resolve_routes(
+            None,
+            vec![RawRoute {
+                prefix: "g.toon.gas".to_string(),
+                handler_url: Some("http://localhost:4000".to_string()),
+                peer_id: None,
+                fee: None,
+                price: Some(Price::flat(1000)),
+                transport: None,
+                request: Some(request),
+            }],
+            vec![],
+        )
+        .expect("resolve");
+
+        assert_eq!(
+            routes[0].request(),
+            Some(&serde_json::json!({
+                "protocol": "nip90",
+                "kinds": [5096, 5098],
+                "params": { "chain": ["evm:84532"] },
+            }))
+        );
+    }
+
+    /// A route that configures none is unaffected -- `None`, not an empty
+    /// table, which is every route before this issue.
+    #[test]
+    fn a_route_with_no_request_table_has_none() {
+        let (routes, _) = resolve_routes(
+            None,
+            vec![priced_route("g.example.app", "http://localhost:4000", 10)],
+            vec![],
+        )
+        .expect("resolve");
+        assert_eq!(routes[0].request(), None);
+    }
+
+    /// A forwarded route can carry the same declaration, for the same
+    /// opaque reason a terminated route can: the connector never reads
+    /// either one's keys.
+    #[test]
+    fn a_forwarded_routes_request_table_resolves_too() {
+        let (_, peer_routes) = resolve_routes(
+            None,
+            vec![RawRoute {
+                prefix: "g.peer-b".to_string(),
+                handler_url: None,
+                peer_id: Some("peer-b".to_string()),
+                fee: None,
+                price: Some(Price::flat(100)),
+                transport: None,
+                request: Some(table(&[(
+                    "protocol",
+                    toml::Value::String("nip90".to_string()),
+                )])),
+            }],
+            vec![],
+        )
+        .expect("resolve");
+
+        assert_eq!(
+            peer_routes[0].request(),
+            Some(&serde_json::json!({ "protocol": "nip90" }))
+        );
     }
 }

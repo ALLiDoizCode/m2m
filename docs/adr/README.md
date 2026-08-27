@@ -1,6 +1,6 @@
 # Architecture decision records
 
-66 records. **Every one now carries a `**Status:**` line under its title** — that line, not this
+69 records. **Every one now carries a `**Status:**` line under its title** — that line, not this
 index, is the authority for whether a record is live. This page is the map: what is live, grouped
 by area; what is dead, grouped by what killed it; and what the folder still says that the code no
 longer does.
@@ -143,11 +143,12 @@ This is the group that spells out the nginx sentence at the top of this page.
 
 ### Discovery
 
-| #                                                                             | Decision                                                       | Status                                                              |
-| ----------------------------------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------- |
-| [0022](0022-a-connector-answers-it-does-not-announce.md)                      | A connector answers when asked; it still never announces       | Accepted — one consequence lost to 0027                             |
-| [0046](0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md) | The kind:10032 announce is removed; a connector needs no relay | Accepted — **built** (#1074); **retires 0030**; restores 0022, 0006 |
-| [0050](0050-a-connectors-url-resolves-to-its-self-description.md)             | A connector's URL resolves to its self-description             | Accepted — **built** (#1080); completes 0022                        |
+| #                                                                                   | Decision                                                             | Status                                                                                |
+| ----------------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| [0022](0022-a-connector-answers-it-does-not-announce.md)                            | A connector answers when asked; it still never announces             | Accepted — one consequence lost to 0027                                               |
+| [0046](0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md)       | The kind:10032 announce is removed; a connector needs no relay       | Accepted — **built** (#1074); **retires 0030**; restores 0022, 0006; extended by 0067 |
+| [0050](0050-a-connectors-url-resolves-to-its-self-description.md)                   | A connector's URL resolves to its self-description                   | Accepted — **built** (#1080); completes 0022; extended by 0067                        |
+| [0067](0067-a-route-declares-its-request-shape-and-the-connector-never-reads-it.md) | A route declares its request shape, and the connector never reads it | Accepted — **built** (#1210); extends 0050, 0046                                      |
 
 ---
 
@@ -156,14 +157,14 @@ This is the group that spells out the nginx sentence at the top of this page.
 Neither connector-internal nor wire law: decisions about how the fleet is run, migrated, or
 how another repository is regarded.
 
-| #                                                                                    | Decision                                                                | Status                                     |
-| ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- | ------------------------------------------ |
-| [0017](0017-the-typescript-connector-is-a-prototype.md)                              | The TypeScript connector is a prototype, not a reference implementation | Accepted — a judgement about another repo  |
-| [0041](0041-a-moving-tag-carries-the-fleets-committed-config-or-it-does-not-move.md) | A moving tag carries the fleet's committed config, or it does not move  | Accepted                                   |
-| [0055](0055-a-release-is-one-dispatch-and-the-ordering-rides-as-data.md)             | A release is one dispatch, and the deploy ordering rides as data        | **Proposed** — extends 0041                |
-| [0056](0056-production-is-a-named-empty-tier.md)                                     | Production is a named, empty tier                                       | **Proposed** — describes an absence        |
-| [0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)                   | Minimum delivery is retired; a claim bounds erosion                     | Accepted — **built** (#1143)               |
-| [0065](0065-mina-leaves-the-repository.md)                                           | Mina leaves the repository                                              | Accepted — **built** (#1205); extends 0002 |
+| #                                                                                        | Decision                                                                  | Status                                                                              |
+| ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| [0017](0017-the-typescript-connector-is-a-prototype.md)                                  | The TypeScript connector is a prototype, not a reference implementation   | Accepted — a judgement about another repo                                           |
+| [0041](0041-a-moving-tag-carries-the-fleets-committed-config-or-it-does-not-move.md)     | A moving tag carries the fleet's committed config, or it does not move    | Partly superseded by 0068 — Decision 3 (connector promotion) retired; 1, 2, 4 stand |
+| [0056](0056-production-is-a-named-empty-tier.md)                                         | Production is a named, empty tier                                         | **Proposed** — describes an absence                                                 |
+| [0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)                       | Minimum delivery is retired; a claim bounds erosion                       | Accepted — **built** (#1143)                                                        |
+| [0065](0065-mina-leaves-the-repository.md)                                               | Mina leaves the repository                                                | Accepted — **built** (#1205); extends 0002                                          |
+| [0068](0068-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md) | A node repository pins the connector; nothing here moves a tag onto a box | Accepted — **built** (#1213); partly supersedes 0041, supersedes 0055               |
 
 ---
 
@@ -172,14 +173,15 @@ how another repository is regarded.
 Dead in full. **None of these is deleted, and none ever will be.** A record saying "we built this
 and then removed it" is the cheapest defence this project has against building it a second time.
 
-| #                                                                                     | What it decided                                                       | What replaced it                                                                                                                                                                                                                     |
-| ------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| [0013](0013-cut-over-through-a-parallel-address-space.md)                             | The Rust fleet runs in parallel under its own address space           | **Spent.** The migration completed (#872): the TypeScript prefix and fleet are gone. Its comparison half was superseded by 0017 first.                                                                                               |
-| [0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md)       | A peer PREPARE arrives with its covering claim, or it is greeted      | **[0042](0042-a-packet-carries-its-claim.md).** Every clause of its Decision was false of the shipped binary; 0042 restates the rule for every role and states the trade it makes.                                                   |
-| [0037](0037-a-purchased-peering-is-a-terminated-route-whose-work-is-a-table-write.md) | A purchased peering is a terminated route whose work is a table write | **Nothing.** [0043](0043-purchasable-peering-is-removed.md) removed purchasable peering outright. A peering is created by the operator or not at all.                                                                                |
-| [0038](0038-a-peer-sale-lease-demotes-at-match-time-and-reaps-off-the-hot-path.md)    | A peer-sale lease demotes at match time and reaps off the hot path    | **Nothing.** [0043](0043-purchasable-peering-is-removed.md). It gave expiry to a row shape that no longer exists.                                                                                                                    |
-| [0039](0039-abuse-bounds-on-a-purchased-peering-refuse-not-refund.md)                 | Abuse bounds on a purchased peering refuse, not refund                | **Nothing.** [0043](0043-purchasable-peering-is-removed.md). Its bounds guarded a network-writable primitive; none remains. "Refuse, not refund" survives as a principle.                                                            |
-| [0030](0030-an-operator-announces-a-node-the-node-still-does-not.md)                  | An operator announces a node; the node still does not                 | **Nothing.** [0046](0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md) removed the announce outright — it assumes a relay, and a pure-connector network has none. Its argument about _who_ may announce is kept. |
+| #                                                                                     | What it decided                                                       | What replaced it                                                                                                                                                                                                                                                 |
+| ------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [0013](0013-cut-over-through-a-parallel-address-space.md)                             | The Rust fleet runs in parallel under its own address space           | **Spent.** The migration completed (#872): the TypeScript prefix and fleet are gone. Its comparison half was superseded by 0017 first.                                                                                                                           |
+| [0031](0031-a-peer-prepare-arrives-with-its-covering-claim-or-it-is-greeted.md)       | A peer PREPARE arrives with its covering claim, or it is greeted      | **[0042](0042-a-packet-carries-its-claim.md).** Every clause of its Decision was false of the shipped binary; 0042 restates the rule for every role and states the trade it makes.                                                                               |
+| [0037](0037-a-purchased-peering-is-a-terminated-route-whose-work-is-a-table-write.md) | A purchased peering is a terminated route whose work is a table write | **Nothing.** [0043](0043-purchasable-peering-is-removed.md) removed purchasable peering outright. A peering is created by the operator or not at all.                                                                                                            |
+| [0038](0038-a-peer-sale-lease-demotes-at-match-time-and-reaps-off-the-hot-path.md)    | A peer-sale lease demotes at match time and reaps off the hot path    | **Nothing.** [0043](0043-purchasable-peering-is-removed.md). It gave expiry to a row shape that no longer exists.                                                                                                                                                |
+| [0039](0039-abuse-bounds-on-a-purchased-peering-refuse-not-refund.md)                 | Abuse bounds on a purchased peering refuse, not refund                | **Nothing.** [0043](0043-purchasable-peering-is-removed.md). Its bounds guarded a network-writable primitive; none remains. "Refuse, not refund" survives as a principle.                                                                                        |
+| [0030](0030-an-operator-announces-a-node-the-node-still-does-not.md)                  | An operator announces a node; the node still does not                 | **Nothing.** [0046](0046-the-kind-10032-announce-is-removed-a-connector-needs-no-relay.md) removed the announce outright — it assumes a relay, and a pure-connector network has none. Its argument about _who_ may announce is kept.                             |
+| [0055](0055-a-release-is-one-dispatch-and-the-ordering-rides-as-data.md)              | A release is one dispatch, and the deploy ordering rides as data      | **Nothing.** [0068](0068-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md) retired the promotion regime this record specified before it was ever accepted or exercised — no release was cut and `:rust-release` never moved under it. |
 
 ### Records carrying superseded reasoning
 
