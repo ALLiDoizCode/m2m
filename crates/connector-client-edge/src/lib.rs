@@ -2894,13 +2894,15 @@ mod tests {
         );
     }
 
-    /// ND-08/ND-09, asserted on the bytes a client actually receives: nothing
-    /// about software BEHIND this connector, and nothing about who it peers
-    /// with or how far it trusts them. A `relayUrl` was the last place ADR
-    /// 0046's removed relay assumption survived; a cap is discovered by being
-    /// refused (ND-10), never by being published.
-    #[tokio::test]
-    async fn the_self_description_carries_no_relay_no_peer_and_no_cap() {
+    /// The per-peer packet cap the two tests below install. Four digits, so a
+    /// random public key's hex can spell it by accident -- which is exactly
+    /// what flaked this suite (#1206).
+    const UNPUBLISHED_PEER_PACKET_CAP: u64 = 9_999;
+
+    /// A node with one forwarded route whose counterparty carries a packet
+    /// cap, rendered by whichever signer the caller hands in -- the two tests
+    /// below differ only in that signer.
+    fn node_with_a_capped_peer(signer: Arc<dyn Signer>) -> Router {
         let peer_route = PeerRoute::new_priced("g.peer.somewhere", "a-counterparty", 7);
         let connector = Connector::new(
             vec![],
@@ -2909,19 +2911,27 @@ mod tests {
             Arc::new(InProcessPeerTransport::new()),
             test_clock(),
         )
-        .with_peer_packet_caps([("a-counterparty".to_string(), 9_999u64)]);
-        let app = router_with_node_facts(
+        .with_peer_packet_caps([("a-counterparty".to_string(), UNPUBLISHED_PEER_PACKET_CAP)]);
+        router_with_node_facts(
             Arc::new(connector),
-            test_signer(),
+            signer,
             None,
             Arc::new(test_gate(ClientChannelRegistry::new())),
             NodeFacts::default(),
             DEFAULT_BTP_SESSION_WINDOW,
             None,
             Arc::from([]),
-        );
+        )
+    }
 
-        let document = self_description_of(app).await;
+    /// ND-08/ND-09, asserted on the bytes a client actually receives: nothing
+    /// about software BEHIND this connector, and nothing about who it peers
+    /// with or how far it trusts them. A `relayUrl` was the last place ADR
+    /// 0046's removed relay assumption survived; a cap is discovered by being
+    /// refused (ND-10), never by being published.
+    #[tokio::test]
+    async fn the_self_description_carries_no_relay_no_peer_and_no_cap() {
+        let document = self_description_of(node_with_a_capped_peer(test_signer())).await;
         let rendered = serde_json::to_string(&document).unwrap();
 
         assert!(
@@ -2929,7 +2939,7 @@ mod tests {
             "a forwarded route's price may be published; WHO carries it may not (ND-09): {rendered}"
         );
         assert!(
-            !json_contains_number(&document, 9_999),
+            !json_carries_amount(&document, UNPUBLISHED_PEER_PACKET_CAP),
             "a cap is discovered by its T04 refusal, never by being published (ND-10): {document}"
         );
         for forbidden in ["relay", "ttl", "notice"] {
@@ -2947,61 +2957,48 @@ mod tests {
     }
 
     /// Regression for #1206: the cap check above must fail on a leaked
-    /// **field**, never on the edge signer's public key incidentally
-    /// spelling the same digits. `test_signer()` generates a fresh
-    /// secp256k1 key per run, and a 130-hex-char string contains "9999"
-    /// about 1 run in 540 -- rare enough to pass a normal gate run yet
-    /// common enough to have flaked this suite. Rather than wait on that
-    /// odds, generate keys until one actually collides and prove the
-    /// document still passes with it installed.
+    /// **field**, never on the edge signer's public key incidentally spelling
+    /// the same digits. `test_signer()` generates a fresh secp256k1 key per
+    /// run, and a 130-hex-char string spells the cap about 1 run in 540 --
+    /// rare enough to survive a normal gate run, common enough to have flaked
+    /// this suite. Rather than wait on those odds, generate keys until one
+    /// actually collides and prove the document still passes with it
+    /// installed.
     #[tokio::test]
     async fn the_no_cap_assertion_survives_a_signer_key_that_spells_the_cap() {
+        let spelled_cap = UNPUBLISHED_PEER_PACKET_CAP.to_string();
         let colliding_signer = (0..10_000)
             .map(|generation| LocalSigner::generate(format!("test-signer-{generation}")))
-            .find(|signer| hex_encode(&signer.public_key().expect("public key")).contains("9999"))
-            .expect("10,000 random keys should turn up at least one '9999' collision");
+            .find(|signer| {
+                hex_encode(&signer.public_key().expect("public key")).contains(&spelled_cap)
+            })
+            .expect("10,000 random keys should turn up at least one cap-spelling collision");
 
-        let peer_route = PeerRoute::new_priced("g.peer.somewhere", "a-counterparty", 7);
-        let connector = Connector::new(
-            vec![],
-            vec![peer_route],
-            Arc::new(FakeAppClient::new()),
-            Arc::new(InProcessPeerTransport::new()),
-            test_clock(),
-        )
-        .with_peer_packet_caps([("a-counterparty".to_string(), 9_999u64)]);
-        let app = router_with_node_facts(
-            Arc::new(connector),
-            Arc::new(colliding_signer),
-            None,
-            Arc::new(test_gate(ClientChannelRegistry::new())),
-            NodeFacts::default(),
-            DEFAULT_BTP_SESSION_WINDOW,
-            None,
-            Arc::from([]),
-        );
-
-        let document = self_description_of(app).await;
+        let document =
+            self_description_of(node_with_a_capped_peer(Arc::new(colliding_signer))).await;
 
         assert!(
-            !json_contains_number(&document, 9_999),
-            "the signer's public key spelling '9999' must not trip the cap assertion: {document}"
+            !json_carries_amount(&document, UNPUBLISHED_PEER_PACKET_CAP),
+            "the signer's public key spelling the cap must not trip the assertion: {document}"
         );
     }
 
-    /// Walks a parsed JSON document for a `9999`-valued number at any depth,
-    /// so the no-leaked-cap assertion inspects the document's shape rather
-    /// than its rendered bytes -- a hex string (a public key, an address)
-    /// can spell the same digits without being that field.
-    fn json_contains_number(value: &serde_json::Value, target: u64) -> bool {
+    /// Walks a parsed JSON document for `amount` at any depth, as a number or
+    /// as the decimal string this document renders amounts with -- a
+    /// `RoutePrice` publishes a price as `"7"`, not `7`, so a leaked cap would
+    /// most likely be a string too. Reading the document's shape rather than
+    /// its rendered bytes is what keeps a hex value -- a public key, an
+    /// address -- from spelling the same digits and failing the check (#1206).
+    fn json_carries_amount(value: &serde_json::Value, amount: u64) -> bool {
         match value {
-            serde_json::Value::Number(n) => n.as_u64() == Some(target),
+            serde_json::Value::Number(number) => number.as_u64() == Some(amount),
+            serde_json::Value::String(text) => *text == amount.to_string(),
             serde_json::Value::Array(items) => {
-                items.iter().any(|item| json_contains_number(item, target))
+                items.iter().any(|item| json_carries_amount(item, amount))
             }
-            serde_json::Value::Object(map) => {
-                map.values().any(|item| json_contains_number(item, target))
-            }
+            serde_json::Value::Object(fields) => fields
+                .values()
+                .any(|field| json_carries_amount(field, amount)),
             _ => false,
         }
     }
