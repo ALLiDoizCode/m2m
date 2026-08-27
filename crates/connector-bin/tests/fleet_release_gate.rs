@@ -23,6 +23,10 @@
 //!
 //! Most surviving cases are regression tests for something that actually
 //! happened on 2026-08-16, and each one names it.
+//!
+//! The CodeQL cases at the end are the same kind of thing for a different
+//! pipeline: `.github/workflows/codeql.yml` filters one query out of the
+//! scan (#1235), and a filter is a list that only ever grows.
 
 use std::collections::BTreeSet;
 
@@ -30,6 +34,8 @@ const PUBLISH_CONNECTOR_WORKFLOW: &str =
     include_str!("../../../.github/workflows/publish-connector-rust-image.yml");
 const RELEASE_WORKFLOW: &str = include_str!("../../../.github/workflows/release-connector.yml");
 const FLEET_HEALTH_WORKFLOW: &str = include_str!("../../../.github/workflows/fleet-health.yml");
+const CODEQL_WORKFLOW: &str = include_str!("../../../.github/workflows/codeql.yml");
+const CODEQL_CONFIG: &str = include_str!("../../../.github/codeql/codeql-config.yml");
 const RELAY_SWAP_CONFIG: &str = include_str!("../../../infra/linode-relay/swap.config.json");
 const RELAY_SWAP_OVERLAY: &str =
     include_str!("../../../infra/linode-relay/docker-compose.relay.swap.yml");
@@ -427,4 +433,144 @@ fn an_unhealthy_fleet_opens_a_labelled_issue() {
          an alert that never closes has to be read and dismissed by hand every \
          time, which is how a monitor stops being read."
     );
+}
+
+/// The `query-filters:` entries of a CodeQL config, as `(kind, id)` pairs in
+/// file order, ignoring comments. The config discusses the query it excludes
+/// at length, so a test keyed on the id alone would be asserting a paragraph.
+fn codeql_query_filters(raw: &str) -> Vec<(String, String)> {
+    let mut filters = Vec::new();
+    let mut inside = false;
+    let mut kind: Option<String> = None;
+    for line in raw.lines() {
+        if line.trim_start().starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        if !inside {
+            inside = line == "query-filters:";
+            continue;
+        }
+        // Any further line at column 0 ends the block.
+        if !line.starts_with(' ') {
+            break;
+        }
+        let trimmed = line.trim_start();
+        if let Some(entry) = trimmed.strip_prefix("- ") {
+            kind = Some(entry.trim_end_matches(':').to_string());
+        } else if let Some(id) = trimmed.strip_prefix("id:") {
+            let kind = kind.clone().expect(
+                "an `id:` under `query-filters:` with no `- exclude:`/`- include:` above it",
+            );
+            filters.push((kind, id.trim().to_string()));
+        }
+    }
+    filters
+}
+
+/// The column-0 keys of a YAML document, ignoring comments.
+fn top_level_keys(raw: &str) -> BTreeSet<String> {
+    raw.lines()
+        .filter(|line| !line.starts_with('#') && !line.starts_with(' ') && !line.trim().is_empty())
+        .filter_map(|line| line.split(':').next().map(str::to_string))
+        .collect()
+}
+
+/// `rust/hard-coded-cryptographic-value` matches on a parameter NAME, and
+/// every claim fixture here has one called `nonce` -- a monotonic counter
+/// the counterparty signs over (ADR 0053), not a secret. 463 alerts on
+/// `main`, and #1228 needed four dismissed by hand to go green. The fix is
+/// a config that excludes that one query (#1235); the risk is that a config
+/// which can exclude one query can exclude a second, or carve a directory
+/// out with `paths-ignore`, and neither would show up anywhere but a
+/// quieter alert count. This pins the exclusion set to exactly one id and
+/// the config to the two keys it needs.
+#[test]
+fn codeql_runs_the_committed_config_and_excludes_exactly_one_query() {
+    assert!(
+        CODEQL_WORKFLOW.contains("config-file: ./.github/codeql/codeql-config.yml"),
+        "codeql.yml no longer passes `.github/codeql/codeql-config.yml` to \
+         `github/codeql-action/init`. Without it the scan runs unfiltered and \
+         the 463 claim-nonce alerts come back, which is the state #1235 was \
+         filed against."
+    );
+
+    let filters = codeql_query_filters(CODEQL_CONFIG);
+    let expected = vec![(
+        "exclude".to_string(),
+        "rust/hard-coded-cryptographic-value".to_string(),
+    )];
+    assert_eq!(
+        filters, expected,
+        "codeql-config.yml's `query-filters` is not exactly one exclusion of \
+         `rust/hard-coded-cryptographic-value`. Every other open rule -- \
+         `rust/cleartext-logging`, `actions/missing-workflow-permissions` -- \
+         is real, and a new alert of an excluded shape is a question about \
+         this config, not a reason to widen it. If a second exclusion is \
+         genuinely warranted, it gets its own rationale comment AND this \
+         expected list changes with it."
+    );
+
+    let keys = top_level_keys(CODEQL_CONFIG);
+    let allowed: BTreeSet<String> = ["name", "query-filters"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let extra: Vec<&String> = keys.difference(&allowed).collect();
+    assert!(
+        extra.is_empty(),
+        "codeql-config.yml grew top-level key(s) {extra:?}. `paths` and \
+         `paths-ignore` silence a directory rather than a query, `queries` \
+         and `packs` change the suite away from the one default setup ran, \
+         and `disable-default-queries` turns the scan off; none of those is \
+         the one-query filter #1235 asked for."
+    );
+
+    // The switch has a human step no workflow performs -- an admin turns
+    // default setup off, or GitHub refuses this workflow's uploads -- and
+    // the header is where the next person finds that out.
+    assert!(
+        CODEQL_WORKFLOW.contains("code-scanning/default-setup"),
+        "codeql.yml's header no longer names the default-setup switch. \
+         GitHub rejects SARIF from an advanced workflow while default setup \
+         is enabled, so a reader seeing the `analyze` step fail on upload \
+         needs to be told it is a settings flip, not a broken scan."
+    );
+}
+
+/// The move from default setup was meant to change one query, not the
+/// coverage. Default setup's own uploads were categorised
+/// `/language:actions`, `/language:javascript-typescript`,
+/// `/language:python` and `/language:rust` (its six configured language
+/// names are four extractors), on a weekly schedule plus every push and
+/// PR. Dropping a language from the matrix would be a coverage cut that
+/// looks like a tidy-up.
+#[test]
+fn codeql_covers_every_analysis_default_setup_ran() {
+    for language in ["actions", "javascript-typescript", "python", "rust"] {
+        assert!(
+            CODEQL_WORKFLOW.contains(&format!("- language: {language}\n")),
+            "codeql.yml's matrix no longer analyses `{language}`, which \
+             default setup did. The switch to an advanced setup (#1235) was \
+             a query filter, not a coverage change."
+        );
+    }
+    assert!(
+        !CODEQL_WORKFLOW.contains("build-mode: autobuild")
+            && !CODEQL_WORKFLOW.contains("build-mode: manual"),
+        "codeql.yml asks CodeQL to build something. Default setup analysed \
+         Rust with `build-mode: none`, and the other three languages have no \
+         other mode; a build here is a second Rust compile on every PR that \
+         the scan does not need."
+    );
+
+    let triggers = workflow_triggers(CODEQL_WORKFLOW);
+    for trigger in ["push", "pull_request", "schedule"] {
+        assert!(
+            triggers.contains(trigger),
+            "codeql.yml no longer runs on `{trigger}` (it runs on {triggers:?}). \
+             Default setup ran on every push, every PR and a weekly schedule; \
+             the schedule is what catches a query-pack update against an \
+             unchanged `main`."
+        );
+    }
 }
