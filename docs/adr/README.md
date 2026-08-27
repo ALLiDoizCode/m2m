@@ -162,7 +162,7 @@ how another repository is regarded.
 | [0055](0055-a-release-is-one-dispatch-and-the-ordering-rides-as-data.md)             | A release is one dispatch, and the deploy ordering rides as data        | **Proposed** — extends 0041                |
 | [0056](0056-production-is-a-named-empty-tier.md)                                     | Production is a named, empty tier                                       | **Proposed** — describes an absence        |
 | [0057](0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md)                   | Minimum delivery is retired; a claim bounds erosion                     | Accepted — **built** (#1143)               |
-| [0065](0065-mina-leaves-the-repository.md)                                           | Mina leaves the repository                                              | Accepted — **built** (#1203); extends 0002 |
+| [0065](0065-mina-leaves-the-repository.md)                                           | Mina leaves the repository                                              | Accepted — **built** (#1205); extends 0002 |
 
 ---
 

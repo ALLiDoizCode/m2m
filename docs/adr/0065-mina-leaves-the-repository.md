@@ -1,6 +1,6 @@
 # Mina leaves the repository
 
-**Status:** Accepted — **built** (#1203). Extends [0002](0002-drop-mina-from-the-rust-connector.md), which dropped Mina as a settlement chain but deliberately left the deployed zkApp and its tooling in the tree. This record deletes what that one left standing. Closes #1117.
+**Status:** Accepted — **built** (#1205). Extends [0002](0002-drop-mina-from-the-rust-connector.md), which dropped Mina as a settlement chain but deliberately left the deployed zkApp and its tooling in the tree. This record deletes what that one left standing. Closes #1117.
 
 **Scope:** repository scope — what this repository contains, not what any implementation must do. See the [ADR index](README.md).
 
