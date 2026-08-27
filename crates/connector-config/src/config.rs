@@ -393,7 +393,7 @@ impl Config {
         if raw.announce.is_some() {
             return Err(ConfigError::AnnounceSectionRenamed);
         }
-        let node = resolve_node(raw.node)?;
+        let node = resolve_node(raw.node, peer_expose)?;
         let client_channels = resolve_client_channels(raw.client_channels, settlement_tables)?;
         let client_identities = resolve_client_identities(raw.client_identities)?;
         // Namespace disjointness (`peer-carriage-spec.md` §1.8). Peer and
@@ -1066,6 +1066,99 @@ price = 0
         );
         let prices: Vec<Price> = config.routes().iter().map(|r| r.price()).collect();
         assert_eq!(prices, vec![Price::flat(25), Price::FREE]);
+    }
+
+    /// Issue #1210: a route declares what a client should send it, as an
+    /// arbitrary table the connector never reads a key out of -- verified
+    /// here through a real TOML file, the shape an operator actually
+    /// writes, nested table and array and all.
+    #[test]
+    fn loads_a_routes_request_table() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[[routes]]
+prefix = "g.toon.gas"
+handler_url = "http://localhost:4000"
+price = 1000
+
+[routes.request]
+protocol = "nip90"
+kinds = [5096, 5098]
+
+[routes.request.params]
+chain = ["evm:84532"]
+"#,
+                key_path.display()
+            )
+        })
+        .expect("load");
+
+        assert_eq!(
+            config.routes()[0].request(),
+            Some(&serde_json::json!({
+                "protocol": "nip90",
+                "kinds": [5096, 5098],
+                "params": { "chain": ["evm:84532"] },
+            }))
+        );
+    }
+
+    /// A route that configures no `request` publishes exactly the document
+    /// it published before this issue -- `None`, not an absent-but-implied
+    /// empty table.
+    #[test]
+    fn a_route_with_no_request_table_loads_with_none() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[[routes]]
+prefix = "g.example.app"
+handler_url = "http://localhost:4000"
+price = 1000
+"#,
+                key_path.display()
+            )
+        })
+        .expect("load");
+
+        assert_eq!(config.routes()[0].request(), None);
+    }
+
+    /// `request` must be a table -- any other shape is refused by name at
+    /// load, the same treatment every other mistyped value in this file
+    /// gets, rather than being read and silently misinterpreted.
+    #[test]
+    fn a_non_table_request_is_refused_by_name() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{}"
+
+[[routes]]
+prefix = "g.example.app"
+handler_url = "http://localhost:4000"
+price = 1000
+request = "x"
+"#,
+                key_path.display()
+            )
+        });
+
+        assert_names_the_unknown_key(result, "request");
     }
 
     /// ADR 0065 (issue #984): a route's `price` may be written as a table

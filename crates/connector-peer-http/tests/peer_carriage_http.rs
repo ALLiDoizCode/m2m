@@ -1499,6 +1499,63 @@ async fn a_claim_that_does_not_cover_the_routes_price_is_refused_the_same_way() 
     assert!(response.headers.get(PAYMENT_REQUIRED_HEADER).is_some());
 }
 
+/// ADR 0065 (issue #984) at the peer gate: what a peer arrival must cover is
+/// the schedule at THAT packet's payload length, and the greeting it gets
+/// back publishes the schedule so the peer can price its next packet.
+///
+/// The specific failure this rules out: a gate that checks the route's base
+/// while the termination charges the full schedule would admit a large
+/// packet across the peering -- banking the covering claim -- and only then
+/// refuse it.
+#[tokio::test]
+async fn a_peer_claim_must_cover_the_schedule_at_this_packets_length() {
+    let payer_signer = LocalSigner::generate("payer");
+    let route = StaticRoute::new_scheduled(
+        "g.example.app",
+        "http://localhost:4000",
+        connector_domain::Price::scheduled(25, 1),
+    )
+    .unwrap();
+    let peer = accepting(payee_with_route(&payer_signer, route), bound_policy());
+
+    // ~2 KiB of sealed payload, so the slope actually bites: 25 + 1*2 = 27.
+    let mut big = prepare("g.example.app");
+    big.data = vec![0xab; 2000];
+    let expected = connector_domain::Price::scheduled(25, 1).charge(big.data.len());
+    assert_eq!(expected, 27);
+
+    // A claim covering the BASE is no longer enough for this packet.
+    let claim = sign_claim(&payer_signer, 1, 25);
+    let response = peer
+        .handle(request(
+            Some(&claim_as_json(&claim, &payer_signer)),
+            big.encode(),
+        ))
+        .await;
+
+    assert_eq!(ack_on(&response), Some(ClaimAckOutcome::Accepted));
+    let reject = connector_domain::Reject::decode(&response.body).expect("a reject");
+    assert_eq!(reject.code.as_str(), "F06");
+
+    // The greeting quotes what THIS packet costs, and publishes the rule
+    // beside it so the peer need not be refused twice to learn it.
+    let terms_header = response
+        .headers
+        .get(PAYMENT_REQUIRED_HEADER)
+        .expect("a refused arrival is greeted");
+    let raw = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        terms_header.as_bytes(),
+    )
+    .expect("the greeting is base64");
+    let terms = connector_domain::x402::parse_greeting(&raw).expect("well-formed terms");
+    assert_eq!(terms.price(), Some(expected));
+    assert_eq!(
+        terms.schedule(),
+        Some(connector_domain::Price::scheduled(25, 1))
+    );
+}
+
 /// The boundary this gate exists to leave open: a claim whose advance
 /// exactly meets the route's price is admitted precisely as it was before
 /// this issue -- delivered to the app, no greeting.

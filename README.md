@@ -43,6 +43,17 @@ mkdir -p node/config node/data && cd node
 openssl rand -hex 32 > data/signer.key && chmod 600 data/signer.key
 ```
 
+> [!NOTE]
+> **The published image is `linux/amd64` only.** On Apple Silicon (or any other
+> arm64 host), pull and run it under emulation:
+>
+> ```bash
+> docker pull --platform linux/amd64 ghcr.io/toon-protocol/connector:rust-main
+> ```
+>
+> and add `platform: linux/amd64` next to `image:` on the `connector` service in
+> `compose.yml` below.
+
 `compose.yml`:
 
 ```yaml
@@ -136,6 +147,22 @@ price       = 2500                       # 0.0025 USDC
 prefix      = "g.example.search.bulk"
 handler_url = "http://search:8080/bulk/"
 price       = 10000                      # 0.01 USDC, a cent
+
+# If your app's own costs go up with the size of what it is handed — storage,
+# uploads, anything you pay an upstream by the byte for — price it by size
+# instead of picking one number and losing money at one end of the range:
+#
+#     base     what every request pays, whatever it carries
+#     per_kib  added for each started kibibyte of the request's payload
+#
+# A caller is charged `base + per_kib × ceil(payload_size / 1024)`, and both
+# figures are published, so it can work out what a request costs before
+# sending it. Leave `price` a plain number when one number is right — that is
+# still what most routes want.
+[[routes]]
+prefix      = "g.example.store"
+handler_url = "http://store:8080/"
+price       = { base = 1000, per_kib = 30 }   # 0.001 USDC + 0.00003 per KiB
 ```
 
 Then ask the node what it is:
@@ -147,7 +174,8 @@ curl http://localhost:3000/ilp
 That free, unauthenticated `GET` returns the node's self-description — its
 addresses, endpoints, identity key and settlement facts. A connector answers; it
 never announces. It is also the whole of what another operator needs to peer with
-you.
+you, once [`[node]` and `peer_expose`](#being-peerable) are set — this minimal
+config's own self-description has no endpoints and nothing to dial.
 
 > [!IMPORTANT]
 > **Three things about the config that bite people.**
@@ -171,11 +199,18 @@ payload, makes exactly that HTTP request of your app, and seals the app's
 complete response back.
 
 **Your app is payment-oblivious, and that is the whole design.** It receives an
-ordinary HTTP request. This connector adds no headers of any kind, holds no key
-on the app's behalf, and the app supplies nothing toward the packet's fulfilment
-— the connector derives that itself. So "the app answered" and "the packet was
-paid for" stay separable, and an app that knows nothing about payment cannot
-leak, forge or withhold one.
+ordinary HTTP request. It holds no key on your behalf, and it supplies nothing
+toward the packet's fulfilment — the connector derives that itself. So "the app
+answered" and "the packet was paid for" stay separable, and an app that knows
+nothing about payment cannot leak, forge or withhold one.
+
+The one thing this connector does add is attribution, on a request it took the
+payment for itself: `X-TOON-Payer` (the paying channel), `X-TOON-Amount` (what
+that request was charged) and `X-TOON-Chain`. Your app is free to ignore all
+three — it is handed them so it can log or rate-limit by payer if it wants to,
+not so it can decide anything about the payment. They are absent on a request
+this node did not take the payment for, so treat them as optional. Whatever a
+caller writes under those names is stripped before your app sees it.
 
 Two consequences before you price anything:
 
@@ -192,18 +227,56 @@ deliberate, because it is never silently free.
 ## 3. Get paid
 
 A price makes a route cost something. A **settlement backend** is what lets
-anyone actually pay it.
+anyone actually pay it. There are two chains. A node may carry either table or
+both — with both, it accepts claims on both at once.
 
 ```toml
+# EVM — Base Sepolia. These are live addresses, not placeholders.
 [settlement.evm]
-rpc_url          = "https://sepolia.base.org"
-contract_address = "0x…"          # the TokenNetworkRegistry, not a TokenNetwork
-token_address    = "0x…"          # the token every price on this node is in
+rpc_url          = "https://base-sepolia-rpc.publicnode.com"
+contract_address = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1"  # the TokenNetworkRegistry, not a TokenNetwork
+token_address    = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"  # the token every price on this node is in
 decimals         = 6              # units per token: 6 means 1,000,000 = 1.00
 
 [settlement.evm.key]
 key_file = "/app/data/settlement.key"
+
+# Solana — public devnet. Note `program_id` where EVM has `contract_address`:
+# there is no registry to resolve a channel contract through, so this names the
+# payment-channel program itself, and `token_address` is an SPL mint.
+[settlement.solana]
+rpc_url       = "https://api.devnet.solana.com"
+program_id    = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
+token_address = "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU"
+decimals      = 6
+
+[settlement.solana.key]
+key_file = "/app/data/settlement-solana.key"
 ```
+
+Those are the addresses the devnet fleet itself runs on, and copying them is the
+point rather than a shortcut: a claim resolves against **one** deployment, so
+every node that might accept a given claim has to name the same one.
+
+|                  | EVM                                                                                                                                                      | Solana                                                                                                                                                                          |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Chain            | Base Sepolia, chain id `84532`                                                                                                                           | public devnet (`solana:devnet`)                                                                                                                                                 |
+| RPC              | `https://base-sepolia-rpc.publicnode.com`                                                                                                                | `https://api.devnet.solana.com`                                                                                                                                                 |
+| Channels live in | [`0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1`](https://sepolia.basescan.org/address/0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1) — `TokenNetworkRegistry` | [`2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip`](https://explorer.solana.com/address/2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip?cluster=devnet) — the payment-channel program |
+| Token            | [`0x49beE1Bca5d15Fb0963117923403F9498119a9Ce`](https://sepolia.basescan.org/address/0x49beE1Bca5d15Fb0963117923403F9498119a9Ce) — mock USDC, 6 dp        | [`34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU`](https://explorer.solana.com/address/34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU?cluster=devnet) — mock USDC mint, 6 dp        |
+| Funding the key  | Base Sepolia ETH for gas; mock USDC from the [devnet faucet](https://faucet.devnet.toonprotocol.dev)                                                     | devnet SOL (`solana airdrop 1 <address> -u devnet`); mock USDC from the same faucet                                                                                             |
+| Full record      | [`packages/contracts/deployments/base-sepolia.md`](packages/contracts/deployments/base-sepolia.md)                                                       | [`packages/solana-program/deployments/devnet-public.md`](packages/solana-program/deployments/devnet-public.md)                                                                  |
+
+**That table is the whole list, and the omissions are deliberate.** There is no
+Solana _testnet_ deployment — the program is on devnet and nowhere else — and
+there is no mainnet on either chain. No EVM mainnet carries a `TokenNetwork` or a
+token for a registry to resolve, so `contract_address` has nothing to point at;
+and because a Solana claim's signed message binds the settlement program, a node
+pointing `[settlement.solana]` at a mainnet RPC while naming the devnet program
+id would take money for claims it can never redeem. Production is a **named,
+empty tier** ([ADR 0056](docs/adr/0056-production-is-a-named-empty-tier.md)), and
+[`connector.production.toml`](deploy/connector-rust/connector.production.toml) is
+a skeleton in which every value fails to load on purpose. Do not fill it in.
 
 `decimals` is what turns a `price` into money. Every `price` in the config is a
 count of the token's smallest unit, and `decimals` says how many of those make
@@ -212,6 +285,16 @@ and a route meant to cost ten cents of USDC is `price = 100000`. The node reads
 the token's own decimals at boot and **refuses to start** if the config
 disagrees, because a wrong `decimals` is not a rounding error: it misprices
 every route by a factor of ten or more.
+
+That check is one of several, and they are why there is no `--network` flag and
+no environment variable anywhere in this: which chain a node is on **is** these
+values and nothing else, so every one of them is verified against the chain
+before the node serves a packet. The EVM backend reads the chain id off the RPC
+and calls `getTokenNetwork()` to prove the address really is a registry; the
+Solana backend proves `program_id` is executable _and_ behaves like the
+payment-channel program, that `token_address` is an SPL mint, and asks the chain
+its own genesis hash so a claim declaring the wrong cluster is refused. A node
+that boots is a node whose chain agreed with its config.
 
 That is all of it. **You do not list the channels your payers will use, and you
 could not** — a client's channel does not exist until that client opens it on
@@ -244,17 +327,53 @@ on chain is [the operator surface](#the-operator-surface)'s job.
 ## Peering
 
 Terminating your own routes earns from callers who know your address. Peering
-puts you on paths that start somewhere else. It is one authenticated write:
+puts you on paths that start somewhere else.
+
+### Being peerable
+
+Step 1's config boots and serves, but nobody can peer _with_ it: its
+self-description has no endpoints and `"peerCarriages": []`, so a
+counterparty's `POST /peers` at it answers `502`. Three more keys, none of
+them shown above, close that gap:
+
+```toml
+# Top level, so it goes above every table — beside step 1's client_edge_addr.
+peer_expose = "http"             # "btp", "http", "both", or "neither" (default)
+
+[node]
+addresses     = ["g.your.node"]
+http_endpoint = "https://your-node.example/ilp"
+```
+
+`peer_expose` says which carriage(s) _this_ node opens a peer listener for.
+`[node]` publishes where clients reach it — both listeners are served
+whatever `peer_expose` says, so publishing either endpoint is always allowed.
+What `peer_expose` decides is what you may _omit_: `btp_endpoint` is required
+only when `"btp"` or `"both"` is exposed, and `http_endpoint` is required
+whenever anything is exposed, because a peer pays you by asking your client
+edge over HTTP whichever carriage its packets ride. So an HTTP-only node
+writes `http_endpoint` and simply leaves `btp_endpoint` out; a BTP node writes
+both; and with `"neither"` (the default) a `[node]` naming only `addresses` is
+legal and still answers `GET /ilp`, it is just not dialable.
+
+For a local or pre-TLS trial only, add `peer_allow_plaintext_endpoints = true`
+at the top level so `http://`/`ws://` endpoints are accepted too — every
+deployed config should stay on `https://`/`wss://`.
+
+With that in place, `GET /ilp` really is the whole of what another operator
+needs to peer with you. It is one authenticated write:
 
 ```
-POST /peers   { "id": "their-node", "url": "https://their-node.example",
+POST /peers   { "id": "their-node", "url": "https://their-node.example/ilp",
                 "fee": 100, "max_packet_amount": 1000000 }
 ```
 
-The node fetches their self-description, picks the carriage from their endpoint's
-scheme (`wss://` → BTP, `https://` → ILP-over-HTTP), finds the shared settlement
-chain, and derives the channel from the two participants — no channel identifier
-is ever exchanged, and there is no shared secret.
+`url` is their connector's self-description URL — the one whose `GET` answers
+with that description (ADR 0050) — not their origin. The node fetches it, picks
+the carriage from their endpoint's scheme (`wss://` → BTP, `https://` →
+ILP-over-HTTP), finds the shared settlement chain, and derives the channel from
+the two participants — no channel identifier is ever exchanged, and there is no
+shared secret.
 
 A route can then **forward** to that peering instead of terminating:
 
@@ -386,6 +505,10 @@ ed25519 public key in hex. `connector send` is a worked example: it signs a
 `POST /packets` this way, and `--expect-fulfill` makes a non-fulfilled packet a
 non-zero exit, which is what turns a rehearsal into a gate.
 
+For every other write — `POST /peers` above all —
+[`docs/operators/sign-write.sh`](docs/operators/sign-write.sh) is a shell-and-`openssl` signer with
+a worked example in [`docs/operators/signing-a-write.md`](docs/operators/signing-a-write.md).
+
 ---
 
 ## Operating it
@@ -395,12 +518,13 @@ packet carries the same `correlation_id` — the packet's execution condition �
 because that value is invariant across hops, the same id appears in every
 connector that handled it. `RUST_LOG=debug` for more.
 
-**Releases.** `:rust-release` is a **promotion** tag, not a build output. A green
-merge does not reach any box; the tag moves only by an explicit dispatch that
-first checks the candidate image still boots the fleet's committed configs.
-Because the binary and a box's mounted TOML are a matched pair in both
-directions, **adding a required config key is a breaking deploy**: land the
-config first, then move the tag.
+**Releases.** A release is one dispatch of `release-connector.yml`: it builds the
+image, cuts a dated handle and opens a GitHub Release. It does not deploy, and
+nothing here moves a tag onto a box (ADR 0068) — a node repository pins the
+connector image it runs, by release handle, in its own `deploy/` bundle. Because
+the binary and a box's mounted TOML are a matched pair in both directions,
+**adding a required config key is a breaking deploy**: land the config first, then
+bump that pin.
 
 **Devnet** settles on Base Sepolia and Solana devnet; test funds come from the
 [devnet faucet](https://faucet.devnet.toonprotocol.dev). **Production is a named,

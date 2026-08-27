@@ -26,19 +26,33 @@ The payment-oblivious service a connector delivers to at the end of a route. It 
 holds no channel and is never told which destination was addressed. It IS told who paid, how much
 and on what chain — `X-TOON-Payer`/`X-TOON-Amount`/`X-TOON-Chain`, from the client claim the
 delivering connector verified itself (ADR 0040) — and told none of the three when that connector
-was not the one paid. Either way, whatever arrives at one of its handlers was paid for, at that
-handler's one price (ADR 0020).
+was not the one paid. Either way, whatever arrives at one of its handlers was paid for, under that
+handler's one price (ADR 0020) — `X-TOON-Amount` states what this packet was actually charged,
+which for a route priced by size is not a figure the app's own route table could have known
+(ADR 0065).
 _Avoid_: BLS, Business Logic Server, agent runtime, backend
 
 **Handler**:
 The app's receiving endpoint, and the unit a price attaches to: one handler, one price. An app
-charges differently for different work by exposing a handler for each.
+charges differently for different work by exposing a handler for each. One handler needs no second
+handler to charge differently by _size_ — that is the price's own slope (ADR 0065).
 
 **Description**:
 Operator-written text saying what the work behind a route is. Attaches exactly where a price
 attaches — one handler, one description — comes from the connector's own configuration and from
 nowhere else, and rides both the greeting and a probe's reject. A menu, not a warranty: whoever
 reads one is reading text from a stranger. _(Decided and not yet built — ADR 0044.)_
+
+**Request**:
+The operator-declared table naming what a client must send to use a route — protocol, parameters,
+whatever the app behind it expects. Written as `[[routes]] request = { ... }`, converted to JSON at
+load and published verbatim on that route's self-description entry and on the greeting for that
+destination; the connector confirms only that it **is** a table and reads none of its keys. Sourced
+by the operator writing it down, never by asking the app — matching the declaration against what the
+app actually registered is the app's own repository's problem, not this one's (ADR 0067). Absent,
+not empty, on a route that configured none.
+_Distinct from_: a route's **description** above — free text about what the work **is**; `request`
+is structured and says what to **send**, and building it does not build ADR 0044.
 
 **Packet**:
 The unit of forwarding: a destination, an amount, an expiry, and a payload that is opaque to
@@ -348,18 +362,35 @@ _Avoid_: spread, commission, rate
 
 **Price**:
 What a terminated route charges for the work the app does. Distinct from a fee — a fee buys
-carriage, a price buys the thing at the end. Flat per packet, as a fee is: it does not vary with
-the payload, so one probe answers what a route costs until the price itself changes. Pricing
+carriage, a price buys the thing at the end. A **schedule** over the packet's payload length
+since [ADR 0065](docs/adr/0065-a-price-is-a-schedule-over-payload-length.md): a `base` every
+packet pays, plus a `per_kib` for each started kibibyte, and **flat** exactly when that slope is
+zero — which is how every route the fleet runs is priced and the only shape that existed before.
+What varies with size is the **charge**; the price is the rule that produces it.
+The length measured is the sealed payload's, never anything inside it — a property of carriage,
+so a connector still prices without ever interpreting what it carries. Pricing
 granularity is handler granularity: an operator publishes a route per handler, and charges
-differently for different work by pointing at a different handler — never by letting one route's
-price vary with what the packet holds. That is how a connector prices without ever interpreting
-what it carries.
+differently for different _work_ by pointing at a different handler — charging differently for
+the same work at different sizes is the slope's job, not a second handler's.
+_Avoid_: per-byte price (the unit is a kibibyte)
+
+**Charge**:
+What one packet actually costs at one terminated route: that route's **price** evaluated at that
+packet's payload length ([ADR 0065](docs/adr/0065-a-price-is-a-schedule-over-payload-length.md)).
+A price is a rule and a charge is its answer for one packet — the two are the same number only
+while the price is flat, which is why they are separate words. Every gate that takes money takes
+the charge: the client edge's claim gate on both carriages, a peer arrival, a probe's reject, and
+the termination itself, all computing it from the same bytes so they cannot disagree.
+_Avoid_: using **price** for this — a price is what the route charges, a charge is what this
+packet cost.
 
 **Cost**:
 What a caller must send for a packet to be delivered: the fees of every hop that carries it, plus
-the price of the route that terminates it. A reject states the cost of the path it travelled,
-which is how a probe discovers it. The sum only — never the per-hop breakdown, and never the
-split between fees and price.
+the **charge** of the route that terminates it. A reject states the cost of the path _that
+packet_ travelled, which is how a probe discovers it. The sum only — never the per-hop breakdown,
+and never the split between fees and price. Because a terminating charge can depend on payload
+length (ADR 0065), a probe's figure is exact for a packet its own size; what answers every size is
+the terminating node's published **price**, on its greeting and its self-description.
 _Avoid_: total fee, quote
 
 **Minimum delivery** _(retired term, [ADR 0057](docs/adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md), issue #1143)_:

@@ -1029,14 +1029,25 @@ pub enum ConfigError {
     )]
     NodeNoAddresses,
 
+    /// Issue #1220: `btp_endpoint` is required when `peer_expose` opens a BTP
+    /// peer listener; `http_endpoint` whenever it opens any -- a peer covering
+    /// a forward asks this node's client edge for claim-state over HTTP
+    /// whichever carriage the packet rides (issue #1217), so a peerable node
+    /// with no HTTP endpoint is one nobody can pay.
     #[error(
-        "[node] {field} is not set: a node behind TLS termination cannot learn its own \
-         public name, so this is an operator fact and there is deliberately no default. The \
-         retired announcer sidecar DID default it, and its compiled-in fallback still names a \
-         `/rust/ilp` path that answers 410 Gone on both devnet boxes -- a default here is how a \
-         node ends up publishing a dead URL to whoever asks (ADR 0050)"
+        "[node] {field} is not set, but peer_expose = \"{peer_expose}\" makes this node \
+         peerable and a peer needs it (btp_endpoint to dial over BTP; http_endpoint to ask \
+         this node's client edge for claim-state over HTTP, whichever carriage a packet \
+         rides): a node behind TLS termination cannot learn its own public name, so this is \
+         an operator fact and there is deliberately no default. The retired announcer sidecar \
+         DID default it, and its compiled-in fallback still names a `/rust/ilp` path that \
+         answers 410 Gone on both devnet boxes -- a default here is how a node ends up \
+         publishing a dead URL to whoever asks (ADR 0050, issue #1220)"
     )]
-    NodeMissingEndpoint { field: &'static str },
+    NodeMissingEndpoint {
+        field: &'static str,
+        peer_expose: &'static str,
+    },
 
     #[error("[node] {field} '{value}' is not a URL: {source}")]
     NodeInvalidUrl {

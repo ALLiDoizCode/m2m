@@ -1,17 +1,15 @@
 // ---------------------------------------------------------------------------
 // Per-address off-chain drip cooldown (in-memory)
 // ---------------------------------------------------------------------------
-// The Mina USDC leg drips by TRANSFER from a treasury that can only replenish
-// itself at 1,000 USDC per ~24h (the RateLimitedUsdcAdmin self-mint cap — see
-// packages/mina-zkapp/src/usdc-faucet.ts). Unlike the mint cap, transfers are
-// NOT rate-limited on-chain, so without a service-side limit one address could
-// drain the whole daily treasury allowance. This limiter is that service-side
-// leg: one successful USDC drip per address per cooldown window.
+// Every leg mints devnet USDC on demand — Base Sepolia because the mock
+// token's mint() is ungated, Solana because the faucet treasury is the mint
+// authority — so nothing on-chain bounds how much a single address can ask
+// for. This limiter is that bound: one successful drip per address per
+// cooldown window, applied service-side before the chain is touched.
 //
 // In-memory by design (matching the faucet's other state: none of the legs
 // persist anything) — a faucet restart forgets cooldowns, which is acceptable
-// for a devnet convenience; the hard backstop is the on-chain treasury
-// replenishment ceiling itself.
+// for a devnet convenience dispensing a mock token.
 //
 // Concurrency: `claim()` RESERVES the slot immediately (before the drip runs
 // on the serialized queue) and `release()` rolls the reservation back when the

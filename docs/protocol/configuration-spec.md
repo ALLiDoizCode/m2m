@@ -69,7 +69,15 @@ and MUST answer a termination it cannot open with an unsealed reject naming wher
 
 **CF-08** `[operator]` — A connector MUST be configurable with its own **public** ILP address(es) and
 its **public** client-edge endpoints, HTTP and BTP. A node cannot derive these: a container sees
-`0.0.0.0:4000` and a private network, never `https://proxy.example/ilp`.
+`0.0.0.0:4000` and a private network, never `https://proxy.example/ilp`. Either endpoint MAY be
+declared under any `peer_expose` (CF-17) — both listeners are served regardless, so a declared
+endpoint is never refused as unexposed. Which may be **omitted** is `peer_expose`'s call, and a
+connector MUST refuse to load, naming the key, when: `btp_endpoint` is absent and a BTP peer listener
+is exposed; or `http_endpoint` is absent and **any** peer carriage is exposed, because a peer
+covering a forward asks this node's client edge for claim-state over HTTP whichever carriage the
+packet rides. A connector whose `peer_expose` is `"neither"` (the default) MAY be configured with an
+address list and no endpoint at all — it still answers its self-description, unpeerable.
+([issue #1220](https://github.com/toon-protocol/connector/issues/1220))
 
 **CF-09** `[connector]` — These facts, and no others about software behind the connector, are what the
 node self-description publishes. A connector describes **itself**.
@@ -96,9 +104,38 @@ and peer routes share one prefix namespace.
 
 **CF-13** `[operator]` — A price attaches to a **handler**, and an operator charges differently for
 different work by publishing a route per handler. A connector MUST NOT let one route's price vary with
-what a packet carries — that is how it prices without ever interpreting what it carries.
+what a packet **carries** — that is how it prices without ever interpreting what it carries. It MAY
+vary with how **long** the packet's sealed payload is, which every hop can measure without opening it
+([ADR 0065](../adr/0065-a-price-is-a-schedule-over-payload-length.md)).
 
-**CF-14** `[connector]` — Two routes naming the same handler MUST agree on its price.
+**CF-13a** `[operator]` — A price MAY be written as a whole number, or as a table
+`{ base = <n>, per_kib = <n> }` charging `base + per_kib × ceil(payload_len / 1024)` where
+`payload_len` is the packet's own `data` length. The two spellings mean the same thing when the slope
+is zero. A table MUST carry both keys: a connector MUST refuse one naming only `base`, by name, rather
+than defaulting the slope to zero — a schedule meant to charge by size going out flat is silent
+mispricing (ADR 0065, ADR 0009).
+
+**CF-13b** `[connector]` — A connector MUST charge one figure per packet, computed from the arriving
+`data` length, at every gate that charges: the client edge on either carriage, a peer arrival's
+coverage check (CF-29), a probe's reject, and the termination. Computing a different figure at two
+gates for one packet admits a packet across a peering that its termination then refuses, after the
+covering claim is banked.
+
+**CF-13c** `[connector]` — A connector that prices by size MUST publish the whole schedule wherever it
+publishes a price: its self-description and its greeting carry the slope beside the base, so one free
+read answers every payload size ([ADR 0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md)'s
+cacheability). A greeting's own `amount` remains what the greeted request costs.
+
+**CF-13d** `[operator]` — A route MAY carry `request`, an arbitrary table naming what a client should
+send to use it. A connector MUST validate only that the value **is** a table — never a key inside
+it, and never `deny_unknown_fields` on its contents — and MUST publish it verbatim, unread, on that
+route's self-description entry and on the greeting for that destination, omitted (not `null`) where
+the operator wrote none. A connector MUST NOT fetch this fact from the app or any other source: an
+operator declares it, or it is absent.
+([ADR 0067](../adr/0067-a-route-declares-its-request-shape-and-the-connector-never-reads-it.md))
+
+**CF-14** `[connector]` — Two routes naming the same handler MUST agree on its price, comparing whole
+schedules: same base and same slope.
 
 **CF-15** `[operator]` — A route MAY require a specific client transport. A connector that pins one
 MUST publish the requirement in its self-description; enforcing a requirement it does not advertise is
@@ -297,8 +334,13 @@ operator surface is mounted when `[operator]` is configured, and where the peer 
 
 **Routes.** A route is a `prefix` plus exactly one of `handler_url` or `peer_id`, and a price is
 required on **both** branches, each with its own named refusal ([ADR 0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md);
-CF-10, CF-11). Write `price = 0` where free is deliberate. `transport` is meaningful only alongside
-`handler_url` (CF-15).
+CF-10, CF-11). Write `price = 0` where free is deliberate. A price is either a whole number or a
+`{ base, per_kib }` table charging by payload length (CF-13a) — `price = { base = 1000, per_kib = 30 }`
+— and the two spellings are one value when the slope is zero. `transport` is meaningful only alongside
+`handler_url` (CF-15). `request` (CF-13d) is an optional arbitrary table, published unread wherever
+the route's price is published; unlike every other row in `[[routes]]`, its contents are not
+`deny_unknown_fields` — that guarantee stops at the row, not inside a blob whose keys are the app's
+business.
 
 **Peerings.** A peer row carries an `id`, an optional `endpoint` whose scheme selects the carriage, a
 `max_packet_amount` (CF-19's cap — `0` is refused by name, and there is no disabling spelling) and a
@@ -349,7 +391,8 @@ chains at once, writes the keyed shape in §2.1's table instead. `contract_addre
 **`TokenNetworkRegistry`**, the contract `getTokenNetwork(token)` is called on, and not a channel
 contract; `[settlement.solana]` names the deployed `payment-channel` `program_id` in its place. Mina
 is not a settlement chain in either shape
-([ADR 0002](../adr/0002-drop-mina-from-the-rust-connector.md)). An absent `[settlement]` is legal, and
+([ADR 0002](../adr/0002-drop-mina-from-the-rust-connector.md)), and is no longer in this
+repository at all ([ADR 0065](../adr/0065-mina-leaves-the-repository.md)). An absent `[settlement]` is legal, and
 every channel operation then answers `503`; a present but wrong one is a startup failure, because a
 real backend is constructed for every chain configured before the node serves anything (CF-25).
 

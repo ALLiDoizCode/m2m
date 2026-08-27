@@ -1,11 +1,14 @@
-// Tests for createSolanaFaucet's per-address cooldown, which protects the
-// treasury's USDC balance (the drip's only on-chain leg, issue #945) from
-// being drained by repeat requests from a single address.
+// Tests for createSolanaFaucet's per-address cooldown, which is the only bound
+// on the drip's single on-chain leg (issue #945): the faucet holds the mint's
+// authority, so nothing on-chain stops one address asking repeatedly.
 //
 // createSolanaFaucet() only touches the network INSIDE drip() (constructing a
-// Connection or loading a Keypair from disk are both local), so its wiring —
-// cooldownMs, claim()/release() — can be exercised with a throwaway generated
-// keypair and no live RPC.
+// Connection or loading a Keypair from disk are both local, and the mint's
+// authority is read lazily by assertMintAuthority, not in the factory), so its
+// wiring — cooldownMs, claim()/release(), mintMode — can be exercised with a
+// throwaway generated keypair and no live RPC. That the factory stays
+// non-dialling is a property this file depends on: SOLANA_RPC_URL below points
+// at a closed port.
 //
 // Config (SOLANA_DRIP_COOLDOWN_MS, ...) is read from env at module load time,
 // so this file sets env vars BEFORE importing solana.js. node's test runner
@@ -54,4 +57,22 @@ test('createSolanaFaucet wires a per-address cooldown (claim/release)', () => {
 test('createSolanaFaucet reports the configured cooldown window', () => {
   const faucet = createSolanaFaucet();
   assert.equal(faucet.cooldownMs, 60_000);
+});
+
+test('createSolanaFaucet advertises how it sources tokens', () => {
+  const faucet = createSolanaFaucet();
+  // /api/info publishes this so an operator reading the capability map knows
+  // the leg cannot run dry, and does not go hunting for a treasury balance.
+  // The Base Sepolia leg's equivalent is 'ungated-mint'.
+  assert.equal(faucet.mintMode, 'faucet-is-mint-authority');
+});
+
+test('the factory dials nothing: an unreachable RPC still yields a faucet', () => {
+  // SOLANA_RPC_URL is 127.0.0.1:1 (a closed port). If the authority check ever
+  // moved into the factory, this would hang or throw instead of returning —
+  // and routes.test.js, which boots the whole server with every chain
+  // unreachable, would go with it.
+  const faucet = createSolanaFaucet();
+  assert.ok(faucet);
+  assert.equal(typeof faucet.assertMintAuthority, 'function');
 });

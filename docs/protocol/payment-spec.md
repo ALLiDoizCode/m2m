@@ -123,23 +123,42 @@ refused by name.
 ## 5. Fee, price and cost
 
 **PM-17** `[connector]` — A **fee** buys carriage across one peering relation. A **price** buys the
-work at the end of a terminated route. Both are **flat per packet**.
+work at the end of a terminated route. A fee is **flat per packet**. A price is a **schedule** over
+the packet's payload length — `base + per_kib × ceil(len / 1024)` — and is flat exactly when its
+slope is zero. Carriage work does not scale with a payload the way the work behind a termination
+does, which is why only one of the two gained a slope.
+([ADR 0010](../adr/0010-flat-per-packet-fee-and-minimum-delivery.md),
+[ADR 0065](../adr/0065-a-price-is-a-schedule-over-payload-length.md))
+
+**PM-17a** `[connector]` — The length a price is evaluated at is the packet's own `data` length: the
+**sealed** payload, never anything inside it. That is a property of carriage — every hop can measure
+it without opening the wrap — which is what lets a forwarded route be priced at the client edge and a
+peer arrival be gated by the same rule the termination charges under.
+([ADR 0065](../adr/0065-a-price-is-a-schedule-over-payload-length.md))
 
 **PM-18** `[operator]` — Pricing granularity is **handler** granularity: one handler, one price. An
 operator charges differently for different work by publishing a route per handler — never by letting
-one route's price vary with what a packet carries. That is how a connector prices without ever
-interpreting what it carries.
-([ADR 0020](../adr/0020-a-price-is-flat-and-attaches-to-a-handler.md))
+one route's price vary with what a packet **carries**. That is how a connector prices without ever
+interpreting what it carries. Charging differently for the same work at different **sizes** is the
+price's own slope, not a second handler.
+([ADR 0020](../adr/0020-a-price-is-flat-and-attaches-to-a-handler.md),
+[ADR 0065](../adr/0065-a-price-is-a-schedule-over-payload-length.md))
 
 **PM-19** `[client]` — **Cost** is what a caller must send for a packet to be delivered: every hop's
-fee plus the terminating route's price. A reject states the cost of the path it travelled — **the sum
-only**, never the per-hop breakdown and never the fee/price split. That is what a **probe** discovers.
-([ADR 0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md))
+fee plus what the terminating route charges **for that packet**. A reject states the cost of the path
+it travelled — **the sum only**, never the per-hop breakdown and never the fee/price split. That is
+what a **probe** discovers. Where a terminating price carries a slope the probe's figure is exact for
+a packet its own size; what answers every size is the terminating node's **published schedule**
+(CF-13c), so a sender still needs one read rather than one probe per size.
+([ADR 0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md),
+[ADR 0065](../adr/0065-a-price-is-a-schedule-over-payload-length.md))
 
 **PM-20** `[connector]` — A **forwarded** route is priced at the client edge, and carries no more than
 it was paid. The invariant `price − fee >= next hop price` is what protects a client across a path.
 No sender declares a floor of its own — minimum delivery is retired, and what bounds erosion is the
-claim covering each crossing.
+claim covering each crossing. Where prices carry a slope that invariant must hold at **every** payload
+length, so each hop's base must clear the next hop's by its fee **and** each hop's slope must be at
+least the next hop's (ADR 0065).
 ([ADR 0028](../adr/0028-a-forwarded-route-is-priced-at-the-client-edge.md),
 [ADR 0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md))
 

@@ -11,7 +11,7 @@ For the mechanism these numbers are plugged into — who pays whom, on which cha
 
 All prices are in **base units of 6-decimal USDC** (ADR 0010;
 `docs/usdc-cross-chain-settlement.md`'s "6 decimals everywhere" is canonical
-across EVM/Solana/Mina, not a TypeScript-only asset config). So `1000` is
+across every chain the connector settles on, not a TypeScript-only asset config). So `1000` is
 0.001 USDC and `1` is 1 µUSDC.
 
 **The apex is retired (issue #872, toon-meta#310 / toon-meta#313's live
@@ -61,6 +61,14 @@ already been serving — the repo moved to the box, not the box to the repo.
 from an arbitrary buyer, not a high-frequency stream. Nothing amortises a
 handshake there, which is also why the relay route pins `transport = "btp"`
 (#701) while the store legs keep the default `both`.
+
+**Every fleet price is flat, by choice rather than by constraint.**
+[ADR 0065](adr/0065-a-price-is-a-schedule-over-payload-length.md) (#984) lets a
+route charge `{ base, per_kib }` over a packet's payload length, which is what a
+store leg fronting a per-byte upstream wants. The fleet has not taken it: a
+schedule is a config **shape** a pre-0065 binary refuses, so adopting one is a
+breaking deploy — the image moves first, then the config, per the usual
+ordering. Until then, `1000` here means the same flat figure it always did.
 
 ## The apex forward (retired, issue #872)
 

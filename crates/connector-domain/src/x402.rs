@@ -53,6 +53,15 @@ pub struct X402PaymentRequired {
     #[serde(rename = "x402Version")]
     pub x402_version: u32,
     pub resource: X402Resource,
+    /// What a client should send to use the addressed route (issue #1210):
+    /// the matching `[[routes]] request` table, converted to JSON verbatim.
+    /// Sits beside `resource` rather than inside `accepts[]` -- it describes
+    /// the *resource*, not a payment option, and applies whichever payment
+    /// method a payer ends up satisfying. Absent -- not `null` -- when the
+    /// route configured none, so this greeting is byte-identical to what it
+    /// was before this issue; a reader that predates the field ignores it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub request: Option<serde_json::Value>,
     pub accepts: Vec<X402PaymentOption>,
 }
 
@@ -394,6 +403,7 @@ pub fn terms_body(terms: &GreetingTerms<'_>) -> Vec<u8> {
         node,
         required_transport,
         session_lease_ttl_ms,
+        request,
     } = *terms;
     // ND-11: every node fact in `extra` is read off the SAME value the node
     // self-description is projected from. There is no second assembly of
@@ -412,6 +422,7 @@ pub fn terms_body(terms: &GreetingTerms<'_>) -> Vec<u8> {
         resource: X402Resource {
             url: destination.to_string(),
         },
+        request: request.cloned(),
         accepts: vec![X402PaymentOption {
             scheme: "toon-channel".to_string(),
             network: destination.to_string(),
@@ -485,6 +496,13 @@ pub struct GreetingTerms<'a> {
     /// carriages) leaves it `0`, which is otherwise never a real
     /// deployment's value.
     pub session_lease_ttl_ms: u64,
+    /// What a client should send to use the addressed route (issue #1210):
+    /// the matching `[[routes]] request` table, converted to JSON at config
+    /// load and handed in by reference here so quoting one costs a clone
+    /// only when there is something to clone. `None` when the route
+    /// configured none, or for a carriage addressing no configured route at
+    /// all.
+    pub request: Option<&'a serde_json::Value>,
 }
 
 /// Read a `payment-required` greeting's terms.
@@ -554,6 +572,109 @@ mod tests {
         assert_eq!(terms.pay_to(), Some("g.toon.relay"));
         assert_eq!(terms.required_transport(), None);
         assert_eq!(terms.offer().unwrap().extra.session_lease_ttl_ms, 300_000);
+    }
+
+    /// ADR 0065: a flat route's greeting is byte-identical to what it was
+    /// before schedules existed. This is the compatibility claim the record
+    /// makes, and it is the one every existing reader depends on.
+    #[test]
+    fn a_flat_routes_greeting_carries_no_slope_at_all() {
+        let body = terms_body(&GreetingTerms {
+            destination: "g.toon.relay",
+            price: Price::flat(1000),
+            payload_len: 4096,
+            ..Default::default()
+        });
+        let text = String::from_utf8(body.clone()).unwrap();
+        assert!(
+            !text.contains("pricePerKib"),
+            "a flat greeting must not carry the field at all, got: {text}"
+        );
+        let terms = parse_greeting(&body).expect("well-formed");
+        // The payload length changes nothing for a flat route.
+        assert_eq!(terms.price(), Some(1000));
+        assert_eq!(terms.schedule(), Some(Price::flat(1000)));
+    }
+
+    /// Issue #1210: a route's `request` table rides at the top level of the
+    /// greeting, beside `resource` -- it describes the resource, not one of
+    /// the payment options in `accepts[]`.
+    #[test]
+    fn a_routes_request_table_rides_beside_resource() {
+        let request = serde_json::json!({"protocol": "nip90", "kinds": [5096, 5098]});
+        let body = terms_body(&GreetingTerms {
+            destination: "g.toon.gas",
+            price: Price::flat(1000),
+            payload_len: 0,
+            request: Some(&request),
+            ..Default::default()
+        });
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["request"], request);
+        assert!(
+            value["accepts"][0].get("request").is_none(),
+            "request describes the resource, not a payment option"
+        );
+
+        let terms = parse_greeting(&body).expect("well-formed");
+        assert_eq!(terms.request, Some(request));
+    }
+
+    /// A route with no `request` table publishes a greeting with no
+    /// `request` key at all -- byte-identical to what it was before this
+    /// issue, and a reader written before the field existed is unaffected.
+    #[test]
+    fn a_route_with_no_request_table_greets_with_no_request_key() {
+        let body = terms_body(&GreetingTerms {
+            destination: "g.toon.relay",
+            price: Price::flat(1000),
+            payload_len: 0,
+            ..Default::default()
+        });
+        let text = String::from_utf8(body).unwrap();
+        assert!(
+            !text.contains("\"request\""),
+            "a route with no request table must not carry the key at all, got: {text}"
+        );
+    }
+
+    /// A schedule route's greeting answers both questions: what THIS request
+    /// costs (`amount`), and what any request would cost (the schedule).
+    #[test]
+    fn a_schedule_greeting_quotes_this_packet_and_publishes_the_rule() {
+        let price = Price::scheduled(1000, 30);
+        let body = terms_body(&GreetingTerms {
+            destination: "g.toon.ario",
+            price,
+            payload_len: 100 * 1024,
+            ..Default::default()
+        });
+        let terms = parse_greeting(&body).expect("well-formed");
+
+        // `amount` is what the greeted request costs.
+        assert_eq!(terms.price(), Some(4_000));
+        // ...and the schedule rides beside it, so a reader can price a
+        // packet it has not sent yet without greeting again. This is what
+        // keeps ADR 0011's cacheability true under a slope.
+        let schedule = terms
+            .schedule()
+            .expect("a schedule route publishes its schedule");
+        assert_eq!(schedule, price);
+        assert_eq!(schedule.charge(2 * 1024 * 1024), 62_440);
+        assert_eq!(terms.offer().unwrap().extra.price, "1000");
+        assert_eq!(
+            terms.offer().unwrap().extra.price_per_kib.as_deref(),
+            Some("30")
+        );
+    }
+
+    /// A greeting from a node that predates schedules reads back as the flat
+    /// price it is, rather than failing to parse.
+    #[test]
+    fn a_pre_schedule_greeting_reads_as_a_flat_schedule() {
+        let terms = parse_greeting(well_formed().as_bytes()).expect("well-formed");
+        assert_eq!(terms.schedule(), Some(Price::flat(1000)));
+        assert!(terms.schedule().unwrap().is_flat());
     }
 
     #[test]

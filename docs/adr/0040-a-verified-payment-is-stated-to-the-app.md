@@ -1,6 +1,6 @@
 # A verified payment is stated to the app; an unverified one is stated by nobody
 
-**Status:** Accepted. **Supersedes [0036](0036-a-paid-deliverys-attribution-stays-on-the-connector.md)'s conclusion** and narrows [0020](0020-a-price-is-flat-and-attaches-to-a-handler.md). Live: `connector-runtime/src/attribution.rs`.
+**Status:** Accepted. **Supersedes [0036](0036-a-paid-deliverys-attribution-stays-on-the-connector.md)'s conclusion** and narrows [0020](0020-a-price-is-flat-and-attaches-to-a-handler.md). Narrowed in turn by [0065](0065-a-price-is-a-schedule-over-payload-length.md): `X-TOON-Amount` is the charge for that packet, which for a flat route is the flat price it always was. Live: `connector-runtime/src/attribution.rs`.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
@@ -76,11 +76,11 @@ previous hop was never an input. "Absent" is what a longer path produces, by con
 `handler_url`**, and only when a covering client claim it verified itself admitted the packet and
 the route's price is non-zero:
 
-| Header          | Value                                                                            |
-| --------------- | -------------------------------------------------------------------------------- |
-| `X-TOON-Payer`  | the admitted client channel key — `evm:0x<64 lower-case hex>`, `solana:<base58>` |
-| `X-TOON-Amount` | the route's flat price (ADR 0020), decimal, in the settlement asset's base units |
-| `X-TOON-Chain`  | that channel key's own namespace — `evm`, `solana`                               |
+| Header          | Value                                                                                                                                                                                                                                                                                 |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `X-TOON-Payer`  | the admitted client channel key — `evm:0x<64 lower-case hex>`, `solana:<base58>`                                                                                                                                                                                                      |
+| `X-TOON-Amount` | what this connector charged for **this packet** — the route's price schedule at the packet's own payload length ([ADR 0065](0065-a-price-is-a-schedule-over-payload-length.md)), which for a flat route is the flat price of ADR 0020 — decimal, in the settlement asset's base units |
+| `X-TOON-Chain`  | that channel key's own namespace — `evm`, `solana`                                                                                                                                                                                                                                    |
 
 `X-TOON-Payer` names a **channel**, not a wallet, and that is the honest unit: it is what the
 connector verified, and it is the join key into both the claim journal and the channel record from
@@ -89,7 +89,12 @@ never handed a guess at one.
 
 `X-TOON-Amount` is the **price this connector charged**, never the amount field of the arriving
 packet. A sender declares the latter; ADR 0020 decides the former, and it is exactly what the
-covering claim had to advance by. Restating it to an app whose route table already knows it is
+covering claim had to advance by. Since
+[ADR 0065](0065-a-price-is-a-schedule-over-payload-length.md) that figure is the route's
+schedule evaluated at this packet's own payload length rather than a constant per route, which
+changes nothing about what the header **means** — it was always "what was charged here" and
+never "what the route lists" — and does mean an app can no longer infer it from its own route
+table alone. Restating it to an app whose route table already knows it is
 mild redundancy, deliberately accepted: the three travel as a set because they are read as a set.
 
 `X-TOON-Chain` is derived from the **claim**, not from the destination address. ADR 0036 recorded

@@ -10,9 +10,7 @@ For each branch:
 2. If there are merge conflicts, resolve them intelligently by reading both sides and choosing the correct resolution
 3. After resolving conflicts, run connector's gate to verify everything works —
    `npm run lint --workspaces --if-present`, `npm run typecheck`,
-   `npm run build` (ordered: `shared` → `mina-zkapp` → rest), and
-   `npm run test --workspaces --if-present` (the `mina-zkapp` jest suite needs
-   `NODE_OPTIONS='--max-old-space-size=8192' ... --runInBand` or it OOMs)
+   `npm run build`, and `npm run test --workspaces --if-present`
 4. If tests fail, fix the issues before proceeding to the next branch
 
 After all branches are merged, make a single commit summarizing the merge.

@@ -67,10 +67,8 @@ const MAX_ITERATIONS = 10;
 // disagree, and wipes node_modules first). This replaces the template's default
 // `npm install`.
 //
-// Two connector-specific caveats a live run must handle in its gate (documented
+// One connector-specific caveat a live run must handle in its gate (documented
 // in implement-prompt.md), not here:
-//   - The mina-zkapp (o1js) jest suite is WASM-heavy — it needs
-//     NODE_OPTIONS=--max-old-space-size and --runInBand or it OOMs.
 //   - CI installs @libsql/linux-x64-gnu explicitly because package-lock.json was
 //     generated on macOS; on a Linux sandbox `npm ci` should pull the linux
 //     optional dep automatically, but if a libsql-backed test can't find its

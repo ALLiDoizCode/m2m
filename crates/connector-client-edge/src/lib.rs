@@ -584,6 +584,7 @@ async fn self_description(State(state): State<Arc<ClientEdgeState>>) -> Response
             prefix: route.prefix,
             price: route.price.base().to_string(),
             price_per_kib: (!route.price.is_flat()).then(|| route.price.per_kib().to_string()),
+            request: route.request,
         })
         .collect();
 
@@ -709,8 +710,9 @@ fn payment_required(
     price: Price,
     payload_len: usize,
     node: &NodeFacts,
+    request: Option<&serde_json::Value>,
 ) -> Response {
-    x402_response(destination, price, payload_len, node, None)
+    x402_response(destination, price, payload_len, node, None, request)
 }
 
 /// Answer a request to `destination` that arrived over a transport its
@@ -729,8 +731,16 @@ fn wrong_transport_required(
     payload_len: usize,
     required: TransportPolicy,
     node: &NodeFacts,
+    request: Option<&serde_json::Value>,
 ) -> Response {
-    x402_response(destination, price, payload_len, node, Some(required.name()))
+    x402_response(
+        destination,
+        price,
+        payload_len,
+        node,
+        Some(required.name()),
+        request,
+    )
 }
 
 fn x402_response(
@@ -739,8 +749,16 @@ fn x402_response(
     payload_len: usize,
     node: &NodeFacts,
     required_transport: Option<&str>,
+    request: Option<&serde_json::Value>,
 ) -> Response {
-    let body = x402_terms_body(destination, price, payload_len, node, required_transport);
+    let body = x402_terms_body(
+        destination,
+        price,
+        payload_len,
+        node,
+        required_transport,
+        request,
+    );
     let header_value = BASE64.encode(&body);
     Response::builder()
         .status(StatusCode::PAYMENT_REQUIRED)
@@ -769,6 +787,7 @@ fn x402_terms_body(
     payload_len: usize,
     node: &NodeFacts,
     required_transport: Option<&str>,
+    request: Option<&serde_json::Value>,
 ) -> Vec<u8> {
     connector_domain::x402::terms_body(&connector_domain::x402::GreetingTerms {
         destination,
@@ -778,6 +797,7 @@ fn x402_terms_body(
         required_transport,
         session_lease_ttl_ms: crate::session_registry::SESSION_LEASE_BACKSTOP_TTL.as_millis()
             as u64,
+        request,
     })
 }
 
@@ -1195,8 +1215,16 @@ async fn handle_ilp(
     // greeting, the over-carry bound, the claim gate and the reject's
     // accumulated cost -- is charged against it, so what is greeted and what
     // is collected cannot disagree.
-    let schedule = client_route.map_or(Price::FREE, |route| route.price);
+    let schedule = client_route
+        .as_ref()
+        .map_or(Price::FREE, |route| route.price);
     let charge = schedule.charge(prepare.data.len());
+    // Issue #1210: what a client should send to use this route, greeted
+    // alongside its price -- read off the same lookup, so the two cannot
+    // name different routes.
+    let request = client_route
+        .as_ref()
+        .and_then(|route| route.request.as_ref());
 
     // Transport policy (issue #701, toon-meta#262 decision 11) is checked
     // before payment is considered at all: a route restricted to BTP is
@@ -1205,7 +1233,7 @@ async fn handle_ilp(
     // like an unpaid one. A destination matching no configured route is
     // unaffected -- `None` here, same as an unmatched destination's price
     // -- and a forwarded route reports `Both`, so this never fires for one.
-    if let Some(policy) = client_route.map(|route| route.transport_policy) {
+    if let Some(policy) = client_route.as_ref().map(|route| route.transport_policy) {
         if !policy.accepts_http() {
             return wrong_transport_required(
                 &prepare.destination,
@@ -1213,6 +1241,7 @@ async fn handle_ilp(
                 prepare.data.len(),
                 policy,
                 &state.node,
+                request,
             );
         }
     }
@@ -1223,6 +1252,7 @@ async fn handle_ilp(
             schedule,
             prepare.data.len(),
             &state.node,
+            request,
         );
     }
 
@@ -1230,7 +1260,7 @@ async fn handle_ilp(
     // connector will not carry never spends the client's watermark. The
     // greeting above runs first, so an unpaying client learns the price it
     // must size its amount under rather than this refusal.
-    if let Some(route) = client_route {
+    if let Some(route) = client_route.as_ref() {
         if let Some(reject) =
             over_carried_reject(&prepare.destination, route.kind, prepare.amount, charge)
         {
@@ -1621,6 +1651,37 @@ mod tests {
             target: target.to_string(),
             headers: vec![],
             body: b"hello app".to_vec(),
+        }
+        .encode();
+        let (data, shared_secret) =
+            connector_signer::giftwrap::seal_request(&envelope, receiver_public).expect("seal");
+        let condition = derive_condition(&connector_signer::giftwrap::derive_fulfillment(
+            &shared_secret,
+        ));
+        (
+            Prepare {
+                data,
+                execution_condition: condition,
+                ..sample_prepare(destination)
+            },
+            shared_secret,
+        )
+    }
+
+    /// As [`sealed_sample_prepare`], but with an envelope body of `body` --
+    /// for a test about ADR 0065, where what a packet costs depends on how
+    /// long its sealed `data` is and two packets must therefore differ in
+    /// length.
+    fn sealed_sample_prepare_with_body(
+        destination: &str,
+        body: &[u8],
+        receiver_public: &PublicKeyBytes,
+    ) -> (Prepare, [u8; 32]) {
+        let envelope = EnvelopeRequest {
+            method: "POST".to_string(),
+            target: "/".to_string(),
+            headers: vec![],
+            body: body.to_vec(),
         }
         .encode();
         let (data, shared_secret) =
@@ -2190,6 +2251,57 @@ mod tests {
         assert!(
             extra.get("settlements").is_none(),
             "a settlement-less node's greeting must not carry a settlements key: {extra}"
+        );
+    }
+
+    /// Issue #1210: a route's `request` table rides on the HTTP 402
+    /// greeting, at the top level -- beside `resource`, not inside
+    /// `accepts[]` -- and a route with none is unaffected.
+    #[tokio::test]
+    async fn an_unpaid_request_to_a_route_with_a_request_table_is_greeted_with_it() {
+        let declared = serde_json::json!({"protocol": "nip90", "kinds": [5096, 5098]});
+        let route = StaticRoute::new_priced("g.toon.gas", "http://localhost:4000", 100)
+            .unwrap()
+            .with_request(declared.clone());
+        let plain_route =
+            StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+        let connector = Arc::new(Connector::new(
+            vec![route, plain_route],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router(connector, test_signer());
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(sample_prepare("g.toon.gas").encode()))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["request"], declared);
+        assert!(
+            value["accepts"][0].get("request").is_none(),
+            "request describes the resource, not a payment option"
+        );
+
+        let plain_request = Request::builder()
+            .method("POST")
+            .uri("/ilp")
+            .body(Body::from(sample_prepare("g.example.app").encode()))
+            .unwrap();
+        let plain_response = app.oneshot(plain_request).await.unwrap();
+        let bytes = hyper::body::to_bytes(plain_response.into_body())
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            value.get("request").is_none(),
+            "a route with no request table must greet with no request key: {value}"
         );
     }
 
@@ -2821,6 +2933,44 @@ mod tests {
         assert_eq!(document["defaultVersion"], serde_json::json!(1));
     }
 
+    /// Issue #1210: a route's `request` table shows up on its own entry in
+    /// the self-description as JSON equal to the table, and a route with
+    /// none has no `request` key at all.
+    #[tokio::test]
+    async fn the_self_description_carries_each_routes_request_table() {
+        let declared = serde_json::json!({"protocol": "nip90", "kinds": [5096, 5098]});
+        let with_request = StaticRoute::new_priced("g.toon.gas", "http://localhost:4000", 100)
+            .unwrap()
+            .with_request(declared.clone());
+        let without_request =
+            StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
+        let connector = Arc::new(Connector::new(
+            vec![with_request, without_request],
+            vec![],
+            Arc::new(FakeAppClient::new()),
+            Arc::new(InProcessPeerTransport::new()),
+            test_clock(),
+        ));
+        let app = router(connector, test_signer());
+
+        let document = self_description_of(app).await;
+
+        let routes = document["routes"].as_array().unwrap();
+        let gas = routes
+            .iter()
+            .find(|route| route["prefix"] == "g.toon.gas")
+            .unwrap();
+        assert_eq!(gas["request"], declared);
+        let plain = routes
+            .iter()
+            .find(|route| route["prefix"] == "g.example.app")
+            .unwrap();
+        assert!(
+            plain.get("request").is_none(),
+            "a route with no request table must have no request key: {plain}"
+        );
+    }
+
     /// ND-06: the edge identity -- the key a packet's payload is sealed to
     /// (ADR 0018) -- must be published, because a route whose terminating
     /// identity is unpublished cannot be delivered to at all. It is the same
@@ -2863,13 +3013,15 @@ mod tests {
         );
     }
 
-    /// ND-08/ND-09, asserted on the bytes a client actually receives: nothing
-    /// about software BEHIND this connector, and nothing about who it peers
-    /// with or how far it trusts them. A `relayUrl` was the last place ADR
-    /// 0046's removed relay assumption survived; a cap is discovered by being
-    /// refused (ND-10), never by being published.
-    #[tokio::test]
-    async fn the_self_description_carries_no_relay_no_peer_and_no_cap() {
+    /// The per-peer packet cap the two tests below install. Four digits, so a
+    /// random public key's hex can spell it by accident -- which is exactly
+    /// what flaked this suite (#1206).
+    const UNPUBLISHED_PEER_PACKET_CAP: u64 = 9_999;
+
+    /// A node with one forwarded route whose counterparty carries a packet
+    /// cap, rendered by whichever signer the caller hands in -- the two tests
+    /// below differ only in that signer.
+    fn node_with_a_capped_peer(signer: Arc<dyn Signer>) -> Router {
         let peer_route = PeerRoute::new_priced("g.peer.somewhere", "a-counterparty", 7);
         let connector = Connector::new(
             vec![],
@@ -2878,19 +3030,27 @@ mod tests {
             Arc::new(InProcessPeerTransport::new()),
             test_clock(),
         )
-        .with_peer_packet_caps([("a-counterparty".to_string(), 9_999u64)]);
-        let app = router_with_node_facts(
+        .with_peer_packet_caps([("a-counterparty".to_string(), UNPUBLISHED_PEER_PACKET_CAP)]);
+        router_with_node_facts(
             Arc::new(connector),
-            test_signer(),
+            signer,
             None,
             Arc::new(test_gate(ClientChannelRegistry::new())),
             NodeFacts::default(),
             DEFAULT_BTP_SESSION_WINDOW,
             None,
             Arc::from([]),
-        );
+        )
+    }
 
-        let document = self_description_of(app).await;
+    /// ND-08/ND-09, asserted on the bytes a client actually receives: nothing
+    /// about software BEHIND this connector, and nothing about who it peers
+    /// with or how far it trusts them. A `relayUrl` was the last place ADR
+    /// 0046's removed relay assumption survived; a cap is discovered by being
+    /// refused (ND-10), never by being published.
+    #[tokio::test]
+    async fn the_self_description_carries_no_relay_no_peer_and_no_cap() {
+        let document = self_description_of(node_with_a_capped_peer(test_signer())).await;
         let rendered = serde_json::to_string(&document).unwrap();
 
         assert!(
@@ -2898,8 +3058,8 @@ mod tests {
             "a forwarded route's price may be published; WHO carries it may not (ND-09): {rendered}"
         );
         assert!(
-            !rendered.contains("9999"),
-            "a cap is discovered by its T04 refusal, never by being published (ND-10): {rendered}"
+            !json_carries_amount(&document, UNPUBLISHED_PEER_PACKET_CAP),
+            "a cap is discovered by its T04 refusal, never by being published (ND-10): {document}"
         );
         for forbidden in ["relay", "ttl", "notice"] {
             assert!(
@@ -2913,6 +3073,53 @@ mod tests {
             "the forwarded route's own price is a fact about what THIS node charges, and is \
              answered at GET /ilp/routes/price already"
         );
+    }
+
+    /// Regression for #1206: the cap check above must fail on a leaked
+    /// **field**, never on the edge signer's public key incidentally spelling
+    /// the same digits. `test_signer()` generates a fresh secp256k1 key per
+    /// run, and a 130-hex-char string spells the cap about 1 run in 540 --
+    /// rare enough to survive a normal gate run, common enough to have flaked
+    /// this suite. Rather than wait on those odds, generate keys until one
+    /// actually collides and prove the document still passes with it
+    /// installed.
+    #[tokio::test]
+    async fn the_no_cap_assertion_survives_a_signer_key_that_spells_the_cap() {
+        let spelled_cap = UNPUBLISHED_PEER_PACKET_CAP.to_string();
+        let colliding_signer = (0..10_000)
+            .map(|generation| LocalSigner::generate(format!("test-signer-{generation}")))
+            .find(|signer| {
+                hex_encode(&signer.public_key().expect("public key")).contains(&spelled_cap)
+            })
+            .expect("10,000 random keys should turn up at least one cap-spelling collision");
+
+        let document =
+            self_description_of(node_with_a_capped_peer(Arc::new(colliding_signer))).await;
+
+        assert!(
+            !json_carries_amount(&document, UNPUBLISHED_PEER_PACKET_CAP),
+            "the signer's public key spelling the cap must not trip the assertion: {document}"
+        );
+    }
+
+    /// Walks a parsed JSON document for `amount` at any depth, as a number or
+    /// as the decimal string this document renders amounts with -- a
+    /// `RoutePrice` publishes a price as `"7"`, not `7`, so a leaked cap would
+    /// most likely be a string too. Reading the document's shape rather than
+    /// its rendered bytes is what keeps a hex value -- a public key, an
+    /// address -- from spelling the same digits and failing the check (#1206).
+    fn json_carries_amount(value: &serde_json::Value, amount: u64) -> bool {
+        match value {
+            serde_json::Value::Number(number) => number.as_u64() == Some(amount),
+            serde_json::Value::String(text) => *text == amount.to_string(),
+            serde_json::Value::Array(items) => {
+                items.iter().any(|item| json_carries_amount(item, amount))
+            }
+            serde_json::Value::Object(fields) => fields
+                .values()
+                .any(|field| json_carries_amount(field, amount)),
+            _ => false,
+        }
     }
 
     /// ND-03, and the one prohibition ADR 0050 states rather than implies: the
@@ -2946,12 +3153,18 @@ mod tests {
     #[tokio::test]
     async fn the_self_description_is_generated_from_live_state_on_each_request() {
         let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 100).unwrap();
-        let connector = Arc::new(Connector::new(
-            vec![route],
-            vec![],
-            Arc::new(FakeAppClient::new()),
-            Arc::new(InProcessPeerTransport::new()),
-            test_clock(),
+        // Issue #1217: `upsert_runtime_peer_route` below now checks for a
+        // CLIENT-role hop, not merely a peer-role channel binding -- `covering`
+        // gives this peering one, the same way a `[[pay_channels]]` row would.
+        let connector = Arc::new(covering(
+            Connector::new(
+                vec![route],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            ),
+            "later",
         ));
         let facts = NodeFacts::default();
         let first = self_description_of(router_with_node_facts(
@@ -3773,6 +3986,143 @@ mod tests {
             assert_eq!(reject.code.as_str(), "F03");
             assert_ne!(reject.code.as_str(), "F01");
             assert!(app_client.deliveries().is_empty());
+        }
+
+        /// ADR 0065 (issue #984) at the seam that actually takes the money:
+        /// two packets to ONE route, differing only in how much payload they
+        /// carry, are charged different amounts -- and the bigger one is not
+        /// paid for by a claim that covers the route's base.
+        ///
+        /// This is the whole point of the record. Under ADR 0020 both packets
+        /// cost `100` and the second was carried at a loss; the deployed
+        /// workaround (a second route at a second handler) could not stop a
+        /// large packet being sent to the cheap one, which is what #984
+        /// measured on a live node.
+        #[tokio::test]
+        async fn two_packets_of_different_sizes_to_one_route_are_charged_differently() {
+            let route = StaticRoute::new_scheduled(
+                "g.example.app",
+                "http://localhost:4000",
+                Price::scheduled(100, 10),
+            )
+            .unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"ok"));
+            let signer = test_signer();
+            let connector = Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone()),
+            );
+            let receiver = signer.public_key().unwrap();
+
+            let (small, _) = sealed_sample_prepare_with_body("g.example.app", b"hi", &receiver);
+            let (large, _) =
+                sealed_sample_prepare_with_body("g.example.app", &vec![b'x'; 3000], &receiver);
+
+            let schedule = Price::scheduled(100, 10);
+            let small_charge = schedule.charge(small.data.len());
+            let large_charge = schedule.charge(large.data.len());
+            assert!(
+                large_charge > small_charge,
+                "the two packets must actually differ in price, or this test proves nothing: \
+                 {small_charge} vs {large_charge}"
+            );
+
+            let app = router_with_gate(connector, signer, None, test_gate(test_channels()));
+
+            // 1. The small packet, paid for exactly.
+            let response = app
+                .clone()
+                .oneshot(request_with_claim_header(
+                    &small,
+                    CLAIM_HEADER,
+                    &evm_claim_json(1, small_charge),
+                ))
+                .await
+                .unwrap();
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            assert!(
+                Fulfill::decode(&bytes).is_ok(),
+                "a claim advancing exactly this packet's charge must buy it"
+            );
+            assert_eq!(app_client.deliveries().len(), 1);
+
+            // 2. The large packet, paid for at the route's BASE -- which is
+            //    what a sender that read only `extra.price` and ignored the
+            //    slope would send, and what every pre-schedule sender sends.
+            //    Refused, and the reject states the figure that would have
+            //    been enough (issue #548), so the sender does not have to
+            //    guess or parse English to find it.
+            let response = app
+                .clone()
+                .oneshot(request_with_claim_header(
+                    &large,
+                    CLAIM_HEADER,
+                    &evm_claim_json(2, small_charge + 100),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            // `accumulated_cost` rides BESIDE the packet, never in its OER
+            // encoding (ADR 0018, ADR 0063) -- on this carriage that is the
+            // `Toon-Accumulated-Cost` response header.
+            let stated_cost = response
+                .headers()
+                .get(ACCUMULATED_COST_HEADER)
+                .expect("a priced refusal states what the packet would have cost")
+                .to_str()
+                .unwrap()
+                .to_string();
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = Reject::decode(&bytes).expect("decode reject");
+            assert_eq!(reject.code.as_str(), "F03");
+            assert_eq!(
+                stated_cost,
+                large_charge.to_string(),
+                "the refusal must report what THIS packet costs, not the route's base"
+            );
+            assert_ne!(stated_cost, "100", "the base is not what this packet costs");
+            assert_eq!(
+                app_client.deliveries().len(),
+                1,
+                "the underpaid packet must never reach the app"
+            );
+
+            // 3. The same large packet, paid for at its own charge.
+            let response = app
+                .oneshot(request_with_claim_header(
+                    &large,
+                    CLAIM_HEADER,
+                    &evm_claim_json(3, small_charge + large_charge),
+                ))
+                .await
+                .unwrap();
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            assert!(
+                Fulfill::decode(&bytes).is_ok(),
+                "a claim advancing this packet's own charge must buy it"
+            );
+
+            let deliveries = app_client.deliveries();
+            assert_eq!(deliveries.len(), 2);
+            // ADR 0040 narrowed by ADR 0065: the app is told what was
+            // actually charged for the delivery in front of it, which for a
+            // schedule route is not the route's base.
+            let stated = deliveries[1]
+                .request
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("X-TOON-Amount"))
+                .map(|(_, value)| value.clone())
+                .expect("a paid delivery states its amount");
+            assert_eq!(stated, large_charge.to_string());
+            assert_ne!(stated, "100", "the base is not what this delivery cost");
         }
 
         /// A claim's value is checked before this ingress would ever spend
