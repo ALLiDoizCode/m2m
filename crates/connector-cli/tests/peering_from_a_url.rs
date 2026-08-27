@@ -558,3 +558,94 @@ key_file = "{key_path}"
         "and never from this node's own address either"
     );
 }
+
+/// The near-miss ADR 0050 gives a name to: `POST /peers` takes a
+/// connector's self-description URL, not its origin. No anvil chain is
+/// needed here at all -- `establish_peering` fails while fetching the
+/// self-description, before it ever reaches settlement, so this test
+/// asserts only the 502 and its hint (issue #1219).
+#[tokio::test]
+async fn an_origin_without_ilp_answers_502_naming_the_fix() {
+    // A real socket serving nothing: a GET on its bare origin 404s, the
+    // way any host that has not mounted a self-description at that exact
+    // path does.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let addr = listener.local_addr().expect("local addr");
+    let empty = Router::new();
+    tokio::spawn(async move {
+        let _ = axum::Server::from_tcp(listener)
+            .expect("serve the bound listener")
+            .serve(empty.into_make_service())
+            .await;
+    });
+
+    let mut key_file = tempfile::NamedTempFile::new().expect("temp key file");
+    key_file
+        .write_all(DEPLOYER_PRIVATE_KEY.as_bytes())
+        .expect("write key file");
+    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let keypair = Keypair::generate(&mut OsRng);
+    let write_key_hex = keypair
+        .public
+        .to_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+
+    let mut config_file = tempfile::NamedTempFile::new().expect("temp config file");
+    write!(
+        config_file,
+        r#"
+client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
+peer_allow_plaintext_endpoints = true
+
+[signer]
+key_file = "{key_path}"
+
+[operator]
+bearer_token = "operator-secret"
+write_keys = ["{write_key_hex}"]
+"#,
+        state_dir = state_dir.path().display(),
+        key_path = key_file.path().display(),
+    )
+    .expect("write config file");
+
+    let command = connector_cli::run(&[
+        "connector".to_string(),
+        config_file.path().display().to_string(),
+    ])
+    .await
+    .expect("run: a config-driven node with no settlement backend at all");
+    let connector_cli::Command::Serve(node) = command else {
+        panic!("a config path must produce a servable node");
+    };
+
+    // The README's failing spelling: an origin, no `/ilp`.
+    let peer_body = serde_json::to_vec(&serde_json::json!({
+        "id": "near-miss",
+        "url": format!("http://{addr}"),
+        "fee": 100,
+        "max_packet_amount": 5_000,
+    }))
+    .unwrap();
+
+    let response = node
+        .router
+        .oneshot(signed(&keypair, Method::POST, "/peers", peer_body))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_GATEWAY,
+        "the counterparty's host answered 404, which is the counterparty's problem, not this \
+         request's"
+    );
+    let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+    let message = String::from_utf8(bytes.to_vec()).expect("a UTF-8 error body");
+    assert!(
+        message.contains("/ilp"),
+        "the 502 must name the fix -- POST /peers takes the self-description URL: {message}"
+    );
+}

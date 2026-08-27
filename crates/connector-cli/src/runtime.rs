@@ -2164,7 +2164,7 @@ pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError
         connector.clone(),
         signer.clone(),
         wrap_receiver_secret,
-        claim_gate,
+        claim_gate.clone(),
         node_facts(config, runtime),
         config
             .btp_session_window()
@@ -2197,6 +2197,7 @@ pub fn router(runtime: &Runtime, config: &Config) -> Result<Router, RuntimeError
     Ok(match config.operator() {
         Some(operator) => app.merge(connector_operator::router(
             connector,
+            claim_gate,
             signer,
             operator.bearer_token().to_string(),
             operator.write_keys().to_vec(),

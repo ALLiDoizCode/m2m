@@ -43,6 +43,17 @@ mkdir -p node/config node/data && cd node
 openssl rand -hex 32 > data/signer.key && chmod 600 data/signer.key
 ```
 
+> [!NOTE]
+> **The published image is `linux/amd64` only.** On Apple Silicon (or any other
+> arm64 host), pull and run it under emulation:
+>
+> ```bash
+> docker pull --platform linux/amd64 ghcr.io/toon-protocol/connector:rust-main
+> ```
+>
+> and add `platform: linux/amd64` next to `image:` on the `connector` service in
+> `compose.yml` below.
+
 `compose.yml`:
 
 ```yaml
@@ -318,14 +329,16 @@ Terminating your own routes earns from callers who know your address. Peering
 puts you on paths that start somewhere else. It is one authenticated write:
 
 ```
-POST /peers   { "id": "their-node", "url": "https://their-node.example",
+POST /peers   { "id": "their-node", "url": "https://their-node.example/ilp",
                 "fee": 100, "max_packet_amount": 1000000 }
 ```
 
-The node fetches their self-description, picks the carriage from their endpoint's
-scheme (`wss://` → BTP, `https://` → ILP-over-HTTP), finds the shared settlement
-chain, and derives the channel from the two participants — no channel identifier
-is ever exchanged, and there is no shared secret.
+`url` is their connector's self-description URL — the one whose `GET` answers
+with that description (ADR 0050) — not their origin. The node fetches it, picks
+the carriage from their endpoint's scheme (`wss://` → BTP, `https://` →
+ILP-over-HTTP), finds the shared settlement chain, and derives the channel from
+the two participants — no channel identifier is ever exchanged, and there is no
+shared secret.
 
 A route can then **forward** to that peering instead of terminating:
 

@@ -1381,6 +1381,7 @@ impl ClaimBook {
                 nonce: ledger.nonce,
                 cumulative_amount: ledger.cumulative_amount,
                 pending: ledger.pending.is_some(),
+                book: crate::operator_view::ClaimBookKind::Peer,
             })
             .collect();
         views.extend(
@@ -1395,6 +1396,7 @@ impl ClaimBook {
                     nonce: watermark.nonce,
                     cumulative_amount: watermark.cumulative_amount,
                     pending: false,
+                    book: crate::operator_view::ClaimBookKind::Peer,
                 }),
         );
         views
