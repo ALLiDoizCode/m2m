@@ -49,7 +49,7 @@ whatever the app behind it expects. Written as `[[routes]] request = { ... }`, c
 load and published verbatim on that route's self-description entry and on the greeting for that
 destination; the connector confirms only that it **is** a table and reads none of its keys. Sourced
 by the operator writing it down, never by asking the app — matching the declaration against what the
-app actually registered is the app's own repository's problem, not this one's (ADR 0066). Absent,
+app actually registered is the app's own repository's problem, not this one's (ADR 0067). Absent,
 not empty, on a route that configured none.
 _Distinct from_: a route's **description** above — free text about what the work **is**; `request`
 is structured and says what to **send**, and building it does not build ADR 0044.

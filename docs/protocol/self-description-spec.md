@@ -75,7 +75,7 @@ The document carries:
 | **edge identity** — the key a packet is sealed to                                                                                                                                                                                                      | without it a packet cannot be sealed, so it cannot be delivered                     |
 | per chain: chain id, settlement address, token network and its registry, token address, decimals                                                                                                                                                       | what a buyer needs to **open a channel**                                            |
 | route prices — the whole schedule, base and per-KiB slope ([ADR 0065](../adr/0065-a-price-is-a-schedule-over-payload-length.md)) — and their descriptions once [ADR 0044](../adr/0044-a-probe-answers-what-a-route-costs-and-what-it-does.md) is built | what a route costs **at any size**, and what it does                                |
-| a route's declared **request** shape, where the operator wrote one ([ADR 0066](../adr/0066-a-route-declares-its-request-shape-and-the-connector-never-reads-it.md))                                                                                    | what to **send** to use the route, for a route whose app expects a specific payload |
+| a route's declared **request** shape, where the operator wrote one ([ADR 0067](../adr/0067-a-route-declares-its-request-shape-and-the-connector-never-reads-it.md))                                                                                    | what to **send** to use the route, for a route whose app expects a specific payload |
 | the client transport its routes require, when they agree on one                                                                                                                                                                                        | the `requiredTransport` failure, closed by construction                             |
 | supported client-edge versions, and which one unversioned `POST /ilp` resolves to                                                                                                                                                                      | [ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md), issue #1054  |
 
@@ -89,7 +89,7 @@ of one fact is how a mainnet node comes to announce itself as devnet.**
 **ND-07a** `[connector]` — A route's `request` table is the one exception to ND-07's "derived, never
 declared" rule, and deliberately so: there is no backend this connector can ask what an arbitrary
 app's payload looks like, so declaration is the only mechanism available at all
-([ADR 0066](../adr/0066-a-route-declares-its-request-shape-and-the-connector-never-reads-it.md)). A
+([ADR 0067](../adr/0067-a-route-declares-its-request-shape-and-the-connector-never-reads-it.md)). A
 connector MUST NOT inspect a key inside it, MUST NOT fetch it from anywhere, and MUST publish it
 byte-for-byte as the operator wrote it, converted to JSON. Omitted — not `null` — on a route that
 configured none.
@@ -109,7 +109,7 @@ paid reverse proxy; what runs behind it is the app's business.
 > `relayUrl` **asserted** — this node claimed a relay existed, mixed in among facts it had proved.
 > `request` is never asserted by the connector at all: it is an operator's opaque declaration, carried
 > unread, and the connector claims nothing about whether the app behind it matches. See
-> [ADR 0066](../adr/0066-a-route-declares-its-request-shape-and-the-connector-never-reads-it.md).
+> [ADR 0067](../adr/0067-a-route-declares-its-request-shape-and-the-connector-never-reads-it.md).
 
 **ND-09** `[connector]` — It MUST NOT carry **per-peer** facts: peer identities, per-peering fees, or
 caps. Publishing them discloses who this node peers with and how far it trusts each — an

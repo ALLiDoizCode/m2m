@@ -2937,7 +2937,7 @@ impl Connector {
     /// a document whose field order wanders is a document nobody can diff.
     ///
     /// Deliberately carries **prefix, price and the route's `request`
-    /// declaration, and nothing else** (ADR 0066 for the last). A terminated
+    /// declaration, and nothing else** (ADR 0067 for the last). A terminated
     /// route's `handler_url` describes software behind this connector
     /// (ND-08); a forwarded route's peer id and per-peering fee are
     /// operator-private (ND-09). Leased routes are absent for the reason

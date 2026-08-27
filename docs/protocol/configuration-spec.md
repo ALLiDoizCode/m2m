@@ -124,7 +124,7 @@ it, and never `deny_unknown_fields` on its contents — and MUST publish it verb
 route's self-description entry and on the greeting for that destination, omitted (not `null`) where
 the operator wrote none. A connector MUST NOT fetch this fact from the app or any other source: an
 operator declares it, or it is absent.
-([ADR 0066](../adr/0066-a-route-declares-its-request-shape-and-the-connector-never-reads-it.md))
+([ADR 0067](../adr/0067-a-route-declares-its-request-shape-and-the-connector-never-reads-it.md))
 
 **CF-14** `[connector]` — Two routes naming the same handler MUST agree on its price, comparing whole
 schedules: same base and same slope.

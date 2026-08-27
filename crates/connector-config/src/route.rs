@@ -86,7 +86,7 @@ pub(crate) struct RawRoute {
     /// registered those keys is the only authority on what they mean, and
     /// the app's **own** repository, where app and connector are composed,
     /// is where a declaration here is checked against what actually runs
-    /// (ADR 0066). Not `deny_unknown_fields`: that guarantee belongs to
+    /// (ADR 0067). Not `deny_unknown_fields`: that guarantee belongs to
     /// this row, not to a blob whose keys are the app's business.
     #[serde(default)]
     request: Option<toml::Table>,

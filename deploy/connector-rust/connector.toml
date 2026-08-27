@@ -80,7 +80,7 @@ prefix = "g.example.connector.app"
 handler_url = "http://app:3100"
 price = 100
 
-# `request` is optional (ADR 0066, issue #1210): an arbitrary table naming
+# `request` is optional (ADR 0067, issue #1210): an arbitrary table naming
 # what a client should send to use this route, for an app whose payload is
 # more than "an amount". This connector validates only that it IS a table --
 # it never reads a key out of it, never fetches anything to produce or check

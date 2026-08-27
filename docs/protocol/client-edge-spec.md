@@ -655,7 +655,7 @@ greeting, plus `pricePerKib` where the addressed route prices by size, plus whic
 configured (below) — and carries nothing else.
 
 **`request`** ([issue #1210](https://github.com/toon-protocol/connector/issues/1210), [ADR
-0066](../adr/0066-a-route-declares-its-request-shape-and-the-connector-never-reads-it.md)) — a
+0066](../adr/0067-a-route-declares-its-request-shape-and-the-connector-never-reads-it.md)) — a
 top-level member, present exactly when the addressed route's `[[routes]] request` table is
 configured, absent (not `null`) otherwise. It sits **beside** `resource`, not inside `accepts[]`:
 it describes what a client should send to use the addressed route — the resource itself — not a
