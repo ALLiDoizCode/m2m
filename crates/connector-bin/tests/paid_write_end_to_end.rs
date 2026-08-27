@@ -378,7 +378,8 @@ async fn a_paid_write_lands_on_the_app_with_the_claim_advanced_by_the_routes_pri
     // `state_dir` -- config load refuses one that does not, because its
     // claim watermarks would live only in memory and every spent claim
     // would be replayable after a restart.
-    let state_dir = tempfile::tempdir().expect("temp state dir");
+    let state_dir_handle = tempfile::tempdir().expect("temp state dir");
+    let state_dir = state_dir_handle.path().display();
     let config = write_config(&format!(
         r#"
 client_edge_addr = "127.0.0.1:0"
@@ -425,7 +426,7 @@ chain_id = {ANVIL_CHAIN_ID}
 token_network_address = "{token_network}"
 "#,
         key_file = key_file.path().display(),
-        state_dir = state_dir.path().display(),
+        state_dir = state_dir,
         settlement_key_file = settlement_key_file.path().display(),
         rpc_url = anvil.rpc_url,
         paid_channel_id = paid_channel.0,
@@ -617,9 +618,16 @@ async fn an_unaffiliated_buyer_pays_for_a_write_with_no_client_channels_configur
     settlement_key_file
         .write_all(DEPLOYER_PRIVATE_KEY.as_bytes())
         .expect("write settlement key file");
+    // Issue #1186: this node declares no `[[client_channels]]` -- that is the
+    // whole point of the test -- and resolves its buyer's channel from chain
+    // instead. That is exactly the shape whose watermarks used to be allowed
+    // to live in memory, so config load now requires a `state_dir` of it.
+    let state_dir_handle = tempfile::tempdir().expect("temp state dir");
+    let state_dir = state_dir_handle.path().display();
     let config = write_config(&format!(
         r#"
 client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
 
 [signer]
 key_file = "{key_file}"
@@ -925,9 +933,16 @@ async fn an_unaffiliated_solana_buyer_pays_for_a_write_with_no_client_channels_c
     // the chain named in `[settlement.solana]`.
     let key_file = write_raw_key_file(60);
     let solana_key_file = write_raw_key_file(61);
+    // Issue #1186: this node declares no `[[client_channels]]` -- that is the
+    // whole point of the test -- and resolves its buyer's channel from chain
+    // instead. That is exactly the shape whose watermarks used to be allowed
+    // to live in memory, so config load now requires a `state_dir` of it.
+    let state_dir_handle = tempfile::tempdir().expect("temp state dir");
+    let state_dir = state_dir_handle.path().display();
     let config = write_config(&format!(
         r#"
 client_edge_addr = "127.0.0.1:0"
+state_dir = "{state_dir}"
 
 [signer]
 key_file = "{key_file}"

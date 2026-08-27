@@ -2199,8 +2199,30 @@ mod tests {
     /// the refusal (issue #1145's required `[[pay_channels]]` row).
     fn try_load_config(text: &str) -> Result<Config, connector_config::ConfigError> {
         let mut config_file = tempfile::NamedTempFile::new().expect("temp config file");
-        write!(config_file, "{text}").expect("write config file");
+        write!(config_file, "{}", with_state_dir(text)).expect("write config file");
         Config::load(config_file.path())
+    }
+
+    /// Give a fixture its own `state_dir` unless it names one itself.
+    ///
+    /// CF-39 as amended by issue #1186 refuses a settlement table with no
+    /// durable watermark location, and most fixtures here configure
+    /// settlement -- so without this every one of them would carry the same
+    /// boilerplate line.
+    ///
+    /// **A fresh directory per call, never a shared one.** These journals are
+    /// real: a constant path lets one test's accepted claim become the next
+    /// test's replay, which is exactly what a first attempt at this hit
+    /// (`Undercollateralized` expected, `NonceNotAdvancing` returned, because
+    /// the watermark had survived from an earlier run). `keep` keeps the
+    /// directory rather than deleting it at end of scope, since the runtime
+    /// opens its journal well after this function has returned.
+    fn with_state_dir(text: &str) -> String {
+        if text.contains("state_dir") {
+            return text.to_string();
+        }
+        let dir = tempfile::tempdir().expect("temp state dir").keep();
+        format!("state_dir = \"{}\"\n{text}", dir.display())
     }
 
     /// A throwaway signer for a [`client_claim_gate`] call whose test is
@@ -2223,14 +2245,17 @@ mod tests {
         let mut config_file = tempfile::NamedTempFile::new().expect("temp config file");
         write!(
             config_file,
-            r#"
+            "{}",
+            with_state_dir(&format!(
+                r#"
 client_edge_addr = "127.0.0.1:0"
 {extra}
 
 [signer]
 key_file = "{}"
 "#,
-            key_path.display()
+                key_path.display()
+            ))
         )
         .expect("write config file");
         Config::load(config_file.path())

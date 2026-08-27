@@ -173,6 +173,12 @@ async fn a_channel_lifecycle_reaches_a_real_chain_through_a_config_driven_node()
         config_file,
         r#"
 client_edge_addr = "127.0.0.1:0"
+# CF-39 (issue #1186): a settlement table means this node resolves channels
+# from chain and takes their claims, so it must keep watermarks durably.
+# A fresh directory per test, never a shared one -- these journals are real,
+# and a constant path lets one test's accepted claim become the next test's
+# replay.
+state_dir = "{state_dir}"
 
 [signer]
 key_file = "{key_path}"
@@ -191,6 +197,10 @@ decimals = 6
 [settlement.key]
 key_file = "{key_path}"
 "#,
+        state_dir = tempfile::tempdir()
+            .expect("temp state dir")
+            .keep()
+            .display(),
         key_path = key_file.path().display(),
         rpc_url = anvil.rpc_url,
     )
@@ -532,6 +542,12 @@ async fn a_solana_channel_is_settled_through_the_operator_surface_of_a_config_dr
         config_file,
         r#"
 client_edge_addr = "127.0.0.1:0"
+# CF-39 (issue #1186): a settlement table means this node resolves channels
+# from chain and takes their claims, so it must keep watermarks durably.
+# A fresh directory per test, never a shared one -- these journals are real,
+# and a constant path lets one test's accepted claim become the next test's
+# replay.
+state_dir = "{state_dir}"
 
 [signer]
 key_file = "{key_path}"
@@ -549,6 +565,10 @@ decimals = 6
 [settlement.solana.key]
 key_file = "{key_path}"
 "#,
+        state_dir = tempfile::tempdir()
+            .expect("temp state dir")
+            .keep()
+            .display(),
         key_path = key_file.path().display(),
         rpc_url = validator.rpc_url,
     )
