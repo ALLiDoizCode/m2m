@@ -241,7 +241,7 @@ there".
 | `adr/`          | The numbered decisions, and the tiebreaker for everything else in this repository. `README.md` is the index — grouped by scope, with each record's own `**Status:**` line as the authority for whether it is live. Numbers are permanent and never reused. |
 | `protocol/`     | The wire specs the ADRs are implemented against: `client-edge-spec.md`, `peer-carriage-spec.md`, `operator-spec.md`, `configuration-spec.md`, `packet-flow-spec.md`, `payment-spec.md`, `self-description-spec.md`, `wire-vectors.md`.                     |
 | `rfcs/`         | The Interledger RFCs this connector implements — see below.                                                                                                                                                                                                |
-| `operators/`    | Runbooks: box bringup, key rotation, fleet release and health, peer-channel migration, BTP peer bringup.                                                                                                                                                   |
+| `operators/`    | Runbooks: box bringup, key rotation, fleet release and health, peer-channel migration, BTP peer bringup, the claim-policy rollout, box reconciliation.                                                                                                     |
 | `agents/`       | Conventions for agents working here: the issue tracker, triage labels, how to consume the domain docs.                                                                                                                                                     |
 | `architecture/` | This page, plus [`tech-stack.md`](tech-stack.md) (languages, runtimes, pinned versions) and [`coding-standards.md`](coding-standards.md) (what the gate enforces, in the order it enforces it).                                                            |
 
@@ -249,12 +249,11 @@ Loose files under `docs/` are chain-deployment notes and one-off design records
 (`evm-deployment.md`, `solana-deployment.md`, `mina-deployment.md`, `devnet-pricing.md` and
 similar). They are point-in-time; the ADRs are not.
 
-**Two operator documents describe software that no longer exists.**
-[`operators/admin-api.md`](../operators/admin-api.md) and
-[`operators/load-testing-guide.md`](../operators/load-testing-guide.md) document the retired
-TypeScript connector ([ADR 0017](../adr/0017-the-typescript-connector-is-a-prototype.md)) and
-are banner-marked as historical at the top of each file. Neither describes anything in
-`crates/`.
+Nothing under `docs/` describes the retired TypeScript connector any more
+([ADR 0017](../adr/0017-the-typescript-connector-is-a-prototype.md)): its admin-API reference,
+load-testing guide, cutover runbooks, stories and changelog were deleted, and are in git history.
+The two `protocol/*-pre-868.md` files are frozen records of an earlier _Rust_ money model, kept
+because the ADRs that replaced it argue against them by name.
 
 ### `docs/rfcs/`
 

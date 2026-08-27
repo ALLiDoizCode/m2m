@@ -77,7 +77,6 @@ scripts/
 
 # Package manager lock files for other managers
 yarn.lock
-pnpm-lock.yaml
 
 # Claude Code
 .claude/

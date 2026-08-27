@@ -51,11 +51,9 @@ Tags:
 
 There is no semver tag series here: no crate under `crates/` has a release
 process yet, and inventing one for the image alone would claim a stability
-contract the binary hasn't earned. Compare
-[`CONNECTOR_RELEASE_CONTRACT.md`](../../CONNECTOR_RELEASE_CONTRACT.md), which
-describes the semver/cosign contract the old TypeScript image had — that
-image is no longer published (4.0.0), and this one does not (yet) carry an
-equivalent contract.
+contract the binary hasn't earned. The retired TypeScript image had a
+semver/cosign contract; that image is no longer published, and this one does
+not (yet) carry an equivalent.
 
 The release handle is what a version number would otherwise have been, minus
 the promise: `2026.08.21.1` says when this state of the world was cut and in

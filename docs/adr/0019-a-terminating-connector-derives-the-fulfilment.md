@@ -18,7 +18,8 @@ terminating one (relaying an app's) from producing a valid fulfilment without th
 actual participation", and never accepts "a fulfilment this connector invents itself".
 
 That rule and envelope delivery cannot both hold. The prototype's own normative contract says so —
-`docs/local-delivery-fulfillment-contract.md`, rule 5:
+`docs/local-delivery-fulfillment-contract.md` (deleted with the prototype, readable in git
+history), rule 5:
 
 > Handlers that structurally cannot supply preimages (e.g. the #216 HTTP reverse-proxy for
 > terminated routes) fulfill without one and are therefore converted to F99 by rule 3; do not point

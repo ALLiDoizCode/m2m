@@ -21,8 +21,8 @@ store app without touching it, and the app cannot tell which connector is in fro
 > `X-TOON-Payer`/`X-TOON-Amount`/`X-TOON-Chain`; the Rust one treats `prepare.data` as an opaque
 > body and sends none of them. The relay and store both read those headers, so an app _can_ tell,
 > and loses payer attribution behind the Rust fleet.
-> [`docs/operators/parallel-fleet-comparison.md`](../operators/parallel-fleet-comparison.md) has
-> the evidence. The rest of this ADR stands.
+> `docs/operators/parallel-fleet-comparison.md` (a closed record, since deleted; in git history)
+> has the evidence. The rest of this ADR stands.
 >
 > The premise is not closed by making the two deliver alike. ADR 0017 withdraws the conformance
 > target, and ADR 0020 with `CONTEXT.md` decides the app is told nothing about the payment at all —
@@ -72,8 +72,8 @@ it.
 
 The conditions for recognizing that moment — what must be observably true of traffic, clients
 and channels before the old prefix is deleted, and what is irreversible if they are wrong — are
-written down in
-[`docs/operators/prefix-retirement-checklist.md`](../operators/prefix-retirement-checklist.md).
-The concrete box-by-box execution of that deletion on the devnet fleet's two boxes — exact nginx
-edits, verification and rollback — is
-[`docs/operators/rust-cutover-runbook.md`](../operators/rust-cutover-runbook.md).
+written down in `docs/operators/prefix-retirement-checklist.md`, and the concrete box-by-box
+execution of that deletion on the devnet fleet's two boxes — exact nginx edits, verification and
+rollback — in `docs/operators/rust-cutover-runbook.md`. Both were executed (issue #872) and have
+since been deleted along with everything else that described the TypeScript fleet; they are in
+git history.

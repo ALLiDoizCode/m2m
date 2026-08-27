@@ -23,10 +23,8 @@ material or funds this environment does not have.
   direct-dial wiring toon-meta#402 proved (swap#105): no `connector`/`connectorUrl`, so
   `toon-swap --config` auto-creates an embedded, parentless `ConnectorNode` gated on
   `btpServerPort`. That embedded node comes from the **retired** `@toon-protocol/connector` 3.x
-  line — see
-  [`../embedded-connector-peer-relation-contract.md`](../embedded-connector-peer-relation-contract.md)
-  for what the maker may rely on there (including the `child` peer relation its leg-B return path
-  sets), and for what the Rust connector does instead. `evm:84532` `chainProviders` point at the deployed `RollingSwapChannel`
+  line; its `child` peer relation (which the leg-B return path sets) is that line's, and the Rust
+  connector has no parent/child peer relation at all. `evm:84532` `chainProviders` point at the deployed `RollingSwapChannel`
   (connector#974) and the fleet's standard `TokenNetworkRegistry`/USDC. See that file's own
   `_..._comment` fields for every placeholder it carries and why.
 - `infra/linode-relay/nginx/node.conf.template` + the rendered `nginx/conf.d/node.conf` — two new
@@ -155,8 +153,8 @@ material or funds this environment does not have.
 4. **Announce-loop pay channel.** Open and fund an ordinary EVM payment channel (the fleet's
    standard `TokenNetworkRegistry`, `0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1`) from the
    index-2 settlement address to the relay box, mirroring how
-   `infra/linode-store/connector-rust.toml`'s own `[announce] pay_channel` is opened and funded
-   (`docs/operators/announcing-a-node.md`, "What the node needs before this can work"). Replace
+   `infra/linode-store/connector-rust.toml`'s own `[announce] pay_channel` was opened and funded
+   before ADR 0046 removed it. Replace
    `connector-rust.swap-announce.toml`'s `pay_channel = "0xdead..."` placeholder with the real id in
    a box-local copy (or land it as a follow-up repo PR once the id is known — it is not secret).
 
@@ -208,9 +206,8 @@ material or funds this environment does not have.
    (`fleet-ops.yml`'s `announce` operation reads this back itself and fails the job if it does not
    appear within 90s). Confirm the published kind:10032 content carries the maker's own
    `btpEndpoint` (`wss://proxy.relay.devnet.toonprotocol.dev/swap/ilp/btp`) and the `evm:84532`
-   settlement facts — the same content-not-author verification
-   `docs/operators/announcing-a-node.md` already asks for when two publishers might be confused,
-   here between the relay's own announce and the maker's.
+   settlement facts — verify the content, not the author, because two publishers are easy to
+   confuse here: the relay's own announce and the maker's.
 
    Proving an actual swap against the deployed maker (a stock client discovering the announce,
    direct-dialing the BTP endpoint, completing a rolling swap, redeeming the leg-B claim on-chain)

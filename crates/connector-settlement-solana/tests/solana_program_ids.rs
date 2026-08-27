@@ -107,13 +107,7 @@ const RETIRED_PROGRAM_IDS: &[(&str, &str)] = &[
 ///
 /// An entry added here needs what these have: a named reason why the value
 /// decides nothing this repository deploys or signs against.
-const NOT_A_DEPLOY: &[(&str, &str)] = &[(
-    "docs/epic-34-preparation.md",
-    "a TypeScript-era Epic 33/34 planning note. Its `programId: PayChan1111…` is an illustrative \
-     placeholder in a YAML fragment for `SolanaProviderConfig`, a type that went with the \
-     retired TypeScript connector (ADR 0017). Nothing reads it; the document is kept as the \
-     record of decisions that epic took",
-)];
+const NOT_A_DEPLOY: &[(&str, &str)] = &[];
 
 /// This file's own path, repo-relative. The walk skips it: the prose above
 /// quotes both live ids and both retired ones in order to explain them, which
@@ -318,7 +312,6 @@ fn the_repository_names_a_solana_program_id_in_exactly_the_known_places() {
         "deploy/connector-rust/README.md",
         "deploy/connector-rust/connector.production.toml",
         "docs/adr/0056-production-is-a-named-empty-tier.md",
-        "docs/epic-34-preparation.md",
         "infra/linode-relay/connector-rust.toml",
         "infra/linode-store/connector-rust.toml",
         "infra/linode/endpoints.json",

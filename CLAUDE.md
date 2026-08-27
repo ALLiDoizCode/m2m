@@ -273,8 +273,8 @@ first, then move the tag.
   `toon-client`, `rig` and `swap` (ADR 0021). Prose is not normative. Regenerate with
   `cargo run -p connector-vectors --bin generate-vectors` after any change to the
   envelope, gift wrap, fulfilment derivation or claim signing.
-- `docs/operators/` — runbooks. `admin-api.md` and `load-testing-guide.md` document
-  the **retired** TypeScript connector and are banner-marked as such.
+- `docs/operators/` — runbooks for the devnet fleet: box bring-up, key rotation, release
+  and health, peering bring-up.
 - `docs/agents/` — issue tracker, triage labels, domain docs conventions.
 - `docs/rfcs/` — the ten Interledger RFCs this connector implements, vendored verbatim
   and pinned, each under a **TOON profile** recording where this connector departs and

@@ -1,19 +1,13 @@
 # Solana Payment Channel Program -- Devnet Deployment & Operations Guide
 
-> **Half historical, and the halves are easy to tell apart.** Everything about
-> `packages/solana-program` itself -- building it, deploying it, its PDA seeds, its account
-> layout -- is current. Everything naming `chainProviders`, `SolanaPaymentChannelProvider`,
-> `ChainProviderRegistry` or a YAML config describes the **retired TypeScript connector**
-> ([ADR 0017](adr/0017-the-typescript-connector-is-a-prototype.md)) and nothing in `crates/`. The
-> Rust connector reads one TOML file
-> ([ADR 0009](adr/0009-one-typed-config-file-no-environment-layer.md)), configures Solana under
-> `[settlement.solana]`, and drives the program through
+> **Where the connector fits.** Everything here is about `packages/solana-program` itself --
+> building it, deploying it, its PDA seeds, its account layout. The connector side is one TOML
+> table, `[settlement.solana]` ([Configuration](#configuration)), and the program is driven through
 > `connector-settlement-solana`'s `SettlementBackend`.
 >
-> One consequence is worth stating up front, because two sections below say the opposite of what
-> the shipped connector does: the Rust connector **does** open a Solana channel on demand --
-> `POST /channels` with `"chain":"solana"` reaches `SolanaSettlementBackend::open`, which submits
-> the `InitializeChannel`
+> Two things the connector does that are easy to assume it does not: it **opens** a Solana channel
+> on demand -- `POST /channels` with `"chain":"solana"` reaches `SolanaSettlementBackend::open`,
+> which submits the `InitializeChannel`
 > ([ADR 0008](adr/0008-operator-surface-splits-read-from-write.md)'s third write, issue #459), and
 > [`local/mixed-chain`](../local/README.md) opens its peering's channel that way on every run. It
 > **also** deposits a node's own collateral, as of issue #1118: `POST /channels/:id/fund` submits a
@@ -21,7 +15,7 @@
 > on any other chain -- is deposit on its _counterparty's_ behalf: `Deposit` credits strictly by
 > signer, so the other side's collateral is always their own transaction from their own wallet.
 
-This guide covers deploying the Solana payment channel program to devnet, configuring the `SolanaPaymentChannelProvider` in the connector, and operating payment channels in a test environment.
+This guide covers deploying the Solana payment channel program to devnet, pointing a connector at it, and operating payment channels in a test environment.
 
 ## Table of Contents
 
@@ -32,9 +26,6 @@ This guide covers deploying the Solana payment channel program to devnet, config
   - [Deployment Cost Estimates](#deployment-cost-estimates)
   - [Verify Deployment](#verify-deployment)
 - [Configuration](#configuration)
-  - [SolanaProviderConfig Fields](#solanaproviderconfig-fields)
-  - [Connector YAML Configuration Example](#connector-yaml-configuration-example)
-  - [Per-Peer Chain Reference](#per-peer-chain-reference)
 - [Deposit Management](#deposit-management)
   - [Opening a Channel](#opening-a-channel)
   - [Funding a Channel Vault](#funding-a-channel-vault)
@@ -55,7 +46,6 @@ This guide covers deploying the Solana payment channel program to devnet, config
   - [Channel Health Monitoring](#channel-health-monitoring)
   - [Stuck Channel Detection](#stuck-channel-detection)
   - [RPC-Based Monitoring](#rpc-based-monitoring)
-  - [SDK-Based Monitoring](#sdk-based-monitoring)
 - [Rent Economics](#rent-economics)
 - [Devnet Endpoints Reference](#devnet-endpoints-reference)
 
@@ -239,92 +229,31 @@ headroom; an upgrade reuses the existing account's `max_len` and records `null`)
 
 ## Configuration
 
-### SolanaProviderConfig Fields
+The connector reads one TOML file
+([ADR 0009](adr/0009-one-typed-config-file-no-environment-layer.md)) and configures Solana
+settlement in one table. There is no environment-variable fallback for any of it.
 
-The `SolanaProviderConfig` interface defines how the connector connects to the Solana payment channel program:
+```toml
+[settlement.solana]
+rpc_url       = "https://api.devnet.solana.com"
+program_id    = "<DEPLOYED_PROGRAM_ID>"   # the payment-channel program this guide deploys
+token_address = "<SPL_TOKEN_MINT>"        # the mint every channel under this backend settles in
+decimals      = 6
 
-| Field       | Type       | Required | Description                                                                    |
-| ----------- | ---------- | -------- | ------------------------------------------------------------------------------ |
-| `chainType` | `'solana'` | Yes      | Discriminator for the Solana provider                                          |
-| `rpcUrl`    | `string`   | Yes      | Solana cluster RPC endpoint (HTTP). Example: `https://api.devnet.solana.com`   |
-| `wsUrl`     | `string`   | No       | WebSocket endpoint for account subscriptions. Derived from `rpcUrl` if omitted |
-| `programId` | `string`   | Yes      | Base58-encoded deployed program address (from `tools/solana/program-id.json`)  |
-| `keyId`     | `string`   | Yes\*    | Raw **base58 ed25519 secret key** (see "Settlement key contract" below)        |
-| `cluster`   | `string`   | No       | Solana cluster name: `'mainnet-beta'`, `'devnet'`, or `'testnet'`              |
-| `tokenMint` | `string`   | No       | Base58 SPL token mint address for the payment-channel token                    |
-
-\* `keyId` is required unless the `SOLANA_PRIVATE_KEY` environment variable is set (see below).
-
-### Settlement key (`keyId`) contract
-
-The Solana `keyId` follows the same contract as the EVM `keyId`: it holds the **raw private key**, not a key-management identifier.
-
-- **Format:** a base58-encoded **64-byte ed25519 secret key** (the full keypair, `seed || public_key`). A base58-encoded **32-byte private-key seed** is also accepted and expanded to a full keypair.
-- **Environment fallback:** when `keyId` is omitted, the connector reads the key from the `SOLANA_PRIVATE_KEY` environment variable. If neither resolves, settlement bootstrap throws a descriptive error.
-- **No file paths / no KMS reference:** unlike some Solana tooling, the connector does **not** read `~/.config/solana/id.json`-style keypair files here. Pass the decoded base58 string (e.g. `bs58.encode(Uint8Array.from(require('./id.json')))`).
-
-#### Standalone Solana-only nodes (claim-driven redemption)
-
-A node configured with **only** a Solana `chainProvider` (no EVM entry) is fully supported. On startup it boots the settlement stack — `ChainProviderRegistry`, `SettlementExecutor`, `ClaimReceiver`, and `SettlementMonitor` — and registers a `solana:<cluster>` provider. The EVM `PaymentChannelSDK` and `ChannelManager` stay `null`.
-
-Non-EVM settlement is **claim-driven redemption**: the connector redeems verified claims against channels that were **opened out-of-band**. It does **not** open Solana channels on demand. Operators are responsible for opening and depositing into channels (see "Deposit Management"); the connector's role is to submit `claimFromChannel` transactions when a peer's credit balance crosses the settlement threshold.
-
-### Connector YAML Configuration Example
-
-Add a Solana provider to the connector's `chainProviders` array:
-
-```yaml
-nodeId: my-connector
-btpServerPort: 3000
-
-chainProviders:
-  - chainType: solana
-    chainId: 'solana:devnet'
-    rpcUrl: 'https://api.devnet.solana.com'
-    wsUrl: 'wss://api.devnet.solana.com'
-    programId: '<DEPLOYED_PROGRAM_ID>' # From tools/solana/program-id.json
-    keyId: '<base58 ed25519 secret key>' # raw key; or set SOLANA_PRIVATE_KEY
-    cluster: 'devnet'
-    tokenMint: '<SPL_TOKEN_MINT>' # optional; defaults to the node settlement token
-
-peers:
-  - id: peer-solana
-    url: wss://peer-solana:3001
-    authToken: secret-solana
-    chain: 'solana:devnet' # References chainProviders[].chainId
-
-  - id: peer-evm
-    url: wss://peer-evm:3002
-    authToken: secret-evm
-    chain: 'evm:8453' # EVM peer unchanged
+[settlement.solana.key]
+key_file = "/app/data/settlement-solana.key"   # the node's settlement signer, by path, never inline
 ```
 
-### Minimal Solana-only configuration
+`program_id` is bound into every Solana claim's signed message
+([ADR 0053](adr/0053-a-solana-claim-binds-its-domain-the-way-an-evm-claim-does.md)), so a node
+naming one program takes money for claims that only redeem against that program: point a node at
+the program you actually deployed, and at nothing else. The key behind `key_file` is the identity
+that opens channels, deposits the node's own collateral and redeems claims -- **fund it with SOL for
+fees and with the SPL token itself before the node starts**, because a Solana backend submits a
+real transaction at `connect`.
 
-A standalone Solana-only node needs only the Solana `chainProvider`:
-
-```yaml
-nodeId: solana-node
-btpServerPort: 3000
-environment: development
-deploymentMode: standalone
-
-chainProviders:
-  - chainType: solana
-    chainId: 'solana:devnet'
-    rpcUrl: 'https://api.devnet.solana.com'
-    programId: '<DEPLOYED_PROGRAM_ID>'
-    keyId: '<base58 ed25519 secret key>' # or set SOLANA_PRIVATE_KEY
-    cluster: 'devnet'
-    tokenMint: '<SPL_TOKEN_MINT>'
-
-peers: [] # accepts inbound BTP; redeems claims against out-of-band channels
-routes: []
-```
-
-### Per-Peer Chain Reference
-
-Each peer's `chain` field references a registered provider's `chainId`. For Solana peers, set `chain` to the same value as the Solana provider's `chainId` (e.g., `"solana:devnet"`). This enables the `ChainProviderRegistry` to route settlement operations to the correct provider.
+[`docs/protocol/configuration-spec.md`](protocol/configuration-spec.md) is the reference for every
+key, and the [README](../README.md) is the walk-through of what the node then does with them.
 
 ---
 
@@ -332,7 +261,7 @@ Each peer's `chain` field references a registered provider's `chainId`. For Sola
 
 ### Opening a Channel
 
-Channels are opened programmatically through the `SolanaPaymentChannelProvider.openChannel()` method or directly via the Solana program. The channel state is stored in a Program Derived Address (PDA):
+A connector opens a channel with an operator write -- `POST /channels` with `"chain":"solana"` -- and any other participant opens one directly against the program. The channel state is stored in a Program Derived Address (PDA):
 
 ```
 PDA seeds = [b"channel", participant_a, participant_b, token_mint]
@@ -367,22 +296,6 @@ submitted directly against the deployed program under that participant's own key
 operation on any node, on either settlement backend, or on the settlement port that does it for
 them, and adding one is not possible without changing the program.
 
-The retired TypeScript path below is kept for the record only:
-
-1. **Identify the channel PDA** -- derived from the two participants' public keys and the token mint
-2. **Transfer tokens** -- use the `deposit()` method on the SDK or provider:
-
-   ```typescript
-   // RETIRED (ADR 0017): the TypeScript SolanaPaymentChannelProvider
-   await provider.deposit(channelId, amount.toString());
-   ```
-
-3. **Verify the deposit** -- check the on-chain channel state:
-
-   ```bash
-   solana account <CHANNEL_PDA> --url devnet --output json
-   ```
-
 ### Verifying Deposits On-Chain
 
 Use the Solana CLI to inspect channel state:
@@ -393,16 +306,6 @@ solana account <CHANNEL_PDA> --url devnet --output json
 
 # Check the token vault balance
 spl-token balance --address <VAULT_ACCOUNT> --url devnet
-```
-
-Or use the SDK programmatically:
-
-```typescript
-const state = await sdk.getChannelState(channelPDA);
-logger.info(
-  { depositA: state.depositA.toString(), depositB: state.depositB.toString() },
-  'Channel deposits'
-);
 ```
 
 ---
@@ -732,41 +635,6 @@ solana account <CHANNEL_PDA> --url devnet --output json
 
 # Check deployer/operator balance
 solana balance <OPERATOR_PUBKEY> --url devnet
-```
-
-### SDK-Based Monitoring
-
-Use the `SolanaPaymentChannelSDK` to subscribe to real-time channel state changes:
-
-```typescript
-import { SolanaPaymentChannelSDK } from './settlement/solana-payment-channel-sdk';
-
-// Subscribe to channel state changes via onAccountChange
-const subscription = sdk.subscribeToChannel(channelPDA, (state) => {
-  logger.info({ channelPDA, state: state.state }, 'Channel state changed');
-
-  if (state.state === 'closed') {
-    const deadline = state.closeTimestamp + state.challengeDuration;
-    if (BigInt(Math.floor(Date.now() / 1000)) > deadline) {
-      logger.warn({ channelPDA, deadline: deadline.toString() }, 'Stuck channel detected');
-    }
-  }
-});
-```
-
-**Periodic polling alternative:**
-
-```typescript
-// Poll channel state every 30 seconds
-setInterval(async () => {
-  const state = await sdk.getChannelState(channelPDA);
-  if (state.state === 'closed') {
-    const deadline = state.closeTimestamp + state.challengeDuration;
-    if (BigInt(Math.floor(Date.now() / 1000)) > deadline) {
-      logger.warn({ channelPDA }, 'Stuck channel -- needs settlement');
-    }
-  }
-}, 30_000);
 ```
 
 ---
