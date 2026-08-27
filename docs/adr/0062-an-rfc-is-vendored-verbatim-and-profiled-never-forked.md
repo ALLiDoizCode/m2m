@@ -1,6 +1,6 @@
 # An RFC is vendored verbatim and profiled, never forked
 
-**Status:** Accepted — **built** (#1173). Ten Interledger RFCs live under [`docs/rfcs/`](../rfcs/README.md), each an unmodified upstream body beneath a TOON-profile preface, pinned by commit and hashed by `crates/connector-bin/tests/vendored_rfcs_are_unmodified.rs`. Extends [0021](0021-vectors-are-normative-prose-is-not.md)'s precedence order downward to cover text this project did not write.
+**Status:** Accepted — **built** (#1173). Ten Interledger RFCs live under [`docs/rfcs/`](../rfcs/README.md), each an unmodified upstream body beneath a TOON-profile preface, pinned by commit and hashed by `crates/connector-bin/tests/vendored_rfcs_are_unmodified.rs`. Extends [0021](0021-vectors-are-normative-prose-is-not.md)'s precedence order downward to cover text this project did not write. Amended by [0063](0063-the-ilp-packet-is-toons-dialect-not-rfc-0027s.md) in one sentence only — the wording of its opening motivation, not any decision.
 
 **Scope:** documentation and protocol law — binds this repository and anyone citing it. See the [ADR index](README.md).
 
@@ -11,9 +11,12 @@ itself. Merging the two destroys both.
 
 ## Why a copy at all
 
-The connector speaks ILPv4 packets, OER bytes, ILP addresses, BTP frames and
-ILP-over-HTTP. An operator standing a node up is entitled to read the protocol
-it rides, and an agent working in this repository is instructed to answer
+The connector routes ILPv4 packets, encodes them as OER bytes, matches on ILP
+addresses, and carries them over BTP and ILP-over-HTTP. (Not "speaks ILPv4":
+[0063](0063-the-ilp-packet-is-toons-dialect-not-rfc-0027s.md) retires that phrase
+as this record was being written, because the semantics are RFC 0027's and the
+byte layout is not.) An operator standing a node up is entitled to read the
+protocol it rides, and an agent working in this repository is instructed to answer
 protocol questions from the RFC rather than from memory (`CLAUDE.md`). Both were
 being served by a link to another repository's default branch — a moving target,
 reachable only online, and silent about the dozen places this connector
