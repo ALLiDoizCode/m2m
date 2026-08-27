@@ -68,15 +68,15 @@ either proved at startup or was configured with, about itself.
 
 The document carries:
 
-| fact                                                                                                                              | why a stranger needs it                                                            |
-| --------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| ILP address(es)                                                                                                                   | what to address                                                                    |
-| public HTTP and BTP endpoints, and which carriages are exposed                                                                    | where to reach it, and how                                                         |
-| **edge identity** — the key a packet is sealed to                                                                                 | without it a packet cannot be sealed, so it cannot be delivered                    |
-| per chain: chain id, settlement address, token network and its registry, token address, decimals                                  | what a buyer needs to **open a channel**                                           |
-| route prices, and their descriptions once [ADR 0044](../adr/0044-a-probe-answers-what-a-route-costs-and-what-it-does.md) is built | what a route costs and what it does                                                |
-| the client transport its routes require, when they agree on one                                                                   | the `requiredTransport` failure, closed by construction                            |
-| supported client-edge versions, and which one unversioned `POST /ilp` resolves to                                                 | [ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md), issue #1054 |
+| fact                                                                                                                                                                                                                                                   | why a stranger needs it                                                            |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------- |
+| ILP address(es)                                                                                                                                                                                                                                        | what to address                                                                    |
+| public HTTP and BTP endpoints, and which carriages are exposed                                                                                                                                                                                         | where to reach it, and how                                                         |
+| **edge identity** — the key a packet is sealed to                                                                                                                                                                                                      | without it a packet cannot be sealed, so it cannot be delivered                    |
+| per chain: chain id, settlement address, token network and its registry, token address, decimals                                                                                                                                                       | what a buyer needs to **open a channel**                                           |
+| route prices — the whole schedule, base and per-KiB slope ([ADR 0065](../adr/0065-a-price-is-a-schedule-over-payload-length.md)) — and their descriptions once [ADR 0044](../adr/0044-a-probe-answers-what-a-route-costs-and-what-it-does.md) is built | what a route costs **at any size**, and what it does                               |
+| the client transport its routes require, when they agree on one                                                                                                                                                                                        | the `requiredTransport` failure, closed by construction                            |
+| supported client-edge versions, and which one unversioned `POST /ilp` resolves to                                                                                                                                                                      | [ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md), issue #1054 |
 
 **ND-06** `[connector]` — The **edge identity** MUST be published. A route whose terminating identity
 is unpublished is unreachable: a sender cannot seal to it, so it can never be delivered to.
@@ -117,6 +117,14 @@ one.
 The greeting therefore carries what a client needs _at that moment_ — `payTo`, `maxTimeoutSeconds`,
 the route's price, `sessionLeaseTtlMs` — alongside the projected node facts. Fields that exist only to
 serve an in-flight transaction stay there and are not promoted.
+
+**ND-12a** `[connector]` — Where a route's price carries a slope
+([ADR 0065](../adr/0065-a-price-is-a-schedule-over-payload-length.md)), both surfaces MUST publish
+the **schedule** and not only a figure: this document per priced prefix, and the greeting as
+`extra.price` + `extra.pricePerKib` beside its own `amount`. The greeting's `amount` stays what the
+greeted request costs — that is the field's job — so the schedule is what makes one read answer
+every size. The slope is **omitted** where it is zero, so a flat route's document and greeting are
+byte-identical to what they were before schedules existed.
 
 ---
 

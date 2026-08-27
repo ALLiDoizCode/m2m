@@ -62,6 +62,14 @@ from an arbitrary buyer, not a high-frequency stream. Nothing amortises a
 handshake there, which is also why the relay route pins `transport = "btp"`
 (#701) while the store legs keep the default `both`.
 
+**Every fleet price is flat, by choice rather than by constraint.**
+[ADR 0065](adr/0065-a-price-is-a-schedule-over-payload-length.md) (#984) lets a
+route charge `{ base, per_kib }` over a packet's payload length, which is what a
+store leg fronting a per-byte upstream wants. The fleet has not taken it: a
+schedule is a config **shape** a pre-0065 binary refuses, so adopting one is a
+breaking deploy — the image moves first, then the config, per the usual
+ordering. Until then, `1000` here means the same flat figure it always did.
+
 ## The apex forward (retired, issue #872)
 
 Until issue #872 removed it, the apex sat in front of both boxes and forwarded to them over a paid

@@ -1,6 +1,6 @@
 # A price is flat, attaches to a handler, and buys an answer
 
-**Status:** Accepted, narrowed by [0040](0040-a-verified-payment-is-stated-to-the-app.md) — a delivery whose covering client claim this connector verified itself now states `X-TOON-Payer` / `X-TOON-Amount` / `X-TOON-Chain`. Everything else stands, and [0044](0044-a-probe-answers-what-a-route-costs-and-what-it-does.md) extends handler granularity from price to description. Amended by [0064](0064-a-deadline-bounds-the-wait-for-an-app-not-the-answer.md) (#1183): “value moves whenever the app answered” now reads “and answered in time” — an app that does not answer within the packet’s own deadline is abandoned and the packet refused `R00`. Every answer that does arrive in time is untouched, a `404` included.
+**Status:** Accepted, narrowed by [0040](0040-a-verified-payment-is-stated-to-the-app.md) — a delivery whose covering client claim this connector verified itself now states `X-TOON-Payer` / `X-TOON-Amount` / `X-TOON-Chain`. Everything else stands, and [0044](0044-a-probe-answers-what-a-route-costs-and-what-it-does.md) extends handler granularity from price to description. Amended by [0064](0064-a-deadline-bounds-the-wait-for-an-app-not-the-answer.md) (#1183): “value moves whenever the app answered” now reads “and answered in time” — an app that does not answer within the packet’s own deadline is abandoned and the packet refused `R00`. Every answer that does arrive in time is untouched, a `404` included. **Amended by [0065](0065-a-price-is-a-schedule-over-payload-length.md) (#984):** “a price is flat per packet” becomes “a price is a schedule over the packet’s payload length”, of which flat is the zero-slope case. Handler granularity, the app’s obliviousness, cost accumulation and value-on-answer are all untouched.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
@@ -23,6 +23,16 @@ resolved this by not resolving it: its route carried a flat price of `1000` and 
 relay's pricing engine.
 
 ## Decision
+
+> **Amended by [ADR 0065](0065-a-price-is-a-schedule-over-payload-length.md) (issue
+> #984).** A price is a **schedule** over the packet's payload length --
+> `base + per_kib × ceil(len / 1024)` -- of which the flat price below is the case whose
+> slope is zero, and which is still what every route the fleet runs charges. The paragraph
+> below was taken against an app whose work is the same at any size; #984 measured a node
+> fronting a per-byte upstream losing money on every job above ~100 KB, across a 61×
+> break-even span one number cannot express. What did **not** change: the length measured is
+> the sealed wrap's, never anything inside it, so a connector still prices without ever
+> interpreting what it carries.
 
 **A price is flat per packet**, exactly as a fee is (ADR 0010). It does not vary with the payload.
 
@@ -83,6 +93,16 @@ defined, useful, unpaid answer.
 
 ## Considered options
 
+> **Reversed in part by [ADR 0065](0065-a-price-is-a-schedule-over-payload-length.md).**
+> Both grounds below were answered rather than overridden. _Asymmetry with the flat fee_
+> stands as written and is now deliberate: a fee buys carriage, whose work does not scale with
+> a payload, and only the price gains a slope. _Cacheability_ is preserved by publishing the
+> **schedule** on the greeting and the self-description (`extra.pricePerKib`), so one free
+> read answers every size and no sender probes with a same-size dummy. The unit is per
+> **KiB** and not per byte, for a reason this record's own ADR 0010 lineage supplies: at
+> 6-decimal USDC the observed slope is ~0.03 base units a byte, which rounds to zero in
+> integer base units exactly as the basis-point fee did.
+
 **Price per byte.** Covers what the relay actually does. Rejected on two counts: it is asymmetric
 with ADR 0010's deliberately flat fee, and it breaks ADR 0011's cacheability — a probe would report
 only the cost of a packet its own size, so a sender would have to probe with a same-size dummy
@@ -96,6 +116,12 @@ app errors free, so anyone can drive unlimited load through a connector into an 
 aiming at paths that error. That is precisely the traffic a price exists to charge for.
 
 ## Consequences
+
+> **Reversed by [ADR 0065](0065-a-price-is-a-schedule-over-payload-length.md) (issue #984).**
+> The sentence below is the exact consequence that had to go: a 100-byte and a 100 KB write to
+> one handler now cost the same only where the operator wrote a flat price, which remains the
+> default and the whole of the deployed fleet. Anti-spam by size follows: a large packet costs
+> more, so the cheap-tier abuse the two-route workaround could not prevent stops existing.
 
 Byte-proportional pricing is gone, and with it anti-spam by size at the connector. A 100-byte and a
 100 KB write to the same handler cost the same.

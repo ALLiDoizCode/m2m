@@ -648,11 +648,17 @@ additively extensible) and MUST NOT be emitted.
 - **`peer-semantics-pre-868.md` §5.1's reject-code table is unchanged, but `F06_UNEXPECTED_PAYMENT` now has
   one peer use** (issue #880, correcting what this bullet said before it landed): a peer PREPARE
   addressed to one of this node's own **`Terminated`** routes, reached over either carriage, MUST
-  carry a claim whose advance over that channel's watermark covers the route's `price`, or it is
+  carry a claim whose advance over that channel's watermark covers what that route charges **for
+  that packet** -- its `price` evaluated at the packet's own `data` length, which for a flat price
+  is the `price` itself ([ADR 0065](../adr/0065-a-price-is-a-schedule-over-payload-length.md)) --
+  or it is
   refused `F06` with the x402 greeting of `client-edge-spec.md` §1.4 attached exactly as the client
   edge's own BTP carriage attaches it -- `payment-required` protocolData (BTP) or a `payment-required`
   response header, base64 (HTTP) -- built by the one shared emitter
-  (`connector_domain::x402::terms_body`), never a second wire shape. This is the same rule the
+  (`connector_domain::x402::terms_body`), never a second wire shape. Where the route prices by
+  size that greeting quotes this packet's own figure as `amount` and publishes the schedule beside
+  it (`extra.price` + `extra.pricePerKib`), so a peer refused once can price its next packet
+  without being refused again. This is the same rule the
   pre-existing amount check right beside it in `Connector::handle_peer_prepare` already enforces
   against `prepare.amount`, extended to require that value be _proven_, not merely declared -- owner
   decision #868's "every packet is paid, or it gets the 402 greeting" applied to the one place a

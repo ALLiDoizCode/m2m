@@ -185,3 +185,72 @@ async fn a_reject_relayed_through_a_paying_hop_reports_that_hops_fee() {
     assert_eq!(reject.code.as_str(), "F02");
     assert_eq!(reported, Some(7));
 }
+
+/// ADR 0065 (issue #984) over the surface a client actually reads: two unpaid
+/// requests of different sizes to ONE schedule-priced route are greeted with
+/// two different `amount`s, and both greetings publish the same schedule.
+///
+/// Not the cost header, deliberately. An unpaid request to a **priced** route
+/// is answered with its terms rather than a reject (ADR 0020), so `402` is
+/// the thing a client actually meets here and `amount` is where the figure
+/// is. The reject-side twin -- a probe on an open channel, whose
+/// `accumulated_cost` is the schedule at its own length -- lives beside
+/// `handle_probe` in `connector-runtime`, which is the ingress that has one.
+///
+/// The `amount`/schedule split is the whole of how ADR 0011's cacheability
+/// survives a slope: `amount` answers for this request, and `extra.price` +
+/// `extra.pricePerKib` answer for every request the client has not sent yet.
+#[tokio::test]
+async fn a_schedule_route_greets_each_size_with_its_own_amount() {
+    let route = connector_config::StaticRoute::new_scheduled(
+        "g.example.app",
+        "http://localhost:4000",
+        connector_domain::Price::scheduled(25, 4),
+    )
+    .expect("a valid scheduled route");
+    let connector = Arc::new(Connector::new(
+        vec![route],
+        vec![],
+        Arc::new(FakeAppClient::new()),
+        Arc::new(InProcessPeerTransport::new()),
+        test_clock(),
+    ));
+
+    let schedule = connector_domain::Price::scheduled(25, 4);
+
+    async fn greeted_terms(
+        connector: Arc<Connector>,
+        data: Vec<u8>,
+    ) -> connector_domain::x402::X402PaymentRequired {
+        let mut packet = prepare("g.example.app");
+        packet.data = data;
+        let response = connector_client_edge::router(connector, test_signer())
+            .oneshot(ilp_request(&packet))
+            .await
+            .expect("the router answers");
+        // An unpaid request to a priced route is answered with its terms.
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        let body = hyper::body::to_bytes(response.into_body())
+            .await
+            .expect("a response body");
+        connector_domain::x402::parse_greeting(&body).expect("well-formed terms")
+    }
+
+    let small = greeted_terms(Arc::clone(&connector), vec![0xff; 40]).await;
+    let large = greeted_terms(connector, vec![0xff; 2000]).await;
+
+    // `amount` is per-request, and differs because the requests differ.
+    assert_eq!(small.price(), Some(schedule.charge(40)));
+    assert_eq!(large.price(), Some(schedule.charge(2000)));
+    assert_eq!(small.price(), Some(25 + 4));
+    assert_eq!(large.price(), Some(25 + 8));
+
+    // The schedule is per-route, and is the same in both -- which is what
+    // lets one greeting answer for a size the client has not sent yet.
+    assert_eq!(small.schedule(), Some(schedule));
+    assert_eq!(large.schedule(), Some(schedule));
+    assert_eq!(
+        schedule.charge(1024 * 1024),
+        small.schedule().unwrap().charge(1024 * 1024)
+    );
+}

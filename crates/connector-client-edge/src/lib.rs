@@ -1638,6 +1638,37 @@ mod tests {
         )
     }
 
+    /// As [`sealed_sample_prepare`], but with an envelope body of `body` --
+    /// for a test about ADR 0065, where what a packet costs depends on how
+    /// long its sealed `data` is and two packets must therefore differ in
+    /// length.
+    fn sealed_sample_prepare_with_body(
+        destination: &str,
+        body: &[u8],
+        receiver_public: &PublicKeyBytes,
+    ) -> (Prepare, [u8; 32]) {
+        let envelope = EnvelopeRequest {
+            method: "POST".to_string(),
+            target: "/".to_string(),
+            headers: vec![],
+            body: body.to_vec(),
+        }
+        .encode();
+        let (data, shared_secret) =
+            connector_signer::giftwrap::seal_request(&envelope, receiver_public).expect("seal");
+        let condition = derive_condition(&connector_signer::giftwrap::derive_fulfillment(
+            &shared_secret,
+        ));
+        (
+            Prepare {
+                data,
+                execution_condition: condition,
+                ..sample_prepare(destination)
+            },
+            shared_secret,
+        )
+    }
+
     fn sealed_sample_prepare_with_amount(
         destination: &str,
         amount: u64,
@@ -3773,6 +3804,143 @@ mod tests {
             assert_eq!(reject.code.as_str(), "F03");
             assert_ne!(reject.code.as_str(), "F01");
             assert!(app_client.deliveries().is_empty());
+        }
+
+        /// ADR 0065 (issue #984) at the seam that actually takes the money:
+        /// two packets to ONE route, differing only in how much payload they
+        /// carry, are charged different amounts -- and the bigger one is not
+        /// paid for by a claim that covers the route's base.
+        ///
+        /// This is the whole point of the record. Under ADR 0020 both packets
+        /// cost `100` and the second was carried at a loss; the deployed
+        /// workaround (a second route at a second handler) could not stop a
+        /// large packet being sent to the cheap one, which is what #984
+        /// measured on a live node.
+        #[tokio::test]
+        async fn two_packets_of_different_sizes_to_one_route_are_charged_differently() {
+            let route = StaticRoute::new_scheduled(
+                "g.example.app",
+                "http://localhost:4000",
+                Price::scheduled(100, 10),
+            )
+            .unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"ok"));
+            let signer = test_signer();
+            let connector = Arc::new(
+                Connector::new(
+                    vec![route],
+                    vec![],
+                    app_client.clone(),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_identity_signer(signer.clone()),
+            );
+            let receiver = signer.public_key().unwrap();
+
+            let (small, _) = sealed_sample_prepare_with_body("g.example.app", b"hi", &receiver);
+            let (large, _) =
+                sealed_sample_prepare_with_body("g.example.app", &vec![b'x'; 3000], &receiver);
+
+            let schedule = Price::scheduled(100, 10);
+            let small_charge = schedule.charge(small.data.len());
+            let large_charge = schedule.charge(large.data.len());
+            assert!(
+                large_charge > small_charge,
+                "the two packets must actually differ in price, or this test proves nothing: \
+                 {small_charge} vs {large_charge}"
+            );
+
+            let app = router_with_gate(connector, signer, None, test_gate(test_channels()));
+
+            // 1. The small packet, paid for exactly.
+            let response = app
+                .clone()
+                .oneshot(request_with_claim_header(
+                    &small,
+                    CLAIM_HEADER,
+                    &evm_claim_json(1, small_charge),
+                ))
+                .await
+                .unwrap();
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            assert!(
+                Fulfill::decode(&bytes).is_ok(),
+                "a claim advancing exactly this packet's charge must buy it"
+            );
+            assert_eq!(app_client.deliveries().len(), 1);
+
+            // 2. The large packet, paid for at the route's BASE -- which is
+            //    what a sender that read only `extra.price` and ignored the
+            //    slope would send, and what every pre-schedule sender sends.
+            //    Refused, and the reject states the figure that would have
+            //    been enough (issue #548), so the sender does not have to
+            //    guess or parse English to find it.
+            let response = app
+                .clone()
+                .oneshot(request_with_claim_header(
+                    &large,
+                    CLAIM_HEADER,
+                    &evm_claim_json(2, small_charge + 100),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            // `accumulated_cost` rides BESIDE the packet, never in its OER
+            // encoding (ADR 0018, ADR 0063) -- on this carriage that is the
+            // `Toon-Accumulated-Cost` response header.
+            let stated_cost = response
+                .headers()
+                .get(ACCUMULATED_COST_HEADER)
+                .expect("a priced refusal states what the packet would have cost")
+                .to_str()
+                .unwrap()
+                .to_string();
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let reject = Reject::decode(&bytes).expect("decode reject");
+            assert_eq!(reject.code.as_str(), "F03");
+            assert_eq!(
+                stated_cost,
+                large_charge.to_string(),
+                "the refusal must report what THIS packet costs, not the route's base"
+            );
+            assert_ne!(stated_cost, "100", "the base is not what this packet costs");
+            assert_eq!(
+                app_client.deliveries().len(),
+                1,
+                "the underpaid packet must never reach the app"
+            );
+
+            // 3. The same large packet, paid for at its own charge.
+            let response = app
+                .oneshot(request_with_claim_header(
+                    &large,
+                    CLAIM_HEADER,
+                    &evm_claim_json(3, small_charge + large_charge),
+                ))
+                .await
+                .unwrap();
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            assert!(
+                Fulfill::decode(&bytes).is_ok(),
+                "a claim advancing this packet's own charge must buy it"
+            );
+
+            let deliveries = app_client.deliveries();
+            assert_eq!(deliveries.len(), 2);
+            // ADR 0040 narrowed by ADR 0065: the app is told what was
+            // actually charged for the delivery in front of it, which for a
+            // schedule route is not the route's base.
+            let stated = deliveries[1]
+                .request
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("X-TOON-Amount"))
+                .map(|(_, value)| value.clone())
+                .expect("a paid delivery states its amount");
+            assert_eq!(stated, large_charge.to_string());
+            assert_ne!(stated, "100", "the base is not what this delivery cost");
         }
 
         /// A claim's value is checked before this ingress would ever spend

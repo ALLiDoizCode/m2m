@@ -136,6 +136,22 @@ price       = 2500                       # 0.0025 USDC
 prefix      = "g.example.search.bulk"
 handler_url = "http://search:8080/bulk/"
 price       = 10000                      # 0.01 USDC, a cent
+
+# If your app's own costs go up with the size of what it is handed — storage,
+# uploads, anything you pay an upstream by the byte for — price it by size
+# instead of picking one number and losing money at one end of the range:
+#
+#     base     what every request pays, whatever it carries
+#     per_kib  added for each started kibibyte of the request's payload
+#
+# A caller is charged `base + per_kib × ceil(payload_size / 1024)`, and both
+# figures are published, so it can work out what a request costs before
+# sending it. Leave `price` a plain number when one number is right — that is
+# still what most routes want.
+[[routes]]
+prefix      = "g.example.store"
+handler_url = "http://store:8080/"
+price       = { base = 1000, per_kib = 30 }   # 0.001 USDC + 0.00003 per KiB
 ```
 
 Then ask the node what it is:
@@ -171,11 +187,18 @@ payload, makes exactly that HTTP request of your app, and seals the app's
 complete response back.
 
 **Your app is payment-oblivious, and that is the whole design.** It receives an
-ordinary HTTP request. This connector adds no headers of any kind, holds no key
-on the app's behalf, and the app supplies nothing toward the packet's fulfilment
-— the connector derives that itself. So "the app answered" and "the packet was
-paid for" stay separable, and an app that knows nothing about payment cannot
-leak, forge or withhold one.
+ordinary HTTP request. It holds no key on your behalf, and it supplies nothing
+toward the packet's fulfilment — the connector derives that itself. So "the app
+answered" and "the packet was paid for" stay separable, and an app that knows
+nothing about payment cannot leak, forge or withhold one.
+
+The one thing this connector does add is attribution, on a request it took the
+payment for itself: `X-TOON-Payer` (the paying channel), `X-TOON-Amount` (what
+that request was charged) and `X-TOON-Chain`. Your app is free to ignore all
+three — it is handed them so it can log or rate-limit by payer if it wants to,
+not so it can decide anything about the payment. They are absent on a request
+this node did not take the payment for, so treat them as optional. Whatever a
+caller writes under those names is stripped before your app sees it.
 
 Two consequences before you price anything:
 

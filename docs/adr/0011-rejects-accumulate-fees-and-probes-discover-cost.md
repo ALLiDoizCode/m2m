@@ -1,6 +1,6 @@
 # Rejects accumulate fees; a probe is how cost is discovered
 
-**Status:** Accepted, amended by [0042](0042-a-packet-carries-its-claim.md) (fee honesty is bounded, not self-enforcing) and extended by [0044](0044-a-probe-answers-what-a-route-costs-and-what-it-does.md) (a probe also answers what a route _does_). Fee accumulation, the probe, and the sum-never-breakdown rule are unchanged.
+**Status:** Accepted, amended by [0042](0042-a-packet-carries-its-claim.md) (fee honesty is bounded, not self-enforcing), extended by [0044](0044-a-probe-answers-what-a-route-costs-and-what-it-does.md) (a probe also answers what a route _does_) and by [0065](0065-a-price-is-a-schedule-over-payload-length.md) (a price may vary with payload length, so cacheability moves to the published schedule). Fee accumulation, the probe, and the sum-never-breakdown rule are unchanged.
 
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
@@ -27,6 +27,16 @@ one that cannot go stale.
 proportional, a path's cost is a constant that does not vary with the amount being sent. One
 probe yields a figure good until the topology or a fee changes. Under a percentage spread the
 client would have to re-probe per amount.
+
+> **Extended by [ADR 0065](0065-a-price-is-a-schedule-over-payload-length.md) (issue #984).**
+> A terminating route's **price** may now vary with the packet's payload length, so a probe's
+> figure is exact for a packet its own size and not for every size. Cacheability is kept, and
+> moved: the terminating node **publishes its schedule** -- `extra.price` and
+> `extra.pricePerKib` on the greeting, the same pair per prefix on the self-description -- so
+> one free, unauthenticated read answers every size, and a sender computes
+> `cost(len) = probe_cost − charge(probe_len) + charge(len)` without a second round trip.
+> A **fee** is untouched and still flat, so everything this clause says about the carrying
+> hops holds exactly as written.
 
 **Understating a fee is unprofitable.** Because ADR 0004 moves value on fulfilment, a hop that
 advertises a low fee to attract traffic and then rejects the real packet earns nothing and has
