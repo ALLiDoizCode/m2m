@@ -309,6 +309,11 @@ fn every_committed_program_id_is_one_of_the_two_this_repository_records() {
 #[test]
 fn the_repository_names_a_solana_program_id_in_exactly_the_known_places() {
     let expected: BTreeSet<&str> = BTreeSet::from([
+        // The operator's guide's "Get paid" step: the devnet
+        // `[settlement.solana]` table an operator pastes, addresses included,
+        // so pointing a node at a chain is not a scavenger hunt across the
+        // deployment records.
+        "README.md",
         "deploy/connector-rust/README.md",
         "deploy/connector-rust/connector.production.toml",
         "docs/adr/0056-production-is-a-named-empty-tier.md",
