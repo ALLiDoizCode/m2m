@@ -687,11 +687,29 @@ impl Config {
         // silently -- there is nothing in a log to see, because from the
         // gate's point of view every replayed nonce genuinely is fresh.
         //
-        // Tied to `[[client_channels]]` rather than demanded of every
-        // node because a node with a record of no channel refuses every
-        // claim outright (issue #558): it has no watermark to lose, so
-        // requiring it to name a writable directory would be ceremony,
-        // and ceremony is what gets configured with a path nobody checked.
+        // The trigger is "can this node resolve a channel", not "did it
+        // declare one" (issue #1186). It used to be the latter, on issue
+        // #558's reasoning that a node with a record of no channel refuses
+        // every claim outright and so has no watermark to lose. That was
+        // true when it was written and stopped being true with chain
+        // resolution: since #611 and #631 `connector-cli` registers a
+        // `ClientChannelSource` over each configured settlement table, and
+        // a claim naming a channel nothing declared is resolved from chain
+        // and accepted. That is ADR 0052 and CF-27, and it is the whole of
+        // what makes payment permissionless -- so the node MOST exposed to
+        // strangers was the one this check did not reach.
+        //
+        // What survives of #558 is the exemption's shape, and it is worth
+        // keeping: a registry with neither a record nor a source refuses
+        // every claim, so a node configuring no channel book and no
+        // settlement genuinely has nothing to lose. Demanding a path of it
+        // would be ceremony, and ceremony is what gets configured with a
+        // path nobody checked.
+        //
+        // Price does not enter into it. `extract_and_validate_claim` runs
+        // on any request carrying a claim header whose envelope target is
+        // not already refused, priced route or not, so a free route on a
+        // node with settlement still advances a watermark.
         if let Some(path) = &state_dir {
             if path.exists() && !path.is_dir() {
                 return Err(ConfigError::StateDirNotADirectory { path: path.clone() });
@@ -713,6 +731,15 @@ impl Config {
             // number that stops a RESTART reissuing a nonce this node has
             // already signed against a different cumulative amount.
             return Err(ConfigError::PayChannelsWithoutStateDir);
+        } else if !settlements.is_empty() {
+            // Last, deliberately. Every channel book already requires a
+            // settlement table for its own chain (CF-36, issue #1138), so
+            // this arm placed first would swallow all three and answer a
+            // declared-channel mistake with a message about chain
+            // resolution. The specific diagnosis wins; this one catches
+            // exactly the case the three books do not -- a node that
+            // declares no channel and is paid by strangers anyway.
+            return Err(ConfigError::SettlementWithoutStateDir);
         }
 
         Ok(Config {
@@ -2880,6 +2907,7 @@ key_file = "{}"
             format!(
                 r#"
 client_edge_addr = "127.0.0.1:3000"
+state_dir = "/tmp"
 
 [signer]
 key_file = "{}"
@@ -2918,6 +2946,7 @@ key_file = "{}"
             format!(
                 r#"
 client_edge_addr = "127.0.0.1:3000"
+state_dir = "/tmp"
 
 [signer]
 key_file = "{}"
@@ -2949,6 +2978,7 @@ key_file = "{}"
             format!(
                 r#"
 client_edge_addr = "127.0.0.1:3000"
+state_dir = "/tmp"
 
 [signer]
 key_file = "{key_path}"
@@ -2996,6 +3026,7 @@ key_file = "{key_path}"
             format!(
                 r#"
 client_edge_addr = "127.0.0.1:3000"
+state_dir = "/tmp"
 
 [signer]
 key_file = "{key_path}"
@@ -3312,6 +3343,78 @@ token_network_address = "0x00000000000000000000000000000000000000bb"
         // this refusal is the first they will hear of the requirement.
         let message = result.unwrap_err().to_string();
         assert!(message.contains("state_dir"), "{message}");
+    }
+
+    /// Issue #1186: the shape this check used to miss, and the one an
+    /// operator should actually be running -- a priced terminated route and
+    /// a settlement backend, declaring no channel at all.
+    ///
+    /// A settlement table registers the `ClientChannelSource` that resolves
+    /// an undeclared channel from chain (ADR 0052, CF-27), so this node takes
+    /// payment from senders it was never configured for. Before #1186 it was
+    /// the one shape that could boot with its watermarks in memory, which
+    /// made the node most exposed to strangers the one the parser did not
+    /// protect.
+    #[test]
+    fn refuses_a_settlement_backend_without_a_state_dir() {
+        let result = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{key_path}"
+
+[[routes]]
+prefix = "g.example.app"
+handler_url = "http://app:3100/"
+price = 1000
+
+{settlement}
+"#,
+                key_path = key_path.display(),
+                settlement = evm_settlement(key_path),
+            )
+        });
+
+        assert!(
+            matches!(result, Err(ConfigError::SettlementWithoutStateDir)),
+            "a node that resolves channels from chain must be made to keep its \
+             watermarks somewhere durable"
+        );
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("state_dir"), "{message}");
+        // The operator has to be told WHY, or the fix reads as ceremony and
+        // gets a path nobody checked.
+        assert!(message.contains("chain"), "{message}");
+    }
+
+    /// The exemption #558 bought, and the half of its reasoning that survives
+    /// #1186: with neither a channel book nor a settlement table, the claim
+    /// registry has neither a record nor a source, so it refuses every claim
+    /// and genuinely has no watermark to lose. Demanding a path of it would
+    /// be ceremony.
+    #[test]
+    fn a_node_that_can_resolve_no_channel_needs_no_state_dir() {
+        let config = with_key_file(|key_path| {
+            format!(
+                r#"
+client_edge_addr = "127.0.0.1:3000"
+
+[signer]
+key_file = "{key_path}"
+
+[[routes]]
+prefix = "g.example.app"
+handler_url = "http://app:3100/"
+price = 0
+"#,
+                key_path = key_path.display(),
+            )
+        })
+        .expect("a node with no settlement and no channel book loads without a state_dir");
+
+        assert!(config.state_dir().is_none());
     }
 
     /// The same config with a `state_dir` loads, and reports it.
