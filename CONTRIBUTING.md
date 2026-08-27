@@ -23,10 +23,11 @@ Before contributing, please read the following documentation to understand proje
 
 ### Required Reading
 
-- **[Developer Guide](docs/development/developer-guide.md)** - Epic branch workflow, pre-push checklist, git hooks overview
-- **[Git Hooks](docs/development/git-hooks.md)** - How pre-commit/pre-push hooks work and troubleshooting
-- **[Test Strategy and Standards](docs/architecture/test-strategy-and-standards.md)** - Test quality anti-patterns, best practices, stability testing
-- **[Coding Standards](docs/architecture/coding-standards.md)** - TypeScript strict mode guidelines, critical rules, naming conventions
+- **[CONTEXT.md](CONTEXT.md)** - The vocabulary. Read before writing docs or naming anything; several terms here mean something narrower than they do elsewhere.
+- **[ADR 0007](docs/adr/0007-testing-doctrine-fakes-yes-mocks-no.md)** - The testing doctrine: property tests over a pure core, contract suites per port, fakes yes and mocks no.
+- **[docs/adr/README.md](docs/adr/README.md)** - The decisions, grouped. Where an ADR and a spec disagree, the ADR wins.
+- **[docs/architecture/source-tree.md](docs/architecture/source-tree.md)** - What every crate does, and what in this repository is deliberately not the connector.
+- **[Coding Standards](docs/architecture/coding-standards.md)** - Naming and structure conventions.
 
 ### Key Concepts
 
@@ -53,11 +54,7 @@ After reading the documentation above:
 - **Node.js** >= 22.11.0
 - **npm** 10.x or higher
 - **Git** 2.x
-- **Docker**:
-  - **Linux/Windows:** Docker Desktop or Docker Engine
-  - **macOS:** Native TigerBeetle installation required (no Docker) - See [macOS Setup Guide](docs/guides/local-development-macos.md)
-    - ⚠️ TigerBeetle requires native installation on macOS
-    - One-command setup: `npm run tigerbeetle:install`
+- **Docker** - Docker Desktop or Docker Engine. Needed for `local/` (the shipped image against real containerised chains) and for the `docker-compose.yml` chain profiles. The Rust test gate does **not** need it: every chain-backed test spawns its own `anvil` or `solana-test-validator` and throws it away.
 - **Familiarity** with TypeScript and Interledger Protocol basics
 
 ### Initial Setup
@@ -510,26 +507,26 @@ If you encounter issues during development or CI failures, use these resources:
 
 ### CI Troubleshooting
 
-- **[CI Troubleshooting Guide](docs/development/ci-troubleshooting.md)** - Comprehensive guide for debugging CI failures
-  - Common failure scenarios (lint, test, build, type-check, contracts, E2E)
-  - Job-specific debugging procedures with diagnostic commands
-  - Investigation runbook for systematic debugging
+Reproduce the gate locally before reading logs — it is the same four commands CI
+runs, in the same order (see [CI Requirements](#ci-requirements)). If they pass
+locally and fail in CI, the usual causes are a missing chain binary (see
+[Chain-backed tests](#chain-backed-tests) — those panic under `CI` rather than
+skipping) or a Solana CLI version other than the pinned one.
+
+`.github/workflows/ci.yml` is the authority on what runs. `gh run view <id>
+--log-failed` gets you the failing step without downloading the whole log.
 
 ### Test Failures
 
-- **[Test Anti-Patterns](docs/architecture/test-strategy-and-standards.md#common-test-anti-patterns-and-solutions)** - Common testing mistakes and fixes
-  - Event listener cleanup failures
-  - Async timeout issues
-  - Mock state leakage
-  - Testing implementation details instead of behavior
-  - Incomplete test cleanup (resources not released)
-  - Hardcoded timeouts in production code
+- **[ADR 0007](docs/adr/0007-testing-doctrine-fakes-yes-mocks-no.md)** - The doctrine, and the anti-pattern it exists to prevent: a stub that asserts a sequence of calls is not a test subject. A fake that upholds a port's contract suite is.
+- A test that needs a chain gets one of its own. Nothing under `crates/` dials `localhost:8545` or `localhost:8899`, so a failure there is not a missing container.
+- Never add a skip-when-unavailable branch that can go green in CI. A guard that returns early and reports `passed` in `0.00s` is worse than a missing test.
 
-### Root Cause Analyses
+### Past failures
 
-Past failures and their resolutions are documented in `docs/qa/`:
-
-- **[RCA 10.1: Settlement Executor Test Failures](docs/qa/root-cause-analysis-10.1.md)** - Event listener cleanup anti-patterns
+The reasoning behind a rule that looks arbitrary is usually in the record that
+set it. [`docs/adr/`](docs/adr/README.md) is grouped by area, and a record's
+`**Status:**` line — not the index — says whether it is still live.
 
 ### Reporting Issues
 
@@ -547,10 +544,11 @@ If you discover a bug or systematic issue:
 
 ### Getting Help
 
-- **Documentation**: Start with [Developer Documentation Index](docs/development/README.md)
-- **GitHub Discussions**: Ask questions in [Discussions](https://github.com/toon-protocol/connector/discussions)
-- **CI Failures**: Use [CI Troubleshooting Guide](docs/development/ci-troubleshooting.md)
-- **Epic Branch Issues**: See [Epic Branch Workflow](docs/development/developer-guide.md#epic-branch-workflow)
+- **What is where**: [docs/architecture/source-tree.md](docs/architecture/source-tree.md)
+- **Why it is that way**: [docs/adr/README.md](docs/adr/README.md)
+- **What a word means here**: [CONTEXT.md](CONTEXT.md)
+- **Running a node rather than changing one**: [README.md](README.md)
+- **GitHub Discussions**: [Discussions](https://github.com/toon-protocol/connector/discussions)
 
 ## Coding Standards
 
