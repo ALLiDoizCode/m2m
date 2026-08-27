@@ -178,9 +178,21 @@ would reject every packet on that route. The rule is keyed on **routes** and no 
 connector only ever accepts from owes nothing and needs no pay channel.
 ([issue #1145](https://github.com/toon-protocol/connector/issues/1145))
 
-**CF-39** `[connector]` — A connector that configures a channel in **any** of the three books MUST
-also be configured with a durable location for its claim watermarks, and MUST be refused at load if
-it is not. It MUST verify that location is writable at startup, naming the path when it is not; it
+**CF-39** `[connector]` — A connector that can **resolve a channel** MUST also be configured with a
+durable location for its claim watermarks, and MUST be refused at load if it is not. It can resolve
+one if it configures a channel in any of the three books, **or** if it configures settlement for any
+chain — a settlement table is what lets an undeclared channel be resolved from chain and its claim
+accepted (CF-27), so such a connector takes payment from senders it was never configured for. Price
+is not the trigger and neither is a route: a claim presented against a free route is admitted the
+same way, and it advances the same watermark. A connector that configures neither a book nor
+settlement can resolve nothing, refuses every claim, and is exempt — that exemption is the point of
+the rule's shape, because a requirement placed where it cannot bite is answered with a path nobody
+checked.
+
+Amended by [issue #1186](https://github.com/toon-protocol/connector/issues/1186). The rule read "a
+channel in **any** of the three books" and missed the permissionless shape entirely — a priced route
+and a settlement backend, declaring no channel — which is both the configuration an operator should
+be running and the one most exposed to strangers. It MUST verify that location is writable at startup, naming the path when it is not; it
 MUST replay what is already there before it serves; and it MUST refuse to start on a record it cannot
 read or cannot decode, rather than starting at no watermarks. A watermark held only in process memory
 is not a replay defence: after a restart every spent nonce reads as fresh, every claim a client has
