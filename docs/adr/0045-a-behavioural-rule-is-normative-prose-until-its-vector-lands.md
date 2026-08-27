@@ -157,7 +157,7 @@ Where the obligation differs at all, the asymmetry rule above applies instead.
 issue #1143 deletes it. `minimum_delivery_absent` and `minimum_delivery_malformed` — cited here as
 vectors that had landed — are gone from `vectors/wire-vectors.json`, along with the
 `minimum_delivery` field on the two `peer_prepare` cases and the `toon-minimum-delivery` entry and
-header their pinned frames carried. **This is a cross-repo wire change** ([0021](0021-vectors-are-the-normative-cross-repo-contract.md)):
+header their pinned frames carried. **This is a cross-repo wire change** ([0021](0021-vectors-are-normative-prose-is-not.md)):
 `toon-client`, `rig` and `swap` replay these.
 
 The rest of the list, and this record's rule, are untouched — a rule with no vector is normative
