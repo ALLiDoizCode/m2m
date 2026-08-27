@@ -215,18 +215,56 @@ deliberate, because it is never silently free.
 ## 3. Get paid
 
 A price makes a route cost something. A **settlement backend** is what lets
-anyone actually pay it.
+anyone actually pay it. There are two chains. A node may carry either table or
+both — with both, it accepts claims on both at once.
 
 ```toml
+# EVM — Base Sepolia. These are live addresses, not placeholders.
 [settlement.evm]
-rpc_url          = "https://sepolia.base.org"
-contract_address = "0x…"          # the TokenNetworkRegistry, not a TokenNetwork
-token_address    = "0x…"          # the token every price on this node is in
+rpc_url          = "https://base-sepolia-rpc.publicnode.com"
+contract_address = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1"  # the TokenNetworkRegistry, not a TokenNetwork
+token_address    = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"  # the token every price on this node is in
 decimals         = 6              # units per token: 6 means 1,000,000 = 1.00
 
 [settlement.evm.key]
 key_file = "/app/data/settlement.key"
+
+# Solana — public devnet. Note `program_id` where EVM has `contract_address`:
+# there is no registry to resolve a channel contract through, so this names the
+# payment-channel program itself, and `token_address` is an SPL mint.
+[settlement.solana]
+rpc_url       = "https://api.devnet.solana.com"
+program_id    = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
+token_address = "xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in"
+decimals      = 6
+
+[settlement.solana.key]
+key_file = "/app/data/settlement-solana.key"
 ```
+
+Those are the addresses the devnet fleet itself runs on, and copying them is the
+point rather than a shortcut: a claim resolves against **one** deployment, so
+every node that might accept a given claim has to name the same one.
+
+|                  | EVM                                                                                                                                                      | Solana                                                                                                                                                                          |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Chain            | Base Sepolia, chain id `84532`                                                                                                                           | public devnet (`solana:devnet`)                                                                                                                                                 |
+| RPC              | `https://base-sepolia-rpc.publicnode.com`                                                                                                                | `https://api.devnet.solana.com`                                                                                                                                                 |
+| Channels live in | [`0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1`](https://sepolia.basescan.org/address/0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1) — `TokenNetworkRegistry` | [`2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip`](https://explorer.solana.com/address/2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip?cluster=devnet) — the payment-channel program |
+| Token            | [`0x49beE1Bca5d15Fb0963117923403F9498119a9Ce`](https://sepolia.basescan.org/address/0x49beE1Bca5d15Fb0963117923403F9498119a9Ce) — mock USDC, 6 dp        | [`xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in`](https://explorer.solana.com/address/xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in?cluster=devnet) — mock USDC mint, 6 dp          |
+| Funding the key  | Base Sepolia ETH for gas; mock USDC from the [devnet faucet](https://faucet.devnet.toonprotocol.dev)                                                     | devnet SOL (`solana airdrop 1 <address> -u devnet`); mock USDC from the same faucet                                                                                             |
+| Full record      | [`packages/contracts/deployments/base-sepolia.md`](packages/contracts/deployments/base-sepolia.md)                                                       | [`packages/solana-program/deployments/devnet-public.md`](packages/solana-program/deployments/devnet-public.md)                                                                  |
+
+**That table is the whole list, and the omissions are deliberate.** There is no
+Solana _testnet_ deployment — the program is on devnet and nowhere else — and
+there is no mainnet on either chain. No EVM mainnet carries a `TokenNetwork` or a
+token for a registry to resolve, so `contract_address` has nothing to point at;
+and because a Solana claim's signed message binds the settlement program, a node
+pointing `[settlement.solana]` at a mainnet RPC while naming the devnet program
+id would take money for claims it can never redeem. Production is a **named,
+empty tier** ([ADR 0056](docs/adr/0056-production-is-a-named-empty-tier.md)), and
+[`connector.production.toml`](deploy/connector-rust/connector.production.toml) is
+a skeleton in which every value fails to load on purpose. Do not fill it in.
 
 `decimals` is what turns a `price` into money. Every `price` in the config is a
 count of the token's smallest unit, and `decimals` says how many of those make
@@ -235,6 +273,16 @@ and a route meant to cost ten cents of USDC is `price = 100000`. The node reads
 the token's own decimals at boot and **refuses to start** if the config
 disagrees, because a wrong `decimals` is not a rounding error: it misprices
 every route by a factor of ten or more.
+
+That check is one of several, and they are why there is no `--network` flag and
+no environment variable anywhere in this: which chain a node is on **is** these
+values and nothing else, so every one of them is verified against the chain
+before the node serves a packet. The EVM backend reads the chain id off the RPC
+and calls `getTokenNetwork()` to prove the address really is a registry; the
+Solana backend proves `program_id` is executable _and_ behaves like the
+payment-channel program, that `token_address` is an SPL mint, and asks the chain
+its own genesis hash so a claim declaring the wrong cluster is refused. A node
+that boots is a node whose chain agreed with its config.
 
 That is all of it. **You do not list the channels your payers will use, and you
 could not** — a client's channel does not exist until that client opens it on
