@@ -210,7 +210,7 @@ pub fn payment_required(
         // ADR 0029's rule has no escape hatch: since issue #1077 deleted
         // `claim_enforcement`, an uncovered arrival to a priced termination
         // is always refused.
-        ClientRouteKind::Terminated => (route.price, true),
+        ClientRouteKind::Terminated => (route.price.base(), true),
         ClientRouteKind::Forwarded => (
             prepare.amount,
             enforcement == ForwardedClaimEnforcement::Enforce,

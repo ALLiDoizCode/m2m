@@ -11,7 +11,8 @@ use connector_domain::x402::X402PaymentRequired;
 use connector_domain::{
     amount_after_fee, condition_is_present, delivery_budget, forwarded_expiry,
     fulfillment_matches_condition, is_expired, is_valid_ilp_address, select_route, EnvelopeRequest,
-    Fulfill, PacketResponse, Prepare, Reject, RejectCode, Watermark, FORWARDING_MESSAGE_WINDOW,
+    Fulfill, PacketResponse, Prepare, Price, Reject, RejectCode, Watermark,
+    FORWARDING_MESSAGE_WINDOW,
 };
 use connector_settlement::{ChannelId, Claim, SettlementBackend, SettlementError};
 use connector_signer::giftwrap::{derive_fulfillment, open_request, seal_response};
@@ -372,7 +373,7 @@ pub enum ClientRouteKind {
 /// which kind of route answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClientRouteFacts {
-    pub price: u64,
+    pub price: Price,
     pub transport_policy: TransportPolicy,
     pub kind: ClientRouteKind,
 }
@@ -387,7 +388,7 @@ pub struct ClientRouteFacts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientRoutePrice {
     pub prefix: String,
-    pub price: u64,
+    pub price: Price,
 }
 
 /// The connector's packet plane: a fixed set of terminated routes and peer
@@ -1418,7 +1419,7 @@ impl Connector {
         &self,
         prefix: impl Into<String>,
         peer_id: impl Into<String>,
-        price: u64,
+        price: Price,
     ) -> Result<PeerRouteView, PeerRouteTableError> {
         let prefix = prefix.into();
         let peer_id = peer_id.into();
@@ -1441,7 +1442,7 @@ impl Connector {
                 Some(_) => {}
             }
         }
-        let route = PeerRoute::new_priced(prefix.clone(), peer_id.clone(), price);
+        let route = PeerRoute::new_scheduled(prefix.clone(), peer_id.clone(), price);
         let mut routes = (*self.runtime_peer_routes_snapshot()).clone();
         routes.insert(prefix.clone(), route);
         self.persist_runtime_table(&self.runtime_peers_snapshot(), &routes)?;
@@ -1640,15 +1641,17 @@ impl Connector {
 
         if let Some(route) = self.client_route(&prepare.destination) {
             if route.kind == ClientRouteKind::Terminated
-                && route.price > 0
-                && prepare.amount < route.price
+                && route.price.base() > 0
+                && prepare.amount < route.price.base()
             {
                 let reject = PacketResponse::Reject(Reject {
                     code: RejectCode::f03_invalid_amount(),
                     triggered_by: String::new(),
                     message: format!(
                         "'{}' costs {} but the peer arrival carried only {}",
-                        prepare.destination, route.price, prepare.amount
+                        prepare.destination,
+                        route.price.base(),
+                        prepare.amount
                     ),
                     data: Vec::new(),
                     accumulated_cost: 0,
@@ -1809,10 +1812,10 @@ impl Connector {
         if let Some(route) = self.client_route(&prepare.destination) {
             let answer_here = match route.kind {
                 ClientRouteKind::Terminated => true,
-                ClientRouteKind::Forwarded => route.price > 0,
+                ClientRouteKind::Forwarded => route.price.base() > 0,
             };
             if answer_here {
-                let price = route.price;
+                let price = route.price.base();
                 let disposition = match route.kind {
                     ClientRouteKind::Terminated => "terminates at this connector",
                     ClientRouteKind::Forwarded => "forwards from this connector",
@@ -2623,7 +2626,7 @@ impl Connector {
                     triggered_by: String::new(),
                     message: format!("envelope did not decode: {error}"),
                     data: Vec::new(),
-                    accumulated_cost: route.price(),
+                    accumulated_cost: route.price().base(),
                 });
             }
         };
@@ -2636,7 +2639,7 @@ impl Connector {
             &mut request,
             client_channel_id.map(|channel_key| PaymentAttribution {
                 channel_key,
-                price: route.price(),
+                price: route.price().base(),
             }),
         );
 
@@ -2701,7 +2704,7 @@ impl Connector {
                     expires_at.to_rfc3339(),
                 ),
                 data: Vec::new(),
-                accumulated_cost: route.price(),
+                accumulated_cost: route.price().base(),
             });
         };
 
@@ -2721,7 +2724,7 @@ impl Connector {
                     fulfillment: derive_fulfillment(shared_secret),
                     data: response.encode(),
                 },
-                route.price(),
+                route.price().base(),
             ),
             AppOutcome::Unreachable { message } => PacketResponse::Reject(Reject {
                 code: RejectCode::t01_peer_unreachable(),
@@ -2860,7 +2863,7 @@ impl Connector {
 
     /// [`Self::client_route`]'s price alone, for a caller with no use for
     /// the rest.
-    pub fn client_route_price(&self, destination: &str) -> Option<u64> {
+    pub fn client_route_price(&self, destination: &str) -> Option<Price> {
         self.client_route(destination).map(|route| route.price)
     }
 
@@ -4496,7 +4499,7 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].prefix, "g.example.app");
         assert_eq!(routes[0].handler_url, "http://localhost:4000/");
-        assert_eq!(routes[0].price, 25);
+        assert_eq!(routes[0].price, Price::flat(25));
     }
 
     #[test]
@@ -4506,8 +4509,14 @@ mod tests {
         let clock = test_clock();
         let connector = connector_with(vec![route], app_client, clock);
 
-        assert_eq!(connector.client_route_price("g.example.app"), Some(25));
-        assert_eq!(connector.client_route_price("g.example.app.sub"), Some(25));
+        assert_eq!(
+            connector.client_route_price("g.example.app"),
+            Some(Price::flat(25))
+        );
+        assert_eq!(
+            connector.client_route_price("g.example.app.sub"),
+            Some(Price::flat(25))
+        );
         assert_eq!(connector.client_route_price("g.nowhere"), None);
     }
 
@@ -4531,7 +4540,7 @@ mod tests {
         let facts = connector
             .client_route("g.example.store.sub")
             .expect("a forwarded route answers the client-edge lookup");
-        assert_eq!(facts.price, 100);
+        assert_eq!(facts.price, Price::flat(100));
         assert_eq!(facts.kind, ClientRouteKind::Forwarded);
         // A forwarded route applies no transport policy: it accepts a
         // client's request over either carriage.
@@ -4555,11 +4564,17 @@ mod tests {
         )
         .with_peer_fees([("store".to_string(), 3)]);
 
-        assert_eq!(connector.client_route_price("g.example.relay"), Some(25));
-        assert_eq!(connector.client_route_price("g.example.store"), Some(100));
+        assert_eq!(
+            connector.client_route_price("g.example.relay"),
+            Some(Price::flat(25))
+        );
+        assert_eq!(
+            connector.client_route_price("g.example.store"),
+            Some(Price::flat(100))
+        );
         assert_eq!(
             connector.client_route_price("g.example.store.sub"),
-            Some(100)
+            Some(Price::flat(100))
         );
     }
 
@@ -7560,7 +7575,7 @@ mod tests {
         #[tokio::test]
         async fn a_free_terminated_route_is_unaffected_by_the_price_check() {
             let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
-            assert_eq!(route.price(), 0);
+            assert_eq!(route.price(), Price::FREE);
             let app_client = Arc::new(FakeAppClient::new());
             app_client.respond(route.handler_url(), answered(b"irrelevant"));
             let connector = connector_with(vec![route], app_client.clone(), test_clock());
@@ -7876,7 +7891,7 @@ mod tests {
                 .upsert_runtime_peer("runtime-hop", peering(0))
                 .unwrap();
             first_hop
-                .upsert_runtime_peer_route("g.example.app", "runtime-hop", 0)
+                .upsert_runtime_peer_route("g.example.app", "runtime-hop", Price::FREE)
                 .unwrap();
             let (sealed, shared_secret) = sealed_prepare(b"hello");
 
@@ -7911,11 +7926,11 @@ mod tests {
                 .upsert_runtime_peer("runtime-hop", peering(0))
                 .unwrap();
             connector
-                .upsert_runtime_peer_route("g.example.app", "runtime-hop", 25)
+                .upsert_runtime_peer_route("g.example.app", "runtime-hop", Price::flat(25))
                 .unwrap();
 
             let facts = connector.client_route("g.example.app").unwrap();
-            assert_eq!(facts.price, 25);
+            assert_eq!(facts.price, Price::flat(25));
             assert_eq!(facts.kind, ClientRouteKind::Forwarded);
         }
 
@@ -7964,14 +7979,14 @@ mod tests {
             .with_config_peer_ids(["configured-peer".to_string()]);
 
             let error = connector
-                .upsert_runtime_peer_route("g.example.app", "configured-peer", 0)
+                .upsert_runtime_peer_route("g.example.app", "configured-peer", Price::FREE)
                 .unwrap_err();
             assert!(
                 matches!(error, PeerRouteTableError::OwnedByConfig(prefix) if prefix == "g.example.app")
             );
 
             let error = connector
-                .upsert_runtime_peer_route("g.example.peer", "configured-peer", 0)
+                .upsert_runtime_peer_route("g.example.peer", "configured-peer", Price::FREE)
                 .unwrap_err();
             assert!(
                 matches!(error, PeerRouteTableError::OwnedByConfig(prefix) if prefix == "g.example.peer")
@@ -7994,7 +8009,7 @@ mod tests {
             );
 
             let error = connector
-                .upsert_runtime_peer_route("g.example.app", "nobody", 0)
+                .upsert_runtime_peer_route("g.example.app", "nobody", Price::FREE)
                 .unwrap_err();
             assert!(matches!(
                 error,
@@ -8020,7 +8035,7 @@ mod tests {
             .with_config_peer_ids(["configured-peer".to_string()]);
 
             let view = connector
-                .upsert_runtime_peer_route("g.example.new", "configured-peer", 10)
+                .upsert_runtime_peer_route("g.example.new", "configured-peer", Price::flat(10))
                 .unwrap();
             assert_eq!(view.peer_id, "configured-peer");
             assert_eq!(view.source, RouteSource::Runtime);
@@ -8043,7 +8058,7 @@ mod tests {
                 .upsert_runtime_peer("runtime-hop", peering(0))
                 .unwrap();
             connector
-                .upsert_runtime_peer_route("g.example.app", "runtime-hop", 0)
+                .upsert_runtime_peer_route("g.example.app", "runtime-hop", Price::FREE)
                 .unwrap();
 
             let error = connector.remove_runtime_peer("runtime-hop").unwrap_err();
@@ -8115,7 +8130,7 @@ mod tests {
                 .upsert_runtime_peer("runtime-hop", peering(0))
                 .unwrap();
             connector
-                .upsert_runtime_peer_route("g.example.app", "runtime-hop", 0)
+                .upsert_runtime_peer_route("g.example.app", "runtime-hop", Price::FREE)
                 .unwrap();
             let (sealed, shared_secret) = sealed_prepare(b"hello");
 
@@ -8153,7 +8168,7 @@ mod tests {
                 .upsert_runtime_peer("apex-relay-2", peering(3))
                 .unwrap();
             before_restart
-                .upsert_runtime_peer_route("g.example.relay2", "apex-relay-2", 25)
+                .upsert_runtime_peer_route("g.example.relay2", "apex-relay-2", Price::flat(25))
                 .unwrap();
             assert_eq!(before_restart.peers().len(), 1);
 
@@ -8179,7 +8194,7 @@ mod tests {
             assert_eq!(routes.len(), 1);
             assert_eq!(routes[0].prefix, "g.example.relay2");
             assert_eq!(routes[0].peer_id, "apex-relay-2");
-            assert_eq!(routes[0].price, 25);
+            assert_eq!(routes[0].price, Price::flat(25));
         }
 
         /// A node with no `state_dir` (no `PeerRouteStore` attached) still
@@ -8220,7 +8235,7 @@ mod tests {
                 .upsert_runtime_peer("runtime-peer", peering(2))
                 .unwrap();
             connector
-                .upsert_runtime_peer_route("g.example.runtime", "runtime-peer", 5)
+                .upsert_runtime_peer_route("g.example.runtime", "runtime-peer", Price::flat(5))
                 .unwrap();
 
             let mut peers = connector.peers();
@@ -8255,13 +8270,13 @@ mod tests {
                     PeerRouteView {
                         prefix: "g.example.configured".to_string(),
                         peer_id: "configured-peer".to_string(),
-                        price: 0,
+                        price: Price::FREE,
                         source: RouteSource::Config,
                     },
                     PeerRouteView {
                         prefix: "g.example.runtime".to_string(),
                         peer_id: "runtime-peer".to_string(),
-                        price: 5,
+                        price: Price::flat(5),
                         source: RouteSource::Runtime,
                     },
                 ]
@@ -8282,7 +8297,7 @@ mod tests {
                 .unwrap();
 
             let error = connector
-                .upsert_runtime_peer_route("not an ilp address", "runtime-hop", 0)
+                .upsert_runtime_peer_route("not an ilp address", "runtime-hop", Price::FREE)
                 .unwrap_err();
             assert!(matches!(error, PeerRouteTableError::InvalidPrefix(_)));
         }
@@ -8358,7 +8373,7 @@ mod tests {
             .with_runtime_peer_route_store(store, peers, routes);
 
             let error = connector
-                .upsert_runtime_peer_route("g.example.runtime", "legacy-hop", 25)
+                .upsert_runtime_peer_route("g.example.runtime", "legacy-hop", Price::flat(25))
                 .unwrap_err();
 
             assert!(

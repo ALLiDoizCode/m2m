@@ -1515,10 +1515,12 @@ pub async fn build(config: &Config) -> Result<Runtime, RuntimeError> {
         // ADR 0028: a forwarded route carries the client-edge `price` its
         // config entry names. What this hop retains of it is the peering's
         // own fee, wired below from `[[peers]]` (ADR 0061). Built with
-        // `new_priced` rather than `new` so a route that loses its price on
-        // the way into the runtime is a compile error, not a silently free
-        // gateway.
-        .map(|route| PeerRoute::new_priced(route.prefix(), route.peer_id(), route.price()))
+        // `new_scheduled` rather than `new` so a route that loses its price
+        // on the way into the runtime is a compile error, not a silently free
+        // gateway -- and it carries the whole schedule (ADR 0065), so a
+        // forwarded route's slope survives the trip into the runtime the way
+        // its base always has.
+        .map(|route| PeerRoute::new_scheduled(route.prefix(), route.peer_id(), route.price()))
         .collect();
     let mut connector = Connector::new(
         config.routes().to_vec(),
@@ -4340,7 +4342,9 @@ client_edge_url = "{url}"
             let peer_routes = config
                 .peer_routes()
                 .iter()
-                .map(|route| PeerRoute::new_priced(route.prefix(), route.peer_id(), route.price()))
+                .map(|route| {
+                    PeerRoute::new_scheduled(route.prefix(), route.peer_id(), route.price())
+                })
                 .collect();
             let (claim_signer, _) = peer_claim_identity(config)
                 .expect("read the settlement key")
@@ -4617,7 +4621,9 @@ client_edge_url = "{client_edge_url}"
             let peer_routes = config
                 .peer_routes()
                 .iter()
-                .map(|route| PeerRoute::new_priced(route.prefix(), route.peer_id(), route.price()))
+                .map(|route| {
+                    PeerRoute::new_scheduled(route.prefix(), route.peer_id(), route.price())
+                })
                 .collect();
             let claim_signer = peer_claim_identity_solana(config)
                 .expect("read the settlement key")

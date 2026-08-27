@@ -71,7 +71,7 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use connector_domain::{PacketResponse, Prepare};
+use connector_domain::{PacketResponse, Prepare, Price};
 use connector_runtime::{
     ChannelOperationError, ChannelView, ClaimView, Connector, EstablishPeeringError,
     LeaseRouteError, LeasedRouteView, PeerRouteTableError, PeerRouteView, PeerView, RouteView,
@@ -547,11 +547,16 @@ async fn remove_peer(
 /// `price` is what this node's client edge charges a client for a packet to
 /// `prefix` (ADR 0028). What this hop retains of it is `peer_id`'s own fee,
 /// written on the peering by `POST /peers` and never here (ADR 0061).
+///
+/// It takes the config file's own spelling (ADR 0065): a bare integer for a
+/// flat price, `{ "base": .., "per_kib": .. }` for one with a slope. A body
+/// written before schedules existed carries the former and still means what
+/// it meant.
 #[derive(Debug, Deserialize)]
 struct UpsertPeerRouteRequest {
     prefix: String,
     peer_id: String,
-    price: u64,
+    price: Price,
 }
 
 /// `POST /routes/peers`: issue #884's runtime peer-route write.
@@ -1005,7 +1010,7 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].prefix, "g.example.app");
         assert_eq!(routes[0].handler_url, "http://localhost:4000/");
-        assert_eq!(routes[0].price, 25);
+        assert_eq!(routes[0].price, Price::flat(25));
     }
 
     #[tokio::test]
@@ -1975,7 +1980,7 @@ mod tests {
             let created: PeerRouteView = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(created.prefix, "g.example.runtime");
             assert_eq!(created.peer_id, "runtime-hop");
-            assert_eq!(created.price, 25);
+            assert_eq!(created.price, Price::flat(25));
             assert_eq!(created.source, RouteSource::Runtime);
 
             let read_response = get(app, "/routes/peers", Some("correct-token")).await;

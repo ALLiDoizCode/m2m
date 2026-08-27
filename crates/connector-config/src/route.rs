@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use connector_domain::Price;
 use serde::Deserialize;
 use url::Url;
 
@@ -76,7 +77,7 @@ pub(crate) struct RawRoute {
     #[serde(default)]
     fee: Option<toml::Value>,
     #[serde(default)]
-    price: Option<u64>,
+    price: Option<Price>,
     #[serde(default)]
     transport: Option<String>,
 }
@@ -98,7 +99,7 @@ pub(crate) struct RawChild {
     name: String,
     handler_url: String,
     #[serde(default)]
-    price: Option<u64>,
+    price: Option<Price>,
     #[serde(default)]
     transport: Option<String>,
 }
@@ -183,7 +184,7 @@ impl std::str::FromStr for TransportPolicy {
 pub struct StaticRoute {
     prefix: String,
     handler_url: Url,
-    price: u64,
+    price: Price,
     transport_policy: TransportPolicy,
 }
 
@@ -203,7 +204,7 @@ impl StaticRoute {
         build_route(
             prefix.into(),
             handler_url.into(),
-            Some(0),
+            Some(Price::FREE),
             TransportPolicy::Both,
         )
     }
@@ -214,6 +215,17 @@ impl StaticRoute {
         prefix: impl Into<String>,
         handler_url: impl Into<String>,
         price: u64,
+    ) -> Result<StaticRoute, ConfigError> {
+        StaticRoute::new_scheduled(prefix, handler_url, Price::flat(price))
+    }
+
+    /// Construct and fully validate a single static route charging a whole
+    /// schedule (ADR 0065, issue #984) -- a `price` that may carry a slope,
+    /// of which [`StaticRoute::new_priced`] above is the flat case.
+    pub fn new_scheduled(
+        prefix: impl Into<String>,
+        handler_url: impl Into<String>,
+        price: Price,
     ) -> Result<StaticRoute, ConfigError> {
         build_route(
             prefix.into(),
@@ -229,6 +241,22 @@ impl StaticRoute {
         prefix: impl Into<String>,
         handler_url: impl Into<String>,
         price: u64,
+        transport_policy: TransportPolicy,
+    ) -> Result<StaticRoute, ConfigError> {
+        StaticRoute::new_scheduled_with_transport(
+            prefix,
+            handler_url,
+            Price::flat(price),
+            transport_policy,
+        )
+    }
+
+    /// Construct and fully validate a single static route charging a whole
+    /// schedule, with an explicit transport policy (ADR 0065, issue #701).
+    pub fn new_scheduled_with_transport(
+        prefix: impl Into<String>,
+        handler_url: impl Into<String>,
+        price: Price,
         transport_policy: TransportPolicy,
     ) -> Result<StaticRoute, ConfigError> {
         build_route(
@@ -249,13 +277,17 @@ impl StaticRoute {
         &self.handler_url
     }
 
-    /// The flat price a claim must advance by to pay for this route (issue
-    /// #520). Never emitted to a client -- ADR 0006 keeps this connector
-    /// mechanism, not a discovery source. Charged against a client-edge
-    /// claim (issue #522) and, since issue #752, checked against a
-    /// peer-role arrival's own `amount` before it is delivered
+    /// The price schedule a claim must advance by to pay for this route
+    /// (issue #520) -- flat exactly when its slope is zero, which is every
+    /// route ADR 0020 could express and every route the fleet runs.
+    ///
+    /// A *schedule*, not a figure: what one packet costs is
+    /// `price().charge(prepare.data.len())` (ADR 0065, issue #984), and every
+    /// gate that charges evaluates it that way. Charged against a client-edge
+    /// claim (issue #522) and, since issue #752, checked against a peer-role
+    /// arrival's own `amount` before it is delivered
     /// (`Connector::handle_peer_prepare`).
-    pub fn price(&self) -> u64 {
+    pub fn price(&self) -> Price {
         self.price
     }
 
@@ -277,7 +309,7 @@ impl StaticRoute {
 pub struct PeerRouteConfig {
     prefix: String,
     peer_id: String,
-    price: u64,
+    price: Price,
 }
 
 impl PeerRouteConfig {
@@ -292,12 +324,13 @@ impl PeerRouteConfig {
         &self.peer_id
     }
 
-    /// The flat price this connector's client edge charges a client for a
-    /// packet to this prefix (ADR 0028) -- greeted, gated and journaled on
-    /// exactly the path a terminated route's own price is. Always written
-    /// down: [`resolve_routes`] refuses a forwarded route with no price, so
-    /// `price == 0` always means deliberate free carriage.
-    pub fn price(&self) -> u64 {
+    /// The price schedule this connector's client edge charges a client for
+    /// a packet to this prefix (ADR 0028) -- greeted, gated and journaled on
+    /// exactly the path a terminated route's own price is, and evaluated at
+    /// the packet's own payload length the same way (ADR 0065). Always
+    /// written down: [`resolve_routes`] refuses a forwarded route with no
+    /// price, so a free schedule always means deliberate free carriage.
+    pub fn price(&self) -> Price {
         self.price
     }
 }
@@ -318,7 +351,7 @@ fn validate_prefix(prefix: String) -> Result<String, ConfigError> {
 fn build_route(
     prefix: String,
     handler_url: String,
-    price: Option<u64>,
+    price: Option<Price>,
     transport_policy: TransportPolicy,
 ) -> Result<StaticRoute, ConfigError> {
     let prefix = validate_prefix(prefix)?;
@@ -370,8 +403,14 @@ fn parse_transport_policy(
 /// that reuses the same `handler_url` at a different price (issue #520):
 /// the app behind that handler cannot tell which request arrived under
 /// which price, so the cheaper one would always win.
+///
+/// Compares whole **schedules** since ADR 0065, which is why [`Price`] is a
+/// struct rather than an enum: `1000` and `{ base = 1000, per_kib = 0 }` are
+/// one value, so writing a handler's price both ways is agreement rather than
+/// a conflict, while any difference in either field is a conflict for exactly
+/// the reason above.
 fn insert_consistent_handler_price(
-    seen: &mut HashMap<String, (String, u64)>,
+    seen: &mut HashMap<String, (String, Price)>,
     route: &StaticRoute,
 ) -> Result<(), ConfigError> {
     let handler_url = route.handler_url().to_string();
@@ -396,7 +435,7 @@ fn insert_consistent_handler_price(
 fn build_peer_route(
     prefix: String,
     peer_id: String,
-    price: Option<u64>,
+    price: Option<Price>,
 ) -> Result<PeerRouteConfig, ConfigError> {
     let prefix = validate_prefix(prefix)?;
     if peer_id.trim().is_empty() {
@@ -526,7 +565,7 @@ mod tests {
             handler_url: Some(handler_url.to_string()),
             peer_id: None,
             fee: None,
-            price: Some(price),
+            price: Some(Price::flat(price)),
             transport: None,
         }
     }
@@ -541,7 +580,7 @@ mod tests {
             handler_url: None,
             peer_id: Some(peer_id.to_string()),
             fee: None,
-            price: Some(price),
+            price: Some(Price::flat(price)),
             transport: None,
         }
     }
@@ -550,7 +589,7 @@ mod tests {
         RawChild {
             name: name.to_string(),
             handler_url: handler_url.to_string(),
-            price: Some(0),
+            price: Some(Price::FREE),
             transport: None,
         }
     }
@@ -559,7 +598,7 @@ mod tests {
     fn static_route_new_validates_like_resolve_routes() {
         let route = StaticRoute::new("g.example.app", "http://localhost:4000").expect("new");
         assert_eq!(route.prefix(), "g.example.app");
-        assert_eq!(route.price(), 0);
+        assert_eq!(route.price(), Price::FREE);
 
         let result = StaticRoute::new("g..app", "http://localhost:4000");
         assert!(matches!(result, Err(ConfigError::InvalidAddress { .. })));
@@ -569,7 +608,7 @@ mod tests {
     fn static_route_new_priced_carries_the_given_price() {
         let route = StaticRoute::new_priced("g.example.app", "http://localhost:4000", 42)
             .expect("new_priced");
-        assert_eq!(route.price(), 42);
+        assert_eq!(route.price(), Price::flat(42));
     }
 
     #[test]
@@ -584,7 +623,7 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].prefix(), "g.example.app");
         assert_eq!(routes[0].handler_url().as_str(), "http://localhost:4000/");
-        assert_eq!(routes[0].price(), 25);
+        assert_eq!(routes[0].price(), Price::flat(25));
         assert!(peer_routes.is_empty());
     }
 
@@ -618,7 +657,7 @@ mod tests {
                 handler_url: Some("http://localhost:4000".to_string()),
                 peer_id: None,
                 fee: Some(toml::Value::Integer(5)),
-                price: Some(100),
+                price: Some(Price::flat(100)),
                 transport: None,
             }],
             vec![],
@@ -641,7 +680,7 @@ mod tests {
                 handler_url: Some("http://localhost:4000".to_string()),
                 peer_id: None,
                 fee: Some(toml::Value::Integer(0)),
-                price: Some(100),
+                price: Some(Price::flat(100)),
                 transport: None,
             }],
             vec![],
@@ -663,7 +702,7 @@ mod tests {
                 handler_url: None,
                 peer_id: Some("store".to_string()),
                 fee: Some(toml::Value::Integer(3)),
-                price: Some(100),
+                price: Some(Price::flat(100)),
                 transport: None,
             }],
             vec![],
@@ -690,7 +729,7 @@ mod tests {
         .expect("resolve");
 
         assert!(routes.is_empty());
-        assert_eq!(peer_routes[0].price(), 100);
+        assert_eq!(peer_routes[0].price(), Price::flat(100));
     }
 
     /// The counterweight: a price on the branch it belongs to is still read
@@ -707,8 +746,8 @@ mod tests {
         )
         .expect("resolve");
 
-        assert_eq!(routes[0].price(), 100);
-        assert_eq!(peer_routes[0].price(), 40);
+        assert_eq!(routes[0].price(), Price::flat(100));
+        assert_eq!(peer_routes[0].price(), Price::flat(40));
     }
 
     #[test]
@@ -719,7 +758,7 @@ mod tests {
             vec![],
         )
         .expect("resolve");
-        assert_eq!(routes[0].price(), 0);
+        assert_eq!(routes[0].price(), Price::FREE);
     }
 
     /// Issue #557's "never silently free", applied to the forwarded branch
@@ -753,7 +792,7 @@ mod tests {
     fn a_peer_route_priced_zero_is_deliberately_free_not_rejected() {
         let (_, peer_routes) =
             resolve_routes(None, vec![peer_route("g.peer-b", "peer-b")], vec![]).expect("resolve");
-        assert_eq!(peer_routes[0].price(), 0);
+        assert_eq!(peer_routes[0].price(), Price::FREE);
     }
 
     #[test]
@@ -809,7 +848,7 @@ mod tests {
             vec![RawChild {
                 name: "billing".to_string(),
                 handler_url: "http://localhost:4000".to_string(),
-                price: Some(20),
+                price: Some(Price::flat(20)),
                 transport: None,
             }],
         );
@@ -817,6 +856,188 @@ mod tests {
             result,
             Err(ConfigError::ConflictingHandlerPrice { .. })
         ));
+    }
+
+    // --- ADR 0065: a price may carry a slope (issue #984) ---------------
+
+    fn scheduled_route(prefix: &str, handler_url: &str, price: Price) -> RawRoute {
+        RawRoute {
+            prefix: prefix.to_string(),
+            handler_url: Some(handler_url.to_string()),
+            peer_id: None,
+            fee: None,
+            price: Some(price),
+            transport: None,
+        }
+    }
+
+    #[test]
+    fn a_terminated_route_resolves_a_whole_schedule() {
+        let (routes, _) = resolve_routes(
+            None,
+            vec![scheduled_route(
+                "g.example.store",
+                "http://localhost:4000",
+                Price::scheduled(1000, 30),
+            )],
+            vec![],
+        )
+        .expect("resolve");
+
+        assert_eq!(routes[0].price(), Price::scheduled(1000, 30));
+        // What one packet costs is the schedule evaluated at its own length.
+        assert_eq!(routes[0].price().charge(100 * 1024), 4_000);
+    }
+
+    #[test]
+    fn a_forwarded_route_resolves_a_whole_schedule() {
+        // ADR 0028 prices a forwarded route at the client edge, and ADR 0065
+        // does not carve it out: the edge measures the same payload length a
+        // termination would.
+        let (_, peer_routes) = resolve_routes(
+            None,
+            vec![RawRoute {
+                prefix: "g.peer-b".to_string(),
+                handler_url: None,
+                peer_id: Some("peer-b".to_string()),
+                fee: None,
+                price: Some(Price::scheduled(100, 5)),
+                transport: None,
+            }],
+            vec![],
+        )
+        .expect("resolve");
+
+        assert_eq!(peer_routes[0].price(), Price::scheduled(100, 5));
+    }
+
+    #[test]
+    fn a_child_resolves_a_whole_schedule() {
+        let (routes, _) = resolve_routes(
+            Some("g.example.connector"),
+            vec![],
+            vec![RawChild {
+                name: "billing".to_string(),
+                handler_url: "http://localhost:4000".to_string(),
+                price: Some(Price::scheduled(7, 3)),
+                transport: None,
+            }],
+        )
+        .expect("resolve");
+
+        assert_eq!(routes[0].prefix(), "g.example.connector.billing");
+        assert_eq!(routes[0].price(), Price::scheduled(7, 3));
+    }
+
+    #[test]
+    fn one_handler_priced_flat_and_by_schedule_is_rejected() {
+        let result = resolve_routes(
+            None,
+            vec![
+                priced_route("g.example.cheap", "http://localhost:4000", 1000),
+                scheduled_route(
+                    "g.example.dear",
+                    "http://localhost:4000",
+                    Price::scheduled(1000, 30),
+                ),
+            ],
+            vec![],
+        );
+        // Same reason as the flat case: the app behind that handler cannot
+        // tell which request arrived under which schedule, so every packet
+        // above a kibibyte would be bought at the flat route's price.
+        assert!(matches!(
+            result,
+            Err(ConfigError::ConflictingHandlerPrice { .. })
+        ));
+    }
+
+    #[test]
+    fn one_handler_priced_flat_and_at_a_zero_slope_is_accepted() {
+        // `1000` and `{ base = 1000, per_kib = 0 }` are the same value, so
+        // spelling one handler's price both ways is agreement, not conflict.
+        let (routes, _) = resolve_routes(
+            None,
+            vec![
+                priced_route("g.example.one", "http://localhost:4000", 1000),
+                scheduled_route(
+                    "g.example.two",
+                    "http://localhost:4000",
+                    Price::scheduled(1000, 0),
+                ),
+            ],
+            vec![],
+        )
+        .expect("resolve");
+
+        assert_eq!(routes[0].price(), routes[1].price());
+    }
+
+    #[test]
+    fn one_handler_at_two_identical_schedules_is_accepted() {
+        let (routes, _) = resolve_routes(
+            None,
+            vec![
+                scheduled_route(
+                    "g.example.one",
+                    "http://localhost:4000",
+                    Price::scheduled(1000, 30),
+                ),
+                scheduled_route(
+                    "g.example.two",
+                    "http://localhost:4000",
+                    Price::scheduled(1000, 30),
+                ),
+            ],
+            vec![],
+        )
+        .expect("resolve");
+
+        assert_eq!(routes.len(), 2);
+    }
+
+    #[test]
+    fn one_handler_at_two_slopes_over_one_base_is_rejected() {
+        let result = resolve_routes(
+            None,
+            vec![
+                scheduled_route(
+                    "g.example.one",
+                    "http://localhost:4000",
+                    Price::scheduled(1000, 30),
+                ),
+                scheduled_route(
+                    "g.example.two",
+                    "http://localhost:4000",
+                    Price::scheduled(1000, 31),
+                ),
+            ],
+            vec![],
+        );
+        assert!(matches!(
+            result,
+            Err(ConfigError::ConflictingHandlerPrice { .. })
+        ));
+    }
+
+    #[test]
+    fn a_conflicting_schedule_is_reported_with_both_spellings() {
+        let result = resolve_routes(
+            None,
+            vec![
+                priced_route("g.example.cheap", "http://localhost:4000", 1000),
+                scheduled_route(
+                    "g.example.dear",
+                    "http://localhost:4000",
+                    Price::scheduled(1000, 30),
+                ),
+            ],
+            vec![],
+        );
+        let message = result.expect_err("conflicting").to_string();
+        // An error naming two prices has to name what distinguishes them, or
+        // it reads as "1000 is not 1000".
+        assert!(message.contains("1000 + 30/KiB"), "got: {message}");
     }
 
     #[test]
@@ -997,7 +1218,7 @@ mod tests {
                 handler_url: Some("http://localhost:4000".to_string()),
                 peer_id: None,
                 fee: None,
-                price: Some(1000),
+                price: Some(Price::flat(1000)),
                 transport: Some("btp".to_string()),
             }],
             vec![],
@@ -1015,7 +1236,7 @@ mod tests {
                 handler_url: Some("http://localhost:4000".to_string()),
                 peer_id: None,
                 fee: None,
-                price: Some(10),
+                price: Some(Price::flat(10)),
                 transport: Some("http".to_string()),
             }],
             vec![],
@@ -1033,7 +1254,7 @@ mod tests {
                 handler_url: Some("http://localhost:4000".to_string()),
                 peer_id: None,
                 fee: None,
-                price: Some(10),
+                price: Some(Price::flat(10)),
                 transport: Some("both".to_string()),
             }],
             vec![],
@@ -1055,7 +1276,7 @@ mod tests {
                 handler_url: Some("http://localhost:4000".to_string()),
                 peer_id: None,
                 fee: None,
-                price: Some(10),
+                price: Some(Price::flat(10)),
                 transport: Some("carrier-pigeon".to_string()),
             }],
             vec![],
@@ -1102,7 +1323,7 @@ mod tests {
             vec![RawChild {
                 name: "relay".to_string(),
                 handler_url: "http://localhost:4001".to_string(),
-                price: Some(1000),
+                price: Some(Price::flat(1000)),
                 transport: Some("btp".to_string()),
             }],
         )

@@ -650,7 +650,7 @@ async fn handle_frame(
     // One lookup serves every fact (issue #701, ADR 0028): see
     // `handle_ilp`'s mirror of this on the HTTP carriage.
     let client_route = state.connector.client_route(&prepare.destination);
-    let price = client_route.map_or(0, |route| route.price);
+    let price = client_route.map_or(0, |route| route.price.base());
     // Issue #807: see `handle_ilp`'s mirror of this on the HTTP carriage --
     // a condition-less PREPARE is structurally a bootstrap/greeting probe,
     // never a real payment attempt, regardless of destination.

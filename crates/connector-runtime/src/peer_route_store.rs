@@ -49,6 +49,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use connector_config::PeerCarriage;
+use connector_domain::Price;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
@@ -342,7 +343,12 @@ struct StoredRoute {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[allow(dead_code)]
     fee: Option<u64>,
-    price: u64,
+    /// The schedule this route charges (ADR 0065). A snapshot written
+    /// before schedules existed carries a bare integer here, which is what
+    /// a flat [`Price`] both reads and writes -- so an image upgrade opens
+    /// an old table unchanged, and a downgrade opens any table whose routes
+    /// are all flat.
+    price: Price,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -417,7 +423,7 @@ impl PeerRouteStore {
             .map(|route| {
                 (
                     route.prefix.clone(),
-                    PeerRoute::new_priced(route.prefix, route.peer_id, route.price),
+                    PeerRoute::new_scheduled(route.prefix, route.peer_id, route.price),
                 )
             })
             .collect();
@@ -611,7 +617,7 @@ mod tests {
         let (store, peers, routes) = PeerRouteStore::open(&path).expect("the old format parses");
         assert_eq!(peers["apex-relay-2"], RuntimePeering::default());
         assert_eq!(routes.len(), 1);
-        assert_eq!(routes["g.example.relay2"].price(), 25);
+        assert_eq!(routes["g.example.relay2"].price(), Price::flat(25));
 
         // And persisting rewrites it in the current form, which the next
         // open reads back identically.

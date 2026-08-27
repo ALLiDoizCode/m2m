@@ -643,7 +643,7 @@ async fn route_price(
     match state.connector.client_route_price(&query.destination) {
         Some(price) => Json(RoutePriceView {
             destination: query.destination,
-            price,
+            price: price.base(),
         })
         .into_response(),
         None => (
@@ -1167,7 +1167,7 @@ async fn handle_ilp(
     // route by, so what is charged and where the packet goes cannot
     // disagree.
     let client_route = state.connector.client_route(&prepare.destination);
-    let price = client_route.map_or(0, |route| route.price);
+    let price = client_route.map_or(0, |route| route.price.base());
 
     // Transport policy (issue #701, toon-meta#262 decision 11) is checked
     // before payment is considered at all: a route restricted to BTP is
@@ -1388,7 +1388,9 @@ mod tests {
     use axum::http::Request;
     use chrono::{TimeZone, Utc};
     use connector_config::StaticRoute;
-    use connector_domain::{derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Reject};
+    use connector_domain::{
+        derive_condition, EnvelopeRequest, EnvelopeResponse, Fulfill, Price, Reject,
+    };
     use connector_runtime::{
         AppOutcome, FakeAppClient, InMemoryJournal, InProcessPeerTransport, PeerRoute,
         RuntimePeerChannel, RuntimePeering, TestClock,
@@ -2949,7 +2951,7 @@ mod tests {
             )
             .expect("add a runtime peer");
         connector
-            .upsert_runtime_peer_route("g.later", "later", 42)
+            .upsert_runtime_peer_route("g.later", "later", Price::flat(42))
             .expect("add a runtime route");
 
         let second = self_description_of(router_with_node_facts(

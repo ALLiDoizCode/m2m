@@ -1,6 +1,8 @@
 use std::net::AddrParseError;
 use std::path::PathBuf;
 
+use connector_domain::Price;
+
 use thiserror::Error;
 
 /// Every way [`crate::Config::load`] can fail.
@@ -214,9 +216,9 @@ pub enum ConfigError {
     ConflictingHandlerPrice {
         handler_url: String,
         first_prefix: String,
-        first_price: u64,
+        first_price: Price,
         second_prefix: String,
-        second_price: u64,
+        second_price: Price,
     },
 
     #[error(

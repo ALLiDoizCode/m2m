@@ -33,6 +33,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use connector_config::{Config, PayChannelConfig, PeerChannelConfig, SettlementChain};
+use connector_domain::Price;
 use connector_settlement_solana::test_support::LOCAL_TEST_PROGRAM_ID;
 
 const SOLO_CONFIG: &str = include_str!("../../../local/solo/connector.toml");
@@ -187,6 +188,29 @@ fn load(name: &str, raw: &str) -> Config {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = file_with(dir.path(), "connector.toml", &loadable(raw, dir.path()));
     Config::load(&path).unwrap_or_else(|error| panic!("{name} must load: {error}"))
+}
+
+/// The one figure a price this topology requires to be **flat** charges, so
+/// the path arithmetic below can compare single numbers.
+///
+/// ADR 0065 (issue #984) lets a route's price carry a slope, and ADR 0028's
+/// path invariant then has to hold at every payload length rather than at
+/// one: with a flat per-packet fee that means each hop's base must clear the
+/// next hop's base by the fee AND each hop's slope must be at least the next
+/// hop's, or a large enough packet erodes to a shortfall the small ones never
+/// showed. None of the committed local topologies prices by size -- they
+/// rehearse carriage and settlement, and a size-priced leg would make a
+/// fixed-size rehearsal packet prove less, not more -- so this asserts that
+/// and hands back the figure. A topology that gains a schedule has to teach
+/// these assertions the slope half of the invariant, not route around this.
+fn flat(price: Price) -> u64 {
+    assert!(
+        price.is_flat(),
+        "this topology's committed price carries a slope ({price}), and the ADR 0028 path \
+         arithmetic in this file compares one figure per hop. Add the slope comparison to every \
+         assertion below before pricing a local leg by size."
+    );
+    price.base()
 }
 
 /// What `config` retains for carrying one packet over the peering `route`
@@ -417,7 +441,7 @@ fn the_two_hop_topologys_committed_configs_load() {
     assert_eq!(forward.prefix(), "g.local.two-hop.b");
     assert_eq!(forward.peer_id(), "a-b");
     assert!(
-        forward.price() > 0,
+        flat(forward.price()) > 0,
         "ADR 0028: a forwarded route with no price is the free gateway issue #620 exists for"
     );
     let forward_fee = fee_of(&payer, forward);
@@ -443,7 +467,7 @@ fn the_two_hop_topologys_committed_configs_load() {
          sends the packet somewhere else entirely"
     );
     assert!(
-        payee.routes()[0].price() > 0,
+        flat(payee.routes()[0].price()) > 0,
         "B both TERMINATES and PRICES this route, which is what this topology is for. Such a \
          route refuses a peer PREPARE that arrives without a claim covering the price (F06, \
          issue #880), and under ADR 0004's postpay ordering the first crossing carries none -- \
@@ -464,15 +488,15 @@ fn the_two_hop_topologys_committed_configs_load() {
     // value it collected and B never charging for it, and a rehearsal with
     // slack cannot tell a shortfall from a discount.
     assert_eq!(
-        forward.price() - forward_fee,
-        payee.routes()[0].price(),
+        flat(forward.price()) - forward_fee,
+        flat(payee.routes()[0].price()),
         "A collects {} and retains {}, so it forwards {} -- and B's route costs {}. Change one \
          of those figures without the other and the packet either arrives short (an `F03` at \
          `handle_peer_prepare`, ADR 0029) or arrives carrying value B never charged for.",
-        forward.price(),
+        flat(forward.price()),
         forward_fee,
-        forward.price() - forward_fee,
-        payee.routes()[0].price()
+        flat(forward.price()) - forward_fee,
+        flat(payee.routes()[0].price())
     );
 
     for (name, config) in [("A", &payer), ("B", &payee)] {
@@ -676,7 +700,7 @@ fn the_two_hop_configs_and_their_compose_file_agree() {
          encoding of an accepted claim and this is where the two are held together."
     );
 
-    let price = payee.routes()[0].price();
+    let price = flat(payee.routes()[0].price());
     let fee = fee_of(&payer, &payer.peer_routes()[0]);
     assert!(
         TWO_HOP_COMPOSE.contains(&format!("PRICE={price}")),
@@ -821,8 +845,8 @@ fn the_mixed_chain_path_is_one_prefix_per_hop_and_one_flat_fee_per_hop() {
          pass unnoticed"
     );
     assert_eq!(
-        first.price() - first_fee,
-        second.price(),
+        flat(first.price()) - first_fee,
+        flat(second.price()),
         "STILL NOT A CONVERSION. What leaves A is what arrived minus A's own FLAT fee, and that \
          is exactly B's price -- the whole difference between the two figures is one hop's fee \
          and nothing else. Any other gap is a rate, which is the `swap` repository's job and \
@@ -830,7 +854,7 @@ fn the_mixed_chain_path_is_one_prefix_per_hop_and_one_flat_fee_per_hop() {
          middle is exactly where somebody would be tempted to put one."
     );
     assert!(
-        second.price() - second_fee >= app.price(),
+        flat(second.price()) - second_fee >= flat(app.price()),
         "ADR 0028's path invariant, which no code enforces because a connector cannot know what \
          the next hop charges: every hop's `price - fee` must be at least the next hop's price. \
          Here the slack is deliberate and is the value delivered to C's unpriced termination -- \
@@ -838,7 +862,7 @@ fn the_mixed_chain_path_is_one_prefix_per_hop_and_one_flat_fee_per_hop() {
          forwarded amount."
     );
     assert_eq!(
-        app.price(),
+        flat(app.price()),
         0,
         "C's termination is unpriced BY CHOICE since issue #1145, not by constraint. It used to \
          be forced: the b-c peering was postpay, a priced peer termination refuses an uncovered \
@@ -991,8 +1015,8 @@ fn the_mixed_chain_forwarded_arrival_is_enforced() {
     let to_b = &a.peer_routes()[0];
     let onward = &b.peer_routes()[0];
     assert_eq!(
-        to_b.price() - fee_of(&a, to_b),
-        onward.price(),
+        flat(to_b.price()) - fee_of(&a, to_b),
+        flat(onward.price()),
         "what A covers on the crossing is `amount_after_fee(price, fee)`, and what B charges the \
          arrival against is the amount that arrives -- the same figure. Enforcing is only safe \
          while those two agree, and nothing at runtime can notice when they stop."
@@ -1257,7 +1281,7 @@ fn the_mixed_chain_configs_and_their_compose_file_agree() {
     // notice this drifting: they record what was paid, not what should have
     // been (issue #1144).
     let a = load("local/mixed-chain/connector-a.toml", MIXED_A);
-    let cost = a.peer_routes()[0].price();
+    let cost = flat(a.peer_routes()[0].price());
     assert!(
         MIXED_COMPOSE.contains(&format!("--amount       {cost}")),
         "the sender must send this path's cost ({cost}): A's fee, plus B's fee, plus what \
