@@ -390,30 +390,89 @@ faucet-resize)
     exit 0
   fi
 
-  # allow_auto_disk_resize below can only shrink a SINGLE ext filesystem (plus
-  # swap). On any other layout Linode either refuses or leaves the disk at its
-  # old size and the resize fails late; check first and say so, rather than
-  # discovering it mid-migration with the box already down.
+  # Linode refuses a downsize while the box has more disk ALLOCATED than the
+  # smaller plan provides -- "Linode has allocated more disk than the new
+  # service plan allows", HTTP 400, whatever allow_auto_disk_resize says. The
+  # disk has to be shrunk first, and a disk can only be resized while the box
+  # is offline. So the order is: measure, power off, shrink, resize, boot.
+  #
+  # (allow_auto_disk_resize is still passed below. It is what keeps a LATER
+  # upsize from leaving the filesystem small, and it costs nothing here.)
   DISKS=$(linode_get "linode/instances/$FAUCET_ID/disks")
-  EXT_COUNT=$(echo "$DISKS" | jq '[.data[] | select(.filesystem != "swap")] | length')
+  EXT_IDS=$(echo "$DISKS" | jq -r '.data[] | select(.filesystem != "swap") | .id')
+  EXT_COUNT=$(echo "$EXT_IDS" | grep -c . || true)
   if [ "$EXT_COUNT" != "1" ]; then
-    echo "ERROR: faucet has $EXT_COUNT non-swap disks; automatic disk resize handles exactly 1." >&2
+    echo "ERROR: faucet has $EXT_COUNT non-swap disks; this verb shrinks exactly 1." >&2
     echo "Resize its disks by hand in the Linode UI first, then re-run." >&2
     exit 1
   fi
+  EXT_ID=$EXT_IDS
+  EXT_SIZE=$(echo "$DISKS" | jq -r --arg id "$EXT_ID" '.data[] | select(.id == ($id|tonumber)) | .size')
+  SWAP_SIZE=$(echo "$DISKS" | jq '[.data[] | select(.filesystem == "swap") | .size] | add // 0')
 
-  # A shrink cannot succeed if the data does not fit the target plan's disk.
+  # How much DATA is on the box. Read it from the guest: /disks reports each
+  # disk's ALLOCATED size, which is always the whole current plan and so is
+  # larger than every smaller plan by construction -- comparing that would
+  # refuse every downsize there is.
   TARGET_DISK=$(curl -sf "$LINODE_API/linode/types/$TARGET_TYPE" | jq -r '.disk')
-  USED_DISK=$(echo "$DISKS" | jq '[.data[].size] | add')
-  if [ -n "$TARGET_DISK" ] && [ "$USED_DISK" -gt "$TARGET_DISK" ]; then
-    echo "ERROR: allocated disk is ${USED_DISK}MB but $TARGET_TYPE provides ${TARGET_DISK}MB." >&2
+  FAUCET_IP=$(get_box_ip "$FAUCET_LABEL")
+  USED_MB=$(ssh_run "$FAUCET_IP" "df -BM --output=used / | tail -1 | tr -dc '0-9'" 2>/dev/null || true)
+  if [ -z "$USED_MB" ]; then
+    echo "ERROR: could not read disk usage from $FAUCET_IP over SSH." >&2
+    echo "Refusing to resize blind: a shrink that does not fit strands the box offline." >&2
+    exit 1
+  fi
+
+  # Target ext size: the whole new plan minus swap. Keep a margin over what is
+  # actually used -- the filesystem needs room to work, and this box builds a
+  # container image on itself.
+  NEW_EXT_SIZE=$(( TARGET_DISK - SWAP_SIZE ))
+  NEEDED_MB=$(( USED_MB * 3 / 2 + 2048 ))
+  echo "==> $FAUCET_LABEL uses ${USED_MB}MB of ${EXT_SIZE}MB; $TARGET_TYPE provides ${TARGET_DISK}MB"
+  if [ "$NEEDED_MB" -gt "$NEW_EXT_SIZE" ]; then
+    echo "ERROR: ${USED_MB}MB used (+50% margin +2GB = ${NEEDED_MB}MB) does not fit ${NEW_EXT_SIZE}MB." >&2
+    echo "Free space on the box first, then re-run." >&2
     exit 1
   fi
 
   echo "==> Resizing $FAUCET_LABEL ($FAUCET_ID): $CURRENT_TYPE -> $TARGET_TYPE"
   echo "    The faucet will be DOWN for roughly 10-20 minutes."
+
+  if [ "$EXT_SIZE" -gt "$NEW_EXT_SIZE" ]; then
+    echo "==> [1/4] Powering off (a disk can only be resized offline)"
+    linode_post "linode/instances/$FAUCET_ID/shutdown" >/dev/null
+    for _ in $(seq 1 60); do
+      [ "$(get_box_status "$FAUCET_LABEL")" = "offline" ] && break
+      sleep 5
+    done
+    [ "$(get_box_status "$FAUCET_LABEL")" = "offline" ] || {
+      echo "ERROR: $FAUCET_LABEL did not power off; not touching its disk." >&2; exit 1; }
+
+    echo "==> [2/4] Shrinking the root disk ${EXT_SIZE}MB -> ${NEW_EXT_SIZE}MB"
+    linode_post "linode/instances/$FAUCET_ID/disks/$EXT_ID/resize" \
+      -d "{\"size\": $NEW_EXT_SIZE}" >/dev/null
+    # The disk goes `resizing` and back to `ready`; the box stays offline.
+    for _ in $(seq 1 120); do
+      st=$(linode_get "linode/instances/$FAUCET_ID/disks/$EXT_ID" | jq -r '.status')
+      [ "$st" = "ready" ] && break
+      sleep 10
+    done
+    [ "$st" = "ready" ] || { echo "ERROR: disk did not return to ready (status=$st)." >&2; exit 1; }
+  fi
+
+  echo "==> [3/4] Resizing the plan"
   linode_post "linode/instances/$FAUCET_ID/resize" \
     -d "{\"type\": \"$TARGET_TYPE\", \"allow_auto_disk_resize\": true}" >/dev/null
+
+  echo "==> [4/4] Waiting for it to come back"
+  # A plan resize reboots the box itself when it was running. It was not: we
+  # powered it off above, so boot it once the migration settles.
+  for _ in $(seq 1 120); do
+    st=$(get_box_status "$FAUCET_LABEL")
+    [ "$st" = "running" ] && break
+    [ "$st" = "offline" ] && linode_post "linode/instances/$FAUCET_ID/boot" >/dev/null 2>&1
+    sleep 10
+  done
   wait_box_running "$FAUCET_LABEL"
 
   NEW_TYPE=$(linode_get "linode/instances/$FAUCET_ID" | jq -r '.type')
