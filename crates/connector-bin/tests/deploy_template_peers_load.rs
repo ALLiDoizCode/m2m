@@ -1,0 +1,189 @@
+//! Proves `deploy/connector-rust/connector.toml`'s own commented `[[peers]]`
+//! peering example still boots on the current binary (issue #1221).
+//!
+//! ADR 0060 deleted `[[peers]].credential` outright -- it is parsed solely
+//! to be refused by name (`ConfigError::PeerCredentialRemoved`). The
+//! template's example predated that deletion and, until this test, nothing
+//! caught it teaching a shape `Config::load` refuses on sight: uncommenting
+//! it as written was a load failure, the same defect #1178 fixed one file
+//! over in `peer-carriage-spec.md`.
+//!
+//! This test takes the template's commented peering block verbatim -- only
+//! the leading `# ` comment markers come off -- and supplies the two things
+//! the template itself deliberately leaves unconfigured: real (if
+//! content-free) key files, and an `[settlement.evm]` table, which the
+//! example's EVM `[[peer_channels]]` row requires since issue #1138 and
+//! which is out of this example's scope to teach. If a future edit
+//! reintroduces a removed key -- a credential, a `ceiling`, a
+//! `claim_enforcement` -- `Config::load` refuses it by name and this test
+//! fails with that exact message.
+
+use std::io::Write;
+use std::path::Path;
+
+use connector_config::Config;
+
+const TEMPLATE: &str = include_str!("../../../deploy/connector-rust/connector.toml");
+
+/// The line the template's own prose tells an operator to uncomment first
+/// (see the "NOTE: uncommenting this block" comment above it). Everything
+/// from here to end of file is the `#`-prefixed peering example.
+const PEERING_EXAMPLE_MARKER: &str = "\n# [[peers]]\n";
+
+/// `peer_expose` is a root-level key (issue #1221): TOML has no way to
+/// write a root-table key once a table header has appeared earlier in the
+/// file, so it lives near the top of the template, beside `state_dir`, and
+/// not in the `[[peers]]` block [`PEERING_EXAMPLE_MARKER`] bounds.
+/// Uncommented here the same way the template's own prose tells an
+/// operator to.
+const PEER_EXPOSE_LINE: &str = "# peer_expose = \"btp\"";
+
+/// Strip exactly one leading `#`, and the space after it if there is one,
+/// from every line of a comment block -- the shape the template's own
+/// comments use throughout. Panics on a line that isn't commented, since
+/// that means [`PEERING_EXAMPLE_MARKER`] no longer bounds what this test
+/// thinks it bounds.
+fn uncomment(block: &str) -> String {
+    block
+        .lines()
+        .map(|line| {
+            if line.is_empty() {
+                return String::new();
+            }
+            line.strip_prefix("# ")
+                .or_else(|| line.strip_prefix('#'))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "expected every line of the template's peering example to start with \
+                         '#', found: {line:?} -- did prose sneak into the commented block, or \
+                         did the block stop being fully commented?"
+                    )
+                })
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn file_with(dir: &Path, name: &str, contents: &str) -> std::path::PathBuf {
+    let path = dir.join(name);
+    let mut handle = std::fs::File::create(&path).expect("create sandbox file");
+    handle
+        .write_all(contents.as_bytes())
+        .expect("write sandbox file");
+    path
+}
+
+#[test]
+fn the_templates_peering_example_loads() {
+    let start = TEMPLATE.find(PEERING_EXAMPLE_MARKER).unwrap_or_else(|| {
+        panic!(
+            "deploy/connector-rust/connector.toml no longer has a '# [[peers]]' line -- if the \
+             peering example moved or was reworded, repoint this test's marker rather than \
+             deleting it"
+        )
+    });
+    let peering_example = uncomment(&TEMPLATE[start..]);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let signer_key = file_with(dir.path(), "signer.key", "");
+    let settlement_key = file_with(dir.path(), "settlement.key", "");
+    let state_dir = dir.path().join("state");
+    std::fs::create_dir_all(&state_dir).expect("create sandbox state dir");
+
+    let mut doc = TEMPLATE[..start].to_string();
+    assert!(
+        doc.contains(PEER_EXPOSE_LINE),
+        "deploy/connector-rust/connector.toml's commented 'peer_expose' line moved out of the \
+         part of the template this test treats as root-scope config (before the '[[peers]]' \
+         marker) -- see issue #1221 for why it must stay a root-level key"
+    );
+    doc = doc.replace(PEER_EXPOSE_LINE, "peer_expose = \"btp\"");
+    doc = doc.replace(
+        "key_file = \"/app/data/signer.key\"",
+        &format!("key_file = \"{}\"", signer_key.display()),
+    );
+    doc = doc.replace(
+        "state_dir = \"/app/state\"",
+        &format!("state_dir = \"{}\"", state_dir.display()),
+    );
+    doc = doc.replace(
+        "write_keys = [\"REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STEP-3\"]",
+        "write_keys = \
+         [\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"]",
+    );
+
+    // Not part of the template: the example's EVM `[[peer_channels]]` row
+    // requires an `[settlement.evm]` table to bind against (issue #1138),
+    // and the template names no settlement chain at all -- rightly, since
+    // which chain an operator settles on is theirs to pick. Supplied here
+    // so this test proves the PEERING example loads, not that the template
+    // should also teach settlement configuration it deliberately omits.
+    doc.push_str(&format!(
+        "\n[settlement.evm]\n\
+         rpc_url = \"http://127.0.0.1:8545\"\n\
+         contract_address = \"0x1234567890123456789012345678901234567890\"\n\
+         token_address = \"0x49beE1Bca5d15Fb0963117923403F9498119a9Ce\"\n\
+         decimals = 6\n\
+         \n\
+         [settlement.evm.key]\n\
+         key_file = \"{}\"\n",
+        settlement_key.display()
+    ));
+    doc.push('\n');
+    doc.push_str(&peering_example);
+
+    let config_path = file_with(dir.path(), "connector.toml", &doc);
+    Config::load(&config_path).unwrap_or_else(|error| {
+        panic!(
+            "deploy/connector-rust/connector.toml's peering example failed to load: {error}\n\n\
+             assembled config:\n{doc}"
+        )
+    });
+}
+
+/// A negative control on [`uncomment`] and the marker itself: if the
+/// template's example still wrote the credential ADR 0060 deleted, this
+/// test would have to fail with `PeerCredentialRemoved`, not with some
+/// unrelated parse error. Proves the harness would actually catch the
+/// regression #1221 fixed, not just that today's file happens to load.
+#[test]
+fn the_harness_would_catch_a_reintroduced_credential() {
+    let start = TEMPLATE
+        .find(PEERING_EXAMPLE_MARKER)
+        .expect("marker must resolve -- see the_templates_peering_example_loads");
+    let peering_example = uncomment(&TEMPLATE[start..]);
+    assert!(
+        peering_example.contains("[[peers]]") && peering_example.contains("id = \"store\""),
+        "uncommenting produced text that doesn't look like the peering example: \
+         {peering_example}"
+    );
+
+    let spoiled = peering_example.replace(
+        "endpoint = \"wss://store.example.net:443/ilp/btp\"",
+        "endpoint = \"wss://store.example.net:443/ilp/btp\"\ncredential = { secret = \"x\" }",
+    );
+    assert_ne!(
+        spoiled, peering_example,
+        "expected to find the endpoint line to reintroduce a credential next to"
+    );
+
+    // The reintroduced-credential doc is missing state_dir, settlement and
+    // valid operator settings -- fine, because PeerCredentialRemoved must
+    // win the race against every other refusal for this control to prove
+    // anything. `[[peers]].credential` is parsed before those other tables
+    // are even reached (`connector-config/src/peer.rs`), so it does.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let signer_key = file_with(dir.path(), "signer.key", "");
+    let doc = format!(
+        "client_edge_addr = \"127.0.0.1:0\"\n\n[signer]\nkey_file = \"{}\"\n\n{}",
+        signer_key.display(),
+        spoiled
+    );
+    let config_path = file_with(dir.path(), "connector.toml", &doc);
+    let error = Config::load(&config_path).expect_err("a reintroduced credential must be refused");
+    assert!(
+        error.to_string().contains("ADR 0060"),
+        "expected a PeerCredentialRemoved-shaped error naming ADR 0060, got: {error}"
+    );
+}
