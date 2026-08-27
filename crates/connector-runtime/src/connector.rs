@@ -1762,6 +1762,22 @@ impl Connector {
                 .contains(channel_id)
     }
 
+    /// Every client channel [`Connector::recognize_channel`] has recorded
+    /// (issue #1218): the only list of these this connector keeps, since a
+    /// client channel is opened by its counterparty, never by this node, so
+    /// it is never in [`Self::known_channels`]. `GET /channels` merges this
+    /// list in so a node holding value from the client edge is reported on
+    /// the same surface `POST /channels` populates for a channel this node
+    /// opened itself.
+    pub fn recognized_channel_ids(&self) -> Vec<String> {
+        self.recognized_channels
+            .read()
+            .expect("recognized channels lock poisoned")
+            .iter()
+            .cloned()
+            .collect()
+    }
+
     /// Whether `channel_account` is a Solana peer channel this
     /// connector recognizes -- the Solana counterpart of
     /// [`Connector::recognizes_channel`] (issue #732/#998). A separate
@@ -3094,6 +3110,23 @@ impl Connector {
         views
     }
 
+    /// This node's own view of `channel_id`'s on-chain state, fetched fresh
+    /// from whichever settlement backend the id's own chain namespace names
+    /// (issue #1218): unlike [`Self::channels`], not limited to a channel
+    /// this node opened itself -- a client channel its counterparty opened
+    /// is exactly as reachable here, since [`Self::settlement_for_channel`]
+    /// dispatches on the id's own shape, not on [`Self::known_channels`].
+    pub async fn channel_view(
+        &self,
+        channel_id: &str,
+    ) -> Result<ChannelView, ChannelOperationError> {
+        let state = self
+            .settlement_for_channel(channel_id)?
+            .channel_state(&ChannelId(channel_id.to_string()))
+            .await?;
+        Ok(ChannelView::from(state))
+    }
+
     /// The settlement backend configured for `chain`.
     /// [`ChannelOperationError::NoSettlementBackend`] on a node with no
     /// backend at all; [`ChannelOperationError::NoSettlementBackendForChain`]
@@ -3342,6 +3375,20 @@ impl Connector {
     /// read-only inspection interface.
     pub fn claims(&self) -> Vec<ClaimView> {
         self.claims.views()
+    }
+
+    /// The latest claim this connector's own peer-semantics book -- never
+    /// the client edge's second book -- has accepted on `channel_id` (issue
+    /// #1218): the read half of what [`Self::redeem_latest_claim`] and
+    /// [`Self::cooperative_close`] already consult internally, exposed so a
+    /// caller holding a second claim book (`connector_client_edge::ClientClaimGate`)
+    /// can tell, before it redeems anything, whether the peer book is the
+    /// authority for `channel_id` or whether it should fall back to its own
+    /// -- the same "which book is the authority is a property of the
+    /// channel, never of who is asking" doctrine `Self::peer_channel_watermark`
+    /// already serves `POST /ilp/claim-state` with.
+    pub fn peer_inbound_claim(&self, channel_id: &str) -> Option<connector_settlement::Claim> {
+        self.claims.latest_inbound_claim(channel_id)
     }
 
     /// Accept `candidate` as a genuine [`Fulfill`] only if its fulfillment
@@ -6685,6 +6732,50 @@ mod tests {
             }
             hex
         }
+
+        /// Issue #1218: `channel_view` reports on a channel by id alone,
+        /// unlike `channels()` -- which only ever lists
+        /// [`Self::known_channels`], the channels this node itself opened.
+        /// A client channel, opened by its counterparty and merely
+        /// recognized here, is exactly the case this exists for: the
+        /// channel below is opened straight through the backend, never
+        /// through `Connector::open_channel`, so it is provably absent
+        /// from `known_channels`.
+        #[tokio::test]
+        async fn channel_view_reports_a_channel_this_node_never_itself_opened() {
+            let settlement = Arc::new(InMemorySettlementBackend::new());
+            let channel_id = settlement
+                .open(b"counterparty".to_vec(), Duration::seconds(3600))
+                .await
+                .unwrap();
+            let connector = bare_connector().with_settlement(SettlementChain::Evm, settlement);
+
+            assert!(connector.channels().await.is_empty());
+
+            let view = connector
+                .channel_view(&channel_id.0)
+                .await
+                .expect("the backend knows this channel even though this node never opened it");
+            assert_eq!(view.counterparty, to_hex(b"counterparty"));
+        }
+
+        /// A channel id no backend has ever heard of answers exactly like
+        /// every other per-channel operation already does.
+        #[tokio::test]
+        async fn channel_view_of_an_unknown_channel_is_not_found() {
+            let connector = bare_connector().with_settlement(
+                SettlementChain::Evm,
+                Arc::new(InMemorySettlementBackend::new()),
+            );
+
+            let result = connector.channel_view("no-such-channel").await;
+            assert!(matches!(
+                result,
+                Err(ChannelOperationError::Settlement(
+                    SettlementError::ChannelNotFound(_)
+                ))
+            ));
+        }
     }
 
     mod redemption {
@@ -6755,6 +6846,44 @@ mod tests {
             let result = connector.redeem_latest_claim(&channel_id.0).await;
 
             assert_eq!(result, Err(ChannelOperationError::NoClaimToRedeem));
+        }
+
+        /// Issue #1218: `peer_inbound_claim` is the read half
+        /// `redeem_latest_claim`/`cooperative_close` already use
+        /// internally, exposed so a caller holding a second book (the
+        /// client edge's own) can tell whether the peer book already
+        /// answers for a channel before falling back to its own.
+        #[tokio::test]
+        async fn peer_inbound_claim_answers_none_until_a_claim_is_accepted_then_the_latest() {
+            let settlement = Arc::new(InMemorySettlementBackend::new());
+            let channel_id = settlement
+                .open(b"peer".to_vec(), Duration::seconds(3600))
+                .await
+                .unwrap();
+            settlement
+                .fund_counterparty(&channel_id, 1_000)
+                .await
+                .unwrap();
+            let peer_signer = LocalSigner::generate("peer-key");
+            let connector =
+                connector_with_settlement(settlement.clone(), &peer_signer, &channel_id.0);
+
+            assert_eq!(connector.peer_inbound_claim(&channel_id.0), None);
+
+            assert_eq!(
+                connector.handle_peer_claim(sign_claim(&peer_signer, &channel_id.0, 1, 100)),
+                ClaimAckOutcome::Accepted
+            );
+            assert_eq!(
+                connector.handle_peer_claim(sign_claim(&peer_signer, &channel_id.0, 2, 400)),
+                ClaimAckOutcome::Accepted
+            );
+
+            let claim = connector
+                .peer_inbound_claim(&channel_id.0)
+                .expect("a claim has been accepted");
+            assert_eq!(claim.nonce, 2);
+            assert_eq!(claim.cumulative_amount, 400);
         }
 
         #[tokio::test]
@@ -7692,6 +7821,26 @@ mod tests {
                 .handle_probe(CHANNEL, prepare("g.somewhere.else", b"hello"))
                 .await;
             assert_eq!(second, Err(ProbeDenied::RateLimited));
+        }
+
+        /// Issue #1218: `GET /channels` needs to list a client channel
+        /// this connector has only ever recognized, never opened --
+        /// `recognized_channel_ids` is the one place that list is kept.
+        /// Idempotent, matching `recognize_channel` itself.
+        #[test]
+        fn recognized_channel_ids_lists_every_recognized_channel_once() {
+            let connector = connector_with(vec![], Arc::new(FakeAppClient::new()), test_clock());
+            assert!(connector.recognized_channel_ids().is_empty());
+
+            connector.recognize_channel(CHANNEL);
+            connector.recognize_channel("some-other-channel");
+            connector.recognize_channel(CHANNEL);
+
+            let mut ids = connector.recognized_channel_ids();
+            ids.sort();
+            let mut expected = vec![CHANNEL.to_string(), "some-other-channel".to_string()];
+            expected.sort();
+            assert_eq!(ids, expected);
         }
 
         /// A probe to a route this connector terminates reports that

@@ -160,3 +160,44 @@ first place). An operator joining `client_channel_id` in a `"packet"` log line t
 with the payer's identity from the channel's `[[client_channels]]`/chain-resolved record — can now
 answer "who paid for this delivery" from records this connector already kept: the record issue #535
 asked for, without the header issue #505 correctly declined to bring back.
+
+## Amendment (issue #1218): the client-edge book now surfaces at `GET /claims`, `GET /channels` and `redeem-latest`
+
+"Deliberately not `GET /channels` or `GET /claims`" above was the honest state of the operator
+surface at the time this record was written, not a boundary it argued for — the paragraph gives no
+reason a client channel's own book _should_ stay invisible to those two reads, only that it
+happened to. Issue #1218 found the consequence of leaving it that way: a node genuinely paid
+through the ADR 0058 peering flow, or by an ordinary client on a chain-resolved channel, answered
+`GET /claims` and `GET /channels` with empty lists and refused `POST /channels/:id/redeem-latest`
+with "no claim has been accepted on this channel to redeem" — while its own
+`state_dir/client-edge-claims.log` held the claim the whole time. `#1102`/`#1103` had already fixed
+the mirror image (a peer channel's claim-state answered out of the client book instead of its own)
+and set the doctrine this amendment now applies in the other direction: **which book is the
+authority for a channel is a property of the channel, never of who is asking**
+(`Connector::peer_channel_watermark`'s own doc states it for the read `POST /ilp/claim-state`
+already used it for).
+
+`connector-operator` now holds a `connector_client_edge::ClientClaimGate` handle alongside
+`Connector` (a new, non-circular dependency edge — `connector-client-edge` already depends on
+`connector-runtime`, never the reverse). `GET /claims` merges `ClaimBook::views()` with the client
+edge's own accepted channels, each row tagged `book: "peer"` or `book: "client"` (`ClaimView`'s one
+additive field) so a reader can tell which book answered. `GET /channels` merges
+`Connector::channels()` (channels this node itself opened) with every channel
+`Connector::recognize_channel` has recorded (a client channel the counterparty opened, fetched
+fresh from the settlement backend by id via the new `Connector::channel_view`). `redeem-latest` and
+`cooperative-close` try the peer book first (`Connector::peer_inbound_claim`, a read-only accessor
+mirroring `peer_channel_watermark`) and fall back to the client edge's own book only once that book
+has nothing — never both, since `ConfigError::ChannelInBothNamespaces` already refuses a channel
+that could be.
+
+The one thing this required inside `ClientClaimGate` itself: its live and replayed state retained
+only a watermark (nonce + cumulative amount), never the claim's signature — sufficient for judging
+freshness, useless for a redemption, which needs the actual claim. `ClientClaimGate::latest_inbound_claim`
+now answers `(nonce, cumulative_amount, signature)`, mirroring
+`connector_domain::Projection::latest_inbound_claim`, the peer semantics's own equivalent — and the
+signature survives a restart exactly as the watermark always did, replayed from the same
+`InboundClaimAccepted` journal entries that carried it durably all along.
+
+The two journals and the two books remain separate — nothing above merges `peer-claims.log` and
+`client-edge-claims.log`, or the state either book folds them into; only what a _read_ or a
+_redeem_ consults now covers both.
