@@ -2936,9 +2936,10 @@ impl Connector {
     /// across a runtime write that happens to land in a different map slot --
     /// a document whose field order wanders is a document nobody can diff.
     ///
-    /// Deliberately carries **prefix and price and nothing else**. A
-    /// terminated route's `handler_url` describes software behind this
-    /// connector (ND-08); a forwarded route's peer id and per-peering fee are
+    /// Deliberately carries **prefix, price and the route's `request`
+    /// declaration, and nothing else** (ADR 0066 for the last). A terminated
+    /// route's `handler_url` describes software behind this connector
+    /// (ND-08); a forwarded route's peer id and per-peering fee are
     /// operator-private (ND-09). Leased routes are absent for the reason
     /// [`Self::client_route`] gives: a lease carries no price at all.
     pub fn client_route_prices(&self) -> Vec<ClientRoutePrice> {
