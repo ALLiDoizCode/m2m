@@ -1029,32 +1029,22 @@ pub enum ConfigError {
     )]
     NodeNoAddresses,
 
+    /// Issue #1220: `btp_endpoint` is required when `peer_expose` opens a BTP
+    /// peer listener; `http_endpoint` whenever it opens any -- a peer covering
+    /// a forward asks this node's client edge for claim-state over HTTP
+    /// whichever carriage the packet rides (issue #1217), so a peerable node
+    /// with no HTTP endpoint is one nobody can pay.
     #[error(
-        "[node] {field} is not set, but peer_expose = \"{peer_expose}\" opens a listener for \
-         the carriage it names: a node behind TLS termination cannot learn its own public \
-         name, so this is an operator fact and there is deliberately no default. The retired \
-         announcer sidecar DID default it, and its compiled-in fallback still names a \
-         `/rust/ilp` path that answers 410 Gone on both devnet boxes -- a default here is how a \
-         node ends up publishing a dead URL to whoever asks (ADR 0050, issue #1220)"
+        "[node] {field} is not set, but peer_expose = \"{peer_expose}\" makes this node \
+         peerable and a peer needs it (btp_endpoint to dial over BTP; http_endpoint to ask \
+         this node's client edge for claim-state over HTTP, whichever carriage a packet \
+         rides): a node behind TLS termination cannot learn its own public name, so this is \
+         an operator fact and there is deliberately no default. The retired announcer sidecar \
+         DID default it, and its compiled-in fallback still names a `/rust/ilp` path that \
+         answers 410 Gone on both devnet boxes -- a default here is how a node ends up \
+         publishing a dead URL to whoever asks (ADR 0050, issue #1220)"
     )]
     NodeMissingEndpoint {
-        field: &'static str,
-        peer_expose: &'static str,
-    },
-
-    /// The converse of [`ConfigError::NodeMissingEndpoint`] (issue #1220): a
-    /// carriage `peer_expose` opens no listener for still gets no endpoint
-    /// published for it either, even when the value written is a perfectly
-    /// valid URL. A published endpoint this node does not actually serve is
-    /// exactly the lie ADR 0050's no-default rule exists to prevent -- it is
-    /// just as false arriving by a stray key as by a compiled-in fallback.
-    #[error(
-        "[node] {field} is set, but peer_expose = \"{peer_expose}\" opens no listener for the \
-         carriage it names: publishing an endpoint this node does not serve is a URL nobody \
-         answers. Delete the line, or add this carriage to peer_expose if the node is meant to \
-         serve it (ADR 0050, issue #1220)"
-    )]
-    NodeEndpointNotExposed {
         field: &'static str,
         peer_expose: &'static str,
     },

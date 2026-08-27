@@ -67,15 +67,16 @@ and MUST answer a termination it cannot open with an unsealed reject naming wher
 
 ### 1.3 Facts a node cannot introspect
 
-**CF-08** `[operator]` — A connector MUST be configurable with its own **public** ILP address(es) and,
-for each carriage `peer_expose` (CF-17) opens a listener for, that carriage's **public** client-edge
-endpoint. A node cannot derive these: a container sees `0.0.0.0:4000` and a private network, never
-`https://proxy.example/ilp`. An endpoint MUST be present exactly when its carriage is exposed — a
-connector MUST refuse to load a config that is missing an endpoint for an exposed carriage, and MUST
-equally refuse one that declares an endpoint for a carriage it opens no listener for: a published
-endpoint nobody serves is the same defect as a missing one, arriving by the other door. A connector
-whose `peer_expose` is `"neither"` (the default) MAY be configured with an address list and no
-endpoint at all — it still answers its self-description, unpeerable.
+**CF-08** `[operator]` — A connector MUST be configurable with its own **public** ILP address(es) and
+its **public** client-edge endpoints, HTTP and BTP. A node cannot derive these: a container sees
+`0.0.0.0:4000` and a private network, never `https://proxy.example/ilp`. Either endpoint MAY be
+declared under any `peer_expose` (CF-17) — both listeners are served regardless, so a declared
+endpoint is never refused as unexposed. Which may be **omitted** is `peer_expose`'s call, and a
+connector MUST refuse to load, naming the key, when: `btp_endpoint` is absent and a BTP peer listener
+is exposed; or `http_endpoint` is absent and **any** peer carriage is exposed, because a peer
+covering a forward asks this node's client edge for claim-state over HTTP whichever carriage the
+packet rides. A connector whose `peer_expose` is `"neither"` (the default) MAY be configured with an
+address list and no endpoint at all — it still answers its self-description, unpeerable.
 ([issue #1220](https://github.com/toon-protocol/connector/issues/1220))
 
 **CF-09** `[connector]` — These facts, and no others about software behind the connector, are what the

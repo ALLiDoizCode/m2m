@@ -142,7 +142,7 @@ terminating node's URL out of band. (`GET /ilp/identity` already published the s
 change, on each node's own URL — so the gap #1026 describes was always the discovery half, not the
 publication half.)
 
-## Amendment (issue #1220): an endpoint is required exactly when its carriage is exposed
+## Amendment (issue #1220): which endpoints a peerable node may omit is `peer_expose`'s call
 
 `[node]` required both `http_endpoint` and `btp_endpoint` unconditionally, with no way to say
 "this node opens only one listener". The README's own minimal config (step 1: `client_edge_addr`,
@@ -157,13 +157,24 @@ was ever opened, so the only way past the loader was inventing a `ws://` line fo
 does not exist and publishing that dead URL to whoever asks. That is exactly the lie this record's
 no-default rule exists to prevent, arriving by a second door the rule did not cover.
 
-The fix makes the two facts agree by construction rather than by operator discipline: an endpoint
-is present exactly when `peer_expose` opens a listener for its carriage. `peer_expose = "http"`
-requires `http_endpoint` and refuses a declared `btp_endpoint`; `"btp"` is the reverse; `"both"`
-requires both; `"neither"` (the default) requires neither, and `[node]` may still exist for its
-`addresses` alone — a legitimate, if unpeerable, self-description. Both directions are refused **by
-name** at load: a carriage exposed with no endpoint names the missing key and the `peer_expose`
-value that made it required; a carriage not exposed with an endpoint declared names the stray key
-and the `peer_expose` value that makes it illegal. `docs/protocol/configuration-spec.md` CF-08 is
-amended to state the rule and cross-reference CF-17, which is what defines "carriage" and "exposed"
-here. The README gains a "Being peerable" step showing the three keys together.
+The fix lets an operator omit what they do not serve, and names what a peerable node cannot omit.
+Two rules, both enforced **by name** at load, each naming the missing key and the `peer_expose`
+value that made it required:
+
+- `btp_endpoint` is required exactly when `peer_expose` opens a BTP peer listener (`"btp"` or
+  `"both"`). An HTTP-only node leaves it out and publishes no `btpEndpoint` — not `null`, absent.
+- `http_endpoint` is required whenever **any** carriage is exposed, BTP included. A peer covering a
+  forward to this node asks its client edge for claim-state over plain HTTP whichever carriage the
+  packet itself rides (`POST /ilp/claim-state`, [0058](0058-a-peering-is-established-from-a-url.md)'s
+  #1217 correction), so a peerable node with no `http_endpoint` is a node nobody can pay.
+
+A **declared** endpoint is never refused for being "unexposed". Both client-edge listeners are
+served whatever `peer_expose` says — `peer_expose` governs only the peer role on them — so an
+operator publishing where clients reach this node over a carriage is publishing a URL that answers.
+The devnet fixtures are exactly that shape (both endpoints, no peer carriage exposed) and keep
+loading unchanged; the symmetric rule first proposed here would have refused every deployed config
+until each node repo added a `peer_expose` line. With `peer_expose = "neither"` (the default) both
+endpoints may be omitted, and `[node]` may still exist for its `addresses` alone — a legitimate, if
+unpeerable, self-description. `docs/protocol/configuration-spec.md` CF-08 is amended to state the
+rule and cross-reference CF-17, which is what defines "carriage" and "exposed" here. The README
+gains a "Being peerable" step showing the three keys together.

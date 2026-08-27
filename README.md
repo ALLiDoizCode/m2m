@@ -346,12 +346,15 @@ http_endpoint = "https://your-node.example/ilp"
 ```
 
 `peer_expose` says which carriage(s) _this_ node opens a peer listener for.
-`[node]` publishes where each is reachable, and the two must agree exactly: an
-endpoint for a carriage `peer_expose` does not name is refused at load, and an
-exposed carriage with no endpoint is too. So `peer_expose = "http"` takes
-`http_endpoint` and no `btp_endpoint`; `"btp"` is the reverse; `"both"` takes
-both; and `"neither"` (the default) takes neither — a `[node]` naming only
-`addresses` is legal and still answers `GET /ilp`, it is just not dialable.
+`[node]` publishes where clients reach it — both listeners are served
+whatever `peer_expose` says, so publishing either endpoint is always allowed.
+What `peer_expose` decides is what you may _omit_: `btp_endpoint` is required
+only when `"btp"` or `"both"` is exposed, and `http_endpoint` is required
+whenever anything is exposed, because a peer pays you by asking your client
+edge over HTTP whichever carriage its packets ride. So an HTTP-only node
+writes `http_endpoint` and simply leaves `btp_endpoint` out; a BTP node writes
+both; and with `"neither"` (the default) a `[node]` naming only `addresses` is
+legal and still answers `GET /ilp`, it is just not dialable.
 
 For a local or pre-TLS trial only, add `peer_allow_plaintext_endpoints = true`
 at the top level so `http://`/`ws://` endpoints are accepted too — every
@@ -361,14 +364,16 @@ With that in place, `GET /ilp` really is the whole of what another operator
 needs to peer with you. It is one authenticated write:
 
 ```
-POST /peers   { "id": "their-node", "url": "https://their-node.example",
+POST /peers   { "id": "their-node", "url": "https://their-node.example/ilp",
                 "fee": 100, "max_packet_amount": 1000000 }
 ```
 
-The node fetches their self-description, picks the carriage from their endpoint's
-scheme (`wss://` → BTP, `https://` → ILP-over-HTTP), finds the shared settlement
-chain, and derives the channel from the two participants — no channel identifier
-is ever exchanged, and there is no shared secret.
+`url` is their connector's self-description URL — the one whose `GET` answers
+with that description (ADR 0050) — not their origin. The node fetches it, picks
+the carriage from their endpoint's scheme (`wss://` → BTP, `https://` →
+ILP-over-HTTP), finds the shared settlement chain, and derives the channel from
+the two participants — no channel identifier is ever exchanged, and there is no
+shared secret.
 
 A route can then **forward** to that peering instead of terminating:
 

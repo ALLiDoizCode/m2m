@@ -15,21 +15,12 @@
 # by a real on-chain payment channel issue #821 opened and funded), so the
 # apex could dial in and forward `g.toon.relay` here rather than terminating
 # it itself. The apex is gone (toon-meta#310 / toon-meta#313's live cutover),
-# and with it the only counterparty that ever dialed this peering, so both
-# tables are removed rather than left pointing at nothing. With no hop, there
-# is no fee and no peer arrival, so the F03 peer-arrival case this table used
-# to make possible cannot arise on this box any more. `transport = "btp"`
-# stays on this file's own terminating route below (issue #701's rationale,
-# unaffected by the peering's removal).
-#
-# `peer_expose = "both"` came back with issue #1220: `[node]` publishing
-# `http_endpoint`/`btp_endpoint` while `peer_expose` opened no listener for
-# either was exactly the lie ADR 0050's no-default rule exists to prevent,
-# and `Config::load` now refuses it by name. `PeerCarriages::from_config`
-# still mounts nothing while `[[peers]]` is empty (its own guard, unrelated
-# to this one), so this is a self-description change only, not a live
-# capability the box did not already have -- both listeners it names have
-# been reachable at these URLs the whole time.
+# and with it the only counterparty that ever dialed this peering, so
+# `peer_expose` and both tables are removed rather than left pointing at
+# nothing. With no hop, there is no fee and no peer arrival, so the F03
+# peer-arrival case this table used to make possible cannot arise on this box
+# any more. `transport = "btp"` stays on this file's own terminating route
+# below (issue #701's rationale, unaffected by the peering's removal).
 #
 # ── Settlement ─────────────────────────────────────────────────────────────
 # Deliberately identical to the store box's (infra/linode-store/) -- and,
@@ -57,7 +48,6 @@
 # ═══════════════════════════════════════════════════════════════════════════
 
 client_edge_addr = "0.0.0.0:4000"
-peer_expose = "both"
 
 # Durable claim watermarks (#605): the journals whose replay is what makes a
 # claim watermark survive a restart. Backed by the `connector_rust_state`

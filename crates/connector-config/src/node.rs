@@ -103,10 +103,12 @@ pub(crate) struct RawNodeConfig {
 /// one syntactically valid ILP address (primary first), and each endpoint
 /// that is present has a scheme that matches what it is for.
 ///
-/// An endpoint is present **exactly when `peer_expose` exposes that
-/// carriage** (issue #1220's owner decision): a node that opens no BTP peer
-/// listener has no `btp_endpoint` to publish, and one that opens no HTTP peer
-/// listener has no `http_endpoint`. `[node]` may still be `Some` with both
+/// Which endpoints may be absent is `peer_expose`'s call (issue #1220's
+/// owner decision, corrected for issue #1217): `btp_endpoint` is required
+/// exactly when a BTP peer listener is exposed, and `http_endpoint` whenever
+/// any carriage is -- a peer pays this node by asking its client edge over
+/// HTTP. A declared endpoint is always legal, since both listeners are served
+/// whatever `peer_expose` says. `[node]` may still be `Some` with both
 /// endpoints absent -- `peer_expose = "neither"` and an address list is a
 /// legitimate, if unpeerable, self-description.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,14 +129,15 @@ impl NodeConfig {
         &self.addresses[0]
     }
 
-    /// Where clients **pay this node** over ILP-over-HTTP. `None` unless
-    /// `peer_expose` includes `"http"`.
+    /// Where clients **pay this node** over ILP-over-HTTP -- and where a peer
+    /// asks it for claim-state. `None` only on a node exposing no peer
+    /// carriage at all that chose not to publish one.
     pub fn http_endpoint(&self) -> Option<&str> {
         self.http_endpoint.as_deref()
     }
 
-    /// Where clients **pay this node** over BTP. `None` unless `peer_expose`
-    /// includes `"btp"`.
+    /// Where clients **pay this node** over BTP. `None` on a node that opens
+    /// no BTP peer listener and chose not to publish one.
     pub fn btp_endpoint(&self) -> Option<&str> {
         self.btp_endpoint.as_deref()
     }
@@ -164,25 +167,22 @@ fn validate_endpoint(
     Ok(value)
 }
 
-/// Resolve one endpoint field against whether `peer_expose` exposes the
-/// carriage it names (issue #1220). A carriage this node opens a listener
-/// for must publish where it lives; a carriage it does not is refused a
-/// published endpoint by name, rather than silently carrying a URL nobody
-/// serves (ADR 0050's no-default rule, extended to no-orphan-either).
+/// Resolve one endpoint field against whether `peer_expose` makes it
+/// required (issue #1220). A declared endpoint is always legal: both
+/// client-edge listeners are served whatever `peer_expose` says, so an
+/// operator publishing where clients reach this node over a carriage is
+/// never publishing a URL nobody serves. What `peer_expose` decides is
+/// which endpoints a node that wants to be PEERED with cannot omit -- see
+/// [`resolve_node`] for the two rules.
 fn resolve_endpoint(
-    carriage: PeerCarriage,
     field: &'static str,
     value: Option<String>,
+    required: bool,
     peer_expose: PeerExposure,
     allowed_schemes: &[&str],
 ) -> Result<Option<String>, ConfigError> {
-    let exposed = peer_expose.exposes(carriage);
-    match (value, exposed) {
-        (Some(_), false) => Err(ConfigError::NodeEndpointNotExposed {
-            field,
-            peer_expose: peer_expose.name(),
-        }),
-        (Some(value), true) => Ok(Some(validate_endpoint(field, value, allowed_schemes)?)),
+    match (value, required) {
+        (Some(value), _) => Ok(Some(validate_endpoint(field, value, allowed_schemes)?)),
         (None, true) => Err(ConfigError::NodeMissingEndpoint {
             field,
             peer_expose: peer_expose.name(),
@@ -246,20 +246,35 @@ pub(crate) fn resolve_node(
     // and those compiled-in literals still named `/rust/ilp`, a path that
     // answers 410 Gone on both devnet boxes. A default here would reintroduce
     // exactly that: a node publishing a dead URL to whoever asks, the day
-    // somebody drops an env line. Which endpoints are even LEGAL to declare
-    // is `peer_expose`'s call, not this section's own -- required exactly
-    // when the carriage is exposed, refused by name otherwise (issue #1220).
+    // somebody drops an env line. Which endpoints a node may OMIT is
+    // `peer_expose`'s call (issue #1220), and there are two rules:
+    //
+    //   * `btp_endpoint` is required exactly when `peer_expose` opens a BTP
+    //     peer listener -- a peer that dials this node over BTP needs it, and
+    //     an HTTP-only node no longer has to invent a `ws://` line for a
+    //     listener it never opens.
+    //   * `http_endpoint` is required whenever ANY carriage is exposed, BTP
+    //     included: a peer covering a forward to this node asks its client
+    //     edge for claim-state over plain HTTP whichever carriage the packet
+    //     rides (`POST /ilp/claim-state`, issue #1217), so a peerable node
+    //     with no `http_endpoint` is a node nobody can pay.
+    //
+    // A declared endpoint is never refused for being "unexposed": both
+    // listeners are served regardless of `peer_expose`, which only governs
+    // the PEER role on them, so publishing where clients pay this node is
+    // never a lie. With `peer_expose = "neither"` both may be omitted.
+    let any_carriage_exposed = !matches!(peer_expose, PeerExposure::Neither);
     let http_endpoint = resolve_endpoint(
-        PeerCarriage::Http,
         "http_endpoint",
         raw.http_endpoint,
+        any_carriage_exposed,
         peer_expose,
         &["https", "http"],
     )?;
     let btp_endpoint = resolve_endpoint(
-        PeerCarriage::Btp,
         "btp_endpoint",
         raw.btp_endpoint,
+        peer_expose.exposes(PeerCarriage::Btp),
         peer_expose,
         &["wss", "ws"],
     )?;
@@ -337,30 +352,45 @@ mod tests {
         ));
     }
 
-    /// The other half of issue #1220's rule: a carriage `peer_expose` does
-    /// NOT open a listener for gets no endpoint published for it either,
-    /// even though the value itself would otherwise be a perfectly valid
-    /// URL -- a node with `peer_expose = "http"` has nothing to dial its
-    /// BTP endpoint over, so publishing one is a URL nobody serves.
+    /// A declared endpoint is never refused for being "unexposed" (issue
+    /// #1220, corrected): both client-edge listeners are served whatever
+    /// `peer_expose` says, so an operator publishing where clients reach
+    /// this node -- the devnet fixtures' own shape, both endpoints with no
+    /// peer carriage exposed -- is publishing URLs that answer.
     #[test]
-    fn an_unexposed_carriage_with_an_endpoint_is_refused_naming_it() {
+    fn an_endpoint_for_an_unexposed_carriage_is_still_published() {
+        for exposure in [PeerExposure::Neither, PeerExposure::Http, PeerExposure::Btp] {
+            let node = resolve_node(Some(raw()), exposure)
+                .expect("both endpoints declared is legal under every exposure")
+                .expect("present");
+            assert_eq!(node.http_endpoint(), Some("https://proxy.ario.example/ilp"));
+            assert_eq!(
+                node.btp_endpoint(),
+                Some("wss://proxy.ario.example/ilp/btp")
+            );
+        }
+    }
+
+    /// The rule issue #1217 forces: a BTP-only node still needs
+    /// `http_endpoint`, because a peer covering a forward asks this node's
+    /// client edge for claim-state over HTTP whichever carriage the packet
+    /// rides -- a peerable node with no HTTP endpoint is one nobody can pay.
+    #[test]
+    fn a_btp_only_node_still_requires_its_http_endpoint() {
+        let mut btp_only_without_http = raw();
+        btp_only_without_http.http_endpoint = None;
         assert!(matches!(
-            resolve_node(Some(raw()), PeerExposure::Http),
-            Err(ConfigError::NodeEndpointNotExposed { field, peer_expose })
-                if field == "btp_endpoint" && peer_expose == "http"
-        ));
-        assert!(matches!(
-            resolve_node(Some(raw()), PeerExposure::Btp),
-            Err(ConfigError::NodeEndpointNotExposed { field, peer_expose })
+            resolve_node(Some(btp_only_without_http), PeerExposure::Btp),
+            Err(ConfigError::NodeMissingEndpoint { field, peer_expose })
                 if field == "http_endpoint" && peer_expose == "btp"
         ));
 
-        let mut both_but_neither_exposed = raw();
-        both_but_neither_exposed.http_endpoint = None;
+        let mut http_only_without_btp = raw();
+        http_only_without_btp.btp_endpoint = None;
         assert!(matches!(
-            resolve_node(Some(both_but_neither_exposed), PeerExposure::Neither),
-            Err(ConfigError::NodeEndpointNotExposed { field, peer_expose })
-                if field == "btp_endpoint" && peer_expose == "neither"
+            resolve_node(Some(http_only_without_btp), PeerExposure::Btp),
+            Err(ConfigError::NodeMissingEndpoint { field, peer_expose })
+                if field == "btp_endpoint" && peer_expose == "btp"
         ));
     }
 
