@@ -337,8 +337,8 @@ counterparty's `POST /peers` at it answers `502`. Three more keys, none of
 them shown above, close that gap:
 
 ```toml
-client_edge_addr = "0.0.0.0:3000"
-peer_expose      = "http"        # "btp", "http", "both", or "neither" (default)
+# Top level, so it goes above every table — beside step 1's client_edge_addr.
+peer_expose = "http"             # "btp", "http", "both", or "neither" (default)
 
 [node]
 addresses     = ["g.your.node"]

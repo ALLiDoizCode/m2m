@@ -26,9 +26,9 @@
 #                 long enough to paste the curl command by hand, short
 #                 enough that a leaked one-shot script output is useless
 #                 quickly.
-#   -u BASE_URL   If set, POST the signed request to BASE_URL+PATH with curl
-#                 and print the response. If unset, only the three headers
-#                 are printed, so a caller can build the request itself.
+#   -u BASE_URL   If set, send the signed request -- METHOD, BASE_URL+PATH --
+#                 with curl and print the response. If unset, only the three
+#                 headers are printed, so a caller builds the request itself.
 #
 # Prints, one per line, always:
 #   Signature-Input: sig1=...
@@ -69,7 +69,9 @@ while getopts "k:X:p:b:e:u:h" opt; do
     e) EXPIRES_IN="$OPTARG" ;;
     u) BASE_URL="$OPTARG" ;;
     h)
-      sed -n '2,40p' "$0"
+      # The whole header comment above, to the blank line that ends it, so
+      # -h cannot drift out of step with the file it is read from.
+      sed -n '2,/^$/p' "$0"
       exit 0
       ;;
     *)

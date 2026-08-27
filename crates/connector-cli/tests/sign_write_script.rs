@@ -141,7 +141,6 @@ write_keys = ["{keyid}"]
 "#,
         state_dir = state_dir.path().display(),
         signer_key = signer_key_file.path().display(),
-        keyid = keyid,
     )
     .expect("write config file");
 
