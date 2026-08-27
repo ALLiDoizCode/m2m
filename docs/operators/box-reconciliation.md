@@ -1,5 +1,14 @@
 # Reconciling a devnet box's checkout with `main`
 
+> **Historical as of [ADR 0066](../adr/0066-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md)**
+> (issue #1213): this runbook's whole premise — a `/root/connector` checkout on the box, reconciled
+> against `main` and redeployed by `fleet-ops.yml` — no longer holds for either box. The relay and
+> store boxes each deploy the connector from their own repository's `deploy/` bundle now
+> (`toon-protocol/relay`, `toon-protocol/store`), not from a checkout of this repo, and
+> `fleet-ops.yml` no longer offers `box=relay`/`box=ario` at all. Kept as the record of how this
+> class of drift was found and resolved once; do not follow its box commands against a live box
+> today — there is no `/root/connector` checkout there to reconcile.
+
 Issue #1004. Both devnet boxes' `/root/connector` checkouts sit at **`39f72a6e`** with uncommitted
 tracked modifications, so `git pull` refuses on either one and `fleet-ops`'s reconcile/deploy path
 cannot move the checkout at all. This is the runbook that gets them to a clean `main` without

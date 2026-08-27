@@ -19,15 +19,14 @@
 #
 # ── WHY IT IS HERE AND NOT UNDER infra/ ─────────────────────────────────────
 # `infra/linode-relay/connector-rust.toml` and
-# `infra/linode-store/connector-rust.toml` are REAL, gate-checked box configs.
-# `promote-to-fleet.yml` boots the candidate image against both of them before
-# it will move `:rust-release` (ADR 0041), `fleet-health.yml`'s config-compat
-# job re-runs that on any PR touching them, and
-# `crates/connector-bin/tests/devnet_configs_load.rs` asserts over their
-# contents. A placeholder file in that directory has exactly two futures: it
-# breaks a gate, or somebody "fixes" it into something real. `deploy/` is
-# where this repository keeps recipes rather than deployments, so a skeleton
-# belongs here.
+# `infra/linode-store/connector-rust.toml` are gate-checked fixtures:
+# `crates/connector-bin/tests/devnet_configs_load.rs` boots them through the
+# real binary and asserts over their contents on every `cargo test`, even
+# though neither box runs them any more (ADR 0066 — each box deploys from its
+# own repository's `deploy/` bundle now). A placeholder file in that
+# directory has exactly two futures: it breaks a gate, or somebody "fixes" it
+# into something real. `deploy/` is where this repository keeps recipes
+# rather than deployments, so a skeleton belongs here.
 #
 # ── WHAT CANNOT BE FILLED IN YET, AND WHY ───────────────────────────────────
 # Two of these are hard blockers, not omissions:

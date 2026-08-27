@@ -1,6 +1,6 @@
 # A moving tag carries the fleet's committed config, or it does not move
 
-**Status:** Accepted. Deployment law for this fleet, not protocol. Live: `crates/connector-bin/tests/fleet_release_gate.rs`, over `publish-connector-rust-image.yml` and `promote-to-fleet.yml`.
+**Status:** Partly superseded by [0066](0066-a-node-repository-pins-the-connector-nothing-here-moves-a-tag-onto-a-box.md) — Decision 3, the connector-specific `promote-to-fleet.yml` promotion mechanism, is retired: neither devnet box deploys the connector from this repository any more, so there is nothing left here for it to gate. Decisions 1, 2 and 4 remain live. Deployment law for this fleet, not protocol. Live: `crates/connector-bin/tests/fleet_release_gate.rs`, over `publish-connector-rust-image.yml` and `fleet-health.yml`.
 
 **Scope:** deployment law for this fleet — not protocol. See the [ADR index](README.md).
 

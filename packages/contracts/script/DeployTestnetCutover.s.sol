@@ -112,19 +112,21 @@ contract DeployTestnetCutoverScript is Script {
         console.log("");
         console.log("NEXT STEPS -- docs/evm-deployment.md carries the checklist; this is the summary:");
         console.log("  1. Repoint [settlement.evm] contract_address to the registry address above in");
-        console.log("     infra/linode-store/connector-rust.toml AND infra/linode-relay/connector-rust.toml");
-        console.log("     (both boxes must agree, or a claim one accepts the other cannot resolve).");
+        console.log("     BOTH toon-protocol/relay's and toon-protocol/store's own committed configs");
+        console.log("     (ADR 0066 -- that is what each box actually runs) AND in this repo's");
+        console.log("     infra/linode-store/connector-rust.toml / infra/linode-relay/connector-rust.toml");
+        console.log("     fixtures, which devnet_configs_load.rs still asserts against.");
         console.log("  2. Work the rest of the runbook's repoint checklist: test literals, the two");
         console.log("     live-chain workflows, infra/linode-relay/swap.config.json and");
         console.log("     infra/linode/endpoints.json all name the registry or the TokenNetwork too.");
         console.log("     Nothing advertises the address any more -- ADR 0046 removed the announce.");
         console.log("  3. Record the addresses above in packages/contracts/deployments.json and");
         console.log("     packages/contracts/deployments/base-sepolia.md.");
-        console.log("  4. Land the config, verify the apply, and only THEN move :rust-release --");
-        console.log("     config-change-required: true (ADR 0055). Contract, both box configs and the");
-        console.log("     image tag are one matched set once channel ids are derived (ADR 0059).");
-        console.log("  5. Rollback: revert contract_address to the OLD registry in both .toml files,");
-        console.log("     AND move :rust-release back to the last pre-ADR-0059 digest. The old");
+        console.log("  4. Land and apply the config in each node repo FIRST, and only THEN bump that");
+        console.log("     repo's own pinned connector tag (ADR 0066). Contract, both box configs and");
+        console.log("     the image tag are one matched set once channel ids are derived (ADR 0059).");
+        console.log("  5. Rollback: revert contract_address to the OLD registry everywhere above, AND");
+        console.log("     roll each node repo's pin back to the last pre-ADR-0059 build. The old");
         console.log("     TokenNetwork is untouched and still settles pre-cutover channels.");
     }
 }

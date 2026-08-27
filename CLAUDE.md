@@ -114,12 +114,14 @@ verdict rides back in `Toon-Claim-Ack` and never gates the packet, so
 `local/README.md` is the long version, and is worth reading before editing
 anything under `local/`.
 
-It is complementary to `promote-to-fleet.yml`, not a duplicate. That gate checks a
-candidate image against the _fleet's_ committed configs and can only warn when the
-node fails to serve, because a GitHub runner has no chain to reach. `local/` has
-chains, so serving is an assertion — but its configs necessarily name local
-container URLs, so it can never be the fleet check. Promotion proves
-image-matches-fleet-config; `local/` proves image-serves-and-settles.
+It is complementary to `devnet_configs_load.rs`'s config-boot tests, not a duplicate.
+Those tests boot the fleet's own committed `connector-rust.toml` fixtures through the
+real binary and can only assert that far, because a GitHub runner has no chain to
+reach. `local/` has chains, so serving is an assertion — but its configs necessarily
+name local container URLs, so it can never be the fleet check. There is no longer a
+promotion gate that boots a _candidate_ image against the fleet's configs before a
+deploy — ADR 0066 retired `promote-to-fleet.yml`, since neither devnet box deploys
+the connector from this repository any more.
 
 `connector send` is the binary's second verb (serving is the other; `announce` was removed by
 ADR 0046 / #1074 and is now refused by name). It forms
@@ -225,48 +227,51 @@ mint script and the local topology are devnet-and-below only.
 
 ## Environments
 
-| Tier           | What it is                                                                                                                                                                                                           |
-| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **local**      | `docker-compose.yml` chain profiles, and the connector image run against them — that is `local/`. Disposable, funded from genesis, no shared state.                                                                  |
-| **devnet**     | Two Linode boxes (`infra/linode-relay/`, `infra/linode-store/`). Containers follow the `rust-release` tag via a label-scoped Watchtower and bind-mount a committed `connector-rust.toml`.                            |
-| **production** | **Named and empty** (ADR 0056). No machines, no mainnet contracts, no keys, no deploy. Its one artefact is `deploy/connector-rust/connector.production.toml`, a skeleton in which every value is invalid on purpose. |
+| Tier           | What it is                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **local**      | `docker-compose.yml` chain profiles, and the connector image run against them — that is `local/`. Disposable, funded from genesis, no shared state.                                                                                                                                                                                                                                                                                                                     |
+| **devnet**     | Two Linode boxes — relay and store (`ario`) — plus a connector-less faucet box. The relay and store boxes deploy the connector from their OWN repos' `deploy/` bundles (`toon-protocol/relay`, `toon-protocol/store`), each pinning it by release handle in one place (ADR 0066). `infra/linode-relay/` and `infra/linode-store/` are fixtures this repo's tests boot, not what either box runs. The faucet box still deploys from `infra/linode-faucet/` in this repo. |
+| **production** | **Named and empty** (ADR 0056). No machines, no mainnet contracts, no keys, no deploy. Its one artefact is `deploy/connector-rust/connector.production.toml`, a skeleton in which every value is invalid on purpose.                                                                                                                                                                                                                                                    |
 
 Production is blocked on two deployments, not on configuration: `packages/contracts`
 has never been deployed to an EVM mainnet, so there is no `TokenNetworkRegistry` to
 name, and the Solana payment-channel program is devnet-only — and ADR 0053 binds the
 settlement program into a claim's signed message, so a mainnet node naming the devnet
 program takes money for claims it can never redeem. Do not fill the skeleton in, and
-do not put it under `infra/`: those are gate-checked box configs.
+do not put it under `infra/`: those are gate-checked fixtures, not a place to add a
+file that must never load.
 `crates/connector-bin/tests/production_skeleton_is_inert.rs` fails the build on either.
 
-`:rust-release` is a **promotion tag**, not a build output. It moves only by an
-explicit `promote-to-fleet.yml` dispatch, which first checks the candidate image
-still boots both boxes' committed configs. A green merge does not reach the boxes,
-and that is deliberate (ADR 0041): the connector is the client edge on both machines,
-so one bad digest takes the whole devnet's paid-write path dark at once. Do not wire
-`:rust-release` to move on green `main` — that shipped once (#990) and was reverted.
+**Nothing in this repository moves a tag onto the relay or store box (ADR 0066).**
+`:rust-release` used to be a promotion tag, moved only by an explicit
+`promote-to-fleet.yml` dispatch after checking the candidate image still booted both
+boxes' committed configs. That mechanism is retired: neither box deploys the
+connector from this repository any more, so there is nothing here left to gate. A
+node repository (`toon-protocol/relay`, `toon-protocol/store`) now pins the connector
+image it runs, by release handle, in exactly one place in its own `deploy/` bundle —
+bumping that pin is that repo's own reviewed change, not a step in this one.
+`:rust-release` itself is frozen at whatever digest it last held; do not wire
+anything here to move it — a floating tag moving on green `main` shipped once (#990)
+and was reverted, and there is even less reason to repeat it now that nothing
+supervises the move at all.
 
-A **release** is one human dispatch of `release-connector.yml` (ADR 0055), after which
-build → handle → GitHub Release → the config-boot gate → the tag move → `fleet-health.yml`
-all happen without further input. It is `workflow_dispatch` only, and must stay that way —
-adding any automatic trigger reverses ADR 0041 Decision 3. Releases are named by a
-monotonic handle (`2026.08.21.1`, UTC date plus that day's ordinal), never semver: every
-crate is `0.1.0` with no release process, so a version series would claim a stability
-contract the binary has not earned. Deploy ordering rides as a `config-change-required:
-true|false` field on the release, which the promotion reads and refuses on. That question
-has no default — the dispatch input's preselected option is a sentinel the workflow rejects,
-because fail-open on deploy ordering is the shape of the swap#134 outage. When the answer is
-yes, the named `fleet-ops config-apply` run is **verified** (right workflow, green, real
-apply not a dry run, right box, and after the config's commit), not taken on trust.
-(`package.json`'s `"version": "3.3.0"` is TypeScript-era residue; leave it alone.)
+A **release** is one human dispatch of `release-connector.yml` (ADR 0055, amended by
+ADR 0066), after which build → handle → GitHub Release happen without further input.
+It is `workflow_dispatch` only, and must stay that way — adding any automatic trigger
+reverses ADR 0041 Decision 3. Releases are named by a monotonic handle
+(`2026.08.21.1`, UTC date plus that day's ordinal), never semver: every crate is
+`0.1.0` with no release process, so a version series would claim a stability contract
+the binary has not earned. (`package.json`'s `"version": "3.3.0"` is TypeScript-era
+residue; leave it alone.) The release workflow does not deploy or promote the build —
+adopting it is a node repository's own pin bump, in its own reviewed change.
 
 Configuration is **one typed TOML file**, validated once at boot, immutable for the
 process lifetime, with `deny_unknown_fields` (ADR 0009). There is no environment-
 variable override layer; `CONFIG_FILE`, `TOON_MNEMONIC` and friends do nothing. A
 removed config key is parsed in order to be _rejected by name_, never silently ignored.
-Because the binary and the box's bind-mounted TOML are a matched pair in both
-directions, adding a required config key is a **breaking deploy**: land the config
-first, then move the tag.
+Because the binary and a box's bind-mounted TOML are a matched pair in both
+directions, adding a required config key is a **breaking deploy** wherever that pair
+lives — for relay and store, that discipline is now each node repo's own to keep.
 
 ## Pointers
 

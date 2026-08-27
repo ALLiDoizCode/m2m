@@ -22,30 +22,33 @@ name: Publish connector-rust image
 #
 # (Those source comments cite "ADR 0034" for that gate and this file repeated
 # it. That is a mis-citation: ADR 0034 is "A runtime peer/route table never
-# shadows the config file". The release-gating record is ADR 0041, written
-# with promote-to-fleet.yml. The comments also named connector#972, an open
-# pin PR, as the gate; it was closed as superseded, because the supervised
-# regime it argued for is what promote-to-fleet.yml now implements and its
-# `rust-sha-*` overlay literals are refused by
-# `every_fleet_overlay_pins_the_connector_repos_pin_of_record`.)
+# shadows the config file". The release-gating record is ADR 0041. The
+# comments also named connector#972, an open pin PR, as the gate; it was
+# closed as superseded, because the supervised regime it argued for is what
+# `promote-to-fleet.yml` implemented, until ADR 0066 retired it.)
 #
-# It is written now: .github/workflows/promote-to-fleet.yml. This workflow
-# publishes CANDIDATES; that one chooses which candidate fronts the fleet,
-# after checking that it still boots both boxes' committed
-# `connector-rust.toml` (ADR 0041). `swap`, `store` and `relay` keep
-# auto-on-green -- see docs/operators/fleet-release-and-health.md for why the
-# connector is the one image held back.
+# It was written for a while: `.github/workflows/promote-to-fleet.yml`. This
+# workflow published CANDIDATES; that one chose which candidate fronted the
+# fleet, after checking it still booted both boxes' committed
+# `connector-rust.toml` (ADR 0041). ADR 0066 retired it: neither devnet box
+# deploys the connector from this repository any more (each pins it by
+# release handle in its own repo's `deploy/` bundle), so there is nothing
+# left here for a promotion to check or move a tag onto. `swap`, `store` and
+# `relay` still keep auto-on-green in their own repos -- see
+# docs/operators/fleet-release-and-health.md.
 #
 # ── AND THIS FILE STILL DOES NOT DEPLOY ANYTHING ────────────────────────────
-# .github/workflows/release-connector.yml (ADR 0055) now automates everything
-# BETWEEN a human's release dispatch and a serving fleet: it calls this
-# workflow to build, cuts a dated release handle, opens a GitHub Release, and
-# hands the resulting `rust-sha-` tag to promote-to-fleet.yml. What it does
-# not do -- and must never be edited to do -- is start itself. A green merge
-# to `main` still reaches GHCR and stops there. ADR 0041 Decision 3 is not a
-# preference about gates: `connector-rust` is the client edge on BOTH boxes,
-# so one bad digest takes the whole devnet's paid-write path dark at once. The human choice of build is the deploy
-# decision; only the labour after it is automated.
+# .github/workflows/release-connector.yml (ADR 0055, amended by ADR 0066) now
+# automates the mechanical half of cutting a release: it calls this workflow
+# to build, cuts a dated release handle, and opens a GitHub Release naming the
+# `rust-sha-` tag. What it does not do -- and must never be edited to do -- is
+# deploy that build anywhere, or start itself. A green merge to `main` still
+# reaches GHCR and stops there. `connector-rust` is the client edge on BOTH
+# devnet boxes, so one bad digest reaching either unreviewed would take that
+# box's paid-write path dark; that risk does not go away just because this
+# repo no longer holds the write path onto the boxes. The human choice of
+# build is the deploy decision, made once per node repo, in that repo's own
+# reviewed pin bump.
 #
 # NAME HISTORY (reversal, connector#633): #487 originally shipped this as a
 # SEPARATE package `connector-rust`, to avoid colliding with the TypeScript
@@ -166,9 +169,9 @@ jobs:
           images: ${{ env.IMAGE }}
           # `rust-` prefix keeps these disjoint from any TS-node tag that ever
           # lived in this package (semver X.Y.Z, latest, main). See header.
-          # `rust-release` is DELIBERATELY ABSENT — see the header. It is a
-          # promotion tag moved by .github/workflows/promote-to-fleet.yml, not
-          # a build output.
+          # `rust-release` is DELIBERATELY ABSENT — see the header. Nothing in
+          # this repository moves it any more (ADR 0066); it is not a build
+          # output either way.
           #
           # The release handle (`rust-2026.08.21.1`) is deliberately absent
           # too, for the opposite reason: it is not known here. It is applied

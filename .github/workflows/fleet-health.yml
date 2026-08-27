@@ -48,9 +48,8 @@
 #   * A subsequent green run COMMENTS the recovery on that issue and CLOSES
 #     it, so the issue's open/closed state is the fleet's current verdict and
 #     a human never has to work out whether an old alert is still live.
-#   * The job itself also fails, so the promotion path below
-#     (`promote-to-fleet.yml` calls this workflow after it moves a tag) goes
-#     red instead of green when the thing it just deployed did not come up.
+#   * The job itself also fails, so a scheduled or dispatched run that finds
+#     the fleet down is visibly red, not a silent probe nobody reads.
 #
 # ── HOW IT REACHES THE BOXES ────────────────────────────────────────────────
 # Same model as fleet-ops.yml and funded-ops.yml, and for the same reason: an
@@ -138,31 +137,10 @@ on:
         default: all
         options: [all, relay, ario]
       settle_seconds:
-        description: 'Seconds to wait before probing (let a just-moved tag land).'
+        description: 'Seconds to wait before probing (let a just-recreated container land).'
         type: string
         required: false
         default: '0'
-  # Called by promote-to-fleet.yml right after it moves `:rust-release`, which
-  # is what makes promotion a gated deploy rather than a hopeful one.
-  workflow_call:
-    inputs:
-      box:
-        type: string
-        required: false
-        default: all
-      settle_seconds:
-        type: string
-        required: false
-        default: '0'
-  pull_request:
-    # The config-compat job below reads committed box config, so a PR editing
-    # one must re-run it. The box-probing jobs skip on `pull_request` — they
-    # need a secret a fork PR must never see.
-    paths:
-      - 'infra/linode-relay/swap.config.json'
-      - 'infra/linode-relay/connector-rust.toml'
-      - 'infra/linode-store/connector-rust.toml'
-      - '.github/workflows/fleet-health.yml'
 
 permissions:
   contents: read
@@ -329,7 +307,7 @@ jobs:
         run: |
           set -euo pipefail
           # Give Watchtower its 60s poll plus a pull and a boot before asking
-          # whether the new image came up. Only promote-to-fleet.yml sets this.
+          # whether the new image came up.
           echo "Waiting ${{ inputs.settle_seconds }}s for the fleet to settle…"
           sleep "${{ inputs.settle_seconds }}"
 
@@ -642,8 +620,10 @@ jobs:
             echo '```sh'
             echo '# Roll a service back to a known-good immutable tag (from a machine with docker + ghcr login):'
             echo 'docker buildx imagetools create -t ghcr.io/toon-protocol/<pkg>:<moving-tag> ghcr.io/toon-protocol/<pkg>:<known-good-sha-tag>'
-            echo '# …then let Watchtower pick it up (~60s), or force it now:'
-            echo '#   gh workflow run fleet-ops.yml -f box=<relay|ario> -f operation=deploy -f service=<svc> -f apply=true'
+            echo '# …then let Watchtower pick it up (~60s). connector-rust on relay/store is no longer'
+            echo '# deployed from here (ADR 0066) -- roll it back via that node repos own deploy/ pin.'
+            echo '# The faucet leg still deploys from this repo:'
+            echo '#   gh workflow run fleet-ops.yml -f operation=deploy -f service=<svc> -f apply=true'
             echo '```'
             echo ""
             echo "Full runbook: \`docs/operators/fleet-release-and-health.md\`."
@@ -662,7 +642,7 @@ jobs:
             echo "Opened a new alert."
           fi
 
-          # The run itself must also be red, so a promote-to-fleet call that
-          # deployed something broken does not report success.
+          # The run itself must also be red — a scheduled or dispatched check
+          # that finds the fleet down must not report success.
           echo "::error::devnet fleet is unhealthy — see the alert issue"
           exit 1

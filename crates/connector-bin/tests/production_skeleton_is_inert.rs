@@ -68,9 +68,9 @@ fn the_production_skeleton_refuses_to_load() {
 /// which is exactly the incremental slide ADR 0056 is written against.
 ///
 /// So substitute real key material at all three `key_file` paths — the same
-/// substitution `devnet_configs_load.rs` and `promote-to-fleet.yml`'s boot
-/// gate make, and for the same reason — and require the file to be refused
-/// anyway, on something semantic.
+/// substitution `devnet_configs_load.rs` makes when it boots the fleet's own
+/// committed configs, and for the same reason — and require the file to be
+/// refused anyway, on something semantic.
 #[test]
 fn the_production_skeleton_refuses_to_load_even_with_key_files_present() {
     let raw = std::fs::read_to_string(production_skeleton_path())
