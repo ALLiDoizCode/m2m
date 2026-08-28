@@ -436,6 +436,16 @@ are two different things to trust, and a well-trodden one is worth more than
 a short one. The kill switch for a path you have stopped trusting is
 `DELETE /peers/:id`.
 
+Hop count is worth thinking about the same way. Fees add up per hop; exposure
+does not. You hand your packet to the first hop and that hop is your only
+counterparty — what happens further down is the next hop's business, on the
+next hop's channel, under its own cap — so a packet that dies anywhere costs
+you the one packet you sent, whether it died at the second hop or the tenth.
+Ten well-walked hops therefore beat two with a stranger in them: the extra
+hops cost a few micro-USDC in fees, and the stranger can cost you the whole
+packet. Longer roads also tend to run through nodes that peer widely, which
+have another way onward when one leg goes dark.
+
 The long version of this — why Glinda says _follow the yellow brick road_
 rather than giving Dorothy an address — is
 [`docs/the-yellow-brick-road.md`](docs/the-yellow-brick-road.md).
