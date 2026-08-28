@@ -231,15 +231,27 @@ outside it in fact.
 | a channel: open, fund, redeem, close            | the operator surface, against a settlement backend                |
 | originating a packet outward                    | the operator surface                                              |
 
-**`fund` is the one row above whose reach depends on the chain.** It deposits into the
-_counterparty's_ on-chain balance — `TokenNetwork.setTotalDeposit` names the participant being
-credited and pulls the tokens from `_msgSender()`, the ERC-2771 forwarded signer, which for the
-connector's own direct call is itself — and `packages/solana-program`'s `Deposit` does not permit
-that: it requires the depositing participant to sign for their own side, so the Solana backend
-refuses the call rather than pretending. A node's own collateral behind its own Solana claims is
-deposited from
-that participant's wallet, directly against the deployed program; there is no operation for it here,
-on either backend, or on the settlement port. `open`, `redeem` and `close` reach both chains.
+**`fund` is a self-deposit, on both chains.** It raises `own_deposited` — this node's own
+collateral, behind the claims this node signs and its counterparty redeems — and every one of
+`open`, `fund`, `redeem` and `close` reaches both backends. The reach of this row does not depend
+on the chain.
+
+It reads that way because of Solana, not in spite of it. `packages/solana-program`'s `Deposit`
+credits strictly by signer (`processor.rs`, `InvalidParticipant` otherwise), so only the payer's own
+node can put the payer's collateral behind the payer's claims. That restriction is the **correct**
+rule rather than an obstacle to work around: a node paying for its counterparty's collateral is not
+a shape production should ever have. Defining the port around the delegate deposit only
+`TokenNetwork.setTotalDeposit` offers — it names the participant to credit separately from the
+caller whose tokens are pulled — left `fund` unconditionally broken on the other chain, which is
+what issue #1118 corrected.
+
+The delegate deposit still exists on the EVM backend, as `fund_counterparty`, and that is
+deliberately a **different method** from the port's `fund`: it is reached by the contract suite, not
+by the operator surface, and an implementation whose chain can delegate a deposit still must not do
+it under `fund`. One asymmetry survives below the port rather than at it: `fund` takes an
+**increment** on both chains, but `TokenNetwork.setTotalDeposit` wants an absolute total, so the EVM
+backend adds the increment to the channel's current `own_deposited` before submitting. Solana's
+`Deposit` is already an increment and needs no such conversion.
 
 **A runtime row can never take a key the configuration file owns.** A colliding write is refused
 outright, and on the next boot a runtime row whose key the file has since claimed is **deleted**, not
