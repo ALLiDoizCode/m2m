@@ -275,9 +275,16 @@ impl RejectCode {
 
     /// T04: Insufficient Liquidity (RFC-0027). Used until issue #424
     /// (peer-semantics-pre-868.md §5.1/§5.3) for this connector's own exposure
-    /// ceiling; that machinery is retired (ADR 0031, ADR 0033, issue #882)
-    /// and nothing in this codebase emits `T04` any more. Kept for wire
-    /// interop -- a standard ILPv4 code a counterparty may still send.
+    /// ceiling; that machinery is retired (ADR 0031, ADR 0033, issue #882).
+    ///
+    /// It is emitted again, for a different thing: ADR 0049's **cap**, the
+    /// largest amount this connector will forward to a given peer. A packet
+    /// over that cap is refused `T04` by `Connector::forward_to_peer`, and
+    /// the refusal's message carries the cap -- discovery is by this refusal
+    /// and nothing else, because clause 4 decided against publishing caps
+    /// (they would disclose who this node peers with and how far it trusts
+    /// each). Between #424 and the cap landing nothing emitted `T04`, and
+    /// this comment went on saying so; issue #1079 corrected it.
     pub fn t04_insufficient_liquidity() -> RejectCode {
         RejectCode("T04".to_string())
     }
