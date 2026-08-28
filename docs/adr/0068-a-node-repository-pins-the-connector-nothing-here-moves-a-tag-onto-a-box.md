@@ -141,8 +141,8 @@ header says: build, version, publish. Adopting a build is a node repository's ow
 — bumping its pin — not a step this workflow takes on its behalf.
 
 **`:rust-release` is frozen at whatever digest it last held.** See Context above. Nothing here will
-move it again; a node repo that still names it is transitionally naming a tag this repo no longer
-supervises, not a live promotion target.
+move it again; a node repo that still names it is naming a tag this repo no longer supervises, not
+a live promotion target. What that means concretely is recorded in the update below.
 
 **The false-green failure mode is gone because the write path is gone.** `fleet-ops.yml` can no
 longer report a successful config-apply against a path nothing reads, because it no longer has a
@@ -160,3 +160,51 @@ rewritten to test nothing; what remains — the build workflow never re-publishi
 the release workflow staying dispatch-only, one shared build definition, the release handle's dated
 shape, the swap config-compat gate, and the fleet-health probe/alert coverage — are properties that
 still hold and are still worth a regression guard.
+
+## Update (2026-08-28) — the tag, named; and the signal, bought back
+
+Two loose ends this record left, closed on the day the fleet finished moving off the tag.
+
+### `:rust-release` is frozen at `rust-sha-8708caf`, and is deliberately not deleted
+
+The tag still exists and still resolves — to the build published from `8708caf`, which **predates
+connector#1230**: on it, a peering established by `POST /peers` can accept a claim but can never
+sign one, so every packet forwarded over a runtime peering is refused `T00`. Anyone who follows an
+older document to `:rust-release` gets a connector that serves, and quietly cannot pay.
+
+As of 2026-08-28 no node repository names it: relay pins its build in `deploy/Dockerfile`'s
+`ARG CONNECTOR_TAG`, store and gas-station in their `deploy/docker-compose.yml`, each guarded by
+that repo's own bundle test. The "transitionally" clause above is discharged.
+
+**It is not deleted, and the reason is mechanical rather than sentimental.** GHCR has no untag
+operation: `rust-release` and `rust-sha-8708caf` are two tags on one package version, and the only
+delete the API offers removes the version — which would take the immutable `rust-sha-8708caf` with
+it, and with that the rollback target for the build the fleet ran until that morning. An immutable
+build tag that vanishes is a worse failure than a retired pointer that misleads, and the second is
+addressable by other means.
+
+So the rule is enforced instead of advised. `.github/workflows/fleet-pin-drift.yml` fails — and
+opens a `needs:human` issue — if any of the three repositories pins `rust-release`, `rust-main` or
+`latest` rather than an immutable `rust-sha-` build. Deleting the tag remains available to a future
+operator; what that decision weighs is the loss of `rust-sha-8708caf`, not the tidiness of the tag
+list.
+
+### The promotion took a signal with it, and that part was not intended
+
+Retiring `promote-to-fleet.yml` removed this repository's write path onto the boxes, which is the
+whole point of this record. It also removed the only moment anything asked whether the fleet agreed
+with itself: promotion booted **one** candidate image against **both** boxes' committed configs.
+Afterwards, three repositories choose a connector build independently and nothing notices when they
+diverge — until a box misbehaves in a way that costs an afternoon to trace back to "these two are
+not running the same binary".
+
+`fleet-pin-drift.yml` buys that signal back without buying back the write path. It is read-only and
+holds no credential — all four repositories are public, and GHCR is queried with an anonymous pull
+token — and it asserts that the three pins parse, name the same build, are immutable, and are
+pullable. How far behind `main` the fleet is, it only reports: a pin lagging is what pinning _is_.
+The distinction it draws in that report is the one that decides whether a bump is worth making —
+commits touching `crates/*/src` change the shipped binary; commits touching tests, docs or fixtures
+do not.
+
+This adds no mechanism that moves a tag, writes a config, or reaches a box, and this record's own
+falsifier is untouched: nothing here calls, dispatches or names the retired promotion workflow.
