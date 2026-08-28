@@ -4,6 +4,11 @@
 # Sepolia (crates/connector-bin/tests/base_sepolia_redeem_proof.rs), and a
 # claim signed under a deliberately wrong EIP-712 domain does not.
 #
+# It also carries the one chain-side check `infra/linode/endpoints.json` needs
+# and the every-push workspace gate structurally cannot make: that the
+# TokenNetwork that document publishes is the one the registry it publishes
+# actually resolves. See the step's own note below.
+#
 # ── WHY A SEPARATE FILE, AND NOT A cargo test ADDED TO ci.yml'S GATE ────────
 # `ci.yml`'s Rust Workspace Gate runs unconditionally on every push and pull
 # request. This check needs a funded EVM private key and spends real -- if
@@ -42,7 +47,9 @@
 #   * `apply` defaults to false. A dry run derives the receiver address,
 #     reads its ETH/USDC balance and the registry's resolved TokenNetwork,
 #     and prints what an apply run would spend -- it sends nothing, and the
-#     job stops there without ever installing the Rust toolchain.
+#     job stops there without ever installing the Rust toolchain. The
+#     endpoints.json check below runs in a dry run too: it is a pure
+#     `eth_call` and needs no secret, so it costs a dispatch and nothing else.
 #   * The derived private key is registered with `::add-mask::` the instant
 #     it exists, before it is ever written anywhere else.
 #   * Same `concurrency: group: funded-ops` as `funded-ops.yml`: both spend
@@ -80,7 +87,7 @@ jobs:
     timeout-minutes: 20
     env:
       RPC_URL: https://base-sepolia-rpc.publicnode.com
-      REGISTRY: "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1"
+      REGISTRY: "0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5"
       TOKEN: "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
       DECIMALS: "6"
 
@@ -102,6 +109,77 @@ jobs:
           npm install --no-audit --no-fund \
             @toon-protocol/sdk@0.6.0 \
             ethers@^6.0.0
+
+      # ── THE DERIVED ADDRESS THIS REPO PUBLISHES, AGAINST THE CHAIN ────────
+      # `infra/linode/endpoints.json` is the hand-maintained document a third
+      # party configures itself from (`infra/linode/README.md`), and it is the
+      # only committed file that states the RESOLVED TokenNetwork rather than
+      # the registry. A connector never reads it -- it is configured with the
+      # registry (`[settlement.evm] contract_address`) and resolves at boot --
+      # so a stale value there breaks nothing on this fleet and nothing on
+      # this fleet notices. It went stale for three weeks: the 2026-08-06
+      # ERC-2771 cutover (#695/#811) repointed `registryAddress` and left
+      # `tokenNetworkUsdc` naming the contract it replaced.
+      #
+      # `crates/connector-bin/tests/devnet_configs_load.rs` now pins that field
+      # to `FLEET_LIVE_TOKEN_NETWORK` on every push. That is the document half.
+      # This step is the chain half: it asks the registry what it actually
+      # resolves and compares the answer to the committed file. The workspace
+      # gate cannot make this call -- it runs on every push and must not need a
+      # chain -- and this job already resolves the registry for its own
+      # purposes one step later, so the eth_call was going to happen anyway.
+      #
+      # It sits BEFORE the derivation step deliberately: it needs no secret and
+      # spends nothing, so a `apply: false` dry run gets the full check.
+      - name: Registry's resolved TokenNetwork matches endpoints.json
+        run: |
+          cat > "$RUNNER_TEMP/ops/endpoints.mjs" <<'SCRIPT'
+          import { appendFileSync, readFileSync } from 'node:fs';
+          import { Contract, JsonRpcProvider } from 'ethers';
+
+          const fail = (m) => { console.error(`::error::${m}`); process.exit(1); };
+          const { RPC_URL, REGISTRY, TOKEN, GITHUB_WORKSPACE } = process.env;
+
+          const path = `${GITHUB_WORKSPACE}/infra/linode/endpoints.json`;
+          const endpoints = JSON.parse(readFileSync(path, 'utf8'));
+
+          const provider = new JsonRpcProvider(RPC_URL);
+          const registry = new Contract(REGISTRY, ['function getTokenNetwork(address) view returns (address)'], provider);
+          const resolved = await registry.getTokenNetwork(TOKEN);
+          if (!resolved || /^0x0+$/.test(resolved)) {
+            fail(`Registry ${REGISTRY} resolves no TokenNetwork for token ${TOKEN}. Either the committed registry address is wrong or the token was never registered through it.`);
+          }
+
+          // Both blocks, not one: `baseSepolia` is a declared mirror of `evm`,
+          // and the 2026-08-06 miss was in BOTH copies at once. Each is
+          // compared to the chain, never to the other.
+          const problems = [];
+          for (const block of ['evm', 'baseSepolia']) {
+            const chain = endpoints[block];
+            if (!chain) { problems.push(`endpoints.json has no \`${block}\` block`); continue; }
+            for (const [field, expected] of [['registryAddress', REGISTRY], ['tokenAddress', TOKEN], ['tokenNetworkUsdc', resolved]]) {
+              const got = chain[field];
+              if (typeof got !== 'string') { problems.push(`\`${block}.${field}\` is missing`); continue; }
+              if (got.toLowerCase() !== expected.toLowerCase()) {
+                problems.push(`\`${block}.${field}\` is ${got}, chain says ${expected}`);
+              }
+            }
+          }
+
+          const summary = process.env.GITHUB_STEP_SUMMARY;
+          const say = (l) => { console.log(l); if (summary) appendFileSync(summary, l + '\n'); };
+          say(`## endpoints.json vs. Base Sepolia`);
+          say('');
+          say(`registry \`${REGISTRY}\` resolves token \`${TOKEN}\` to \`${resolved}\``);
+          say('');
+
+          if (problems.length) {
+            for (const p of problems) say(`- ❌ ${p}`);
+            fail(`infra/linode/endpoints.json disagrees with the chain: ${problems.join('; ')}. tokenNetworkUsdc is DERIVED from registryAddress and tokenAddress -- it does not re-derive itself, so it moves in the same commit the registry does. Fix the file and FLEET_LIVE_TOKEN_NETWORK in crates/connector-bin/tests/devnet_configs_load.rs together.`);
+          }
+          say('- ✅ both the `evm` and `baseSepolia` blocks match what the chain resolves');
+          SCRIPT
+          node "$RUNNER_TEMP/ops/endpoints.mjs"
 
       - name: Derive receiver key and check balances
         env:

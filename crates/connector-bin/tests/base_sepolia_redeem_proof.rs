@@ -1,5 +1,5 @@
 //! The proof issue #566 says nothing else in the epic can give: a claim
-//! signed by this workspace's *production* peer-wire signing path redeems
+//! signed by this workspace's *production* peer signing path redeems
 //! against the `TokenNetwork` actually deployed and resolved on Base
 //! Sepolia -- through the same `TokenNetworkRegistry` every fleet config's
 //! `[settlement.evm]` names (`infra/linode-store/connector-rust.toml` and
@@ -8,8 +8,8 @@
 //! local `anvil` fixture (issue #577).
 //!
 //! Every other chain-backed test in this workspace (`contract_suite.rs`,
-//! `local_stack_rehearsal.rs`'s `on_chain` module, `gas_and_nonce.rs`)
-//! proves the same backend against a `TokenNetwork` this test run itself
+//! `gas_and_nonce.rs`) proves the same backend against a `TokenNetwork`
+//! this test run itself
 //! deployed a minute ago. That is real proof that the Rust code and the
 //! *source* `packages/contracts/src/TokenNetwork.sol` agree -- but #566's
 //! own acceptance criterion is explicit that it is not enough: whether a
@@ -26,7 +26,7 @@
 //!   an outbound claim (`connector-runtime/src/claim.rs:881`), not a
 //!   hand-rolled digest.
 //! - **Wire**: [`connector_runtime::WireClaim::encode`]/`decode` -- the
-//!   exact peer-wire byte shape (peer-wire-spec.md §3.5), round-tripped
+//!   exact peer-role byte shape (peer-semantics-pre-868.md §3.5), round-tripped
 //!   before anything is submitted, so a bug in the wire codec would show up
 //!   here as a decode failure rather than being silently bypassed.
 //! - **Verify**: [`connector_signer::verify_evm_balance_proof`] -- the
@@ -132,7 +132,7 @@ const DEFAULT_RPC: &str = "https://base-sepolia-rpc.publicnode.com";
 /// The `TokenNetworkRegistry` `[settlement.evm] contract_address` names --
 /// a factory, resolved to a `TokenNetwork` at connect time, never pinned
 /// directly (issue #566).
-const DEFAULT_REGISTRY: &str = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1";
+const DEFAULT_REGISTRY: &str = "0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5";
 const DEFAULT_TOKEN: &str = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce";
 const DEFAULT_DECIMALS: u8 = 6;
 
@@ -215,7 +215,7 @@ fn production_signature(
     signer.sign(&evm_balance_proof_digest(proof)).expect("sign")
 }
 
-/// Round-trip `proof`/`signature` through the real peer-wire codec and hand
+/// Round-trip `proof`/`signature` through the real peer-role codec and hand
 /// back the on-chain redemption `Claim` the decoded side would submit --
 /// the same construction `ClaimBook::latest_inbound_claim` performs
 /// (`connector-runtime/src/claim.rs:798-802`).
@@ -308,11 +308,18 @@ async fn a_production_signed_claim_redeems_on_the_deployed_token_network_and_a_w
         .await
         .expect("open a real channel on the deployed TokenNetwork");
     println!("channel opened: {channel}");
+    // The payer's slot, not this backend's own: the claim redeemed below
+    // is signed by the payer and drawn from the payer's deposit. On the
+    // real network the payer deposits it; this proof run stands in for
+    // them with the fixture-only delegate deposit (issue #1118).
     let funded = backend
-        .fund(&channel, DEPOSIT)
+        .fund_counterparty(&channel, DEPOSIT)
         .await
         .expect("fund the payer's slot with real deposited value");
-    assert_eq!(funded.deposited, DEPOSIT, "a real transaction moved this");
+    assert_eq!(
+        funded.counterparty_deposited, DEPOSIT,
+        "a real transaction moved this"
+    );
     println!("payer's slot funded: {DEPOSIT} base units");
 
     let channel_id_bytes = parse_channel_id(&channel.0);

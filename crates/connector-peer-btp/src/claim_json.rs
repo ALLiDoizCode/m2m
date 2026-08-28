@@ -106,7 +106,7 @@ pub fn canonical_evm_channel_id(channel_id: &str) -> String {
 }
 
 /// `0x` + 64 lower-case hex, the shape `locksRoot` takes when locks are
-/// hashed as zeros -- which is always, per `peer-wire-spec.md` §3.5 and
+/// hashed as zeros -- which is always, per `peer-semantics-pre-868.md` §3.5 and
 /// ADR 0024. Neither field enters the digest as anything else, on either
 /// edge.
 const ZERO_BYTES32: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
@@ -192,15 +192,16 @@ pub fn encode(
                 panic!(
                     "a Solana claim on channel '{}' was handed to the dial side with no \
                      solana_program_id -- render it only for a channel with a Solana \
-                     '[[peer_channels]]' row, whose 'program_id' is required at config load \
-                     (issue #759)",
+                     '[[peer_channels]]' row, which config load gives a program id from \
+                     '[settlement.solana]' (issues #759, #1128)",
                     claim.channel_id
                 )
             });
             // Deliberately no `chainId`/`tokenNetworkAddress`-style domain
             // fields here: a Solana claim's signature covers
-            // `solana_balance_proof_message`'s 48 bytes, which carry no
-            // EIP-712 domain to render (`SolanaChannel`'s own doc,
+            // `solana_balance_proof_message`'s 96 bytes, which bind the
+            // settlement program id (ADR 0053) and carry no EIP-712 domain
+            // to render (`SolanaChannel`'s own doc,
             // `connector_runtime::claim`).
             let signer = bs58::encode(signer_public_key).into_string();
             let json = serde_json::json!({
@@ -232,14 +233,79 @@ pub fn protocol_data(json: &str) -> ProtocolData {
     }
 }
 
+/// More than one claim was presented on one frame or one request.
+///
+/// Refused, never resolved (§1.5). The connector MUST NOT pick the first,
+/// the last, or a concatenation: this is the smuggling defence, and its
+/// absence is how "which claim did we verify?" becomes unanswerable. The
+/// carriage maps it -- BTP: an ERROR frame (`code F00`, `name
+/// NotAcceptedError`); HTTP: `400` with no ILP body.
+///
+/// It is role-independent on purpose. An ambiguous claim is refused whether
+/// or not any of its candidates would have proven a peering, because
+/// deciding *which* to verify is the thing that cannot be done safely.
+/// Until ADR 0060 this rule guarded the `{peerId, secret}` credential; the
+/// defect it names is a property of duplicated authentication material
+/// rather than of the credential in particular, and the claim is now that
+/// material.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AmbiguousClaim {
+    /// How many were presented. Two or more, by construction.
+    pub presented: usize,
+}
+
+impl std::fmt::Display for AmbiguousClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "more than one claim presented on one interaction ({}): ambiguous claims are \
+             refused, not resolved (peer-carriage-spec.md §1.5)",
+            self.presented
+        )
+    }
+}
+
+impl std::error::Error for AmbiguousClaim {}
+
 /// The raw JSON of a frame's `payment-channel-claim` entry, if it carried
 /// one. A frame with no claim is legal on both carriages (§10.2 item 6),
 /// so `None` is an ordinary outcome and not a refusal.
+///
+/// **First-wins, and only safe behind [`present_from_protocol_data`].** A
+/// caller that reaches for this directly is answering "which claim did we
+/// verify?" with "whichever came first"; §1.5 requires the frame be refused
+/// instead. It stays public for the one caller that is genuinely only
+/// peeking -- the client edge's shared front door, deciding whether an
+/// arrival is peer handling's at all before the carriage that owns the rule
+/// applies it.
 pub fn from_protocol_data(protocol_data: &[ProtocolData]) -> Option<&[u8]> {
     protocol_data
         .iter()
         .find(|pd| pd.name == CLAIM_PROTOCOL)
         .map(|pd| pd.data.as_slice())
+}
+
+/// The claim a BTP frame presents, from every `payment-channel-claim` entry
+/// on it (§1.5).
+///
+/// Zero entries is `None` -- a frame that presents no claim is a client
+/// frame, which is an ordinary outcome and not an error. Two or more is
+/// [`AmbiguousClaim`], **counted before anything is parsed**, so a second
+/// undecodable entry cannot be quietly discarded to leave one unambiguous
+/// claim standing.
+pub fn present_from_protocol_data(
+    protocol_data: &[ProtocolData],
+) -> Result<Option<&[u8]>, AmbiguousClaim> {
+    let entries: Vec<&ProtocolData> = protocol_data
+        .iter()
+        .filter(|pd| pd.name == CLAIM_PROTOCOL)
+        .collect();
+    if entries.len() > 1 {
+        return Err(AmbiguousClaim {
+            presented: entries.len(),
+        });
+    }
+    Ok(entries.first().map(|pd| pd.data.as_slice()))
 }
 
 /// Parse a §4 claim into the in-process [`WireClaim`] the pipeline below
@@ -274,6 +340,33 @@ pub fn parse(raw: &[u8]) -> Result<WireClaim, ClaimDecodeError> {
         // drops `signerAddress`: whose signature a claim is checked
         // against comes from `ClaimBook`'s own per-channel record
         // (`set_solana_channel`), never from the claim.
+        //
+        // For `signerPublicKey` that is the whole story -- it rides the
+        // wire and carries no authority, and no value is pinned for it.
+        // `programId` is no longer the same case and the analogy above
+        // must not be read that far (issue #1127): since PR #1133 what a
+        // payer MUST write there is pinned -- the settlement program the
+        // `channelAccount` lives under -- and the client edge **reports**
+        // a claim that writes something else (`connector_client_edge`'s
+        // `claim_gate`, at `warn`). Dropping it here means the peer edge
+        // does not, and that difference is a decision rather than an
+        // oversight: `peer-carriage-spec.md` §4.1 states it and argues it,
+        // and `client-edge-spec.md` §1.3 step 4 records that the reporting
+        // duty is the client edge's alone.
+        //
+        // The short of it. Since issue #1128 a Solana peering has exactly
+        // one program it can be judged under, `[settlement.solana]
+        // program_id`, and that one value both renders `programId` on an
+        // outbound peer claim (`encode` above, from
+        // `PeerRelation::solana_program_ids`) and keys the `SolanaChannel`
+        // an inbound one is verified against. A peer that declares a
+        // program it did not sign under is a disagreement this connector
+        // cannot produce; a peer that signs under a program this node does
+        // not settle with already fails `SignatureInvalid` and moves no
+        // traffic at all. Neither leaves a report anyone could act on, and
+        // the price of one would be an authority-free field on `WireClaim`.
+        // `tests/a_peer_claims_declared_program_is_not_consulted.rs` holds
+        // both halves of that.
         ClientClaim::Solana(claim) => Ok(WireClaim {
             channel_id: claim.channel_account,
             nonce: claim.nonce,
@@ -340,6 +433,13 @@ mod tests {
     /// another.
     const CHANNEL_ACCOUNT: &str = "GDDMwNyyx8uB6zrqwBFHjLLG3TBYk2F1Mh6usnNPUsqk";
 
+    /// A conforming inbound fixture: `programId` is the settlement program
+    /// `CHANNEL_ACCOUNT` lives under, which is what a payer MUST write
+    /// there (`client-edge-spec.md` §1.3, issue #1127). It used to be the
+    /// **system program** -- no channel lives under that, so the fixture
+    /// was an example of the one value the pinned rule excludes, sitting in
+    /// the codec both edges share. Nothing here consults the field, so this
+    /// changes no assertion; it stops the file teaching the wrong shape.
     fn solana_claim_json(signature: &str) -> String {
         serde_json::json!({
             "version": "1.0",
@@ -347,7 +447,7 @@ mod tests {
             "messageId": "m",
             "timestamp": "2030-01-01T00:00:00Z",
             "senderId": "s",
-            "programId": "11111111111111111111111111111111",
+            "programId": SOLANA_PROGRAM_ID,
             "channelAccount": CHANNEL_ACCOUNT,
             "nonce": 1,
             "transferredAmount": "10",

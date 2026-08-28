@@ -6,6 +6,13 @@ It is the Rust connector — the only connector this repository builds — with 
 commented `connector.toml` you fill in, a `Dockerfile`, and a README that walks
 the key material, the settlement section and the first `up -d`.
 
+Beside it sits `connector.production.toml`, which looks like the same thing and
+is not: it is a skeleton for a tier that **does not exist** — no machine, no
+mainnet contract, no key, no deploy
+([ADR 0056](../docs/adr/0056-production-is-a-named-empty-tier.md)). Do not fill
+it in. Two of its settings have no correct value in existence, and the file
+says which and why.
+
 ## What was here, and why it is gone
 
 Two bundles were removed on 2026-08-05: **`pay-edge/`** ("put a TOON payment

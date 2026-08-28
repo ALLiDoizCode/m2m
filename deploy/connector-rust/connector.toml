@@ -32,7 +32,7 @@ client_edge_addr = "0.0.0.0:3000"
 # replay watermark survive a restart:
 #
 #   client-edge-claims.log  claims accepted at POST /ilp
-#   peer-claims.log         the peer wire's own ClaimBook
+#   peer-claims.log         the peer semantics's own ClaimBook
 #
 # Both are append-only, fsync'd per accepted claim, and replayed before this
 # node serves anything. Without a state_dir every channel's watermark lives
@@ -50,6 +50,16 @@ client_edge_addr = "0.0.0.0:3000"
 # for you) is simpler than a host bind mount (`chown 10001:10001` it first).
 # See README step 6.
 state_dir = "/app/state"
+
+# ── Peer exposure (issue #677, ADR 0027) ─────────────────────────────────
+# Whether this node opens a peer listener, and for which carriage(s) --
+# `peer_expose` is a root-level key (see "Peering" below for what each
+# value means and the full [[peers]] shape), and it MUST be set up here,
+# before the first [section] header: TOML has no way to write a root-table
+# key once a table header has appeared earlier in the file, so this line
+# cannot live down in "Peering" alongside the rest of that story.
+#
+# peer_expose = "btp"
 
 # ── Signer ───────────────────────────────────────────────────────────────
 # Where this node's signing key material lives -- a location, never the
@@ -69,11 +79,32 @@ key_file = "/app/data/signer.key"
 # `price` is required on every terminated route (issue #520): a claim must
 # advance by at least this much to pay for the app's work. It is never
 # silently free -- write `price = 0` if that is deliberate. Denominated in
-# the smallest unit of whatever this node settles in (ADR 0010).
+# the smallest unit of whatever this node settles in (ADR 0010), the way a
+# card terminal counts in cents: with a 6-decimal token such as USDC there
+# are 1,000,000 units to one token, so `price = 100` is 0.0001 USDC, a
+# hundredth of a cent, and ten cents is `price = 100000`. A wallet shows the
+# whole-token figure; this file never does. `[settlement.*] decimals` below
+# is what fixes the scale, and it is checked against the token at boot.
 [[routes]]
 prefix = "g.example.connector.app"
 handler_url = "http://app:3100"
 price = 100
+
+# `request` is optional (ADR 0067, issue #1210): an arbitrary table naming
+# what a client should send to use this route, for an app whose payload is
+# more than "an amount". This connector validates only that it IS a table --
+# it never reads a key out of it, never fetches anything to produce or check
+# it, and publishes it verbatim on this route's self-description entry and
+# on the greeting for this destination. Uncomment and replace with whatever
+# shape your own app actually expects; the example below is illustrative,
+# not a shape this connector understands or enforces.
+#
+# [routes.request]
+# protocol = "nip90"
+# kinds = [5096, 5098]
+#
+# [routes.request.params]
+# chain = ["evm:84532"]
 
 # ── Operator surface (ADR 0008) ─────────────────────────────────────────
 # Reads (peers, routes, channels, claims, exposure, identity, the write
@@ -91,6 +122,33 @@ bearer_token = "CHANGE-ME-generate-with-openssl-rand-hex-32"
 # to load until you replace it with a real key from README step 3 --
 # removing a key from this list and restarting is how you revoke it.
 write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STEP-3"]
+
+# ── Being peerable ([node], ADR 0050, issue #1220) ───────────────────────
+# The facts this node cannot introspect about itself: which ILP addresses
+# it answers to, and where each peer carriage it opens a listener for is
+# publicly reachable. Absent entirely, as this file leaves it, the node
+# still serves -- GET /ilp just answers with no endpoints and
+# "peerCarriages": [] -- so a counterparty's POST /peers at it gets a 502
+# rather than a peering: there is nothing published to dial.
+#
+# Either endpoint may always be declared -- both listeners are served
+# whatever `peer_expose` (in the Peering block below) says. What
+# peer_expose decides is what you may leave OUT: `btp_endpoint` is required
+# only when it exposes "btp" or "both", and `http_endpoint` whenever it
+# exposes anything at all, because a peer pays this node by asking its
+# client edge for claim-state over HTTP whichever carriage a packet rides.
+# A missing required endpoint is refused at load, by name.
+#
+# CHANGE ME and uncomment for an HTTP-only node -- the common shape behind
+# a single TLS-terminating reverse proxy:
+#
+# [node]
+# addresses     = ["g.example.connector"]
+# http_endpoint = "https://connector.example.com/ilp"
+#
+# ...and set `peer_expose = "http"` below to match. A node exposing BTP
+# (`peer_expose = "btp"` or `"both"`) sets BOTH endpoints here -- the BTP
+# one to be dialled, the HTTP one to be paid.
 
 # ── Peering (issue #677, ADR 0027, docs/protocol/peer-carriage-spec.md) ──
 # Two independent axes. `peer_expose` says which peer carriages THIS node
@@ -111,22 +169,30 @@ write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STE
 #
 # There is NO peer port. A node that exposes a carriage serves it on the
 # paths its client edge already serves, on `client_edge_addr`:
-# BTP on `GET /ilp/btp`, ILP-over-HTTP on `POST /ilp`. Role is decided by
-# the credential, never by the listener, so there is nothing extra to open
-# and nothing extra to firewall.
+# BTP on `GET /ilp/btp`, ILP-over-HTTP on `POST /ilp`. Role is decided by a
+# verified claim signature on a configured `[[peer_channels]]` row, never by
+# the listener and never by a shared secret (ADR 0060) -- so there is
+# nothing extra to open and nothing extra to firewall.
 #
 # NOTE: uncommenting this block gives you a live peering as of issue #678 --
 # the dial side is built from these lines and the accept side rides the
-# listener above. Before #678 it validated and traversed nothing.
+# listener above. Before #678 it validated and traversed nothing. Also
+# uncomment `peer_expose` up near `state_dir` -- it cannot be set here; see
+# the comment there for why.
 #
-# peer_expose = "btp"
+# A peering can also be established at RUNTIME, without touching this file
+# at all: `POST /peers` (ADR 0058) writes the same relation an operator
+# would otherwise hand-write below. The rows here are the durable,
+# reviewed alternative -- use them for a peering this node should always
+# have; use `POST /peers` for one an operator wants to add or rotate
+# without a restart.
 #
 # [[peers]]
-# # The id a [[routes]] entry's peer_id names, and the peerId the
-# # credential JSON carries -- so BOTH operators must write the SAME
-# # string. The far side proves the credential by looking this id up in
-# # its own [[peers]] table; an id it does not have is admitted as an
-# # ordinary client, silently. It names the relation, not "the other guy".
+# # A LOCAL label: names this peering to this node's own [[routes]],
+# # [[peer_channels]] and [[pay_channels]] rows below. Nothing puts it on
+# # the wire and the counterparty's file need not spell it the same way --
+# # the accepting side reads the peer id off the [[peer_channels]] row the
+# # claim's channel resolves to, never off the interaction (ADR 0060).
 # id = "store"
 #
 # # The URL this node dials to reach the peer. The SCHEME selects the
@@ -138,57 +204,79 @@ write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STE
 # # peering that dials IN to this node instead.
 # endpoint = "wss://store.example.net:443/ilp/btp"
 #
-# # Where the shared secret this peering is authenticated by comes from.
-# # Role is decided by authentication and by nothing else: not the port,
-# # not the source address, not the carriage. An interaction that does not
-# # present this secret is a CLIENT, whatever else it looks like -- and an
-# # empty secret matches nothing, so an empty one is refused at load rather
-# # than becoming a peering anyone can claim.
-# #
-# # Exactly one of `secret_file` and `secret`; both, or neither, is refused
-# # at load by name. Use `secret_file` on any node whose config is
-# # committed -- the file stays off the repo (`*.secret` here is
-# # gitignored) while the peering itself gets tracked, the same way
-# # `[signer] key_file` and the settlement keys already work. It is read at
-# # startup, trimmed of trailing whitespace, and a missing, unreadable or
-# # empty file stops the node.
-# #
-# #   openssl rand -hex 32 > /app/data/store-peer.secret
-# #   chmod 600 /app/data/store-peer.secret
-# #
-# # Both operators must end up with the SAME bytes; share them out of band.
-# credential = { secret_file = "/app/data/store-peer.secret" }
-# # ...or, only for a config that is never committed, the literal:
-# # credential = { secret = "CHANGE-ME-generate-with-openssl-rand-hex-32" }
-#
 # # `ceiling`/`flush_interval_ms` used to be set here -- retired along with
 # # the credit window they bounded (ADR 0031, ADR 0033, issue #882): every
 # # peer PREPARE now carries its own covering claim, whether or not this
 # # node dials. Setting either is a named load-time error, not a default.
+#
+# # What this node RETAINS for carrying one packet to this peer (ADR 0010,
+# # ADR 0061). Flat and per packet -- never a share of the amount -- and
+# # realized on the wire as the difference between the amount that arrived
+# # and the amount forwarded. It sits here, on the peering, and not on a
+# # [[routes]] entry: this hop does the same work whichever prefix the
+# # packet was addressed to, so the number is a fact about the counterparty.
+# # Writing `fee` on a [[routes]] entry is a named load-time error.
+# #
+# # Omit for free carriage, which is what every config on this fleet does
+# # today -- no devnet box charges a fee at all.
+# fee = 3
 #
 # # How long this node waits for a claim's acknowledgement and for an
 # # answer. Both default to 30000 ms each.
 # claim_ack_timeout_ms = 30000
 # peer_answer_timeout_ms = 30000
 #
-# # TEMPORARY migration knob (issue #883, child B6) -- do not set this on a
-# # config expected to outlive the fleet's own claim-policy rollout
-# # (docs/operators/claim-policy-rollout.md). Omit for the default,
-# # "enforce": an uncovered peer PREPARE is refused (F06_UNEXPECTED_PAYMENT
-# # + the x402 greeting). "observe" admits it instead and logs it the same
-# # way a refusal would be logged, so an operator can watch this peering's
-# # logs for admissions before flipping it to enforce. A mistyped value is a
-# # named load-time error, not a silent default.
-# # claim_enforcement = "observe"
+# # `claim_enforcement` used to be set here -- issue #883's migration ramp
+# # for the rule that an uncovered peer PREPARE to a priced TERMINATION is
+# # refused (F06_UNEXPECTED_PAYMENT + the x402 greeting). The ramp is gone
+# # (ADR 0042 item 4, issue #1077) and that rule is now unconditional, so
+# # setting the key is a named load-time error. No commented example is left
+# # here on purpose: a commented-out example of a rejected key is a trap for
+# # whoever uncomments it.
+#
+# # ADR 0042 item 3's knob, for the OTHER half of the same rule and the only
+# # claim-enforcement setting a peering still has: an arrival this node
+# # FORWARDS onward must carry a claim covering the packet's own amount.
+# # Omit for the default, "observe" -- admitted, forwarded, and logged
+# # exactly as a refusal would be logged -- which is deliberately the
+# # opposite default to the deleted claim_enforcement's: no box on this
+# # fleet covers its forwards yet, so enforcing by default would stop
+# # forwarding fleet-wide. Set "enforce" on a peering only once that
+# # peering's counterparty is covering its forwards ([[pay_channels]]).
+# # A mistyped value is a named load-time error, not a silent default.
+# # forwarded_claim_enforcement = "enforce"
 #
 # # Every peering needs at least one channel binding, or it can never take
-# # the peer role at all: the role rule needs BOTH a proven credential and
-# # a channel. This is the table whose absence left ADR 0024's peer-claim
-# # verification wired to nothing (issue #620).
+# # the peer role at all: the role rule needs BOTH this channel binding and
+# # a claim signature that verifies against it (ADR 0060). This is the
+# # table whose absence left ADR 0024's peer-claim verification wired to
+# # nothing (issue #620).
 # #
 # # A channel id here must NOT also appear in [[client_channels]]: peer and
 # # client claim watermarks are separate records, and one channel in both
 # # namespaces would let the same money be counted as credit twice.
+# #
+# # chain_id/token_network are the channel's EIP-712 domain (ADR 0024): what
+# # an inbound peer claim's signature is recovered against, and what an
+# # outbound one is signed under. They are declared here because
+# # [settlement.evm] names a TokenNetworkRegistry, not a TokenNetwork -- the
+# # verifying contract is whatever getTokenNetwork(token_address) resolves to
+# # on that registry, and no line in this file states it.
+# #
+# # They are CHECKED against that answer at startup (issue #1136), the same
+# # way [settlement.evm] decimals is checked against the token's own
+# # decimals() (#564): a row naming a different TokenNetwork, or a different
+# # chain id, is a refusal to start that names both contracts. Get the value
+# # from the deployment, not from memory -- `cast call <contract_address>
+# # "getTokenNetwork(address)(address)" <token_address>`.
+# #
+# # An EVM row here REQUIRES [settlement.evm], and a Solana row requires
+# # [settlement.solana] (issue #1138). That table is where this node's
+# # address on the chain comes from, and a claim is redeemed by the
+# # channel's on-chain participant -- so without it there is no address to
+# # be that participant, and the peering would verify inbound claims it
+# # could never collect and sign no covering claim outbound. Refused by
+# # name at load, per chain: a Solana-only node still loads its Solana rows.
 # [[peer_channels]]
 # peer_id = "store"
 # channel_id = "0x0000000000000000000000000000000000000000000000000000000000000000"
@@ -196,26 +284,83 @@ write_keys = ["REPLACE-WITH-A-64-HEX-CHARACTER-ED25519-PUBLIC-KEY-SEE-README-STE
 # chain_id = 31337
 # token_network = "0x0000000000000000000000000000000000000000"
 #
-# # A route forwarding over the peering. Both numbers are required and they
-# # answer different questions (ADR 0028):
+# # A route forwarding over the peering. `price` is required (ADR 0028):
+# # what THIS node's client edge charges a client for a packet to this
+# # prefix. Greeted with x402 terms, claim-gated and journaled exactly as a
+# # terminated route's price is. A forwarded route is never silently free:
+# # omitting `price` is a refuse-to-start error, and `price = 0` means free
+# # carriage was deliberate.
 # #
-# #   price -- what THIS node's client edge charges a client for a packet to
-# #            this prefix. Greeted with x402 terms, claim-gated and
-# #            journaled exactly as a terminated route's price is. A
-# #            forwarded route is never silently free: omitting `price` is a
-# #            refuse-to-start error, and `price = 0` means free carriage
-# #            was deliberate.
-# #   fee   -- what THIS hop retains of that price for the carriage (ADR
-# #            0010). The difference, `price - fee`, is what reaches the
-# #            peer, so a client's packet may not declare an amount larger
-# #            than `price`.
+# # `fee` used to be set here too -- what this hop retains of that price.
+# # It moved to the [[peers]] row above (ADR 0061), because it is the same
+# # number whichever prefix the packet was addressed to, and writing it on
+# # a route is now a named load-time error rather than a value read. The
+# # difference, `price - fee`, is still what reaches the peer, so a client's
+# # packet may not declare an amount larger than `price`.
 # #
 # # Set `price` to at least what the rest of the path charges plus this
-# # hop's `fee`, or this node forwards value it was not paid for. The
+# # peering's `fee`, or this node forwards value it was not paid for. The
 # # connector cannot check that -- it does not know what the far end
 # # charges -- so it is the operator's number to get right.
 # [[routes]]
 # prefix = "g.example.store"
 # peer_id = "store"
-# fee = 3
 # price = 1000
+#
+# # The channel this node PAYS that peer from, as an ordinary client of it
+# # (ADR 0042, "a connector covers every PREPARE it sends"; issue #881).
+# # Every packet forwarded to `peer_id` carries a covering claim, signed
+# # before the packet is sent, worth exactly what the packet forwards.
+# #
+# # REQUIRED, since issue #1145, of any peering a [[routes]] entry FORWARDS
+# # to. A route naming a peer with no row here is refused at load by name
+# # (`peer '<id>' is the next hop of route '<prefix>' but has no
+# # '[[pay_channels]]' entry`) -- the node does not start. It used to be
+# # optional, and a peering without one fell back to ADR 0004's postpay
+# # convention: the claim covering crossing n was signed once crossing n
+# # fulfilled and rode crossing n + 1. That path is deleted, so there is
+# # nothing left for an uncovered forward to fall back to.
+# #
+# # THIS IS A BREAKING DEPLOY (ADR 0009). A newly required key means the
+# # binary and this file are a matched pair in both directions: land the
+# # config that carries this row FIRST, then move the image tag. The other
+# # order is a node that will not boot. No config on this fleet forwards to
+# # a peering today -- neither box has an uncommented [[peers]] table at all
+# # (issue #872) -- so nothing deployed is affected right now; the ordering
+# # rule does not depend on that staying true.
+# #
+# # A peering this node only ever RECEIVES on needs no row: the requirement
+# # is keyed on the route, not on the peering.
+# #
+# # Three tables name channels and they are not interchangeable:
+# #   [[peer_channels]]   -- the channel a peering's claims are JUDGED against
+# #   [[client_channels]] -- a channel this node RECEIVES claims on
+# #   [[pay_channels]]    -- a channel this node PAYS from
+# # A channel here may NOT also appear in [[client_channels]] (it would be
+# # received on and paid from at once); it MAY be the same channel as this
+# # peering's own [[peer_channels]] row, which is the ordinary shape -- one
+# # on-chain channel, one role in each direction.
+# #
+# # client_edge_url is that peer's own `POST /ilp` endpoint: where this node
+# # arrives as a buyer, and where `POST /ilp/claim-state` says where its
+# # claims on the channel stand. The RECEIVER is the authority on its own
+# # watermark, so it is asked on every packet and never guessed or
+# # remembered. It is NOT derived from the peering's `endpoint` -- a `wss://`
+# # peer endpoint is not an HTTP client edge, and guessing one from the other
+# # is the class of mistake ADR 0030 refuses. `https://` only, unless
+# # peer_allow_plaintext_endpoints is set for a loopback test.
+# #
+# # chain_id/token_network are the channel's EIP-712 domain -- the same two
+# # facts its [[peer_channels]] row carries, because both roles sign against
+# # the very same on-chain channel. The signing key is [settlement.evm]'s;
+# # there is no second key and none is invented (ADR 0030). They are held
+# # against the resolved TokenNetwork at startup exactly as that row's are
+# # (issue #1136), and the failure here is the loud one: a covering claim
+# # signed under a contract the channel does not live in is one the next hop
+# # refuses, with the PREPARE already sent.
+# [[pay_channels]]
+# peer_id = "store"
+# channel_id = "0x0000000000000000000000000000000000000000000000000000000000000000"
+# chain_id = 31337
+# token_network = "0x0000000000000000000000000000000000000000"
+# client_edge_url = "https://store.example/ilp"

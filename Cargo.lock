@@ -1061,6 +1061,7 @@ dependencies = [
  "k256",
  "libsecp256k1",
  "rand 0.7.3",
+ "regex",
  "reqwest",
  "serde_json",
  "sha2 0.10.9",
@@ -1071,6 +1072,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite",
+ "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1086,9 +1088,11 @@ dependencies = [
 name = "connector-cli"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "bs58",
  "chrono",
  "connector-btp",
  "connector-client-edge",
@@ -1114,6 +1118,7 @@ dependencies = [
  "serde_json",
  "solana-rpc-client",
  "solana-sdk",
+ "spl-associated-token-account",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
@@ -1148,6 +1153,7 @@ dependencies = [
  "libsecp256k1",
  "proptest",
  "rand 0.7.3",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
@@ -1163,7 +1169,9 @@ name = "connector-config"
 version = "0.1.0"
 dependencies = [
  "bs58",
+ "connector-domain",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.19",
  "toml 0.8.23",
@@ -1188,7 +1196,9 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "bs58",
  "chrono",
+ "connector-client-edge",
  "connector-config",
  "connector-domain",
  "connector-runtime",
@@ -1202,26 +1212,24 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "tokio",
  "tower",
+ "url",
 ]
 
 [[package]]
 name = "connector-peer-auth"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
- "connector-btp",
  "connector-config",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
 ]
 
 [[package]]
 name = "connector-peer-btp"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "base64 0.22.1",
  "bs58",
@@ -1232,10 +1240,12 @@ dependencies = [
  "connector-peer-auth",
  "connector-runtime",
  "connector-signer",
+ "ed25519-dalek",
  "futures-util",
  "hex",
  "libsecp256k1",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
  "tracing",
@@ -1246,6 +1256,7 @@ dependencies = [
 name = "connector-peer-http"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "base64 0.22.1",
  "chrono",
@@ -1271,6 +1282,8 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "axum",
+ "base64 0.22.1",
  "bs58",
  "chrono",
  "connector-config",
@@ -1278,6 +1291,7 @@ dependencies = [
  "connector-settlement",
  "connector-signer",
  "ed25519-dalek",
+ "futures-util",
  "hyper",
  "percent-encoding",
  "prometheus",
@@ -1309,6 +1323,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "connector-settlement",
+ "connector-settlement-evm",
  "connector-signer",
  "ethers",
  "libsecp256k1",
@@ -1361,6 +1376,7 @@ name = "connector-vectors"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "bs58",
  "chrono",
  "connector-btp",
  "connector-config",

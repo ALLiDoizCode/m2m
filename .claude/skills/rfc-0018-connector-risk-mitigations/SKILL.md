@@ -1,36 +1,40 @@
 ---
 name: rfc-0018-connector-risk-mitigations
-description: Expert knowledge of Interledger RFC 0018 - Connector Risk Mitigations. Use when users ask about connector security, risk management, rate limiting, liquidity controls, or connector protection strategies. Triggers on 'connector risk', 'connector security', 'risk mitigation', or security best practices.
+description: Expert knowledge of Interledger RFC 0018 - Connector Risk Mitigations. Use when users ask about connector security, risk management, rate limiting, liquidity controls, or connector protection strategies. Answers from the copy vendored in this repository at docs/rfcs/, which carries a TOON profile saying where this connector departs. Triggers on 'connector risk', 'connector security', 'risk mitigation', or security best practices.
 ---
 
 # RFC 0018: Connector Risk Mitigations
 
-## Overview
+**Read [`docs/rfcs/0018-connector-risk-mitigations/0018-connector-risk-mitigations.md`](../../../docs/rfcs/0018-connector-risk-mitigations/0018-connector-risk-mitigations.md).**
+It is the upstream RFC, unmodified, beneath a **TOON profile** written by this
+project. Answer from that file rather than from memory or from the network.
 
-Provides expert guidance on risk management strategies for Interledger connectors including security controls, rate limiting, and liquidity management.
+It gives you the risks of running a forwarding node.
 
-## Core Capabilities
+## How to read it
 
-### 1. RFC Documentation Search
-Access RFC specification details using the MCP tool:
+1. **The TOON profile, at the top.** Every place this connector departs from the
+   RFC, each citing the ADR or `docs/protocol/` rule that governs it. A ⚠ marks
+   a departure that is easy to assume away — one a reader of the RFC would not
+   expect and would be wrong to guess at. Some are recorded and guarded, some are
+   open gaps; the bullet itself says which. Surface it plainly when it is
+   relevant, rather than reading the glyph as "unrecorded".
+2. **The body, below the `<!-- BEGIN VERBATIM UPSTREAM BODY -->` marker.** The
+   standard as written. It is never edited to match this connector
+   ([ADR 0062](../../../docs/adr/0062-an-rfc-is-vendored-verbatim-and-profiled-never-forked.md)),
+   and a test enforces that.
+
+## Precedence when they disagree
+
 ```
-mcp__interledger_org-v4_Docs__search_rfcs_documentation
+vectors  >  ADRs  >  docs/protocol/ specs  >  the TOON profile  >  the RFC body
 ```
 
-Search with queries like:
-- "connector risk mitigations"
-- "connector security controls"
-- "liquidity management"
+The RFC body never overrides anything local — it is what the local rules are
+stated against. If the question is "what does this connector do", the ADR wins.
+If the question is "what does Interledger specify", the body wins. Distinguish
+the two in your answer; they are often not the same, and this file exists
+because that surprised somebody.
 
-### 2. Answer Questions
-Provide detailed explanations based on the RFC specification.
-
-### 3. Implementation Guidance
-Help users implement and integrate the protocol or feature.
-
-## Common Topics
-- Connector risk analysis
-- Security controls and mitigations
-- Rate limiting strategies
-- Liquidity management
-- Fraud prevention
+Never edit the body. A correction to how TOON aligns goes **above** the marker,
+or into the record that owns the rule.

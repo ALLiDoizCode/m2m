@@ -15,7 +15,30 @@ DC=(docker compose -f infra/linode-store/docker-compose.store.yml)
 # the current name from the start.
 PRIMARY="proxy.ario.${DOMAIN}"
 DOMAINS=("proxy.ario.${DOMAIN}" "dvm.${DOMAIN}")
-CERT_PATH="/etc/letsencrypt/live/${PRIMARY}"
+# ── The LINEAGE name is separate from the first SAN (issue #1004) ───────────
+# `--cert-name` names a DIRECTORY under /etc/letsencrypt/{live,archive,renewal}
+# — an internal label, never a served hostname, and nothing resolves it. It
+# only has to agree with whatever `ssl_certificate` path nginx loads.
+#
+# On a FRESH box those two agree by construction: ./bootstrap.sh renders
+# ./nginx/conf.d/node.conf from ./nginx/node.conf.template, which emits
+# `live/proxy.ario.${DOMAIN}` — the same default this line takes.
+#
+# The LIVE devnet store box does NOT: it carries an inherited lineage named
+# `proxy.store.devnet.toonprotocol.dev` (from before the 2026-08-05 rename),
+# and the committed ./nginx/conf.d/node.conf on that box's disk hardcodes that
+# path deliberately — see its own comment, which argues renaming the lineage
+# would orphan the renewal config for no gain. Running this script there with
+# the default would issue a perfectly good cert into a SECOND lineage nginx
+# never reads, and the box would go on serving the old one with no error
+# anywhere. Override it instead:
+#
+#   CERT_NAME="proxy.store.${DOMAIN}" ./infra/linode-store/init-letsencrypt.sh
+#
+# docs/operators/fleet-release-and-health.md, "The store box's `dvm.` name has
+# no certificate", is the runbook that does exactly that.
+CERT_NAME="${CERT_NAME:-${PRIMARY}}"
+CERT_PATH="/etc/letsencrypt/live/${CERT_NAME}"
 RENEW_WINDOW_DAYS="${RENEW_WINDOW_DAYS:-30}"
 
 seed_dummy() {
@@ -70,7 +93,7 @@ seed_dummy
 echo "==> Starting nginx for ACME challenge"
 "${DC[@]}" up -d nginx
 
-"${DC[@]}" run --rm --entrypoint sh certbot -c "rm -rf /etc/letsencrypt/live/${PRIMARY} /etc/letsencrypt/archive/${PRIMARY} /etc/letsencrypt/renewal/${PRIMARY}.conf"
+"${DC[@]}" run --rm --entrypoint sh certbot -c "rm -rf /etc/letsencrypt/live/${CERT_NAME} /etc/letsencrypt/archive/${CERT_NAME} /etc/letsencrypt/renewal/${CERT_NAME}.conf"
 
 d_args=()
 for d in "${DOMAINS[@]}"; do d_args+=(-d "$d"); done
@@ -81,7 +104,7 @@ echo "==> Requesting cert (${staging_arg:-production})"
 if "${DC[@]}" run --rm --entrypoint certbot certbot \
   certonly --webroot -w /var/www/certbot \
   $staging_arg \
-  --cert-name "${PRIMARY}" \
+  --cert-name "${CERT_NAME}" \
   "${d_args[@]}" \
   --email "${LETSENCRYPT_EMAIL}" \
   --rsa-key-size 2048 --agree-tos --no-eff-email --keep-until-expiring; then

@@ -292,13 +292,22 @@ fn build_claim_instruction(
     }
 }
 
-/// Build a balance proof message: channel_pda (32) || nonce (8 LE) || transferred_amount (8 LE)
+/// Build a balance proof message (ADR 0053, issue #1082):
+/// domain tag (16) || program_id (32) || channel_pda (32) || nonce (8 LE)
+///   || transferred_amount (8 LE)
+///
+/// The program id is in here so a signature is valid only against THIS
+/// deployment. Before #1082 the message was 48 bytes and bound nothing about
+/// which chain the channel lived on.
 fn build_balance_proof_message(
+    program_id: &Pubkey,
     channel_pda: &Pubkey,
     nonce: u64,
     transferred_amount: u64,
 ) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(48);
+    let mut msg = Vec::with_capacity(96);
+    msg.extend_from_slice(b"TOON-BALPROOF-V2");
+    msg.extend_from_slice(program_id.as_ref());
     msg.extend_from_slice(channel_pda.as_ref());
     msg.extend_from_slice(&nonce.to_le_bytes());
     msg.extend_from_slice(&transferred_amount.to_le_bytes());
@@ -421,7 +430,7 @@ async fn submit_claim(
     nonce: u64,
     transferred_amount: u64,
 ) -> Result<(), solana_program_test::BanksClientError> {
-    let message = build_balance_proof_message(channel_pda, nonce, transferred_amount);
+    let message = build_balance_proof_message(&PROGRAM_ID, channel_pda, nonce, transferred_amount);
     let dalek_keypair = to_dalek_keypair(claimer);
     let ed25519_ix = new_ed25519_instruction(&dalek_keypair, &message);
     // The claimer (participant) authorizes via the precompile only; the
@@ -600,7 +609,7 @@ async fn test_invalid_signature_rejected() {
     .await;
 
     // Sign a WRONG message (different nonce in the signed message vs the instruction)
-    let wrong_message = build_balance_proof_message(&channel_pda, 999, 5000);
+    let wrong_message = build_balance_proof_message(&PROGRAM_ID, &channel_pda, 999, 5000);
     let dalek_keypair = to_dalek_keypair(&participant_a);
     let ed25519_ix = new_ed25519_instruction(&dalek_keypair, &wrong_message);
 
@@ -658,7 +667,7 @@ async fn test_non_participant_signer_rejected() {
     .await;
 
     // The outsider signs the balance proof but is not a channel participant
-    let message = build_balance_proof_message(&channel_pda, 1, 5000);
+    let message = build_balance_proof_message(&PROGRAM_ID, &channel_pda, 1, 5000);
     let dalek_outsider = to_dalek_keypair(&outsider);
     let ed25519_ix = new_ed25519_instruction(&dalek_outsider, &message);
     let claim_ix = build_claim_instruction(
@@ -861,7 +870,7 @@ async fn test_ed25519_precompile_at_wrong_index_rejected() {
     .await;
 
     // Put claim instruction FIRST, Ed25519 precompile SECOND (wrong order)
-    let message = build_balance_proof_message(&channel_pda, 1, 5000);
+    let message = build_balance_proof_message(&PROGRAM_ID, &channel_pda, 1, 5000);
     let dalek_keypair = to_dalek_keypair(&participant_a);
     let ed25519_ix = new_ed25519_instruction(&dalek_keypair, &message);
     let claim_ix = build_claim_instruction(
@@ -1015,27 +1024,32 @@ async fn test_balance_proof_message_format() {
     let nonce: u64 = 42;
     let transferred_amount: u64 = 123456;
 
-    let message = build_balance_proof_message(&channel_pda, nonce, transferred_amount);
+    let message = build_balance_proof_message(&PROGRAM_ID, &channel_pda, nonce, transferred_amount);
 
-    // Total size is 48 bytes
+    // Total size is 96 bytes (ADR 0053, issue #1082)
     assert_eq!(
         message.len(),
-        48,
-        "Balance proof message must be exactly 48 bytes"
+        96,
+        "Balance proof message must be exactly 96 bytes: a 16-byte domain tag, the \
+         program id, the channel PDA, the nonce and the transferred amount. The \
+         pre-#1082 48-byte layout fails on length here rather than being read as a \
+         truncated prefix of this one."
     );
 
     // First 32 bytes are channel_pda
-    assert_eq!(&message[0..32], channel_pda.as_ref());
+    assert_eq!(&message[0..16], b"TOON-BALPROOF-V2");
+    assert_eq!(&message[16..48], PROGRAM_ID.as_ref());
+    assert_eq!(&message[48..80], channel_pda.as_ref());
 
     // Next 8 bytes are nonce (LE)
     assert_eq!(
-        u64::from_le_bytes(message[32..40].try_into().unwrap()),
+        u64::from_le_bytes(message[80..88].try_into().unwrap()),
         nonce
     );
 
     // Next 8 bytes are transferred_amount (LE)
     assert_eq!(
-        u64::from_le_bytes(message[40..48].try_into().unwrap()),
+        u64::from_le_bytes(message[88..96].try_into().unwrap()),
         transferred_amount
     );
 }
@@ -1126,7 +1140,7 @@ async fn test_third_party_fee_payer_redeems_without_participant_signature() {
 
     // Participant A signs the balance proof (the precompile authorization), but
     // does NOT sign the redemption transaction.
-    let message = build_balance_proof_message(&channel_pda, 1, 5000);
+    let message = build_balance_proof_message(&PROGRAM_ID, &channel_pda, 1, 5000);
     let dalek_a = to_dalek_keypair(&participant_a);
     let ed25519_ix = new_ed25519_instruction(&dalek_a, &message);
     let claim_ix = build_claim_instruction(

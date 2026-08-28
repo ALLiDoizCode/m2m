@@ -24,6 +24,7 @@
 //! shape.
 
 mod bindings;
+mod channel_id;
 mod channel_index;
 pub mod channel_index_sync;
 // Also compiled for this crate's own `#[cfg(test)]` unit tests (none left
@@ -33,6 +34,7 @@ pub mod channel_index_sync;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support;
 
+pub use channel_id::{derive_channel_id, sort_participants};
 pub use channel_index::{
     ChannelIndexEvent, ChannelIndexLookup, EvmChannelIndex, EvmChannelIndexError,
     IndexedChannelStatus, OrderedChannelIndexEvent,
@@ -52,6 +54,8 @@ use ethers::types::{Address, BlockNumber, Bytes, TransactionReceipt, U256};
 use connector_settlement::{
     ChannelId, ChannelState, ChannelStatus, Claim, SettlementBackend, SettlementError,
 };
+
+use channel_id::{format_channel_id, parse_channel_id};
 
 use bindings::token_network::{
     BalanceProof, ChannelOpenedFilter, TokenNetwork as TokenNetworkContract,
@@ -350,6 +354,76 @@ impl EvmSettlementBackend {
         Ok(Some((counterparty, deposit)))
     }
 
+    /// This node's current channel epoch with `counterparty`, read from
+    /// the chain: `TokenNetwork.channelEpoch(p1, p2)` over the sorted pair
+    /// (ADR 0059). One `eth_call`.
+    ///
+    /// Zero for a pair that has never settled a channel here -- including
+    /// a pair that has never opened one -- and one higher after each of
+    /// their channels settles. It is not a count of live channels: there
+    /// is at most one of those, and `openChannel` refuses a second
+    /// (`ChannelAlreadyExists`).
+    pub async fn channel_epoch(&self, counterparty: Address) -> Result<U256, SettlementError> {
+        let (p1, p2) = sort_participants(self.own_address, counterparty);
+        self.contract
+            .channel_epoch(p1, p2)
+            .call()
+            .await
+            .map_err(backend_error)
+    }
+
+    /// The channel id this node and `counterparty` derive **right now** --
+    /// [`channel_epoch`](Self::channel_epoch) plus
+    /// [`derive_channel_id`]. One `eth_call`.
+    ///
+    /// It names where their next channel will land, which is the same
+    /// place their current one already is if they have one. It says
+    /// nothing about whether anything is there: ask
+    /// [`channel_with`](Self::channel_with) for that.
+    pub async fn derived_channel_id(
+        &self,
+        counterparty: Address,
+    ) -> Result<ChannelId, SettlementError> {
+        let epoch = self.channel_epoch(counterparty).await?;
+        Ok(derive_channel_id(self.own_address, counterparty, epoch))
+    }
+
+    /// **"Do I already have a channel with this counterparty?"**, answered
+    /// from the chain (ADR 0059, issue #1158). `Ok(Some(id))` when one is
+    /// live, `Ok(None)` when the pair has none and
+    /// [`open`](SettlementBackend::open) is what to do next; `Err` only
+    /// when the chain could not be asked, so "there is no channel" is
+    /// never confused with "I could not find out". Two `eth_call`s:
+    /// `channelEpoch`, then `channels` at the id that derives from it.
+    ///
+    /// The read goes to the chain rather than to
+    /// [`EvmChannelIndex`]'s `lookup`, and deliberately: that index is a
+    /// projection of `ChannelOpened` logs and is only complete once
+    /// `channel_index_from_block` has been replayed, so a "none exists"
+    /// out of a half-built index opens a duplicate channel. A derivation
+    /// plus a point read has no such window -- ADR 0059 rejects building
+    /// a local participant index for exactly this reason.
+    ///
+    /// "Live" is `Opened` or `Closed`: a `Closed` channel is still in its
+    /// challenge window, still holds collateral and still occupies the
+    /// pair's id, so reporting it absent would hand the caller an
+    /// `openChannel` that reverts. `Settled` cannot appear at the current
+    /// epoch at all -- `settleChannel` advances the epoch in the same
+    /// transaction that sets that state
+    /// (`packages/contracts/test/TokenNetworkChannelDerivation.t.sol`) --
+    /// so it needs no case of its own here.
+    pub async fn channel_with(
+        &self,
+        counterparty: Address,
+    ) -> Result<Option<ChannelId>, SettlementError> {
+        let channel = self.derived_channel_id(counterparty).await?;
+        let (_, state, _, _, _, _) = self.fetch_channel(parse_channel_id(&channel)?).await?;
+        if state == CHANNEL_STATE_NONEXISTENT {
+            return Ok(None);
+        }
+        Ok(Some(channel))
+    }
+
     /// Resolve `channel` to the on-chain id it names and confirm a channel
     /// actually exists there (`TokenNetwork.channels(id).state !=
     /// NonExistent`) -- [`SettlementError::ChannelNotFound`] either because
@@ -425,11 +499,94 @@ impl EvmSettlementBackend {
         }
     }
 
+    /// Approve-then-`setTotalDeposit`: two transactions, where a single
+    /// `payable` call sufficed for native ETH. Approving a large fixed
+    /// allowance, rather than exactly the increment, means a stale
+    /// approval from an earlier call (or another channel funded through
+    /// this same backend) is still always enough -- `deposit_lock` already
+    /// rules out two `fund` calls racing each other's approval.
+    ///
+    /// `total` is `participant`'s **new cumulative** deposit, not an
+    /// increment: that is `setTotalDeposit`'s own parameter
+    /// (`TokenNetwork.sol:252`), and computing it is the read-then-write
+    /// `deposit_lock` exists to serialize.
+    async fn set_total_deposit(
+        &self,
+        id: [u8; 32],
+        participant: Address,
+        total: U256,
+    ) -> Result<(), SettlementError> {
+        let approve = self.token.approve(self.contract.address(), U256::MAX);
+        let pending = approve.send().await.map_err(backend_error)?;
+        confirm(pending).await?;
+
+        let call = self.contract.set_total_deposit(id, participant, total);
+        let pending = call.send().await.map_err(backend_error)?;
+        confirm(pending).await?;
+        Ok(())
+    }
+
+    /// Test/dev-only (issue #1118): mint `amount` of this backend's token
+    /// to `owner`, which works only because the local chain's token is
+    /// `MockERC20` (`packages/contracts/test/mocks/MockERC20.sol`) and this
+    /// backend's signer is its minter.
+    ///
+    /// The EVM twin of `SolanaSettlementBackend::test_mint_tokens_to`, and
+    /// needed for the same reason: once `fund` is a self-deposit, each side
+    /// of a channel spends its **own** tokens to collateralise, so a test
+    /// standing up a second participant has to put real tokens in that
+    /// participant's balance first -- exactly as a real deployment has to.
+    #[cfg(any(test, feature = "test-util"))]
+    pub async fn mint_mock_tokens_to(
+        &self,
+        owner: Address,
+        amount: u128,
+    ) -> Result<(), SettlementError> {
+        let token = MockErc20Contract::new(self.token.address(), self.token.client());
+        let call = token.mint(owner, U256::from(amount));
+        let pending = call.send().await.map_err(backend_error)?;
+        confirm(pending).await?;
+        Ok(())
+    }
+
+    /// Deposit `amount` into the **counterparty's** side of `channel`,
+    /// from this backend's own token balance -- the delegate deposit
+    /// `TokenNetwork.setTotalDeposit` permits by naming the credited
+    /// participant separately from the caller whose tokens are pulled
+    /// (`TokenNetwork.sol:255`, `:273`, `:282`).
+    ///
+    /// **Not on the [`SettlementBackend`] port, and not for production**
+    /// (issue #1118). No node should pay for its counterparty's
+    /// collateral, and no other chain this port settles on can:
+    /// `packages/solana-program`'s `Deposit` credits strictly by signer.
+    /// This exists so a fixture can stand in for the external actor that
+    /// would really make that deposit -- it is what this crate's
+    /// `connector_settlement::contract::ContractFixture::fund_counterparty`
+    /// is wired to -- which is why it is `test-util`-gated rather than
+    /// merely documented as "do not call".
+    #[cfg(any(test, feature = "test-util"))]
+    pub async fn fund_counterparty(
+        &self,
+        channel: &ChannelId,
+        amount: u128,
+    ) -> Result<ChannelState, SettlementError> {
+        let _guard = self.deposit_lock.lock().await;
+
+        let (id, state) = self.open_channel(channel).await?;
+        let counterparty = Address::from_slice(&state.counterparty);
+        let new_total = U256::from(state.counterparty_deposited) + U256::from(amount);
+        self.set_total_deposit(id, counterparty, new_total).await?;
+        self.read_state(channel, id).await
+    }
+
     /// Derive a single [`ChannelState`] from `TokenNetwork`'s two-sided
-    /// state (issue #576's core mismatch): `deposited` is the
+    /// state (issue #576's core mismatch): `counterparty_deposited` is the
     /// counterparty's own `ParticipantState.deposit` -- the balance
     /// `claimFromChannel` actually bounds a claim against
-    /// (`TokenNetwork.sol:317`) -- and `redeemed` is
+    /// (`TokenNetwork.sol:317`) -- `own_deposited` is this backend's own
+    /// side of the same mapping (issue #1118), what
+    /// [`fund`](SettlementBackend::fund) raises and what
+    /// `settleChannel` eventually returns; and `redeemed` is
     /// `claimedAmounts[channelId][self]` -- what *this* backend has
     /// already pulled out via [`redeem`](SettlementBackend::redeem).
     /// Reading the sides the other way round would report a channel that
@@ -448,6 +605,12 @@ impl EvmSettlementBackend {
             .call()
             .await
             .map_err(backend_error)?;
+        let (own_deposit, _nonce, _transferred_amount) = self
+            .contract
+            .participants(id, self.own_address)
+            .call()
+            .await
+            .map_err(backend_error)?;
         let self_claimed = self
             .contract
             .claimed_amounts(id, self.own_address)
@@ -458,7 +621,8 @@ impl EvmSettlementBackend {
             id: channel.clone(),
             counterparty: counterparty.as_bytes().to_vec(),
             status: status_from_u8(state)?,
-            deposited: counterparty_deposit.as_u128(),
+            counterparty_deposited: counterparty_deposit.as_u128(),
+            own_deposited: own_deposit.as_u128(),
             redeemed: self_claimed.as_u128(),
         })
     }
@@ -563,46 +727,13 @@ fn counterparty_address(counterparty: &[u8]) -> Result<Address, SettlementError>
     Ok(Address::from_slice(counterparty))
 }
 
-/// `TokenNetwork`'s channel id is a `bytes32`
-/// (`keccak256(participant1, participant2, channelCounter)`,
-/// `TokenNetwork.sol:199`), formatted as `0x`-prefixed, zero-padded lowercase
-/// hex -- the same shape `connector_runtime::claim::parse_channel_id`
-/// already accepts for a peer-wire channel id (issue #575's AC4), so an id
-/// this backend hands back is usable there unchanged.
-fn format_channel_id(id: [u8; 32]) -> ChannelId {
-    let mut hex = String::with_capacity(2 + 64);
-    hex.push_str("0x");
-    for byte in id {
-        hex.push_str(&format!("{byte:02x}"));
-    }
-    ChannelId(hex)
-}
-
-/// The inverse of [`format_channel_id`]. A channel id that does not parse
-/// as 32 bytes of hex is reported as [`SettlementError::ChannelNotFound`]
-/// rather than a distinct parse-error variant -- from this port's
-/// perspective a malformed id and one nothing was ever opened at mean the
-/// same thing: there is no channel to operate on.
-fn parse_channel_id(channel: &ChannelId) -> Result<[u8; 32], SettlementError> {
-    let hex_digits = channel.0.strip_prefix("0x").unwrap_or(channel.0.as_str());
-    if hex_digits.len() != 64 || !hex_digits.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(SettlementError::ChannelNotFound(channel.clone()));
-    }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex_digits[i * 2..i * 2 + 2], 16)
-            .map_err(|_| SettlementError::ChannelNotFound(channel.clone()))?;
-    }
-    Ok(out)
-}
-
 fn backend_error<E: std::fmt::Display>(error: E) -> SettlementError {
     SettlementError::Backend(error.to_string())
 }
 
 /// Put a claim's `r || s || v` signature's trailing recovery-id byte into
 /// the `{27, 28}` range `TokenNetwork.claimFromChannel`'s `ECDSA.recover`
-/// requires (issue #590). The peer wire (and every other producer of a
+/// requires (issue #590). The peer semantics (and every other producer of a
 /// [`Claim`]) carries whatever libsecp256k1 itself emits -- `{0, 1}` -- so
 /// this is the one place that convention is bridged to the Ethereum-wallet
 /// one an on-chain verifier expects; a value already in `{27, 28}` is left
@@ -752,6 +883,20 @@ impl SettlementBackend for EvmSettlementBackend {
         ))
     }
 
+    /// A **self**-deposit (issue #1118): `setTotalDeposit` is called
+    /// naming this backend's own `own_address` as the participant to
+    /// credit, so the tokens it pulls from this node land behind this
+    /// node's own claims and nowhere else. Until #1118 this named the
+    /// *counterparty* instead -- a delegate deposit `TokenNetwork` happens
+    /// to permit (caller and credited participant are independent
+    /// parameters, `TokenNetwork.sol:255`, `:273`, `:282`) and
+    /// `packages/solana-program` deliberately does not, which is what left
+    /// the Solana backend's `fund` an unconditional error. It is also the
+    /// shape production should never have: a node paying for its
+    /// counterparty's collateral out of its own token balance.
+    /// [`fund_counterparty`](Self::fund_counterparty) keeps the delegate
+    /// deposit available to this crate's own fixtures, where standing in
+    /// for an absent external actor is the whole point.
     async fn fund(
         &self,
         channel: &ChannelId,
@@ -762,23 +907,9 @@ impl SettlementBackend for EvmSettlementBackend {
         let _guard = self.deposit_lock.lock().await;
 
         let (id, state) = self.open_channel(channel).await?;
-        let counterparty = Address::from_slice(&state.counterparty);
-        let new_total = U256::from(state.deposited) + U256::from(amount);
-
-        // Approve-then-deposit: two transactions, where a single `payable`
-        // call sufficed for native ETH. Approving a large fixed allowance,
-        // rather than exactly `amount`, means a stale approval from an
-        // earlier call (or another channel funded through this same
-        // backend) is still always enough -- `deposit_lock` above already
-        // rules out two `fund` calls racing each other's approval.
-        let approve = self.token.approve(self.contract.address(), U256::MAX);
-        let pending = approve.send().await.map_err(backend_error)?;
-        confirm(pending).await?;
-
-        let call = self.contract.set_total_deposit(id, counterparty, new_total);
-        let pending = call.send().await.map_err(backend_error)?;
-        confirm(pending).await?;
-
+        let new_total = U256::from(state.own_deposited) + U256::from(amount);
+        self.set_total_deposit(id, self.own_address, new_total)
+            .await?;
         self.read_state(channel, id).await
     }
 
@@ -794,10 +925,10 @@ impl SettlementBackend for EvmSettlementBackend {
                 already_redeemed: state.redeemed,
             });
         }
-        if claim.cumulative_amount > state.deposited {
+        if claim.cumulative_amount > state.counterparty_deposited {
             return Err(SettlementError::InsufficientChannelBalance {
                 requested: claim.cumulative_amount,
-                deposited: state.deposited,
+                deposited: state.counterparty_deposited,
             });
         }
 
@@ -861,6 +992,20 @@ impl SettlementBackend for EvmSettlementBackend {
     async fn channel_state(&self, channel: &ChannelId) -> Result<ChannelState, SettlementError> {
         let id = self.existing_channel_id(channel).await?;
         self.read_state(channel, id).await
+    }
+
+    /// The port's ADR 0059 question, answered by
+    /// [`channel_with`](Self::channel_with) -- `channelEpoch` over the
+    /// sorted pair, then `channels` at the id that derives from it. The
+    /// counterparty is a 20-byte `TokenNetwork` participant address, the
+    /// same identity [`open`](SettlementBackend::open) takes and the same
+    /// one whose signature `claimFromChannel` recovers.
+    async fn live_channel_with(
+        &self,
+        counterparty: Vec<u8>,
+    ) -> Result<Option<ChannelId>, SettlementError> {
+        self.channel_with(counterparty_address(&counterparty)?)
+            .await
     }
 }
 

@@ -24,6 +24,7 @@ connector-settlement-evm = { path = "../connector-settlement-evm" }
 connector-settlement-solana = { path = "../connector-settlement-solana" }
 connector-signer = { path = "../connector-signer" }
 async-trait = "0.1"
+arc-swap = "1.9.2"
 axum = "0.6"
 # The `ilp-payment-channel-claim` header is base64 of the claim JSON -- the
 # client send path of `connector announce` (issue #784).
@@ -32,6 +33,9 @@ base64 = "0.22"
 # against the through-URL (its x402 greeting and its `/ilp/identity`), and
 # the clock the PREPARE's expiry and the event's `created_at` are read from.
 chrono = "0.4"
+# `connector send` signs its RFC 9421 operator write with an ed25519 key --
+# the same curve and the same crate `connector-operator` verifies with.
+ed25519-dalek = "1"
 ethers = { version = "2", default-features = false, features = ["rustls"] }
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }
@@ -46,6 +50,11 @@ tracing = "0.1"
 
 [dev-dependencies]
 base64 = "0.22"
+# Reads a Solana channel account and program id back off a rendered claim
+# and a rendered claim-state ask (issue #1146's `[[pay_channels]]` wiring
+# test), so the assertions are against the base58 the far side decodes
+# rather than against this crate's own idea of it.
+bs58 = "0.5"
 connector-operator = { path = "../connector-operator", features = ["test-util"] }
 connector-settlement-evm = { path = "../connector-settlement-evm", features = ["test-util"] }
 connector-settlement-solana = { path = "../connector-settlement-solana", features = ["test-util"] }
@@ -63,6 +72,11 @@ serde_json = "1"
 # solana-rpc-client, not the solana-client meta-crate -- see
 # crates/connector-settlement-solana/Cargo.toml for why.
 solana-rpc-client = "=2.1.0"
+# Derives the node's own associated token account, so the Solana settle
+# proof can read the SPL payout straight off the chain rather than trusting
+# a `ChannelView`. Pinned to the same version `connector-settlement-solana`
+# builds its instructions with.
+spl-associated-token-account = "=4.0.0"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tower = { version = "0.4", features = ["util"] }

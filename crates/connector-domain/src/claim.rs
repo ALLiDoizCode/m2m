@@ -1,7 +1,7 @@
 //! Claim validation: nonce, watermark and value-binding rules (ADR 0004, ADR
-//! 0005, `docs/protocol/peer-wire-spec.md` §3.2-§3.5,
+//! 0005, `docs/protocol/peer-semantics-pre-868.md` §3.2-§3.5,
 //! `docs/protocol/client-edge-spec.md` §1.3, issues #423, #522). Pure, no
-//! I/O -- a claim's signature is chain-specific (peer-wire-spec.md §3.5,
+//! I/O -- a claim's signature is chain-specific (peer-semantics-pre-868.md §3.5,
 //! ADR 0024) and is both produced and verified in `connector-signer`
 //! (`evm_balance_proof_digest`), which this crate deliberately has no
 //! dependency on (ADR 0001): a digest computed over on-chain data belongs
@@ -27,7 +27,7 @@ pub struct Watermark {
 }
 
 /// Why a claim was rejected at the watermark layer -- mirrors
-/// peer-wire-spec.md §3.4's `nonce_not_advancing`/`amount_not_advancing`
+/// peer-semantics-pre-868.md §3.4's `nonce_not_advancing`/`amount_not_advancing`
 /// CLAIM_ACK rejection reasons (`signature_invalid` and `unknown_channel`
 /// are not this module's concern: they depend on a verification key and a
 /// channel registry, neither of which is pure domain state).

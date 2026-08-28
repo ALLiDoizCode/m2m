@@ -1,0 +1,127 @@
+# =============================================================================
+# local/solo -- the connector image, both chains, and an app behind one route.
+#
+# Merged ON TOP of the repository-root docker-compose.yml so the chains are the
+# SAME services `make anvil-up` / `make solana-up` bring up, on one network:
+#
+#   docker compose -f docker-compose.yml -f local/solo/compose.yml \
+#     --profile evm --profile solana --profile solo up -d
+#
+# `make local-up` does exactly that. One compose project means one network,
+# which means the connector reaches the chains by service name -- `anvil:8545`,
+# `solana-validator:8899`. The bundle this replaces could not: its chain ran on
+# the HOST, anvil binds loopback, and a container could only reach it through a
+# hand-run Python TCP forwarder. There is no forwarder here because there is
+# nothing left to forward.
+# =============================================================================
+
+services:
+  # ── The payment-oblivious app ──────────────────────────────────────────────
+  # The connector image's second binary. Not published: only the connector
+  # dials it, which is what makes "an unpaid packet never reaches the app"
+  # a statement the host cannot trivially falsify by calling it directly.
+  stub-app:
+    image: connector-rust:local
+    profiles: [solo]
+    entrypoint: ['/usr/local/bin/stub-app']
+    command: ['0.0.0.0:3100']
+    expose:
+      - '3100'
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+
+  # ── The connector under test ───────────────────────────────────────────────
+  connector:
+    image: connector-rust:local
+    profiles: [solo]
+    # The image's CMD is already /app/config/connector.toml; naming it here
+    # keeps the mount and the argument visible in one place.
+    command: ['/app/config/connector.toml']
+    # PATHS ARE RELATIVE TO THE REPOSITORY ROOT, not to this file. Compose
+    # resolves relative bind mounts against the PROJECT directory, which is the
+    # directory of the FIRST `-f` file -- and that is always
+    # ./docker-compose.yml here (see the header, and `make local-up`). Writing
+    # `./connector.toml` would silently look for it at the repo root.
+    volumes:
+      - ./local/solo/connector.toml:/app/config/connector.toml:ro
+      # Written by local/keys.sh, gitignored, never committed (ADR 0012).
+      - ./local/.keys/solo/connector:/app/data:ro
+      # A NAMED volume, not a bind mount: the image creates /app/state owned by
+      # uid 10001 so a fresh named volume inherits that ownership. A host bind
+      # mount arrives root-owned and the connector refuses to start.
+      - solo-state:/app/state
+    ports:
+      # Published to loopback only. The client edge is the paid surface; there
+      # is no reason for it to be reachable off this machine.
+      - '127.0.0.1:3000:3000'
+    depends_on:
+      anvil:
+        condition: service_healthy
+      solana-validator:
+        condition: service_healthy
+      stub-app:
+        condition: service_started
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    healthcheck:
+      # GET /ilp/identity is unauthenticated and free, and answering it means
+      # the config loaded, both settlement backends connected, and the router
+      # is serving. `docker ps` showing "Up" proves none of that.
+      # busybox wget, from the alpine base -- the image installs no curl.
+      #
+      # 127.0.0.1, NOT localhost. `client_edge_addr = "0.0.0.0:3000"` binds
+      # IPv4 only, while `localhost` inside the container resolves to `::1`
+      # first -- so busybox wget connects to the v6 loopback and gets
+      # "Connection refused" against a perfectly healthy connector. Observed
+      # exactly that: the host reached the published port and the sender
+      # container reached `connector:3000`, while this check sat unhealthy.
+      test:
+        ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:3000/ilp/identity || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ── The sender ─────────────────────────────────────────────────────────────
+  # Its own profile so `up` never starts it: it is a one-shot that exits 0 or
+  # 1, run by `make local-rehearse` via `docker compose run --rm`.
+  #
+  # --expect-fulfill is the assertion. Without it `connector send` reports a
+  # REJECT and exits 0, which is right for an operator probing a route and
+  # wrong for a gate -- a run that prints "REJECT F02" and goes green is the
+  # same nothing-asserted success ADR 0007 bans elsewhere.
+  sender:
+    image: connector-rust:local
+    profiles: [sender]
+    entrypoint: ['/usr/local/bin/connector']
+    command:
+      - send
+      - --operator
+      - http://connector:3000
+      - --operator-key
+      - /app/data/operator-send.key
+      - --to
+      - g.local.solo
+      - --seal-to
+      - http://connector:3000/ilp
+      - --target
+      - /
+      - --amount
+      - '0'
+      - --body
+      - /app/data/payload.json
+      - --expect-fulfill
+    # Repo-root-relative, as above.
+    volumes:
+      - ./local/.keys/solo/connector:/app/data:ro
+
+volumes:
+  solo-state:

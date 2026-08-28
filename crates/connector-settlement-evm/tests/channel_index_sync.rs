@@ -88,7 +88,13 @@ async fn a_channel_opened_and_funded_on_chain_is_indexed_once_confirmed() {
         )
         .await
         .expect("open a channel");
-    backend.fund(&channel, 750).await.expect("fund the channel");
+    // The index reports the *counterparty's* deposit for a lookup made
+    // under this backend's own address, so that is the side funded here
+    // (issue #1118).
+    backend
+        .fund_counterparty(&channel, 750)
+        .await
+        .expect("fund the counterparty's side of the channel");
 
     // One confirmation, and mine a couple more blocks so the open/fund logs
     // are comfortably behind head.
@@ -204,7 +210,7 @@ async fn a_settled_channel_is_indexed_as_terminal_without_a_further_chain_read()
 /// (`infra/linode-*/connector-rust.toml`), used verbatim so the recorded
 /// filter can be compared against the address an operator would read off
 /// the committed config.
-const DEVNET_TOKEN_NETWORK: &str = "0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478";
+const DEVNET_TOKEN_NETWORK: &str = "0xe9E05dfecfe165266C88d73e61D483612651952a";
 
 /// A JSON-RPC endpoint that refuses an `eth_getLogs` naming no contract,
 /// the way `https://base-sepolia-rpc.publicnode.com` -- the `rpc_url` both

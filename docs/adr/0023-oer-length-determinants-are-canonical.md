@@ -1,5 +1,7 @@
 # OER length determinants are canonical, for every consumer of `oer.rs`
 
+**Status:** Accepted. Live in `connector-domain/src/oer.rs`. Flagged: its "safe for the wire" argument reasons from `packages/shared/src/encoding/oer.ts`, the TypeScript encoder `oer.rs` was ported from — **that package is no longer in this repository** (only untracked build output survives). The argument is historical; the canonicality rule is not.
+
 **Scope:** protocol law — binds every implementation, not just this one. See the [ADR index](README.md).
 
 `decode_var_uint` (`crates/connector-domain/src/oer.rs`) now rejects any length determinant

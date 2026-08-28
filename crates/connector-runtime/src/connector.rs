@@ -6,23 +6,26 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Duration, Utc};
-use connector_config::{SettlementChain, StaticRoute, TransportPolicy};
+use connector_config::{SettlementChain, StaticRoute, TransportPolicy, DEFAULT_MAX_PACKET_AMOUNT};
 use connector_domain::x402::X402PaymentRequired;
 use connector_domain::{
-    amount_after_fee, condition_is_present, fulfillment_matches_condition, is_expired,
-    is_valid_ilp_address, select_route, EnvelopeRequest, EnvelopeResponse, Fulfill, PacketResponse,
-    Prepare, Reject, RejectCode,
+    amount_after_fee, condition_is_present, delivery_budget, forwarded_expiry,
+    fulfillment_matches_condition, is_expired, is_valid_ilp_address, select_route, EnvelopeRequest,
+    Fulfill, PacketResponse, Prepare, Price, Reject, RejectCode, Watermark,
+    FORWARDING_MESSAGE_WINDOW,
 };
-use connector_settlement::{ChannelId, ChannelStatus, Claim, SettlementBackend, SettlementError};
+use connector_settlement::{ChannelId, Claim, SettlementBackend, SettlementError};
 use connector_signer::giftwrap::{derive_fulfillment, open_request, seal_response};
-use connector_signer::{Address, Signer};
-use serde::{Deserialize, Serialize};
+use connector_signer::{Address, Ed25519Signer, Signer};
 use thiserror::Error;
 use tracing::Instrument;
+use url::Url;
 
 use crate::app_client::{AppClient, AppOutcome};
+use crate::attribution::{apply_payment_attribution, PaymentAttribution};
 use crate::claim::{
-    ChannelDomain, ClaimAckOutcome, ClaimBook, ClaimSignature, InvalidChannelId, WireClaim,
+    ChannelDomain, ClaimAckOutcome, ClaimBook, ClaimRejectReason, InvalidChannelId,
+    InvalidSolanaChannel, WireClaim,
 };
 use crate::clock::Clock;
 use crate::journal::{Journal, JournalError};
@@ -30,10 +33,16 @@ use crate::metrics::Metrics;
 use crate::operator_view::{
     ChannelView, ClaimView, LeasedRouteView, PeerRouteView, PeerView, RouteSource, RouteView,
 };
-use crate::outbound_client::{ClaimStateSource, EvmDomain, OutboundClientLedger};
-use crate::peer_route_store::{PeerRouteStore, PeerRouteStoreError, RuntimePeers};
-use crate::peer_transport::PeerTransport;
-use crate::route::{LeasedRoute, PeerRoute, PeerSaleBounds, PeerSaleRoute};
+use crate::outbound_client::{
+    ClaimStateChallengeSigner, ClaimStateSource, EvmDomain, OutboundClaimBinding,
+    OutboundClientLedger, OwnedHttpClaimState, SolanaDomain,
+};
+use crate::peer_route_store::{
+    PeerRouteStore, PeerRouteStoreError, RuntimePeerChannel, RuntimePeering, RuntimePeers,
+};
+use crate::peer_transport::{PeerRegistrar, PeerTransport};
+use crate::route::{LeasedRoute, PeerRoute};
+use crate::self_description::{SelfDescriptionSource, UnreachableSelfDescription};
 
 /// A reject this connector originates before a gift wrap's shared secret
 /// could be recovered -- no identity key configured, or the wrap itself
@@ -91,6 +100,26 @@ pub enum PeerRouteTableError {
     /// route with a peer id nothing recognizes.
     #[error("peer '{0}' is still referenced by a runtime route")]
     PeerInUse(String),
+    /// A runtime peering carried no payment-channel binding -- the runtime
+    /// twin of `connector-config`'s load-time `PeerChannelUnbound`, which
+    /// refuses a `[[peers]]` row with no `[[peer_channels]]` row for it.
+    ///
+    /// ADR 0058 requires this to be a refusal at *write* time rather than
+    /// a discovery at the first arriving frame: without a channel binding
+    /// a peering can never take the peer role at all (ADR 0060 -- role is
+    /// a verified claim on a channel this peering configures), so a row
+    /// written without one is a peering that silently only ever behaves
+    /// as a stranger.
+    #[error("peering '{0}' has no payment channel bound to it")]
+    PeerChannelUnbound(String),
+    /// A runtime route forwards to a peering this node cannot pay -- the
+    /// runtime twin of the `[[pay_channels]]` rule ADR 0042 made
+    /// load-refusing: *"a peering this node forwards to must name the
+    /// channel it pays from"*. A forward this node cannot cover is
+    /// refused rather than carried, so a route to such a peering would
+    /// only ever produce refused packets.
+    #[error("route '{prefix}' forwards to peering '{peer_id}', which has no channel to pay from")]
+    PeerHasNoPayChannel { prefix: String, peer_id: String },
     #[error("no such runtime peer '{0}'")]
     PeerNotFound(String),
     #[error("no such runtime route '{0}'")]
@@ -165,20 +194,17 @@ pub enum ProbeDenied {
 /// this connector's own injected [`Clock`] rather than wall time, so tests
 /// control it deterministically instead of racing real elapsed time.
 ///
-/// One instance per budget, never one shared across budgets: this
-/// connector holds two (probe traffic, issue #426 / ADR 0011's "a probe
-/// traverses the network and pays nothing ... so it is ... rate-limited
-/// per that identity"; and peer-sale purchase attempts, issue #887's
-/// "rate limit on purchase attempts per identity"), and a flood against
-/// one must not starve the other's.
+/// One instance per budget, never one shared across budgets, so a flood
+/// against one can never starve another's. This connector holds exactly
+/// one: probe traffic (issue #426 / ADR 0011's "a probe traverses the
+/// network and pays nothing ... so it is ... rate-limited per that
+/// identity").
 struct FixedWindowRateLimiter {
     max_per_window: u32,
     window: Duration,
     /// A plain [`Mutex`] rather than [`RwLock`] like `known_channels`
-    /// below -- the counting path mutates on every access, and the one
-    /// read-only path ([`Self::would_allow`], issue #887's pre-admission
-    /// peek) is far too infrequent to give a reader/writer lock any
-    /// advantage over mutual exclusion.
+    /// below -- the counting path mutates on every access, so a
+    /// reader/writer lock would buy nothing over mutual exclusion.
     windows: Mutex<HashMap<String, (DateTime<Utc>, u32)>>,
 }
 
@@ -213,21 +239,6 @@ impl FixedWindowRateLimiter {
             }
         }
     }
-
-    /// Whether an attempt from `identity` at `now` WOULD be allowed,
-    /// recording nothing (issue #887's pre-admission peek). Only
-    /// [`Self::allow`] ever counts, so a purchase refused before its claim
-    /// was admitted -- charged nothing -- also costs the payer none of
-    /// their window.
-    fn would_allow(&self, identity: &str, now: DateTime<Utc>) -> bool {
-        let windows = self.windows.lock().expect("rate limiter lock poisoned");
-        match windows.get(identity) {
-            Some((started_at, count)) if now < *started_at + self.window => {
-                *count < self.max_per_window
-            }
-            _ => true,
-        }
-    }
 }
 
 /// Which kind of routing-table entry matched a packet's destination, and
@@ -250,15 +261,6 @@ enum RouteTarget {
     /// bounded-size clone per packet, not the whole-collection copy ADR
     /// 0015 warns against.
     RuntimePeer(PeerRoute),
-    /// The single priced peer-sale route (issue #885), carrying its own
-    /// price and lease duration (issue #886) rather than an index: there
-    /// is at most one such route, so there is nothing to index into, and
-    /// carrying the facts here means no arm downstream has to reach back
-    /// into `Connector::peer_sale` and assert it is still `Some`.
-    PeerSale {
-        price: u64,
-        lease: Duration,
-    },
 }
 
 /// How permanent a matched routing-table entry is, least to most -- the
@@ -291,10 +293,10 @@ impl RouteTarget {
             RouteTarget::Leased(_) => RouteRank::Leased,
             RouteTarget::RuntimePeer(_) => RouteRank::RuntimePeer,
             RouteTarget::Peer(_) => RouteRank::Peer,
-            // A config-file entry, like an app route -- durable and
-            // priced, never shadowed by a lease or a runtime peer route
-            // at the same prefix length.
-            RouteTarget::App(_) | RouteTarget::PeerSale { .. } => RouteRank::App,
+            // A config-file entry -- durable and priced, never shadowed
+            // by a lease or a runtime peer route at the same prefix
+            // length.
+            RouteTarget::App(_) => RouteRank::App,
         }
     }
 }
@@ -327,12 +329,6 @@ enum ConfiguredTarget {
     /// file. See [`RouteTarget::RuntimePeer`] for why this is owned
     /// rather than indexed.
     RuntimePeer(PeerRoute),
-    /// The single priced peer-sale route (issue #885), carrying its price
-    /// and lease duration (issue #886). See [`RouteTarget::PeerSale`].
-    PeerSale {
-        price: u64,
-        lease: Duration,
-    },
 }
 
 impl ConfiguredTarget {
@@ -341,7 +337,6 @@ impl ConfiguredTarget {
             ConfiguredTarget::App(index) => RouteTarget::App(index),
             ConfiguredTarget::Peer(index) => RouteTarget::Peer(index),
             ConfiguredTarget::RuntimePeer(route) => RouteTarget::RuntimePeer(route),
-            ConfiguredTarget::PeerSale { price, lease } => RouteTarget::PeerSale { price, lease },
         }
     }
 
@@ -352,7 +347,7 @@ impl ConfiguredTarget {
     /// it.
     fn rank(&self) -> RouteRank {
         match self {
-            ConfiguredTarget::App(_) | ConfiguredTarget::PeerSale { .. } => RouteRank::App,
+            ConfiguredTarget::App(_) => RouteRank::App,
             ConfiguredTarget::Peer(_) => RouteRank::Peer,
             ConfiguredTarget::RuntimePeer(_) => RouteRank::RuntimePeer,
         }
@@ -374,51 +369,58 @@ pub enum ClientRouteKind {
     Forwarded,
 }
 
+/// The two facts about a matched terminated route that finishing a delivery
+/// needs: where to send the request, and what this connector charged for the
+/// packet that carries it.
+///
+/// Bundled rather than passed loose for the same reason `btp.rs`'s
+/// `MatchedRoute` is -- one more loose parameter puts
+/// [`Connector::deliver_opened_envelope`] over clippy's argument-count lint.
+/// It carries the **charge** and not the route's `Price`, deliberately: the
+/// schedule was evaluated once, against the payload length of the packet that
+/// arrived, before the wrap that payload lives in was opened (ADR 0065). Past
+/// that point there is no length left to evaluate against and nothing here
+/// can quietly re-derive a different figure.
+struct PricedTermination<'a> {
+    handler_url: &'a Url,
+    charge: u64,
+}
+
 /// What the client edge needs to know about the configured route a
 /// destination resolves to, from a single lookup (issue #701, ADR 0028):
 /// the price to greet and charge, the transport policy to enforce, and
 /// which kind of route answered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Copy` since issue #1210: `request` carries an owned JSON value when
+/// the route configured one, so a caller that needs this more than once
+/// borrows it (`.as_ref()`) rather than relying on an implicit copy.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClientRouteFacts {
-    pub price: u64,
+    pub price: Price,
     pub transport_policy: TransportPolicy,
     pub kind: ClientRouteKind,
+    /// What a client should send to use this route (issue #1210) -- the
+    /// matching route's `request` table, converted to JSON. `None` when the
+    /// route configured none.
+    pub request: Option<serde_json::Value>,
 }
 
-/// A peer-sale purchase's request body (issue #885), JSON inside the
-/// sealed `EnvelopeRequest` a terminated route already carries (ADR 0018):
-/// the terms of the peer-forwarding route the buyer wants inserted for the
-/// channel that pays for this packet. `prefix` is the buyer's own address,
-/// reachable through this connector once admitted; `fee` is what this
-/// connector retains per packet forwarded there; `price` is what this
-/// connector's client edge will charge for a packet to `prefix`;
-/// `next_hop_price` is what the buyer itself declares it needs delivered
-/// to relay a packet onward, checked against `price - fee` before
-/// anything is inserted.
-#[derive(Debug, Deserialize)]
-struct PeerSaleRequest {
-    prefix: String,
-    #[serde(default)]
-    fee: u64,
-    price: u64,
-    #[serde(default)]
-    next_hop_price: u64,
-}
-
-/// The sealed confirmation a successful peer-sale purchase answers with:
-/// the peer id (the channel key that paid) and the route row now in
-/// force, echoed back so the buyer can confirm what was actually inserted
-/// rather than only what it asked for. `expires_at` (issue #886) is the
-/// lease this purchase (or renewal) actually resulted in -- the buyer's
-/// own confirmation that a renewal extended rather than restarted, since
-/// it can compare this against what it expected.
-#[derive(Debug, Serialize)]
-struct PeerSaleResponse {
-    peer_id: String,
-    prefix: String,
-    fee: u64,
-    price: u64,
-    expires_at: DateTime<Utc>,
+/// One priced prefix, as [`Connector::client_route_prices`] enumerates them
+/// for the node self-description (ADR 0050).
+///
+/// Prefix, price and `request` only. What else a route has -- where it
+/// terminates, which peer it forwards to, what that peering costs this node
+/// -- is either an app fact or an operator-private one, and neither belongs
+/// in a document a stranger reads.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClientRoutePrice {
+    pub prefix: String,
+    pub price: Price,
+    /// What a client should send to use this route (issue #1210), read back
+    /// through the same [`Connector::client_route`] lookup `price` is, so a
+    /// prefix that appears in more than one source is quoted with the
+    /// request table a real request to it would resolve.
+    pub request: Option<serde_json::Value>,
 }
 
 /// The connector's packet plane: a fixed set of terminated routes and peer
@@ -433,26 +435,6 @@ struct PeerSaleResponse {
 pub struct Connector {
     routes: Vec<StaticRoute>,
     peer_routes: Vec<PeerRoute>,
-    /// The single priced route that, when paid, buys peering with this
-    /// node (issue #885). `None` on a node that sells no peering, in
-    /// which case its would-be prefix simply matches nothing here.
-    peer_sale: Option<PeerSaleRoute>,
-    /// Issue #887 (C4): abuse bounds on a purchased peering -- row caps,
-    /// the purchased-prefix length cap, and the purchase-attempt rate
-    /// limit `peer_sale_rate_limiter` below is sized from. Always
-    /// populated ([`PeerSaleBounds::default`] until
-    /// [`Self::with_peer_sale_bounds`] overrides it), the same "a bound
-    /// exists even if nobody configured one" shape `probe_rate_limiter`
-    /// below already takes; consulted only when `peer_sale` is `Some` and
-    /// a purchase is actually attempted.
-    peer_sale_bounds: PeerSaleBounds,
-    /// Issue #887 (C4): the purchase-attempt rate limit half of
-    /// `peer_sale_bounds` -- kept apart because it needs mutable
-    /// per-identity state, unlike the plain data the rest of the bounds
-    /// are. Rebuilt by [`Self::with_peer_sale_bounds`] whenever the bounds
-    /// it is sized from change, so the two can never disagree about the
-    /// limit currently in force.
-    peer_sale_rate_limiter: FixedWindowRateLimiter,
     /// Routes pushed at runtime over the operator surface with a time
     /// limit (ADR 0006, issue #427), keyed by prefix so pushing the same
     /// prefix again renews it rather than adding a duplicate entry. Lives
@@ -493,12 +475,11 @@ pub struct Connector {
     /// Claims owed to and received from every peering relation (ADR 0004,
     /// ADR 0005, issue #423): signing an outbound claim on fulfilment,
     /// verifying and watermarking an inbound one. Empty and signer-less
-    /// until configured via [`Connector::with_signer`],
-    /// [`Connector::with_peer_claim_channel`] and
+    /// until configured via [`Connector::with_signer`] and
     /// [`Connector::with_channel_verification_key`] -- a node with none of
     /// those simply never emits or accepts a claim, matching how
     /// `settlement` degrades to `None`.
-    claims: ClaimBook,
+    pub(crate) claims: ClaimBook,
     /// This connector's own identity key (ADR 0018, ADR 0022), used to open
     /// a gift wrap sealed to it (issue #524) -- distinct from `claims`'s
     /// signer, which signs outbound claims to a peer rather than performing
@@ -521,7 +502,7 @@ pub struct Connector {
     /// client edge (issue #548), and therefore recognizes as belonging to a
     /// sender that holds a channel with it -- the other half of
     /// [`Connector::handle_probe`]'s first gate, beside `claims`'s
-    /// configured peer-wire verification keys. Without this the gate is
+    /// configured peer-role verification keys. Without this the gate is
     /// unsatisfiable on a deployed node: nothing in a node's configuration
     /// supplies a client's channel id, and a gate no node can pass is not a
     /// gate (ADR 0011's "accepted only from a sender that already holds an
@@ -553,7 +534,15 @@ pub struct Connector {
     /// greeted forward is relayed as the refusal it is rather than covered
     /// -- the same "degrade to just empty" shape `settlements` and
     /// `leased_routes` take.
-    outbound_client_hops: HashMap<String, OutboundClientHop>,
+    ///
+    /// Held as an atomically-swapped immutable snapshot, like
+    /// `runtime_peers` (issue #1217): `POST /peers` (ADR 0058) registers a
+    /// hop live, from a handler running concurrently with the packet path,
+    /// so a plain `HashMap` behind `&self` was never soundly writable here
+    /// -- only construction-time `with_outbound_client_hop` ever wrote it
+    /// before this, which is exactly why a runtime peering could accept but
+    /// never pay.
+    outbound_client_hops: ArcSwap<HashMap<String, OutboundClientHop>>,
     /// Peer ids this node's config file names (`[[peers]]`), threaded in
     /// via [`Connector::with_config_peer_ids`) purely as a reservation
     /// list (issue #884): the routing table IS the relationship set
@@ -564,29 +553,22 @@ pub struct Connector {
     /// stored peer identity before #884 (see [`PeerView`]'s history) and
     /// still stores nothing about a config peer beyond its id here.
     config_peer_ids: HashSet<String>,
-    /// Peer ids added at runtime over the operator surface (issue #884),
-    /// each paired with its lease expiry -- `None` for one added over the
-    /// plain `POST /peers` surface (permanent, never subject to a lease),
-    /// `Some` for one a peer-sale purchase inserted
-    /// (`Connector::upsert_runtime_peer_purchase`, issue #886), demoted
-    /// back to client role once it lapses. Read-mostly, like
-    /// `leased_routes` (ADR 0015) -- an `ArcSwap` so `handle_prepare`'s
-    /// hot path (which consults this only indirectly, through
-    /// `runtime_peer_routes`' referential integrity already having been
-    /// checked at write time) never locks. Unlike `leased_routes`, this
-    /// is durable: every write is persisted to `runtime_store` before
+    /// Peer ids added at runtime over the operator surface (issue #884).
+    /// Read-mostly, like `leased_routes` (ADR 0015) -- an `ArcSwap` so
+    /// `handle_prepare`'s hot path (which consults this only indirectly,
+    /// through `runtime_peer_routes`' referential integrity already having
+    /// been checked at write time) never locks. Unlike `leased_routes`,
+    /// this is durable: every write is persisted to `runtime_store` before
     /// being published here, so it survives a restart -- the whole point
     /// of #884 versus #427's lease mechanism. A config-file peer id
-    /// (`config_peer_ids`) never appears here at all, so it can never
-    /// carry a lease either.
+    /// (`config_peer_ids`) never appears here at all: config always wins,
+    /// by refusing the runtime write (ADR 0034).
     runtime_peers: ArcSwap<RuntimePeers>,
     /// Peer-forwarding routes added at runtime over the operator surface
     /// (issue #884), keyed by prefix like `leased_routes` -- but durable,
-    /// and stored as a plain [`PeerRoute`] with no expiry of its own: a
-    /// route's lease (if any) lives on its `peer_id`'s entry in
-    /// `runtime_peers` rather than on the route itself, since a purchase
-    /// always inserts exactly one peer for its one route and demotion acts
-    /// on peer identity, not on the route in isolation. Participates in
+    /// and stored as a plain [`PeerRoute`] with no expiry of its own: an
+    /// operator's row lapses when the operator removes it, never on a
+    /// clock. Participates in
     /// `select_configured_route`/`client_route` exactly like a
     /// config-file peer route: matching is still longest-prefix-first
     /// with the same priority tie-break (issue #884's acceptance
@@ -601,6 +583,66 @@ pub struct Connector {
     /// closure would perform a disk write -- rcu is only safe for a pure
     /// in-memory transform, which persisting to disk is not.
     runtime_table_lock: Mutex<()>,
+    /// ADR 0042's **cap**, keyed by peer id: the largest amount this
+    /// connector will forward to that peer in a single packet, from its
+    /// `[[peers]]` row's `max_packet_amount`.
+    ///
+    /// A peer with no entry here is capped at
+    /// [`connector_config::DEFAULT_MAX_PACKET_AMOUNT`] rather than
+    /// uncapped -- the same "a bound exists even if nobody configured one"
+    /// shape `probe_rate_limiter` already takes, and
+    /// the reason this is a plain map with a defaulted lookup
+    /// ([`Self::packet_cap_for`]) rather than an `Option`. That covers a
+    /// peer added at runtime over the operator surface (issue #884), which
+    /// has no config row to read a cap off at all and is exactly the
+    /// counterparty ADR 0042 says starts at the floor.
+    ///
+    /// **Per packet, never an accumulation.** Nothing here counts what a
+    /// peer has already been sent -- ADR 0033 deleted the exposure ceiling
+    /// and this is not it (`CONTEXT.md` keeps "ceiling" and "cap" apart for
+    /// this reason). The cap is checked against one packet's own forwarded
+    /// amount and forgotten.
+    peer_packet_caps: HashMap<String, u64>,
+    /// ADR 0010's flat per-packet **fee**, keyed by peer id: what this
+    /// connector retains for carrying one packet to that peer, from its
+    /// `[[peers]]` row's `fee`.
+    ///
+    /// Keyed by peering rather than carried on the route because this hop
+    /// does the same work whichever prefix the packet was addressed to (ADR
+    /// 0061) -- `[[routes]] fee` is a refuse-to-start tombstone now. A peer
+    /// with no entry here charges nothing, which is what an operator who
+    /// wrote no fee meant; a peer added at runtime over the operator
+    /// surface carries its own fee on its row instead
+    /// (`runtime_peers`), and [`Self::fee_for`] reads whichever holds it.
+    ///
+    /// Flat and per packet, never a share of the amount: it is realized on
+    /// the wire as the difference between the amount that arrived and the
+    /// amount forwarded, and added to the accumulated cost of a reject this
+    /// peer itself decided on (ADR 0011).
+    peer_fees: HashMap<String, u64>,
+    /// Reads another node's self-description so a peering can be
+    /// established from a URL (ADR 0058). Defaults to
+    /// [`UnreachableSelfDescription`]: a node whose builder never gave it
+    /// one refuses `POST /peers` by name rather than hanging or panicking,
+    /// the same "degrade to a named refusal" every other unconfigured port
+    /// on this connector takes.
+    ///
+    /// **Never read on the packet path.** The only caller is
+    /// [`Connector::establish_peering`], which is reached from one
+    /// authenticated operator write.
+    self_description: Arc<dyn SelfDescriptionSource>,
+    /// Adds and removes a dial carriage while this process serves (ADR
+    /// 0058). `None` on a node whose transport cannot be changed at
+    /// runtime -- every in-process test harness, and any deployment whose
+    /// peerings all come from the config file -- and then a peering
+    /// established at runtime is durable and unreachable until the next
+    /// boot wires it.
+    peer_registrar: Option<Arc<dyn PeerRegistrar>>,
+    /// The node's own `peer_allow_plaintext_endpoints` (issue #678, gap 3),
+    /// carried here because a peering established at runtime decides its
+    /// carriage by the same rule a config-file peering does and must reach
+    /// the same answer.
+    peer_allow_plaintext: bool,
     /// Where the runtime peer/route table is written durably (issue #884).
     /// `None` on a node with no `state_dir` configured -- the table is
     /// still mutable, exactly like `leased_routes` always is, it simply
@@ -609,72 +651,48 @@ pub struct Connector {
     runtime_store: Option<PeerRouteStore>,
 }
 
+/// What a client-role hop's covering claims are signed under, by chain
+/// (issue #1146).
+///
+/// Operator config either way, the same way [`ClaimBook::set_channel_domain`]
+/// and [`ClaimBook::set_solana_channel`] are for the peer role on the very
+/// same channel: a node that opened this channel already knows which
+/// `TokenNetwork` -- or which settlement program -- it was deployed under,
+/// so this is a configured input, not a guess.
+#[derive(Clone, Copy)]
+enum OutboundClientDomain {
+    /// The channel's EIP-712 domain (issue #881). Used to COVER a forward
+    /// proactively, before any greeting exists to read a domain off of;
+    /// [`Connector::cover_greeted_packet`]'s reactive retry still reads the
+    /// domain from the peer's own greeting, deliberately.
+    Evm(EvmDomain),
+    /// The settlement program this channel lives under (ADR 0053), which is
+    /// `[settlement.solana] program_id` and nothing else -- since issue
+    /// #1128 there is exactly one program a node can redeem a Solana claim
+    /// through, so there is exactly one a channel can be signed under. That
+    /// is also why the greeting is not consulted on the retry arm: unlike an
+    /// EVM `TokenNetwork`, there is no second answer a receiver could give.
+    Solana(SolanaDomain),
+}
+
 /// One next hop this connector can pay as a client (issue #875).
+#[derive(Clone)]
 struct OutboundClientHop {
     /// The channel this node's settlement address holds with the hop, as
-    /// its on-chain `bytes32`...
+    /// its raw on-chain 32 bytes -- an EVM `bytes32` channel id or a Solana
+    /// channel account, whichever this hop's `domain` says...
     channel: [u8; 32],
-    /// ...and as the `0x`-prefixed lower-case hex a claim names it by on
-    /// the wire, kept beside it so the packet path never re-renders it.
+    /// ...and as the spelling a claim names it by on the wire -- `0x`
+    /// lower-case hex for EVM, base58 for Solana -- kept beside it so the
+    /// packet path never re-renders it.
     channel_id: String,
     /// The hop, asked where this node's claims on that channel stand. The
     /// RECEIVER is the authority on its own watermark (see
     /// `crate::outbound_client`'s header); nothing local substitutes.
     claim_state: Arc<dyn ClaimStateSource>,
-    /// This channel's EIP-712 signing domain (issue #881): operator
-    /// config, the same way [`ClaimBook::set_channel_domain`] is for the
-    /// peer role on the very same channel -- a node that opened this
-    /// channel already knows which `TokenNetwork` it was deployed under,
-    /// so this is a configured input, not a guess. Used only to COVER a
-    /// forward proactively, before any greeting exists to read a domain
-    /// off of; [`Connector::cover_greeted_packet`]'s reactive retry still
-    /// reads the domain from the peer's own greeting, deliberately.
-    domain: EvmDomain,
-}
-
-/// What [`Connector::cover_forward`] found when asked to cover a forward to
-/// a peer from the outbound client ledger (issue #881).
-enum CoverOutcome {
-    /// No [`Connector::with_outbound_client_hop`] is configured for this
-    /// peer at all -- the packet proceeds under the peer ledger's own
-    /// postpay convention (ADR 0004), entirely unaffected by #881.
-    NotConfigured,
-    /// A claim covering the packet's own forwarded value, ready to ride
-    /// the outgoing PREPARE.
-    Covered(WireClaim),
-    /// A hop IS configured, but no claim could be produced -- `reason`
-    /// names why. The caller must fail the packet rather than emit it
-    /// uncovered: a hop with covering turned on is either covered or
-    /// refused, never silently downgraded.
-    Failed(String),
-}
-
-/// How much of a packet [`Connector::open_peer_sale_purchase`] could read,
-/// for the two pre-admission peer-sale probes (issue #887).
-enum PeerSalePeek {
-    /// Nothing this probe may judge: `prepare` is not a packet this node's
-    /// peer-sale route will terminate (no peer-sale route, an outranking
-    /// lease), or it is one this node cannot read (no identity key, a gift
-    /// wrap or envelope that does not open). Every one of those is
-    /// answered by the delivery path before any claim is spent, so a probe
-    /// declines to guess at them.
-    NotJudgeable,
-    /// A peer-sale packet whose body does not parse as a purchase.
-    Malformed,
-    /// The parsed purchase.
-    Purchase(PeerSaleRequest),
-}
-
-/// Whether a peer-sale bound check may spend the payer's rate window
-/// (issue #887) -- named rather than a bare `bool`, since which side of
-/// claim admission the caller is on is exactly what decides it.
-#[derive(Clone, Copy)]
-enum RateWindow {
-    /// The judged, charged side ([`Connector::settle_peer_sale_purchase`]):
-    /// this attempt counts against the window.
-    Spend,
-    /// The pre-admission probe: read the window, spend none of it.
-    Peek,
+    /// What this hop's covering claims are bound to, and which chain's arm
+    /// of the outbound client ledger signs them.
+    domain: OutboundClientDomain,
 }
 
 /// [`Connector`]'s default probe rate limit absent
@@ -682,13 +700,6 @@ enum RateWindow {
 /// figure (issue #426): probing costs a sender nothing, so the safe default
 /// is a small allowance rather than none at all.
 const DEFAULT_PROBE_LIMIT: u32 = 60;
-
-/// What a refusal log names as the payer when the refusal was reached
-/// without a claim ever having been admitted (issue #887): the shape
-/// refusals the client edge predicts pre-admission arrive here with no
-/// channel bound, and "no payer was charged for this" is the honest thing
-/// for the log to say.
-const UNADMITTED_PAYER: &str = "<unadmitted>";
 
 /// [`Connector`]'s default probe rate limit window, paired with
 /// [`DEFAULT_PROBE_LIMIT`].
@@ -701,15 +712,6 @@ fn default_probe_window() -> Duration {
     Duration::seconds(60)
 }
 
-/// Whether `peer_id`'s peer-sale lease has lapsed as of `now` (issue
-/// #886). `false` for a peer with no lease at all -- one added over the
-/// plain `POST /peers` surface -- and for one whose lease is still
-/// running, so the one thing this is `true` for is the row a demotion is
-/// owed to.
-fn peer_lease_has_lapsed(peers: &RuntimePeers, peer_id: &str, now: DateTime<Utc>) -> bool {
-    matches!(peers.get(peer_id), Some(Some(expires_at)) if is_expired(*expires_at, now))
-}
-
 impl Connector {
     pub fn new(
         routes: Vec<StaticRoute>,
@@ -718,16 +720,9 @@ impl Connector {
         peer_transport: Arc<dyn PeerTransport>,
         clock: Arc<dyn Clock>,
     ) -> Connector {
-        let peer_sale_bounds = PeerSaleBounds::default();
         Connector {
             routes,
             peer_routes,
-            peer_sale: None,
-            peer_sale_bounds,
-            peer_sale_rate_limiter: FixedWindowRateLimiter::new(
-                peer_sale_bounds.purchase_rate_limit(),
-                peer_sale_bounds.purchase_rate_window(),
-            ),
             leased_routes: ArcSwap::from_pointee(HashMap::new()),
             app_client,
             peer_transport,
@@ -743,12 +738,358 @@ impl Connector {
             ),
             recognized_channels: RwLock::new(HashSet::new()),
             outbound_client: None,
-            outbound_client_hops: HashMap::new(),
+            outbound_client_hops: ArcSwap::from_pointee(HashMap::new()),
             config_peer_ids: HashSet::new(),
             runtime_peers: ArcSwap::from_pointee(RuntimePeers::new()),
             runtime_peer_routes: ArcSwap::from_pointee(HashMap::new()),
             runtime_table_lock: Mutex::new(()),
             runtime_store: None,
+            self_description: Arc::new(UnreachableSelfDescription),
+            peer_registrar: None,
+            peer_allow_plaintext: false,
+            peer_packet_caps: HashMap::new(),
+            peer_fees: HashMap::new(),
+        }
+    }
+
+    /// Give this node the port that reads another node's self-description,
+    /// so `POST /peers` can establish a peering from a URL (ADR 0058).
+    /// Without one every such write is refused by name.
+    pub fn with_self_description_source(mut self, source: Arc<dyn SelfDescriptionSource>) -> Self {
+        self.self_description = source;
+        self
+    }
+
+    /// Give this node the port that adds and removes a dial carriage while
+    /// it serves (ADR 0058), so a peering established at runtime is
+    /// reachable without a restart.
+    pub fn with_peer_registrar(mut self, registrar: Arc<dyn PeerRegistrar>) -> Self {
+        self.peer_registrar = Some(registrar);
+        self
+    }
+
+    /// Tell this node whether plaintext peer endpoints are permitted
+    /// (issue #678, gap 3) -- the same node-wide opt-in `Config` holds, so
+    /// a peering established at runtime chooses its carriage by exactly the
+    /// rule a config-file peering does.
+    pub fn with_peer_allow_plaintext_endpoints(mut self, allow: bool) -> Self {
+        self.peer_allow_plaintext = allow;
+        self
+    }
+
+    pub(crate) fn self_description_source(&self) -> &Arc<dyn SelfDescriptionSource> {
+        &self.self_description
+    }
+
+    pub(crate) fn peer_allows_plaintext(&self) -> bool {
+        self.peer_allow_plaintext
+    }
+
+    /// Refuse a peering write that could never land, **before** any
+    /// outbound request is made: an empty id, or one the config file owns
+    /// (ADR 0034 -- config wins by refusing the write). A stranger's host
+    /// is not worth dialling on behalf of a write this node has already
+    /// decided against.
+    pub(crate) fn refuse_unlandable_peering(&self, id: &str) -> Result<(), PeerRouteTableError> {
+        if id.trim().is_empty() {
+            return Err(PeerRouteTableError::InvalidPeerId);
+        }
+        if self.config_peer_ids.contains(id) {
+            return Err(PeerRouteTableError::OwnedByConfig(id.to_string()));
+        }
+        Ok(())
+    }
+
+    /// The settlement backend for `chain`, for the peering path.
+    pub(crate) fn settlement_on_chain(
+        &self,
+        chain: SettlementChain,
+    ) -> Result<Arc<dyn SettlementBackend>, ChannelOperationError> {
+        self.settlement_on(chain).cloned()
+    }
+
+    /// Narrow a fetched self-description's published settlements to the one
+    /// chain this connector will derive a channel on.
+    pub(crate) fn shared_settlement(
+        &self,
+        document: &connector_domain::NodeSelfDescription,
+        wanted: Option<SettlementChain>,
+        url: &url::Url,
+    ) -> Result<crate::peering::SharedSettlement, crate::peering::EstablishPeeringError> {
+        crate::peering::shared_settlement_of(
+            document,
+            |chain| self.settlement_on(chain).is_ok(),
+            wanted,
+            url,
+        )
+    }
+
+    /// Register a runtime peering's channel binding with this node's claim
+    /// book, so a claim on it is judged from the moment the peering is
+    /// established rather than from the next boot.
+    ///
+    /// **PEER role only** -- a counterparty key and a signing domain for
+    /// what arrives on this channel. It also names this channel as the one
+    /// `ClaimBook`'s own (now inbound-only, issue #1145) `outbound_channel`
+    /// bookkeeping tracks for `peer_id`, but that is not the CLIENT role
+    /// ADR 0042 needs to pay a forward: this call alone leaves a runtime
+    /// peering able to accept a claim and unable to sign one. See
+    /// [`Connector::register_outbound_client_hop`] for the client-role half
+    /// (issue #1217) -- `establish_peering` and boot rehydration both call
+    /// this and that together, the same way `connector_config::pay_channel`
+    /// documents the deployed shape as both roles on one channel.
+    ///
+    /// A binding whose identifiers do not parse is skipped rather than
+    /// coerced: an unparseable channel id names no channel, and a book
+    /// entry filed under a mangled key would accept claims for a channel
+    /// that does not exist.
+    pub(crate) fn bind_runtime_peer_channel(&self, peer_id: &str, binding: &RuntimePeerChannel) {
+        match binding {
+            RuntimePeerChannel::Evm {
+                channel_id,
+                counterparty_key,
+                chain_id,
+                token_network,
+            } => {
+                let (Some(counterparty), Some(token_network_address)) = (
+                    crate::peering::parse_evm_address(counterparty_key),
+                    crate::peering::parse_evm_address(token_network),
+                ) else {
+                    tracing::warn!(
+                        peer_id,
+                        "peering published an EVM address this node cannot read; \
+                         its channel is not bound"
+                    );
+                    return;
+                };
+                if let Err(error) = self.claims.set_channel_domain(
+                    channel_id,
+                    ChannelDomain {
+                        chain_id: *chain_id,
+                        token_network_address,
+                    },
+                ) {
+                    tracing::warn!(peer_id, %error, "peering's channel id is not bindable");
+                    return;
+                }
+                self.claims.set_verification_key(channel_id, counterparty);
+                self.claims.set_outbound_channel(peer_id, channel_id);
+            }
+            RuntimePeerChannel::Solana {
+                channel_account,
+                counterparty_key,
+                program_id,
+            } => {
+                if let Err(error) =
+                    self.claims
+                        .set_solana_channel(channel_account, counterparty_key, program_id)
+                {
+                    tracing::warn!(peer_id, %error, "peering's Solana channel is not bindable");
+                    return;
+                }
+                self.claims.set_outbound_channel(peer_id, channel_account);
+            }
+        }
+    }
+
+    /// Register a runtime peering's channel binding as an outbound CLIENT
+    /// hop (issue #1217, ADR 0042/0058): the missing counterpart of
+    /// [`Connector::bind_runtime_peer_channel`] that lets
+    /// [`Connector::cover_forward`] actually pay `peer_id` for a forward,
+    /// live from the moment the peering is established rather than only
+    /// after the next boot rewires `[[pay_channels]]` from a config file.
+    ///
+    /// `client_edge_url` is [`RuntimePeering::client_edge_url`] --
+    /// `POST /ilp/claim-state` is always asked over plain HTTP (issue
+    /// #1146's `OwnedHttpClaimState`), whichever carriage the packet
+    /// itself rides.
+    ///
+    /// Skipped -- with the reason logged, never silently -- for exactly the
+    /// failure modes `bind_runtime_peer_channel` already tolerates (an
+    /// address or channel id this node cannot read), plus one of its own:
+    /// no settlement signer configured for this binding's chain. A node
+    /// with no `[settlement.<chain>]` table cannot pay a next hop on that
+    /// chain as a client, the same way it cannot open a channel on it
+    /// either -- the peering is left accept-only on that chain rather than
+    /// refused outright, since the peer role this call does not touch may
+    /// still be perfectly usable.
+    pub(crate) fn register_outbound_client_hop(
+        &self,
+        peer_id: &str,
+        binding: &RuntimePeerChannel,
+        client_edge_url: &str,
+    ) {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(
+                connector_config::DEFAULT_PEER_TIMEOUT_MS,
+            ))
+            .build()
+            .expect("a reqwest client with only a timeout set always builds");
+        let hop = match binding {
+            RuntimePeerChannel::Evm {
+                channel_id,
+                chain_id,
+                token_network,
+                ..
+            } => {
+                let Some(signer) = self.claims.signer().cloned() else {
+                    tracing::warn!(
+                        peer_id,
+                        "no EVM settlement signer configured; cannot pay this peer as a client"
+                    );
+                    return;
+                };
+                let Some(token_network) = crate::peering::parse_evm_address(token_network) else {
+                    tracing::warn!(
+                        peer_id,
+                        "peering's token network is not an address this node can read; its \
+                         outbound client hop is not registered"
+                    );
+                    return;
+                };
+                let Ok(channel) = crate::claim::parse_channel_id(channel_id) else {
+                    tracing::warn!(
+                        peer_id,
+                        "peering's channel id is not bindable; its outbound client hop is not \
+                         registered"
+                    );
+                    return;
+                };
+                OutboundClientHop {
+                    channel,
+                    channel_id: channel_id.clone(),
+                    claim_state: Arc::new(OwnedHttpClaimState::new(
+                        client,
+                        client_edge_url,
+                        ClaimStateChallengeSigner::Evm(signer),
+                    )),
+                    domain: OutboundClientDomain::Evm(EvmDomain {
+                        chain_id: *chain_id,
+                        token_network,
+                    }),
+                }
+            }
+            RuntimePeerChannel::Solana {
+                channel_account,
+                program_id,
+                ..
+            } => {
+                let Some(signer) = self.claims.solana_signer().cloned() else {
+                    tracing::warn!(
+                        peer_id,
+                        "no Solana settlement signer configured; cannot pay this peer as a client"
+                    );
+                    return;
+                };
+                let Ok(channel) = crate::claim::parse_base58_32("channel account", channel_account)
+                else {
+                    tracing::warn!(
+                        peer_id,
+                        "peering's Solana channel account is not bindable; its outbound client \
+                         hop is not registered"
+                    );
+                    return;
+                };
+                let Ok(program_id) = crate::claim::parse_base58_32("program id", program_id) else {
+                    tracing::warn!(
+                        peer_id,
+                        "peering's Solana program id is not bindable; its outbound client hop \
+                         is not registered"
+                    );
+                    return;
+                };
+                OutboundClientHop {
+                    channel,
+                    channel_id: channel_account.clone(),
+                    claim_state: Arc::new(OwnedHttpClaimState::new(
+                        client,
+                        client_edge_url,
+                        ClaimStateChallengeSigner::Solana(signer),
+                    )),
+                    domain: OutboundClientDomain::Solana(SolanaDomain { program_id }),
+                }
+            }
+        };
+        self.outbound_client_hops.rcu(|current| {
+            let mut next = (**current).clone();
+            next.insert(peer_id.to_string(), hop.clone());
+            next
+        });
+    }
+
+    /// Make a runtime peering dialable, if this node holds a registrar.
+    pub(crate) fn register_runtime_peering(&self, peer_id: &str, peering: &RuntimePeering) {
+        if let Some(registrar) = &self.peer_registrar {
+            registrar.register(peer_id, peering);
+        }
+    }
+
+    /// Give each named peering the cap its `[[peers]]` row configures (ADR
+    /// 0042): the largest amount this connector will forward to it in one
+    /// packet. Every peer left out of `caps` -- including one added at
+    /// runtime over the operator surface (issue #884) -- keeps
+    /// [`connector_config::DEFAULT_MAX_PACKET_AMOUNT`], so this only ever
+    /// overrides a bound that already exists; there is no call that removes
+    /// one.
+    pub fn with_peer_packet_caps(mut self, caps: impl IntoIterator<Item = (String, u64)>) -> Self {
+        self.peer_packet_caps = caps.into_iter().collect();
+        self
+    }
+
+    /// The most this connector will forward to `peer_id` in one packet --
+    /// its configured cap, or [`DEFAULT_MAX_PACKET_AMOUNT`] for a peering
+    /// that states none.
+    ///
+    /// Two sources, never overlapping, read in the same order and for the
+    /// same reason [`Self::fee_for`] reads them: the config file's
+    /// `[[peers]]` rows (`peer_packet_caps`) and the runtime peer table,
+    /// which can never hold an id the config file owns (ADR 0034). A
+    /// runtime peering states its cap on its own row, written there by
+    /// `POST /peers` (ADR 0058) -- a peering established at runtime is
+    /// exactly the counterparty ADR 0049 says an operator must be able to
+    /// set a cap for, and the row it lands on is this one.
+    ///
+    /// A stated cap of zero is "this row states none", not "forward
+    /// nothing": there is no call anywhere that removes a bound, and a
+    /// peering that could be silently capped at zero would go dark on a
+    /// default rather than on a decision.
+    fn packet_cap_for(&self, peer_id: &str) -> u64 {
+        if let Some(cap) = self.peer_packet_caps.get(peer_id) {
+            return *cap;
+        }
+        match self.runtime_peers_snapshot().get(peer_id) {
+            Some(peering) => crate::peering::stated_cap(peering.max_packet_amount),
+            None => DEFAULT_MAX_PACKET_AMOUNT,
+        }
+    }
+
+    /// Give each named peering the flat per-packet fee its `[[peers]]` row
+    /// configures (ADR 0010, ADR 0061): what this connector retains for
+    /// carrying one packet to it. A peering left out of `fees` charges
+    /// nothing -- and one added at runtime carries its fee on its own row
+    /// instead, which [`Self::fee_for`] reads.
+    pub fn with_peer_fees(mut self, fees: impl IntoIterator<Item = (String, u64)>) -> Self {
+        self.peer_fees = fees.into_iter().collect();
+        self
+    }
+
+    /// What this connector retains for carrying one packet to `peer_id` --
+    /// the peering's own flat fee (ADR 0010, ADR 0061), zero for a peering
+    /// that configured none.
+    ///
+    /// Two sources, never overlapping: the config file's `[[peers]]` rows
+    /// (`peer_fees`) and the runtime peer table (`runtime_peers`), which
+    /// can never hold an id the config file owns (ADR 0034). The runtime
+    /// snapshot is loaded only on a config miss, so a config peering -- the
+    /// only kind either devnet box has -- costs the packet path one hash
+    /// lookup and no `ArcSwap` load at all.
+    pub(crate) fn fee_for(&self, peer_id: &str) -> u64 {
+        match self.peer_fees.get(peer_id) {
+            Some(fee) => *fee,
+            None => self
+                .runtime_peers_snapshot()
+                .get(peer_id)
+                .map_or(0, |peering| peering.fee),
         }
     }
 
@@ -762,45 +1103,42 @@ impl Connector {
         self
     }
 
-    /// Configure the single priced route that buys peering with this node
-    /// (issue #885, `[peer_sale]`), leased for `lease` and renewable by
-    /// paying again before it lapses (issue #886). A node not given one
-    /// sells no peering.
-    pub fn with_peer_sale(
-        mut self,
-        prefix: impl Into<String>,
-        price: u64,
-        lease: Duration,
-    ) -> Self {
-        self.peer_sale = Some(PeerSaleRoute::new(prefix, price, lease));
-        self
-    }
-
-    /// Override issue #887's abuse bounds on purchased peering from
-    /// `[peer_sale]`'s own fields, exactly like [`Self::with_peer_sale`]
-    /// overrides price and lease from the same section. A node that never
-    /// calls this still has bounds -- [`PeerSaleBounds::default`] applies
-    /// as soon as [`Self::new`] returns.
-    pub fn with_peer_sale_bounds(mut self, bounds: PeerSaleBounds) -> Self {
-        self.peer_sale_rate_limiter = FixedWindowRateLimiter::new(
-            bounds.purchase_rate_limit(),
-            bounds.purchase_rate_window(),
-        );
-        self.peer_sale_bounds = bounds;
-        self
-    }
-
     /// Replay a durable runtime peer/route table (issue #884) into this
     /// connector and arm it to persist future writes back to the same
     /// store -- the two must always be given together, since a table
     /// replayed from `peers`/`routes` but not armed to persist further
     /// writes would silently stop being durable after the first mutation.
+    /// Every replayed peering is also **re-armed**: its channel binding
+    /// goes back into the claim book and its carriage back into the
+    /// registrar, exactly as establishing it did. A durable row that came
+    /// back as a name would be the hollow row ADR 0058 exists to remove,
+    /// one restart later. Call this after
+    /// [`Connector::with_peer_registrar`], or the carriages replay
+    /// nowhere.
+    ///
+    /// Also re-registers each binding's outbound CLIENT hop (issue #1217),
+    /// so a restart does not turn a payable runtime peering back into an
+    /// accept-only one -- the same "everything establishing it did" claim
+    /// this doc already makes, extended to the role `establish_peering`
+    /// only started arming here. A row with channels but no
+    /// `client_edge_url` -- the shape every row written before issue #1217
+    /// has -- replays exactly as it always did: peer role bound, client
+    /// role absent, accept-only until re-peered.
     pub fn with_runtime_peer_route_store(
         mut self,
         store: PeerRouteStore,
         peers: RuntimePeers,
         routes: HashMap<String, PeerRoute>,
     ) -> Self {
+        for (id, peering) in &peers {
+            for binding in &peering.channels {
+                self.bind_runtime_peer_channel(id, binding);
+                if let Some(client_edge_url) = &peering.client_edge_url {
+                    self.register_outbound_client_hop(id, binding, client_edge_url);
+                }
+            }
+            self.register_runtime_peering(id, peering);
+        }
         self.runtime_peers = ArcSwap::from_pointee(peers);
         self.runtime_peer_routes = ArcSwap::from_pointee(routes);
         self.runtime_store = Some(store);
@@ -832,10 +1170,11 @@ impl Connector {
     /// it** (issue #875): the channel it holds with that hop, and the hop
     /// itself as the source of that channel's watermark.
     ///
-    /// Deliberately separate from [`Connector::with_peer_claim_channel`]
-    /// even where both name the same channel id. That one configures the
-    /// PEER role -- claims this node signs against its own `ClaimBook`
-    /// projection once a forward has fulfilled. This one configures the
+    /// Deliberately separate from the PEER-role binding a `[[peer_channels]]`
+    /// row makes, even where both name the same channel id. That one is now
+    /// INBOUND ONLY: its outbound half signed a claim against this node's own
+    /// `ClaimBook` projection once a forward had fulfilled, which was ADR
+    /// 0004's postpay model and was deleted in issue #1145. This one configures the
     /// CLIENT role, whose watermark authority is the receiver, asked over
     /// `claim_state` every time. The two books must never merge (see
     /// `crate::outbound_client`'s header), and configuring them apart is
@@ -854,7 +1193,7 @@ impl Connector {
     /// unaffected: it keeps riding `pending_claim` exactly as before this
     /// method existed.
     pub fn with_outbound_client_hop(
-        mut self,
+        self,
         peer_id: impl Into<String>,
         channel_id: impl Into<String>,
         domain: EvmDomain,
@@ -862,7 +1201,8 @@ impl Connector {
     ) -> Result<Self, InvalidChannelId> {
         let channel_id = channel_id.into();
         let channel = crate::claim::parse_channel_id(&channel_id)?;
-        self.outbound_client_hops.insert(
+        let mut hops = (*self.outbound_client_hops.load_full()).clone();
+        hops.insert(
             peer_id.into(),
             OutboundClientHop {
                 channel,
@@ -871,9 +1211,59 @@ impl Connector {
                 // watermarks at the far gate.
                 channel_id: format!("0x{}", hex_lower(&channel)),
                 claim_state,
-                domain,
+                domain: OutboundClientDomain::Evm(domain),
             },
         );
+        self.outbound_client_hops.store(Arc::new(hops));
+        Ok(self)
+    }
+
+    /// [`Connector::with_outbound_client_hop`] for a **Solana** next hop
+    /// (issue #1146): the channel account this node pays that hop from, and
+    /// the settlement program its claims are signed under.
+    ///
+    /// A second method rather than a chain parameter, exactly as
+    /// [`ClaimBook::set_solana_channel`] is a second method beside
+    /// [`ClaimBook::set_channel_domain`]: the two chains name a channel with
+    /// different kinds of identifier, and a shared entry point would have to
+    /// accept both spellings for both chains and sort them out afterwards.
+    ///
+    /// `program_id` is `[settlement.solana] program_id` -- ADR 0053 signs it
+    /// into every claim on this channel, and issue #1128 made it the single
+    /// source for the peer role on the very same channel. Both it and
+    /// `channel_account` must be base58 of exactly 32 bytes; anything else is
+    /// refused here rather than turned into a claim verified against the
+    /// wrong message.
+    ///
+    /// **Until this existed, a Solana peering could only be paid postpay**
+    /// -- `cover_forward` had no arm to mint under, so the claim covering
+    /// crossing n rode crossing n + 1, which is the model ADR 0042 exists to
+    /// retire.
+    pub fn with_solana_outbound_client_hop(
+        self,
+        peer_id: impl Into<String>,
+        channel_account: impl Into<String>,
+        program_id: &str,
+        claim_state: Arc<dyn ClaimStateSource>,
+    ) -> Result<Self, InvalidSolanaChannel> {
+        let channel_account = channel_account.into();
+        let channel = crate::claim::parse_base58_32("channel account", &channel_account)?;
+        let program_id = crate::claim::parse_base58_32("program id", program_id)?;
+        let mut hops = (*self.outbound_client_hops.load_full()).clone();
+        hops.insert(
+            peer_id.into(),
+            OutboundClientHop {
+                channel,
+                // Re-encoded from the bytes rather than kept as written, so
+                // the wire carries one spelling of the account however the
+                // operator's config spelled it -- the base58 counterpart of
+                // the EVM arm's lower-casing above.
+                channel_id: bs58::encode(channel).into_string(),
+                claim_state,
+                domain: OutboundClientDomain::Solana(SolanaDomain { program_id }),
+            },
+        );
+        self.outbound_client_hops.store(Arc::new(hops));
         Ok(self)
     }
 
@@ -905,20 +1295,8 @@ impl Connector {
         self
     }
 
-    /// Configure the channel this node claims against when it owes
-    /// `peer_id` for value it forwarded and `peer_id` fulfilled (issue
-    /// #423, peer-wire-spec.md §3.5).
-    pub fn with_peer_claim_channel(
-        mut self,
-        peer_id: impl Into<String>,
-        channel_id: impl Into<String>,
-    ) -> Self {
-        self.claims.set_outbound_channel(peer_id, channel_id);
-        self
-    }
-
     /// Configure the EVM address whose signature this node accepts on an
-    /// inbound claim for `channel_id` (issue #423, peer-wire-spec.md §1.1's
+    /// inbound claim for `channel_id` (issue #423, peer-semantics-pre-868.md §1.1's
     /// "a configured peer id and verification key"; issue #575: this is now
     /// the channel's counterparty *address*, recovered from an EIP-712
     /// `BalanceProof` signature, not a raw public key checked against a
@@ -927,7 +1305,7 @@ impl Connector {
     /// claim naming a channel with no domain configured is refused
     /// regardless of this.
     pub fn with_channel_verification_key(
-        mut self,
+        self,
         channel_id: impl Into<String>,
         counterparty: Address,
     ) -> Self {
@@ -938,18 +1316,45 @@ impl Connector {
     /// Configure `channel_id`'s EIP-712 signing domain -- the chain it is
     /// deployed on and the `TokenNetwork` contract that verifies a claim's
     /// signature on redemption (issue #575/#566). Required, alongside
-    /// [`Connector::with_peer_claim_channel`] or
+    /// a `[[peer_channels]]` row or
     /// [`Connector::with_channel_verification_key`], before this channel
     /// can sign or accept a claim -- see [`ClaimBook::set_channel_domain`].
     /// `channel_id` must already be the channel's on-chain `bytes32`, refused
     /// otherwise rather than hashed or truncated into shape.
     pub fn with_channel_domain(
-        mut self,
+        self,
         channel_id: impl Into<String>,
         domain: ChannelDomain,
     ) -> Result<Self, InvalidChannelId> {
         self.claims.set_channel_domain(channel_id, domain)?;
         Ok(self)
+    }
+
+    /// Configure `channel_account`'s Solana peer binding (issue #732/#998):
+    /// the base58 Ed25519 public key whose signature this node accepts on a
+    /// claim for it. The Solana counterpart of both
+    /// [`Connector::with_channel_verification_key`] and
+    /// [`Connector::with_channel_domain`] in one call -- see
+    /// [`ClaimBook::set_solana_channel`] for why the two cannot be
+    /// separated on this chain.
+    pub fn with_solana_channel(
+        self,
+        channel_account: impl Into<String>,
+        counterparty_public_key: &str,
+        program_id: &str,
+    ) -> Result<Self, InvalidSolanaChannel> {
+        self.claims
+            .set_solana_channel(channel_account, counterparty_public_key, program_id)?;
+        Ok(self)
+    }
+
+    /// Configure this node's own ed25519 identity (issue #742/#998), used to
+    /// sign every outbound claim on a channel registered via
+    /// [`Connector::with_solana_channel`] -- the Solana counterpart of
+    /// [`Connector::with_signer`].
+    pub fn with_solana_signer(mut self, signer: Arc<dyn Ed25519Signer>) -> Self {
+        self.claims.set_solana_signer(signer);
+        self
     }
 
     /// Configure the settlement backend a node's channel-lifecycle writes
@@ -999,7 +1404,6 @@ impl Connector {
         &self,
         prefix: impl Into<String>,
         peer_id: impl Into<String>,
-        fee: u64,
         ttl: Duration,
     ) -> Result<LeasedRouteView, LeaseRouteError> {
         let prefix = prefix.into();
@@ -1007,7 +1411,7 @@ impl Connector {
             return Err(LeaseRouteError::InvalidPrefix(prefix));
         }
         let expires_at = self.clock.now() + ttl;
-        let route = LeasedRoute::new(prefix.clone(), peer_id.into(), fee, expires_at);
+        let route = LeasedRoute::new(prefix.clone(), peer_id.into(), expires_at);
         let view = leased_route_view(&route);
         self.leased_routes.rcu(|current| {
             let mut next = (**current).clone();
@@ -1073,24 +1477,29 @@ impl Connector {
         }
     }
 
-    /// Add or update a runtime peer row (issue #884): `POST /peers`.
-    /// Refused by name -- never silently accepted as a no-op -- when `id`
-    /// is empty or already belongs to the config file
-    /// (`docs/adr/0034-a-runtime-peer-route-table-never-shadows-the-config-file.md`).
-    /// Calling this again for an id already in the runtime table is an
-    /// update (there is nothing to update yet beyond the id itself, but
-    /// the write still persists and still returns `Ok`, matching
-    /// `upsert_leased_route`'s own renew-by-reinsertion shape).
+    /// Add or update a runtime peering (issue #884, ADR 0058): the durable
+    /// half of `POST /peers`.
     ///
-    /// Always inserts (or restates) the id with no lease (issue #886): the
-    /// plain operator surface never creates a leased row, so a peer added
-    /// this way is a permanent grant exactly as it was before #886, the
-    /// same way a config-file row always is. Use
-    /// [`Self::upsert_runtime_peer_purchase`] for the peer-sale purchase
-    /// path, which does lease.
+    /// Refused by name -- never silently accepted as a no-op -- when `id`
+    /// is empty, when it already belongs to the config file
+    /// (`docs/adr/0034-a-runtime-peer-route-table-never-shadows-the-config-file.md`),
+    /// or when `peering` carries **no payment-channel binding**. That last
+    /// one is the runtime twin ADR 0058 requires of
+    /// `connector-config`'s load-time `PeerChannelUnbound`: a peering with
+    /// no channel can never take the peer role (ADR 0060), so writing one
+    /// would record a relationship that behaves as a stranger and says so
+    /// nowhere.
+    ///
+    /// Calling this again for an id already in the runtime table replaces
+    /// that row wholesale, matching `upsert_leased_route`'s own
+    /// renew-by-reinsertion shape. It is how a peering is repriced, and --
+    /// because ADR 0059 derives the same channel from the same two
+    /// participants -- how repeating `POST /peers` lands on the peering
+    /// that already exists rather than a second one.
     pub fn upsert_runtime_peer(
         &self,
         id: impl Into<String>,
+        peering: RuntimePeering,
     ) -> Result<PeerView, PeerRouteTableError> {
         let id = id.into();
         if id.trim().is_empty() {
@@ -1099,59 +1508,32 @@ impl Connector {
         if self.config_peer_ids.contains(&id) {
             return Err(PeerRouteTableError::OwnedByConfig(id));
         }
+        if peering.channels.is_empty() {
+            return Err(PeerRouteTableError::PeerChannelUnbound(id));
+        }
+        let view = PeerView {
+            id: id.clone(),
+            fee: peering.fee,
+            max_packet_amount: crate::peering::stated_cap(peering.max_packet_amount),
+            source: RouteSource::Runtime,
+        };
         let _write_guard = self
             .runtime_table_lock
             .lock()
             .expect("runtime peer/route table lock poisoned");
         let mut peers = (*self.runtime_peers_snapshot()).clone();
-        peers.insert(id.clone(), None);
+        peers.insert(id, peering);
         self.persist_runtime_table(&peers, &self.runtime_peer_routes_snapshot())?;
         self.runtime_peers.store(Arc::new(peers));
-        Ok(PeerView {
-            id,
-            source: RouteSource::Runtime,
-            expires_at: None,
-        })
+        Ok(view)
     }
 
-    /// Add or renew a runtime peer row bought by a peer-sale purchase
-    /// (issue #886), leasing it for `lease_duration` from this connector's
-    /// own injected clock. A renewal (the id is already in the runtime
-    /// table, leased or not) **extends rather than restarts**: the new
-    /// expiry is `lease_duration` added onto whichever is later of the
-    /// current expiry or now, so paying again before a lease lapses
-    /// stacks the fresh term on top of the unused remainder instead of
-    /// discarding it, while paying again after it has already lapsed (or
-    /// for a brand new id) simply starts a fresh lease from now -- there
-    /// is no unused remainder left to preserve either way. Returns the
-    /// resulting expiry.
-    fn upsert_runtime_peer_purchase(
-        &self,
-        id: &str,
-        lease_duration: Duration,
-    ) -> Result<DateTime<Utc>, PeerRouteTableError> {
-        if id.trim().is_empty() {
-            return Err(PeerRouteTableError::InvalidPeerId);
-        }
-        if self.config_peer_ids.contains(id) {
-            return Err(PeerRouteTableError::OwnedByConfig(id.to_string()));
-        }
-        let _write_guard = self
-            .runtime_table_lock
-            .lock()
-            .expect("runtime peer/route table lock poisoned");
-        let now = self.clock.now();
-        let mut peers = (*self.runtime_peers_snapshot()).clone();
-        let base = peers
-            .get(id)
-            .copied()
-            .flatten()
-            .map_or(now, |current| current.max(now));
-        let expires_at = base + lease_duration;
-        peers.insert(id.to_string(), Some(expires_at));
-        self.persist_runtime_table(&peers, &self.runtime_peer_routes_snapshot())?;
-        self.runtime_peers.store(Arc::new(peers));
-        Ok(expires_at)
+    /// The runtime peering `id` names, or `None` for an id this table does
+    /// not hold. A config-file peering is never here (ADR 0034 keeps the
+    /// two tables disjoint by refusing a collision).
+    #[must_use]
+    pub fn runtime_peering(&self, id: &str) -> Option<RuntimePeering> {
+        self.runtime_peers_snapshot().get(id).cloned()
     }
 
     /// Remove a runtime peer row (issue #884): `DELETE /peers/:id`.
@@ -1181,6 +1563,12 @@ impl Connector {
         next_peers.remove(id);
         self.persist_runtime_table(&next_peers, &routes)?;
         self.runtime_peers.store(Arc::new(next_peers));
+        // ADR 0060 named `DELETE /peers` as the kill switch that replaced
+        // revoking a shared secret: "immediate, does not require a
+        // restart". It is only immediate if the carriage goes with the row.
+        if let Some(registrar) = &self.peer_registrar {
+            registrar.deregister(id);
+        }
         Ok(())
     }
 
@@ -1191,61 +1579,13 @@ impl Connector {
         self.config_prefixes().any(|owned| owned == prefix)
     }
 
-    /// Every prefix the config file itself serves: app routes, peer
-    /// forwarding routes, and -- when configured -- the `[peer_sale]`
-    /// route (this PR's review, fourth finding: the sale prefix is as
-    /// config-owned as any `[[routes]]` row, and omitting it here let a
-    /// buyer purchase a prefix strictly beneath the sale address and
-    /// outrank the sale route for its whole subtree).
+    /// Every prefix the config file itself serves: app routes and peer
+    /// forwarding routes.
     fn config_prefixes(&self) -> impl Iterator<Item = &str> {
         self.routes
             .iter()
             .map(|route| route.prefix())
             .chain(self.peer_routes.iter().map(|route| route.prefix()))
-            .chain(self.peer_sale.as_ref().map(|sale| sale.prefix()))
-    }
-
-    /// Whether `prefix` sits strictly inside address space a config-file
-    /// route already serves -- some configured prefix is a proper ancestor
-    /// of it (`prefix` extends that prefix by at least one `.`-separated
-    /// segment; a sibling like `g.appx` beside `g.app` does not count).
-    /// Route selection ranks matched prefix length first, so a durable row
-    /// inserted here would outrank the configured route for that whole
-    /// subtree: without this guard, one peer-sale purchase (issue #885,
-    /// ADR 0037) permanently diverts the seller's own app route -- or,
-    /// per this PR's review, the seller's own sale route.
-    fn config_owns_ancestor_of(&self, prefix: &str) -> bool {
-        self.config_prefixes().any(|owned| {
-            prefix.len() > owned.len()
-                && prefix.starts_with(owned)
-                && prefix.as_bytes()[owned.len()] == b'.'
-        })
-    }
-
-    /// How many distinct payers currently hold a runtime-purchased peer
-    /// row (issue #887, C4) -- a lease is issue #886's own signal that a
-    /// row came from a purchase and not the plain `POST /peers` operator
-    /// surface, so this is the count [`PeerSaleBounds::max_purchased_rows`]
-    /// bounds, not the whole `runtime_peers` table.
-    fn purchased_peer_count(&self) -> usize {
-        self.runtime_peers_snapshot()
-            .values()
-            .filter(|expires_at| expires_at.is_some())
-            .count()
-    }
-
-    /// How many runtime routes already forward to `payer_id` -- the count
-    /// [`PeerSaleBounds::max_routes_per_payer`] bounds (issue #887, C4).
-    /// `payer_id` is always a purchase's own channel key, so every route
-    /// this finds is one a purchase inserted; an operator's own
-    /// `POST /routes/peers` write pointed at the same peer id would count
-    /// too, which is the honest answer to "how many prefixes reach this
-    /// peer" regardless of which surface added them.
-    fn purchased_route_count_for_payer(&self, payer_id: &str) -> usize {
-        self.runtime_peer_routes_snapshot()
-            .values()
-            .filter(|route| route.peer_id() == payer_id)
-            .count()
     }
 
     /// Add or update a runtime peer-forwarding route (issue #884):
@@ -1256,12 +1596,23 @@ impl Connector {
     /// (app route or peer route alike), or when `peer_id` resolves to no
     /// known peer -- the config file's or the runtime table's --
     /// mirroring `connector-config`'s load-time `UnknownPeerId` check.
+    ///
+    /// A **runtime** peering is additionally required to have a channel to
+    /// pay from ([`PeerRouteTableError::PeerHasNoPayChannel`]) -- the
+    /// runtime twin of ADR 0042's `[[pay_channels]]` load rule, which ADR
+    /// 0058 requires enforced continuously rather than once at boot. That
+    /// checks the CLIENT-role hop (`outbound_client_hops`, issue #1217),
+    /// not `peering.channels` -- the PEER-role bindings, which are
+    /// non-empty for every peering `establish_peering` ever writes and so
+    /// never caught the gap this guard exists for: a peering that can
+    /// accept a claim but hold nothing to sign one with. A config-file
+    /// peering is not re-checked here: `Config::load` already refused to
+    /// start without the row, and this table cannot see it.
     pub fn upsert_runtime_peer_route(
         &self,
         prefix: impl Into<String>,
         peer_id: impl Into<String>,
-        fee: u64,
-        price: u64,
+        price: Price,
     ) -> Result<PeerRouteView, PeerRouteTableError> {
         let prefix = prefix.into();
         let peer_id = peer_id.into();
@@ -1275,12 +1626,16 @@ impl Connector {
             .runtime_table_lock
             .lock()
             .expect("runtime peer/route table lock poisoned");
-        if !self.config_peer_ids.contains(&peer_id)
-            && !self.runtime_peers_snapshot().contains_key(&peer_id)
-        {
-            return Err(PeerRouteTableError::UnknownPeerId { prefix, peer_id });
+        if !self.config_peer_ids.contains(&peer_id) {
+            match self.runtime_peers_snapshot().get(&peer_id) {
+                None => return Err(PeerRouteTableError::UnknownPeerId { prefix, peer_id }),
+                Some(_) if !self.outbound_client_hops.load_full().contains_key(&peer_id) => {
+                    return Err(PeerRouteTableError::PeerHasNoPayChannel { prefix, peer_id })
+                }
+                Some(_) => {}
+            }
         }
-        let route = PeerRoute::new_priced(prefix.clone(), peer_id.clone(), fee, price);
+        let route = PeerRoute::new_scheduled(prefix.clone(), peer_id.clone(), price);
         let mut routes = (*self.runtime_peer_routes_snapshot()).clone();
         routes.insert(prefix.clone(), route);
         self.persist_runtime_table(&self.runtime_peers_snapshot(), &routes)?;
@@ -1288,7 +1643,6 @@ impl Connector {
         Ok(PeerRouteView {
             prefix,
             peer_id,
-            fee,
             price,
             source: RouteSource::Runtime,
         })
@@ -1314,70 +1668,6 @@ impl Connector {
         Ok(())
     }
 
-    /// Demote every runtime peer whose peer-sale lease has lapsed (issue
-    /// #886) back to client role: removes its row, and every runtime route
-    /// that forwards to it, from the durable table -- never left to rot,
-    /// which is the "slow leak" issue #886 exists to close. Returns the
-    /// peer ids demoted this call, each logged positively at the moment it
-    /// happens (`tracing::info!`, naming the peer id and the instant it
-    /// lapsed) -- a demotion is never silent, unlike an unconfigured
-    /// credential logging nothing at all (issue #886's own warning).
-    ///
-    /// Safe to call at any time, including with packets concurrently in
-    /// flight: [`Self::select_configured_route`] already stops matching a
-    /// lapsed lease's route the instant the clock passes it (independent
-    /// of whether or when this has run), and a packet already forwarding
-    /// carries a [`PeerRoute`] cloned out of the `ArcSwap` snapshot it
-    /// matched against, so it reads nothing this method can touch -- a
-    /// call here can only ever remove a row nothing in flight still
-    /// depends on.
-    /// Intended to be driven periodically by a caller outside this crate
-    /// (`connector-cli`), the same shape `EvmChannelIndexSyncer::run`
-    /// takes for its own periodic sweep.
-    pub fn reap_expired_peer_leases(&self) -> Vec<String> {
-        let now = self.clock.now();
-        let _write_guard = self
-            .runtime_table_lock
-            .lock()
-            .expect("runtime peer/route table lock poisoned");
-        let peers = self.runtime_peers_snapshot();
-        let lapsed: Vec<(String, DateTime<Utc>)> = peers
-            .iter()
-            .filter_map(|(id, expires_at)| {
-                let expires_at = (*expires_at)?;
-                is_expired(expires_at, now).then(|| (id.clone(), expires_at))
-            })
-            .collect();
-        if lapsed.is_empty() {
-            return Vec::new();
-        }
-        let lapsed_ids: HashSet<&str> = lapsed.iter().map(|(id, _)| id.as_str()).collect();
-        let routes = self.runtime_peer_routes_snapshot();
-        let next_routes: HashMap<String, PeerRoute> = (*routes)
-            .clone()
-            .into_iter()
-            .filter(|(_, route)| !lapsed_ids.contains(route.peer_id()))
-            .collect();
-        let mut next_peers = (*peers).clone();
-        for (id, _) in &lapsed {
-            next_peers.remove(id);
-        }
-        if let Err(error) = self.persist_runtime_table(&next_peers, &next_routes) {
-            tracing::warn!(%error, "could not persist demoted peer-sale leases; leaving the table unchanged");
-            return Vec::new();
-        }
-        self.runtime_peers.store(Arc::new(next_peers));
-        self.runtime_peer_routes.store(Arc::new(next_routes));
-        for (id, expires_at) in &lapsed {
-            tracing::info!(
-                peer_id = %id,
-                lapsed_at = %expires_at,
-                "peer-sale lease lapsed: demoting peer to client role"
-            );
-        }
-        lapsed.into_iter().map(|(id, _)| id).collect()
-    }
-
     /// Every peer-forwarding route this node knows, config-file and
     /// runtime alike (issue #884), for the operator surface's
     /// `GET /routes/peers`. Deliberately excludes a leased route --
@@ -1390,7 +1680,6 @@ impl Connector {
             .map(|route| PeerRouteView {
                 prefix: route.prefix().to_string(),
                 peer_id: route.peer_id().to_string(),
-                fee: route.fee(),
                 price: route.price(),
                 source: RouteSource::Config,
             })
@@ -1401,7 +1690,6 @@ impl Connector {
                 .map(|route| PeerRouteView {
                     prefix: route.prefix().to_string(),
                     peer_id: route.peer_id().to_string(),
-                    fee: route.fee(),
                     price: route.price(),
                     source: RouteSource::Runtime,
                 }),
@@ -1429,7 +1717,7 @@ impl Connector {
                 // condition is the exact shape a naive "unconditional
                 // announce" packet takes, and this connector has no such
                 // packet type to fall back to (ADR 0004, ADR 0022,
-                // peer-wire-spec.md §3.1): attach a real condition instead.
+                // peer-semantics-pre-868.md §3.1): attach a real condition instead.
                 message: "prepare carries no execution condition -- every prepare must carry \
                     a real, non-zero 32-byte execution condition chosen by the sender; retry \
                     with one attached rather than an unconditional/announce-style packet"
@@ -1456,21 +1744,24 @@ impl Connector {
     /// forward it to the matching peer -- and translate whatever comes back
     /// into the ILP-level response a client receives.
     ///
-    /// `minimum_delivery` is the amount the original sender declared must
-    /// reach the destination (ADR 0010). Forwarding to a peer subtracts
-    /// that peering relation's flat fee from `prepare.amount`; if the
-    /// result would fall below `minimum_delivery`, this hop rejects
-    /// (`R01_INSUFFICIENT_SOURCE_AMOUNT`) instead of forwarding a smaller
-    /// amount than declared. Delivering to this connector's own app takes
-    /// no fee -- a fee is earned per peering relation, not for terminating
-    /// traffic at your own destination.
+    /// Forwarding to a peer subtracts that peering relation's flat fee
+    /// from `prepare.amount` (ADR 0010); a packet that does not even cover
+    /// that fee is refused `R01` -- RFC 0027's Insufficient Source Amount,
+    /// the standard meaning that survives ADR 0057's retirement of the
+    /// minimum-delivery one -- rather than forwarded at zero. Nothing
+    /// here checks a declared floor: the packet carries none since ADR
+    /// 0057 (issue #1143), and what bounds erosion is the claim covering
+    /// each crossing -- `cover_forward` mints for the forwarded value, so
+    /// every hop holds a claim for at least what it passes on. Delivering
+    /// to this connector's own app takes no fee -- a fee is earned per
+    /// peering relation, not for terminating traffic at your own
+    /// destination.
     ///
     /// Carries no client channel id in its `"packet"` span -- see
     /// [`Self::handle_prepare_with_client_channel`] for the client edge's
     /// entry point, which does.
-    pub async fn handle_prepare(&self, prepare: Prepare, minimum_delivery: u64) -> PacketResponse {
-        self.handle_prepare_with_client_channel(prepare, minimum_delivery, None)
-            .await
+    pub async fn handle_prepare(&self, prepare: Prepare) -> PacketResponse {
+        self.handle_prepare_with_client_channel(prepare, None).await
     }
 
     /// Same as [`Self::handle_prepare`], but additionally records
@@ -1486,13 +1777,12 @@ impl Connector {
     /// either chain names its channel unambiguously.
     ///
     /// `None` when no client claim admitted this packet (an unclaimed
-    /// request, a peer-wire arrival, or a caller using
+    /// request, a peer-role arrival, or a caller using
     /// [`Self::handle_prepare`] directly) -- the field is then simply
     /// absent from the span, not recorded empty.
     pub async fn handle_prepare_with_client_channel(
         &self,
         prepare: Prepare,
-        minimum_delivery: u64,
         client_channel_id: Option<&str>,
     ) -> PacketResponse {
         let span = tracing::info_span!(
@@ -1504,14 +1794,14 @@ impl Connector {
         if let Some(channel_id) = client_channel_id {
             span.record("client_channel_id", channel_id);
         }
-        self.handle_prepare_traced(prepare, minimum_delivery, client_channel_id)
+        self.handle_prepare_traced(prepare, client_channel_id)
             .instrument(span)
             .await
     }
 
-    /// The peer wire's entry point (issue #423): accepts an inbound PREPARE
+    /// The peer semantics's entry point (issue #423): accepts an inbound PREPARE
     /// exactly like [`Connector::handle_prepare`], but also verifies and
-    /// watermarks whatever claim it carries (peer-wire-spec.md §3.2).
+    /// watermarks whatever claim it carries (peer-semantics-pre-868.md §3.2).
     ///
     /// The claim outcome and the PREPARE outcome are independent -- a
     /// rejected claim does not reject the PREPARE it rode in on (§3.4), and
@@ -1524,7 +1814,7 @@ impl Connector {
     /// route paid for by nothing (or by less than the route is worth) got
     /// the same free service ADR 0028 already closed off at the client
     /// edge. This is a per-packet gate, not a relation-wide throttle
-    /// (`peer-wire-spec.md` §5.4): it is answered from the amount already
+    /// (`peer-semantics-pre-868.md` §5.4): it is answered from the amount already
     /// on this PREPARE via the same `client_route` lookup the client edge
     /// prices with (ADR 0028) and leaves the claim exchange itself (§3.2)
     /// untouched, and carries no x402 greeting of its own: since issue #880
@@ -1536,7 +1826,6 @@ impl Connector {
     pub async fn handle_peer_prepare(
         &self,
         prepare: Prepare,
-        minimum_delivery: u64,
         claim: Option<WireClaim>,
     ) -> (PacketResponse, ClaimAckOutcome) {
         let ack = claim.map_or(ClaimAckOutcome::NotSent, |claim| {
@@ -1544,16 +1833,19 @@ impl Connector {
         });
 
         if let Some(route) = self.client_route(&prepare.destination) {
-            if route.kind == ClientRouteKind::Terminated
-                && route.price > 0
-                && prepare.amount < route.price
-            {
+            // ADR 0029's per-packet coverage rule, read off the schedule at
+            // this packet's own payload length (ADR 0065): the peer measures
+            // the sealed wrap it was handed, which is the same figure the
+            // termination below will charge and the same one the sending
+            // hop's own edge collected against.
+            let charge = route.price.charge(prepare.data.len());
+            if route.kind == ClientRouteKind::Terminated && charge > 0 && prepare.amount < charge {
                 let reject = PacketResponse::Reject(Reject {
                     code: RejectCode::f03_invalid_amount(),
                     triggered_by: String::new(),
                     message: format!(
                         "'{}' costs {} but the peer arrival carried only {}",
-                        prepare.destination, route.price, prepare.amount
+                        prepare.destination, charge, prepare.amount
                     ),
                     data: Vec::new(),
                     accumulated_cost: 0,
@@ -1562,7 +1854,7 @@ impl Connector {
             }
         }
 
-        let response = self.handle_prepare(prepare, minimum_delivery).await;
+        let response = self.handle_prepare(prepare).await;
         (response, ack)
     }
 
@@ -1591,8 +1883,48 @@ impl Connector {
         }
     }
 
+    /// Where a channel this node holds as a **peer** channel stands in the
+    /// book that actually judges its claims -- [`crate::ClaimBook`]'s own
+    /// inbound watermark -- or `None` when this node holds no peer channel
+    /// by that name.
+    ///
+    /// A connector keeps two inbound books (`crate::outbound_client`'s
+    /// header has the table), and which one is the authority for a channel
+    /// is a property of the **channel**, never of who is asking: a claim
+    /// naming a `[[peer_channels]]` row is judged here, and
+    /// `Config::load` refuses a channel that is also a `[[client_channels]]`
+    /// row (`ConfigError::ChannelInBothNamespaces`), so at most one book
+    /// can ever be the authority. That is what lets
+    /// `POST /ilp/claim-state` answer a payer correctly without knowing
+    /// which role the payer holds.
+    ///
+    /// `Some(Watermark { nonce: 0, cumulative_amount: 0 })` for a
+    /// configured peer channel nothing has claimed on yet -- deliberately
+    /// not `None`, which would send the caller back to the wrong book for
+    /// exactly the first claim on a channel.
+    ///
+    /// Covers both chains: an EVM `channel_id` (`0x` + 64 hex) and a
+    /// Solana `channel_account` (base58) are drawn from disjoint spellings,
+    /// so one lookup cannot answer for the other chain by accident.
+    #[must_use]
+    pub fn peer_channel_watermark(&self, channel_id: &str) -> Option<Watermark> {
+        if !self.claims.has_verification_key(channel_id)
+            && !self.claims.has_solana_channel(channel_id)
+        {
+            return None;
+        }
+        Some(
+            self.claims
+                .inbound_watermark(channel_id)
+                .unwrap_or(Watermark {
+                    nonce: 0,
+                    cumulative_amount: 0,
+                }),
+        )
+    }
+
     /// Whether `channel_id` is a channel this connector recognizes: either
-    /// a peer-wire channel whose verification key its operator configured
+    /// a peer channel whose verification key its operator configured
     /// ([`Connector::with_channel_verification_key`]), or a client channel
     /// [`Connector::recognize_channel`] recorded when a claim on it
     /// verified at this connector's client edge.
@@ -1603,6 +1935,34 @@ impl Connector {
                 .read()
                 .expect("recognized channels lock poisoned")
                 .contains(channel_id)
+    }
+
+    /// Every client channel [`Connector::recognize_channel`] has recorded
+    /// (issue #1218): the only list of these this connector keeps, since a
+    /// client channel is opened by its counterparty, never by this node, so
+    /// it is never in [`Self::known_channels`]. `GET /channels` merges this
+    /// list in so a node holding value from the client edge is reported on
+    /// the same surface `POST /channels` populates for a channel this node
+    /// opened itself.
+    pub fn recognized_channel_ids(&self) -> Vec<String> {
+        self.recognized_channels
+            .read()
+            .expect("recognized channels lock poisoned")
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Whether `channel_account` is a Solana peer channel this
+    /// connector recognizes -- the Solana counterpart of
+    /// [`Connector::recognizes_channel`] (issue #732/#998). A separate
+    /// query rather than folded into `recognizes_channel`: an EVM
+    /// `channel_id` and a Solana `channel_account` are drawn from disjoint
+    /// spellings (`0x` + 64 hex vs. base58), so there is no name either
+    /// chain's config could hand this connector that the other chain would
+    /// also recognize.
+    pub fn recognizes_solana_channel(&self, channel_account: &str) -> bool {
+        self.claims.has_solana_channel(channel_account)
     }
 
     /// Entry point for a probe -- an ordinary packet a sender expects to be
@@ -1621,7 +1981,7 @@ impl Connector {
     /// recognizes (`ProbeDenied::NoOpenChannel` otherwise -- see
     /// [`Connector::recognizes_channel`] for what makes that satisfiable on
     /// a deployed node), and even then only within a rate limit per that
-    /// identity (`ProbeDenied::RateLimited` otherwise) -- peer-wire-spec.md
+    /// identity (`ProbeDenied::RateLimited` otherwise) -- peer-semantics-pre-868.md
     /// §5.2's consequences, `docs/protocol/client-edge-spec.md` §1.6.
     /// Neither denial reaches [`Connector::handle_prepare`]: the packet is
     /// never forwarded.
@@ -1652,7 +2012,6 @@ impl Connector {
         &self,
         channel_id: &str,
         prepare: Prepare,
-        minimum_delivery: u64,
     ) -> Result<PacketResponse, ProbeDenied> {
         if !self.recognizes_channel(channel_id) {
             return Err(ProbeDenied::NoOpenChannel);
@@ -1661,12 +2020,19 @@ impl Connector {
             return Err(ProbeDenied::RateLimited);
         }
         if let Some(route) = self.client_route(&prepare.destination) {
+            // A probe learns what the path costs *for a packet like the one
+            // it sent* (ADR 0011, ADR 0065): the schedule is evaluated at the
+            // probe's own payload length, so a sender that probes with the
+            // body it means to send is told the figure it will be charged.
+            // What makes one probe still answer every size is that the
+            // schedule itself is published -- on the greeting and the node
+            // self-description -- rather than only its value here.
+            let price = route.price.charge(prepare.data.len());
             let answer_here = match route.kind {
                 ClientRouteKind::Terminated => true,
-                ClientRouteKind::Forwarded => route.price > 0,
+                ClientRouteKind::Forwarded => price > 0,
             };
             if answer_here {
-                let price = route.price;
                 let disposition = match route.kind {
                     ClientRouteKind::Terminated => "terminates at this connector",
                     ClientRouteKind::Forwarded => "forwards from this connector",
@@ -1683,37 +2049,35 @@ impl Connector {
                 }));
             }
         }
-        Ok(self.handle_prepare(prepare, minimum_delivery).await)
+        Ok(self.handle_prepare(prepare).await)
     }
 
-    /// Verify and, if valid, accept a claim received over the peer wire --
+    /// What this node's own record of a peer channel makes of `claim`'s
+    /// signature -- `Ok(())`, [`ClaimRejectReason::UnknownChannel`] or
+    /// [`ClaimRejectReason::SignatureInvalid`] -- with nothing accepted,
+    /// no watermark advanced and nothing journaled.
+    ///
+    /// This is `peer-carriage-spec.md` §1.2's **P3**, and it is what
+    /// decides role: a peer carriage asks this of the claim a frame
+    /// carries, and admits the frame as a peer frame only on `Ok`. The
+    /// check is against the counterparty key the `[[peer_channels]]` row
+    /// configures, never against anything the claim declares about itself,
+    /// which is the whole reason a signature proves more here than a
+    /// bearer string ever did (ADR 0060).
+    pub fn verify_peer_claim(&self, claim: &WireClaim) -> Result<(), ClaimRejectReason> {
+        self.claims.verify_signature(claim)
+    }
+
+    /// Verify and, if valid, accept a claim received over the peer semantics --
     /// whether it rode a PREPARE or a FLUSH -- advancing its channel's
-    /// watermark (issue #423, peer-wire-spec.md §3.4).
+    /// watermark (issue #423, peer-semantics-pre-868.md §3.4).
     pub fn handle_peer_claim(&self, claim: WireClaim) -> ClaimAckOutcome {
         self.claims.accept_inbound(&claim)
-    }
-
-    /// Send a FLUSH frame (peer-wire-spec.md §3.3) for every peer whose
-    /// claim has waited at least `flush_interval` since it armed, as of
-    /// this connector's injected clock -- the mechanism that bounds
-    /// trailing exposure once traffic to a peer stops rather than leaving a
-    /// claim to ride a PREPARE that may never come. Checked fresh against
-    /// the clock on every call, like leased-route expiry, rather than
-    /// driven by its own timer: a caller (production: a periodic task;
-    /// tests: a direct call after advancing the clock) decides when to
-    /// sweep.
-    pub async fn sweep_flush(&self, flush_interval: Duration) {
-        for (peer_id, claim) in self.claims.due_for_flush(self.clock.now(), flush_interval) {
-            let nonce = claim.nonce;
-            let ack = self.peer_transport.flush(&peer_id, claim).await;
-            self.claims.acknowledge_outbound(&peer_id, nonce, ack);
-        }
     }
 
     async fn handle_prepare_traced(
         &self,
         prepare: Prepare,
-        minimum_delivery: u64,
         client_channel_id: Option<&str>,
     ) -> PacketResponse {
         // Per-packet lines are debug, not info (issue #690): at huddle rates
@@ -1781,13 +2145,8 @@ impl Connector {
         let peer_route: Cow<'_, PeerRoute> = match target {
             RouteTarget::App(index) => {
                 tracing::debug!(handler_url = %self.routes[index].handler_url(), "routed to app");
-                let response = self.deliver_to_app(&self.routes[index], prepare).await;
-                return self.finish(response);
-            }
-            RouteTarget::PeerSale { price, lease } => {
-                tracing::debug!("routed to peer-sale");
                 let response = self
-                    .deliver_peer_sale(prepare, client_channel_id, price, lease)
+                    .deliver_to_app(&self.routes[index], prepare, client_channel_id)
                     .await;
                 return self.finish(response);
             }
@@ -1796,11 +2155,10 @@ impl Connector {
             RouteTarget::RuntimePeer(route) => Cow::Owned(route),
         };
         tracing::debug!(peer_id = %peer_route.peer_id(), "routed to peer");
-        let response = self
-            .forward_via_peer_route(&peer_route, prepare, minimum_delivery)
-            .await;
+        let response = self.forward_via_peer_route(&peer_route, prepare).await;
         if matches!(response, PacketResponse::Fulfill(_)) {
-            self.metrics.record_fee_earned(peer_route.fee());
+            self.metrics
+                .record_fee_earned(self.fee_for(peer_route.peer_id()));
         }
         self.finish(response)
     }
@@ -1827,41 +2185,59 @@ impl Connector {
         response
     }
 
-    /// Forward `prepare` to `peer_route`'s peer, covering it from the
-    /// outbound CLIENT ledger when this hop is configured for that (issue
-    /// #881), or piggybacking whatever claim this connector currently owes
-    /// it on the peer ledger otherwise (issue #423, peer-wire-spec.md
-    /// §3.2). Only once the answer is a genuine fulfilment, verified
-    /// against `prepare`'s own execution condition, and only when the
-    /// packet was NOT already covered by a client-role claim, does a fresh
-    /// peer-ledger claim get recorded for the value now owed (ADR 0004:
-    /// value moves on fulfilment, never on a forward that merely returned a
-    /// fulfillment-shaped answer) -- ADR 0004 having been inverted for a
-    /// hop covering proactively (issue #868): value and its covering claim
-    /// travel together on the SAME PREPARE there, not on the fulfilment
-    /// that follows it.
+    /// Forward `prepare` to `peer_route`'s peer, covered by a claim minted
+    /// from the outbound CLIENT ledger before the packet is put on the wire
+    /// (ADR 0042, issue #881). **There is no other way out of this method
+    /// with a packet sent.** A peering this node cannot cover a forward to
+    /// is refused here, naming the hop and the reason; it is never carried
+    /// uncovered and nothing is ever owed for it afterwards.
     ///
-    /// # Proactive covering (issue #881), and the retry arm it replaced
+    /// That "afterwards" is what issue #1145 deleted. ADR 0004's model --
+    /// the claim covering crossing *n* signed once it fulfilled and riding
+    /// crossing *n + 1* out of `ClaimBook::pending_claim` -- used to run
+    /// here for any peering with no [`Connector::with_outbound_client_hop`],
+    /// and ADR 0042 exists to retire it. It is gone from the peer role
+    /// entirely: no fulfilment arms a peer claim, so no packet leaves owing
+    /// one. (`ClaimBook::record_fulfillment` itself survives for a different
+    /// caller on a different edge -- `ClientPayoutLedger`, this connector
+    /// paying a *client* back, ADR 0026.)
     ///
-    /// Before #881, the claim riding the first attempt was always
-    /// `pending_claim` -- armed only by a *previous* fulfilment
-    /// (`ClaimBook::record_fulfillment`) and cleared the moment that claim
-    /// was acknowledged, so on a healthy, fully-acked link the next packet
-    /// out carried nothing. A next hop enforcing #868's "every peer packet
-    /// carries a covering claim" rule would refuse that packet outright.
+    /// # The cap (ADR 0042)
     ///
-    /// So [`Connector::cover_forward`] is tried FIRST, for exactly this
-    /// packet's own forwarded value: a hop configured via
+    /// Before any of that, the amount this forward would put on the wire is
+    /// checked against the peering's own cap
+    /// ([`Self::packet_cap_for`]) and refused with `T04` if it exceeds it.
+    /// The cap bounds a single packet -- how much this connector is willing
+    /// to lose at once to a hop that takes the claim and does not carry --
+    /// and never an accumulation.
+    ///
+    /// # The message window (PF-19)
+    ///
+    /// The forwarded packet's expiry is the arriving one's less
+    /// [`FORWARDING_MESSAGE_WINDOW`], never the arriving one itself -- a
+    /// hop keeps time back for the return leg, and one with none left
+    /// refuses `R00` rather than forwarding a packet whose fulfilment could
+    /// not reach it in time (issue #1174). Unilateral, and not a wire
+    /// change: a shorter expiry needs no agreement from the peer receiving
+    /// it.
+    ///
+    /// # Covering (issue #881), and the retry arm beside it
+    ///
+    /// [`Connector::cover_forward`] mints for exactly this packet's own
+    /// forwarded value: a hop configured via
     /// [`Connector::with_outbound_client_hop`] gets a fresh claim from the
     /// outbound client ledger (issue #873) minted and attached before the
     /// packet is ever sent -- covered from the first attempt, including the
     /// first attempt after a restart, never merely recovered after a
-    /// refusal. A hop with no such config is unaffected and keeps riding
-    /// `pending_claim` exactly as before this method existed. If a
-    /// configured hop's claim cannot be produced at all (no signer, no
-    /// headroom, a receiver that will not report its watermark), the
-    /// packet fails right there naming the hop and the reason -- it is
-    /// never emitted uncovered as a fallback.
+    /// refusal. If the claim cannot be produced at all (no hop configured,
+    /// no signer, no headroom, a receiver that will not report its
+    /// watermark), the packet fails right there naming the hop and the
+    /// reason. `Config::load` refuses a peering with a route to it and no
+    /// `[[pay_channels]]` row (`ConfigError::PayChannelUnbound`), so on a
+    /// configured route the no-hop case is unreachable from a file that
+    /// loaded -- it is still refused here rather than assumed away, because
+    /// a leased or runtime-installed route (ADR 0028) reaches this method
+    /// without passing that check.
     ///
     /// The retry arm issue #875 added is kept, narrowed to what it is now
     /// actually for: a covered packet the peer STILL greets is a
@@ -1872,30 +2248,125 @@ impl Connector {
     /// where this hop's own idea of the forwarded value is not. A second
     /// greeting after that is a failure, not a second retry.
     ///
-    /// Cost, since #881 moves it from the exception to the norm: a forward
-    /// to a COVERED hop now spends one watermark round trip to the receiver
-    /// and the one durable nonce reservation
-    /// [`OutboundClientLedger::next_claim`] makes, on every packet rather
-    /// than only on a greeted one (issue #879 measured the forwarded-packet
-    /// path at 3.00 `fdatasync`/packet with exposure accounting on; this is
-    /// a fourth). A forward to a hop with no client-role config spends
-    /// neither -- no extra call, no extra `fdatasync` -- exactly as before.
+    /// Cost: a forward spends one watermark round trip to the receiver and
+    /// the one durable nonce reservation
+    /// [`OutboundClientLedger::next_claim`] makes, on every packet (issue
+    /// #879 measured the forwarded-packet path at 3.00 `fdatasync`/packet
+    /// with exposure accounting on; this is a fourth). That is the price of
+    /// ADR 0042 and it is now paid on every forward, because there is no
+    /// longer a cheaper uncovered path to fall back to.
     async fn forward_via_peer_route(
         &self,
         peer_route: &PeerRoute,
         prepare: Prepare,
-        minimum_delivery: u64,
     ) -> PacketResponse {
         let condition = prepare.execution_condition;
-        let Some(forwarded_amount) =
-            amount_after_fee(prepare.amount, peer_route.fee(), minimum_delivery)
-        else {
+        // A packet that does not cover this hop's own flat fee is refused
+        // rather than forwarded at whatever is left. `R01` -- RFC 0027's
+        // "the amount received by a connector in the path was too little to
+        // forward (zero or less)", which is this case verbatim. ADR 0057's
+        // first sweep retired the code outright and ADR 0051's #1143 update
+        // rehomed this case to `F03`; both were wrong, and 0057's corrected
+        // update says so: only R01's *minimum-delivery* meaning dies with
+        // the field. `F03` is for an amount wrong against a price the
+        // sender can pay; here nothing survives the fee at all, the class
+        // letter is relative rather than final, and the move is "send
+        // more".
+        // ADR 0061: this hop's fee belongs to the PEERING, so it is read off
+        // `peer_route.peer_id()` rather than off the route the packet
+        // matched. Every prefix forwarded to one counterparty therefore
+        // costs the same, which is what "flat, per packet" always meant.
+        let fee = self.fee_for(peer_route.peer_id());
+        let Some(forwarded_amount) = amount_after_fee(prepare.amount, fee) else {
             return PacketResponse::Reject(Reject {
                 code: RejectCode::r01_insufficient_source_amount(),
                 triggered_by: String::new(),
+                // The message is the sender's only way to learn its next
+                // move, and for a relative code that move is "send more" --
+                // so both figures are named and so is the threshold to
+                // clear (ADR 0051, "what a reject carries besides its
+                // code").
                 message: format!(
-                    "cannot meet minimum delivery {minimum_delivery} after this hop's fee for peer '{}'",
-                    peer_route.peer_id()
+                    "peer '{}' charges a fee of {} and this packet carried only {}: nothing \
+                     would be left to forward. Send more than {}",
+                    peer_route.peer_id(),
+                    fee,
+                    prepare.amount,
+                    fee
+                ),
+                data: Vec::new(),
+                accumulated_cost: 0,
+            });
+        };
+
+        let peer_id = peer_route.peer_id();
+
+        // ADR 0042, "The cap": the most this connector will hand this peer
+        // in ONE packet, and therefore the most a single theft by it can
+        // take -- a packet carries its own claim now, so the value on this
+        // forward is at risk from the moment it leaves. Checked here,
+        // before the packet is covered or sent, against the amount actually
+        // going out (post-fee, the figure `cover_forward` would mint a
+        // claim for); refused with `T04` naming both numbers, never
+        // truncated and never split into two packets, which would defeat
+        // the bound rather than respect it.
+        //
+        // Tempting and wrong: adding "and how much has this peer had
+        // lately" here. That is an accumulation, ADR 0033 deleted the
+        // machinery for it deliberately, and it stays deleted -- nothing is
+        // ever owed between packets, so there is no running total for this
+        // to bound. One packet, checked and forgotten.
+        let cap = self.packet_cap_for(peer_id);
+        if forwarded_amount > cap {
+            return PacketResponse::Reject(Reject {
+                code: RejectCode::t04_insufficient_liquidity(),
+                triggered_by: String::new(),
+                message: format!(
+                    "peer '{peer_id}' has a maximum packet amount of {cap}, and this packet \
+                     would forward {forwarded_amount}"
+                ),
+                data: Vec::new(),
+                accumulated_cost: 0,
+            });
+        }
+
+        // PF-19: the packet that goes out expires strictly before the one
+        // that arrived, by a whole [`FORWARDING_MESSAGE_WINDOW`]. This hop
+        // keeps that window back for the return leg -- the time a
+        // fulfilment answered just inside the downstream deadline needs to
+        // travel back here and be relayed on before *this* packet's own
+        // deadline fires. Copying `expires_at` through verbatim, which is
+        // what this did until issue #1174, handed the last hop the entire
+        // remaining budget and left every hop above it holding a paid-for
+        // crossing it could no longer be paid for.
+        //
+        // Nothing about this is a wire change and nothing downstream has to
+        // agree to it: shortening is unilateral, a receiver that would
+        // honour the longer expiry honours the shorter one too, and the
+        // field is the same field. It is done here rather than in a
+        // transport because it is a property of forwarding, not of HTTP or
+        // BTP, and both carriages must do it.
+        //
+        // A window that leaves nothing is `R00`, the same code PF-02 gives
+        // an already-expired arrival and the same reason: the packet has
+        // run out of time here, this hop's fee and route are beside the
+        // point, and the sender's move is a fresh packet with more budget
+        // rather than anything about this path. `packet-flow-spec.md` §5
+        // lists `R00` (expired) among the class-only codes -- there is no
+        // distinct action to bind, so the message carries the diagnosis and
+        // the code carries the class. `T00` would be a lie (this is not
+        // this connector's own configuration error) and `F02` a worse one
+        // (the path is fine; the clock is not).
+        let Some(outgoing_expires_at) = forwarded_expiry(prepare.expires_at, self.clock.now())
+        else {
+            return PacketResponse::Reject(Reject {
+                code: RejectCode::r00_transfer_timed_out(),
+                triggered_by: String::new(),
+                message: format!(
+                    "packet expires at {} and forwarding to peer '{peer_id}' keeps {}s back for \
+                     the return leg, which leaves no time to carry it",
+                    prepare.expires_at.to_rfc3339(),
+                    FORWARDING_MESSAGE_WINDOW.num_seconds(),
                 ),
                 data: Vec::new(),
                 accumulated_cost: 0,
@@ -1904,51 +2375,46 @@ impl Connector {
 
         let outgoing = Prepare {
             amount: forwarded_amount,
+            expires_at: outgoing_expires_at,
             ..prepare
         };
-        let peer_id = peer_route.peer_id();
 
-        // Issue #881: a hop configured for client-role covering is covered
-        // proactively, from this packet's own forwarded value -- never
-        // falling back to an uncovered send when it cannot be. A hop with
-        // no such config keeps riding the peer ledger's `pending_claim`,
-        // untouched.
+        // ADR 0042: a connector covers every PREPARE it sends. The claim is
+        // minted from this packet's own forwarded value and attached before
+        // the packet leaves; a peering that cannot be covered is refused
+        // here and the packet is not forwarded at all.
         //
-        // `riding_claim` is whatever goes out on this attempt; `pending_claim`
-        // is the subset of that the PEER book is waiting on an ack for, so
-        // it is `None` on a client-covered packet: that claim's authority is
-        // the receiver's watermark, and `self.claims` knows nothing of it.
-        let (mut covered, riding_claim, pending_claim) =
-            match self.cover_forward(peer_id, forwarded_amount).await {
-                CoverOutcome::Covered(claim) => (true, Some(claim), None),
-                CoverOutcome::NotConfigured => {
-                    let pending = self.claims.pending_claim(peer_id);
-                    (false, pending.clone(), pending)
-                }
-                CoverOutcome::Failed(reason) => {
-                    tracing::warn!(
-                        peer_id,
-                        %reason,
-                        "refusing to forward to this peer uncovered -- a covering claim could \
-                         not be produced"
-                    );
-                    return PacketResponse::Reject(Reject {
-                        code: RejectCode::t00_internal_error(),
-                        triggered_by: String::new(),
-                        message: format!("cannot cover a peer PREPARE to '{peer_id}': {reason}"),
-                        data: Vec::new(),
-                        accumulated_cost: 0,
-                    });
-                }
-            };
+        // There is no `NotConfigured` arm any more (issue #1145). It used to
+        // fall through to `ClaimBook::pending_claim` -- ADR 0004's postpay
+        // convention, armed by a *previous* fulfilment -- which is precisely
+        // the model ADR 0042 retires, and while it existed "a connector
+        // covers every PREPARE it sends" was a record rather than a fact.
+        // Nothing this method sends is acknowledged against `self.claims`
+        // either: the claim's watermark authority is the RECEIVER, asked
+        // over `claim_state`, and the peer book knows nothing of it (see
+        // `crate::outbound_client`'s header).
+        let riding_claim = match self.cover_forward(peer_id, forwarded_amount).await {
+            Ok(claim) => claim,
+            Err(reason) => {
+                tracing::warn!(
+                    peer_id,
+                    %reason,
+                    "refusing to forward to this peer uncovered -- a covering claim could \
+                     not be produced"
+                );
+                return PacketResponse::Reject(Reject {
+                    code: RejectCode::t00_internal_error(),
+                    triggered_by: String::new(),
+                    message: format!("cannot cover a peer PREPARE to '{peer_id}': {reason}"),
+                    data: Vec::new(),
+                    accumulated_cost: 0,
+                });
+            }
+        };
         let mut answer = self
             .peer_transport
-            .forward(peer_id, outgoing.clone(), minimum_delivery, riding_claim)
+            .forward(peer_id, outgoing.clone(), Some(riding_claim))
             .await;
-        if let Some(claim) = pending_claim {
-            self.claims
-                .acknowledge_outbound(peer_id, claim.nonce, answer.ack);
-        }
 
         if let Some(terms) = answer.payment_required.take() {
             if let Some(covering) = self.cover_greeted_packet(peer_id, &terms).await {
@@ -1959,10 +2425,9 @@ impl Connector {
                     price = terms.price().unwrap_or_default(),
                     "covering a greeted forward and retrying it once"
                 );
-                covered = true;
                 answer = self
                     .peer_transport
-                    .forward(peer_id, outgoing, minimum_delivery, Some(covering))
+                    .forward(peer_id, outgoing, Some(covering))
                     .await;
                 // Bounded: whatever the retry answered is the answer. A
                 // second greeting is logged with its terms and relayed, not
@@ -1984,25 +2449,21 @@ impl Connector {
         // this book records (see `crate::outbound_client`'s header).
 
         match answer.response {
-            PacketResponse::Fulfill(fulfill) => {
-                let outcome = Self::accept_if_fulfilled(&condition, fulfill, 0);
-                if matches!(outcome, PacketResponse::Fulfill(_)) && !covered {
-                    // A packet already paid for by a client-role claim is
-                    // not owed a second time on the peer ledger: one packet,
-                    // one debt, whichever role carried it.
-                    self.claims
-                        .record_fulfillment(peer_id, forwarded_amount, self.clock.now());
-                }
-                outcome
-            }
-            // ADR 0011, peer-wire-spec.md §5.2: this hop's own fee is added
+            // No claim is signed here, and that absence is the whole of
+            // issue #1145. A fulfilment is a DELIVERY RECEIPT (ADR 0042),
+            // not a payment trigger: this packet was paid for before it was
+            // sent, so there is nothing left to owe once it lands. The
+            // `ClaimBook::record_fulfillment` call that used to sit here was
+            // the last arming site of ADR 0004's model in the peer role.
+            PacketResponse::Fulfill(fulfill) => Self::accept_if_fulfilled(&condition, fulfill, 0),
+            // ADR 0011, peer-semantics-pre-868.md §5.2: this hop's own fee is added
             // only once it has genuinely reached `peer_id` and relays a
             // reject that peer itself decided on -- never on a reject this
             // transport synthesized locally (`reached_peer` false) because
             // the packet never actually traversed this hop in that case.
             PacketResponse::Reject(mut reject) => {
                 if answer.reached_peer {
-                    reject.accumulated_cost += peer_route.fee();
+                    reject.accumulated_cost += fee;
                 }
                 PacketResponse::Reject(reject)
             }
@@ -2016,23 +2477,61 @@ impl Connector {
     /// greeting: `amount` and [`OutboundClientHop::domain`] are both known
     /// locally, which is exactly what lets this run proactively rather
     /// than only once a refusal has already taught this node a price.
-    async fn cover_forward(&self, peer_id: &str, amount: u64) -> CoverOutcome {
-        let Some(hop) = self.outbound_client_hops.get(peer_id) else {
-            // Never configured for client-role covering: the peer ledger's
-            // own postpay convention (ADR 0004) is untouched by #881.
-            return CoverOutcome::NotConfigured;
+    async fn cover_forward(&self, peer_id: &str, amount: u64) -> Result<WireClaim, String> {
+        let hops = self.outbound_client_hops.load_full();
+        let Some(hop) = hops.get(peer_id) else {
+            // Neither populator of `outbound_client_hops` has armed this
+            // peering -- no `[[pay_channels]]` row at boot, and no
+            // `register_outbound_client_hop` from a runtime peering (issue
+            // #1217) -- so there is nothing to pay it from, and since issue
+            // #1145 there is no postpay path to fall through to either.
+            // `Config::load` refuses a configured route to an uncovered
+            // peering by name (`ConfigError::PayChannelUnbound`), so a file
+            // that loaded cannot reach this; a leased or runtime-installed
+            // route (ADR 0028) can, and is refused here rather than carried
+            // free.
+            return Err(format!(
+                "no client-role channel is configured to pay peer '{peer_id}' from -- neither a \
+                 '[[pay_channels]]' row nor a runtime peering (ADR 0058) has bound one -- and a \
+                 connector covers every PREPARE it sends (ADR 0042)"
+            ));
         };
         let Some(ledger) = self.outbound_client.as_ref() else {
-            return CoverOutcome::Failed(
+            return Err(
                 "a client-role channel is configured for this peer but this node has no \
                  outbound client ledger to sign from"
                     .to_string(),
             );
         };
-        let Some(signer) = self.claims.signer() else {
-            return CoverOutcome::Failed(
-                "this node has no settlement signer to sign a claim with".to_string(),
-            );
+        // The key is the settlement identity of the channel's on-chain
+        // participant, on the channel's own chain (issue #1146) -- the same
+        // key the PEER role on that channel signs with, because it is the
+        // same participant. Chosen by matching the hop's domain, so a
+        // secp256k1 key can never be paired with a Solana program id.
+        let binding = match &hop.domain {
+            OutboundClientDomain::Evm(domain) => {
+                let Some(signer) = self.claims.signer() else {
+                    return Err(
+                        "this node has no EVM settlement signer to sign a claim with".to_string(),
+                    );
+                };
+                OutboundClaimBinding::Evm {
+                    domain: *domain,
+                    signer: signer.as_ref(),
+                }
+            }
+            OutboundClientDomain::Solana(domain) => {
+                let Some(signer) = self.claims.solana_signer() else {
+                    return Err(
+                        "this node has no Solana settlement signer to sign a claim with"
+                            .to_string(),
+                    );
+                };
+                OutboundClaimBinding::Solana {
+                    program_id: domain.program_id,
+                    signer: signer.as_ref(),
+                }
+            }
         };
 
         let claim = match ledger
@@ -2040,29 +2539,31 @@ impl Connector {
                 peer_id,
                 hop.claim_state.as_ref(),
                 &hop.channel,
-                &hop.domain,
-                signer.as_ref(),
+                &binding,
                 amount,
             )
             .await
         {
             Ok(claim) => claim,
-            Err(error) => return CoverOutcome::Failed(error.to_string()),
+            Err(error) => return Err(error.to_string()),
         };
         // The wire carries `cumulative_amount` as a `uint64` (§4.2); see
         // the matching check in `cover_greeted_packet` for why this is
         // refused rather than truncated.
         let Ok(cumulative_amount) = u64::try_from(claim.cumulative) else {
-            return CoverOutcome::Failed(format!(
+            return Err(format!(
                 "the covering claim's cumulative amount {} does not fit the wire's uint64",
                 claim.cumulative
             ));
         };
-        CoverOutcome::Covered(WireClaim {
+        Ok(WireClaim {
             channel_id: hop.channel_id.clone(),
             nonce: claim.nonce,
             cumulative_amount,
-            signature: ClaimSignature::Evm(claim.signature),
+            // Already discriminated by the binding that produced it -- an
+            // ed25519 signature is never re-labelled as an EVM one on its
+            // way to the carriage (issue #732's rule, issue #1146's arm).
+            signature: claim.signature,
         })
     }
 
@@ -2071,18 +2572,27 @@ impl Connector {
     ///
     /// The claim is minted from the outbound CLIENT ledger (issue #873):
     /// its cumulative amount is the RECEIVER's own watermark advanced by the
-    /// quoted price, and its EIP-712 domain is the receiver's own, read off
-    /// the greeting rather than out of this node's settlement config -- a
-    /// claim signed under the payer's idea of the `TokenNetwork` recovers to
-    /// a different address and is refused at the far gate.
+    /// quoted price, and on EVM its EIP-712 domain is the receiver's own,
+    /// read off the greeting rather than out of this node's settlement
+    /// config -- a claim signed under the payer's idea of the `TokenNetwork`
+    /// recovers to a different address and is refused at the far gate.
+    ///
+    /// **A Solana hop reads no domain off the greeting** (issue #1146), and
+    /// that is not the same shortcut this method refuses for EVM. ADR 0053's
+    /// binding is the settlement program id, and since issue #1128 a node
+    /// has exactly one -- the program it can redeem through -- so a payer and
+    /// a payee that disagreed about it would have no channel in common to be
+    /// quoting each other prices about. The greeting supplies the price and
+    /// nothing else. The retry arm therefore works on both chains rather
+    /// than silently doing nothing on one.
     ///
     /// `None` -- with the reason logged, never silently -- for every way
     /// this node cannot pay: no ledger, no client-role channel configured
-    /// for this hop, no settlement signer, a greeting naming no EVM
-    /// settlement, or a receiver that would not report the watermark (which
-    /// includes refusing for want of headroom). The caller then relays the
-    /// peer's refusal as it stands; nothing is ever emitted claiming to have
-    /// paid when it has not.
+    /// for this hop, no settlement signer on that channel's chain, an EVM
+    /// hop whose greeting names no EVM settlement, or a receiver that would
+    /// not report the watermark (which includes refusing for want of
+    /// headroom). The caller then relays the peer's refusal as it stands;
+    /// nothing is ever emitted claiming to have paid when it has not.
     async fn cover_greeted_packet(
         &self,
         peer_id: &str,
@@ -2095,27 +2605,51 @@ impl Connector {
             );
             return None;
         };
-        let Some(hop) = self.outbound_client_hops.get(peer_id) else {
+        let hops = self.outbound_client_hops.load_full();
+        let Some(hop) = hops.get(peer_id) else {
             tracing::warn!(
                 peer_id,
                 "peer quoted x402 terms but no client-role channel is configured for it"
             );
             return None;
         };
-        let Some(signer) = self.claims.signer() else {
-            tracing::warn!(
-                peer_id,
-                "peer quoted x402 terms but this node has no settlement signer to sign a claim with"
-            );
-            return None;
-        };
-        let Some(domain) = EvmDomain::from_greeting(terms) else {
-            tracing::warn!(
-                peer_id,
-                resource = %terms.resource.url,
-                "peer quoted x402 terms naming no EVM settlement this node can sign under"
-            );
-            return None;
+        let binding = match &hop.domain {
+            OutboundClientDomain::Evm(_) => {
+                let Some(signer) = self.claims.signer() else {
+                    tracing::warn!(
+                        peer_id,
+                        "peer quoted x402 terms but this node has no EVM settlement signer to \
+                         sign a claim with"
+                    );
+                    return None;
+                };
+                let Some(domain) = EvmDomain::from_greeting(terms) else {
+                    tracing::warn!(
+                        peer_id,
+                        resource = %terms.resource.url,
+                        "peer quoted x402 terms naming no EVM settlement this node can sign under"
+                    );
+                    return None;
+                };
+                OutboundClaimBinding::Evm {
+                    domain,
+                    signer: signer.as_ref(),
+                }
+            }
+            OutboundClientDomain::Solana(domain) => {
+                let Some(signer) = self.claims.solana_signer() else {
+                    tracing::warn!(
+                        peer_id,
+                        "peer quoted x402 terms but this node has no Solana settlement signer to \
+                         sign a claim with"
+                    );
+                    return None;
+                };
+                OutboundClaimBinding::Solana {
+                    program_id: domain.program_id,
+                    signer: signer.as_ref(),
+                }
+            }
         };
         let Some(price) = terms.price() else {
             // Unreachable through a parsed greeting (`parse_greeting`
@@ -2130,8 +2664,7 @@ impl Connector {
                 peer_id,
                 hop.claim_state.as_ref(),
                 &hop.channel,
-                &domain,
-                signer.as_ref(),
+                &binding,
                 price,
             )
             .await
@@ -2162,7 +2695,7 @@ impl Connector {
             channel_id: hop.channel_id.clone(),
             nonce: claim.nonce,
             cumulative_amount,
-            signature: ClaimSignature::Evm(claim.signature),
+            signature: claim.signature,
         })
     }
 
@@ -2188,8 +2721,38 @@ impl Connector {
     /// REJECT raised at the termination are both sealed with it (ADR 0018);
     /// only [`Self::open_termination_request`]'s own two failures, which
     /// happen before any secret is recovered, stay plaintext.
-    async fn deliver_to_app(&self, route: &StaticRoute, prepare: Prepare) -> PacketResponse {
+    ///
+    /// `client_channel_id` is the client channel whose covering claim
+    /// admitted this packet at this connector's own edge, or `None` when
+    /// nothing did (a peer-role arrival, an unpriced or unclaimed
+    /// request). It is the sole source of the attribution headers the
+    /// delivery carries (ADR 0040, `crate::attribution`) -- which is why a
+    /// packet that reached here across another hop states no payer at all
+    /// rather than naming the hop it arrived from, the failure ADR 0017
+    /// found in the TypeScript prototype's own header.
+    ///
+    /// `prepare.expires_at` travels down with it (ADR 0064, PF-25, issue
+    /// #1183): the packet's deadline bounds how long this termination waits
+    /// for the app, so a slow handler is abandoned rather than waited on
+    /// past the instant the sender said to stop. It is read here rather
+    /// than left behind with the rest of the `Prepare` because
+    /// [`Self::deliver_opened_envelope`] is where the app call is made, and
+    /// the deadline has to be in scope at the call it bounds.
+    async fn deliver_to_app(
+        &self,
+        route: &StaticRoute,
+        prepare: Prepare,
+        client_channel_id: Option<&str>,
+    ) -> PacketResponse {
         let condition = prepare.execution_condition;
+        let expires_at = prepare.expires_at;
+        // What this packet costs, read off the schedule at its own payload
+        // length (ADR 0065) -- taken here because `open_termination_request`
+        // below is the last moment `prepare.data` is whole, and because the
+        // length that is charged must be the length that arrived rather than
+        // anything recovered from inside the wrap. The client edge and the
+        // peer gate computed the same figure from the same bytes.
+        let charge = route.price().charge(prepare.data.len());
 
         let (envelope_bytes, shared_secret) = match self.open_termination_request(&prepare.data) {
             Ok(opened) => opened,
@@ -2197,7 +2760,17 @@ impl Connector {
         };
 
         let inner = self
-            .deliver_opened_envelope(route, &condition, &shared_secret, &envelope_bytes)
+            .deliver_opened_envelope(
+                PricedTermination {
+                    handler_url: route.handler_url(),
+                    charge,
+                },
+                &condition,
+                expires_at,
+                &shared_secret,
+                &envelope_bytes,
+                client_channel_id,
+            )
             .await;
         Self::seal_termination_response(inner, &shared_secret)
     }
@@ -2207,8 +2780,8 @@ impl Connector {
     /// is sealed with -- or the plaintext refusal to answer instead. Its
     /// two failures are the only ones a termination raises before a secret
     /// is in hand, which is exactly why they are also the only ones that
-    /// stay unsealed. Shared by both terminations this connector has:
-    /// [`Self::deliver_to_app`] and [`Self::deliver_peer_sale`].
+    /// stay unsealed. The one termination this connector has is
+    /// [`Self::deliver_to_app`].
     fn open_termination_request(&self, data: &[u8]) -> Result<(Vec<u8>, [u8; 32]), Reject> {
         let Some(identity_signer) = self.identity_signer.as_ref() else {
             return Err(unsealed_termination_reject(
@@ -2222,17 +2795,63 @@ impl Connector {
 
     /// The part of [`Self::deliver_to_app`] that runs once the gift wrap has
     /// been opened: decode the envelope it carried and, if that succeeds,
-    /// make the request it describes. Split out so the caller can seal
-    /// every return path uniformly with the one shared secret the wrap
-    /// carried, including this method's own envelope-decode failure.
+    /// make the request it describes -- bounded by the packet's own
+    /// deadline. Split out so the caller can seal every return path
+    /// uniformly with the one shared secret the wrap carried, including
+    /// this method's own envelope-decode failure.
+    ///
+    /// # The deadline bounds the wait, and nothing else (ADR 0064, PF-25)
+    ///
+    /// Until issue #1183 nothing here read `expires_at` at all. Expiry was
+    /// checked once on arrival ([`Self::reject_ineligible`], PF-02) and
+    /// never again, so an app that took longer than the packet's whole
+    /// budget was still answered for: this connector derived the fulfilment
+    /// (ADR 0019) and returned a FULFILL for a packet whose deadline had
+    /// already fired, to an upstream that had given up and, if it was
+    /// another connector, moved on. That is the termination-side twin of
+    /// the forwarding race PF-19 closed one release earlier.
+    ///
+    /// The rule is that the deadline bounds the *wait*, not the *answer*.
+    /// [`connector_domain::delivery_budget`] says how long there is, and
+    /// the app call is abandoned when that runs out; an app that answers
+    /// inside the budget is answered for, however close to the line it
+    /// came, and no second expiry check is applied to work already done.
+    /// That asymmetry is deliberate and is the whole of ADR 0064: the claim
+    /// paying for this packet was taken *before* the app was called -- at
+    /// the client edge by `ClientClaimGate::ingest`, or on a peer arrival by
+    /// `ClaimBook`, in both cases with the watermark advanced and journalled
+    /// before routing began -- and only a forwarded route's terminal reject
+    /// gives one back (`roll_back_uncarried_forward`, issue #1012). So the
+    /// verdict returned here decides nothing about who is out of pocket.
+    /// Rejecting a late-but-real answer would destroy work the payer has
+    /// already been charged for, refund nobody, and say something false
+    /// besides: under ADR 0042 a fulfilment is a delivery receipt, not a
+    /// payment trigger, and the delivery genuinely happened.
+    ///
+    /// Both refusals are `R00` -- the code PF-02 gives an already-dead
+    /// arrival and PF-19 a forward with no window left, for the same reason
+    /// in all three places: the packet ran out of time, the sender's move is
+    /// a fresh packet with more budget, and nothing about this route or this
+    /// connector's configuration is at fault. `T01` would be the available
+    /// lie -- the app was reachable, it was simply slower than the sender
+    /// allowed -- and would send a sender looking for another path.
+    ///
+    /// Both are also raised *here*, below [`Self::open_termination_request`],
+    /// so they ride home sealed to the sender's own shared secret like every
+    /// other verdict a termination reaches (ADR 0018, PF-24). Checking
+    /// before the wrap was open would have been marginally cheaper and would
+    /// have leaked an unsealed reject for a packet this connector could read
+    /// perfectly well.
     async fn deliver_opened_envelope(
         &self,
-        route: &StaticRoute,
+        termination: PricedTermination<'_>,
         condition: &[u8; 32],
+        expires_at: chrono::DateTime<Utc>,
         shared_secret: &[u8; 32],
         envelope_bytes: &[u8],
+        client_channel_id: Option<&str>,
     ) -> PacketResponse {
-        let request = match EnvelopeRequest::decode(envelope_bytes) {
+        let mut request = match EnvelopeRequest::decode(envelope_bytes) {
             Ok(request) => request,
             Err(error) => {
                 return PacketResponse::Reject(Reject {
@@ -2240,12 +2859,89 @@ impl Connector {
                     triggered_by: String::new(),
                     message: format!("envelope did not decode: {error}"),
                     data: Vec::new(),
-                    accumulated_cost: route.price(),
+                    accumulated_cost: termination.charge,
                 });
             }
         };
 
-        match self.app_client.deliver(route.handler_url(), &request).await {
+        // ADR 0040: state what this connector itself verified about the
+        // payment -- and, whether or not there is anything to state, remove
+        // whatever the sender wrote under those same names first, so an app
+        // reading them is reading this connector or reading nothing.
+        apply_payment_attribution(
+            &mut request,
+            client_channel_id.map(|channel_key| PaymentAttribution {
+                channel_key,
+                charge: termination.charge,
+            }),
+        );
+
+        // PF-25's first half: a packet with nothing left is not delivered at
+        // all. `accumulated_cost` is zero because the app was never asked --
+        // the same figure, for the same reason, as `Unreachable` and
+        // `Refused` below, and unlike the envelope-decode failure above,
+        // which reached the termination and is charged this route's price
+        // (issue #545).
+        let Some(budget) = delivery_budget(expires_at, self.clock.now()) else {
+            return PacketResponse::Reject(Reject {
+                code: RejectCode::r00_transfer_timed_out(),
+                triggered_by: String::new(),
+                message: format!(
+                    "packet expired at {} before it could be delivered -- the app was not asked",
+                    expires_at.to_rfc3339(),
+                ),
+                data: Vec::new(),
+                accumulated_cost: 0,
+            });
+        };
+
+        // The wait itself is real time, not the injected clock, and that
+        // split is on purpose: what to do is a decision (`delivery_budget`,
+        // pure, deterministic, property-tested in `connector-domain`), while
+        // when to stop waiting is a mechanism only a real timer can perform.
+        // A test drives the decision through the clock port and the
+        // abandonment through a genuinely slow fake app, which is what those
+        // two things actually are.
+        //
+        // `to_std` cannot fail here -- `delivery_budget` returns a strictly
+        // positive span or nothing -- and the saturating arm is a far-future
+        // timer rather than a panic, so a sender naming a preposterous
+        // expiry gets a wait it will never see the end of instead of taking
+        // the packet path down with it.
+        let budget = budget
+            .to_std()
+            .unwrap_or(std::time::Duration::from_secs(u64::MAX));
+        let delivery = self.app_client.deliver(termination.handler_url, &request);
+        let Ok(outcome) = tokio::time::timeout(budget, delivery).await else {
+            // PF-25's second half. Dropping the future is what abandons the
+            // request: the socket to the app closes and this connector stops
+            // waiting. The app may well finish the work anyway -- that is
+            // between an operator and its own handler, both inside one trust
+            // domain (ADR 0019), and not a protocol question. What is a
+            // protocol question is that the packet reached its termination
+            // and the priced work was set in motion, so unlike the arm
+            // above this reject carries the route's price (ADR 0011, issue
+            // #545): a sender learns "your answer was too slow", not "this
+            // path is free".
+            tracing::info!(
+                handler_url = %termination.handler_url,
+                expires_at = %expires_at.to_rfc3339(),
+                "the app did not answer within the packet's deadline -- abandoning the request"
+            );
+            return PacketResponse::Reject(Reject {
+                code: RejectCode::r00_transfer_timed_out(),
+                triggered_by: String::new(),
+                message: format!(
+                    "the app did not answer before this packet's expiry at {}; the request was \
+                     abandoned rather than answered late",
+                    expires_at.to_rfc3339(),
+                ),
+                data: Vec::new(),
+                accumulated_cost: termination.charge,
+            });
+        };
+
+        match outcome {
             // ADR 0020: an HTTP status is envelope content, never a packet
             // outcome, so any complete answer -- whatever its status --
             // rides home as a response envelope on a FULFILL. ADR
@@ -2261,7 +2957,7 @@ impl Connector {
                     fulfillment: derive_fulfillment(shared_secret),
                     data: response.encode(),
                 },
-                route.price(),
+                termination.charge,
             ),
             AppOutcome::Unreachable { message } => PacketResponse::Reject(Reject {
                 code: RejectCode::t01_peer_unreachable(),
@@ -2309,267 +3005,6 @@ impl Connector {
         }
     }
 
-    /// Deliver a PREPARE that paid this connector's peer-sale route (issue
-    /// #885): sealed and priced exactly like a terminated app route (ADR
-    /// 0018/0019/0020), but the "app" is this connector itself, and the
-    /// work it does is inserting the payer into the runtime peer/route
-    /// table (issue #884) rather than an HTTP round trip.
-    ///
-    /// The channel that paid for this very packet is the channel being
-    /// bought into peering -- "the payment names the channel it is
-    /// binding" (issue #885) -- so no separate `channelId` field rides the
-    /// request: `client_channel_id` (ADR 0036, threaded from the client
-    /// edge's own already-chain-verified claim admission) is both the
-    /// payer's identity and the binding. This method re-reads that
-    /// channel fresh from its settlement backend before inserting
-    /// anything: the client edge already proved the claim's signer
-    /// against it once to admit the payment, and this guards against the
-    /// channel having gone terminal (or vanished from an operator's chain
-    /// entirely) in the window between that admission and this delivery,
-    /// rather than trusting a string across that boundary.
-    async fn deliver_peer_sale(
-        &self,
-        prepare: Prepare,
-        client_channel_id: Option<&str>,
-        price: u64,
-        lease: Duration,
-    ) -> PacketResponse {
-        let condition = prepare.execution_condition;
-
-        let (envelope_bytes, shared_secret) = match self.open_termination_request(&prepare.data) {
-            Ok(opened) => opened,
-            Err(reject) => return PacketResponse::Reject(reject),
-        };
-        let inner = self
-            .settle_peer_sale_purchase(
-                &condition,
-                &shared_secret,
-                client_channel_id,
-                price,
-                lease,
-                &envelope_bytes,
-            )
-            .await;
-        Self::seal_termination_response(inner, &shared_secret)
-    }
-
-    /// The part of [`Self::deliver_peer_sale`] that runs once the gift wrap
-    /// has been opened -- split out, like [`Self::deliver_opened_envelope`],
-    /// so every return path is sealed uniformly by the caller.
-    async fn settle_peer_sale_purchase(
-        &self,
-        condition: &[u8; 32],
-        shared_secret: &[u8; 32],
-        client_channel_id: Option<&str>,
-        price: u64,
-        lease: Duration,
-        envelope_bytes: &[u8],
-    ) -> PacketResponse {
-        let refuse = |message: String| {
-            PacketResponse::Reject(Reject {
-                code: RejectCode::f00_bad_request(),
-                triggered_by: String::new(),
-                message,
-                data: Vec::new(),
-                accumulated_cost: 0,
-            })
-        };
-
-        let request = match EnvelopeRequest::decode(envelope_bytes) {
-            Ok(request) => request,
-            Err(error) => {
-                return PacketResponse::Reject(Reject {
-                    code: RejectCode::f01_invalid_packet(),
-                    triggered_by: String::new(),
-                    message: format!("envelope did not decode: {error}"),
-                    data: Vec::new(),
-                    accumulated_cost: price,
-                });
-            }
-        };
-
-        // Shape-derived refusals come FIRST, before the payment binding
-        // is even looked at (issue #887's "refuse BEFORE taking
-        // payment"): these are exactly the refusals the client edge's
-        // pre-admission probe (`Self::peer_sale_purchase_would_be_refused`)
-        // predicts from the packet alone, and a packet whose claim was
-        // therefore never admitted must re-derive the identical answer
-        // here -- the #869 two-sided pattern. The prior order ran the
-        // rate limit before the parse to throttle garbage bodies, but
-        // that property was already spent the moment the edge's probe
-        // began parsing every attempt pre-admission; the rate limit still
-        // throttles per-identity judged attempts below.
-        //
-        // Issue #887's "refusal is loud" still names the payer wherever
-        // there is one to name -- but a shape refusal is judged before any
-        // payment was bound, so on the pre-admission path (the ordinary
-        // one for these) there is no admitted channel and the log says so
-        // rather than inventing an identity.
-        let payer = client_channel_id.unwrap_or(UNADMITTED_PAYER);
-        let purchase: PeerSaleRequest = match serde_json::from_slice(&request.body) {
-            Ok(purchase) => purchase,
-            Err(error) => {
-                tracing::warn!(
-                    channel_id = payer,
-                    %error,
-                    "peer-sale purchase refused: malformed request body"
-                );
-                return refuse(format!("malformed peer-sale request body: {error}"));
-            }
-        };
-        if let Some(message) = self.peer_sale_shape_refusal(&purchase) {
-            tracing::warn!(
-                channel_id = payer,
-                prefix = %purchase.prefix,
-                %message,
-                "peer-sale purchase refused on the request's own shape"
-            );
-            return refuse(message);
-        }
-
-        let Some(channel_id) = client_channel_id else {
-            tracing::warn!(
-                "peer-sale purchase refused: no client channel admitted this payment to bind"
-            );
-            return refuse(
-                "buying peering requires paying with a covering claim on the channel being \
-                 bought in"
-                    .to_string(),
-            );
-        };
-
-        // Issue #887 (C4): the identity-keyed bounds -- the purchase rate
-        // limit, then the row caps -- via the same
-        // `peer_sale_identity_refusal` the client edge's pre-admission
-        // probe consults (the #869 two-sided pattern), counting the rate
-        // attempt on this, the judged-and-charged side only. In the normal
-        // edge flow the probe has already refused these unpaid; this copy
-        // is the authority for direct callers and for races against the
-        // window between the probe and here. The renewal semantics (a
-        // repeat purchase never grows a table, so neither cap applies to
-        // it) live inside the shared function.
-        if let Some(message) =
-            self.peer_sale_identity_refusal(channel_id, &purchase, RateWindow::Spend)
-        {
-            tracing::warn!(
-                channel_id,
-                %message,
-                "peer-sale purchase refused on an identity-keyed bound"
-            );
-            return refuse(message);
-        }
-
-        if let Err(message) = self.verify_purchasing_channel_open(channel_id).await {
-            return refuse(message);
-        }
-
-        // The channel that paid for this packet IS the peer being bought
-        // in (issue #885: "the payment names the channel it is binding"),
-        // so it doubles as this connector's peer id -- unique, stable, and
-        // needing no buyer-chosen name to collide over.
-        let peer_id = channel_id;
-        let expires_at = match self.upsert_runtime_peer_purchase(peer_id, lease) {
-            Ok(expires_at) => expires_at,
-            Err(error) => {
-                tracing::warn!(channel_id, %error, "peer-sale purchase refused: could not insert peer row");
-                return refuse(format!("could not register peer '{peer_id}': {error}"));
-            }
-        };
-        let route = match self.upsert_runtime_peer_route(
-            purchase.prefix.clone(),
-            peer_id,
-            purchase.fee,
-            purchase.price,
-        ) {
-            Ok(route) => route,
-            Err(error) => {
-                tracing::warn!(channel_id, %error, "peer-sale purchase refused: could not insert route row");
-                return refuse(format!(
-                    "could not register route '{}': {error}",
-                    purchase.prefix
-                ));
-            }
-        };
-
-        tracing::info!(
-            channel_id,
-            peer_id,
-            prefix = %route.prefix,
-            fee = route.fee,
-            price = route.price,
-            %expires_at,
-            "peer-sale purchase admitted: peer and route rows inserted"
-        );
-
-        let body = serde_json::to_vec(&PeerSaleResponse {
-            peer_id: peer_id.to_string(),
-            prefix: route.prefix.clone(),
-            fee: route.fee,
-            price: route.price,
-            expires_at,
-        })
-        .expect("PeerSaleResponse always serializes");
-        Self::accept_if_fulfilled(
-            condition,
-            Fulfill {
-                fulfillment: derive_fulfillment(shared_secret),
-                data: EnvelopeResponse {
-                    status: 200,
-                    headers: vec![("content-type".to_string(), "application/json".to_string())],
-                    body,
-                }
-                .encode(),
-            },
-            price,
-        )
-    }
-
-    /// Re-read the channel that paid for a peer-sale purchase from its own
-    /// settlement backend and confirm it is still open (issue #885), or
-    /// return the message the purchase is refused with. Every failure is
-    /// logged with the channel it names and the reason it failed, so a
-    /// refused purchase leaves positive evidence rather than silence.
-    ///
-    /// `channel_id` is `ClientClaim::channel_key`'s chain-namespaced form
-    /// (`evm:<id>` / `solana:<account>`); the namespace is stripped before
-    /// the backend is asked, since `settlement_for_channel` and
-    /// [`ChannelId`] both take the bare on-chain id, matching every other
-    /// per-channel operation on this connector (`open_channel`,
-    /// `redeem_channel`, ...).
-    async fn verify_purchasing_channel_open(&self, channel_id: &str) -> Result<(), String> {
-        let raw_channel_id = channel_id.split_once(':').map_or(channel_id, |(_, id)| id);
-        let settlement = self
-            .settlement_for_channel(raw_channel_id)
-            .map_err(|error| {
-                tracing::warn!(
-                    channel_id,
-                    %error,
-                    "peer-sale purchase refused: no settlement backend for this channel"
-                );
-                format!("channel '{channel_id}' names no settlement backend")
-            })?;
-        let state = settlement
-            .channel_state(&ChannelId(raw_channel_id.to_string()))
-            .await
-            .map_err(|error| {
-                tracing::warn!(
-                    channel_id,
-                    %error,
-                    "peer-sale purchase refused: channel does not exist on chain"
-                );
-                format!("channel '{channel_id}' does not exist on chain: {error}")
-            })?;
-        if state.status != ChannelStatus::Open {
-            tracing::warn!(
-                channel_id,
-                status = ?state.status,
-                "peer-sale purchase refused: channel is not open"
-            );
-            return Err(format!("channel '{channel_id}' is not open"));
-        }
-        Ok(())
-    }
-
     /// The index into `self.routes` that `destination` longest-prefix
     /// matches against, if any.
     fn select_app_route(&self, destination: &str) -> Option<usize> {
@@ -2593,13 +3028,6 @@ impl Connector {
     /// belong in "configured" as this method means it -- only a lease
     /// (issue #427), with no price and no durability, is excluded.
     ///
-    /// A runtime peer route whose peer's peer-sale lease has lapsed (issue
-    /// #886) is excluded here too, the instant the clock passes its
-    /// expiry -- exactly the same "checked fresh against the clock on
-    /// every lookup" treatment [`Self::handle_prepare_traced`] already
-    /// gives a lapsed lease (issue #427), so a demoted peer stops being
-    /// routed to immediately, whether or not [`Self::reap_expired_peer_leases`]
-    /// has run yet to remove its row from the durable table.
     fn select_configured_route(&self, destination: &str) -> Option<(usize, ConfiguredTarget)> {
         let app_match = self.select_app_route(destination).map(|index| {
             (
@@ -2614,13 +3042,8 @@ impl Connector {
                 ConfiguredTarget::Peer(index),
             )
         });
-        let now = self.clock.now();
-        let runtime_peers = self.runtime_peers_snapshot();
         let runtime_peer_routes = self.runtime_peer_routes_snapshot();
-        let runtime_list: Vec<&PeerRoute> = runtime_peer_routes
-            .values()
-            .filter(|route| !peer_lease_has_lapsed(&runtime_peers, route.peer_id(), now))
-            .collect();
+        let runtime_list: Vec<&PeerRoute> = runtime_peer_routes.values().collect();
         let runtime_prefixes: Vec<&str> = runtime_list.iter().map(|route| route.prefix()).collect();
         let runtime_match = select_route(destination, &runtime_prefixes).map(|index| {
             (
@@ -2628,18 +3051,7 @@ impl Connector {
                 ConfiguredTarget::RuntimePeer(runtime_list[index].clone()),
             )
         });
-        let peer_sale_match = self.peer_sale.as_ref().and_then(|sale| {
-            select_route(destination, &[sale.prefix()]).map(|_| {
-                (
-                    sale.prefix().len(),
-                    ConfiguredTarget::PeerSale {
-                        price: sale.price(),
-                        lease: sale.lease(),
-                    },
-                )
-            })
-        });
-        [app_match, peer_match, runtime_match, peer_sale_match]
+        [app_match, peer_match, runtime_match]
             .into_iter()
             .flatten()
             .max_by_key(|(len, target)| (*len, target.rank()))
@@ -2668,33 +3080,74 @@ impl Connector {
                     price: self.routes[index].price(),
                     transport_policy: self.routes[index].transport_policy(),
                     kind: ClientRouteKind::Terminated,
+                    request: self.routes[index].request().cloned(),
                 },
                 ConfiguredTarget::Peer(index) => ClientRouteFacts {
                     price: self.peer_routes[index].price(),
                     transport_policy: TransportPolicy::Both,
                     kind: ClientRouteKind::Forwarded,
+                    request: self.peer_routes[index].request().cloned(),
                 },
+                // A runtime-pushed peer route (issue #884) carries no
+                // `request` table: it is written through the operator
+                // surface, not `[[routes]]`, so there is no config-file row
+                // for one to live on.
                 ConfiguredTarget::RuntimePeer(route) => ClientRouteFacts {
                     price: route.price(),
                     transport_policy: TransportPolicy::Both,
                     kind: ClientRouteKind::Forwarded,
-                },
-                // Priced and greeted exactly like a terminated route
-                // (issue #885): buying peering is the terminating app's
-                // work, done by this connector itself rather than an
-                // HTTP handler.
-                ConfiguredTarget::PeerSale { price, .. } => ClientRouteFacts {
-                    price,
-                    transport_policy: TransportPolicy::Both,
-                    kind: ClientRouteKind::Terminated,
+                    request: None,
                 },
             })
     }
 
     /// [`Self::client_route`]'s price alone, for a caller with no use for
     /// the rest.
-    pub fn client_route_price(&self, destination: &str) -> Option<u64> {
+    pub fn client_route_price(&self, destination: &str) -> Option<Price> {
         self.client_route(destination).map(|route| route.price)
+    }
+
+    /// Every prefix this connector prices at the client edge, with what it
+    /// costs -- the enumeration behind the node self-description's `routes`
+    /// (ADR 0050).
+    ///
+    /// Each prefix's price is read back through [`Self::client_route`] rather
+    /// than off the table it was found in, so a prefix that appears in more
+    /// than one source is quoted at the price a real request to it would be
+    /// charged. There is exactly one lookup rule and this uses it.
+    ///
+    /// Sorted by prefix, which makes the answer stable across restarts and
+    /// across a runtime write that happens to land in a different map slot --
+    /// a document whose field order wanders is a document nobody can diff.
+    ///
+    /// Deliberately carries **prefix, price and the route's `request`
+    /// declaration, and nothing else** (ADR 0067 for the last). A terminated
+    /// route's `handler_url` describes software behind this connector
+    /// (ND-08); a forwarded route's peer id and per-peering fee are
+    /// operator-private (ND-09). Leased routes are absent for the reason
+    /// [`Self::client_route`] gives: a lease carries no price at all.
+    pub fn client_route_prices(&self) -> Vec<ClientRoutePrice> {
+        let mut prefixes: std::collections::BTreeSet<String> = self
+            .routes
+            .iter()
+            .map(|route| route.prefix().to_string())
+            .collect();
+        prefixes.extend(
+            self.peer_routes
+                .iter()
+                .map(|route| route.prefix().to_string()),
+        );
+        prefixes.extend(self.runtime_peer_routes.load().keys().cloned());
+        prefixes
+            .into_iter()
+            .filter_map(|prefix| {
+                self.client_route(&prefix).map(|facts| ClientRoutePrice {
+                    prefix,
+                    price: facts.price,
+                    request: facts.request,
+                })
+            })
+            .collect()
     }
 
     /// Whether `prepare` names a terminated app route whose envelope
@@ -2783,209 +3236,6 @@ impl Connector {
         EnvelopeRequest::decode(&envelope_bytes).ok()
     }
 
-    /// The purchase refusals derivable from the request's own shape --
-    /// prefix validity, config containment (ADR 0037), the price/fee
-    /// arithmetic, and the prefix-length bound (issue #887) -- with no
-    /// payer identity involved. One function, consulted from BOTH sides
-    /// of claim admission: [`Self::peer_sale_purchase_would_be_refused`]
-    /// asks it before the client edge admits the covering claim, and
-    /// [`Self::settle_peer_sale_purchase`] re-derives the identical
-    /// answer after, so the two can never disagree (the #869 pattern)
-    /// and a shape-refused purchase is never charged (issue #887's own
-    /// "refuse BEFORE taking payment").
-    fn peer_sale_shape_refusal(&self, purchase: &PeerSaleRequest) -> Option<String> {
-        if !is_valid_ilp_address(&purchase.prefix) {
-            return Some(format!("'{}' is not a valid ILP address", purchase.prefix));
-        }
-        if self.config_owns_ancestor_of(&purchase.prefix) {
-            return Some(format!(
-                "'{}' sits under address space a configured route already serves; \
-                 config-owned space is not for sale",
-                purchase.prefix
-            ));
-        }
-        let covers_next_hop = purchase
-            .price
-            .checked_sub(purchase.fee)
-            .is_some_and(|forwarded| forwarded >= purchase.next_hop_price);
-        if !covers_next_hop {
-            return Some(format!(
-                "price ({}) minus fee ({}) must be at least next_hop_price ({})",
-                purchase.price, purchase.fee, purchase.next_hop_price
-            ));
-        }
-        let max_prefix_length = self.peer_sale_bounds.max_prefix_length();
-        if purchase.prefix.len() > max_prefix_length {
-            return Some(format!(
-                "'{}' is {} bytes, over this node's {max_prefix_length}-byte purchased-prefix \
-                 limit",
-                purchase.prefix,
-                purchase.prefix.len(),
-            ));
-        }
-        None
-    }
-
-    /// The purchase refusals keyed by the payer's identity -- the purchase
-    /// rate limit and the two row caps (issue #887) -- evaluated for
-    /// `channel_id` against `purchase`. One function, consulted from BOTH
-    /// sides of claim admission exactly like
-    /// [`Self::peer_sale_shape_refusal`]:
-    /// [`Self::peer_sale_purchase_refusal_for_payer`] asks it before the
-    /// client edge admits the claim (with [`RateWindow::Peek`] -- a
-    /// refusal that charged nothing must cost none of the payer's window
-    /// either), and [`Self::settle_peer_sale_purchase`] asks it after
-    /// (with [`RateWindow::Spend`]), the authoritative copy for callers
-    /// that reach it directly. Same order both sides: rate, then caps.
-    fn peer_sale_identity_refusal(
-        &self,
-        channel_id: &str,
-        purchase: &PeerSaleRequest,
-        window: RateWindow,
-    ) -> Option<String> {
-        let bounds = self.peer_sale_bounds;
-        let now = self.clock.now();
-        let rate_ok = match window {
-            RateWindow::Spend => self.peer_sale_rate_limiter.allow(channel_id, now),
-            RateWindow::Peek => self.peer_sale_rate_limiter.would_allow(channel_id, now),
-        };
-        if !rate_ok {
-            return Some(format!(
-                "purchase rate limit exceeded for '{channel_id}': at most {} attempts per {} \
-                 seconds",
-                bounds.purchase_rate_limit(),
-                bounds.purchase_rate_window().num_seconds()
-            ));
-        }
-        let is_new_payer = !self.runtime_peers_snapshot().contains_key(channel_id);
-        if is_new_payer {
-            let total = self.purchased_peer_count();
-            // Widen the count, never narrow the configured cap: `as usize`
-            // on the cap truncates on a 32-bit target.
-            if total as u64 >= bounds.max_purchased_rows() {
-                return Some(format!(
-                    "this node already holds {total} purchased peer rows, at its limit of {}",
-                    bounds.max_purchased_rows()
-                ));
-            }
-        }
-        let route_already_owned_by_payer = self
-            .runtime_peer_routes_snapshot()
-            .get(&purchase.prefix)
-            .is_some_and(|route| route.peer_id() == channel_id);
-        if !route_already_owned_by_payer {
-            let payer_routes = self.purchased_route_count_for_payer(channel_id);
-            if payer_routes as u64 >= bounds.max_routes_per_payer() {
-                return Some(format!(
-                    "'{channel_id}' already holds {payer_routes} purchased routes, at this \
-                     node's limit of {}",
-                    bounds.max_routes_per_payer()
-                ));
-            }
-        }
-        None
-    }
-
-    /// Whether `prepare` names this node's peer-sale route with a purchase
-    /// its own shape already dooms (issue #887). The client edge consults
-    /// this BEFORE admitting the packet's covering claim -- the same seam
-    /// as [`Self::envelope_target_would_be_refused`] -- so a shape-refused
-    /// purchase spends nothing: routing still runs unchanged, and
-    /// [`Self::settle_peer_sale_purchase`] raises the identical refusal
-    /// from the same [`Self::peer_sale_shape_refusal`], only with no
-    /// watermark moved getting there.
-    ///
-    /// The identity-keyed bounds -- the purchase rate limit and the row
-    /// caps -- need a payer to judge, so they are not answerable from the
-    /// packet alone and live in
-    /// [`Self::peer_sale_purchase_refusal_for_payer`], which the edge
-    /// consults second, off the claim's own declared channel key. ADR
-    /// 0039 records why that peek is a sound refusal basis unadmitted.
-    pub fn peer_sale_purchase_would_be_refused(&self, prepare: &Prepare) -> bool {
-        match self.open_peer_sale_purchase(prepare) {
-            PeerSalePeek::NotJudgeable => false,
-            // A body that does not parse dooms the purchase as surely as
-            // any bound -- no identity could make it insertable -- so it
-            // is predicted here too, and `settle_peer_sale_purchase`
-            // raises the identical malformed-body refusal on the
-            // unadmitted path.
-            PeerSalePeek::Malformed => true,
-            PeerSalePeek::Purchase(purchase) => self.peer_sale_shape_refusal(&purchase).is_some(),
-        }
-    }
-
-    /// The identity-keyed half of the pre-admission peer-sale probe
-    /// (issue #887): the refusal `claimed_channel` would hit -- rate limit
-    /// or a row cap -- for the purchase `prepare` carries, or `None` when
-    /// it would clear them. `claimed_channel` is the claim's own declared
-    /// channel key, read WITHOUT admitting it: that is sound because
-    /// admission verifies the claim's signature against that exact
-    /// channel's registered signer, so a payer declaring any other channel
-    /// is rejected at admission and charged nothing -- the peek is
-    /// accurate for every payer who can actually be charged. The rate
-    /// check is a pure peek: a refusal that charges nothing costs none of
-    /// the payer's window. [`Self::settle_peer_sale_purchase`] re-derives
-    /// the same answer post-admission (counting), the authority for
-    /// direct callers and races.
-    ///
-    /// The edge consults [`Self::peer_sale_purchase_would_be_refused`]
-    /// first, so a shape-doomed purchase never reaches this.
-    ///
-    /// `claimed_channel` is a closure, not a `&str`, because reading it
-    /// costs the caller real work on every packet -- on the HTTP carriage
-    /// a wrapped claim header is a whole ECDH open -- and only a packet
-    /// that actually is a purchase for this node's sale route ever needs
-    /// it. `None` from the closure (no claim header, or one that does not
-    /// decode) declines to judge: admission answers that shape
-    /// authoritatively a moment later.
-    pub fn peer_sale_purchase_refusal_for_payer(
-        &self,
-        prepare: &Prepare,
-        claimed_channel: impl FnOnce() -> Option<String>,
-    ) -> Option<String> {
-        let PeerSalePeek::Purchase(purchase) = self.open_peer_sale_purchase(prepare) else {
-            return None;
-        };
-        let claimed_channel = claimed_channel()?;
-        let refusal =
-            self.peer_sale_identity_refusal(&claimed_channel, &purchase, RateWindow::Peek);
-        if let Some(message) = &refusal {
-            // #887's "every rejected purchase logs the payer identity and
-            // the bound it hit": this probe's answer IS the refusal the
-            // client edge returns -- the packet is never routed
-            // afterwards, so no later stage exists to log it. One log site
-            // covers both carriages.
-            tracing::warn!(
-                channel_id = %claimed_channel,
-                prefix = %purchase.prefix,
-                %message,
-                "peer-sale purchase refused pre-admission on an identity-keyed bound"
-            );
-        }
-        refusal
-    }
-
-    /// The shared front half of both peer-sale probes: how much of a
-    /// packet a pre-admission probe can actually read -- see
-    /// [`PeerSalePeek`].
-    fn open_peer_sale_purchase(&self, prepare: &Prepare) -> PeerSalePeek {
-        let Some((configured_len, ConfiguredTarget::PeerSale { .. })) =
-            self.select_configured_route(&prepare.destination)
-        else {
-            return PeerSalePeek::NotJudgeable;
-        };
-        if self.active_lease_outranks(&prepare.destination, configured_len) {
-            return PeerSalePeek::NotJudgeable;
-        }
-        let Some(request) = self.opened_envelope_request(&prepare.data) else {
-            return PeerSalePeek::NotJudgeable;
-        };
-        match serde_json::from_slice::<PeerSaleRequest>(&request.body) {
-            Ok(purchase) => PeerSalePeek::Purchase(purchase),
-            Err(_) => PeerSalePeek::Malformed,
-        }
-    }
-
     /// This node's static routes, for the operator surface's read-only
     /// inspection interface (issue #420).
     pub fn routes(&self) -> Vec<RouteView> {
@@ -3009,19 +3259,17 @@ impl Connector {
             .iter()
             .map(|id| PeerView {
                 id: id.clone(),
+                fee: self.fee_for(id),
+                max_packet_amount: self.packet_cap_for(id),
                 source: RouteSource::Config,
-                expires_at: None,
             })
             .collect();
-        views.extend(
-            self.runtime_peers_snapshot()
-                .iter()
-                .map(|(id, expires_at)| PeerView {
-                    id: id.clone(),
-                    source: RouteSource::Runtime,
-                    expires_at: *expires_at,
-                }),
-        );
+        views.extend(self.runtime_peers_snapshot().keys().map(|id| PeerView {
+            id: id.clone(),
+            fee: self.fee_for(id),
+            max_packet_amount: self.packet_cap_for(id),
+            source: RouteSource::Runtime,
+        }));
         views
     }
 
@@ -3050,6 +3298,23 @@ impl Connector {
             }
         }
         views
+    }
+
+    /// This node's own view of `channel_id`'s on-chain state, fetched fresh
+    /// from whichever settlement backend the id's own chain namespace names
+    /// (issue #1218): unlike [`Self::channels`], not limited to a channel
+    /// this node opened itself -- a client channel its counterparty opened
+    /// is exactly as reachable here, since [`Self::settlement_for_channel`]
+    /// dispatches on the id's own shape, not on [`Self::known_channels`].
+    pub async fn channel_view(
+        &self,
+        channel_id: &str,
+    ) -> Result<ChannelView, ChannelOperationError> {
+        let state = self
+            .settlement_for_channel(channel_id)?
+            .channel_state(&ChannelId(channel_id.to_string()))
+            .await?;
+        Ok(ChannelView::from(state))
     }
 
     /// The settlement backend configured for `chain`.
@@ -3198,6 +3463,37 @@ impl Connector {
         Ok(ChannelView::from(state))
     }
 
+    /// Settle `channel_id` (issue #1129) once its challenge period --
+    /// the `settlement_timeout` [`Connector::open_channel`] was given,
+    /// counted from [`Connector::close_channel`] -- has elapsed: the
+    /// remainder of each side's deposit is paid back out on chain and the
+    /// channel becomes permanently done.
+    ///
+    /// This is the operation that *finishes* a close. Nothing else does:
+    /// [`Connector::close_channel`] only starts the challenge window
+    /// (issue #574), and [`Connector::cooperative_close`] is a redeem
+    /// followed by that same close, so a channel closed by either route
+    /// still holds every un-claimed deposit until this runs. Before #1129
+    /// no surface reached it at all and the remainder was recoverable only
+    /// by an out-of-band chain call.
+    ///
+    /// [`SettlementError::SettlementNotYetDue`] while the window is still
+    /// open (or if the channel was never closed) -- a named, retry-later
+    /// answer rather than a generic backend failure. There is deliberately
+    /// no timer here that settles a channel on the node's own initiative:
+    /// when a node settles is an operator's call, made with an
+    /// authenticated write, exactly like when it closes.
+    pub async fn settle_channel(
+        &self,
+        channel_id: &str,
+    ) -> Result<ChannelView, ChannelOperationError> {
+        let state = self
+            .settlement_for_channel(channel_id)?
+            .settle(&ChannelId(channel_id.to_string()))
+            .await?;
+        Ok(ChannelView::from(state))
+    }
+
     /// Redeem the latest claim this node has accepted on `channel_id`
     /// (issue #425, story 36): looks up the highest-nonce claim this node
     /// has ever verified and accepted from that channel's counterparty --
@@ -3227,10 +3523,19 @@ impl Connector {
 
     /// Cooperatively close `channel_id` (issue #425, story 37): redeem
     /// whatever claim this node last accepted on it, then close -- one
-    /// operator-driven action rather than two, and no dispute window to
-    /// wait out, since this port's own `close` is already terminal the
-    /// instant it is called (`connector_settlement::SettlementBackend::close`'s
-    /// own docs). A channel with no claim ever accepted closes directly,
+    /// operator-driven action rather than two.
+    ///
+    /// "Cooperative" names the *claim* half only: it collects what this
+    /// node is owed in the same breath as closing, rather than leaving a
+    /// redemption to be raced into the challenge window afterwards. It
+    /// does **not** skip that window. This method was written (2026-07-26)
+    /// against a port where `close` was terminal; issue #574 reversed that
+    /// two days later, and `close` now starts a challenge period on both
+    /// chains -- so the deposits still sit on chain until
+    /// [`Connector::settle_channel`] runs (issue #1129). A caller wanting
+    /// the collateral back needs both.
+    ///
+    /// A channel with no claim ever accepted closes directly,
     /// exactly like [`Connector::close_channel`]. A claim already fully
     /// redeemed (`SettlementError::StaleClaim`, or `StaleNonce` -- issue
     /// #573 -- for the same already-redeemed claim) is not a reason to
@@ -3260,6 +3565,20 @@ impl Connector {
     /// read-only inspection interface.
     pub fn claims(&self) -> Vec<ClaimView> {
         self.claims.views()
+    }
+
+    /// The latest claim this connector's own peer-semantics book -- never
+    /// the client edge's second book -- has accepted on `channel_id` (issue
+    /// #1218): the read half of what [`Self::redeem_latest_claim`] and
+    /// [`Self::cooperative_close`] already consult internally, exposed so a
+    /// caller holding a second claim book (`connector_client_edge::ClientClaimGate`)
+    /// can tell, before it redeems anything, whether the peer book is the
+    /// authority for `channel_id` or whether it should fall back to its own
+    /// -- the same "which book is the authority is a property of the
+    /// channel, never of who is asking" doctrine `Self::peer_channel_watermark`
+    /// already serves `POST /ilp/claim-state` with.
+    pub fn peer_inbound_claim(&self, channel_id: &str) -> Option<connector_settlement::Claim> {
+        self.claims.latest_inbound_claim(channel_id)
     }
 
     /// Accept `candidate` as a genuine [`Fulfill`] only if its fulfillment
@@ -3299,7 +3618,6 @@ fn leased_route_view(route: &LeasedRoute) -> LeasedRouteView {
     LeasedRouteView {
         prefix: route.prefix().to_string(),
         peer_id: route.peer_id().to_string(),
-        fee: route.fee(),
         expires_at: route.expires_at(),
     }
 }
@@ -3311,10 +3629,10 @@ mod tests {
     use crate::clock::TestClock;
     use crate::peer_transport::{InProcessPeerTransport, PeerForward, PeerTransport};
     use crate::test_support::{
-        answered, answered_with_status, expected_fulfillment, fulfill_envelope,
+        answered, answered_with_status, covering, expected_fulfillment, fulfill_envelope,
         fulfill_envelope_with_status, identity_signer, matching_condition, open_sealed_envelope,
-        sealed_envelope_request_data, sealed_envelope_request_data_with_target,
-        test_channel_domain, test_channel_id, with_test_channel,
+        sealed_envelope_request_data, sealed_envelope_request_data_with_headers,
+        sealed_envelope_request_data_with_target, test_channel_domain, test_channel_id,
     };
     use async_trait::async_trait;
     use chrono::{Duration, TimeZone, Utc};
@@ -3431,7 +3749,7 @@ mod tests {
         let connector = connector_with(vec![route], app_client.clone(), clock);
         let (sealed, shared_secret) = sealed_prepare(b"hello app");
 
-        let response = connector.handle_prepare(sealed, 0).await;
+        let response = connector.handle_prepare(sealed).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -3449,6 +3767,192 @@ mod tests {
         assert_eq!(deliveries[0].request.body, b"hello app");
     }
 
+    /// ADR 0040 (issue #994): what a terminating connector tells the app
+    /// about the payment that brought a packet to it. Every case here
+    /// asserts the headers a `FakeAppClient` actually recorded receiving,
+    /// never the call site -- including the cases whose whole content is
+    /// that a header is *absent*.
+    mod payment_attribution {
+        use super::*;
+        use crate::attribution::{AMOUNT_HEADER, CHAIN_HEADER, PAYER_HEADER};
+        use crate::Delivery;
+
+        /// The channel key the client edge admits a covering EVM claim
+        /// under -- `ClientClaim::channel_key`'s own spelling.
+        const PAYING_CHANNEL: &str =
+            "evm:0x1111111111111111111111111111111111111111111111111111111111111111";
+
+        const PRICE: u64 = 1000;
+
+        fn header<'a>(delivery: &'a Delivery, name: &str) -> Option<&'a str> {
+            delivery
+                .request
+                .headers
+                .iter()
+                .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        }
+
+        fn one_delivery(app_client: &FakeAppClient) -> Delivery {
+            let deliveries = app_client.deliveries();
+            assert_eq!(deliveries.len(), 1, "expected exactly one delivery");
+            deliveries.into_iter().next().expect("one delivery")
+        }
+
+        /// Deliver one sealed packet to a route priced at `price`, admitted
+        /// by `client_channel_id` (or by nothing, when `None`), and return
+        /// what the app was handed.
+        async fn deliver(
+            price: u64,
+            client_channel_id: Option<&str>,
+            sealed_data: Vec<u8>,
+            shared_secret: [u8; 32],
+        ) -> Delivery {
+            let route =
+                StaticRoute::new_priced("g.example.app", "http://localhost:4000", price).unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"stored"));
+            let connector = connector_with(vec![route], app_client.clone(), test_clock());
+            let prepare = Prepare {
+                data: sealed_data,
+                execution_condition: matching_condition(&shared_secret),
+                ..prepare("g.example.app", b"unused")
+            };
+
+            let response = connector
+                .handle_prepare_with_client_channel(prepare, client_channel_id)
+                .await;
+            assert!(
+                matches!(response, PacketResponse::Fulfill(_)),
+                "expected the delivery to fulfil, got {response:?}"
+            );
+            one_delivery(&app_client)
+        }
+
+        /// The defect this ADR closes, stated as the delivery the store
+        /// behind this connector actually receives: a paid write names the
+        /// channel that paid for it, what it paid, and the chain that
+        /// channel settles on.
+        #[tokio::test]
+        async fn a_paid_delivery_names_the_channel_whose_claim_admitted_it() {
+            let (data, secret) = sealed_envelope_request_data(b"an event");
+
+            let delivery = deliver(PRICE, Some(PAYING_CHANNEL), data, secret).await;
+
+            assert_eq!(header(&delivery, PAYER_HEADER), Some(PAYING_CHANNEL));
+            assert_eq!(header(&delivery, AMOUNT_HEADER), Some("1000"));
+            assert_eq!(header(&delivery, CHAIN_HEADER), Some("evm"));
+        }
+
+        /// The chain is read off the admitted claim's own namespace, not
+        /// off the destination address (ADR 0017's objection to the
+        /// TypeScript header): the same destination, paid from a Solana
+        /// channel, says `solana`.
+        #[tokio::test]
+        async fn the_chain_comes_from_the_claim_not_the_destination() {
+            let (data, secret) = sealed_envelope_request_data(b"an event");
+
+            let delivery = deliver(
+                PRICE,
+                Some("solana:9xQeWvG816bUx9EPjHmaT23yvVM2ZHbGrX"),
+                data,
+                secret,
+            )
+            .await;
+
+            assert_eq!(header(&delivery, CHAIN_HEADER), Some("solana"));
+        }
+
+        /// Nothing admitted this packet at this connector's own edge -- a
+        /// peer-role arrival, or an unclaimed request -- so there is no
+        /// payer to name and none is invented. This is the case that makes
+        /// ADR 0017's "on a longer path the header names the wrong party"
+        /// unreachable rather than merely avoided.
+        #[tokio::test]
+        async fn a_delivery_no_claim_admitted_states_no_attribution() {
+            let (data, secret) = sealed_envelope_request_data(b"an event");
+
+            let delivery = deliver(PRICE, None, data, secret).await;
+
+            assert_eq!(header(&delivery, PAYER_HEADER), None);
+            assert_eq!(header(&delivery, AMOUNT_HEADER), None);
+            assert_eq!(header(&delivery, CHAIN_HEADER), None);
+        }
+
+        /// A free route charged nothing, so there is no payment to
+        /// attribute even when a claim rode along with the request.
+        #[tokio::test]
+        async fn a_free_routes_delivery_states_no_attribution() {
+            let (data, secret) = sealed_envelope_request_data(b"an event");
+
+            let delivery = deliver(0, Some(PAYING_CHANNEL), data, secret).await;
+
+            assert_eq!(header(&delivery, PAYER_HEADER), None);
+            assert_eq!(header(&delivery, AMOUNT_HEADER), None);
+            assert_eq!(header(&delivery, CHAIN_HEADER), None);
+        }
+
+        /// The spoof defence: a sender who seals its own `X-TOON-Payer`
+        /// into the envelope has it overwritten by the channel that
+        /// actually paid, not appended alongside it.
+        #[tokio::test]
+        async fn a_spoofed_payer_is_overwritten_by_the_admitted_one() {
+            let (data, secret) = sealed_envelope_request_data_with_headers(
+                "/",
+                vec![
+                    (
+                        "X-TOON-Payer".to_string(),
+                        "evm:0xdeadbeef-someone-else".to_string(),
+                    ),
+                    ("x-toon-amount".to_string(), "1".to_string()),
+                    ("X-Toon-Chain".to_string(), "solana".to_string()),
+                ],
+                b"an event",
+            );
+
+            let delivery = deliver(PRICE, Some(PAYING_CHANNEL), data, secret).await;
+
+            assert_eq!(header(&delivery, PAYER_HEADER), Some(PAYING_CHANNEL));
+            assert_eq!(header(&delivery, AMOUNT_HEADER), Some("1000"));
+            assert_eq!(header(&delivery, CHAIN_HEADER), Some("evm"));
+            assert_eq!(
+                delivery
+                    .request
+                    .headers
+                    .iter()
+                    .filter(|(name, _)| name.eq_ignore_ascii_case(PAYER_HEADER))
+                    .count(),
+                1,
+                "the sender's spelling must be removed, not joined by ours"
+            );
+        }
+
+        /// And the harder half of the same defence: on a delivery this
+        /// connector states nothing about, a sender's own headers are
+        /// still removed -- otherwise addressing a free (or peer-reached)
+        /// route would be all it takes to hand an app a forged payer.
+        #[tokio::test]
+        async fn a_spoofed_payer_does_not_survive_an_unattributed_delivery() {
+            let spoofed = vec![
+                ("X-TOON-Payer".to_string(), "evm:0xvictim".to_string()),
+                ("X-TOON-Amount".to_string(), "999999".to_string()),
+                ("X-TOON-Chain".to_string(), "evm".to_string()),
+                ("Content-Type".to_string(), "application/json".to_string()),
+            ];
+            let (data, secret) =
+                sealed_envelope_request_data_with_headers("/", spoofed, b"an event");
+
+            let delivery = deliver(0, None, data, secret).await;
+
+            assert_eq!(header(&delivery, PAYER_HEADER), None);
+            assert_eq!(header(&delivery, AMOUNT_HEADER), None);
+            assert_eq!(header(&delivery, CHAIN_HEADER), None);
+            // The sender's other headers are its own business and reach
+            // the app untouched.
+            assert_eq!(header(&delivery, "content-type"), Some("application/json"));
+        }
+    }
+
     #[tokio::test]
     async fn rejects_a_packet_with_no_matching_route() {
         let app_client = Arc::new(FakeAppClient::new());
@@ -3456,7 +3960,7 @@ mod tests {
         let connector = connector_with(vec![], app_client.clone(), clock);
 
         let response = connector
-            .handle_prepare(prepare("g.nowhere", b"hello"), 0)
+            .handle_prepare(prepare("g.nowhere", b"hello"))
             .await;
 
         match response {
@@ -3556,9 +4060,7 @@ mod tests {
         let mut attempts = 0u32;
         loop {
             tracing::callsite::rebuild_interest_cache();
-            let _ = probe
-                .handle_prepare(prepare("g.nowhere", b"probe"), 0)
-                .await;
+            let _ = probe.handle_prepare(prepare("g.nowhere", b"probe")).await;
             if fields.lock().unwrap().contains_key("correlation_id") {
                 // The probe's own fields must not leak into `work`'s
                 // assertions.
@@ -3591,7 +4093,6 @@ mod tests {
             let _ = connector
                 .handle_prepare_with_client_channel(
                     prepare("g.nowhere", b"hello"),
-                    0,
                     Some("evm:0xdeadbeef"),
                 )
                 .await;
@@ -3613,10 +4114,10 @@ mod tests {
 
         let fields = packet_span_fields(async {
             // The ordinary `handle_prepare` entry point -- no admitting
-            // client channel available at all, exactly the peer-wire and
+            // client channel available at all, exactly the peer-role and
             // unclaimed-request shapes.
             let _ = connector
-                .handle_prepare(prepare("g.nowhere", b"hello"), 0)
+                .handle_prepare(prepare("g.nowhere", b"hello"))
                 .await;
         })
         .await;
@@ -3640,7 +4141,7 @@ mod tests {
 
         let mut without_condition = prepare("g.example.app", b"hello");
         without_condition.execution_condition = [0u8; 32];
-        let response = connector.handle_prepare(without_condition, 0).await;
+        let response = connector.handle_prepare(without_condition).await;
 
         match response {
             PacketResponse::Reject(reject) => {
@@ -3676,7 +4177,7 @@ mod tests {
         let already_expired =
             prepare_expiring_at("g.example.app", b"hello", now - Duration::seconds(1));
 
-        let response = connector.handle_prepare(already_expired, 0).await;
+        let response = connector.handle_prepare(already_expired).await;
 
         match response {
             PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "R00"),
@@ -3698,19 +4199,13 @@ mod tests {
         let expires_at = start + Duration::seconds(30);
 
         let response = connector
-            .handle_prepare(
-                prepare_expiring_at("g.example.app", b"hello", expires_at),
-                0,
-            )
+            .handle_prepare(prepare_expiring_at("g.example.app", b"hello", expires_at))
             .await;
         assert!(matches!(response, PacketResponse::Fulfill(_)));
 
         clock.advance(Duration::seconds(30));
         let response = connector
-            .handle_prepare(
-                prepare_expiring_at("g.example.app", b"hello", expires_at),
-                0,
-            )
+            .handle_prepare(prepare_expiring_at("g.example.app", b"hello", expires_at))
             .await;
         match response {
             PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "R00"),
@@ -3736,7 +4231,7 @@ mod tests {
         let connector = connector_with(vec![route], app_client.clone(), clock);
         let (data, _shared_secret) = sealed_envelope_request_data(b"hello");
 
-        let response = connector.handle_prepare(prepare_with_data(data), 0).await;
+        let response = connector.handle_prepare(prepare_with_data(data)).await;
 
         match response {
             PacketResponse::Reject(reject) => {
@@ -3766,7 +4261,7 @@ mod tests {
         let connector = connector_with(vec![route], app_client, clock);
         let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-        let response = connector.handle_prepare(sealed, 0).await;
+        let response = connector.handle_prepare(sealed).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -3795,7 +4290,7 @@ mod tests {
         let connector = connector_with(vec![route], app_client.clone(), clock);
         let (data, _shared_secret) = sealed_envelope_request_data(b"hello");
 
-        let response = connector.handle_prepare(prepare_with_data(data), 0).await;
+        let response = connector.handle_prepare(prepare_with_data(data)).await;
 
         match response {
             PacketResponse::Reject(reject) => {
@@ -3816,7 +4311,7 @@ mod tests {
         let connector = connector_with(vec![route], app_client, clock);
 
         let response = connector
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .handle_prepare(prepare("g.example.app", b"hello"))
             .await;
 
         match response {
@@ -3844,7 +4339,7 @@ mod tests {
         let connector = connector_with(vec![general, specific.clone()], app_client.clone(), clock);
 
         let response = connector
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .handle_prepare(prepare("g.example.app", b"hello"))
             .await;
 
         assert!(matches!(response, PacketResponse::Fulfill(_)));
@@ -3874,16 +4369,19 @@ mod tests {
         );
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
-        let first_hop = Connector::new(
-            vec![],
-            vec![PeerRoute::new("g.example.app", "second-hop", 0)],
-            Arc::new(FakeAppClient::new()),
-            Arc::new(peer_transport),
-            test_clock(),
+        let first_hop = covering(
+            Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(peer_transport),
+                test_clock(),
+            ),
+            "second-hop",
         );
         let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-        let response = first_hop.handle_prepare(sealed, 0).await;
+        let response = first_hop.handle_prepare(sealed).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -3898,60 +4396,11 @@ mod tests {
         assert_eq!(second_hop_app_client.deliveries().len(), 1);
     }
 
+    /// ADR 0057, issue #1143: no floor rides beside the packet any more,
+    /// so the only arithmetic left is this hop's own fee -- and a packet
+    /// that cannot even pay it is refused rather than forwarded at nothing.
     #[tokio::test]
-    async fn forwarding_to_a_peer_subtracts_that_relations_flat_fee() {
-        use connector_signer::{LocalSigner, Signer};
-
-        let second_hop_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
-        let second_hop_app_client = Arc::new(FakeAppClient::new());
-        second_hop_app_client.respond(
-            second_hop_route.handler_url(),
-            answered(b"delivered by the second hop"),
-        );
-        let payer_signer = LocalSigner::generate("payer-claim-key");
-        let payer_address = derive_evm_address(&payer_signer.public_key().unwrap());
-        let second_hop = Arc::new(with_test_channel(
-            Connector::new(
-                vec![second_hop_route],
-                vec![],
-                second_hop_app_client.clone(),
-                Arc::new(InProcessPeerTransport::new()),
-                test_clock(),
-            )
-            .with_identity_signer(identity_signer()),
-            1,
-            payer_address,
-        ));
-        let mut peer_transport = InProcessPeerTransport::new();
-        peer_transport.add_peer("second-hop", second_hop);
-        let first_hop = Connector::new(
-            vec![],
-            vec![PeerRoute::new("g.example.app", "second-hop", 7)],
-            Arc::new(FakeAppClient::new()),
-            Arc::new(peer_transport),
-            test_clock(),
-        )
-        .with_signer(Arc::new(payer_signer))
-        .with_peer_claim_channel("second-hop", test_channel_id(1))
-        .with_channel_domain(test_channel_id(1), test_channel_domain())
-        .unwrap();
-
-        let response = first_hop
-            .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
-            .await;
-
-        assert!(matches!(response, PacketResponse::Fulfill(_)));
-        // The port never sees a `Prepare` (issue #521), so the forwarded
-        // amount is asserted through the claim it armed rather than
-        // through the app client -- 100 minus this peer relationship's
-        // flat fee of 7.
-        assert_eq!(second_hop_app_client.deliveries().len(), 1);
-        assert_eq!(first_hop.claims()[0].cumulative_amount, 93);
-    }
-
-    #[tokio::test]
-    async fn a_hop_that_cannot_meet_the_minimum_delivery_after_its_fee_rejects_without_forwarding()
-    {
+    async fn a_hop_whose_fee_exceeds_the_packet_rejects_without_forwarding() {
         let second_hop_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let second_hop_app_client = Arc::new(FakeAppClient::new());
         second_hop_app_client.respond(second_hop_route.handler_url(), answered(b""));
@@ -3966,28 +4415,235 @@ mod tests {
         peer_transport.add_peer("second-hop", second_hop);
         let first_hop = Connector::new(
             vec![],
-            vec![PeerRoute::new("g.example.app", "second-hop", 10)],
+            vec![PeerRoute::new("g.example.app", "second-hop")],
             Arc::new(FakeAppClient::new()),
             Arc::new(peer_transport),
             test_clock(),
-        );
+        )
+        .with_peer_fees([("second-hop".to_string(), 10)]);
 
-        // amount 100, fee 10 -> would forward 90, but the sender declared
-        // a minimum delivery of 95: this hop must reject rather than
-        // forward the smaller amount.
+        // amount 4, fee 10: nothing is left to forward, so this hop
+        // refuses rather than carrying a packet it is not paid for.
         let response = first_hop
-            .handle_prepare(prepare_with_amount("g.example.app", 100), 95)
+            .handle_prepare(prepare_with_amount("g.example.app", 4))
             .await;
 
         match response {
             PacketResponse::Reject(reject) => {
+                // RFC 0027's `R01`, "too little to forward (zero or less)",
+                // and not `F03`: the class letter is itself the sender's
+                // instruction, and this one is relative -- send more --
+                // rather than final (ADR 0051, ADR 0057 as corrected).
                 assert_eq!(reject.code.as_str(), "R01");
-                assert!(reject.message.contains("95"));
+                assert!(reject.message.contains("10"), "{}", reject.message);
+                assert!(reject.message.contains('4'), "{}", reject.message);
             }
             other => panic!("expected a reject, got {other:?}"),
         }
         // Never forwarded a smaller amount hoping the far end would cope.
         assert!(second_hop_app_client.deliveries().is_empty());
+    }
+
+    // -- ADR 0042's cap: the largest amount this connector will forward to
+    // one peer in a SINGLE packet. Every case here builds the same two-hop
+    // rig the fee tests above use, so the only thing under test is which
+    // amounts get past the cap.
+
+    /// A first hop forwarding `g.example.app` to `second-hop`, whose own
+    /// app answers -- the rig every cap test shares. Returns the first hop
+    /// alongside the second hop's app client, which is the evidence of
+    /// whether a packet was actually carried: a refused packet leaves it
+    /// empty.
+    fn capped_hop_pair(fee: u64, caps: Vec<(String, u64)>) -> (Connector, Arc<FakeAppClient>) {
+        let second_hop_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
+        let second_hop_app_client = Arc::new(FakeAppClient::new());
+        second_hop_app_client.respond(
+            second_hop_route.handler_url(),
+            answered(b"delivered by the second hop"),
+        );
+        let second_hop = Arc::new(
+            Connector::new(
+                vec![second_hop_route],
+                vec![],
+                second_hop_app_client.clone(),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_identity_signer(identity_signer()),
+        );
+        let mut peer_transport = InProcessPeerTransport::new();
+        peer_transport.add_peer("second-hop", second_hop);
+        let first_hop = covering(
+            Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(peer_transport),
+                test_clock(),
+            )
+            .with_peer_fees([("second-hop".to_string(), fee)])
+            .with_peer_packet_caps(caps),
+            "second-hop",
+        );
+        (first_hop, second_hop_app_client)
+    }
+
+    #[tokio::test]
+    async fn a_packet_at_exactly_the_cap_is_forwarded() {
+        let (first_hop, second_hop_app_client) =
+            capped_hop_pair(0, vec![("second-hop".to_string(), 100)]);
+
+        let response = first_hop
+            .handle_prepare(prepare_with_amount("g.example.app", 100))
+            .await;
+
+        assert!(
+            matches!(response, PacketResponse::Fulfill(_)),
+            "{response:?}"
+        );
+        assert_eq!(second_hop_app_client.deliveries().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_packet_one_unit_over_the_cap_is_refused_with_t04() {
+        let (first_hop, second_hop_app_client) =
+            capped_hop_pair(0, vec![("second-hop".to_string(), 100)]);
+
+        let response = first_hop
+            .handle_prepare(prepare_with_amount("g.example.app", 101))
+            .await;
+
+        match response {
+            PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "T04"),
+            other => panic!("expected a reject, got {other:?}"),
+        }
+        // Never carried, and never split into two packets that each fit:
+        // the far end saw nothing at all.
+        assert!(second_hop_app_client.deliveries().is_empty());
+    }
+
+    /// A refusal an operator cannot act on is a refusal they will
+    /// mis-diagnose, so the message names the peering, the cap in force and
+    /// the amount that exceeded it.
+    #[tokio::test]
+    async fn the_cap_refusal_names_the_peer_the_cap_and_the_offending_amount() {
+        let (first_hop, _) = capped_hop_pair(0, vec![("second-hop".to_string(), 250)]);
+
+        let response = first_hop
+            .handle_prepare(prepare_with_amount("g.example.app", 900))
+            .await;
+
+        match response {
+            PacketResponse::Reject(reject) => {
+                assert!(reject.message.contains("second-hop"), "{}", reject.message);
+                assert!(reject.message.contains("250"), "{}", reject.message);
+                assert!(reject.message.contains("900"), "{}", reject.message);
+            }
+            other => panic!("expected a reject, got {other:?}"),
+        }
+    }
+
+    /// ADR 0042: the cap has a default "so an operator who never configures
+    /// one is still bounded". A connector nobody gave a cap to still holds
+    /// this peering to `DEFAULT_MAX_PACKET_AMOUNT` -- forwarding a packet
+    /// at it, refusing the one above it.
+    #[tokio::test]
+    async fn a_peer_with_no_configured_cap_is_still_bounded_by_the_default() {
+        let (first_hop, second_hop_app_client) = capped_hop_pair(0, vec![]);
+
+        let at_the_default = first_hop
+            .handle_prepare(prepare_with_amount(
+                "g.example.app",
+                DEFAULT_MAX_PACKET_AMOUNT,
+            ))
+            .await;
+        assert!(
+            matches!(at_the_default, PacketResponse::Fulfill(_)),
+            "{at_the_default:?}"
+        );
+
+        let over_the_default = first_hop
+            .handle_prepare(prepare_with_amount(
+                "g.example.app",
+                DEFAULT_MAX_PACKET_AMOUNT + 1,
+            ))
+            .await;
+        match over_the_default {
+            PacketResponse::Reject(reject) => {
+                assert_eq!(reject.code.as_str(), "T04");
+                assert!(
+                    reject
+                        .message
+                        .contains(&DEFAULT_MAX_PACKET_AMOUNT.to_string()),
+                    "{}",
+                    reject.message
+                );
+            }
+            other => panic!("expected a reject, got {other:?}"),
+        }
+
+        // Only the first packet was ever carried.
+        assert_eq!(second_hop_app_client.deliveries().len(), 1);
+    }
+
+    /// The cap bounds what this connector hands the peer, which is the
+    /// amount left after its own fee -- an arriving 105 with a fee of 10
+    /// puts 95 on the wire and clears a cap of 100.
+    #[tokio::test]
+    async fn the_cap_is_measured_against_the_amount_forwarded_not_the_amount_that_arrived() {
+        let (first_hop, second_hop_app_client) =
+            capped_hop_pair(10, vec![("second-hop".to_string(), 100)]);
+
+        let response = first_hop
+            .handle_prepare(prepare_with_amount("g.example.app", 105))
+            .await;
+
+        assert!(
+            matches!(response, PacketResponse::Fulfill(_)),
+            "{response:?}"
+        );
+        assert_eq!(second_hop_app_client.deliveries().len(), 1);
+    }
+
+    /// The cap bounds ONE packet, never a running total (ADR 0042; ADR 0033
+    /// retired the exposure ceiling and it is not coming back). Three
+    /// packets at the cap are three carried packets, not two and a refusal:
+    /// each carries its own claim, so nothing accumulates between them for
+    /// a cap to bound.
+    #[tokio::test]
+    async fn the_cap_bounds_each_packet_rather_than_a_running_total() {
+        let (first_hop, second_hop_app_client) =
+            capped_hop_pair(0, vec![("second-hop".to_string(), 100)]);
+
+        for _ in 0..3 {
+            let response = first_hop
+                .handle_prepare(prepare_with_amount("g.example.app", 100))
+                .await;
+            assert!(
+                matches!(response, PacketResponse::Fulfill(_)),
+                "{response:?}"
+            );
+        }
+
+        assert_eq!(second_hop_app_client.deliveries().len(), 3);
+    }
+
+    /// The cap is per peering: a tight one on one peer says nothing about
+    /// another, which keeps its own (here, the default).
+    #[tokio::test]
+    async fn a_cap_on_one_peer_does_not_bind_another() {
+        let (first_hop, second_hop_app_client) =
+            capped_hop_pair(0, vec![("some-other-peer".to_string(), 1)]);
+
+        let response = first_hop
+            .handle_prepare(prepare_with_amount("g.example.app", 5_000))
+            .await;
+
+        assert!(
+            matches!(response, PacketResponse::Fulfill(_)),
+            "{response:?}"
+        );
+        assert_eq!(second_hop_app_client.deliveries().len(), 1);
     }
 
     #[tokio::test]
@@ -4001,16 +4657,19 @@ mod tests {
         ));
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
-        let first_hop = Connector::new(
-            vec![],
-            vec![PeerRoute::new("g.example.app", "second-hop", 0)],
-            Arc::new(FakeAppClient::new()),
-            Arc::new(peer_transport),
-            test_clock(),
+        let first_hop = covering(
+            Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(peer_transport),
+                test_clock(),
+            ),
+            "second-hop",
         );
 
         let response = first_hop
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .handle_prepare(prepare("g.example.app", b"hello"))
             .await;
 
         match response {
@@ -4024,7 +4683,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_terminated_route_wins_over_a_shorter_peer_route() {
-        let peer_route = PeerRoute::new("g.example", "second-hop", 0);
+        let peer_route = PeerRoute::new("g.example", "second-hop");
         let terminated_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
         let app_client = Arc::new(FakeAppClient::new());
         app_client.respond(terminated_route.handler_url(), answered(b"handled locally"));
@@ -4038,7 +4697,7 @@ mod tests {
         .with_identity_signer(identity_signer());
         let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-        let response = connector.handle_prepare(sealed, 0).await;
+        let response = connector.handle_prepare(sealed).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -4074,16 +4733,19 @@ mod tests {
         );
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
-        let first_hop = Connector::new(
-            vec![terminated_route],
-            vec![PeerRoute::new("g.example.app", "second-hop", 0)],
-            app_client,
-            Arc::new(peer_transport),
-            test_clock(),
+        let first_hop = covering(
+            Connector::new(
+                vec![terminated_route],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
+                app_client,
+                Arc::new(peer_transport),
+                test_clock(),
+            ),
+            "second-hop",
         );
         let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-        let response = first_hop.handle_prepare(sealed, 0).await;
+        let response = first_hop.handle_prepare(sealed).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -4110,7 +4772,7 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].prefix, "g.example.app");
         assert_eq!(routes[0].handler_url, "http://localhost:4000/");
-        assert_eq!(routes[0].price, 25);
+        assert_eq!(routes[0].price, Price::flat(25));
     }
 
     #[test]
@@ -4120,8 +4782,14 @@ mod tests {
         let clock = test_clock();
         let connector = connector_with(vec![route], app_client, clock);
 
-        assert_eq!(connector.client_route_price("g.example.app"), Some(25));
-        assert_eq!(connector.client_route_price("g.example.app.sub"), Some(25));
+        assert_eq!(
+            connector.client_route_price("g.example.app"),
+            Some(Price::flat(25))
+        );
+        assert_eq!(
+            connector.client_route_price("g.example.app.sub"),
+            Some(Price::flat(25))
+        );
         assert_eq!(connector.client_route_price("g.nowhere"), None);
     }
 
@@ -4135,16 +4803,17 @@ mod tests {
         let app_client = Arc::new(FakeAppClient::new());
         let connector = Connector::new(
             vec![],
-            vec![PeerRoute::new_priced("g.example.store", "store", 3, 100)],
+            vec![PeerRoute::new_priced("g.example.store", "store", 100)],
             app_client,
             Arc::new(InProcessPeerTransport::new()),
             test_clock(),
-        );
+        )
+        .with_peer_fees([("store".to_string(), 3)]);
 
         let facts = connector
             .client_route("g.example.store.sub")
             .expect("a forwarded route answers the client-edge lookup");
-        assert_eq!(facts.price, 100);
+        assert_eq!(facts.price, Price::flat(100));
         assert_eq!(facts.kind, ClientRouteKind::Forwarded);
         // A forwarded route applies no transport policy: it accepts a
         // client's request over either carriage.
@@ -4161,17 +4830,24 @@ mod tests {
         let app_client = Arc::new(FakeAppClient::new());
         let connector = Connector::new(
             vec![StaticRoute::new_priced("g.example", "http://localhost:4000", 25).unwrap()],
-            vec![PeerRoute::new_priced("g.example.store", "store", 3, 100)],
+            vec![PeerRoute::new_priced("g.example.store", "store", 100)],
             app_client,
             Arc::new(InProcessPeerTransport::new()),
             test_clock(),
-        );
+        )
+        .with_peer_fees([("store".to_string(), 3)]);
 
-        assert_eq!(connector.client_route_price("g.example.relay"), Some(25));
-        assert_eq!(connector.client_route_price("g.example.store"), Some(100));
+        assert_eq!(
+            connector.client_route_price("g.example.relay"),
+            Some(Price::flat(25))
+        );
+        assert_eq!(
+            connector.client_route_price("g.example.store"),
+            Some(Price::flat(100))
+        );
         assert_eq!(
             connector.client_route_price("g.example.store.sub"),
-            Some(100)
+            Some(Price::flat(100))
         );
     }
 
@@ -4236,7 +4912,7 @@ mod tests {
         let connector = connector_with(vec![route], app_client, test_clock());
 
         connector
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .handle_prepare(prepare("g.example.app", b"hello"))
             .await;
 
         let metrics = connector.metrics().encode();
@@ -4249,7 +4925,7 @@ mod tests {
         let connector = connector_with(vec![], app_client, test_clock());
 
         connector
-            .handle_prepare(prepare("g.nowhere", b"hello"), 0)
+            .handle_prepare(prepare("g.nowhere", b"hello"))
             .await;
 
         let metrics = connector.metrics().encode();
@@ -4274,16 +4950,20 @@ mod tests {
         );
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
-        let first_hop = Connector::new(
-            vec![],
-            vec![PeerRoute::new("g.example.app", "second-hop", 7)],
-            Arc::new(FakeAppClient::new()),
-            Arc::new(peer_transport),
-            test_clock(),
+        let first_hop = covering(
+            Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(peer_transport),
+                test_clock(),
+            )
+            .with_peer_fees([("second-hop".to_string(), 7)]),
+            "second-hop",
         );
 
         first_hop
-            .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+            .handle_prepare(prepare_with_amount("g.example.app", 100))
             .await;
 
         let metrics = first_hop.metrics().encode();
@@ -4314,19 +4994,25 @@ mod tests {
         let mut peer_transport = InProcessPeerTransport::new();
         peer_transport.add_peer("second-hop", second_hop);
         let clock = test_clock();
-        let first_hop = Connector::new(
-            vec![],
-            vec![],
-            Arc::new(FakeAppClient::new()),
-            Arc::new(peer_transport),
-            clock.clone(),
+        // A leased route reaches `forward_via_peer_route` without passing
+        // `Config::load`'s `PayChannelUnbound` check (ADR 0028), so the
+        // covering configuration is what makes it deliverable at all.
+        let first_hop = covering(
+            Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(peer_transport),
+                clock.clone(),
+            ),
+            "second-hop",
         );
         first_hop
-            .upsert_leased_route("g.example.app", "second-hop", 0, Duration::seconds(60))
+            .upsert_leased_route("g.example.app", "second-hop", Duration::seconds(60))
             .unwrap();
         let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-        let response = first_hop.handle_prepare(sealed, 0).await;
+        let response = first_hop.handle_prepare(sealed).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -4355,13 +5041,13 @@ mod tests {
             clock.clone(),
         );
         first_hop
-            .upsert_leased_route("g.example.app", "second-hop", 0, Duration::seconds(60))
+            .upsert_leased_route("g.example.app", "second-hop", Duration::seconds(60))
             .unwrap();
 
         // Still active a moment before its limit.
         clock.advance(Duration::seconds(59));
         let response = first_hop
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .handle_prepare(prepare("g.example.app", b"hello"))
             .await;
         match response {
             PacketResponse::Reject(reject) => {
@@ -4377,7 +5063,7 @@ mod tests {
         // One second later, the lease has lapsed -- selected no longer.
         clock.advance(Duration::seconds(1));
         let response = first_hop
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .handle_prepare(prepare("g.example.app", b"hello"))
             .await;
         match response {
             PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "F02"),
@@ -4400,19 +5086,19 @@ mod tests {
             clock.clone(),
         );
         first_hop
-            .upsert_leased_route("g.example.app", "second-hop", 0, Duration::seconds(60))
+            .upsert_leased_route("g.example.app", "second-hop", Duration::seconds(60))
             .unwrap();
 
         clock.advance(Duration::seconds(30));
         first_hop
-            .upsert_leased_route("g.example.app", "second-hop", 0, Duration::seconds(60))
+            .upsert_leased_route("g.example.app", "second-hop", Duration::seconds(60))
             .unwrap();
 
         // Past the *original* lease's limit (60s from the start), but well
         // within the renewed one (60s from the 30s renewal).
         clock.advance(Duration::seconds(40));
         let response = first_hop
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .handle_prepare(prepare("g.example.app", b"hello"))
             .await;
         match response {
             PacketResponse::Reject(reject) => assert_ne!(reject.code.as_str(), "F02"),
@@ -4438,11 +5124,11 @@ mod tests {
         )
         .with_identity_signer(identity_signer());
         connector
-            .upsert_leased_route("g.example.app", "second-hop", 0, Duration::seconds(60))
+            .upsert_leased_route("g.example.app", "second-hop", Duration::seconds(60))
             .unwrap();
         let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-        let response = connector.handle_prepare(sealed, 0).await;
+        let response = connector.handle_prepare(sealed).await;
 
         match response {
             PacketResponse::Fulfill(fulfill) => {
@@ -4471,7 +5157,7 @@ mod tests {
             clock.clone(),
         );
         before_restart
-            .upsert_leased_route("g.example.app", "second-hop", 0, Duration::seconds(60))
+            .upsert_leased_route("g.example.app", "second-hop", Duration::seconds(60))
             .unwrap();
         assert_eq!(before_restart.leased_routes().len(), 1);
 
@@ -4496,14 +5182,13 @@ mod tests {
             clock.clone(),
         );
         connector
-            .upsert_leased_route("g.example.app", "second-hop", 3, Duration::seconds(60))
+            .upsert_leased_route("g.example.app", "second-hop", Duration::seconds(60))
             .unwrap();
 
         let leases = connector.leased_routes();
         assert_eq!(leases.len(), 1);
         assert_eq!(leases[0].prefix, "g.example.app");
         assert_eq!(leases[0].peer_id, "second-hop");
-        assert_eq!(leases[0].fee, 3);
 
         clock.advance(Duration::seconds(60));
         assert!(connector.leased_routes().is_empty());
@@ -4520,8 +5205,7 @@ mod tests {
             clock,
         );
 
-        let result =
-            connector.upsert_leased_route("g..app", "second-hop", 0, Duration::seconds(60));
+        let result = connector.upsert_leased_route("g..app", "second-hop", Duration::seconds(60));
 
         assert!(matches!(result, Err(LeaseRouteError::InvalidPrefix(_))));
         assert!(connector.leased_routes().is_empty());
@@ -4559,7 +5243,6 @@ mod tests {
             &self,
             _peer_id: &str,
             _prepare: Prepare,
-            _minimum_delivery: u64,
             _claim: Option<WireClaim>,
         ) -> PeerForward {
             PeerForward::answered(self.0.clone(), ClaimAckOutcome::NotSent)
@@ -4577,16 +5260,19 @@ mod tests {
             fulfillment: bogus_fulfillment,
             data: b"claimed delivery".to_vec(),
         }));
-        let connector = Connector::new(
-            vec![],
-            vec![PeerRoute::new("g.example.app", "second-hop", 0)],
-            Arc::new(FakeAppClient::new()),
-            Arc::new(peer_transport),
-            test_clock(),
+        let connector = covering(
+            Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(peer_transport),
+                test_clock(),
+            ),
+            "second-hop",
         );
 
         let response = connector
-            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+            .handle_prepare(prepare("g.example.app", b"hello"))
             .await;
 
         match response {
@@ -4595,167 +5281,451 @@ mod tests {
         }
     }
 
-    /// Issue #423's acceptance criteria, exercised end to end through
-    /// `handle_prepare` over an in-process peer transport rather than at
-    /// the `ClaimBook` unit level: a fulfilled forward arms a claim; it
-    /// rides the *next* packet to that peer, where it is verified and
-    /// advances the watermark; and each fulfilment produces its own claim
-    /// rather than a batch.
-    mod claim_exchange {
-        use super::*;
-        use crate::operator_view::ClaimDirection;
-        use connector_signer::{LocalSigner, Signer};
+    /// A peer that carries whatever it is handed and keeps the packets it
+    /// carried, so a test can read back the PREPARE that actually went on
+    /// the wire rather than the one that arrived.
+    ///
+    /// It is a fake and not a mock (ADR 0007): it answers every forward the
+    /// way the port says a reachable peer answers -- with a REJECT it
+    /// genuinely decided on, `reached_peer` true -- and asserts nothing
+    /// about being called. What the tests below assert is the state it
+    /// accumulated, which is the packet itself.
+    #[derive(Default)]
+    struct CarriesAndRemembers {
+        carried: Mutex<Vec<Prepare>>,
+    }
 
-        fn two_hop_setup() -> (Connector, Arc<Connector>, Arc<FakeAppClient>, url::Url) {
-            let second_hop_route =
-                StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
-            let handler_url = second_hop_route.handler_url().clone();
-            let second_hop_app_client = Arc::new(FakeAppClient::new());
-            second_hop_app_client.respond(&handler_url, answered(b""));
-            let payer_signer = LocalSigner::generate("payer-claim-key");
-            let payer_address = derive_evm_address(&payer_signer.public_key().unwrap());
-            let second_hop = Arc::new(with_test_channel(
-                Connector::new(
-                    vec![second_hop_route],
-                    vec![],
-                    second_hop_app_client.clone(),
-                    Arc::new(InProcessPeerTransport::new()),
-                    test_clock(),
-                )
-                .with_identity_signer(identity_signer()),
-                1,
-                payer_address,
-            ));
-            let mut peer_transport = InProcessPeerTransport::new();
-            peer_transport.add_peer("second-hop", second_hop.clone());
-            let first_hop = Connector::new(
-                vec![],
-                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
-                Arc::new(FakeAppClient::new()),
-                Arc::new(peer_transport),
-                test_clock(),
-            )
-            .with_signer(Arc::new(payer_signer))
-            .with_peer_claim_channel("second-hop", test_channel_id(1))
-            .with_channel_domain(test_channel_id(1), test_channel_domain())
-            .unwrap();
-            (first_hop, second_hop, second_hop_app_client, handler_url)
-        }
-
-        #[tokio::test]
-        async fn a_fulfilled_forward_arms_a_claim_and_the_next_fulfilled_forward_carries_it_to_the_peer(
-        ) {
-            let (first_hop, second_hop, _app, _handler_url) = two_hop_setup();
-
-            let first = first_hop
-                .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
-                .await;
-            assert!(matches!(first, PacketResponse::Fulfill(_)));
-
-            // Armed by the first fulfilment, but not yet sent anywhere --
-            // nothing has gone out to the peer since it armed.
-            let claims = first_hop.claims();
-            assert_eq!(claims.len(), 1);
-            assert_eq!(claims[0].peer_id, Some("second-hop".to_string()));
-            assert_eq!(claims[0].direction, ClaimDirection::Outbound);
-            assert_eq!(claims[0].nonce, 1);
-            assert_eq!(claims[0].cumulative_amount, 100);
-            assert!(claims[0].pending);
-            assert!(second_hop.claims().is_empty());
-
-            let second = first_hop
-                .handle_prepare(prepare_with_amount("g.example.app", 50), 0)
-                .await;
-            assert!(matches!(second, PacketResponse::Fulfill(_)));
-
-            // The second forward carried the first claim to the peer, who
-            // verified it and advanced its watermark -- and the second
-            // fulfilment armed its own fresh claim behind it.
-            let peer_claims = second_hop.claims();
-            assert_eq!(peer_claims.len(), 1);
-            assert_eq!(peer_claims[0].peer_id, None);
-            assert_eq!(peer_claims[0].direction, ClaimDirection::Inbound);
-            assert_eq!(peer_claims[0].channel_id, test_channel_id(1));
-            assert_eq!(peer_claims[0].nonce, 1);
-            assert_eq!(peer_claims[0].cumulative_amount, 100);
-
-            let claims = first_hop.claims();
-            assert_eq!(claims.len(), 1);
-            assert_eq!(claims[0].nonce, 2);
-            assert_eq!(claims[0].cumulative_amount, 150);
-            assert!(claims[0].pending);
-        }
-
-        #[tokio::test]
-        async fn no_claim_is_emitted_for_a_rejected_packet() {
-            let (first_hop, _second_hop, app_client, handler_url) = two_hop_setup();
-            // A non-2xx response still answers -- what actually rejects
-            // this packet is a condition that was not derived from its own
-            // sealed secret (issue #525), not the app's status.
-            app_client.respond(&handler_url, answered_with_status(402, b""));
-            let (data, _shared_secret) = sealed_envelope_request_data(b"hello");
-            let mismatched = Prepare {
-                amount: 100,
-                ..prepare_with_data(data)
-            };
-
-            let response = first_hop.handle_prepare(mismatched, 0).await;
-
-            assert!(matches!(response, PacketResponse::Reject(_)));
-            assert!(first_hop.claims().is_empty());
-        }
-
-        #[tokio::test]
-        async fn no_claim_is_emitted_for_an_already_expired_packet() {
-            let (first_hop, _second_hop, _app, _handler_url) = two_hop_setup();
-            let already_expired = prepare_expiring_at(
-                "g.example.app",
-                b"hello",
-                Utc.with_ymd_and_hms(2029, 1, 1, 0, 0, 0).unwrap(),
-            );
-
-            let response = first_hop.handle_prepare(already_expired, 0).await;
-
-            match response {
-                PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "R00"),
-                other => panic!("expected a reject, got {other:?}"),
-            }
-            assert!(first_hop.claims().is_empty());
-        }
-
-        /// Peer-wire-spec.md §3.3: a flush sends a claim that would
-        /// otherwise have waited to ride the next packet -- the mechanism
-        /// that covers traffic stopping.
-        #[tokio::test]
-        async fn sweep_flush_sends_a_claim_that_has_no_packet_to_ride() {
-            let (first_hop, second_hop, _app, _handler_url) = two_hop_setup();
-            first_hop
-                .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
-                .await;
-            assert!(first_hop.claims()[0].pending);
-            assert!(second_hop.claims().is_empty());
-
-            first_hop.sweep_flush(Duration::seconds(0)).await;
-
-            assert!(second_hop.claims()[0].nonce == 1);
-            assert_eq!(second_hop.claims()[0].cumulative_amount, 100);
-            // Acknowledged by the flush: no longer pending.
-            assert!(!first_hop.claims()[0].pending);
-        }
-
-        #[tokio::test]
-        async fn sweep_flush_does_nothing_before_the_flush_interval_elapses() {
-            let (first_hop, second_hop, _app, _handler_url) = two_hop_setup();
-            first_hop
-                .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
-                .await;
-
-            first_hop.sweep_flush(Duration::seconds(60)).await;
-
-            assert!(second_hop.claims().is_empty());
-            assert!(first_hop.claims()[0].pending);
+    impl CarriesAndRemembers {
+        fn carried(&self) -> Vec<Prepare> {
+            self.carried.lock().unwrap().clone()
         }
     }
+
+    #[async_trait]
+    impl PeerTransport for CarriesAndRemembers {
+        async fn forward(
+            &self,
+            _peer_id: &str,
+            prepare: Prepare,
+            _claim: Option<WireClaim>,
+        ) -> PeerForward {
+            self.carried.lock().unwrap().push(prepare);
+            PeerForward::answered(
+                PacketResponse::Reject(Reject {
+                    code: RejectCode::f02_unreachable(),
+                    triggered_by: "g.peer".to_string(),
+                    message: "carried, and the far end had nowhere to put it".to_string(),
+                    data: Vec::new(),
+                    accumulated_cost: 0,
+                }),
+                ClaimAckOutcome::NotSent,
+            )
+        }
+
+        async fn flush(&self, _peer_id: &str, _claim: WireClaim) -> ClaimAckOutcome {
+            ClaimAckOutcome::NotSent
+        }
+    }
+
+    fn forwards_to(peer: Arc<CarriesAndRemembers>, clock: Arc<TestClock>) -> Connector {
+        covering(
+            Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
+                Arc::new(FakeAppClient::new()),
+                peer,
+                clock,
+            ),
+            "second-hop",
+        )
+    }
+
+    /// PF-19, issue #1174: a hop decreases a packet's expiry when it
+    /// forwards. Until this landed `expires_at` was copied through
+    /// verbatim, so the last hop held the sender's entire remaining budget
+    /// and every hop above it could have its own deadline fire while the
+    /// fulfilment it had already paid for was still in flight.
+    #[tokio::test]
+    async fn a_forwarded_packet_expires_before_the_one_that_arrived() {
+        let peer = Arc::new(CarriesAndRemembers::default());
+        let clock = test_clock();
+        let connector = forwards_to(peer.clone(), clock.clone());
+        let expires_at = clock.now() + Duration::seconds(30);
+
+        connector
+            .handle_prepare(prepare_expiring_at("g.example.app", b"hello", expires_at))
+            .await;
+
+        let carried = peer.carried();
+        assert_eq!(carried.len(), 1, "the packet should have been forwarded");
+        assert!(
+            carried[0].expires_at < expires_at,
+            "a forwarded packet must expire strictly before the one that arrived: \
+             arrived {expires_at}, forwarded {}",
+            carried[0].expires_at
+        );
+        // The window is kept back whole, and off the arriving expiry rather
+        // than off `now` -- what a hop owes the return leg is a fixed
+        // amount of time, not a fraction of whatever budget it was handed.
+        assert_eq!(
+            carried[0].expires_at,
+            expires_at - FORWARDING_MESSAGE_WINDOW
+        );
+    }
+
+    /// PF-19's second half: a hop with less than a message window left does
+    /// not forward a packet with a dead or negative window -- it refuses
+    /// it. `R00`, the code PF-02 gives an already-expired arrival, because
+    /// this is the same fact one hop later: the packet has run out of time
+    /// here.
+    #[tokio::test]
+    async fn a_packet_with_no_time_left_for_the_return_leg_is_refused_rather_than_forwarded() {
+        let peer = Arc::new(CarriesAndRemembers::default());
+        let clock = test_clock();
+        let connector = forwards_to(peer.clone(), clock.clone());
+        // Alive on arrival -- PF-02 lets it through -- but with less than a
+        // whole window left, so there is no forward that could be answered
+        // in time.
+        let expires_at = clock.now() + FORWARDING_MESSAGE_WINDOW - Duration::milliseconds(1);
+
+        let response = connector
+            .handle_prepare(prepare_expiring_at("g.example.app", b"hello", expires_at))
+            .await;
+
+        match response {
+            PacketResponse::Reject(reject) => {
+                assert_eq!(reject.code.as_str(), "R00");
+                // A class-only code (`packet-flow-spec.md` §5) carries its
+                // diagnosis in the message or nowhere.
+                assert!(
+                    reject.message.contains("return leg"),
+                    "message should say what the time was needed for: {}",
+                    reject.message
+                );
+            }
+            other => panic!("expected a reject, got {other:?}"),
+        }
+        assert!(
+            peer.carried().is_empty(),
+            "a packet with no window left must never reach the wire"
+        );
+    }
+
+    /// The boundary is [`is_expired`]'s, one hop out: a shortened expiry
+    /// landing exactly on `now` is dead, and a packet is forwarded only
+    /// when strictly more than a window remains.
+    #[tokio::test]
+    async fn a_packet_with_exactly_one_window_left_is_refused_and_a_hair_more_is_carried() {
+        let peer = Arc::new(CarriesAndRemembers::default());
+        let clock = test_clock();
+        let connector = forwards_to(peer.clone(), clock.clone());
+
+        let response = connector
+            .handle_prepare(prepare_expiring_at(
+                "g.example.app",
+                b"hello",
+                clock.now() + FORWARDING_MESSAGE_WINDOW,
+            ))
+            .await;
+        match response {
+            PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "R00"),
+            other => panic!("expected a reject at exactly one window, got {other:?}"),
+        }
+        assert!(peer.carried().is_empty());
+
+        connector
+            .handle_prepare(prepare_expiring_at(
+                "g.example.app",
+                b"hello",
+                clock.now() + FORWARDING_MESSAGE_WINDOW + Duration::milliseconds(1),
+            ))
+            .await;
+        assert_eq!(peer.carried().len(), 1);
+    }
+
+    /// ADR 0064 / PF-25 (issue #1183): the packet's own deadline bounds how
+    /// long a termination waits for its app.
+    ///
+    /// Before this landed, `deliver_opened_envelope` never read
+    /// `expires_at`. Expiry was checked once on arrival (PF-02) and never
+    /// again, so an app that took an hour over a thirty-second packet was
+    /// still answered for: the fulfilment was derived (ADR 0019) and a
+    /// FULFILL went back to an upstream that had long since given up. Every
+    /// test here fails against that tree.
+    ///
+    /// The two doubles are the real things, not expectation-checking stubs
+    /// (ADR 0007). [`SlowAppClient`] is an app that genuinely takes time and
+    /// then genuinely answers -- upholding the [`AppClient`] contract
+    /// exactly as [`FakeAppClient`] does, only later -- which is the whole
+    /// situation under test and cannot be faked by asserting on calls.
+    /// [`ClockThatMovesAfterArrival`] is the other half of the same
+    /// situation: a clock that has moved on by the time delivery is reached,
+    /// which is what every real clock does and what a frozen [`TestClock`]
+    /// structurally cannot.
+    mod termination_deadline {
+        use super::*;
+        use crate::app_client::AppClient;
+        use crate::clock::Clock;
+        use connector_domain::EnvelopeResponse;
+        use connector_signer::giftwrap::looks_like_sealed_response;
+        use url::Url;
+
+        /// An app that answers -- after `delay` of real elapsed time. The
+        /// delay is real because what is under test is a timer: the budget
+        /// is decided from the injected clock by
+        /// `connector_domain::delivery_budget` (proven exhaustively over
+        /// there), and the only thing left for this side to prove is that
+        /// the connector stops waiting when it runs out.
+        struct SlowAppClient {
+            delay: std::time::Duration,
+            response: EnvelopeResponse,
+            deliveries: std::sync::atomic::AtomicUsize,
+        }
+
+        impl SlowAppClient {
+            fn new(delay: std::time::Duration, body: &[u8]) -> SlowAppClient {
+                SlowAppClient {
+                    delay,
+                    response: EnvelopeResponse {
+                        status: 200,
+                        headers: vec![],
+                        body: body.to_vec(),
+                    },
+                    deliveries: std::sync::atomic::AtomicUsize::new(0),
+                }
+            }
+
+            fn deliveries(&self) -> usize {
+                self.deliveries.load(std::sync::atomic::Ordering::SeqCst)
+            }
+        }
+
+        #[async_trait]
+        impl AppClient for SlowAppClient {
+            async fn deliver(&self, _handler_url: &Url, _request: &EnvelopeRequest) -> AppOutcome {
+                self.deliveries
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(self.delay).await;
+                AppOutcome::Answered {
+                    response: self.response.clone(),
+                }
+            }
+        }
+
+        /// A clock reporting one instant to its first reader and a much
+        /// later one to every reader after it: the smallest fake that puts a
+        /// packet's arrival check and its delivery on opposite sides of the
+        /// same deadline. A century is not realism, it is margin -- the
+        /// packet must be alive for `reject_ineligible` (the first read on
+        /// this path) and unambiguously dead by the time delivery asks,
+        /// however many reads the router makes in between. If a future
+        /// change ever reads the clock *before* the arrival check, this test
+        /// fails loudly on the wrong reject message rather than passing for
+        /// the wrong reason.
+        struct ClockThatMovesAfterArrival {
+            arrival: DateTime<Utc>,
+            reads: std::sync::atomic::AtomicUsize,
+        }
+
+        impl ClockThatMovesAfterArrival {
+            fn new(arrival: DateTime<Utc>) -> ClockThatMovesAfterArrival {
+                ClockThatMovesAfterArrival {
+                    arrival,
+                    reads: std::sync::atomic::AtomicUsize::new(0),
+                }
+            }
+        }
+
+        impl Clock for ClockThatMovesAfterArrival {
+            fn now(&self) -> DateTime<Utc> {
+                if self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    self.arrival
+                } else {
+                    self.arrival + Duration::days(365 * 100)
+                }
+            }
+        }
+
+        const PRICE: u64 = 1000;
+
+        fn priced_route() -> StaticRoute {
+            StaticRoute::new_priced("g.example.app", "http://localhost:4000", PRICE).unwrap()
+        }
+
+        fn connector_with_clock(
+            route: StaticRoute,
+            app_client: Arc<dyn AppClient>,
+            clock: Arc<dyn Clock>,
+        ) -> Connector {
+            Connector::new(
+                vec![route],
+                vec![],
+                app_client,
+                Arc::new(InProcessPeerTransport::new()),
+                clock,
+            )
+            .with_identity_signer(identity_signer())
+        }
+
+        /// A packet expiring in 100ms, handed to an app that takes two
+        /// seconds. The old tree derived the fulfilment and returned a
+        /// FULFILL two seconds after the sender's deadline; this one
+        /// abandons the request at the deadline and says so.
+        #[tokio::test]
+        async fn an_app_slower_than_the_deadline_is_abandoned_rather_than_answered_late() {
+            let route = priced_route();
+            let app_client = Arc::new(SlowAppClient::new(
+                std::time::Duration::from_secs(2),
+                b"far too late",
+            ));
+            let clock = test_clock();
+            let expires_at = clock.now() + Duration::milliseconds(100);
+            let connector =
+                connector_with_clock(route, app_client.clone(), clock as Arc<dyn Clock>);
+            let (mut sealed, _shared_secret) = sealed_prepare(b"hello app");
+            sealed.expires_at = expires_at;
+
+            let response = connector.handle_prepare(sealed).await;
+
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "R00");
+                    assert!(
+                        reject.message.contains("did not answer"),
+                        "{}",
+                        reject.message
+                    );
+                    assert!(
+                        reject.message.contains(&expires_at.to_rfc3339()),
+                        "the reject names the deadline it fired on: {}",
+                        reject.message
+                    );
+                    // The app was asked and the priced work was set in
+                    // motion, so unlike an unreachable app this reject
+                    // carries the route's price (ADR 0011, issue #545).
+                    assert_eq!(reject.accumulated_cost, PRICE);
+                }
+                other => panic!("expected an R00 reject, got {other:?}"),
+            }
+            assert_eq!(
+                app_client.deliveries(),
+                1,
+                "the app is still asked -- this packet was alive when it arrived"
+            );
+        }
+
+        /// The rule is that the deadline bounds the *wait*, not the answer.
+        /// An app that takes real time and comes back inside the budget is
+        /// answered for exactly as a prompt one is -- there is no second
+        /// expiry check applied to work already done (ADR 0064).
+        #[tokio::test]
+        async fn an_app_answering_inside_the_deadline_still_fulfils() {
+            let route = priced_route();
+            let app_client = Arc::new(SlowAppClient::new(
+                std::time::Duration::from_millis(50),
+                b"app said yes",
+            ));
+            let clock = test_clock();
+            let expires_at = clock.now() + Duration::seconds(5);
+            let connector =
+                connector_with_clock(route, app_client.clone(), clock as Arc<dyn Clock>);
+            let (mut sealed, shared_secret) = sealed_prepare(b"hello app");
+            sealed.expires_at = expires_at;
+
+            let response = connector.handle_prepare(sealed).await;
+
+            match response {
+                PacketResponse::Fulfill(fulfill) => {
+                    assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
+                    assert_eq!(
+                        open_sealed_envelope(&shared_secret, &fulfill.data),
+                        fulfill_envelope(b"app said yes")
+                    );
+                }
+                other => panic!("expected a fulfill, got {other:?}"),
+            }
+            assert_eq!(app_client.deliveries(), 1);
+        }
+
+        /// PF-25's first half: a packet whose deadline has fired between
+        /// arriving and reaching delivery is not handed to the app at all.
+        /// Nothing was asked of it, so nothing is charged for the attempt --
+        /// the same figure `Unreachable` and `Refused` carry, and a
+        /// different message from the abandoned case above, so a sender can
+        /// tell "too late to ask" from "your app was too slow".
+        #[tokio::test]
+        async fn a_packet_whose_deadline_fires_before_delivery_never_reaches_the_app() {
+            let route = priced_route();
+            let app_client = Arc::new(SlowAppClient::new(
+                std::time::Duration::ZERO,
+                b"never reached",
+            ));
+            let arrival = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+            let expires_at = arrival + Duration::seconds(30);
+            let connector = connector_with_clock(
+                route,
+                app_client.clone(),
+                Arc::new(ClockThatMovesAfterArrival::new(arrival)),
+            );
+            let (mut sealed, _shared_secret) = sealed_prepare(b"hello app");
+            sealed.expires_at = expires_at;
+
+            let response = connector.handle_prepare(sealed).await;
+
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "R00");
+                    assert!(
+                        reject.message.contains("the app was not asked"),
+                        "{}",
+                        reject.message
+                    );
+                    assert_eq!(reject.accumulated_cost, 0);
+                }
+                other => panic!("expected an R00 reject, got {other:?}"),
+            }
+            assert_eq!(
+                app_client.deliveries(),
+                0,
+                "a packet with no time left is never handed to the app"
+            );
+        }
+
+        /// Both refusals are raised below the gift wrap, so they ride home
+        /// sealed to the sender's own shared secret like every other verdict
+        /// a termination reaches (ADR 0018, PF-24) -- readable by the sender
+        /// who holds that secret and by nobody else.
+        #[tokio::test]
+        async fn an_abandoned_deliverys_reject_is_sealed_to_the_sender() {
+            let route = priced_route();
+            let app_client = Arc::new(SlowAppClient::new(
+                std::time::Duration::from_secs(2),
+                b"far too late",
+            ));
+            let clock = test_clock();
+            let expires_at = clock.now() + Duration::milliseconds(100);
+            let connector = connector_with_clock(route, app_client, clock as Arc<dyn Clock>);
+            let (mut sealed, shared_secret) = sealed_prepare(b"hello app");
+            sealed.expires_at = expires_at;
+
+            let response = connector.handle_prepare(sealed).await;
+
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "R00");
+                    assert!(looks_like_sealed_response(&reject.data));
+                    connector_signer::giftwrap::open_response(&shared_secret, &reject.data)
+                        .expect("an abandoned delivery's reject opens with the request's secret");
+                    assert!(
+                        connector_signer::giftwrap::open_response(&[0xffu8; 32], &reject.data)
+                            .is_err()
+                    );
+                }
+                other => panic!("expected an R00 reject, got {other:?}"),
+            }
+        }
+    }
+
     /// Issue #881: every packet forwarded to a hop configured for
     /// client-role covering carries a claim of its own, minted before the
     /// packet is sent -- plus issue #875's one bounded retry for the hop
@@ -4771,14 +5741,16 @@ mod tests {
     /// receiver in `outbound_client`'s own tests).
     mod covering_a_forward {
         use super::*;
+        use crate::claim::ClaimSignature;
         use crate::outbound_client::{
-            ClaimStateSource, ClaimWatermark, EvmDomain, OutboundClientError, OutboundClientLedger,
+            ClaimStateDomain, ClaimStateSource, ClaimWatermark, EvmDomain, OutboundClientError,
+            OutboundClientLedger,
         };
         use connector_domain::x402::{
             X402ChannelExtra, X402PaymentOption, X402PaymentRequired, X402Resource,
             X402SettlementTerms, X402_VERSION,
         };
-        use connector_signer::LocalSigner;
+        use connector_signer::{LocalEd25519Signer, LocalSigner};
         use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
         /// The price the far side quotes for carrying one packet.
@@ -4798,6 +5770,7 @@ mod tests {
                 resource: X402Resource {
                     url: "g.example.app".to_string(),
                 },
+                request: None,
                 accepts: vec![X402PaymentOption {
                     scheme: "toon-channel".to_string(),
                     network: "g.example.app".to_string(),
@@ -4865,7 +5838,6 @@ mod tests {
                 &self,
                 _peer_id: &str,
                 _prepare: Prepare,
-                _minimum_delivery: u64,
                 claim: Option<WireClaim>,
             ) -> PeerForward {
                 let covered = claim
@@ -4906,6 +5878,11 @@ mod tests {
             nonce: AtomicU64,
             cumulative: AtomicU64,
             asked: AtomicU64,
+            /// Which chain's ask each call made (issue #1146). A covering
+            /// payer that asked one chain and signed on the other would
+            /// still get an answer here, so the ask itself has to be
+            /// observable for a test to say the arm was chosen correctly.
+            asked_about: Mutex<Vec<ClaimStateDomain>>,
             /// The receiver that will not answer at all: there is then no
             /// watermark to advance, and nothing safe to sign.
             silent: AtomicBool,
@@ -4917,6 +5894,7 @@ mod tests {
                     nonce: AtomicU64::new(nonce),
                     cumulative: AtomicU64::new(cumulative),
                     asked: AtomicU64::new(0),
+                    asked_about: Mutex::new(Vec::new()),
                     silent: AtomicBool::new(false),
                 })
             }
@@ -4927,9 +5905,13 @@ mod tests {
             async fn watermark(
                 &self,
                 channel: &[u8; 32],
-                _domain: &EvmDomain,
+                domain: &ClaimStateDomain,
             ) -> Result<ClaimWatermark, OutboundClientError> {
                 self.asked.fetch_add(1, Ordering::SeqCst);
+                self.asked_about
+                    .lock()
+                    .expect("asked-about lock poisoned")
+                    .push(*domain);
                 if self.silent.load(Ordering::SeqCst) {
                     return Err(OutboundClientError::ClaimStateUnavailable {
                         channel: format!("0x{}", hex_lower(channel)),
@@ -4957,26 +5939,33 @@ mod tests {
             }
         }
 
-        /// A first hop routing `g.example.app` to `second-hop`, holding
-        /// BOTH roles for that hop: the peer role (`with_peer_claim_channel`,
-        /// ADR 0004's post-pay claim) and the client role (`#875`'s ledger
-        /// plus the receiver as watermark authority), on the same channel.
-        /// That is the deployed shape, and it is what makes "the ledger
-        /// advances once per forward" a statement worth asserting.
-        fn first_hop(
+        /// A first hop routing `g.example.app` to `second-hop`, charging
+        /// `fee` for the carriage, holding the client role for that hop:
+        /// the ledger it signs from plus the receiver as the authority on
+        /// where its claims stand. The channel is also bound in the PEER
+        /// role (`with_channel_domain`) because that is the deployed
+        /// shape -- one channel, the peer role for what arrives and the
+        /// client role for what this node sends.
+        ///
+        /// It no longer registers an OUTBOUND peer-role channel, because
+        /// there is no longer such a thing (issue #1145): nothing is owed
+        /// to a peer after a fulfilment, so `[[peer_channels]]` is an
+        /// inbound binding only.
+        fn first_hop_charging(
             peer: Arc<GreetingPeer>,
             receiver: Arc<StandingWatermark>,
             ledger: Arc<OutboundClientLedger>,
+            fee: u64,
         ) -> Connector {
             Connector::new(
                 vec![],
-                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
                 Arc::new(FakeAppClient::new()),
                 peer,
                 test_clock(),
             )
+            .with_peer_fees([("second-hop".to_string(), fee)])
             .with_signer(Arc::new(LocalSigner::generate("settlement-key")))
-            .with_peer_claim_channel("second-hop", test_channel_id(1))
             .with_channel_domain(test_channel_id(1), test_channel_domain())
             .expect("test_channel_id(1) is a valid on-chain channel id")
             .with_outbound_client_ledger(ledger)
@@ -4987,6 +5976,17 @@ mod tests {
                 receiver,
             )
             .expect("test_channel_id(1) is a valid on-chain channel id")
+        }
+
+        /// [`first_hop_charging`] with no fee, which is what most of these
+        /// tests want: the claim then covers the packet's own amount and
+        /// there is one number to follow rather than two.
+        fn first_hop(
+            peer: Arc<GreetingPeer>,
+            receiver: Arc<StandingWatermark>,
+            ledger: Arc<OutboundClientLedger>,
+        ) -> Connector {
+            first_hop_charging(peer, receiver, ledger, 0)
         }
 
         fn ledger() -> (tempfile::TempDir, Arc<OutboundClientLedger>) {
@@ -5015,13 +6015,10 @@ mod tests {
             const N: u64 = 3;
             for _ in 0..N {
                 let response = connector
-                    .handle_prepare(
-                        Prepare {
-                            amount: PACKET_AMOUNT,
-                            ..sealed.clone()
-                        },
-                        0,
-                    )
+                    .handle_prepare(Prepare {
+                        amount: PACKET_AMOUNT,
+                        ..sealed.clone()
+                    })
                     .await;
                 assert!(
                     matches!(response, PacketResponse::Fulfill(_)),
@@ -5076,13 +6073,10 @@ mod tests {
                 let peer = GreetingPeer::new(expected_fulfillment(&shared_secret));
                 let connector = first_hop(peer.clone(), receiver.clone(), ledger.clone());
                 let response = connector
-                    .handle_prepare(
-                        Prepare {
-                            amount: PACKET_AMOUNT,
-                            ..sealed.clone()
-                        },
-                        0,
-                    )
+                    .handle_prepare(Prepare {
+                        amount: PACKET_AMOUNT,
+                        ..sealed.clone()
+                    })
                     .await;
                 assert!(matches!(response, PacketResponse::Fulfill(_)));
                 assert_eq!(ledger.issued_nonce("second-hop"), 6);
@@ -5094,13 +6088,10 @@ mod tests {
             let peer = GreetingPeer::new(expected_fulfillment(&shared_secret));
             let connector = first_hop(peer.clone(), receiver, ledger);
             let response = connector
-                .handle_prepare(
-                    Prepare {
-                        amount: PACKET_AMOUNT,
-                        ..sealed
-                    },
-                    0,
-                )
+                .handle_prepare(Prepare {
+                    amount: PACKET_AMOUNT,
+                    ..sealed
+                })
                 .await;
 
             assert!(
@@ -5135,13 +6126,10 @@ mod tests {
             let connector = first_hop(peer.clone(), receiver, ledger.clone());
 
             let response = connector
-                .handle_prepare(
-                    Prepare {
-                        amount: PACKET_AMOUNT,
-                        ..sealed
-                    },
-                    0,
-                )
+                .handle_prepare(Prepare {
+                    amount: PACKET_AMOUNT,
+                    ..sealed
+                })
                 .await;
 
             match response {
@@ -5172,13 +6160,10 @@ mod tests {
             let connector = first_hop(peer.clone(), receiver.clone(), ledger.clone());
 
             let response = connector
-                .handle_prepare(
-                    Prepare {
-                        amount: PACKET_AMOUNT,
-                        ..sealed
-                    },
-                    0,
-                )
+                .handle_prepare(Prepare {
+                    amount: PACKET_AMOUNT,
+                    ..sealed
+                })
                 .await;
 
             assert!(matches!(response, PacketResponse::Fulfill(_)));
@@ -5215,13 +6200,10 @@ mod tests {
             let refusing = first_hop(peer.clone(), receiver.clone(), ledger.clone());
 
             let refused = refusing
-                .handle_prepare(
-                    Prepare {
-                        amount: PACKET_AMOUNT,
-                        ..sealed.clone()
-                    },
-                    0,
-                )
+                .handle_prepare(Prepare {
+                    amount: PACKET_AMOUNT,
+                    ..sealed.clone()
+                })
                 .await;
             assert!(matches!(refused, PacketResponse::Reject(_)));
             let seen = peer.seen();
@@ -5246,13 +6228,10 @@ mod tests {
             let peer = GreetingPeer::new(expected_fulfillment(&shared_secret));
             let connector = first_hop(peer.clone(), receiver.clone(), ledger.clone());
             let response = connector
-                .handle_prepare(
-                    Prepare {
-                        amount: PACKET_AMOUNT,
-                        ..sealed
-                    },
-                    0,
-                )
+                .handle_prepare(Prepare {
+                    amount: PACKET_AMOUNT,
+                    ..sealed
+                })
                 .await;
 
             assert!(matches!(response, PacketResponse::Fulfill(_)));
@@ -5296,13 +6275,10 @@ mod tests {
             let connector = first_hop(peer.clone(), receiver.clone(), ledger.clone());
 
             let response = connector
-                .handle_prepare(
-                    Prepare {
-                        amount: PACKET_AMOUNT,
-                        ..sealed
-                    },
-                    0,
-                )
+                .handle_prepare(Prepare {
+                    amount: PACKET_AMOUNT,
+                    ..sealed
+                })
                 .await;
 
             assert!(matches!(response, PacketResponse::Fulfill(_)));
@@ -5320,86 +6296,103 @@ mod tests {
             );
         }
 
-        /// A hop with NO client-role config at all is entirely unaffected
-        /// by #881: it keeps riding the peer ledger's own postpay claim
-        /// (ADR 0004), exactly as before this mechanism existed --
-        /// bilateral peer-to-peer forwarding is not what #868/#881 changed
-        /// (`peer-carriage-spec.md` §3.1: a peer-role PREPARE reaching a
-        /// `Forwarded` route is priced by the claim exchange of §4 alone,
-        /// not by a client edge's price).
+        /// **A peering that cannot cover a forward does not forward it**
+        /// (issue #1145). This is the deleted fallback, asserted as its
+        /// own refusal: a hop with no client-role config used to fall
+        /// through to `ClaimBook::pending_claim` and carry the packet on
+        /// ADR 0004's postpay convention -- the model ADR 0042 exists to
+        /// retire, and the reason "a connector covers every PREPARE it
+        /// sends" was a record rather than a fact. There is now no arm
+        /// that reaches the wire uncovered, so the packet dies here and
+        /// the peer never sees it.
+        ///
+        /// Note which peer this uses: one that demands nothing. Even a
+        /// receiver perfectly happy to carry the packet for free does not
+        /// get it, because the rule is about what this connector will
+        /// send, not about what the far side will accept.
         #[tokio::test]
-        async fn a_hop_with_no_client_role_configured_is_unaffected_by_proactive_covering() {
+        async fn a_hop_with_no_client_role_configured_refuses_the_forward_rather_than_sending_it() {
             let (sealed, shared_secret) = sealed_prepare(b"hello");
             let mut peer = GreetingPeer::new(expected_fulfillment(&shared_secret));
             Arc::get_mut(&mut peer).expect("sole owner").greets = false;
             let connector = Connector::new(
                 vec![],
-                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
                 Arc::new(FakeAppClient::new()),
                 peer.clone(),
                 test_clock(),
             )
             .with_signer(Arc::new(LocalSigner::generate("settlement-key")))
-            .with_peer_claim_channel("second-hop", test_channel_id(1))
             .with_channel_domain(test_channel_id(1), test_channel_domain())
             .expect("test_channel_id(1) is a valid on-chain channel id");
             // Deliberately no `with_outbound_client_ledger` /
-            // `with_outbound_client_hop`.
+            // `with_outbound_client_hop` -- the `[[pay_channels]]` row
+            // `Config::load` now refuses a routed peering for being
+            // without.
 
             let response = connector
-                .handle_prepare(
-                    Prepare {
-                        amount: PACKET_AMOUNT,
-                        ..sealed
-                    },
-                    0,
-                )
-                .await;
-
-            assert!(matches!(response, PacketResponse::Fulfill(_)));
-            assert_eq!(
-                peer.seen(),
-                vec![None],
-                "one forward, carrying nothing -- the peer ledger's own postpay convention"
-            );
-            let armed = connector
-                .claims
-                .pending_claim("second-hop")
-                .expect("the peer-role claim ADR 0004 arms on fulfilment is unchanged");
-            assert_eq!(armed.cumulative_amount, PACKET_AMOUNT);
-        }
-
-        /// A node with no client role configured for the hop relays the
-        /// refusal it was given rather than inventing a payment -- and,
-        /// critically, does not emit the packet a second time claiming to
-        /// have paid.
-        #[tokio::test]
-        async fn a_greeted_forward_with_nothing_to_pay_from_is_relayed_as_the_refusal_it_is() {
-            let (sealed, shared_secret) = sealed_prepare(b"hello");
-            let peer = GreetingPeer::new(expected_fulfillment(&shared_secret));
-            let connector = Connector::new(
-                vec![],
-                vec![PeerRoute::new("g.example.app", "second-hop", 0)],
-                Arc::new(FakeAppClient::new()),
-                peer.clone(),
-                test_clock(),
-            );
-
-            let response = connector
-                .handle_prepare(
-                    Prepare {
-                        amount: PACKET_AMOUNT,
-                        ..sealed
-                    },
-                    0,
-                )
+                .handle_prepare(Prepare {
+                    amount: PACKET_AMOUNT,
+                    ..sealed
+                })
                 .await;
 
             match response {
-                PacketResponse::Reject(reject) => assert_eq!(reject.code.as_str(), "F06"),
-                other => panic!("expected the peer's refusal, got {other:?}"),
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "T00");
+                    assert!(
+                        reject.message.contains("second-hop")
+                            && reject.message.contains("pay_channels"),
+                        "the refusal must name the hop and what is missing: {}",
+                        reject.message
+                    );
+                }
+                other => panic!("expected a local refusal, got {other:?}"),
             }
-            assert_eq!(peer.seen().len(), 1, "nothing to pay with, so no retry");
+            assert!(
+                peer.seen().is_empty(),
+                "nothing may reach the peer when nothing could pay for it"
+            );
+            assert!(
+                connector.claims.pending_claim("second-hop").is_none(),
+                "and nothing is owed afterwards either -- the postpay ledger is not armed by \
+                 anything any more"
+            );
+        }
+
+        /// The fee is subtracted BEFORE the claim is minted: this hop
+        /// covers what it forwards, not what arrived, so it keeps exactly
+        /// its own fee (ADR 0010's earnings rule, ADR 0042's symmetric
+        /// figure). The property the deleted postpay test
+        /// `forwarding_to_a_peer_subtracts_that_relations_flat_fee` used to
+        /// read off the peer ledger's armed claim, read off the covering
+        /// claim that actually rides the packet instead.
+        #[tokio::test]
+        async fn a_covered_forward_covers_the_amount_after_this_hops_own_fee() {
+            const FEE: u64 = 7;
+            let (sealed, shared_secret) = sealed_prepare(b"hello");
+            let peer = GreetingPeer::new(expected_fulfillment(&shared_secret));
+            let receiver = StandingWatermark::at(4, 4_000);
+            let (_dir, ledger) = ledger();
+            let connector = first_hop_charging(peer.clone(), receiver, ledger, FEE);
+
+            let response = connector
+                .handle_prepare(Prepare {
+                    amount: PACKET_AMOUNT,
+                    ..sealed
+                })
+                .await;
+
+            assert!(matches!(response, PacketResponse::Fulfill(_)));
+            let seen = peer.seen();
+            assert_eq!(seen.len(), 1, "covered on the first attempt");
+            let claim = seen[0].as_ref().expect("covered before it was sent");
+            assert_eq!(
+                claim.cumulative_amount,
+                4_000 + PACKET_AMOUNT - FEE,
+                "the covering claim advances by what this hop FORWARDS, so the difference \
+                 between what it collected and what it covered is exactly its fee"
+            );
         }
 
         /// A receiver that will not report its watermark leaves nothing
@@ -5416,13 +6409,10 @@ mod tests {
             let connector = first_hop(peer.clone(), receiver, ledger.clone());
 
             let response = connector
-                .handle_prepare(
-                    Prepare {
-                        amount: PACKET_AMOUNT,
-                        ..sealed
-                    },
-                    0,
-                )
+                .handle_prepare(Prepare {
+                    amount: PACKET_AMOUNT,
+                    ..sealed
+                })
                 .await;
 
             match response {
@@ -5467,6 +6457,182 @@ mod tests {
             let mut settlement_less = quoted_terms();
             settlement_less.accepts[0].extra.settlement = None;
             assert_eq!(EvmDomain::from_greeting(&settlement_less), None);
+        }
+
+        // -----------------------------------------------------------
+        // Solana (issue #1146): the arm `cover_forward` did not have.
+        // -----------------------------------------------------------
+
+        /// The Solana channel account this node pays its next hop from.
+        const SOLANA_ACCOUNT: [u8; 32] = [0x6a; 32];
+        /// `[settlement.solana] program_id` -- what ADR 0053 signs into
+        /// every claim on that channel.
+        const SOLANA_PROGRAM: [u8; 32] = [0x2c; 32];
+
+        fn solana_base58(bytes: &[u8; 32]) -> String {
+            bs58::encode(bytes).into_string()
+        }
+
+        /// [`first_hop`]'s Solana twin: the same node, the same routes, the
+        /// same ledger -- with the client-role hop bound to a Solana channel
+        /// account instead of an EVM channel id, and an ed25519 settlement
+        /// key to sign under.
+        ///
+        /// Before #1146 this connector could not be built at all:
+        /// `with_outbound_client_hop` took an `EvmDomain` and nothing else,
+        /// so the b-c leg of `local/mixed-chain` had no way to be covered
+        /// and rode ADR 0004's postpay convention forever.
+        fn first_hop_on_solana(
+            peer: Arc<GreetingPeer>,
+            receiver: Arc<StandingWatermark>,
+            ledger: Arc<OutboundClientLedger>,
+            claim_signer: Arc<dyn Ed25519Signer>,
+        ) -> Connector {
+            let account = solana_base58(&SOLANA_ACCOUNT);
+            let program = solana_base58(&SOLANA_PROGRAM);
+            // The counterparty this node's PEER book would judge inbound
+            // claims on the same channel by -- the deployed shape, one
+            // channel in both roles.
+            let counterparty = solana_base58(
+                &LocalEd25519Signer::from_secret_bytes([44u8; 32])
+                    .unwrap()
+                    .public_key(),
+            );
+            Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
+                Arc::new(FakeAppClient::new()),
+                peer,
+                test_clock(),
+            )
+            .with_solana_signer(claim_signer)
+            .with_solana_channel(account.clone(), &counterparty, &program)
+            .expect("a well-formed channel account")
+            .with_outbound_client_ledger(ledger)
+            .with_solana_outbound_client_hop("second-hop", account, &program, receiver)
+            .expect("a well-formed channel account")
+        }
+
+        /// The Solana half of
+        /// [`n_consecutive_forwards_over_a_healthy_link_each_carry_their_own_covering_claim`]:
+        /// a forward to a Solana peering is covered BEFORE it is sent, with
+        /// an ed25519 claim that verifies under the channel's own settlement
+        /// program.
+        ///
+        /// The three things this pins, each of which was impossible before
+        /// #1146: the claim exists at all on the first attempt; it is a
+        /// `ClaimSignature::Solana` rather than an EVM signature wearing a
+        /// Solana channel's name; and the watermark ask that priced it was
+        /// made as a Solana ask, not an EVM one that happened to be
+        /// answered.
+        #[tokio::test]
+        async fn a_forward_to_a_solana_peering_is_covered_before_it_is_sent() {
+            let (sealed, shared_secret) = sealed_prepare(b"hello");
+            let peer = GreetingPeer::new(expected_fulfillment(&shared_secret));
+            let receiver = StandingWatermark::at(7, 7_000);
+            let (_dir, ledger) = ledger();
+            let key = LocalEd25519Signer::from_secret_bytes([13u8; 32]).expect("a settlement key");
+            let public_key = key.public_key();
+            let connector = first_hop_on_solana(
+                peer.clone(),
+                Arc::clone(&receiver),
+                ledger.clone(),
+                Arc::new(key),
+            );
+
+            let response = connector
+                .handle_prepare(Prepare {
+                    amount: PACKET_AMOUNT,
+                    ..sealed
+                })
+                .await;
+            assert!(
+                matches!(response, PacketResponse::Fulfill(_)),
+                "a proactively covered Solana forward must fulfil, got {response:?}"
+            );
+
+            let seen = peer.seen();
+            assert_eq!(seen.len(), 1, "covered on the first attempt, so no retry");
+            let claim = seen[0]
+                .as_ref()
+                .expect("the packet must not have been emitted uncovered");
+            assert_eq!(claim.channel_id, solana_base58(&SOLANA_ACCOUNT));
+            assert_eq!(claim.nonce, 8);
+            assert_eq!(claim.cumulative_amount, 7_000 + PACKET_AMOUNT);
+
+            let ClaimSignature::Solana(signature) = claim.signature else {
+                panic!("a Solana hop must mint a Solana claim, not an EVM one");
+            };
+            assert!(
+                connector_signer::verify_solana_balance_proof(
+                    &SOLANA_PROGRAM,
+                    &SOLANA_ACCOUNT,
+                    claim.nonce,
+                    claim.cumulative_amount,
+                    &signature,
+                    &public_key,
+                ),
+                "the far gate must verify this claim under the channel's own settlement program"
+            );
+
+            assert_eq!(
+                *receiver
+                    .asked_about
+                    .lock()
+                    .expect("asked-about lock poisoned"),
+                vec![ClaimStateDomain::Solana],
+                "the watermark ask must be the Solana one -- an EVM challenge would be answered \
+                 `unverified` by a real payee, and this node would have signed nothing"
+            );
+        }
+
+        /// A Solana hop on a node with no ed25519 settlement key cannot sign,
+        /// and the packet FAILS naming the reason rather than going out
+        /// uncovered. The same rule the EVM arm holds, and the reason
+        /// `cover_forward` has no "send it anyway" branch on either chain.
+        #[tokio::test]
+        async fn a_solana_hop_with_no_solana_signer_fails_the_packet_rather_than_sending_it() {
+            let (sealed, shared_secret) = sealed_prepare(b"hello");
+            let peer = GreetingPeer::new(expected_fulfillment(&shared_secret));
+            let receiver = StandingWatermark::at(0, 0);
+            let (_dir, ledger) = ledger();
+            let account = solana_base58(&SOLANA_ACCOUNT);
+            let program = solana_base58(&SOLANA_PROGRAM);
+            let connector = Connector::new(
+                vec![],
+                vec![PeerRoute::new("g.example.app", "second-hop")],
+                Arc::new(FakeAppClient::new()),
+                peer.clone(),
+                test_clock(),
+            )
+            // Deliberately `with_signer` and NOT `with_solana_signer`: an
+            // EVM key is no use to a Solana channel, and silently reaching
+            // for it would sign a claim on the wrong curve.
+            .with_signer(Arc::new(LocalSigner::generate("evm-only")))
+            .with_outbound_client_ledger(ledger.clone())
+            .with_solana_outbound_client_hop("second-hop", account, &program, receiver)
+            .expect("a well-formed channel account");
+
+            let response = connector
+                .handle_prepare(Prepare {
+                    amount: PACKET_AMOUNT,
+                    ..sealed
+                })
+                .await;
+            match response {
+                PacketResponse::Reject(reject) => assert!(
+                    reject.message.contains("Solana settlement signer"),
+                    "the reject must name what is missing, got: {}",
+                    reject.message
+                ),
+                other => panic!("expected a local refusal, got {other:?}"),
+            }
+            assert_eq!(
+                peer.seen().len(),
+                0,
+                "nothing may be sent when no claim could be signed"
+            );
+            assert_eq!(ledger.issued_nonce("second-hop"), 0);
         }
     }
 
@@ -5542,6 +6708,16 @@ mod tests {
             ) -> Result<ChannelState, SettlementError> {
                 Err(SettlementError::Backend(format!(
                     "{}: channel_state",
+                    self.0
+                )))
+            }
+
+            async fn live_channel_with(
+                &self,
+                _counterparty: Vec<u8>,
+            ) -> Result<Option<ChannelId>, SettlementError> {
+                Err(SettlementError::Backend(format!(
+                    "{}: live_channel_with",
                     self.0
                 )))
             }
@@ -5747,1164 +6923,49 @@ mod tests {
             }
             hex
         }
-    }
 
-    /// Issue #885: paying the priced peer-sale route inserts the payer as
-    /// a runtime peer, per issue #884's own `upsert_runtime_peer`/
-    /// `upsert_runtime_peer_route` API. Driven against
-    /// `connector_settlement::InMemorySettlementBackend` (ADR 0007) rather
-    /// than a real chain -- the channel-verification step this exercises
-    /// (`Connector::settlement_for_channel` + `channel_state`) is the same
-    /// port every real backend implements, and the port's own contract
-    /// suite (`connector_settlement::contract`) is what proves a real
-    /// backend answers it identically.
-    mod peer_sale_purchase {
-        use super::*;
-        use connector_settlement::InMemorySettlementBackend;
-
-        const PEER_SALE_PREFIX: &str = "g.example.node.peer-sale";
-        const PEER_SALE_PRICE: u64 = 1000;
-        const PEER_SALE_LEASE_SECONDS: i64 = 3600;
-
-        fn peer_sale_connector(backend: Arc<InMemorySettlementBackend>) -> Connector {
-            peer_sale_connector_with_clock(backend, test_clock())
-        }
-
-        /// Like [`peer_sale_connector`], but built on a caller-held clock
-        /// (issue #886) so a test can advance it past the lease's expiry
-        /// after purchasing.
-        fn peer_sale_connector_with_clock(
-            backend: Arc<InMemorySettlementBackend>,
-            clock: Arc<TestClock>,
-        ) -> Connector {
-            Connector::new(
-                vec![],
-                vec![],
-                Arc::new(FakeAppClient::new()),
-                Arc::new(InProcessPeerTransport::new()),
-                clock,
-            )
-            .with_identity_signer(identity_signer())
-            .with_peer_sale(
-                PEER_SALE_PREFIX,
-                PEER_SALE_PRICE,
-                Duration::seconds(PEER_SALE_LEASE_SECONDS),
-            )
-            .with_settlement(SettlementChain::Evm, backend)
-        }
-
-        /// A sealed `Prepare` to the peer-sale route, priced correctly and
-        /// carrying `body` as its `EnvelopeRequest.body` -- the purchase
-        /// terms, JSON-encoded by the caller.
-        fn peer_sale_prepare(body: &[u8]) -> (Prepare, [u8; 32]) {
-            let (data, shared_secret) = sealed_envelope_request_data(body);
-            let prepare = Prepare {
-                data,
-                execution_condition: matching_condition(&shared_secret),
-                ..prepare_with_amount(PEER_SALE_PREFIX, PEER_SALE_PRICE)
-            };
-            (prepare, shared_secret)
-        }
-
-        fn purchase_body(prefix: &str, fee: u64, price: u64, next_hop_price: u64) -> Vec<u8> {
-            serde_json::json!({
-                "prefix": prefix,
-                "fee": fee,
-                "price": price,
-                "next_hop_price": next_hop_price,
-            })
-            .to_string()
-            .into_bytes()
-        }
-
+        /// Issue #1218: `channel_view` reports on a channel by id alone,
+        /// unlike `channels()` -- which only ever lists
+        /// [`Self::known_channels`], the channels this node itself opened.
+        /// A client channel, opened by its counterparty and merely
+        /// recognized here, is exactly the case this exists for: the
+        /// channel below is opened straight through the backend, never
+        /// through `Connector::open_channel`, so it is provably absent
+        /// from `known_channels`.
         #[tokio::test]
-        async fn a_valid_purchase_inserts_both_rows_and_the_buyer_can_route_immediately() {
-            let backend = Arc::new(InMemorySettlementBackend::new());
-            let channel_id = backend
-                .open(b"buyer".to_vec(), Duration::seconds(3600))
+        async fn channel_view_reports_a_channel_this_node_never_itself_opened() {
+            let settlement = Arc::new(InMemorySettlementBackend::new());
+            let channel_id = settlement
+                .open(b"counterparty".to_vec(), Duration::seconds(3600))
                 .await
-                .expect("open");
-            let client_channel_id = format!("evm:{}", channel_id.0);
-            let connector = peer_sale_connector(backend);
+                .unwrap();
+            let connector = bare_connector().with_settlement(SettlementChain::Evm, settlement);
 
-            let (sealed, shared_secret) =
-                peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
+            assert!(connector.channels().await.is_empty());
 
-            let response = connector
-                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                .await;
-
-            match response {
-                PacketResponse::Fulfill(fulfill) => {
-                    assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
-                    let envelope = open_sealed_envelope(&shared_secret, &fulfill.data);
-                    assert_eq!(envelope.status, 200);
-                    let body: serde_json::Value =
-                        serde_json::from_slice(&envelope.body).expect("json body");
-                    assert_eq!(body["peer_id"], client_channel_id);
-                    assert_eq!(body["prefix"], "g.example.buyer");
-                    assert_eq!(body["fee"], 3);
-                    assert_eq!(body["price"], 25);
-                }
-                other => panic!("expected a fulfill, got {other:?}"),
-            }
-
-            // The routing table IS insertable and immediately routable
-            // (issue #884's own mechanism, driven here at the same
-            // `Connector` level its own tests exercise): a subsequent
-            // packet to the purchased prefix resolves to the new peer.
-            let route = connector
-                .client_route("g.example.buyer")
-                .expect("route now exists");
-            assert_eq!(route.price, 25);
-            assert_eq!(route.kind, ClientRouteKind::Forwarded);
-            assert!(connector
-                .peers()
-                .iter()
-                .any(|peer| peer.id == client_channel_id));
+            let view = connector
+                .channel_view(&channel_id.0)
+                .await
+                .expect("the backend knows this channel even though this node never opened it");
+            assert_eq!(view.counterparty, to_hex(b"counterparty"));
         }
 
-        /// The sale route's own subtree is config-owned too (this PR's
-        /// review, fourth finding): a purchase strictly beneath the
-        /// `[peer_sale]` prefix would outrank the sale route by length and
-        /// hijack the purchase endpoint itself. Predicted by the probe,
-        /// refused unpaid, and the sale route still terminates its
-        /// subtree afterwards.
+        /// A channel id no backend has ever heard of answers exactly like
+        /// every other per-channel operation already does.
         #[tokio::test]
-        async fn a_purchase_under_the_sale_prefix_itself_is_refused() {
-            let backend = Arc::new(InMemorySettlementBackend::new());
-            let channel_id = backend
-                .open(b"buyer".to_vec(), Duration::seconds(3600))
-                .await
-                .expect("open");
-            let client_channel_id = format!("evm:{}", channel_id.0);
-            let connector = peer_sale_connector(backend);
+        async fn channel_view_of_an_unknown_channel_is_not_found() {
+            let connector = bare_connector().with_settlement(
+                SettlementChain::Evm,
+                Arc::new(InMemorySettlementBackend::new()),
+            );
 
-            let evil_prefix = format!("{PEER_SALE_PREFIX}.evil");
-            let (sealed, _s) = peer_sale_prepare(&purchase_body(&evil_prefix, 3, 25, 10));
-            assert!(connector.peer_sale_purchase_would_be_refused(&sealed));
-
-            let response = connector
-                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                .await;
-            match response {
-                PacketResponse::Reject(reject) => assert!(
-                    reject
-                        .message
-                        .contains("config-owned space is not for sale"),
-                    "expected the containment refusal, got: {}",
-                    reject.message
-                ),
-                other => panic!("expected a reject, got {other:?}"),
-            }
-            assert!(connector.peers().is_empty());
-            // The sale route still wins its own subtree.
+            let result = connector.channel_view("no-such-channel").await;
             assert!(matches!(
-                connector.select_configured_route(&format!("{evil_prefix}.x")),
-                Some((_, ConfiguredTarget::PeerSale { .. }))
+                result,
+                Err(ChannelOperationError::Settlement(
+                    SettlementError::ChannelNotFound(_)
+                ))
             ));
-        }
-
-        /// Config-owned address space is not for sale (ADR 0037): with an
-        /// app route on `g.example.node.app`, a purchase of
-        /// `g.example.node.app.sub` would otherwise insert a durable,
-        /// longer-prefix row outranking the seller's own route for that
-        /// whole subtree. Containment is per `.`-separated segment, so a
-        /// sibling that merely shares the string start stays purchasable.
-        #[tokio::test]
-        async fn a_purchase_under_a_configured_routes_prefix_is_refused() {
-            let backend = Arc::new(InMemorySettlementBackend::new());
-            let channel_id = backend
-                .open(b"buyer".to_vec(), Duration::seconds(3600))
-                .await
-                .expect("open");
-            let client_channel_id = format!("evm:{}", channel_id.0);
-            let connector = Connector::new(
-                vec![
-                    StaticRoute::new_priced("g.example.node.app", "http://localhost:4000", 10)
-                        .unwrap(),
-                ],
-                vec![],
-                Arc::new(FakeAppClient::new()),
-                Arc::new(InProcessPeerTransport::new()),
-                test_clock(),
-            )
-            .with_identity_signer(identity_signer())
-            .with_peer_sale(
-                PEER_SALE_PREFIX,
-                PEER_SALE_PRICE,
-                Duration::seconds(PEER_SALE_LEASE_SECONDS),
-            )
-            .with_settlement(SettlementChain::Evm, backend);
-
-            let (sealed, _shared_secret) =
-                peer_sale_prepare(&purchase_body("g.example.node.app.sub", 3, 25, 10));
-            let response = connector
-                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                .await;
-
-            assert!(matches!(response, PacketResponse::Reject(_)));
-            // Nothing was inserted, and the seller's subtree still
-            // terminates at the seller's own app.
-            assert!(connector.peers().is_empty());
-            let route = connector
-                .client_route("g.example.node.app.sub")
-                .expect("the app route still serves its subtree");
-            assert_eq!(route.kind, ClientRouteKind::Terminated);
-
-            // The dot boundary: `g.example.node.appendix` shares the
-            // string start but is a sibling, not contained — purchasable.
-            let (sealed, shared_secret) =
-                peer_sale_prepare(&purchase_body("g.example.node.appendix", 3, 25, 10));
-            let response = connector
-                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                .await;
-            match response {
-                PacketResponse::Fulfill(fulfill) => {
-                    assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
-                }
-                other => panic!("expected a fulfill, got {other:?}"),
-            }
-        }
-
-        #[tokio::test]
-        async fn a_purchase_with_no_client_channel_is_refused() {
-            let backend = Arc::new(InMemorySettlementBackend::new());
-            let connector = peer_sale_connector(backend);
-            let (sealed, _shared_secret) =
-                peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
-
-            // `handle_prepare` (unlike `handle_prepare_with_client_channel`)
-            // carries no client channel id at all -- exactly the shape a
-            // caller with nothing to bind produces.
-            let response = connector.handle_prepare(sealed, 0).await;
-
-            assert!(matches!(response, PacketResponse::Reject(_)));
-            assert!(connector.peers().is_empty());
-        }
-
-        #[tokio::test]
-        async fn a_purchase_whose_channel_does_not_exist_on_chain_is_refused() {
-            let backend = Arc::new(InMemorySettlementBackend::new());
-            let connector = peer_sale_connector(backend);
-            let (sealed, _shared_secret) =
-                peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
-
-            let response = connector
-                .handle_prepare_with_client_channel(sealed, 0, Some("evm:999999"))
-                .await;
-
-            match response {
-                PacketResponse::Reject(reject) => {
-                    assert!(
-                        reject.message.contains("does not exist"),
-                        "expected the refusal to say the channel does not exist, got: {}",
-                        reject.message
-                    );
-                }
-                other => panic!("expected a reject, got {other:?}"),
-            }
-            assert!(connector.peers().is_empty());
-        }
-
-        #[tokio::test]
-        async fn a_purchase_against_a_closed_channel_is_refused() {
-            let backend = Arc::new(InMemorySettlementBackend::new());
-            let channel_id = backend
-                .open(b"buyer".to_vec(), Duration::seconds(3600))
-                .await
-                .expect("open");
-            backend
-                .close(&channel_id)
-                .await
-                .expect("close starts the challenge period");
-            let client_channel_id = format!("evm:{}", channel_id.0);
-            let connector = peer_sale_connector(backend);
-            let (sealed, _shared_secret) =
-                peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
-
-            let response = connector
-                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                .await;
-
-            assert!(matches!(response, PacketResponse::Reject(_)));
-            assert!(connector.peers().is_empty());
-        }
-
-        #[tokio::test]
-        async fn a_purchase_whose_arithmetic_does_not_cover_the_next_hop_is_refused() {
-            let backend = Arc::new(InMemorySettlementBackend::new());
-            let channel_id = backend
-                .open(b"buyer".to_vec(), Duration::seconds(3600))
-                .await
-                .expect("open");
-            let client_channel_id = format!("evm:{}", channel_id.0);
-            let connector = peer_sale_connector(backend);
-            // price(25) - fee(3) = 22, less than next_hop_price(30): the
-            // buyer would be forwarded less than it declared it needs.
-            let (sealed, _shared_secret) =
-                peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 30));
-
-            let response = connector
-                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                .await;
-
-            match response {
-                PacketResponse::Reject(reject) => {
-                    assert!(
-                        reject.message.contains("next_hop_price"),
-                        "expected the refusal to name the arithmetic it violated, got: {}",
-                        reject.message
-                    );
-                }
-                other => panic!("expected a reject, got {other:?}"),
-            }
-            assert!(connector.peers().is_empty());
-        }
-
-        #[tokio::test]
-        async fn a_purchase_whose_fee_exceeds_its_price_is_refused_not_a_panic() {
-            let backend = Arc::new(InMemorySettlementBackend::new());
-            let channel_id = backend
-                .open(b"buyer".to_vec(), Duration::seconds(3600))
-                .await
-                .expect("open");
-            let client_channel_id = format!("evm:{}", channel_id.0);
-            let connector = peer_sale_connector(backend);
-            // fee(30) > price(25): `price.checked_sub(fee)` is `None`,
-            // proving the refusal path (not an underflow panic) is what
-            // actually runs.
-            let (sealed, _shared_secret) =
-                peer_sale_prepare(&purchase_body("g.example.buyer", 30, 25, 0));
-
-            let response = connector
-                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                .await;
-
-            assert!(matches!(response, PacketResponse::Reject(_)));
-            assert!(connector.peers().is_empty());
-        }
-
-        #[tokio::test]
-        async fn a_malformed_purchase_body_is_refused() {
-            let backend = Arc::new(InMemorySettlementBackend::new());
-            let channel_id = backend
-                .open(b"buyer".to_vec(), Duration::seconds(3600))
-                .await
-                .expect("open");
-            let client_channel_id = format!("evm:{}", channel_id.0);
-            let connector = peer_sale_connector(backend);
-            let (sealed, _shared_secret) = peer_sale_prepare(b"not json");
-
-            let response = connector
-                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                .await;
-
-            assert!(matches!(response, PacketResponse::Reject(_)));
-        }
-
-        #[test]
-        fn the_peer_sale_prefix_is_priced_and_terminated_for_the_client_edge() {
-            let connector = peer_sale_connector(Arc::new(InMemorySettlementBackend::new()));
-            let route = connector
-                .client_route(PEER_SALE_PREFIX)
-                .expect("peer-sale route matches its own prefix");
-            assert_eq!(route.price, PEER_SALE_PRICE);
-            assert_eq!(route.kind, ClientRouteKind::Terminated);
-        }
-
-        #[tokio::test]
-        async fn a_repeat_purchase_on_the_same_channel_updates_rather_than_duplicates() {
-            let backend = Arc::new(InMemorySettlementBackend::new());
-            let channel_id = backend
-                .open(b"buyer".to_vec(), Duration::seconds(3600))
-                .await
-                .expect("open");
-            let client_channel_id = format!("evm:{}", channel_id.0);
-            let connector = peer_sale_connector(backend);
-
-            for price in [25, 40] {
-                let (sealed, _shared_secret) =
-                    peer_sale_prepare(&purchase_body("g.example.buyer", 3, price, 10));
-                let response = connector
-                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                    .await;
-                assert!(
-                    matches!(response, PacketResponse::Fulfill(_)),
-                    "the purchase at price {price} did not fulfil: {response:?}"
-                );
-            }
-
-            // The channel that paid IS the peer id, so a second purchase on
-            // one channel restates the same rows rather than adding a
-            // second pair -- `upsert_runtime_peer`/`upsert_runtime_peer_route`'s
-            // own upsert contract (issue #884), reached the way a buyer
-            // actually reaches it.
-            assert_eq!(
-                connector
-                    .peers()
-                    .iter()
-                    .filter(|peer| peer.id == client_channel_id)
-                    .count(),
-                1
-            );
-            assert_eq!(
-                connector
-                    .client_route("g.example.buyer")
-                    .expect("route now exists")
-                    .price,
-                40
-            );
-        }
-
-        /// Issue #886's first acceptance criterion: the lease is part of
-        /// what a purchase buys, and this connector tells the buyer
-        /// exactly what it bought -- not just what it asked for.
-        #[tokio::test]
-        async fn a_purchases_response_names_the_lease_it_bought() {
-            let backend = Arc::new(InMemorySettlementBackend::new());
-            let channel_id = backend
-                .open(b"buyer".to_vec(), Duration::seconds(3600))
-                .await
-                .expect("open");
-            let client_channel_id = format!("evm:{}", channel_id.0);
-            let clock = test_clock();
-            let connector = peer_sale_connector_with_clock(backend, clock.clone());
-            let (sealed, shared_secret) =
-                peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
-
-            let response = connector
-                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                .await;
-
-            let PacketResponse::Fulfill(fulfill) = response else {
-                panic!("expected a fulfill, got {response:?}");
-            };
-            let envelope = open_sealed_envelope(&shared_secret, &fulfill.data);
-            let body: serde_json::Value = serde_json::from_slice(&envelope.body).expect("json");
-            let expected_expiry = clock.now() + Duration::seconds(PEER_SALE_LEASE_SECONDS);
-            let reported_expiry: DateTime<Utc> = body["expires_at"]
-                .as_str()
-                .expect("expires_at is a string")
-                .parse()
-                .expect("expires_at parses as an RFC 3339 timestamp");
-            assert_eq!(reported_expiry, expected_expiry);
-        }
-
-        /// Issue #886's second acceptance criterion, at the routing
-        /// altitude: once the clock passes the lease this purchase bought,
-        /// the route it inserted stops matching -- the demotion takes
-        /// effect the instant it lapses, with no sweep delay, the same
-        /// "checked fresh against the clock on every lookup" guarantee
-        /// issue #427's leases already give.
-        #[tokio::test]
-        async fn a_purchased_route_stops_matching_the_instant_its_lease_expires() {
-            let backend = Arc::new(InMemorySettlementBackend::new());
-            let channel_id = backend
-                .open(b"buyer".to_vec(), Duration::seconds(3600))
-                .await
-                .expect("open");
-            let client_channel_id = format!("evm:{}", channel_id.0);
-            let clock = test_clock();
-            let connector = peer_sale_connector_with_clock(backend, clock.clone());
-            let (sealed, _shared_secret) =
-                peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
-            let response = connector
-                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                .await;
-            assert!(matches!(response, PacketResponse::Fulfill(_)));
-
-            assert!(connector.client_route("g.example.buyer").is_some());
-
-            clock.advance(Duration::seconds(PEER_SALE_LEASE_SECONDS));
-
-            assert!(
-                connector.client_route("g.example.buyer").is_none(),
-                "a lapsed purchase must stop being routed to, demoting the buyer back to client \
-                 role"
-            );
-        }
-
-        /// Issue #886's own acceptance wording: "expiry is tested,
-        /// including expiry while packets are in flight". A packet routed
-        /// while the lease is still active forwards to the purchased peer
-        /// and is untouched by a later expiry; a packet sent after the
-        /// lease has lapsed no longer forwards there at all -- proving the
-        /// demotion is safe to apply without disturbing traffic that
-        /// already resolved its route under the earlier, still-valid
-        /// lease.
-        #[tokio::test]
-        async fn a_purchased_route_forwards_until_its_lease_expires_then_stops() {
-            let second_hop_route =
-                StaticRoute::new("g.example.buyer", "http://localhost:4000").unwrap();
-            let second_hop_app_client = Arc::new(FakeAppClient::new());
-            second_hop_app_client.respond(
-                second_hop_route.handler_url(),
-                answered(b"delivered by the purchased peer"),
-            );
-            let second_hop = Arc::new(
-                Connector::new(
-                    vec![second_hop_route],
-                    vec![],
-                    second_hop_app_client,
-                    Arc::new(InProcessPeerTransport::new()),
-                    test_clock(),
-                )
-                .with_identity_signer(identity_signer()),
-            );
-
-            let backend = Arc::new(InMemorySettlementBackend::new());
-            let channel_id = backend
-                .open(b"buyer".to_vec(), Duration::seconds(3600))
-                .await
-                .expect("open");
-            let client_channel_id = format!("evm:{}", channel_id.0);
-
-            let mut peer_transport = InProcessPeerTransport::new();
-            peer_transport.add_peer(&client_channel_id, second_hop);
-
-            let clock = test_clock();
-            let connector = Connector::new(
-                vec![],
-                vec![],
-                Arc::new(FakeAppClient::new()),
-                Arc::new(peer_transport),
-                clock.clone(),
-            )
-            .with_identity_signer(identity_signer())
-            .with_peer_sale(
-                PEER_SALE_PREFIX,
-                PEER_SALE_PRICE,
-                Duration::seconds(PEER_SALE_LEASE_SECONDS),
-            )
-            .with_settlement(SettlementChain::Evm, backend);
-
-            let (sealed, _shared_secret) =
-                peer_sale_prepare(&purchase_body("g.example.buyer", 0, 0, 0));
-            let response = connector
-                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                .await;
-            assert!(matches!(response, PacketResponse::Fulfill(_)));
-
-            // Still within the lease: forwards to the purchased peer.
-            let (sealed, shared_secret) = sealed_prepare_to("g.example.buyer", b"hello");
-            let response = connector.handle_prepare(sealed, 0).await;
-            match response {
-                PacketResponse::Fulfill(fulfill) => {
-                    assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
-                    assert_eq!(
-                        open_sealed_envelope(&shared_secret, &fulfill.data),
-                        fulfill_envelope(b"delivered by the purchased peer")
-                    );
-                }
-                other => panic!("expected a fulfill while the lease is active, got {other:?}"),
-            }
-
-            clock.advance(Duration::seconds(PEER_SALE_LEASE_SECONDS));
-
-            // Past the lease: no longer routed to the demoted peer at all.
-            let (sealed, _shared_secret) = sealed_prepare_to("g.example.buyer", b"hello");
-            let response = connector.handle_prepare(sealed, 0).await;
-            match response {
-                PacketResponse::Reject(reject) => {
-                    assert_eq!(reject.code, RejectCode::f02_unreachable());
-                }
-                other => panic!("expected the lapsed route to be unreachable, got {other:?}"),
-            }
-        }
-
-        /// An [`AppClient`] that parks every delivery until the test
-        /// releases it -- the "packet in flight" issue #886's expiry
-        /// criterion needs to hold open while the clock advances and the
-        /// reap runs. `arrived` fires when a delivery is parked; `release`
-        /// lets it complete.
-        struct HoldingAppClient {
-            outcome: AppOutcome,
-            arrived: tokio::sync::Notify,
-            release: tokio::sync::Notify,
-        }
-
-        impl HoldingAppClient {
-            fn new(outcome: AppOutcome) -> HoldingAppClient {
-                HoldingAppClient {
-                    outcome,
-                    arrived: tokio::sync::Notify::new(),
-                    release: tokio::sync::Notify::new(),
-                }
-            }
-        }
-
-        #[async_trait]
-        impl AppClient for HoldingAppClient {
-            async fn deliver(
-                &self,
-                _handler_url: &url::Url,
-                _request: &EnvelopeRequest,
-            ) -> AppOutcome {
-                self.arrived.notify_one();
-                self.release.notified().await;
-                self.outcome.clone()
-            }
-        }
-
-        /// Issue #886's "expiry is tested, including expiry while packets
-        /// are in flight", exercised for real (this PR's review): the
-        /// forward is parked mid-delivery at the second hop while the lease
-        /// lapses AND `reap_expired_peer_leases` demotes the peer -- and it
-        /// still completes, because `select_configured_route` cloned the
-        /// matched route out of the `ArcSwap` snapshot before the reap
-        /// swapped it. The packet arriving after the reap gets F02.
-        #[tokio::test]
-        async fn a_forward_in_flight_while_the_lease_lapses_and_the_reap_runs_still_completes() {
-            let second_hop_route =
-                StaticRoute::new("g.example.buyer", "http://localhost:4000").unwrap();
-            let holding = Arc::new(HoldingAppClient::new(answered(b"delivered mid-demotion")));
-            let second_hop = Arc::new(
-                Connector::new(
-                    vec![second_hop_route],
-                    vec![],
-                    holding.clone(),
-                    Arc::new(InProcessPeerTransport::new()),
-                    test_clock(),
-                )
-                .with_identity_signer(identity_signer()),
-            );
-
-            let backend = Arc::new(InMemorySettlementBackend::new());
-            let channel_id = backend
-                .open(b"buyer".to_vec(), Duration::seconds(3600))
-                .await
-                .expect("open");
-            let client_channel_id = format!("evm:{}", channel_id.0);
-
-            let mut peer_transport = InProcessPeerTransport::new();
-            peer_transport.add_peer(&client_channel_id, second_hop);
-
-            let clock = test_clock();
-            let connector = Arc::new(
-                Connector::new(
-                    vec![],
-                    vec![],
-                    Arc::new(FakeAppClient::new()),
-                    Arc::new(peer_transport),
-                    clock.clone(),
-                )
-                .with_identity_signer(identity_signer())
-                .with_peer_sale(
-                    PEER_SALE_PREFIX,
-                    PEER_SALE_PRICE,
-                    Duration::seconds(PEER_SALE_LEASE_SECONDS),
-                )
-                .with_settlement(SettlementChain::Evm, backend),
-            );
-
-            let (sealed, _shared_secret) =
-                peer_sale_prepare(&purchase_body("g.example.buyer", 0, 0, 0));
-            let response = connector
-                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                .await;
-            assert!(matches!(response, PacketResponse::Fulfill(_)));
-
-            // Put a forward genuinely in flight: it parks inside the second
-            // hop's delivery and stays there until released.
-            let (sealed, shared_secret) = sealed_prepare_to("g.example.buyer", b"hello");
-            let in_flight = tokio::spawn({
-                let connector = Arc::clone(&connector);
-                async move { connector.handle_prepare(sealed, 0).await }
-            });
-            holding.arrived.notified().await;
-
-            // With the packet parked mid-delivery: lapse the lease and run
-            // the reap. The row is gone before the in-flight packet's
-            // delivery has completed.
-            clock.advance(Duration::seconds(PEER_SALE_LEASE_SECONDS));
-            let demoted = connector.reap_expired_peer_leases();
-            assert_eq!(demoted, vec![client_channel_id.clone()]);
-            assert!(connector.client_route("g.example.buyer").is_none());
-
-            // The demotion did not disturb the traffic that had already
-            // resolved its route.
-            holding.release.notify_one();
-            match in_flight.await.expect("the in-flight task completes") {
-                PacketResponse::Fulfill(fulfill) => {
-                    assert_eq!(fulfill.fulfillment, expected_fulfillment(&shared_secret));
-                    assert_eq!(
-                        open_sealed_envelope(&shared_secret, &fulfill.data),
-                        fulfill_envelope(b"delivered mid-demotion")
-                    );
-                }
-                other => panic!("expected the in-flight forward to complete, got {other:?}"),
-            }
-
-            // And the packet AFTER the reap is refused, not forwarded.
-            let (sealed, _shared_secret) = sealed_prepare_to("g.example.buyer", b"hello");
-            match connector.handle_prepare(sealed, 0).await {
-                PacketResponse::Reject(reject) => {
-                    assert_eq!(reject.code, RejectCode::f02_unreachable());
-                }
-                other => panic!("expected the reaped route to be unreachable, got {other:?}"),
-            }
-        }
-
-        /// Issue #886's third acceptance criterion: paying again before the
-        /// lease lapses extends the existing term rather than discarding
-        /// its unused remainder and starting over from the moment of
-        /// renewal.
-        #[tokio::test]
-        async fn renewing_before_expiry_extends_rather_than_restarts_the_lease() {
-            let backend = Arc::new(InMemorySettlementBackend::new());
-            let channel_id = backend
-                .open(b"buyer".to_vec(), Duration::seconds(3600))
-                .await
-                .expect("open");
-            let client_channel_id = format!("evm:{}", channel_id.0);
-            let clock = test_clock();
-            let connector = peer_sale_connector_with_clock(backend, clock.clone());
-
-            let (sealed, _shared_secret) =
-                peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
-            connector
-                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                .await;
-            let first_expiry = connector
-                .peers()
-                .into_iter()
-                .find(|peer| peer.id == client_channel_id)
-                .and_then(|peer| peer.expires_at)
-                .expect("purchase leases the peer");
-
-            // Well before the first lease lapses.
-            clock.advance(Duration::seconds(PEER_SALE_LEASE_SECONDS / 4));
-            let (sealed, _shared_secret) =
-                peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
-            let response = connector
-                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                .await;
-            assert!(matches!(response, PacketResponse::Fulfill(_)));
-
-            let second_expiry = connector
-                .peers()
-                .into_iter()
-                .find(|peer| peer.id == client_channel_id)
-                .and_then(|peer| peer.expires_at)
-                .expect("still leased after renewal");
-
-            assert_eq!(
-                second_expiry,
-                first_expiry + Duration::seconds(PEER_SALE_LEASE_SECONDS),
-                "a renewal before expiry must stack the fresh term onto the unused remainder, \
-                 not discard it"
-            );
-        }
-
-        /// The other half of "extends rather than restarts": once a lease
-        /// has already lapsed there is no unused remainder left to
-        /// preserve, so paying again simply starts a fresh lease from the
-        /// moment of that payment.
-        #[tokio::test]
-        async fn renewing_after_expiry_starts_a_fresh_lease_from_now() {
-            let backend = Arc::new(InMemorySettlementBackend::new());
-            let channel_id = backend
-                .open(b"buyer".to_vec(), Duration::seconds(3600))
-                .await
-                .expect("open");
-            let client_channel_id = format!("evm:{}", channel_id.0);
-            let clock = test_clock();
-            let connector = peer_sale_connector_with_clock(backend, clock.clone());
-
-            let (sealed, _shared_secret) =
-                peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
-            connector
-                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                .await;
-
-            // Well past the first lease.
-            clock.advance(Duration::seconds(PEER_SALE_LEASE_SECONDS * 2));
-            let (sealed, _shared_secret) =
-                peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
-            let response = connector
-                .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                .await;
-            assert!(matches!(response, PacketResponse::Fulfill(_)));
-
-            let expiry = connector
-                .peers()
-                .into_iter()
-                .find(|peer| peer.id == client_channel_id)
-                .and_then(|peer| peer.expires_at)
-                .expect("leased again after renewal");
-            assert_eq!(
-                expiry,
-                clock.now() + Duration::seconds(PEER_SALE_LEASE_SECONDS)
-            );
-        }
-
-        /// Issue #886's "Why": a lapsed purchase must not rot as a dead row
-        /// in the now-durable table forever. `reap_expired_peer_leases`
-        /// removes it (and the route it inserted), names the peer id and
-        /// the instant it lapsed in the ids it returns, and leaves an
-        /// active lease -- and a config-file/operator-added peer, neither
-        /// ever subject to a lease at all -- completely alone.
-        #[tokio::test]
-        async fn reap_expired_peer_leases_demotes_a_lapsed_purchase_and_leaves_active_rows_alone() {
-            let backend = Arc::new(InMemorySettlementBackend::new());
-            let lapsing_channel = backend
-                .open(b"lapsing-buyer".to_vec(), Duration::seconds(3600))
-                .await
-                .expect("open");
-            let lapsing_id = format!("evm:{}", lapsing_channel.0);
-            let active_channel = backend
-                .open(b"active-buyer".to_vec(), Duration::seconds(3600))
-                .await
-                .expect("open");
-            let active_id = format!("evm:{}", active_channel.0);
-            let clock = test_clock();
-            let connector = peer_sale_connector_with_clock(backend, clock.clone());
-            connector.upsert_runtime_peer("operator-added").unwrap();
-
-            let (sealed, _shared_secret) =
-                peer_sale_prepare(&purchase_body("g.example.lapsing", 3, 25, 10));
-            connector
-                .handle_prepare_with_client_channel(sealed, 0, Some(&lapsing_id))
-                .await;
-
-            clock.advance(Duration::seconds(PEER_SALE_LEASE_SECONDS));
-
-            let (sealed, _shared_secret) =
-                peer_sale_prepare(&purchase_body("g.example.active", 3, 25, 10));
-            let response = connector
-                .handle_prepare_with_client_channel(sealed, 0, Some(&active_id))
-                .await;
-            assert!(matches!(response, PacketResponse::Fulfill(_)));
-
-            let demoted = connector.reap_expired_peer_leases();
-            assert_eq!(demoted, vec![lapsing_id.clone()]);
-
-            let peers = connector.peers();
-            assert!(!peers.iter().any(|peer| peer.id == lapsing_id));
-            assert!(peers.iter().any(|peer| peer.id == active_id));
-            assert!(peers.iter().any(|peer| peer.id == "operator-added"));
-            assert!(connector.client_route("g.example.lapsing").is_none());
-            assert!(connector.client_route("g.example.active").is_some());
-
-            // Calling again with nothing lapsed does nothing.
-            assert!(connector.reap_expired_peer_leases().is_empty());
-        }
-
-        /// Issue #887 (C4): abuse bounds on purchased peering, each tested
-        /// at its own edge with tight, test-local overrides
-        /// ([`Connector::with_peer_sale_bounds`]) rather than the real
-        /// defaults -- exhausting the default of 32 distinct payers to
-        /// prove the total-row cap would need 32 real channels for no
-        /// added coverage.
-        mod abuse_bounds {
-            use super::*;
-
-            async fn open_channel(backend: &InMemorySettlementBackend, label: &[u8]) -> String {
-                let id = backend
-                    .open(label.to_vec(), Duration::seconds(3600))
-                    .await
-                    .expect("open");
-                format!("evm:{}", id.0)
-            }
-
-            /// Issue #887's "refuse BEFORE taking payment", the probe half
-            /// (the review's finding on this PR): every refusal derivable
-            /// from the request's own shape is predicted by
-            /// `peer_sale_purchase_would_be_refused` before the covering
-            /// claim is admitted, and the unadmitted packet -- exactly what
-            /// the client edge produces once the probe answers true -- is
-            /// refused by the settle path with the same bound's message and
-            /// `accumulated_cost` 0, never the "requires paying" refusal
-            /// that would misname the problem.
-            #[tokio::test]
-            async fn a_shape_doomed_purchase_is_predicted_pre_admission_and_refused_unpaid() {
-                let backend = Arc::new(InMemorySettlementBackend::new());
-                let connector = peer_sale_connector(backend).with_peer_sale_bounds(
-                    PeerSaleBounds::new(32, 4, 32, 100, Duration::seconds(60)),
-                );
-
-                // Over the 32-byte prefix bound: predicted...
-                let long_prefix = format!("g.example.{}", "a".repeat(40));
-                let (sealed, _s) = peer_sale_prepare(&purchase_body(&long_prefix, 3, 25, 10));
-                assert!(connector.peer_sale_purchase_would_be_refused(&sealed));
-
-                // ...and refused identically, unpaid, on the unadmitted path.
-                let response = connector.handle_prepare(sealed, 0).await;
-                match response {
-                    PacketResponse::Reject(reject) => {
-                        assert!(
-                            reject.message.contains("purchased-prefix limit"),
-                            "expected the length bound's own message, got: {}",
-                            reject.message
-                        );
-                        assert_eq!(reject.accumulated_cost, 0);
-                    }
-                    other => panic!("expected a reject, got {other:?}"),
-                }
-
-                // The arithmetic bound is predicted the same way.
-                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.ok", 5, 1, 0));
-                assert!(connector.peer_sale_purchase_would_be_refused(&sealed));
-
-                // A well-shaped purchase is NOT predicted refused --
-                // identity-keyed bounds are the paid side's business
-                // (ADR 0039).
-                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.ok", 3, 25, 10));
-                assert!(!connector.peer_sale_purchase_would_be_refused(&sealed));
-            }
-
-            /// The identity-keyed half of the pre-admission probe (this
-            /// PR's review, second finding): the payer's rate window and
-            /// row caps are peeked off the claim's declared channel key
-            /// before admission, the peek itself never counts, and the
-            /// predicted refusal is the settle path's own message.
-            #[tokio::test]
-            async fn the_identity_probe_predicts_rate_refusals_without_counting() {
-                let backend = Arc::new(InMemorySettlementBackend::new());
-                let client_channel_id = open_channel(&backend, b"buyer").await;
-                let connector = peer_sale_connector(backend).with_peer_sale_bounds(
-                    PeerSaleBounds::new(32, 4, 128, 1, Duration::seconds(60)),
-                );
-
-                // A fresh payer clears the peek -- however many times it is
-                // peeked, because a peek never counts.
-                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
-                for _ in 0..5 {
-                    assert_eq!(
-                        connector.peer_sale_purchase_refusal_for_payer(&sealed, || Some(
-                            client_channel_id.clone()
-                        )),
-                        None
-                    );
-                }
-
-                // The one judged attempt still succeeds: the five peeks
-                // above consumed none of the window...
-                let response = connector
-                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                    .await;
-                assert!(matches!(response, PacketResponse::Fulfill(_)));
-
-                // ...and with the window now genuinely spent, the peek
-                // predicts the settle path's own rate refusal.
-                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.buyer", 3, 26, 10));
-                let predicted = connector
-                    .peer_sale_purchase_refusal_for_payer(&sealed, || {
-                        Some(client_channel_id.clone())
-                    })
-                    .expect("the spent window is predicted");
-                assert!(predicted.contains("rate limit"), "got: {predicted}");
-            }
-
-            #[tokio::test]
-            async fn a_new_payer_is_refused_once_the_total_row_cap_is_reached() {
-                let backend = Arc::new(InMemorySettlementBackend::new());
-                let first_id = open_channel(&backend, b"buyer-a").await;
-                let second_id = open_channel(&backend, b"buyer-b").await;
-                let connector = peer_sale_connector(backend).with_peer_sale_bounds(
-                    PeerSaleBounds::new(1, 4, 128, 100, Duration::seconds(60)),
-                );
-
-                let (sealed, _s) =
-                    peer_sale_prepare(&purchase_body("g.example.buyer-a", 3, 25, 10));
-                let response = connector
-                    .handle_prepare_with_client_channel(sealed, 0, Some(&first_id))
-                    .await;
-                assert!(matches!(response, PacketResponse::Fulfill(_)));
-
-                let (sealed, _s) =
-                    peer_sale_prepare(&purchase_body("g.example.buyer-b", 3, 25, 10));
-                let response = connector
-                    .handle_prepare_with_client_channel(sealed, 0, Some(&second_id))
-                    .await;
-                match response {
-                    PacketResponse::Reject(reject) => assert!(
-                        reject.message.contains("purchased peer rows"),
-                        "expected the refusal to name the row cap, got: {}",
-                        reject.message
-                    ),
-                    other => panic!("expected a reject, got {other:?}"),
-                }
-                assert!(connector.client_route("g.example.buyer-b").is_none());
-
-                // The first payer renewing its own row is not a new row,
-                // so it still succeeds even with the cap already reached.
-                let (sealed, _s) =
-                    peer_sale_prepare(&purchase_body("g.example.buyer-a", 3, 40, 10));
-                let response = connector
-                    .handle_prepare_with_client_channel(sealed, 0, Some(&first_id))
-                    .await;
-                assert!(matches!(response, PacketResponse::Fulfill(_)));
-            }
-
-            #[tokio::test]
-            async fn a_payer_is_refused_a_new_route_once_its_own_route_cap_is_reached() {
-                let backend = Arc::new(InMemorySettlementBackend::new());
-                let client_channel_id = open_channel(&backend, b"buyer").await;
-                let connector = peer_sale_connector(backend).with_peer_sale_bounds(
-                    PeerSaleBounds::new(32, 1, 128, 100, Duration::seconds(60)),
-                );
-
-                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.first", 3, 25, 10));
-                let response = connector
-                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                    .await;
-                assert!(matches!(response, PacketResponse::Fulfill(_)));
-
-                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.second", 3, 25, 10));
-                let response = connector
-                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                    .await;
-                match response {
-                    PacketResponse::Reject(reject) => assert!(
-                        reject.message.contains("purchased routes"),
-                        "expected the refusal to name the per-payer route cap, got: {}",
-                        reject.message
-                    ),
-                    other => panic!("expected a reject, got {other:?}"),
-                }
-                assert!(connector.client_route("g.example.second").is_none());
-
-                // Renewing the first prefix is still fine at the cap: it
-                // is not a new row.
-                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.first", 3, 40, 10));
-                let response = connector
-                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                    .await;
-                assert!(matches!(response, PacketResponse::Fulfill(_)));
-            }
-
-            #[tokio::test]
-            async fn a_prefix_at_the_length_bound_succeeds_and_one_byte_over_is_refused() {
-                let backend = Arc::new(InMemorySettlementBackend::new());
-                let client_channel_id = open_channel(&backend, b"buyer").await;
-                let at_limit = "g.example.buyer";
-                let over_limit = "g.example.buyerx";
-                let connector = peer_sale_connector(backend).with_peer_sale_bounds(
-                    PeerSaleBounds::new(32, 4, at_limit.len(), 100, Duration::seconds(60)),
-                );
-
-                let (sealed, _s) = peer_sale_prepare(&purchase_body(at_limit, 3, 25, 10));
-                let response = connector
-                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                    .await;
-                assert!(matches!(response, PacketResponse::Fulfill(_)));
-
-                let (sealed, _s) = peer_sale_prepare(&purchase_body(over_limit, 3, 25, 10));
-                let response = connector
-                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                    .await;
-                match response {
-                    PacketResponse::Reject(reject) => assert!(
-                        reject.message.contains("byte"),
-                        "expected the refusal to name the length bound, got: {}",
-                        reject.message
-                    ),
-                    other => panic!("expected a reject, got {other:?}"),
-                }
-                assert!(connector.client_route(over_limit).is_none());
-            }
-
-            #[tokio::test]
-            async fn purchase_attempts_are_rate_limited_and_the_window_resets() {
-                let backend = Arc::new(InMemorySettlementBackend::new());
-                let client_channel_id = open_channel(&backend, b"buyer").await;
-                let clock = test_clock();
-                let connector =
-                    peer_sale_connector_with_clock(backend, clock.clone()).with_peer_sale_bounds(
-                        PeerSaleBounds::new(32, 4, 128, 1, Duration::seconds(60)),
-                    );
-
-                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.first", 3, 25, 10));
-                let response = connector
-                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                    .await;
-                assert!(matches!(response, PacketResponse::Fulfill(_)));
-
-                // A second attempt within the window is rate-limited, even
-                // though this purchase (a different, otherwise-valid
-                // prefix) would otherwise succeed.
-                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.second", 3, 25, 10));
-                let response = connector
-                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                    .await;
-                match response {
-                    PacketResponse::Reject(reject) => assert!(
-                        reject.message.contains("rate limit"),
-                        "expected the refusal to name the rate limit, got: {}",
-                        reject.message
-                    ),
-                    other => panic!("expected a reject, got {other:?}"),
-                }
-                assert!(connector.client_route("g.example.second").is_none());
-
-                clock.advance(Duration::seconds(60));
-
-                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.second", 3, 25, 10));
-                let response = connector
-                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                    .await;
-                assert!(matches!(response, PacketResponse::Fulfill(_)));
-            }
-
-            /// The rate limit counts every attempt, not only ones that go
-            /// on to succeed -- a malformed body still occupies a slot, so
-            /// a sender cannot dodge the limit by sending garbage.
-            #[tokio::test]
-            async fn a_malformed_attempt_refuses_unpaid_and_only_judged_attempts_count() {
-                let backend = Arc::new(InMemorySettlementBackend::new());
-                let client_channel_id = open_channel(&backend, b"buyer").await;
-                let connector = peer_sale_connector(backend).with_peer_sale_bounds(
-                    PeerSaleBounds::new(32, 4, 128, 1, Duration::seconds(60)),
-                );
-
-                // A malformed body is a SHAPE refusal now (issue #887's
-                // "refuse before taking payment"): it refuses before the
-                // payment binding is looked at, costs nothing, and — the
-                // flip side of costing nothing — does not count against
-                // the payer's rate window. The window meters judged,
-                // charged attempts, which malformed ones no longer are.
-                let (sealed, _s) = peer_sale_prepare(b"not json");
-                assert!(connector.peer_sale_purchase_would_be_refused(&sealed));
-                let response = connector
-                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                    .await;
-                match response {
-                    PacketResponse::Reject(reject) => {
-                        assert!(
-                            reject.message.contains("malformed"),
-                            "expected the malformed-body refusal, got: {}",
-                            reject.message
-                        );
-                        assert_eq!(reject.accumulated_cost, 0);
-                    }
-                    other => panic!("expected a reject, got {other:?}"),
-                }
-
-                // The window is untouched: the payer's one allowed judged
-                // attempt still succeeds...
-                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.buyer", 3, 25, 10));
-                let response = connector
-                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                    .await;
-                assert!(matches!(response, PacketResponse::Fulfill(_)));
-
-                // ...and the next judged attempt is the one the limit
-                // refuses.
-                let (sealed, _s) = peer_sale_prepare(&purchase_body("g.example.buyer", 3, 26, 10));
-                let response = connector
-                    .handle_prepare_with_client_channel(sealed, 0, Some(&client_channel_id))
-                    .await;
-                match response {
-                    PacketResponse::Reject(reject) => assert!(
-                        reject.message.contains("rate limit"),
-                        "expected the second judged attempt to be rate-limited, got: {}",
-                        reject.message
-                    ),
-                    other => panic!("expected a reject, got {other:?}"),
-                }
-            }
         }
     }
 
@@ -6978,6 +7039,44 @@ mod tests {
             assert_eq!(result, Err(ChannelOperationError::NoClaimToRedeem));
         }
 
+        /// Issue #1218: `peer_inbound_claim` is the read half
+        /// `redeem_latest_claim`/`cooperative_close` already use
+        /// internally, exposed so a caller holding a second book (the
+        /// client edge's own) can tell whether the peer book already
+        /// answers for a channel before falling back to its own.
+        #[tokio::test]
+        async fn peer_inbound_claim_answers_none_until_a_claim_is_accepted_then_the_latest() {
+            let settlement = Arc::new(InMemorySettlementBackend::new());
+            let channel_id = settlement
+                .open(b"peer".to_vec(), Duration::seconds(3600))
+                .await
+                .unwrap();
+            settlement
+                .fund_counterparty(&channel_id, 1_000)
+                .await
+                .unwrap();
+            let peer_signer = LocalSigner::generate("peer-key");
+            let connector =
+                connector_with_settlement(settlement.clone(), &peer_signer, &channel_id.0);
+
+            assert_eq!(connector.peer_inbound_claim(&channel_id.0), None);
+
+            assert_eq!(
+                connector.handle_peer_claim(sign_claim(&peer_signer, &channel_id.0, 1, 100)),
+                ClaimAckOutcome::Accepted
+            );
+            assert_eq!(
+                connector.handle_peer_claim(sign_claim(&peer_signer, &channel_id.0, 2, 400)),
+                ClaimAckOutcome::Accepted
+            );
+
+            let claim = connector
+                .peer_inbound_claim(&channel_id.0)
+                .expect("a claim has been accepted");
+            assert_eq!(claim.nonce, 2);
+            assert_eq!(claim.cumulative_amount, 400);
+        }
+
         #[tokio::test]
         async fn redeeming_submits_only_the_highest_nonce_claim_ever_accepted() {
             let settlement = Arc::new(InMemorySettlementBackend::new());
@@ -6985,7 +7084,12 @@ mod tests {
                 .open(b"peer".to_vec(), Duration::seconds(3600))
                 .await
                 .unwrap();
-            settlement.fund(&channel_id, 1_000).await.unwrap();
+            // The peer signs the claims redeemed below, so it is the peer's
+            // own deposit that backs them (issue #1118).
+            settlement
+                .fund_counterparty(&channel_id, 1_000)
+                .await
+                .unwrap();
             let peer_signer = LocalSigner::generate("peer-key");
             let connector =
                 connector_with_settlement(settlement.clone(), &peer_signer, &channel_id.0);
@@ -7012,7 +7116,12 @@ mod tests {
                 .open(b"peer".to_vec(), Duration::seconds(3600))
                 .await
                 .unwrap();
-            settlement.fund(&channel_id, 100).await.unwrap();
+            // The peer signs the claims redeemed below, so it is the peer's
+            // own deposit that backs them (issue #1118).
+            settlement
+                .fund_counterparty(&channel_id, 100)
+                .await
+                .unwrap();
             let peer_signer = LocalSigner::generate("peer-key");
             let connector =
                 connector_with_settlement(settlement.clone(), &peer_signer, &channel_id.0);
@@ -7057,7 +7166,12 @@ mod tests {
                 .open(b"peer".to_vec(), Duration::seconds(3600))
                 .await
                 .unwrap();
-            settlement.fund(&channel_id, 1_000).await.unwrap();
+            // The peer signs the claims redeemed below, so it is the peer's
+            // own deposit that backs them (issue #1118).
+            settlement
+                .fund_counterparty(&channel_id, 1_000)
+                .await
+                .unwrap();
             let peer_signer = LocalSigner::generate("peer-key");
             let connector =
                 connector_with_settlement(settlement.clone(), &peer_signer, &channel_id.0);
@@ -7076,7 +7190,12 @@ mod tests {
                 .open(b"peer".to_vec(), Duration::seconds(3600))
                 .await
                 .unwrap();
-            settlement.fund(&channel_id, 1_000).await.unwrap();
+            // The peer signs the claims redeemed below, so it is the peer's
+            // own deposit that backs them (issue #1118).
+            settlement
+                .fund_counterparty(&channel_id, 1_000)
+                .await
+                .unwrap();
             let peer_signer = LocalSigner::generate("peer-key");
             let connector =
                 connector_with_settlement(settlement.clone(), &peer_signer, &channel_id.0);
@@ -7097,7 +7216,12 @@ mod tests {
                 .open(b"peer".to_vec(), Duration::seconds(3600))
                 .await
                 .unwrap();
-            settlement.fund(&channel_id, 100).await.unwrap();
+            // The peer signs the claims redeemed below, so it is the peer's
+            // own deposit that backs them (issue #1118).
+            settlement
+                .fund_counterparty(&channel_id, 100)
+                .await
+                .unwrap();
             let peer_signer = LocalSigner::generate("peer-key");
             let connector =
                 connector_with_settlement(settlement.clone(), &peer_signer, &channel_id.0);
@@ -7143,23 +7267,31 @@ mod tests {
             for &fee in fees.iter().skip(1).rev() {
                 let mut transport = InProcessPeerTransport::new();
                 transport.add_peer("next", downstream);
-                downstream = Arc::new(Connector::new(
-                    vec![],
-                    vec![PeerRoute::new("g.example.app", "next", fee)],
-                    Arc::new(FakeAppClient::new()),
-                    Arc::new(transport),
-                    test_clock(),
+                downstream = Arc::new(covering(
+                    Connector::new(
+                        vec![],
+                        vec![PeerRoute::new("g.example.app", "next")],
+                        Arc::new(FakeAppClient::new()),
+                        Arc::new(transport),
+                        test_clock(),
+                    )
+                    .with_peer_fees([("next".to_string(), fee)]),
+                    "next",
                 ));
             }
 
             let mut entry_transport = InProcessPeerTransport::new();
             entry_transport.add_peer("next", downstream);
-            Connector::new(
-                vec![],
-                vec![PeerRoute::new("g.example.app", "next", fees[0])],
-                Arc::new(FakeAppClient::new()),
-                Arc::new(entry_transport),
-                test_clock(),
+            covering(
+                Connector::new(
+                    vec![],
+                    vec![PeerRoute::new("g.example.app", "next")],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(entry_transport),
+                    test_clock(),
+                )
+                .with_peer_fees([("next".to_string(), fees[0])]),
+                "next",
             )
         }
 
@@ -7168,7 +7300,7 @@ mod tests {
             let connector = connector_with(vec![], Arc::new(FakeAppClient::new()), test_clock());
 
             let response = connector
-                .handle_prepare(prepare("g.nowhere", b"hello"), 0)
+                .handle_prepare(prepare("g.nowhere", b"hello"))
                 .await;
 
             match response {
@@ -7185,7 +7317,7 @@ mod tests {
             let entry = chain_of(&[7]);
 
             let response = entry
-                .handle_prepare(prepare_with_amount("g.example.app", 100), 0)
+                .handle_prepare(prepare_with_amount("g.example.app", 100))
                 .await;
 
             match response {
@@ -7202,7 +7334,7 @@ mod tests {
             let entry = chain_of(&[7, 3, 11]);
 
             let response = entry
-                .handle_prepare(prepare_with_amount("g.example.app", 1_000), 0)
+                .handle_prepare(prepare_with_amount("g.example.app", 1_000))
                 .await;
 
             match response {
@@ -7217,32 +7349,40 @@ mod tests {
         /// The hop that cannot reach its own next hop never actually
         /// forwarded the packet, so its own fee is never added -- only the
         /// hops before it, which genuinely reached their peer, add theirs
-        /// (peer-wire-spec.md §5.2: fee is added only when relaying a
+        /// (peer-semantics-pre-868.md §5.2: fee is added only when relaying a
         /// REJECT "received from its own next hop").
         #[tokio::test]
         async fn a_hop_that_cannot_reach_its_peer_does_not_add_its_own_fee() {
             // hop-0 (fee 7) -> hop-1 (fee 3), but hop-1's own peer route
             // names a peer its transport never registered -- hop-1 cannot
             // reach it at all.
-            let hop1 = Arc::new(Connector::new(
-                vec![],
-                vec![PeerRoute::new("g.example.app", "unregistered", 3)],
-                Arc::new(FakeAppClient::new()),
-                Arc::new(InProcessPeerTransport::new()),
-                test_clock(),
+            let hop1 = Arc::new(covering(
+                Connector::new(
+                    vec![],
+                    vec![PeerRoute::new("g.example.app", "unregistered")],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                )
+                .with_peer_fees([("unregistered".to_string(), 3)]),
+                "unregistered",
             ));
             let mut hop0_transport = InProcessPeerTransport::new();
             hop0_transport.add_peer("hop-1", hop1);
-            let hop0 = Connector::new(
-                vec![],
-                vec![PeerRoute::new("g.example.app", "hop-1", 7)],
-                Arc::new(FakeAppClient::new()),
-                Arc::new(hop0_transport),
-                test_clock(),
+            let hop0 = covering(
+                Connector::new(
+                    vec![],
+                    vec![PeerRoute::new("g.example.app", "hop-1")],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(hop0_transport),
+                    test_clock(),
+                )
+                .with_peer_fees([("hop-1".to_string(), 7)]),
+                "hop-1",
             );
 
             let response = hop0
-                .handle_prepare(prepare_with_amount("g.example.app", 1_000), 0)
+                .handle_prepare(prepare_with_amount("g.example.app", 1_000))
                 .await;
 
             match response {
@@ -7271,7 +7411,7 @@ mod tests {
                     let entry = chain_of(&fees);
 
                     let response = entry
-                        .handle_prepare(prepare_with_amount("g.example.app", 1_000_000), 0)
+                        .handle_prepare(prepare_with_amount("g.example.app", 1_000_000))
                         .await;
 
                     match response {
@@ -7320,7 +7460,7 @@ mod tests {
             // Sealed to `identity_signer()`, not `wrong_identity` above.
             let (sealed, _shared_secret) = sealed_prepare(b"hello");
 
-            let response = connector.handle_prepare(sealed, 0).await;
+            let response = connector.handle_prepare(sealed).await;
 
             match response {
                 PacketResponse::Reject(reject) => {
@@ -7349,7 +7489,7 @@ mod tests {
             // Garbage bytes: not shaped like a gift wrap at all, so it never
             // opens.
             let unopenable = connector
-                .handle_prepare(prepare_with_data(vec![0xff; 40]), 0)
+                .handle_prepare(prepare_with_data(vec![0xff; 40]))
                 .await;
             match unopenable {
                 PacketResponse::Reject(reject) => {
@@ -7367,7 +7507,7 @@ mod tests {
             )
             .unwrap();
             let malformed = connector
-                .handle_prepare(prepare_with_data(malformed_envelope), 0)
+                .handle_prepare(prepare_with_data(malformed_envelope))
                 .await;
             match malformed {
                 PacketResponse::Reject(reject) => {
@@ -7394,7 +7534,7 @@ mod tests {
             let connector = connector_with(vec![route], app_client, test_clock());
             let (data, shared_secret) = sealed_envelope_request_data(b"hello");
 
-            let response = connector.handle_prepare(prepare_with_data(data), 0).await;
+            let response = connector.handle_prepare(prepare_with_data(data)).await;
 
             match response {
                 PacketResponse::Reject(reject) => {
@@ -7426,7 +7566,7 @@ mod tests {
             let connector = connector_with(vec![], Arc::new(FakeAppClient::new()), test_clock());
 
             let response = connector
-                .handle_prepare(prepare("g.nowhere", b"hello"), 0)
+                .handle_prepare(prepare("g.nowhere", b"hello"))
                 .await;
 
             match response {
@@ -7451,7 +7591,7 @@ mod tests {
             let connector = connector_with(vec![route], app_client, test_clock());
             let (data, _shared_secret) = sealed_envelope_request_data(b"hello");
 
-            let response = connector.handle_prepare(prepare_with_data(data), 0).await;
+            let response = connector.handle_prepare(prepare_with_data(data)).await;
 
             match response {
                 PacketResponse::Reject(reject) => {
@@ -7492,7 +7632,7 @@ mod tests {
             let connector = connector_with(vec![route], app_client, test_clock());
             let (data, _shared_secret) = sealed_envelope_request_data(b"hello");
 
-            let response = connector.handle_prepare(prepare_with_data(data), 0).await;
+            let response = connector.handle_prepare(prepare_with_data(data)).await;
 
             match response {
                 PacketResponse::Reject(reject) => {
@@ -7522,7 +7662,7 @@ mod tests {
             .unwrap();
 
             let response = connector
-                .handle_prepare(prepare_with_data(malformed_envelope), 0)
+                .handle_prepare(prepare_with_data(malformed_envelope))
                 .await;
 
             match response {
@@ -7549,7 +7689,7 @@ mod tests {
             // Garbage bytes: not shaped like a gift wrap at all, so it never
             // opens.
             let response = connector
-                .handle_prepare(prepare_with_data(vec![0xff; 40]), 0)
+                .handle_prepare(prepare_with_data(vec![0xff; 40]))
                 .await;
 
             match response {
@@ -7576,7 +7716,7 @@ mod tests {
             let connector = connector_with(vec![route], app_client, test_clock());
             let (sealed, _shared_secret) = sealed_prepare(b"hello");
 
-            let response = connector.handle_prepare(sealed, 0).await;
+            let response = connector.handle_prepare(sealed).await;
 
             match response {
                 PacketResponse::Reject(reject) => {
@@ -7602,7 +7742,7 @@ mod tests {
             let (data, _shared_secret) =
                 sealed_envelope_request_data_with_target("/admin", b"hello");
 
-            let response = connector.handle_prepare(prepare_with_data(data), 0).await;
+            let response = connector.handle_prepare(prepare_with_data(data)).await;
 
             match response {
                 PacketResponse::Reject(reject) => {
@@ -7639,12 +7779,7 @@ mod tests {
             assert!(connector.envelope_target_would_be_refused(&to_leased_prefix));
 
             connector
-                .upsert_leased_route(
-                    "g.example.app.leased",
-                    "leased-peer",
-                    0,
-                    Duration::seconds(60),
-                )
+                .upsert_leased_route("g.example.app.leased", "leased-peer", Duration::seconds(60))
                 .unwrap();
 
             // With the lease active, this packet forwards -- nothing to
@@ -7655,7 +7790,7 @@ mod tests {
             // that tie (issue #427, `RouteRank`), the packet terminates
             // here, and the probe still predicts the refusal.
             connector
-                .upsert_leased_route("g.example.app", "leased-peer", 0, Duration::seconds(60))
+                .upsert_leased_route("g.example.app", "leased-peer", Duration::seconds(60))
                 .unwrap();
             let (data, _shared_secret) =
                 sealed_envelope_request_data_with_target("/admin", b"hello");
@@ -7685,12 +7820,16 @@ mod tests {
             );
             let mut peer_transport = InProcessPeerTransport::new();
             peer_transport.add_peer("second-hop", second_hop);
-            let first_hop = Connector::new(
-                vec![],
-                vec![PeerRoute::new("g.example.app", "second-hop", 7)],
-                Arc::new(FakeAppClient::new()),
-                Arc::new(peer_transport),
-                test_clock(),
+            let first_hop = covering(
+                Connector::new(
+                    vec![],
+                    vec![PeerRoute::new("g.example.app", "second-hop")],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(peer_transport),
+                    test_clock(),
+                )
+                .with_peer_fees([("second-hop".to_string(), 7)]),
+                "second-hop",
             );
             let (mismatched_data, _shared_secret) = sealed_envelope_request_data(b"hello");
             let packet = Prepare {
@@ -7698,7 +7837,7 @@ mod tests {
                 ..prepare_with_data(mismatched_data)
             };
 
-            let response = first_hop.handle_prepare(packet, 0).await;
+            let response = first_hop.handle_prepare(packet).await;
 
             match response {
                 PacketResponse::Reject(reject) => {
@@ -7715,11 +7854,11 @@ mod tests {
     /// that route's price, checked in `Connector::handle_peer_prepare`
     /// before the app is ever consulted -- closing the gap ADR 0028 named
     /// and left open (a connector whose priced terminated route was
-    /// reached over the peer wire served it for free).
-    mod peer_wire_termination_price {
+    /// reached over the peer semantics served it for free).
+    mod peer_role_termination_price {
         use super::*;
 
-        /// A route priced at 25, reached over the peer wire with a PREPARE
+        /// A route priced at 25, reached over the peer semantics with a PREPARE
         /// carrying only 10, is refused before the app is ever called --
         /// unlike every other reject this connector originates for a
         /// packet that never reached its termination, this one is possible
@@ -7734,7 +7873,7 @@ mod tests {
             let connector = connector_with(vec![route], app_client.clone(), test_clock());
 
             let (response, ack) = connector
-                .handle_peer_prepare(prepare_with_amount("g.example.app", 10), 0, None)
+                .handle_peer_prepare(prepare_with_amount("g.example.app", 10), None)
                 .await;
 
             match response {
@@ -7759,7 +7898,7 @@ mod tests {
             let connector = connector_with(vec![route], app_client.clone(), test_clock());
 
             let (response, _ack) = connector
-                .handle_peer_prepare(prepare_with_amount("g.example.app", 25), 0, None)
+                .handle_peer_prepare(prepare_with_amount("g.example.app", 25), None)
                 .await;
 
             assert!(matches!(response, PacketResponse::Fulfill(_)));
@@ -7768,7 +7907,7 @@ mod tests {
 
         /// Unlike a priced *forwarded* route at the client edge (ADR 0028's
         /// `F03` over-carry cap), a priced terminated route reached over the
-        /// peer wire has no upper bound -- this connector never forwards the
+        /// peer role has no upper bound -- this connector never forwards the
         /// excess anywhere, so nothing is lost by a peer that overpays it.
         #[tokio::test]
         async fn a_peer_arrival_that_overpays_the_routes_price_is_still_delivered() {
@@ -7779,7 +7918,7 @@ mod tests {
             let connector = connector_with(vec![route], app_client.clone(), test_clock());
 
             let (response, _ack) = connector
-                .handle_peer_prepare(prepare_with_amount("g.example.app", 100), 0, None)
+                .handle_peer_prepare(prepare_with_amount("g.example.app", 100), None)
                 .await;
 
             assert!(matches!(response, PacketResponse::Fulfill(_)));
@@ -7792,26 +7931,26 @@ mod tests {
         #[tokio::test]
         async fn a_free_terminated_route_is_unaffected_by_the_price_check() {
             let route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
-            assert_eq!(route.price(), 0);
+            assert_eq!(route.price(), Price::FREE);
             let app_client = Arc::new(FakeAppClient::new());
             app_client.respond(route.handler_url(), answered(b"irrelevant"));
             let connector = connector_with(vec![route], app_client.clone(), test_clock());
 
             let (response, _ack) = connector
-                .handle_peer_prepare(prepare_with_amount("g.example.app", 0), 0, None)
+                .handle_peer_prepare(prepare_with_amount("g.example.app", 0), None)
                 .await;
 
             assert!(matches!(response, PacketResponse::Fulfill(_)));
         }
 
-        /// This check is specific to the peer wire. A destination reached
+        /// This check is specific to the peer semantics. A destination reached
         /// through [`Connector::handle_prepare`] directly -- what the
         /// client edge itself calls, only after its own claim gate already
         /// charged `price` (issue #522) -- is never subject to it, since
         /// `handle_prepare` cannot tell whether `prepare.amount` reflects
         /// anything a client actually paid.
         #[tokio::test]
-        async fn handle_prepare_itself_is_not_gated_by_the_peer_wire_price_check() {
+        async fn handle_prepare_itself_is_not_gated_by_the_peer_role_price_check() {
             let route =
                 StaticRoute::new_priced("g.example.app", "http://localhost:4000", 25).unwrap();
             let app_client = Arc::new(FakeAppClient::new());
@@ -7819,7 +7958,7 @@ mod tests {
             let connector = connector_with(vec![route], app_client.clone(), test_clock());
 
             let response = connector
-                .handle_prepare(prepare_with_amount("g.example.app", 10), 0)
+                .handle_prepare(prepare_with_amount("g.example.app", 10))
                 .await;
 
             assert!(matches!(response, PacketResponse::Fulfill(_)));
@@ -7836,7 +7975,7 @@ mod tests {
         /// The gate that made `handle_probe` unreachable in practice:
         /// nothing in a node's configuration names an unaffiliated client's
         /// channel, so before #548 the only way to satisfy it was a
-        /// peer-wire verification key -- and a gate no deployed node can
+        /// peer-role verification key -- and a gate no deployed node can
         /// pass is not a gate. A channel a claim has been seen on at this
         /// connector's own client edge now satisfies it.
         #[tokio::test]
@@ -7845,13 +7984,13 @@ mod tests {
             let connector = connector_with(vec![], Arc::new(FakeAppClient::new()), test_clock());
 
             let denied = connector
-                .handle_probe(CHANNEL, prepare("g.somewhere.else", b"hello"), 0)
+                .handle_probe(CHANNEL, prepare("g.somewhere.else", b"hello"))
                 .await;
             assert_eq!(denied, Err(ProbeDenied::NoOpenChannel));
 
             connector.recognize_channel(CHANNEL);
             let admitted = connector
-                .handle_probe(CHANNEL, prepare("g.somewhere.else", b"hello"), 0)
+                .handle_probe(CHANNEL, prepare("g.somewhere.else", b"hello"))
                 .await;
             assert!(matches!(admitted, Ok(PacketResponse::Reject(_))));
         }
@@ -7865,14 +8004,34 @@ mod tests {
             connector.recognize_channel(CHANNEL);
 
             let first = connector
-                .handle_probe(CHANNEL, prepare("g.somewhere.else", b"hello"), 0)
+                .handle_probe(CHANNEL, prepare("g.somewhere.else", b"hello"))
                 .await;
             assert!(first.is_ok());
 
             let second = connector
-                .handle_probe(CHANNEL, prepare("g.somewhere.else", b"hello"), 0)
+                .handle_probe(CHANNEL, prepare("g.somewhere.else", b"hello"))
                 .await;
             assert_eq!(second, Err(ProbeDenied::RateLimited));
+        }
+
+        /// Issue #1218: `GET /channels` needs to list a client channel
+        /// this connector has only ever recognized, never opened --
+        /// `recognized_channel_ids` is the one place that list is kept.
+        /// Idempotent, matching `recognize_channel` itself.
+        #[test]
+        fn recognized_channel_ids_lists_every_recognized_channel_once() {
+            let connector = connector_with(vec![], Arc::new(FakeAppClient::new()), test_clock());
+            assert!(connector.recognized_channel_ids().is_empty());
+
+            connector.recognize_channel(CHANNEL);
+            connector.recognize_channel("some-other-channel");
+            connector.recognize_channel(CHANNEL);
+
+            let mut ids = connector.recognized_channel_ids();
+            ids.sort();
+            let mut expected = vec![CHANNEL.to_string(), "some-other-channel".to_string()];
+            expected.sort();
+            assert_eq!(ids, expected);
         }
 
         /// A probe to a route this connector terminates reports that
@@ -7893,7 +8052,7 @@ mod tests {
             connector.recognize_channel(CHANNEL);
             let (probe, _shared_secret) = sealed_prepare(b"hello");
 
-            let response = connector.handle_probe(CHANNEL, probe, 0).await;
+            let response = connector.handle_probe(CHANNEL, probe).await;
 
             match response {
                 Ok(PacketResponse::Reject(reject)) => {
@@ -7902,6 +8061,119 @@ mod tests {
                 other => panic!("expected a priced reject, got {other:?}"),
             }
             assert_eq!(app_client.deliveries().len(), 0);
+        }
+
+        /// ADR 0065: a probe learns what the path costs **for a packet like
+        /// the one it sent**, so two probes of different sizes to one
+        /// schedule route come back with two figures.
+        ///
+        /// This is the half ADR 0011 was worried about -- a probe answering
+        /// only for its own size. It is answered not here but on the
+        /// greeting and the self-description, which publish the schedule
+        /// itself, so one free read still covers every size. What this test
+        /// pins is that the figure a probe does report is the true one for
+        /// its own packet rather than the route's base.
+        #[tokio::test]
+        async fn a_probe_to_a_schedule_route_reports_the_cost_of_its_own_packet() {
+            let route = StaticRoute::new_scheduled(
+                "g.example.app",
+                "http://localhost:4000",
+                Price::scheduled(25, 4),
+            )
+            .unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(
+                route.handler_url(),
+                answered(b"work the app should never do"),
+            );
+            let connector = connector_with(vec![route], app_client.clone(), test_clock());
+            connector.recognize_channel(CHANNEL);
+
+            let (small, _) = sealed_prepare(b"hi");
+            let (large, _) = sealed_prepare(&vec![b'x'; 4096]);
+            let small_len = small.data.len();
+            let large_len = large.data.len();
+
+            let small_cost = match connector.handle_probe(CHANNEL, small).await {
+                Ok(PacketResponse::Reject(reject)) => reject.accumulated_cost,
+                other => panic!("expected a priced reject, got {other:?}"),
+            };
+            let large_cost = match connector.handle_probe(CHANNEL, large).await {
+                Ok(PacketResponse::Reject(reject)) => reject.accumulated_cost,
+                other => panic!("expected a priced reject, got {other:?}"),
+            };
+
+            let schedule = Price::scheduled(25, 4);
+            assert_eq!(small_cost, schedule.charge(small_len));
+            assert_eq!(large_cost, schedule.charge(large_len));
+            assert!(
+                large_cost > small_cost,
+                "a bigger probe must be quoted a bigger figure: {small_cost} vs {large_cost}"
+            );
+            // And neither probe bought any of the app's work.
+            assert_eq!(app_client.deliveries().len(), 0);
+        }
+
+        /// ADR 0029 read through ADR 0065: a peer arrival carrying enough for
+        /// the route's **base** but not for the packet it actually brought is
+        /// refused `F03`, and the app never sees it.
+        ///
+        /// The failure this rules out is the one a partial implementation
+        /// would have: charging the base at the peer gate and the full
+        /// schedule at the termination, so a large packet is admitted across
+        /// the peering and then refused after the claim was already banked.
+        #[tokio::test]
+        async fn a_peer_arrival_covering_only_the_base_is_refused_for_a_large_packet() {
+            let route = StaticRoute::new_scheduled(
+                "g.example.app",
+                "http://localhost:4000",
+                Price::scheduled(100, 10),
+            )
+            .unwrap();
+            let app_client = Arc::new(FakeAppClient::new());
+            app_client.respond(route.handler_url(), answered(b"never"));
+            let connector = connector_with(vec![route], app_client.clone(), test_clock());
+
+            let (large, _) = sealed_prepare(&vec![b'x'; 3000]);
+            let charge = Price::scheduled(100, 10).charge(large.data.len());
+            assert!(charge > 100, "the test packet must cost more than the base");
+
+            // Carries the base exactly -- what a sender reading only
+            // `extra.price` would send.
+            let (response, _ack) = connector
+                .handle_peer_prepare(
+                    Prepare {
+                        amount: 100,
+                        ..large.clone()
+                    },
+                    None,
+                )
+                .await;
+            match response {
+                PacketResponse::Reject(reject) => {
+                    assert_eq!(reject.code.as_str(), "F03");
+                    assert!(
+                        reject.message.contains(&charge.to_string()),
+                        "the refusal must name what this packet costs, got: {}",
+                        reject.message
+                    );
+                }
+                other => panic!("expected F03, got {other:?}"),
+            }
+            assert_eq!(app_client.deliveries().len(), 0);
+
+            // Carrying the packet's own charge is admitted and delivered.
+            let (response, _ack) = connector
+                .handle_peer_prepare(
+                    Prepare {
+                        amount: charge,
+                        ..large
+                    },
+                    None,
+                )
+                .await;
+            assert!(matches!(response, PacketResponse::Fulfill(_)));
+            assert_eq!(app_client.deliveries().len(), 1);
         }
 
         /// The same packet sent through the ordinary entry point still
@@ -7918,7 +8190,7 @@ mod tests {
             let connector = connector_with(vec![route], app_client.clone(), test_clock());
             let (packet, _shared_secret) = sealed_prepare(b"hello");
 
-            let response = connector.handle_prepare(packet, 0).await;
+            let response = connector.handle_prepare(packet).await;
 
             assert!(matches!(response, PacketResponse::Fulfill(_)));
             assert_eq!(app_client.deliveries().len(), 1);
@@ -7931,15 +8203,16 @@ mod tests {
         async fn a_probe_beyond_this_connector_accumulates_the_hops_it_traversed() {
             let connector = Connector::new(
                 vec![],
-                vec![PeerRoute::new("g.example", "unreachable-peer", 7)],
+                vec![PeerRoute::new("g.example", "unreachable-peer")],
                 Arc::new(FakeAppClient::new()),
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
-            );
+            )
+            .with_peer_fees([("unreachable-peer".to_string(), 7)]);
             connector.recognize_channel(CHANNEL);
 
             let response = connector
-                .handle_probe(CHANNEL, prepare("g.example.remote", b"hello"), 0)
+                .handle_probe(CHANNEL, prepare("g.example.remote", b"hello"))
                 .await;
 
             match response {
@@ -7988,7 +8261,6 @@ mod tests {
                     .upsert_leased_route(
                         format!("g.other-{i}.app"),
                         "unused-peer",
-                        0,
                         Duration::seconds(60),
                     )
                     .unwrap();
@@ -8017,7 +8289,7 @@ mod tests {
                 rt.block_on(async {
                     for _ in 0..ITERATIONS {
                         let response = connector
-                            .handle_prepare(prepare("g.example.app", b"hello"), 0)
+                            .handle_prepare(prepare("g.example.app", b"hello"))
                             .await;
                         assert!(matches!(response, PacketResponse::Fulfill(_)));
                     }
@@ -8034,6 +8306,32 @@ mod tests {
     /// Issue #884: the runtime-mutable, durable peer/route table.
     mod runtime_peer_route_table {
         use super::*;
+
+        /// A peering as ADR 0058's `POST /peers` writes one: an endpoint
+        /// to dial the counterparty on and a channel its claims are
+        /// judged against, beside the operator's own fee.
+        ///
+        /// Every test below builds its peerings through this, because a
+        /// peering with no channel bound to it is refused at write time
+        /// (`PeerChannelUnbound`) -- the runtime twin of the load-time
+        /// rule that a `[[peers]]` row needs a `[[peer_channels]]` row.
+        /// The channel id varies with the fee only so two peerings in one
+        /// test do not name the same channel.
+        fn peering(fee: u64) -> RuntimePeering {
+            RuntimePeering {
+                fee,
+                max_packet_amount: 0,
+                endpoint: Some("https://peer.example/ilp".to_string()),
+                edge_identity: Some("0x04ab".to_string()),
+                client_edge_url: Some("https://peer.example/ilp".to_string()),
+                channels: vec![RuntimePeerChannel::Evm {
+                    channel_id: format!("0x{:064x}", fee + 1),
+                    counterparty_key: "0x00000000000000000000000000000000000000aa".to_string(),
+                    chain_id: 31337,
+                    token_network: "0x00000000000000000000000000000000000000bb".to_string(),
+                }],
+            }
+        }
 
         /// A round trip through the exact shape
         /// `forwards_a_packet_matching_a_peer_route_to_the_next_hop`
@@ -8064,20 +8362,29 @@ mod tests {
             );
             let mut peer_transport = InProcessPeerTransport::new();
             peer_transport.add_peer("runtime-hop", second_hop);
-            let first_hop = Connector::new(
-                vec![],
-                vec![],
-                Arc::new(FakeAppClient::new()),
-                Arc::new(peer_transport),
-                test_clock(),
+            // A runtime peer route reaches `forward_via_peer_route`
+            // without passing `Config::load` (issue #884), so it needs the
+            // covering configuration for the hop it names just as a
+            // configured route does.
+            let first_hop = covering(
+                Connector::new(
+                    vec![],
+                    vec![],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(peer_transport),
+                    test_clock(),
+                ),
+                "runtime-hop",
             );
-            first_hop.upsert_runtime_peer("runtime-hop").unwrap();
             first_hop
-                .upsert_runtime_peer_route("g.example.app", "runtime-hop", 0, 0)
+                .upsert_runtime_peer("runtime-hop", peering(0))
+                .unwrap();
+            first_hop
+                .upsert_runtime_peer_route("g.example.app", "runtime-hop", Price::FREE)
                 .unwrap();
             let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-            let response = first_hop.handle_prepare(sealed, 0).await;
+            let response = first_hop.handle_prepare(sealed).await;
 
             match response {
                 PacketResponse::Fulfill(fulfill) => {
@@ -8097,20 +8404,25 @@ mod tests {
         /// lease, so it belongs in `client_route`'s answer.
         #[test]
         fn client_route_prices_a_runtime_peer_route() {
-            let connector = Connector::new(
-                vec![],
-                vec![],
-                Arc::new(FakeAppClient::new()),
-                Arc::new(InProcessPeerTransport::new()),
-                test_clock(),
+            let connector = covering(
+                Connector::new(
+                    vec![],
+                    vec![],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                ),
+                "runtime-hop",
             );
-            connector.upsert_runtime_peer("runtime-hop").unwrap();
             connector
-                .upsert_runtime_peer_route("g.example.app", "runtime-hop", 3, 25)
+                .upsert_runtime_peer("runtime-hop", peering(0))
+                .unwrap();
+            connector
+                .upsert_runtime_peer_route("g.example.app", "runtime-hop", Price::flat(25))
                 .unwrap();
 
             let facts = connector.client_route("g.example.app").unwrap();
-            assert_eq!(facts.price, 25);
+            assert_eq!(facts.price, Price::flat(25));
             assert_eq!(facts.kind, ClientRouteKind::Forwarded);
         }
 
@@ -8129,7 +8441,9 @@ mod tests {
             )
             .with_config_peer_ids(["apex-store".to_string()]);
 
-            let error = connector.upsert_runtime_peer("apex-store").unwrap_err();
+            let error = connector
+                .upsert_runtime_peer("apex-store", peering(0))
+                .unwrap_err();
             assert!(matches!(error, PeerRouteTableError::OwnedByConfig(id) if id == "apex-store"));
 
             // Not removable at runtime either -- the same rule, checked on
@@ -8149,7 +8463,7 @@ mod tests {
             let app_route = StaticRoute::new("g.example.app", "http://localhost:4000").unwrap();
             let connector = Connector::new(
                 vec![app_route],
-                vec![PeerRoute::new("g.example.peer", "configured-peer", 0)],
+                vec![PeerRoute::new("g.example.peer", "configured-peer")],
                 Arc::new(FakeAppClient::new()),
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
@@ -8157,14 +8471,14 @@ mod tests {
             .with_config_peer_ids(["configured-peer".to_string()]);
 
             let error = connector
-                .upsert_runtime_peer_route("g.example.app", "configured-peer", 0, 0)
+                .upsert_runtime_peer_route("g.example.app", "configured-peer", Price::FREE)
                 .unwrap_err();
             assert!(
                 matches!(error, PeerRouteTableError::OwnedByConfig(prefix) if prefix == "g.example.app")
             );
 
             let error = connector
-                .upsert_runtime_peer_route("g.example.peer", "configured-peer", 0, 0)
+                .upsert_runtime_peer_route("g.example.peer", "configured-peer", Price::FREE)
                 .unwrap_err();
             assert!(
                 matches!(error, PeerRouteTableError::OwnedByConfig(prefix) if prefix == "g.example.peer")
@@ -8187,7 +8501,7 @@ mod tests {
             );
 
             let error = connector
-                .upsert_runtime_peer_route("g.example.app", "nobody", 0, 0)
+                .upsert_runtime_peer_route("g.example.app", "nobody", Price::FREE)
                 .unwrap_err();
             assert!(matches!(
                 error,
@@ -8198,9 +8512,9 @@ mod tests {
 
         /// A runtime route's `peer_id` may resolve to a CONFIG peer, not
         /// only a runtime one -- referential integrity is checked against
-        /// the union of both tables, matching how a sold peering
-        /// (issue #867) might route traffic through a peering this node
-        /// already had before any runtime mutation existed.
+        /// the union of both tables (ADR 0034), so an operator may point a
+        /// runtime prefix at a peering this node already had before any
+        /// runtime mutation existed.
         #[test]
         fn a_runtime_route_may_name_a_config_peer_id() {
             let connector = Connector::new(
@@ -8213,7 +8527,7 @@ mod tests {
             .with_config_peer_ids(["configured-peer".to_string()]);
 
             let view = connector
-                .upsert_runtime_peer_route("g.example.new", "configured-peer", 2, 10)
+                .upsert_runtime_peer_route("g.example.new", "configured-peer", Price::flat(10))
                 .unwrap();
             assert_eq!(view.peer_id, "configured-peer");
             assert_eq!(view.source, RouteSource::Runtime);
@@ -8225,16 +8539,21 @@ mod tests {
         /// instead.
         #[test]
         fn removing_a_runtime_peer_still_referenced_by_a_runtime_route_is_refused() {
-            let connector = Connector::new(
-                vec![],
-                vec![],
-                Arc::new(FakeAppClient::new()),
-                Arc::new(InProcessPeerTransport::new()),
-                test_clock(),
+            let connector = covering(
+                Connector::new(
+                    vec![],
+                    vec![],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                ),
+                "runtime-hop",
             );
-            connector.upsert_runtime_peer("runtime-hop").unwrap();
             connector
-                .upsert_runtime_peer_route("g.example.app", "runtime-hop", 0, 0)
+                .upsert_runtime_peer("runtime-hop", peering(0))
+                .unwrap();
+            connector
+                .upsert_runtime_peer_route("g.example.app", "runtime-hop", Price::FREE)
                 .unwrap();
 
             let error = connector.remove_runtime_peer("runtime-hop").unwrap_err();
@@ -8289,23 +8608,28 @@ mod tests {
             let mut peer_transport = InProcessPeerTransport::new();
             peer_transport.add_peer("leased-hop", leased_hop);
             peer_transport.add_peer("runtime-hop", runtime_hop);
-            let connector = Connector::new(
-                vec![],
-                vec![],
-                Arc::new(FakeAppClient::new()),
-                Arc::new(peer_transport),
-                test_clock(),
+            let connector = covering(
+                Connector::new(
+                    vec![],
+                    vec![],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(peer_transport),
+                    test_clock(),
+                ),
+                "runtime-hop",
             );
             connector
-                .upsert_leased_route("g.example.app", "leased-hop", 0, Duration::seconds(60))
+                .upsert_leased_route("g.example.app", "leased-hop", Duration::seconds(60))
                 .unwrap();
-            connector.upsert_runtime_peer("runtime-hop").unwrap();
             connector
-                .upsert_runtime_peer_route("g.example.app", "runtime-hop", 0, 0)
+                .upsert_runtime_peer("runtime-hop", peering(0))
+                .unwrap();
+            connector
+                .upsert_runtime_peer_route("g.example.app", "runtime-hop", Price::FREE)
                 .unwrap();
             let (sealed, shared_secret) = sealed_prepare(b"hello");
 
-            let response = connector.handle_prepare(sealed, 0).await;
+            let response = connector.handle_prepare(sealed).await;
 
             match response {
                 PacketResponse::Fulfill(fulfill) => assert_eq!(
@@ -8327,17 +8651,22 @@ mod tests {
             let path = dir.path().join("runtime_peers.json");
 
             let (store, peers, routes) = PeerRouteStore::open(&path).expect("open");
-            let before_restart = Connector::new(
-                vec![],
-                vec![],
-                Arc::new(FakeAppClient::new()),
-                Arc::new(InProcessPeerTransport::new()),
-                test_clock(),
+            let before_restart = covering(
+                Connector::new(
+                    vec![],
+                    vec![],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                ),
+                "apex-relay-2",
             )
             .with_runtime_peer_route_store(store, peers, routes);
-            before_restart.upsert_runtime_peer("apex-relay-2").unwrap();
             before_restart
-                .upsert_runtime_peer_route("g.example.relay2", "apex-relay-2", 3, 25)
+                .upsert_runtime_peer("apex-relay-2", peering(3))
+                .unwrap();
+            before_restart
+                .upsert_runtime_peer_route("g.example.relay2", "apex-relay-2", Price::flat(25))
                 .unwrap();
             assert_eq!(before_restart.peers().len(), 1);
 
@@ -8355,12 +8684,15 @@ mod tests {
             assert_eq!(peers.len(), 1);
             assert_eq!(peers[0].id, "apex-relay-2");
             assert_eq!(peers[0].source, RouteSource::Runtime);
+            // The peering's fee came back with it (ADR 0061), and so did
+            // the forward this node charges a client for.
+            assert_eq!(peers[0].fee, 3);
+            assert_eq!(after_restart.fee_for("apex-relay-2"), 3);
             let routes = after_restart.peer_routes_view();
             assert_eq!(routes.len(), 1);
             assert_eq!(routes[0].prefix, "g.example.relay2");
             assert_eq!(routes[0].peer_id, "apex-relay-2");
-            assert_eq!(routes[0].fee, 3);
-            assert_eq!(routes[0].price, 25);
+            assert_eq!(routes[0].price, Price::flat(25));
         }
 
         /// A node with no `state_dir` (no `PeerRouteStore` attached) still
@@ -8377,7 +8709,9 @@ mod tests {
                 test_clock(),
             );
 
-            connector.upsert_runtime_peer("runtime-hop").unwrap();
+            connector
+                .upsert_runtime_peer("runtime-hop", peering(0))
+                .unwrap();
             assert_eq!(connector.peers().len(), 1);
         }
 
@@ -8386,17 +8720,23 @@ mod tests {
         /// something an operator can actually verify rather than infer.
         #[test]
         fn peers_and_peer_routes_report_config_and_runtime_rows_with_their_source() {
-            let connector = Connector::new(
-                vec![],
-                vec![PeerRoute::new("g.example.configured", "configured-peer", 1)],
-                Arc::new(FakeAppClient::new()),
-                Arc::new(InProcessPeerTransport::new()),
-                test_clock(),
+            let connector = covering(
+                Connector::new(
+                    vec![],
+                    vec![PeerRoute::new("g.example.configured", "configured-peer")],
+                    Arc::new(FakeAppClient::new()),
+                    Arc::new(InProcessPeerTransport::new()),
+                    test_clock(),
+                ),
+                "runtime-peer",
             )
+            .with_peer_fees([("configured-peer".to_string(), 1)])
             .with_config_peer_ids(["configured-peer".to_string()]);
-            connector.upsert_runtime_peer("runtime-peer").unwrap();
             connector
-                .upsert_runtime_peer_route("g.example.runtime", "runtime-peer", 2, 5)
+                .upsert_runtime_peer("runtime-peer", peering(2))
+                .unwrap();
+            connector
+                .upsert_runtime_peer_route("g.example.runtime", "runtime-peer", Price::flat(5))
                 .unwrap();
 
             let mut peers = connector.peers();
@@ -8406,13 +8746,19 @@ mod tests {
                 vec![
                     PeerView {
                         id: "configured-peer".to_string(),
+                        fee: 1,
+                        max_packet_amount: DEFAULT_MAX_PACKET_AMOUNT,
                         source: RouteSource::Config,
-                        expires_at: None,
                     },
+                    // The cap this peering states is zero -- "this row
+                    // states none" -- so what is reported is the bound
+                    // actually enforced, never a zero that would read as
+                    // "forward nothing" (ADR 0049).
                     PeerView {
                         id: "runtime-peer".to_string(),
+                        fee: 2,
+                        max_packet_amount: DEFAULT_MAX_PACKET_AMOUNT,
                         source: RouteSource::Runtime,
-                        expires_at: None,
                     },
                 ]
             );
@@ -8425,15 +8771,13 @@ mod tests {
                     PeerRouteView {
                         prefix: "g.example.configured".to_string(),
                         peer_id: "configured-peer".to_string(),
-                        fee: 1,
-                        price: 0,
+                        price: Price::FREE,
                         source: RouteSource::Config,
                     },
                     PeerRouteView {
                         prefix: "g.example.runtime".to_string(),
                         peer_id: "runtime-peer".to_string(),
-                        fee: 2,
-                        price: 5,
+                        price: Price::flat(5),
                         source: RouteSource::Runtime,
                     },
                 ]
@@ -8449,12 +8793,102 @@ mod tests {
                 Arc::new(InProcessPeerTransport::new()),
                 test_clock(),
             );
-            connector.upsert_runtime_peer("runtime-hop").unwrap();
+            connector
+                .upsert_runtime_peer("runtime-hop", peering(0))
+                .unwrap();
 
             let error = connector
-                .upsert_runtime_peer_route("not an ilp address", "runtime-hop", 0, 0)
+                .upsert_runtime_peer_route("not an ilp address", "runtime-hop", Price::FREE)
                 .unwrap_err();
             assert!(matches!(error, PeerRouteTableError::InvalidPrefix(_)));
+        }
+
+        /// ADR 0058's first runtime twin, and the one that makes a
+        /// runtime peering a peering rather than a name: a peering with no
+        /// payment channel bound to it is refused **at write time**, the
+        /// runtime analogue of `connector-config`'s load-time
+        /// `PeerChannelUnbound`.
+        ///
+        /// Discovering it at the first arriving frame instead is a peering
+        /// that silently only ever behaves as a stranger: role is a
+        /// verified claim on a channel this peering configures (ADR 0060),
+        /// so with no channel there is no route to the peer role at all.
+        #[test]
+        fn a_peering_with_no_channel_bound_to_it_is_refused_at_write_time() {
+            let connector = Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            );
+
+            let unbound = RuntimePeering {
+                fee: 100,
+                endpoint: Some("https://peer.example/ilp".to_string()),
+                ..RuntimePeering::default()
+            };
+            let error = connector
+                .upsert_runtime_peer("runtime-hop", unbound)
+                .unwrap_err();
+
+            assert!(
+                matches!(error, PeerRouteTableError::PeerChannelUnbound(id) if id == "runtime-hop"),
+                "an endpoint and a fee are not a peering"
+            );
+            assert!(
+                connector.peers().is_empty(),
+                "a refused write leaves no row behind"
+            );
+        }
+
+        /// ADR 0058's second runtime twin: a route forwarding to a peering
+        /// with no channel to pay from is refused, the runtime analogue of
+        /// ADR 0042's `[[pay_channels]]` load rule.
+        ///
+        /// Reached here through a peering replayed out of a durable
+        /// snapshot written before ADR 0058 -- the one way a channel-less
+        /// runtime peering can still exist, since the write above refuses
+        /// to create one. A route to it would produce nothing but refused
+        /// packets: a forward this node cannot cover is refused rather
+        /// than carried.
+        #[test]
+        fn a_route_forwarding_to_a_peering_with_no_pay_channel_is_refused() {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join("runtime_peers.json");
+            // Exactly the bytes the pre-ADR-0058 snapshot format wrote.
+            std::fs::write(
+                &path,
+                r#"{"peers":[{"id":"legacy-hop","fee":7}],"routes":[]}"#,
+            )
+            .expect("write an older snapshot");
+            let (store, peers, routes) = PeerRouteStore::open(&path).expect("replay it");
+
+            let connector = Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                test_clock(),
+            )
+            .with_runtime_peer_route_store(store, peers, routes);
+
+            let error = connector
+                .upsert_runtime_peer_route("g.example.runtime", "legacy-hop", Price::flat(25))
+                .unwrap_err();
+
+            assert!(
+                matches!(
+                    error,
+                    PeerRouteTableError::PeerHasNoPayChannel { ref peer_id, .. }
+                        if peer_id == "legacy-hop"
+                ),
+                "expected the pay-channel twin to fire, got {error:?}"
+            );
+            // Distinct from `UnknownPeerId`: the peering is known, and
+            // saying so is what tells an operator to fix the peering
+            // rather than the route's `peer_id`.
+            assert!(!matches!(error, PeerRouteTableError::UnknownPeerId { .. }));
         }
 
         #[test]
@@ -8467,7 +8901,7 @@ mod tests {
                 test_clock(),
             );
 
-            let error = connector.upsert_runtime_peer("").unwrap_err();
+            let error = connector.upsert_runtime_peer("", peering(0)).unwrap_err();
             assert!(matches!(error, PeerRouteTableError::InvalidPeerId));
         }
 

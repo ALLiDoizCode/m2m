@@ -1,0 +1,1195 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TOON connector — operator dashboard</title>
+    <style>
+      /* Palette drawn from the TOON logo, as the faucet's page draws it: warm
+         cream field, charcoal ink, one gold accent. The two chart series are
+         gold (fulfilled) and slate (rejected); both pairs were run through a
+         CVD/contrast validator against their surface, light and dark. */
+      :root {
+        --cream: #f2efe6;
+        --card: #faf8f1;
+        --ink: #2a2d34;
+        --ink-soft: #3a3e47;
+        --line: #565a63;
+        --rule: #d9d4c5;
+        --muted: #6b6f77;
+        --gold: #b8912e;
+        --gold-deep: #9a7825;
+        --ok-bg: #e9efe2;
+        --ok-ink: #3d5230;
+        --err-bg: #f3e3e0;
+        --err-ink: #7a3a30;
+        --warn-bg: #f5ecd6;
+        --warn-ink: #6e5a1e;
+        --series-fulfil: #9a7825;
+        --series-reject: #3f6fb0;
+        --grid: #e3dfd2;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --cream: #16181c;
+          --card: #1e2025;
+          --ink: #ece8dc;
+          --ink-soft: #d6d2c6;
+          --line: #9a9ea8;
+          --rule: #33373f;
+          --muted: #9a9ea8;
+          --gold: #c9a03d;
+          --gold-deep: #b08a2c;
+          --ok-bg: #26331f;
+          --ok-ink: #c6dbb3;
+          --err-bg: #3d2420;
+          --err-ink: #f0c2b8;
+          --warn-bg: #3a3118;
+          --warn-ink: #eed9a0;
+          --series-fulfil: #b08a2c;
+          --series-reject: #5a89d0;
+          --grid: #2b2f36;
+        }
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
+          sans-serif;
+        background: var(--cream);
+        color: var(--ink);
+        min-height: 100vh;
+        line-height: 1.45;
+      }
+      code,
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.92em;
+      }
+      a {
+        color: var(--gold-deep);
+      }
+      header.top {
+        position: sticky;
+        top: 0;
+        z-index: 5;
+        background: var(--card);
+        border-bottom: 2px solid var(--ink);
+        padding: 12px 24px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px 24px;
+        align-items: center;
+      }
+      header.top h1 {
+        font-size: 1.05rem;
+        letter-spacing: 0.02em;
+      }
+      header.top h1 span {
+        color: var(--gold-deep);
+      }
+      nav.sections {
+        display: flex;
+        gap: 4px;
+        flex-wrap: wrap;
+      }
+      nav.sections a {
+        text-decoration: none;
+        color: var(--ink-soft);
+        padding: 4px 10px;
+        border-radius: 999px;
+        border: 1px solid transparent;
+        font-size: 0.9rem;
+      }
+      nav.sections a:hover {
+        border-color: var(--line);
+      }
+      .status {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.85rem;
+        color: var(--muted);
+      }
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--line);
+        display: inline-block;
+      }
+      .dot.ok {
+        background: var(--ok-ink);
+      }
+      .dot.err {
+        background: var(--err-ink);
+      }
+      .dot.idle {
+        background: var(--warn-ink);
+      }
+      main {
+        max-width: 1180px;
+        margin: 0 auto;
+        padding: 20px 24px 64px;
+        display: grid;
+        gap: 20px;
+      }
+      section.card {
+        background: var(--card);
+        border: 2px solid var(--ink);
+        border-radius: 14px;
+        box-shadow: 6px 6px 0 rgba(42, 45, 52, 0.1);
+        padding: 20px 22px;
+        scroll-margin-top: 70px;
+      }
+      section.card > h2 {
+        font-size: 1rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--gold-deep);
+        margin-bottom: 4px;
+      }
+      section.card > p.lede {
+        color: var(--muted);
+        font-size: 0.9rem;
+        margin-bottom: 14px;
+        max-width: 72ch;
+      }
+      h3 {
+        font-size: 0.95rem;
+        margin: 18px 0 8px;
+      }
+      .tiles {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+        gap: 12px;
+        margin-bottom: 16px;
+      }
+      .tile {
+        border: 1px solid var(--rule);
+        border-radius: 10px;
+        padding: 12px 14px;
+      }
+      .tile .label {
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+      }
+      .tile .value {
+        font-size: 1.6rem;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+        margin-top: 2px;
+      }
+      .tile .sub {
+        font-size: 0.8rem;
+        color: var(--muted);
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.9rem;
+        font-variant-numeric: tabular-nums;
+      }
+      .table-wrap {
+        overflow-x: auto;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 6px 8px;
+        border-bottom: 1px solid var(--rule);
+        vertical-align: top;
+        white-space: nowrap;
+      }
+      th {
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--muted);
+        font-weight: 600;
+      }
+      td.num,
+      th.num {
+        text-align: right;
+      }
+      td.wrap {
+        white-space: normal;
+        word-break: break-all;
+      }
+      tr.empty td {
+        color: var(--muted);
+        font-style: italic;
+      }
+      .badge {
+        display: inline-block;
+        font-size: 0.72rem;
+        padding: 1px 8px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        color: var(--ink-soft);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .badge.config {
+        background: var(--warn-bg);
+        color: var(--warn-ink);
+        border-color: transparent;
+      }
+      .badge.runtime {
+        background: var(--ok-bg);
+        color: var(--ok-ink);
+        border-color: transparent;
+      }
+      .badge.leased {
+        background: var(--card);
+      }
+      .badge.you {
+        background: var(--gold);
+        color: #fff;
+        border-color: transparent;
+      }
+      form.inline {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 10px;
+        align-items: end;
+        margin-top: 8px;
+      }
+      label.field {
+        display: grid;
+        gap: 3px;
+        font-size: 0.78rem;
+        color: var(--muted);
+      }
+      input,
+      select {
+        font: inherit;
+        padding: 7px 9px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--cream);
+        color: var(--ink);
+        width: 100%;
+      }
+      input:focus,
+      select:focus {
+        outline: 2px solid var(--gold);
+        outline-offset: 1px;
+      }
+      button {
+        font: inherit;
+        padding: 7px 14px;
+        border-radius: 8px;
+        border: 2px solid var(--ink);
+        background: var(--card);
+        color: var(--ink);
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      button.primary {
+        background: var(--ink);
+        color: var(--cream);
+      }
+      button.small {
+        padding: 2px 10px;
+        font-size: 0.8rem;
+        border-width: 1px;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .notice {
+        padding: 8px 12px;
+        border-radius: 8px;
+        font-size: 0.88rem;
+        margin: 8px 0;
+      }
+      .notice.ok {
+        background: var(--ok-bg);
+        color: var(--ok-ink);
+      }
+      .notice.err {
+        background: var(--err-bg);
+        color: var(--err-ink);
+      }
+      .notice.warn {
+        background: var(--warn-bg);
+        color: var(--warn-ink);
+      }
+      .hidden {
+        display: none !important;
+      }
+      .access-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 18px;
+      }
+      @media (max-width: 760px) {
+        .access-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+      .access-grid h3 {
+        margin-top: 0;
+      }
+      .access-grid p {
+        font-size: 0.85rem;
+        color: var(--muted);
+        margin-bottom: 8px;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .row > input {
+        flex: 1 1 200px;
+      }
+      .chart {
+        position: relative;
+        margin: 8px 0 4px;
+      }
+      .chart svg {
+        width: 100%;
+        height: 180px;
+        display: block;
+        overflow: visible;
+      }
+      .chart .tip {
+        position: absolute;
+        pointer-events: none;
+        background: var(--ink);
+        color: var(--cream);
+        font-size: 0.78rem;
+        padding: 6px 8px;
+        border-radius: 6px;
+        white-space: nowrap;
+        transform: translate(-50%, -110%);
+        display: none;
+      }
+      .legend {
+        display: flex;
+        gap: 16px;
+        font-size: 0.8rem;
+        color: var(--muted);
+        margin-bottom: 4px;
+      }
+      .legend .swatch {
+        display: inline-block;
+        width: 14px;
+        height: 3px;
+        vertical-align: middle;
+        margin-right: 6px;
+        border-radius: 2px;
+      }
+      #writes {
+        display: grid;
+        gap: 6px;
+      }
+      #writes .notice {
+        margin: 0;
+      }
+      footer {
+        color: var(--muted);
+        font-size: 0.8rem;
+        text-align: center;
+        padding: 0 24px 32px;
+      }
+      .controls {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        font-size: 0.85rem;
+        color: var(--muted);
+      }
+      .controls select,
+      .controls input {
+        width: auto;
+        padding: 3px 6px;
+      }
+      .controls input {
+        width: 4.5em;
+      }
+    </style>
+  </head>
+  <body>
+    <header class="top">
+      <h1><span>TOON</span> connector · operator dashboard</h1>
+      <nav class="sections">
+        <a href="#access">Access</a>
+        <a href="#traffic">Traffic</a>
+        <a href="#earnings">Earnings</a>
+        <a href="#peering">Peering</a>
+        <a href="#routes">Routes</a>
+        <a href="#audit">Audit log</a>
+      </nav>
+      <div class="status">
+        <span class="controls">
+          <label>poll
+            <select id="interval">
+              <option value="2000">2s</option>
+              <option value="5000" selected>5s</option>
+              <option value="15000">15s</option>
+              <option value="60000">60s</option>
+            </select>
+          </label>
+          <label>decimals <input id="decimals" type="number" min="0" max="18" value="6" /></label>
+        </span>
+        <span class="dot idle" id="dot"></span>
+        <span id="status-text">no token</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="card" id="node">
+        <h2>This node</h2>
+        <div class="tiles" id="node-tiles"></div>
+      </section>
+
+      <section class="card" id="access">
+        <h2>Access</h2>
+        <p class="lede">
+          Read authority and write authority are different things on this surface (ADR 0008). The
+          bearer token lets this page inspect; only an operator key on the node's
+          <code>write_keys</code> allowlist lets it change anything, and every change it makes is
+          signed here, in your browser, by that key.
+        </p>
+        <div class="access-grid">
+          <div>
+            <h3>Bearer token — reads</h3>
+            <p>Kept in this tab's session storage; it confers no authority to move value.</p>
+            <div class="row">
+              <input id="token" type="password" placeholder="operator bearer token" autocomplete="off" />
+              <button class="primary" id="token-use">Use</button>
+              <button id="token-forget">Forget</button>
+            </div>
+          </div>
+          <div>
+            <h3>Operator key — writes</h3>
+            <p>
+              The <em>private</em> half, 64 hex characters (what <code>connector send --operator-key</code>
+              reads). Held in memory for this tab only — never stored, never sent to the node; only
+              signatures leave the page.
+            </p>
+            <div class="row">
+              <input id="key" type="password" placeholder="ed25519 secret, 64 hex" autocomplete="off" />
+              <button class="primary" id="key-hold">Hold for this session</button>
+              <button id="key-forget">Forget</button>
+            </div>
+            <div id="key-status" class="notice warn">No operator key held — this page is read-only.</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" id="traffic">
+        <h2>Traffic</h2>
+        <p class="lede">
+          Counters from <code>GET /metrics</code> (ADR 0014), sampled by this page on its poll
+          interval. Totals are since this process started; rates are over the samples this tab has
+          seen, and a counter that falls is read as a restart.
+        </p>
+        <div class="tiles" id="traffic-tiles"></div>
+        <div class="legend">
+          <span><span class="swatch" style="background: var(--series-fulfil)"></span>fulfilled / min</span>
+          <span><span class="swatch" style="background: var(--series-reject)"></span>rejected / min</span>
+        </div>
+        <div class="chart" id="traffic-chart"></div>
+        <h3>Rejects by code</h3>
+        <div class="table-wrap"><table id="rejects-table"></table></div>
+      </section>
+
+      <section class="card" id="earnings">
+        <h2>Earnings</h2>
+        <p class="lede">
+          A fee is flat per packet, per peering, and is earned on fulfilment only. The counter is
+          this process's memory since boot; the claim journal is the truth (ADR 0005), so the
+          inbound claims below are what counterparties have actually signed over.
+        </p>
+        <div class="tiles" id="earnings-tiles"></div>
+        <div class="legend">
+          <span><span class="swatch" style="background: var(--series-fulfil)"></span>fees earned / min</span>
+        </div>
+        <div class="chart" id="earnings-chart"></div>
+        <h3>Inbound claims — what you have been paid</h3>
+        <div class="table-wrap"><table id="claims-in-table"></table></div>
+        <h3>Outbound claims — what you have signed away</h3>
+        <div class="table-wrap"><table id="claims-out-table"></table></div>
+      </section>
+
+      <section class="card" id="peering">
+        <h2>Peering</h2>
+        <p class="lede">
+          A peering is a counterparty, a carriage, a fee and a cap. Config-file rows are immutable
+          for the process's life; runtime rows are durable and can never take a key the file owns
+          (ADR 0034). A peering's fee changes only by editing the file and restarting.
+        </p>
+        <div class="table-wrap"><table id="peers-table"></table></div>
+        <h3>Channels</h3>
+        <div class="table-wrap"><table id="channels-table"></table></div>
+        <h3>Establish a peering from a URL</h3>
+        <p class="lede">
+          The node fetches the counterparty's self-description and peers with whoever answers —
+          trust on first use (ADR 0058). A <code>502</code> means go and look at that URL.
+        </p>
+        <form class="inline" id="peer-form">
+          <label class="field">peer id<input name="id" required placeholder="store" /></label>
+          <label class="field">url<input name="url" type="url" required placeholder="https://…" /></label>
+          <label class="field">fee (base units)<input name="fee" type="number" min="0" value="0" /></label>
+          <label class="field">max packet amount<input name="max_packet_amount" type="number" min="0" value="0" /></label>
+          <label class="field">chain
+            <select name="chain">
+              <option value="">(the configured backend)</option>
+              <option value="evm">evm</option>
+              <option value="solana">solana</option>
+            </select>
+          </label>
+          <button class="primary write" type="submit">Peer</button>
+        </form>
+      </section>
+
+      <section class="card" id="routes">
+        <h2>Routes</h2>
+        <p class="lede">
+          Three kinds. A <strong>terminated</strong> route ends at a handler and carries a price;
+          a <strong>peer</strong> route forwards to a peering; a <strong>leased</strong> route is
+          pushed by a controller with a TTL and lapses on its own. Precedence is longest prefix,
+          then rank (ADR 0048).
+        </p>
+        <h3>Terminated routes — config file</h3>
+        <div class="table-wrap"><table id="routes-table"></table></div>
+        <h3>Peer routes</h3>
+        <div class="table-wrap"><table id="peer-routes-table"></table></div>
+        <h3>Leased routes</h3>
+        <div class="table-wrap"><table id="leased-table"></table></div>
+        <datalist id="peer-ids"></datalist>
+        <h3>Add or replace a runtime peer route</h3>
+        <form class="inline" id="route-form">
+          <label class="field">prefix<input name="prefix" required placeholder="g.example" /></label>
+          <label class="field">peer id<input name="peer_id" required list="peer-ids" placeholder="a peering this node holds" /></label>
+          <label class="field">price base<input name="base" type="number" min="0" required value="0" /></label>
+          <label class="field">price per KiB (optional)<input name="per_kib" type="number" min="0" placeholder="flat" /></label>
+          <button class="primary write" type="submit">Write route</button>
+        </form>
+        <h3>Lease a route</h3>
+        <form class="inline" id="lease-form">
+          <label class="field">prefix<input name="prefix" required placeholder="g.example" /></label>
+          <label class="field">peer id<input name="peer_id" required list="peer-ids" placeholder="a peering this node holds" /></label>
+          <label class="field">ttl (seconds)<input name="ttl_seconds" type="number" min="1" required value="300" /></label>
+          <button class="primary write" type="submit">Lease</button>
+        </form>
+      </section>
+
+      <section class="card" id="audit">
+        <h2>Audit log</h2>
+        <p class="lede">
+          Every accepted write, retained as the signature that authorised it — not a log line
+          saying something happened. Rows signed by the key held in this tab are marked.
+        </p>
+        <div id="writes"></div>
+        <div class="table-wrap"><table id="audit-table"></table></div>
+      </section>
+    </main>
+    <footer>
+      Served by the node's operator surface. Amounts are in a token's base units unless a
+      <code>decimals</code> value is set above; this node does not know which token a figure is in.
+    </footer>
+
+    <script>
+      'use strict';
+
+      // ---- storage (per-viewer conveniences; every access may throw) ----------
+      const store = {
+        get(area, key) {
+          try {
+            return window[area].getItem(key);
+          } catch (_) {
+            return null;
+          }
+        },
+        set(area, key, value) {
+          try {
+            if (value === null) window[area].removeItem(key);
+            else window[area].setItem(key, value);
+          } catch (_) {
+            /* storage unavailable: run without it */
+          }
+        },
+      };
+      const TOKEN_KEY = 'toon.dashboard.bearer';
+
+      // ---- tiny DOM helper: text is always text, never markup ----------------
+      function el(tag, attrs, ...children) {
+        const node = document.createElement(tag);
+        if (attrs) {
+          for (const [k, v] of Object.entries(attrs)) {
+            if (k === 'class') node.className = v;
+            else if (k === 'title') node.title = v;
+            else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+            else node.setAttribute(k, v);
+          }
+        }
+        for (const child of children.flat()) {
+          if (child === null || child === undefined) continue;
+          node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+        }
+        return node;
+      }
+      function replace(container, ...children) {
+        container.replaceChildren(...children.flat().filter((c) => c != null));
+      }
+      function table(container, headers, rows, emptyText) {
+        const thead = el('thead', null, el('tr', null, headers.map((h) => el('th', { class: h.num ? 'num' : '' }, h.label))));
+        const body = el('tbody');
+        if (rows.length === 0) {
+          body.append(el('tr', { class: 'empty' }, el('td', { colspan: String(headers.length) }, emptyText)));
+        }
+        for (const row of rows) body.append(el('tr', null, row));
+        replace(container, thead, body);
+      }
+      const td = (content, cls) => el('td', { class: cls || '' }, content);
+      const badge = (text, cls) => el('span', { class: 'badge ' + (cls || '') }, text);
+
+      // ---- formatting -----------------------------------------------------
+      const state = {
+        token: store.get('sessionStorage', TOKEN_KEY) || '',
+        key: null, // CryptoKey, memory only
+        keyid: null,
+        decimals: Number(store.get('localStorage', 'toon.dashboard.decimals') ?? 6),
+        interval: Number(store.get('localStorage', 'toon.dashboard.interval') ?? 5000),
+        samples: [], // {t, fulfil, reject, fees, byCode}
+        lastMetrics: null,
+        timer: null,
+        peers: [],
+        failing: false,
+      };
+      function fmtAmount(raw) {
+        if (raw === null || raw === undefined) return '—';
+        const n = typeof raw === 'bigint' ? raw : BigInt(Math.trunc(Number(raw)));
+        const d = state.decimals;
+        if (!Number.isFinite(d) || d <= 0) return n.toString();
+        const s = n.toString().padStart(d + 1, '0');
+        const whole = s.slice(0, -d);
+        const frac = s.slice(-d).replace(/0+$/, '');
+        return frac ? `${whole}.${frac}` : whole;
+      }
+      const amountCell = (raw) => td(fmtAmount(raw), 'num');
+      function fmtPrice(price) {
+        if (price === null || price === undefined) return '—';
+        if (typeof price === 'number') return fmtAmount(price);
+        return `${fmtAmount(price.base)} + ${fmtAmount(price.per_kib)} / KiB`;
+      }
+      function ago(ms) {
+        const s = Math.round(ms / 1000);
+        if (s < 60) return `${s}s`;
+        if (s < 3600) return `${Math.round(s / 60)}m`;
+        return `${(s / 3600).toFixed(1)}h`;
+      }
+      function short(hex, n = 10) {
+        if (!hex) return '—';
+        return hex.length > 2 * n + 1 ? `${hex.slice(0, n)}…${hex.slice(-n)}` : hex;
+      }
+      function tile(label, value, sub) {
+        return el('div', { class: 'tile' }, el('div', { class: 'label' }, label), el('div', { class: 'value' }, value), sub ? el('div', { class: 'sub' }, sub) : null);
+      }
+      function setStatus(kind, text) {
+        document.getElementById('dot').className = 'dot ' + kind;
+        document.getElementById('status-text').textContent = text;
+      }
+      function notice(kind, text) {
+        const box = document.getElementById('writes');
+        box.prepend(el('div', { class: 'notice ' + kind }, `${new Date().toLocaleTimeString()} — ${text}`));
+        while (box.childElementCount > 6) box.lastElementChild.remove();
+      }
+
+      // ---- reads: bearer token, JSON or Prometheus text -----------------------
+      async function read(path, asText) {
+        const response = await fetch(path, { headers: { Authorization: `Bearer ${state.token}` }, cache: 'no-store' });
+        if (response.status === 401) throw new Error('token refused (401)');
+        if (!response.ok) throw new Error(`${path} → ${response.status}`);
+        return asText ? response.text() : response.json();
+      }
+      // Prometheus text exposition: `name{k="v",...} value` or `name value`.
+      function parseMetrics(text) {
+        const out = new Map();
+        for (const line of text.split('\n')) {
+          if (!line || line.startsWith('#')) continue;
+          const m = /^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{([^}]*)\})?\s+(\S+)/.exec(line);
+          if (!m) continue;
+          const labels = {};
+          if (m[3]) {
+            for (const kv of m[3].match(/[^,]*?="(?:[^"\\]|\\.)*"/g) || []) {
+              const eq = kv.indexOf('=');
+              labels[kv.slice(0, eq).trim()] = kv.slice(eq + 2, -1);
+            }
+          }
+          const list = out.get(m[1]) || [];
+          list.push({ labels, value: Number(m[4]) });
+          out.set(m[1], list);
+        }
+        return out;
+      }
+      const metricValue = (metrics, name, want) => {
+        let sum = 0;
+        for (const { labels, value } of metrics.get(name) || []) {
+          if (!want || Object.entries(want).every(([k, v]) => labels[k] === v)) sum += value;
+        }
+        return sum;
+      };
+
+      // ---- writes: RFC 9421 over ("@method" "@path" "content-digest") ----------
+      // Mirrors `connector_operator::signing::sign_request` line for line; the
+      // node's verifier is the only judge of whether this is right, which is why
+      // an accepted write shows up in the audit log below.
+      const PKCS8_ED25519_PREFIX = '302e020100300506032b657004220420';
+      const utf8 = new TextEncoder();
+      const hexToBytes = (hex) => Uint8Array.from(hex.match(/../g), (b) => parseInt(b, 16));
+      const bytesToHex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+      const b64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
+      const b64urlToBytes = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+
+      async function holdKey(secretHex) {
+        const hex = secretHex.trim().toLowerCase();
+        if (!/^[0-9a-f]{64}$/.test(hex)) throw new Error('an operator key is 64 hex characters (32 bytes)');
+        if (!window.crypto || !crypto.subtle) throw new Error('WebCrypto is unavailable — is this page served over http://localhost or https?');
+        let key;
+        try {
+          key = await crypto.subtle.importKey('pkcs8', hexToBytes(PKCS8_ED25519_PREFIX + hex), { name: 'Ed25519' }, true, ['sign']);
+        } catch (error) {
+          throw new Error('this browser cannot sign Ed25519 (WebCrypto Ed25519 needs Chrome 137+, Firefox 130+ or Safari 17+): ' + error.message);
+        }
+        const jwk = await crypto.subtle.exportKey('jwk', key);
+        state.key = key;
+        state.keyid = bytesToHex(b64urlToBytes(jwk.x));
+      }
+      async function signedFetch(method, path, body) {
+        if (!state.key) throw new Error('no operator key held');
+        const bodyText = body === undefined ? '' : JSON.stringify(body);
+        const bodyBytes = utf8.encode(bodyText);
+        const digest = `sha-256=:${b64(await crypto.subtle.digest('SHA-256', bodyBytes))}:`;
+        const created = Math.floor(Date.now() / 1000);
+        const expires = created + 60;
+        const params = `("@method" "@path" "content-digest");created=${created};expires=${expires};keyid="${state.keyid}";alg="ed25519"`;
+        const base = [`"@method": ${method}`, `"@path": ${path}`, `"content-digest": ${digest}`, `"@signature-params": ${params}`].join('\n');
+        const signature = await crypto.subtle.sign({ name: 'Ed25519' }, state.key, utf8.encode(base));
+        const headers = {
+          'Signature-Input': `sig1=${params}`,
+          Signature: `sig1=:${b64(signature)}:`,
+          'Content-Digest': digest,
+        };
+        if (body !== undefined) headers['Content-Type'] = 'application/json';
+        const response = await fetch(path, { method, headers, body: body === undefined ? undefined : bodyText });
+        const text = await response.text();
+        if (!response.ok) throw new Error(`${method} ${path} → ${response.status}${text ? ': ' + text : ''}`);
+        return text;
+      }
+      async function write(method, path, body, describe) {
+        try {
+          await signedFetch(method, path, body);
+          notice('ok', `${describe} — accepted (${method} ${path})`);
+          await poll();
+        } catch (error) {
+          notice('err', `${describe} — ${error.message}`);
+        }
+      }
+
+      // ---- rendering --------------------------------------------------------
+      function renderNode(identity, description) {
+        const tiles = [
+          tile('ILP addresses', (description?.ilpAddresses || []).join(', ') || '—'),
+          tile('key id', el('span', { class: 'mono', title: identity?.key_id || '' }, short(identity?.key_id))),
+          tile('address', el('span', { class: 'mono', title: identity?.address || '' }, short(identity?.address))),
+          tile('peer carriages', (description?.peerCarriages || []).join(', ') || 'none'),
+        ];
+        replace(document.getElementById('node-tiles'), tiles);
+      }
+
+      function recordSample(metrics) {
+        const sample = {
+          t: Date.now(),
+          fulfil: metricValue(metrics, 'toon_packets_total', { outcome: 'fulfill' }),
+          reject: metricValue(metrics, 'toon_packets_total', { outcome: 'reject' }),
+          fees: metricValue(metrics, 'toon_fees_earned_total'),
+          byCode: (metrics.get('toon_packets_rejected_total') || []).map((m) => [m.labels.code, m.value]),
+        };
+        state.samples.push(sample);
+        if (state.samples.length > 240) state.samples.shift();
+        return sample;
+      }
+      // Per-minute rate between consecutive samples; a counter that fell has
+      // been reset by a restart, so the new value is the whole delta.
+      function rates(field) {
+        const out = [];
+        for (let i = 1; i < state.samples.length; i++) {
+          const a = state.samples[i - 1];
+          const b = state.samples[i];
+          const delta = b[field] >= a[field] ? b[field] - a[field] : b[field];
+          const dt = (b.t - a.t) / 1000;
+          out.push({ t: b.t, v: dt > 0 ? (delta / dt) * 60 : 0 });
+        }
+        return out;
+      }
+      function windowRate(field) {
+        const r = rates(field);
+        if (r.length === 0) return null;
+        const first = state.samples[0];
+        const last = state.samples[state.samples.length - 1];
+        const span = (last.t - first.t) / 1000;
+        const total = r.reduce((acc, p, i) => acc + (p.v * ((state.samples[i + 1].t - state.samples[i].t) / 1000)) / 60, 0);
+        return span > 0 ? (total / span) * 60 : 0;
+      }
+
+      function renderTraffic(sample) {
+        const total = sample.fulfil + sample.reject;
+        const fulfilRate = windowRate('fulfil');
+        const rejectRate = windowRate('reject');
+        const span = state.samples.length > 1 ? ago(sample.t - state.samples[0].t) : null;
+        replace(
+          document.getElementById('traffic-tiles'),
+          tile('fulfilled', sample.fulfil.toLocaleString(), 'since boot'),
+          tile('rejected', sample.reject.toLocaleString(), 'since boot'),
+          tile('fulfilled / min', fulfilRate === null ? '—' : fulfilRate.toFixed(2), span ? `over the last ${span}` : 'needs two samples'),
+          tile('reject share', total === 0 ? '—' : `${((sample.reject / total) * 100).toFixed(1)}%`, 'since boot'),
+        );
+        drawChart(
+          document.getElementById('traffic-chart'),
+          [
+            { name: 'fulfilled / min', color: 'var(--series-fulfil)', points: rates('fulfil') },
+            { name: 'rejected / min', color: 'var(--series-reject)', points: rates('reject') },
+          ],
+          (v) => v.toFixed(2),
+        );
+        const totalRejects = sample.byCode.reduce((a, [, v]) => a + v, 0);
+        table(
+          document.getElementById('rejects-table'),
+          [{ label: 'code' }, { label: 'count', num: true }, { label: 'share', num: true }],
+          sample.byCode
+            .sort((a, b) => b[1] - a[1])
+            .map(([code, count]) => [td(el('code', null, code)), td(count.toLocaleString(), 'num'), td(totalRejects ? `${((count / totalRejects) * 100).toFixed(1)}%` : '—', 'num')]),
+          'no rejects recorded since boot',
+        );
+      }
+
+      function renderEarnings(sample, claims) {
+        const feeRate = windowRate('fees');
+        const inbound = claims.filter((c) => c.direction === 'inbound');
+        const outbound = claims.filter((c) => c.direction === 'outbound');
+        const sum = (rows) => rows.reduce((a, c) => a + BigInt(Math.trunc(Number(c.cumulative_amount))), 0n);
+        replace(
+          document.getElementById('earnings-tiles'),
+          tile('fees earned', fmtAmount(sample.fees), 'since boot, on fulfilment only'),
+          tile('fees / min', feeRate === null ? '—' : fmtAmount(Math.round(feeRate)), 'over the samples seen'),
+          tile('inbound claims', fmtAmount(sum(inbound)), `cumulative across ${inbound.length} channel${inbound.length === 1 ? '' : 's'}`),
+          tile('outbound claims', fmtAmount(sum(outbound)), `cumulative across ${outbound.length} channel${outbound.length === 1 ? '' : 's'}`),
+        );
+        drawChart(document.getElementById('earnings-chart'), [{ name: 'fees earned / min', color: 'var(--series-fulfil)', points: rates('fees') }], (v) => fmtAmount(Math.round(v)));
+        const claimRow = (c) => [
+          td(c.peer_id || el('span', { class: 'badge' }, 'client edge')),
+          td(el('code', { title: c.channel_id }, short(c.channel_id, 8))),
+          td(String(c.nonce), 'num'),
+          amountCell(c.cumulative_amount),
+          td(c.pending ? badge('pending', 'config') : badge('acked', 'runtime')),
+        ];
+        const headers = [{ label: 'peer' }, { label: 'channel' }, { label: 'nonce', num: true }, { label: 'cumulative', num: true }, { label: 'state' }];
+        table(document.getElementById('claims-in-table'), headers, inbound.map(claimRow), 'no inbound claims');
+        table(document.getElementById('claims-out-table'), headers, outbound.map(claimRow), 'no outbound claims');
+      }
+
+      function renderPeering(peers, channels) {
+        state.peers = peers;
+        table(
+          document.getElementById('peers-table'),
+          [{ label: 'peer id' }, { label: 'fee', num: true }, { label: 'max packet amount', num: true }, { label: 'source' }, { label: '' }],
+          peers.map((p) => [
+            td(el('code', null, p.id)),
+            amountCell(p.fee),
+            amountCell(p.max_packet_amount),
+            td(badge(p.source, p.source)),
+            td(
+              p.source === 'runtime'
+                ? el('button', { class: 'small write', onclick: () => confirm(`Remove peering '${p.id}'? Runtime routes to it become unreachable.`) && write('DELETE', `/peers/${encodeURIComponent(p.id)}`, undefined, `remove peer ${p.id}`) }, 'Remove')
+                : el('span', { class: 'sub', title: 'a config-file row changes by editing the file and restarting' }, '—'),
+            ),
+          ]),
+          'no peerings',
+        );
+        table(
+          document.getElementById('channels-table'),
+          [{ label: 'channel' }, { label: 'counterparty' }, { label: 'status' }, { label: 'deposited', num: true }, { label: 'own deposited', num: true }, { label: 'redeemed', num: true }],
+          channels.map((c) => [
+            td(el('code', { title: c.id }, short(c.id, 8))),
+            td(el('code', { title: c.counterparty }, short(c.counterparty, 8))),
+            td(badge(c.status, c.status === 'open' ? 'runtime' : '')),
+            amountCell(c.deposited),
+            amountCell(c.own_deposited),
+            amountCell(c.redeemed),
+          ]),
+          'no channels — a node with no settlement backend has none',
+        );
+        // Suggestions, not a constraint: the node is the judge of whether a
+        // peer id names a peering, and says so in the write's answer.
+        replace(document.getElementById('peer-ids'), peers.map((p) => el('option', { value: p.id })));
+      }
+
+      function renderRoutes(routes, peerRoutes, leased) {
+        table(
+          document.getElementById('routes-table'),
+          [{ label: 'prefix' }, { label: 'handler' }, { label: 'price', num: true }],
+          routes.map((r) => [td(el('code', null, r.prefix)), td(r.handler_url, 'wrap'), td(fmtPrice(r.price), 'num')]),
+          'no terminated routes',
+        );
+        table(
+          document.getElementById('peer-routes-table'),
+          [{ label: 'prefix' }, { label: 'peer' }, { label: 'price', num: true }, { label: 'source' }, { label: '' }],
+          peerRoutes.map((r) => [
+            td(el('code', null, r.prefix)),
+            td(el('code', null, r.peer_id)),
+            td(fmtPrice(r.price), 'num'),
+            td(badge(r.source, r.source)),
+            td(
+              r.source === 'runtime'
+                ? el('button', { class: 'small write', onclick: () => confirm(`Remove runtime route '${r.prefix}'?`) && write('DELETE', `/routes/peers/${encodeURIComponent(r.prefix)}`, undefined, `remove route ${r.prefix}`) }, 'Remove')
+                : el('span', { title: 'a config-file row changes by editing the file and restarting' }, '—'),
+            ),
+          ]),
+          'no peer routes',
+        );
+        const now = Date.now();
+        table(
+          document.getElementById('leased-table'),
+          [{ label: 'prefix' }, { label: 'peer' }, { label: 'expires' }, { label: 'remaining', num: true }],
+          leased.map((r) => {
+            const left = Date.parse(r.expires_at) - now;
+            return [td(el('code', null, r.prefix)), td(el('code', null, r.peer_id)), td(new Date(r.expires_at).toLocaleString()), td(left > 0 ? ago(left) : 'lapsed', 'num')];
+          }),
+          'no leased routes — a controller pushes these, and they lapse unless renewed',
+        );
+      }
+
+      function renderAudit(records) {
+        table(
+          document.getElementById('audit-table'),
+          [{ label: 'at' }, { label: 'write' }, { label: 'key' }, { label: 'expires' }],
+          records
+            .slice()
+            .reverse()
+            .map((r) => [
+              td(new Date(r.created * 1000).toLocaleString()),
+              td(el('code', null, `${r.method} ${r.path}`)),
+              el('td', null, el('span', { class: 'mono', title: r.keyid }, short(r.keyid, 8)), r.keyid === state.keyid ? [' ', badge('this tab', 'you')] : null),
+              td(new Date(r.expires * 1000).toLocaleTimeString()),
+            ]),
+          'no writes accepted since boot',
+        );
+      }
+
+      // A thin two-series line chart with a crosshair tooltip; one y-axis.
+      function drawChart(container, series, fmt) {
+        const W = 800;
+        const H = 180;
+        const pad = { l: 44, r: 8, t: 8, b: 22 };
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+        svg.setAttribute('preserveAspectRatio', 'none');
+        const ns = (tag, attrs) => {
+          const n = document.createElementNS('http://www.w3.org/2000/svg', tag);
+          for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+          return n;
+        };
+        const all = series.flatMap((s) => s.points);
+        const tip = el('div', { class: 'tip' });
+        if (all.length < 2) {
+          const t = ns('text', { x: W / 2, y: H / 2, 'text-anchor': 'middle', fill: 'var(--muted)', 'font-size': '13' });
+          t.textContent = 'collecting samples…';
+          svg.append(t);
+          replace(container, svg, tip);
+          return;
+        }
+        const t0 = Math.min(...all.map((p) => p.t));
+        const t1 = Math.max(...all.map((p) => p.t));
+        const vMax = Math.max(1e-9, ...all.map((p) => p.v));
+        const x = (t) => pad.l + ((t - t0) / Math.max(1, t1 - t0)) * (W - pad.l - pad.r);
+        const y = (v) => pad.t + (1 - v / vMax) * (H - pad.t - pad.b);
+        for (const frac of [0, 0.5, 1]) {
+          const yy = y(vMax * frac);
+          svg.append(ns('line', { x1: pad.l, x2: W - pad.r, y1: yy, y2: yy, stroke: 'var(--grid)', 'stroke-width': 1 }));
+          const label = ns('text', { x: pad.l - 6, y: yy + 4, 'text-anchor': 'end', fill: 'var(--muted)', 'font-size': '11' });
+          label.textContent = fmt(vMax * frac);
+          svg.append(label);
+        }
+        for (const [i, tt] of [t0, t1].entries()) {
+          const label = ns('text', { x: x(tt), y: H - 6, 'text-anchor': i === 0 ? 'start' : 'end', fill: 'var(--muted)', 'font-size': '11' });
+          label.textContent = new Date(tt).toLocaleTimeString();
+          svg.append(label);
+        }
+        for (const s of series) {
+          const d = s.points.map((p, i) => `${i === 0 ? 'M' : 'L'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ');
+          svg.append(ns('path', { d, fill: 'none', stroke: s.color, 'stroke-width': 2, 'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke' }));
+        }
+        const cursor = ns('line', { x1: 0, x2: 0, y1: pad.t, y2: H - pad.b, stroke: 'var(--line)', 'stroke-width': 1, 'stroke-dasharray': '3 3', opacity: 0 });
+        svg.append(cursor);
+        const hit = ns('rect', { x: pad.l, y: pad.t, width: W - pad.l - pad.r, height: H - pad.t - pad.b, fill: 'transparent' });
+        hit.addEventListener('mousemove', (event) => {
+          const rect = svg.getBoundingClientRect();
+          const px = ((event.clientX - rect.left) / rect.width) * W;
+          const t = t0 + ((px - pad.l) / (W - pad.l - pad.r)) * (t1 - t0);
+          const lines = [new Date(t).toLocaleTimeString()];
+          for (const s of series) {
+            if (s.points.length === 0) continue;
+            const nearest = s.points.reduce((a, b) => (Math.abs(b.t - t) < Math.abs(a.t - t) ? b : a));
+            lines.push(`${s.name}: ${fmt(nearest.v)}`);
+          }
+          cursor.setAttribute('x1', px);
+          cursor.setAttribute('x2', px);
+          cursor.setAttribute('opacity', 1);
+          replace(tip, lines.map((l, i) => el(i === 0 ? 'strong' : 'div', null, l)));
+          tip.style.display = 'block';
+          tip.style.left = `${event.clientX - rect.left}px`;
+          tip.style.top = `${event.clientY - rect.top}px`;
+        });
+        hit.addEventListener('mouseleave', () => {
+          cursor.setAttribute('opacity', 0);
+          tip.style.display = 'none';
+        });
+        svg.append(hit);
+        replace(container, svg, tip);
+      }
+
+      // ---- the poll ---------------------------------------------------------
+      async function poll() {
+        if (!state.token) {
+          setStatus('idle', 'no token');
+          return;
+        }
+        try {
+          const [metricsText, identity, peers, channels, claims, routes, peerRoutes, leased, audit] = await Promise.all([
+            read('/metrics', true),
+            read('/identity'),
+            read('/peers'),
+            read('/channels'),
+            read('/claims'),
+            read('/routes'),
+            read('/routes/peers'),
+            read('/routes/leased'),
+            read('/audit-log'),
+          ]);
+          // The self-description is the free, unauthenticated document a
+          // stranger reads; it is the only place a node states its addresses.
+          const description = await fetch('/ilp', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+          const sample = recordSample(parseMetrics(metricsText));
+          renderNode(identity, description);
+          renderTraffic(sample);
+          renderEarnings(sample, claims);
+          renderPeering(peers, channels);
+          renderRoutes(routes, peerRoutes, leased);
+          renderAudit(audit);
+          state.failing = false;
+          setStatus('ok', `live · ${new Date(sample.t).toLocaleTimeString()}`);
+        } catch (error) {
+          state.failing = true;
+          setStatus('err', error.message);
+        }
+      }
+      function schedule() {
+        clearInterval(state.timer);
+        state.timer = setInterval(poll, state.interval);
+        poll();
+      }
+
+      // ---- wiring -----------------------------------------------------------
+      const $ = (id) => document.getElementById(id);
+      const formValues = (form) => Object.fromEntries(new FormData(form).entries());
+
+      $('interval').value = String(state.interval);
+      $('decimals').value = String(state.decimals);
+      $('interval').addEventListener('change', (e) => {
+        state.interval = Number(e.target.value);
+        store.set('localStorage', 'toon.dashboard.interval', String(state.interval));
+        schedule();
+      });
+      $('decimals').addEventListener('change', (e) => {
+        state.decimals = Math.max(0, Math.min(18, Number(e.target.value) || 0));
+        store.set('localStorage', 'toon.dashboard.decimals', String(state.decimals));
+        poll();
+      });
+      $('token').value = state.token;
+      $('token-use').addEventListener('click', () => {
+        state.token = $('token').value.trim();
+        store.set('sessionStorage', TOKEN_KEY, state.token || null);
+        state.samples = [];
+        schedule();
+      });
+      $('token-forget').addEventListener('click', () => {
+        state.token = '';
+        $('token').value = '';
+        store.set('sessionStorage', TOKEN_KEY, null);
+        clearInterval(state.timer);
+        setStatus('idle', 'no token');
+      });
+      function refreshKeyStatus() {
+        const box = $('key-status');
+        const writable = Boolean(state.key);
+        box.className = 'notice ' + (writable ? 'ok' : 'warn');
+        replace(box, writable ? ['Holding a key with keyid ', el('code', null, state.keyid), ' — writes are enabled if that keyid is on this node’s write_keys.'] : 'No operator key held — this page is read-only.');
+        for (const button of document.querySelectorAll('button.write')) button.disabled = !writable;
+      }
+      $('key-hold').addEventListener('click', async () => {
+        try {
+          await holdKey($('key').value);
+          $('key').value = '';
+          refreshKeyStatus();
+          poll();
+        } catch (error) {
+          state.key = null;
+          state.keyid = null;
+          refreshKeyStatus();
+          notice('err', error.message);
+        }
+      });
+      $('key-forget').addEventListener('click', () => {
+        state.key = null;
+        state.keyid = null;
+        $('key').value = '';
+        refreshKeyStatus();
+        poll();
+      });
+      $('peer-form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const v = formValues(e.target);
+        const body = { id: v.id.trim(), url: v.url.trim(), fee: Number(v.fee) || 0, max_packet_amount: Number(v.max_packet_amount) || 0 };
+        if (v.chain) body.chain = v.chain;
+        write('POST', '/peers', body, `peer with ${body.id}`);
+      });
+      $('route-form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const v = formValues(e.target);
+        const base = Number(v.base) || 0;
+        const perKib = v.per_kib === '' ? 0 : Number(v.per_kib) || 0;
+        // A flat price is spelled as a bare integer, a sloped one as an
+        // object — the operator's own spelling, exactly as the config file.
+        const price = perKib > 0 ? { base, per_kib: perKib } : base;
+        write('POST', '/routes/peers', { prefix: v.prefix.trim(), peer_id: v.peer_id.trim(), price }, `route ${v.prefix.trim()} → ${v.peer_id}`);
+      });
+      $('lease-form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const v = formValues(e.target);
+        write('POST', '/routes/leased', { prefix: v.prefix.trim(), peer_id: v.peer_id.trim(), ttl_seconds: Number(v.ttl_seconds) }, `lease ${v.prefix.trim()} → ${v.peer_id}`);
+      });
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) clearInterval(state.timer);
+        else if (state.token) schedule();
+      });
+
+      refreshKeyStatus();
+      schedule();
+    </script>
+  </body>
+</html>

@@ -57,110 +57,49 @@ state_dir = "/app/state"
 [signer]
 key_file = "/app/data/signer.key"
 
-# ── Announce (issue #843, repo half of #815) ────────────────────────────────
-# This box's own kind:10032 publisher, so `g.toon.relay` is discoverable
-# under THIS node's identity -- the same `[signer]` key that answers `GET
-# /ilp/identity` and opens every gift wrap this node terminates (ADR 0018).
-# Mirrors the store's own publisher (issue #833,
-# infra/linode-store/connector-rust.toml's [announce] section), which fixed
-# the identical defect for `g.toon.ario`: a stock client that reads an
-# announce published under a FORWARDER's identity seals its gift wrap to a
-# key the TERMINATING node does not hold, pays at the client edge, and is
-# refused `F01 gift wrap could not be opened` -- after the money is spent.
+# ── The facts this node cannot introspect (ADR 0050, issue #1080) ────────
+# `[node]` was `[announce]` until ADR 0046 removed the kind:10032 announce
+# outright (issue #1074). Two of its fields already fed the packet path -- the
+# x402 greeting carries them so a client with a stale genesis peer seed can
+# bootstrap (issue #807) -- and ADR 0050 re-homed them, with the public HTTP
+# endpoint beside them, into a section named for what they ARE rather than for
+# a verb this connector no longer has.
 #
-# `identity_key_file` (issue #870, toon-meta#310's apex-retirement spec)
-# CARRIES OVER the retired apex's announce identity, reversing the reasoning
-# this comment used to give for leaving the field absent: the genesis peer
-# seed baked into published `@toon-protocol/core` pins the apex announcer
-# sidecar's pubkey (`30fdd01d…` -- the key that sidecar read via
-# `ANNOUNCER_IDENTITY_SECRET_KEY_FILE`, whose in-container path
-# `/app/data/announce.key` was bind-mounted from the apex host's
-# `/root/keys/announce.key` -- that box, and the compose file that mounted
-# it, are gone as of issue #872), not this box's `[signer]`. Now that the
-# apex is retired, this box is the fleet's public front, so it must sign
-# `g.toon.relay`'s announce under that SAME pubkey --
-# docs/operators/announcing-a-node.md's "carry over a durable Nostr
-# identity" case exactly, and the reason every already-deployed client can
-# repair itself without an update: it already trusts this author, and only
-# needs to learn the new endpoints.
+# Three fields, and they are here for one reason: no process can learn them
+# about itself. This container sees `0.0.0.0:4000` and a private docker
+# network, never `https://proxy.relay.devnet.toonprotocol.dev/ilp`. Everything
+# else this node says about itself is DERIVED -- prices from `[[routes]]`
+# below, settlement facts from the `[settlement.*]` backends that verified
+# them against a chain at startup, the edge identity from `[signer]`, and
+# `requiredTransport` from the transport policy `g.toon.relay` is pinned to --
+# and is served, free and unauthenticated, by `GET /ilp`.
 #
-# `/app/data/announce.key` is a box-local file this line names but does not
-# supply -- like every other key_file in this section, real key material is
-# never committed (`infra/linode-relay/*.key` in .gitignore). It must hold
-# the EXACT bytes of the retired apex's `/root/keys/announce.key`, extracted
-# and copied verbatim before the apex was destroyed (toon-meta#310 Wave B,
-# issue #311): the Rust reader accepts either 64-hex or 32 raw bytes, so no
-# reformatting is needed. Until that copy lands, this box has no file at
-# that path and refuses to boot (`AnnounceIdentityKeyFileNotFound`), which
-# is why the compose overlays that mount it (docker-compose.relay.rust.yml,
-# docker-compose.relay.announce.yml) are part of this same change: the
-# mount and the config line must land together or neither does anything.
-# The key itself is set below, inside the `[announce]` table proper -- a
-# bare `key = value` up here, under the `[signer]` header this comment
-# block sits below, would be read as a `[signer]` key instead and refused.
+# That last one is why ADR 0050 exists. This box pins `g.toon.relay` to
+# `transport = "btp"` (see `[[routes]]` below), its client edge has refused
+# an HTTP paid write on that route since issue #701, and NOT ONE announce in
+# this fleet's corpus ever carried the key that says so -- verified live
+# 2026-08-14. toon-client's guard read a key that was not there, fell through
+# to HTTP, and every relay publish was refused. Two descriptions of one node
+# is what made that possible; there is one now, derived from the route table
+# this file already writes, so it cannot fall behind again.
 #
-# Unlike the store, `relay_url` IS set here: this box fronts the relay app
-# (docker-compose.relay.yml's `relay` service, port 7100 behind this box's
-# own nginx) and genuinely serves free reads, so the announce says so.
-# `relay-ws.devnet.toonprotocol.dev` is this box's OWN nginx's name for that
-# service (./nginx/conf.d/node.conf) -- the same public name the apex's
-# announcer sidecar used to advertise (`ANNOUNCER_RELAY_PUBLIC_URL`) before
-# the DNS move (#815 constraint 4, #820/#821) repointed it here and the apex
-# was destroyed (issue #872).
-#
-# `publish_to`, `publish_btp_url` and `pay_channel` are all deliberately
-# ABSENT -- and unlike the store's omissions above, this is not "not yet
-# provisioned", it is "does not apply". Those three fields describe PAYING
-# THROUGH somebody else's client edge to reach a prefix this node does not
-# terminate (the store's shape: it announces `g.toon.ario` by paying the
-# relay box). This node terminates `g.toon.relay` itself (see `[[routes]]`
-# below), so its scheduled announce (docker-compose.relay.announce.yml)
-# runs `--via-own-routing --to g.toon.relay` against its OWN client edge
-# instead of the default pay-the-URL path -- the packet is handed straight
-# to this node's own `handle_prepare` rather than to `pay_the_through_url`
-# (`crates/connector-cli/src/announce.rs`'s `via_own_routing` branch), so it
-# never leaves this process: there is nobody to pay and no through-address to
-# name. Per docs/operators/announcing-a-node.md's "Routing it yourself",
-# `--via-own-routing` replaces the funded-channel requirement with "a
-# [[routes]] entry reaching the destination", which this file already has.
-#
-# `notice_id`/`notice_severity`/`notice_summary`/`notice_url` (issue #948,
-# re-homed from toon-meta#335) put the two-box-cutover operator notice on the
-# wire via the schema'd `notice` field (toon#183, issue #912) -- the
-# permanent mechanism, not toon-meta#335's retired content ride-along. The
-# durable text lives at `notice_url`, in toon-meta's own
-# `docs/operators/2026-08-13-two-box-cutover.md`; this box's announce carries
-# only the pointer, per that doc's own convention
-# (`docs/operators/README.md` in toon-meta). `severity` is
-# `action-required`: a client that only ever uploads to the store has
-# something it must do once the cutover runs (get an updated client), so
-# doing nothing is not always safe.
-#
-# `route_publish`/`route_store` are PINNED, not left to derive -- issue #845,
-# the same class of defect #841 pinned shut on the TypeScript sidecar's
-# ANNOUNCER_ROUTE_STORE. `derive_route_hints` (crates/connector-config/src/
-# announce.rs) first looks for a `.store`/`.ario` address in `addresses`
-# above; this box's list is just `["g.toon.relay"]`, so it falls through to
-# suffix surgery -- strip `.relay` off the one address it has and append
-# `.store` -- inventing `g.toon.store`, a prefix NOTHING on this fleet
-# routes (the store prefix is `g.toon.ario`). A client that takes that
-# unpinned `routes.store` hint at face value has nowhere to upload. Pinning
-# both here the way the store box's own address already does implicitly
-# (`g.toon.ario` matches the `.ario` branch directly, so it never reaches
-# the fallback) is load-bearing: do not remove either key without also
-# removing the reason `derive_route_hints` would misfire without it.
-[announce]
-addresses         = ["g.toon.relay"]
-http_endpoint     = "https://proxy.relay.devnet.toonprotocol.dev/ilp"
-btp_endpoint      = "wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp"
-relay_url         = "wss://relay-ws.devnet.toonprotocol.dev"
-identity_key_file = "/app/data/announce.key"
-route_publish     = "g.toon.relay"
-route_store       = "g.toon.ario"
-notice_id         = "2026-08-13-two-box-cutover"
-notice_severity   = "action-required"
-notice_summary    = "The devnet apex is being retired; reads and relay publishing repair themselves, but store uploads need a client released after the cutover."
-notice_url        = "https://github.com/toon-protocol/toon-meta/blob/main/docs/operators/2026-08-13-two-box-cutover.md"
+# What used to be here and is now refused BY NAME at boot (ADR 0009):
+# `relay_url` -- this box does front the relay app for free reads, but that is
+# an assertion about software BEHIND the connector, which a self-description
+# never carries (ND-08); the operator advertises it elsewhere.
+# `identity_key_file` carried the retired apex announcer's Nostr pubkey
+# forward so a pinned genesis seed would not go stale (issue #870); with no
+# event to sign there is no signature to keep stable, and the seed's staleness
+# is now a downstream-consumer question ADR 0046 records as a separate
+# operational task. `route_publish`/`route_store` were pinned here (issue
+# #845) to stop a suffix heuristic inventing `g.toon.store`; the heuristic and
+# the fields are both gone. `publish_to`, `publish_btp_url`, `pay_channel`,
+# `ttl_secs`, `asset_code`, `asset_scale`, `solana_chain_id` and the four
+# `notice_*` all rode the announce and went with it.
+[node]
+addresses     = ["g.toon.relay"]
+http_endpoint = "https://proxy.relay.devnet.toonprotocol.dev/ilp"
+btp_endpoint  = "wss://proxy.relay.devnet.toonprotocol.dev/ilp/btp"
 
 # ── Routes ─────────────────────────────────────────────────────────────────
 
@@ -195,7 +134,7 @@ transport = "btp"
 
 [settlement.evm]
 rpc_url = "https://base-sepolia-rpc.publicnode.com"
-contract_address = "0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1"
+contract_address = "0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5"
 token_address = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
 decimals = 6
 
@@ -205,7 +144,7 @@ key_file = "/app/data/settlement.key"
 [settlement.solana]
 rpc_url = "https://api.devnet.solana.com"
 program_id = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
-token_address = "xyc5J8MgKFiEN13PnfftdXxUzYH34FEvw1LCrFwN7in"
+token_address = "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU"
 decimals = 6
 
 [settlement.solana.key]

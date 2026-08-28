@@ -1,5 +1,7 @@
 # Read-mostly state is a swapped snapshot; the packet path never locks
 
+**Status:** Accepted. Live: `ArcSwap`-held leased routes in `connector-runtime`.
+
 **Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
 
 Routes, peers and configuration are read on every packet and written rarely, if ever. That
@@ -88,3 +90,53 @@ path. It does not apply to:
 
 Reaching for `ArcSwap` on either of those would not remove a cost — it would just be a different
 name for the same lock, protecting data that was never the problem this rule exists to solve.
+
+## Update (issue #1069) — the rule is "never serialises", and the title undersells it
+
+This record's title says _"the packet path never locks."_ Taken literally that is both too strong and
+too weak, and issue #1069 found live code on each side of it.
+
+**The rule is: the packet path never takes a lock that serialises it on data that is barely written.**
+
+A **write** lock on the per-packet path is the defect this record exists to prevent — it is the shape
+of the #452 bug, and every packet queues behind every other. A `Mutex` is the same defect, because it
+serialises reads as well. A **read** lock on genuinely read-mostly data is not: concurrent packets
+proceed in parallel and contend only with a rare write.
+
+### What that condemns, and what it clears
+
+**Defects.** Both are live as of 2026-08-20 and neither is covered by the exemptions below:
+
+- `Connector::recognized_channels` (`RwLock<HashSet<String>>`) — `recognize_channel` takes `.write()`
+  **unconditionally**, with its `contains` check _inside_ the lock, on every admitted paid request on
+  both carriages (`connector-client-edge/src/lib.rs`, `btp.rs`). Written once per channel and
+  re-confirmed forever after. **Fix: check under a read lock and upgrade only on a miss.** `ArcSwap` is
+  not indicated — the set never needs a consistent snapshot across a decision, and after warmup
+  essentially every call is a read hit.
+- `SessionRegistry::bindings` (`Mutex<HashMap<String, SessionBinding>>`) — read per packet on the
+  session arm, for a map that changes only when a client binds or disconnects. A `Mutex` makes
+  concurrent reads queue. It does evict a lease past its backstop TTL, so it is not a pure read; that
+  is rare enough to belong under a read lock with an upgrade, not to justify serialising every packet.
+
+**Not defects, and deliberately not swept up.** `ClientChannelRegistry::resolved` /
+`resolved_solana` / `last_failure` (`RwLock<HashMap<..>>`) are read-locked memos on the packet path.
+Their writes are genuinely rare — one per previously-unseen channel — and an `ArcSwap` there would
+clone the whole map on every newly-seen channel, trading a cheap read for an expensive write. A read
+lock is the right tool.
+
+**The two this record already exempted remain exempt, and for the stated reason:**
+`Connector::probe_rate_limiter`'s window map and `lookup_budget`'s `BudgetState` are both mutated on
+every access, so there is no read-mostly shape to snapshot.
+
+### Why this is a code fix and not a records fix
+
+The map's scope-based default (#1049) says a **connector architecture** record loses to the binary and
+gets amended. That default is overridden here: `recognized_channels` is a genuine instance of the
+exact bug this record was written against, and ratifying it would retire the record's usefulness while
+leaving the defect in place. The record is right; the code is the outlier.
+
+### F-17, folded in
+
+This record names `known_channels` with a type the tree no longer has. The drift is real and the
+**placement is correct** — it is read and written by settlement operations, not by the packet path, so
+it is a cold-path lock either way. A citation fix, not a behavioural one.

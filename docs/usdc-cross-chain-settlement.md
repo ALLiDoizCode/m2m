@@ -1,10 +1,16 @@
 # USDC settlement across all chains (design)
 
 > Status: design + decomposition (historical). Implementation tracked in the linked tickets.
+> ⚠️ **Note (2026-08-27):** every Mina section below describes code that no longer
+> exists. [ADR 0065](adr/0065-mina-leaves-the-repository.md) removed Mina from this
+> repository — the zkApp, the token, the browser faucet dApp and the faucet's Mina leg
+> are all deleted, and `endpoints.json` no longer carries a `mina` block. Those sections
+> are kept as the record of a design that shipped and was then retired; read them as
+> history, not as a description of the tree.
 > ⚠️ **Note (2026-07-19):** the self-hosted devnet chains referenced below
 > (anvil `0x5FbDB2…`, self-hosted Solana validator mint `H8HSreUF…`) are
 > **deleted** — the devnet now settles on public chains (Base Sepolia, public
-> Solana devnet, public Mina devnet); see
+> Solana devnet); see
 > [`infra/linode/endpoints.json`](../infra/linode/endpoints.json) for live
 > values. The addresses below remain valid for the **local** docker-compose
 > chains only.
@@ -128,8 +134,9 @@ compile + per-tx proving time; keep Mina settlement **nightly, not per-PR**
 ## Devnet wiring (after Mina lands)
 
 - Deploy the USDC `FungibleToken` to public Mina devnet; pin `mina.tokenAddress` /
-  `mina.tokenId` in `infra/linode/endpoints.json` + the linode `devnet.sh`
-  generator (currently `mina.tokenId: null`).
+  `mina.tokenId` in `infra/linode/endpoints.json` (currently `mina.tokenId: null`).
+  That file is hand-maintained now — the chain box's `devnet.sh endpoints`
+  generator was deleted with the box's provisioning.
 - Add a Mina USDC funding path analogous to `fund-solana.sh` / the EVM faucet.
   (DONE, updated for the rate-limited redeploy: the token's mint is
   permissionless-but-recipient-signed, so funding is either the

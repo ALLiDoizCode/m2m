@@ -8,11 +8,35 @@
 #   make solana-up     Start Solana test validator
 #   make solana-down   Stop Solana services
 #   make solana-logs   Follow Solana logs
-#   make mina-up       Start Mina lightnet
-#   make mina-down     Stop Mina services
-#   make mina-logs     Follow Mina logs
-#   make infra-up      Start all chains (EVM + Solana + Mina)
-#   make infra-down    Stop all chains (EVM + Solana + Mina; preserves volumes)
+#   make infra-up      Start every chain the connector settles on (EVM + Solana)
+#   make infra-down    Stop them (preserves volumes)
+
+# ── One project name, wherever this file is run from ──
+# Compose defaults the project name to the basename of the directory holding
+# this file, and prefixes every container, network and named volume with it.
+# That made the same repository produce different, mutually invisible stacks:
+# `connector-anvil-1` from the main checkout, `agent-a00677d430ef-anvil-1` from
+# a git worktree of it. `make local-down` only removes the project it is
+# standing in, so a stack started from a worktree survived a `make local-down`
+# in the main checkout while still holding 8545/8899 — and, worse, its named
+# state volumes survived with it. `local/README.md` is explicit that those must
+# NOT outlive a run: a claim journal left behind satisfies the next run's money
+# assertion without that run having paid anything. This machine carried a
+# `connector_solo-state` volume for two days that way (issue #1122).
+#
+# Naming the project here rather than exporting COMPOSE_PROJECT_NAME from the
+# Makefile is deliberate: `local/README.md` and the headers under `local/`
+# document a hand-run `docker compose -f docker-compose.yml -f local/<t>/compose.yml`,
+# and that path has to land in the same project as `make local-up` or the two
+# would go back to being invisible to each other.
+#
+# One name means one stack per machine, which is what the machine can actually
+# hold: every topology publishes 8545, 8899 and the connectors' client edges,
+# so a second stack could never have run anyway — it would have failed on a
+# port bind, half-started, and been unreachable from the other checkout's
+# `make local-down`. `local/stack-guard.sh` turns that into a refusal that
+# names the directory and topology already holding the stack.
+name: connector
 
 # ── Shared json-file log rotation for the long-running dev-chain services ──
 # Incident 2026-06-26: on the self-hosted devnet box the solana-validator wrote
@@ -20,8 +44,8 @@
 # of an oversized rocksdb ledger, which helped fill the box disk to 100%. A full
 # disk silently FREEZES Solana block production (slot stops advancing) while
 # /health still returns "ok", so faucet/settlement writes hang then 500
-# ("Transaction was not confirmed in 30s") with no obvious cause. anvil, faucet
-# and mina-lightnet are similarly chatty. Cap every such service's container log
+# ("Transaction was not confirmed in 30s") with no obvious cause. anvil and the
+# faucet are similarly chatty. Cap every such service's container log
 # at 30 MB total (10 MB x 3 rotated files) so logs can never fill /var/lib/docker.
 # (The solana ledger itself is bounded separately by --limit-ledger-size in
 # infra/solana/entrypoint.sh — the two together are the durable disk-full fix.)
@@ -37,11 +61,44 @@ services:
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   anvil:
     image: ghcr.io/foundry-rs/foundry:latest
-    # Run as root: the foundry image's default non-root user cannot write
-    # forge's out/cache/broadcast dirs into the bind-mounted ./packages/contracts
-    # when the host dir is owned by a different UID (e.g. the CI runner) —
-    # `forge script` then fails with `"/contracts/out": Permission denied`. See #104.
-    user: root
+    # Run as the user who INVOKED make, not as root and not as the image's own
+    # `foundry` user. This service bind-mounts ./packages/contracts read-write
+    # and `forge` writes four things into it — out/, cache/, broadcast/ and, on
+    # a checkout whose submodules are not initialized, lib/ — so whoever this
+    # container is decides who owns the developer's source tree afterwards.
+    #
+    # `user: root` was the previous answer, for the reason #104 records: the
+    # image's baked-in uid 1000 cannot write the mount when the host dir
+    # belongs to a different uid (a CI runner is 1001), and `forge script` then
+    # dies with `"/contracts/out": Permission denied`. Running as the OWNER of
+    # the mount solves that without handing root a writable path into the tree,
+    # and root cost two distinct failures that both looked like something else:
+    #
+    #   * The artefacts came back root-owned, so the next `cargo test` could
+    #     not rebuild them — `abi_provenance` runs a real `forge build` of
+    #     packages/contracts — and the developer could not even `rm -rf` the
+    #     directory to recover without sudo. Running the local environment
+    #     broke the unit-test gate, with nothing connecting the two.
+    #   * On a git worktree, or any checkout where `git submodule update
+    #     --init` has not run, lib/forge-std and lib/openzeppelin-contracts
+    #     exist and are EMPTY, owned by the developer. `forge install` clones
+    #     into them and git refuses as root — "detected dubious ownership in
+    #     repository at '/contracts/lib/forge-std'" — so the self-heal below
+    #     never completed, the deploy compiled against absent OpenZeppelin
+    #     sources, and every topology under local/ failed bring-up with
+    #     `container ... is unhealthy` and no other clue.
+    #
+    # HOST_UID/HOST_GID are exported by the Makefile (`id -u` / `id -g`), so
+    # every `make anvil-up` / `make infra-up` / `make local-*` gets this right.
+    # A hand-run `docker compose up` falls back to 1000:1000, the image's own
+    # user and the common single-developer case.
+    user: '${HOST_UID:-1000}:${HOST_GID:-1000}'
+    environment:
+      # An arbitrary uid has no /etc/passwd entry in this image, so $HOME would
+      # resolve to `/`, which is not writable. forge needs a writable home: it
+      # downloads the solc pinned by foundry.toml into ~/.svm on every start
+      # (the image ships none) and git wants somewhere for its config.
+      HOME: /tmp
     profiles:
       - evm
       - app # issue #221 — reused by the app profile
@@ -64,22 +121,88 @@ services:
 
         # DeployLocal.s.sol imports forge-std + openzeppelin-contracts from
         # lib/ (git submodules). In CI the checkout fetches them via
-        # `submodules: recursive`; for local dev / git worktrees where the
-        # submodules may not be initialized, fall back to `forge install` so the
-        # deploy is self-healing and the stack never comes up without the USDC
-        # token + TokenNetworkRegistry. See issue #104.
-        if [ ! -f lib/forge-std/src/Script.sol ] || [ ! -f lib/openzeppelin-contracts/contracts/access/Ownable.sol ]; then
-          echo "Foundry libs missing — running 'forge install'..."
-          forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts --no-git || forge install
-        fi
+        # `submodules: recursive`, and every `make anvil-up` / `make infra-up` /
+        # `make local-up` runs tools/contracts/init-libs.sh on the HOST first,
+        # which is the same thing done from the checkout that owns the pin. This
+        # is the LAST RESORT for the one caller neither covers: a hand-run
+        # `docker compose up` on a clone made without `--recursive`, which the
+        # headers under local/ document. Without it the stack comes up with no
+        # USDC token and no TokenNetworkRegistry. See issue #104.
+        #
+        # PINNED TO A REVISION, and that is the whole of issue #1121. `forge
+        # install <repo>` with no ref takes that repository's default branch:
+        # this installed OpenZeppelin 5.7.0 into a tree whose submodule names
+        # fcbae539 (5.5.0), and the next host-side `forge build` said so —
+        # `Warning: Dependency 'lib/openzeppelin-contracts' revision mismatch`,
+        # from inside abi_provenance's own passing test output. Two consumers
+        # then compile against a version nobody chose: this deploy, and
+        # `crates/connector-settlement-evm/tests/abi_provenance.rs`, which
+        # diffs the committed ABI against a fresh build. An upstream release
+        # that touched anything the ABI depends on would turn that gate red on
+        # a machine that changed nothing, days after the container ran, and it
+        # would read as "someone edited a contract".
+        #
+        # This installs only what is MISSING, so a tree an OLDER unpinned run
+        # already polluted is repaired by tools/contracts/init-libs.sh rather
+        # than here: it can tell an unregistered lib/ from a submodule, and this
+        # sentinel check cannot.
+        #
+        # The revisions below are `packages/contracts/foundry.lock`'s, which are
+        # the committed submodule shas.
+        # `local_topologies_load.rs::the_contract_libs_this_chain_installs_are_pinned_to_the_lockfile`
+        # holds these three copies to one figure, so the pin cannot rot in
+        # silence the way an unpinned install did.
+        #
+        # ONE LIB AT A TIME, and each one repaired rather than topped up. A
+        # single `forge install a b` fails as a unit, so a half-installed lib/
+        # took the other lib down with it; and `forge install` into a directory
+        # that already holds a partial clone errors instead of fixing it, which
+        # is exactly the state a previously-failed run leaves behind. Removing
+        # the directory first is what makes this idempotent on a broken tree as
+        # well as on a clean one — and it is only possible at all because this
+        # container runs as the owner of the mount (see `user:` above).
+        install_lib() {
+          if [ -f "$$3" ]; then
+            return 0
+          fi
+          echo "Foundry lib $$1 is missing — installing $$2..."
+          rm -rf "$$1"
+          forge install "$$2" --no-git
+        }
+        install_lib lib/forge-std \
+          foundry-rs/forge-std@rev=1801b0541f4fda118a10798fd3486bb7051c5dd6 \
+          lib/forge-std/src/Script.sol
+        install_lib lib/openzeppelin-contracts \
+          OpenZeppelin/openzeppelin-contracts@rev=fcbae5394ae8ad52d8e580a3477db99814b9d565 \
+          lib/openzeppelin-contracts/contracts/access/Ownable.sol
 
         # Deploy must succeed: the faucet and the EVM settlement tests depend on
         # the USDC token + TokenNetworkRegistry existing at deterministic
         # addresses. A silent failure here (the old `|| echo non-fatal`) is what
         # left the faucet reporting tokenReady:true with no token on-chain (#104).
-        forge script script/DeployLocal.s.sol:DeployLocalScript --rpc-url http://localhost:8545 --broadcast --skip-simulation
+        #
+        # The success line is CONDITIONAL, which it was not. `sh -c` has no
+        # `set -e` here — it cannot have one, the whole point of the tail of
+        # this script is to keep anvil in the foreground — so a failed deploy
+        # printed "Anvil ready with contracts deployed!" and then served an
+        # empty chain forever. The healthcheck below still caught it, but what
+        # a developer read in the log said the opposite of what had happened.
+        if forge script script/DeployLocal.s.sol:DeployLocalScript \
+             --rpc-url http://localhost:8545 --broadcast --skip-simulation; then
+          echo "Anvil ready with contracts deployed!"
+        else
+          echo "============================================================"
+          echo "CONTRACT DEPLOY FAILED. This anvil is serving an EMPTY chain:"
+          echo "there is no MockERC20 USDC and no TokenNetworkRegistry on it,"
+          echo "so this container will never pass its healthcheck and nothing"
+          echo "that settles can start against it. The forge output above is"
+          echo "the reason; the container stays up so it can be read."
+          echo "============================================================"
+        fi
 
-        echo "Anvil ready with contracts deployed!"
+        # Anvil stays in the foreground either way. Exiting here would let
+        # `restart: unless-stopped` crash-loop the container, which replaces a
+        # readable log with a scrolling one.
         wait $$ANVIL_PID
     volumes:
       - ./packages/contracts:/contracts
@@ -87,30 +210,44 @@ services:
       - '8545:8545'
     restart: unless-stopped
     logging: *default-logging
+    # Healthy means THE SETTLEMENT TOPOLOGY IS DEPLOYED, not merely that the
+    # RPC answers. `cast client` succeeds the moment anvil binds, which is
+    # seconds before `forge script` finishes deploying — and everything
+    # downstream that waits on this health gate then races the deploy:
+    #
+    #   * `EvmSettlementBackend::connect` resolves getTokenNetwork() through
+    #     the registry and refuses to start when it comes back empty, so the
+    #     connector dies with "failed to decode empty bytes" (observed
+    #     exactly this, via local/'s solo topology).
+    #   * a `cast send` of `mint(...)` to an address with NO CODE does not
+    #     revert — it is an ordinary call to a plain account — so funding
+    #     scripts report success having minted nothing.
+    #   * issue #104's original symptom was this same class: the faucet
+    #     reporting tokenReady:true with no token on-chain.
+    #
+    # `cast code` on the TokenNetworkRegistry returns `0x` until the deploy
+    # lands, and its bytecode after. The address is the deterministic output
+    # of DeployLocal.s.sol run by account 0 at a fixed nonce, which is the
+    # same reason a committed config can name it.
     healthcheck:
       test:
         [
           'CMD-SHELL',
-          "cast client --rpc-url http://localhost:8545 2>&1 | grep -q 'anvil' || exit 1",
+          "test \"$$(cast code 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 --rpc-url http://localhost:8545 2>/dev/null)\" != '0x' || exit 1",
         ]
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 3
+      retries: 30
       start_period: 15s
 
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   # Token Faucet - Provides ETH and USDC tokens for testing
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   faucet:
-    # Build context is the repo ROOT (not packages/faucet): the image builds the
-    # mina-zkapp ESM bundle for the Mina USDC drip path (treasury self-mint +
-    # transfer), so the Dockerfile COPYs packages/mina-zkapp + packages/faucet.
-    # See packages/faucet/Dockerfile.
     build:
-      # Build context is the repo ROOT (not packages/faucet): the multi-stage
-      # Dockerfile compiles the mina-zkapp ESM bundle from packages/mina-zkapp/
-      # so the faucet's USDC admin-mint shares ONE o1js instance. See the
-      # Dockerfile header and infra/linode-faucet/docker-compose.faucet.yml.
+      # Build context is the repo ROOT (not packages/faucet) so the Dockerfile
+      # can COPY packages/faucet/ by its repo-relative path, matching
+      # infra/linode-faucet/docker-compose.faucet.yml. See packages/faucet/Dockerfile.
       context: .
       dockerfile: packages/faucet/Dockerfile
     # Runs under BOTH evm and solana so a single host can drip every chain.
@@ -138,46 +275,12 @@ services:
       TOKEN_AMOUNT: '10000'
 
       # ── Solana (only active under the `solana` profile) ──
-      # Treasury authority keypair mounted below; deterministic devnet USDC mint
-      # from infra/solana/create-usdc-mint.sh. Drips SOL via airdrop + USDC from
-      # the treasury. Defaults: 2 SOL + 1000 USDC per request.
+      # Mint authority keypair mounted below; deterministic local-validator USDC
+      # mint from infra/solana/create-usdc-mint.sh, whose authority IS that
+      # keypair. USDC only (no SOL): 1000 USDC per request.
       SOLANA_RPC_URL: http://solana-validator:8899
       SOLANA_USDC_MINT: H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H
       SOLANA_FAUCET_KEYPAIR: /keys/usdc-authority.json
-
-      # ── Mina (native-MINA treasury drip) — RETIRED, this var is inert ──
-      # The faucet is USDC only since connector#898 (toon-meta#310 §4.6): there
-      # is no `POST /api/mina/request` in the service any more, so nothing reads
-      # MINA_FAUCET_KEY. It is left declared (never hardcoded — a SECRET passed
-      # through from the host environment) only so redeploys of a box whose .env
-      # still carries it do not error; drop it with the rest of the apex's faucet
-      # config in connector#872. MINA_GRAPHQL_URL below IS still read — the USDC
-      # leg reads and submits through it.
-      MINA_FAUCET_KEY: ${MINA_FAUCET_KEY:-}
-      MINA_GRAPHQL_URL: ${MINA_GRAPHQL_URL:-https://api.minascan.io/node/devnet/v1/graphql}
-      MINA_DRIP_AMOUNT: ${MINA_DRIP_AMOUNT:-5}
-
-      # ── Mina USDC drip: treasury self-mint + transfer (o1js zk-proving) ──
-      # The public-devnet USDC token is gated by RateLimitedUsdcAdmin: mints are
-      # permissionless but capped (1,000 USDC/address/~24h) and require the
-      # RECIPIENT's signature — so the faucet cannot mint to users. Instead, when
-      # MINA_USDC_TREASURY_KEY + MINA_USDC_TOKEN + MINA_USDC_ADMIN_CONTRACT are
-      # all set, /api/mina/usdc-request drips USDC by plain TRANSFER from the
-      # treasury, which lazily SELF-MINTS its own daily allowance when below
-      # MINA_USDC_LOW_WATER (≤1,000 USDC/day ceiling).
-      # MINA_USDC_TREASURY_KEY is the FUNDED treasury base58 PRIVATE key (a
-      # SECRET — pass through from the host env, never hardcoded; the legacy
-      # MINA_USDC_ADMIN_KEY name is still accepted as a fallback). When unset,
-      # the route 503s — there is no native-MINA leg to fall back to any more.
-      # Reuses MINA_GRAPHQL_URL above.
-      MINA_USDC_TREASURY_KEY: ${MINA_USDC_TREASURY_KEY:-}
-      MINA_USDC_ADMIN_KEY: ${MINA_USDC_ADMIN_KEY:-} # legacy name (treasury fallback)
-      MINA_USDC_TOKEN: ${MINA_USDC_TOKEN:-}
-      MINA_USDC_ADMIN_CONTRACT: ${MINA_USDC_ADMIN_CONTRACT:-}
-      MINA_USDC_DRIP_AMOUNT: ${MINA_USDC_DRIP_AMOUNT:-50}
-      MINA_USDC_LOW_WATER: ${MINA_USDC_LOW_WATER:-500}
-      MINA_USDC_COOLDOWN_HOURS: ${MINA_USDC_COOLDOWN_HOURS:-24}
-      MINA_TX_FEE: ${MINA_TX_FEE:-}
 
     volumes:
       # Committed throwaway devnet treasury authority (mint authority + USDC
@@ -249,30 +352,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
-
-  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  # Mina Lightnet - Local Mina Network with Accounts Manager & Archive
-  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  # NOTE: Mina lightnet requires 4-8 GB RAM. Ensure Docker Desktop has
-  # sufficient memory allocated (at least 8 GB recommended).
-  mina-lightnet:
-    image: o1labs/mina-local-network:compatible-latest-lightnet
-    profiles:
-      - mina
-    ports:
-      - '3085:3085' # GraphQL
-      - '8181:8181' # Accounts manager
-      - '8282:8282' # Explorer
-      - '5433:5432' # Archive PostgreSQL (remapped to avoid conflicts with local Postgres on 5432)
-    deploy:
-      resources:
-        limits:
-          memory: 8g
-    restart: unless-stopped
-    logging: *default-logging
-    healthcheck:
-      test: ['CMD-SHELL', 'curl -sf http://localhost:8181/list-acquired-accounts || exit 1']
-      interval: 15s
-      timeout: 10s
-      retries: 10
-      start_period: 120s

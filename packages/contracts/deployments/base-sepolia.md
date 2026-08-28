@@ -71,7 +71,12 @@ is a placeholder.
 
 ---
 
-## ERC-2771 cutover deployment (2026-08-06) — CURRENT LIVE
+## ERC-2771 cutover deployment (2026-08-06) — SUPERSEDED 2026-08-28
+
+> **Superseded by the ADR 0059 cutover below.** This `TokenNetwork` still carries the global
+> `channelCounter` and has no `channelEpoch(address,address)`; it is untouched, and every channel
+> opened on it keeps settling and closing there. Nothing new is opened on it: the fleet's
+> `[settlement.evm] contract_address` moved to the new registry.
 
 Issue #695. Broadcast of `packages/contracts/script/DeployTestnetCutover.s.sol`; the runbook is
 `docs/evm-deployment.md`. `TokenNetwork` is not upgradeable, so meta-tx support (#694) shipped as a
@@ -107,3 +112,83 @@ Verified on-chain after broadcast:
 
 The live kind:10032 announce advertises the new `TokenNetwork` (`tokenNetworks["evm:84532"]`) as of
 2026-08-06T12:49:42Z.
+
+## ADR 0059 cutover deployment (2026-08-28) — CURRENT LIVE
+
+[ADR 0059](../../../docs/adr/0059-a-channel-is-derived-from-its-participants.md): a channel id is
+derived from its two participants and a per-pair epoch, never from a global counter, because a
+peering established from a URL (ADR 0058) has no channel id to be told and must compute one.
+`TokenNetwork` is not upgradeable, so this is the same shape as the 2026-08-06 cutover — a fresh
+forwarder + registry + `TokenNetwork` from `packages/contracts/script/DeployTestnetCutover.s.sol`,
+the **same** mock USDC reused. The runbook is `docs/evm-deployment.md`, "Second cutover".
+
+- **Network:** Base Sepolia (`chainId 84532`)
+- **RPC:** https://sepolia.base.org
+- **Deployed:** 2026-08-28 (2026-08-28T01:01:34Z)
+- **Deployer:** `0x0E1e13d0A87e99F66715441CdFadfCD273134ADc` — a dedicated key generated for this broadcast; it owns the registry
+- **Block:** 46055303
+- **Script:** `packages/contracts/script/DeployTestnetCutover.s.sol` (broadcast record:
+  `packages/contracts/broadcast/DeployTestnetCutover.s.sol/84532/`)
+- **Source:** `packages/contracts/src` at connector commit `c714551a` (`forge build`, solc 0.8.26,
+  optimizer 200 runs, via-IR — the committed `foundry.toml`)
+
+| Contract               | Address                                      | Deploy tx                                                            |
+| ---------------------- | -------------------------------------------- | -------------------------------------------------------------------- |
+| ERC2771Forwarder       | `0x350fCd266F95B1f5B84944E0C7e06C16B837FCAA` | `0x983988504363bfd84549bd3a2c2bcb7e49bad13e074d6448df29dbc5862884f1` |
+| TokenNetworkRegistry   | `0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5` | `0x26299c72e663a5c4f985d90330c0a431336e4ba11ef372c2ff67656ca0a3297e` |
+| TokenNetwork (USDC)    | `0xe9E05dfecfe165266C88d73e61D483612651952a` | `0xbd8a0583189f33347b2cd594b86119a7309d0f5b0ea91df393cfd921605a11d0` |
+| Mock USDC (6 decimals) | `0x49beE1Bca5d15Fb0963117923403F9498119a9Ce` | unchanged — reused from the 2026-07-18 deployment                    |
+
+`registry.setTrustedForwarder(forwarder)` was tx `0x2017c45b0dfa69209a54dda1c2851c2e658322c9566a57add1f53ec9e5161273`. All four
+transactions landed in block 46055303; 4,801,808 gas in total.
+
+Verified on-chain after broadcast (`cast call` against `https://sepolia.base.org`):
+
+- `registry.getTokenNetwork(0x49beE1…) == 0xe9E05dfe…`
+- `registry.owner() == 0x0E1e13d0…`
+- `registry.trustedForwarder() == 0x350fCd26…`
+- `tokenNetwork.isTrustedForwarder(0x350fCd26…) == true`
+- `tokenNetwork.token() == 0x49beE1Bca5…` (same USDC)
+- `tokenNetwork.channelEpoch(a, b)` answers `0` — the function exists (ADR 0059)
+- `tokenNetwork.channelCounter()` **reverts** — the global counter is gone
+- The superseded `0xa79C3b1d…` still has no `channelEpoch` (reverts) and the old registry
+  `0x8263BdD4…` still resolves it — untouched; channels opened there keep settling there.
+- Runtime bytecode of both new contracts matches the local `forge build` byte-for-byte
+  (`crates/connector-settlement-evm/contracts/BYTECODE-PROVENANCE.md`, 2026-08-28 section).
+
+## RollingSwapChannel deployment (2026-08-15)
+
+The rolling-swap leg-B settlement contract (connector#973, epic toon-meta#394), deployed via
+`funded-ops.yml`'s `deploy-rolling-swap-channel` verb (dry run 31885868413, apply run 31885961037).
+See `docs/rolling-swap-channel-deployment.md` for the full runbook and verification detail.
+
+- **Network:** Base Sepolia (`chainId 84532`, chain key `evm:84532`)
+- **RPC:** https://base-sepolia-rpc.publicnode.com
+- **Deployer:** `0x2B00c21af9926F9222bC29B87f7e03004AbAd43e` (NIP-06 account index 0)
+- **Block:** 45515248
+- **Script:** `packages/contracts/script/DeployRollingSwapChannel.s.sol` (forge v1.7.1)
+
+| Contract           | Address                                      | Deploy tx                                                            |
+| ------------------ | -------------------------------------------- | -------------------------------------------------------------------- |
+| RollingSwapChannel | `0xd329aBf86ceae23F904641F992ca90e3721FeF83` | `0x23bbebaf8bea0976861eb51883db3322c5cfafdd69fee82207e83dcb8b06c3a2` |
+
+Constructor args: `token = 0x49beE1Bca5d15Fb0963117923403F9498119a9Ce` (the same mock USDC every
+other devnet contract settles), `challengePeriod = 86400s` (the contract's own floor).
+
+Verified on-chain after broadcast (by the apply run itself, never from the receipt alone):
+
+- `token() == 0x49beE1Bca5…` and `challengePeriod() == 86400`
+- `domainSeparator()` == the independently computed EIP-712 domain hash for the domain below
+- `claimDigest(...)` for the golden-vector sample in `docs/rolling-swap-v2-digest-spec.md` == the
+  same struct hashed off-chain via `TypedDataEncoder` for this deployment's real
+  `(chainId, address)` pair
+- `updateBalance(...)` against a never-opened channel reverts `InvalidChannelState()` — the
+  entrypoint is live contract code
+
+```
+EIP712Domain(name="RollingSwapChannel", version="2", chainId=84532,
+             verifyingContract=0xd329aBf86ceae23F904641F992ca90e3721FeF83)
+```
+
+No live announce advertises this address yet: advertising it under `tokenNetworks["evm:84532"]` is
+the swap node's job (swap#102), blocked on the signer migration (swap#101), not on this deploy.

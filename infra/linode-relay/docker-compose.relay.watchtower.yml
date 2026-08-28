@@ -1,0 +1,85 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# TOON devnet — label-scoped Watchtower, RELAY box (issue #988, connector-
+# infra half of toon-meta#403's fleet-wide `:release` + Watchtower epic)
+# ═══════════════════════════════════════════════════════════════════════════
+# This is committed infra only. Bringing it up on the live box is a HUMAN
+# step (`docker compose ... up -d watchtower`, or dispatch fleet-ops.yml with
+# `box=relay operation=deploy service=watchtower apply=true`) — nothing here
+# makes a live-box change by itself.
+#
+# ── Proven live (toon-meta#402/#403) ────────────────────────────────────────
+# This exact shape is already running on the relay box, as drift: Watchtower
+# 1.7.1, `--label-enable`, auto-recreated `swap-node` on a new
+# `ghcr.io/toon-protocol/swap:release` digest — `Scanned=1 Updated=1`, and
+# nothing else on the box (connector-rust, relay, nginx) was touched, because
+# none of them carry the enable label. This file makes that reproducible.
+#
+# ── Label-scoped, not fleet-wide ────────────────────────────────────────────
+# `--label-enable` makes Watchtower ignore every container UNLESS it carries
+# `com.centurylinklabs.watchtower.enable=true`. On this shared box that is
+# load-bearing in BOTH directions.
+#
+# When this file was first committed (issue #988) `swap-node` was the only
+# labelled service and the other three were named here as things Watchtower
+# must never touch. That was already untrue of the live box, and issue #992's
+# reconciliation is what makes the repo say so: `relay`
+# (./docker-compose.relay.yml), `connector-rust`
+# (./docker-compose.relay.rust.yml) and `announce`
+# (./docker-compose.relay.announce.yml) have followed moving tags with this
+# label since 2026-08-16. Each opts in beside the moving tag it follows, in
+# its own file, so the label and the tag cannot be separated by an edit to
+# one of them. The deliberate-pin doctrine those three used to follow is not
+# gone — it moved to the tag pointer, and `EXPECTED_CONNECTOR_TAG` in
+# crates/connector-bin/tests/devnet_configs_load.rs is where the whole
+# argument now lives.
+#
+# What must NEVER carry the label, and is asserted not to:
+#   * `nginx` — the TLS edge, and the holder of the `resolver` that lets
+#     every other service's recreate self-heal (issue #993). Recreating it on
+#     an upstream `nginx:alpine` push would be an unreviewed change to the one
+#     component whose job is surviving the others being replaced.
+#   * `certbot` — holds the renewal timer.
+#   * `watchtower` itself.
+#
+# ── `--interval 60 --cleanup` ───────────────────────────────────────────────
+# `--interval 60` polls the ONE watched repository once a minute — the public
+# `ghcr.io/toon-protocol/swap`, so no registry credentials have to be mounted
+# in here. That is a manifest check per scan, cheap enough to let a green
+# `main` reach the box in about a minute rather than on a human's next
+# dispatch. `--cleanup` removes the image a recreate just superseded, so a
+# box tracking a moving tag does not accumulate one dangling maker image per
+# merge; the superseded build stays pullable from GHCR by its own immutable
+# `sha-<short-sha>` tag for the manual rollback
+# docs/operators/swap-node-bringup.md describes.
+#
+# ── DOCKER_API_VERSION ───────────────────────────────────────────────────────
+# The relay box's Docker daemon serves API 1.44+; Watchtower's bundled client
+# defaults to 1.25 and refuses to talk to a newer daemon without this pinned
+# explicitly. Set here rather than left to the image default, same rationale
+# as `TOON_DATA_DIR` in ./docker-compose.relay.yml (issue #831): a silent
+# image-side default is not visible from this file, and an image change
+# could move it without anyone noticing here.
+#
+# ── `/var/run/docker.sock` ───────────────────────────────────────────────────
+# Root socket, unavoidable for a container-recreating tool — Watchtower's own
+# documented requirement, not something this file can sandbox further. No
+# `ports:` are published; there is nothing here for nginx to front and
+# nothing that should ever be reachable off-box.
+#
+# ── Run alongside the relay's base stack (never on its own) ────────────────
+#   docker compose -f infra/linode-relay/docker-compose.relay.yml \
+#                  -f infra/linode-relay/docker-compose.relay.rust.yml \
+#                  -f infra/linode-relay/docker-compose.relay.swap.yml \
+#                  -f infra/linode-relay/docker-compose.relay.watchtower.yml \
+#                  up -d watchtower
+# ═══════════════════════════════════════════════════════════════════════════
+
+services:
+  watchtower:
+    image: containrrr/watchtower:1.7.1
+    environment:
+      DOCKER_API_VERSION: '1.44'
+    command: ['--label-enable', '--interval', '60', '--cleanup']
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped

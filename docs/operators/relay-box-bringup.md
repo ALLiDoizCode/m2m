@@ -63,9 +63,11 @@ every other infra-touching ticket in this repo's history records when it applies
   the relay box has no legacy TypeScript identity to reproduce
   (`infra/linode-relay/connector-rust.toml`'s own header note), so its keys are new material, not
   a mnemonic-index reproduction.
-- The apex's `[operator]` surface (ADR 0008, issue #459) is enabled with a bearer token, so step 7
-  can open and fund a channel without hand-crafting a raw settlement transaction. Not a given
-  today: `infra/linode-node/connector-rust.toml` omits the section deliberately ("Operator surface
+- The apex's `[operator]` surface (ADR 0008, issue #459) is enabled, so step 7 can open a channel
+  without hand-crafting a raw settlement transaction. Note what that needs: `bearer_token` gates
+  reads, and step 7 is a **write**, so it also needs the private half of a key whose public half is
+  on `write_keys` — no shared secret is ever sufficient to move value. Not a given today:
+  `infra/linode-node/connector-rust.toml` omits the section deliberately ("Operator surface
   (optional)"), so enabling it per `deploy/connector-rust/README.md` steps 2–3 is itself work this
   precondition asks for.
 
@@ -81,7 +83,8 @@ every other infra-touching ticket in this repo's history records when it applies
 
 3. **Certs.** `cd infra/linode-relay && cp .env.example .env && $EDITOR .env` (set `DOMAIN`,
    `LETSENCRYPT_EMAIL`, and `LETSENCRYPT_STAGING=1` until DNS is confirmed — `.env.example` ships
-   `0`), then `./bootstrap.sh` — it opens the firewall (22/80/443 only, `firewall.sh`), pulls
+   `0`), then `./bootstrap.sh` — it hardens the box first (firewall to 22/80/443 only, then
+   key-only sshd; `infra/harden-box.sh`, ahead of everything that can fail), pulls
    images, renders `nginx/conf.d/node.conf` from the template for `${DOMAIN}`, starts the compose
    stack, and runs `init-letsencrypt.sh`, which seeds a self-signed cert, then requests a real one
    for both names once nginx can answer the ACME challenge. If issuance fails it logs a warning and
@@ -135,7 +138,23 @@ every other infra-touching ticket in this repo's history records when it applies
    ```
 
    (`"chain":"solana"` for the Solana leg — a node settling on more than one chain refuses an
-   omitted `chain` as ambiguous.) Fund it with `POST /channels/:id/fund`. Record the resulting
+   omitted `chain` as ambiguous.)
+
+   **Collateral, on both chains.** `POST /channels/:id/fund` is a **self-deposit** (issue #1118):
+   run it on the box that will _sign_ claims on this channel, and it puts that box's own collateral
+   behind them, raising `own_deposited` on `GET /channels`. It works identically on EVM and Solana.
+   Each participant funds their own side; neither box can fund the other's, and the endpoint no
+   longer tries — `packages/solana-program`'s `Deposit` credits strictly by signer, and
+   `TokenNetwork.setTotalDeposit`'s ability to credit an arbitrary participant from the caller's
+   balance is deliberately not exposed. So: the apex funds the apex's side, the relay funds the
+   relay's, and the direction debt actually flows decides which of the two matters (§6.4 — debt
+   flows the way packets do).
+
+   Before the Solana leg can be funded, the box's `[settlement.solana]` address needs the SPL token
+   itself, not just SOL for fees: the deposit moves real tokens out of that identity's associated
+   token account, which the node creates at boot but nothing fills.
+
+   Record the resulting
    `channel_id`/`channel_account`, the relay's `counterparty_key`, and (EVM) `chain_id` +
    `token_network` — exactly the fields `btp-peer-transport-bringup.md`'s "A correct peering"
    example's `[[peer_channels]]` row needs, one row on each side.

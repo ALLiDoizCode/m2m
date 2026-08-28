@@ -23,10 +23,11 @@ Before contributing, please read the following documentation to understand proje
 
 ### Required Reading
 
-- **[Developer Guide](docs/development/developer-guide.md)** - Epic branch workflow, pre-push checklist, git hooks overview
-- **[Git Hooks](docs/development/git-hooks.md)** - How pre-commit/pre-push hooks work and troubleshooting
-- **[Test Strategy and Standards](docs/architecture/test-strategy-and-standards.md)** - Test quality anti-patterns, best practices, stability testing
-- **[Coding Standards](docs/architecture/coding-standards.md)** - TypeScript strict mode guidelines, critical rules, naming conventions
+- **[CONTEXT.md](CONTEXT.md)** - The vocabulary. Read before writing docs or naming anything; several terms here mean something narrower than they do elsewhere.
+- **[ADR 0007](docs/adr/0007-testing-doctrine-fakes-yes-mocks-no.md)** - The testing doctrine: property tests over a pure core, contract suites per port, fakes yes and mocks no.
+- **[docs/adr/README.md](docs/adr/README.md)** - The decisions, grouped. Where an ADR and a spec disagree, the ADR wins.
+- **[docs/architecture/source-tree.md](docs/architecture/source-tree.md)** - What every crate does, and what in this repository is deliberately not the connector.
+- **[Coding Standards](docs/architecture/coding-standards.md)** - Naming and structure conventions.
 
 ### Key Concepts
 
@@ -48,24 +49,27 @@ After reading the documentation above:
 
 ### Prerequisites
 
+- **Rust** stable — the connector itself is Rust (ADR 0017), and CI pins nothing tighter than `dtolnay/rust-toolchain@stable`
+- **Chain binaries** — `anvil`, `forge` and `solana-test-validator`, for the tests that need a real chain. See [Chain-backed tests](#chain-backed-tests) for which tests need which, and how to install each
 - **Node.js** >= 22.11.0
 - **npm** 10.x or higher
 - **Git** 2.x
-- **Docker**:
-  - **Linux/Windows:** Docker Desktop or Docker Engine
-  - **macOS:** Native TigerBeetle installation required (no Docker) - See [macOS Setup Guide](docs/guides/local-development-macos.md)
-    - ⚠️ TigerBeetle requires native installation on macOS
-    - One-command setup: `npm run tigerbeetle:install`
+- **Docker** - Docker Desktop or Docker Engine. Needed for `local/` (the shipped image against real containerised chains) and for the `docker-compose.yml` chain profiles. The Rust test gate does **not** need it: every chain-backed test spawns its own `anvil` or `solana-test-validator` and throws it away.
 - **Familiarity** with TypeScript and Interledger Protocol basics
 
 ### Initial Setup
 
 1. Fork the repository on GitHub
-2. Clone your fork locally:
+2. Clone your fork locally, **with submodules**:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/connector.git
+   git clone --recurse-submodules https://github.com/YOUR_USERNAME/connector.git
    cd connector
    ```
+   `packages/contracts` vendors OpenZeppelin and forge-std as git submodules, and
+   `connector-settlement-evm`'s `abi_provenance` test shells out to a real `forge build` of
+   them — without the submodules that build fails on unresolved imports and the Rust gate
+   reports a failure that has nothing to do with the Rust code. An existing clone catches up
+   with `git submodule update --init --recursive`.
 3. Add upstream remote:
    ```bash
    git remote add upstream https://github.com/toon-protocol/connector.git
@@ -169,7 +173,7 @@ The scope specifies which package or component is affected:
 
 - `connector` - Changes to the Rust connector crates (`crates/*`)
 - `contracts` - Changes to the EVM payment channel contracts
-- `faucet` - Changes to the devnet faucet and its Mina zkApp
+- `faucet` - Changes to the devnet faucet
 - `monorepo` - Changes affecting the entire monorepo
 - `btp` - BTP protocol implementation
 - `routing` - Routing logic
@@ -312,6 +316,42 @@ All pull requests must pass:
 - ✅ `cargo clippy --workspace --exclude payment-channel --all-targets -- -D warnings`
 - ✅ ESLint + Prettier over the remaining npm workspaces (devnet tooling)
 
+That is the order CI runs them in, and it is worth running locally in the same order — a
+formatting failure is cheaper to find than a clippy one. `make rust-build` and `make rust-test`
+are shorthands for the middle two; the `fmt` and `clippy` checks have no make target and are
+typed out.
+
+These run on a PR against **any** base branch, not only `main` (issue #1152).
+That was not always true: `ci.yml` used to filter on `branches: [main]`, so a
+PR stacked on another PR's branch ran none of the Rust gate and still showed
+green checks from the workflows that had no branch filter. If you are looking
+at a PR with no `Rust Workspace Gate` check at all, that is a trigger bug, not
+a passing build — say so rather than merging it.
+
+Beside the gate, `.github/workflows/codeql.yml` runs CodeQL's default query suite
+over the Actions workflows, the JavaScript/TypeScript packages, the Python
+scripts and the Rust workspace, filtered by `.github/codeql/codeql-config.yml`,
+which excludes exactly one query (a literal claim `nonce` in a test is a
+counter, not a key — see the comment there). A new alert of a shape that config
+already excludes is a question about the config, to be answered in a PR that
+also updates `fleet_release_gate.rs`, never a dismissal by hand.
+
+### Merging, and Stacked PRs
+
+Prefer basing a PR on `main`. When you do stack one PR on another's branch,
+know the two hazards:
+
+1. **Merging the base PR with `--delete-branch` auto-closes everything stacked
+   on it**, and a PR whose base branch no longer exists **cannot be reopened**.
+   `gh pr merge --squash --delete-branch` on the base is enough to lose the
+   child outright — that is how #1149 was lost and had to be recreated by hand
+   as #1150. Retarget the child at `main` _first_
+   (`gh pr edit <child> --base main`), then merge and delete the base.
+
+2. **Rebase the child after the base lands.** A squash-merged base leaves the
+   child carrying the base's commits as duplicates until it is rebased onto
+   `main`, which makes the diff — and every review of it — wrong.
+
 ## Code Review Guidelines
 
 ### For Authors
@@ -336,6 +376,52 @@ The connector's tests are Rust: unit tests in-module (`#[cfg(test)]`), integrati
 tests in each crate's `tests/`. See ADR 0007 for the testing doctrine (fakes yes,
 mocks no) — chain-touching tests run against a real `anvil` /
 `solana-test-validator` and hard-fail rather than skip under `CI`.
+
+### Chain-backed tests
+
+Some integration tests need a real chain, and they **skip locally when the binary is absent but
+panic when `CI` is set** — so the gate can never go green without one. A guard that returns early
+and reports `passed` in `0.00s` is worse than a missing test, which is what issue #471 closed:
+**never add a skip-when-unavailable branch that can go green in CI.**
+
+| Needs                   | Get it with                                                      | Tests                                                                                                       |
+| ----------------------- | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `anvil` (Foundry)       | `curl -L https://foundry.paradigm.xyz \| bash`                   | `connector-settlement-evm`, `connector-operator`, `connector-cli`, `connector-client-edge`, `connector-bin` |
+| `forge`                 | same                                                             | `connector-settlement-evm`'s `abi_provenance`, which rebuilds the contracts and diffs the committed ABI     |
+| `solana-test-validator` | `sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.21/install)"` | `connector-settlement-solana`, `connector-cli`, `connector-bin`                                             |
+
+**That Solana version is not `stable` and not arbitrary.** This repository installs exactly two
+Solana CLIs, for opposite reasons, and `crates/connector-settlement-solana/tests/solana_cli_pins.rs`
+records both with the evidence behind them and fails the build if either literal drifts: **v2.1.21
+wherever the program is run**, because v3's `solana-test-validator` hard-requires io_uring and
+because the workspace pins the Solana crates to `=2.1.0`; **v3.1.12 wherever a deployed artifact is
+built**. The row above is the run side, so it is the same CLI `ci.yml`'s `rust-gate` installs — a
+local gate on a different one is not the gate.
+
+**`cargo test` spawns its own chain.** This is the thing most often gotten wrong here. Every
+chain-backed test forks a **disposable** node of its own on its own port and tears it down on drop
+— `connector_settlement_evm::test_support::Anvil::spawn` for `anvil`, and
+`connector_settlement_solana::test_support::SolanaValidator::spawn` for `solana-test-validator`,
+which also loads `payment_channel.so` into genesis at a fixed program id. Nothing under `crates/`
+dials `localhost:8545` or `localhost:8899`, so running `make anvil-up` or `make solana-up` before
+`cargo test` changes nothing. The Docker chain profiles exist for running a node by hand, and for
+`local/` — not for the test gate.
+
+### What the workspace gate does not cover
+
+`cargo test --workspace --exclude payment-channel` is the connector's gate and nothing else's.
+Four things sit outside it:
+
+- **`packages/solana-program`** — the on-chain `payment-channel` crate, a Cargo workspace member
+  and the thing `--exclude payment-channel` excludes. It has its own `cargo test-sbf` job in CI,
+  and `make solana-test` locally.
+- **`packages/contracts`** — a separate Foundry job (`forge test`, `.github/workflows/contracts.yml`).
+  No make target runs it.
+- **`npm test`** (and `make test`) — the surviving npm workspaces, which are devnet tooling only:
+  the faucet and the announcer sidecar. It does **not** test the connector.
+- **[`local/`](local/README.md)** — the shipped **image**, as uid 10001, on a mounted config,
+  against real containerised chains. A separate gate answering a question `cargo test`
+  structurally cannot: run one with `make local-verify LOCAL_TOPOLOGY=<solo|two-hop|mixed-chain>`.
 
 ### Test Writing Guidelines
 
@@ -429,26 +515,26 @@ If you encounter issues during development or CI failures, use these resources:
 
 ### CI Troubleshooting
 
-- **[CI Troubleshooting Guide](docs/development/ci-troubleshooting.md)** - Comprehensive guide for debugging CI failures
-  - Common failure scenarios (lint, test, build, type-check, contracts, E2E)
-  - Job-specific debugging procedures with diagnostic commands
-  - Investigation runbook for systematic debugging
+Reproduce the gate locally before reading logs — it is the same four commands CI
+runs, in the same order (see [CI Requirements](#ci-requirements)). If they pass
+locally and fail in CI, the usual causes are a missing chain binary (see
+[Chain-backed tests](#chain-backed-tests) — those panic under `CI` rather than
+skipping) or a Solana CLI version other than the pinned one.
+
+`.github/workflows/ci.yml` is the authority on what runs. `gh run view <id>
+--log-failed` gets you the failing step without downloading the whole log.
 
 ### Test Failures
 
-- **[Test Anti-Patterns](docs/architecture/test-strategy-and-standards.md#common-test-anti-patterns-and-solutions)** - Common testing mistakes and fixes
-  - Event listener cleanup failures
-  - Async timeout issues
-  - Mock state leakage
-  - Testing implementation details instead of behavior
-  - Incomplete test cleanup (resources not released)
-  - Hardcoded timeouts in production code
+- **[ADR 0007](docs/adr/0007-testing-doctrine-fakes-yes-mocks-no.md)** - The doctrine, and the anti-pattern it exists to prevent: a stub that asserts a sequence of calls is not a test subject. A fake that upholds a port's contract suite is.
+- A test that needs a chain gets one of its own. Nothing under `crates/` dials `localhost:8545` or `localhost:8899`, so a failure there is not a missing container.
+- Never add a skip-when-unavailable branch that can go green in CI. A guard that returns early and reports `passed` in `0.00s` is worse than a missing test.
 
-### Root Cause Analyses
+### Past failures
 
-Past failures and their resolutions are documented in `docs/qa/`:
-
-- **[RCA 10.1: Settlement Executor Test Failures](docs/qa/root-cause-analysis-10.1.md)** - Event listener cleanup anti-patterns
+The reasoning behind a rule that looks arbitrary is usually in the record that
+set it. [`docs/adr/`](docs/adr/README.md) is grouped by area, and a record's
+`**Status:**` line — not the index — says whether it is still live.
 
 ### Reporting Issues
 
@@ -466,10 +552,11 @@ If you discover a bug or systematic issue:
 
 ### Getting Help
 
-- **Documentation**: Start with [Developer Documentation Index](docs/development/README.md)
-- **GitHub Discussions**: Ask questions in [Discussions](https://github.com/toon-protocol/connector/discussions)
-- **CI Failures**: Use [CI Troubleshooting Guide](docs/development/ci-troubleshooting.md)
-- **Epic Branch Issues**: See [Epic Branch Workflow](docs/development/developer-guide.md#epic-branch-workflow)
+- **What is where**: [docs/architecture/source-tree.md](docs/architecture/source-tree.md)
+- **Why it is that way**: [docs/adr/README.md](docs/adr/README.md)
+- **What a word means here**: [CONTEXT.md](CONTEXT.md)
+- **Running a node rather than changing one**: [README.md](README.md)
+- **GitHub Discussions**: [Discussions](https://github.com/toon-protocol/connector/discussions)
 
 ## Coding Standards
 

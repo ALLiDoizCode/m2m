@@ -20,7 +20,6 @@ Brief description of what changed and why.
 - [ ] No console.log statements (Pino logger used)
 - [ ] TypeScript strict mode compliance (no 'any' types)
 - [ ] Architecture documentation updated if needed
-- [ ] CHANGELOG.md updated with changes
 - [ ] All acceptance criteria met (if implementing a story)
 
 ## Testing

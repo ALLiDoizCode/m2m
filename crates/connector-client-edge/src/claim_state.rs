@@ -51,6 +51,21 @@
 //! response must not make, moved to a place only this node's own operator
 //! reads.
 //!
+//! **Which of this node's two books answers.** A connector keeps two
+//! inbound books (`connector_runtime::outbound_client`'s header has the
+//! table): the client edge's [`crate::ClientClaimGate`], and the peer
+//! semantics's `ClaimBook`. Which one is the authority for a channel is a
+//! property of the **channel**, never of who is asking -- a claim naming a
+//! `[[peer_channels]]` row is judged by `ClaimBook`, and `Config::load`
+//! refuses a channel that is also a `[[client_channels]]` row
+//! (`ConfigError::ChannelInBothNamespaces`), so at most one book can ever
+//! be the authority for one channel. So this endpoint asks
+//! [`connector_runtime::Connector::peer_channel_watermark`] first and
+//! falls back to the client edge's book, which is what lets a
+//! `[[pay_channels]]` payer -- who holds one channel with its next hop in
+//! both roles -- be told where its claims actually stand. See
+//! [`verified_state`] for what went wrong when it did not.
+//!
 //! **The admission path is untouched.** This handler only reads --
 //! [`crate::ClientClaimGate::watermark`], [`crate::ClientClaimGate::channels`],
 //! [`crate::ClientClaimGate::last_claim_time`] -- and a channel lookup that
@@ -70,6 +85,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
+use connector_domain::Watermark;
 use connector_signer::{
     verify_evm_claim_state_challenge, verify_solana_claim_state_challenge, EvmClaimStateChallenge,
 };
@@ -296,11 +312,13 @@ async fn resolve_evm(
 
     let channel_id_hex = format!("0x{}", hex_encode(&channel_id));
     let channel_key = format!("evm:{channel_id_hex}");
+    let peer_watermark = state.connector.peer_channel_watermark(&channel_id_hex);
     ChannelStateResult::Verified(verified_state(
         "evm",
         channel_id_hex,
         state,
         &channel_key,
+        peer_watermark,
         channel.deposit_floor,
         state.claim_gate.credited_evm(&channel_id),
     ))
@@ -356,11 +374,15 @@ async fn resolve_solana(
     log_outcome("solana", &channel_account_text, "verified");
 
     let channel_key = format!("solana:{channel_account_text}");
+    let peer_watermark = state
+        .connector
+        .peer_channel_watermark(&channel_account_text);
     ChannelStateResult::Verified(verified_state(
         "solana",
         channel_account_text,
         state,
         &channel_key,
+        peer_watermark,
         channel.deposit_floor,
         // `ClientPayoutLedger` only ever signs an EVM balance proof (issue
         // #699) -- a Solana channel has no credited amount to net yet, see
@@ -377,15 +399,44 @@ async fn resolve_solana(
 /// `cumulative_claimed` below -- so a fleet dashboard reads one number
 /// that already reflects an agent's own earnings, not a raw on-chain
 /// balance a human would have to net by hand.
+///
+/// # Which book the watermark comes from
+///
+/// `peer_watermark` is
+/// [`connector_runtime::Connector::peer_channel_watermark`]'s answer:
+/// `Some` exactly when this node holds the channel as a
+/// `[[peer_channels]]` row, in which case that book -- and not the client
+/// edge's -- is the one every claim on the channel is judged against, so it
+/// is the one this endpoint has to report.
+///
+/// Answering every channel out of the client edge's book was a measured
+/// failure, not a theoretical one. `[[pay_channels]]` (ADR 0042 item 2)
+/// makes a forwarding node ask this endpoint, on every covered packet, for
+/// the state of a channel it holds with its next hop in **both** roles --
+/// `connector_config`'s `pay_channel` module calls that "the deployed
+/// shape" -- and `OutboundClientLedger::next_claim` signs
+/// `cumulative + amount` at `max(nonce, issued_floor) + 1` from the answer.
+/// A client-edge book no peer claim ever reaches answers nonce 0 /
+/// cumulative 0 forever, so the payer re-signs the same cumulative amount
+/// at a fresh nonce on every packet: the payee accepts each one (a nonce
+/// did advance) and each one advances nothing, and a priced peer
+/// termination refuses every packet after the first with `F06`,
+/// `advanced = 0`.
+///
+/// `last_claim_time` stays the client edge's. The peer book journals no
+/// timestamp on `InboundClaimAccepted`, so a peer channel reports `null`
+/// there -- which that field's own doc already admits as a best-effort,
+/// non-durable answer, and which no payer reads.
 fn verified_state(
     blockchain: &'static str,
     channel_id: String,
     state: &ClientEdgeState,
     channel_key: &str,
+    peer_watermark: Option<Watermark>,
     deposit_floor: DepositFloor,
     credited: u64,
 ) -> VerifiedChannelState {
-    let watermark = state.claim_gate.watermark(channel_key);
+    let watermark = peer_watermark.or_else(|| state.claim_gate.watermark(channel_key));
     let cumulative_claimed = watermark.map(|w| w.cumulative_amount).unwrap_or(0);
     let nonce = watermark.map(|w| w.nonce).unwrap_or(0);
     let deposit_total = deposit_floor.deposit();
@@ -415,7 +466,8 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use connector_domain::Prepare;
     use connector_runtime::{
-        Connector, FakeAppClient, InMemoryJournal, InProcessPeerTransport, TestClock,
+        ChannelDomain, ClaimAckOutcome, ClaimSignature, Connector, FakeAppClient, InMemoryJournal,
+        InProcessPeerTransport, TestClock, WireClaim,
     };
     use connector_signer::{
         evm_claim_state_challenge_digest, solana_claim_state_challenge_message, LocalSigner, Signer,
@@ -511,6 +563,7 @@ mod tests {
             .record_solana(
                 &base58_encode(&SOLANA_CHANNEL_ACCOUNT),
                 &base58_encode(&solana_signer().public.to_bytes()),
+                "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
             )
             .expect("a 32-byte base58 channel account");
         channels
@@ -1187,5 +1240,178 @@ mod tests {
             .as_u64()
             .expect("a recorded claim time");
         assert!(last_claim_time >= before);
+    }
+
+    /// A peer claim on `EVM_CHANNEL_ID`, signed by the same settlement key
+    /// that signs this channel's claim-state challenge -- one key, both
+    /// roles, exactly as `[[pay_channels]]` describes the deployed shape.
+    fn peer_claim(secret: &SecretKey, nonce: u64, cumulative_amount: u64) -> WireClaim {
+        let digest =
+            connector_signer::evm_balance_proof_digest(&connector_signer::EvmBalanceProof {
+                channel_id: EVM_CHANNEL_ID,
+                nonce,
+                transferred_amount: u128::from(cumulative_amount),
+                locked_amount: 0,
+                locks_root: [0u8; 32],
+                chain_id: EVM_CHAIN_ID,
+                token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+            });
+        let bytes = sign_evm(secret, &digest);
+        // `sign_evm` emits the Ethereum-wallet `{27, 28}` recovery
+        // convention the claim wire carries; `ClaimSignature` holds
+        // libsecp256k1's raw `{0, 1}` (issue #590).
+        let mut raw = bytes.clone();
+        raw[64] -= 27;
+        WireClaim {
+            channel_id: evm_channel_id_hex(),
+            nonce,
+            cumulative_amount,
+            signature: ClaimSignature::Evm(
+                connector_signer::Signature::from_bytes(&raw).expect("65 bytes"),
+            ),
+        }
+    }
+
+    /// A connector holding `EVM_CHANNEL_ID` as a **peer** channel -- the
+    /// `[[peer_channels]]` shape: a counterparty key whose signature it
+    /// accepts there, and that channel's EIP-712 domain.
+    fn connector_with_peer_channel(counterparty: connector_signer::Address) -> Arc<Connector> {
+        Arc::new(
+            Connector::new(
+                vec![],
+                vec![],
+                Arc::new(FakeAppClient::new()),
+                Arc::new(InProcessPeerTransport::new()),
+                Arc::new(TestClock::new(
+                    Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+                )),
+            )
+            .with_channel_verification_key(evm_channel_id_hex(), counterparty)
+            .with_channel_domain(
+                evm_channel_id_hex(),
+                ChannelDomain {
+                    chain_id: EVM_CHAIN_ID,
+                    token_network_address: EVM_TOKEN_NETWORK_ADDRESS,
+                },
+            )
+            .expect("a well-formed channel id"),
+        )
+    }
+
+    /// **The `[[pay_channels]]` defect.** A channel this node holds in its
+    /// PEER book -- claims on it arrive peer-role and advance
+    /// `ClaimBook`'s own inbound watermark -- must be answered out of that
+    /// book, because that is the book the next claim on it will be judged
+    /// against.
+    ///
+    /// `[[pay_channels]]` (ADR 0042 item 2) makes the payer ask this
+    /// endpoint on every covered packet and take the answer as gospel:
+    /// `OutboundClientLedger::next_claim` signs `cumulative + amount` at
+    /// `max(nonce, issued_floor) + 1`. An answer of `nonce 0 /
+    /// cumulativeClaimed 0` for a channel already at nonce 1 / 1000 makes
+    /// the payer re-sign the SAME cumulative amount at a fresh nonce
+    /// forever: the payee accepts each one (a nonce did advance) and each
+    /// one advances nothing, so a priced peer termination refuses every
+    /// packet after the first with `F06`, `advanced = 0`.
+    ///
+    /// `Config::load` refuses a channel that is both a `[[peer_channels]]`
+    /// and a `[[client_channels]]` row (`ChannelInBothNamespaces`), so the
+    /// channel alone tells this node which of its two books is the
+    /// authority -- it never has to know who is asking.
+    #[tokio::test]
+    async fn a_peer_channel_is_answered_out_of_the_peer_book() {
+        let (secret, address) = evm_signer();
+        let connector = connector_with_peer_channel(address);
+        let app = router_with_gate(connector.clone(), test_signer(), None, test_gate());
+        let ask = |app: axum::Router| async move {
+            let expires = far_future_expiry();
+            let body = serde_json::json!({
+                "channels": [{
+                    "blockchain": "evm",
+                    "channelId": evm_channel_id_hex(),
+                    "expires": expires,
+                    "signature": evm_challenge_signature(&secret, EVM_CHANNEL_ID, expires),
+                }]
+            });
+            let request = Request::builder()
+                .method("POST")
+                .uri("/ilp/claim-state")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["channels"][0].clone()
+        };
+
+        // Before the first crossing: a configured peer channel nothing has
+        // claimed on. Zero, and the payer's first claim is nonce 1 for the
+        // packet's own forwarded value.
+        let entry = ask(app.clone()).await;
+        assert_eq!(entry["ok"], true);
+        assert_eq!(entry["nonce"], 0);
+        assert_eq!(entry["cumulativeClaimed"], "0");
+
+        assert_eq!(
+            connector.handle_peer_claim(peer_claim(&secret, 1, 1_000)),
+            ClaimAckOutcome::Accepted,
+            "the peer book must accept the claim this test is about"
+        );
+
+        // After it. This is the answer the defect got wrong: the client
+        // edge's book is still at zero and always will be, because no peer
+        // claim ever reaches it.
+        let entry = ask(app.clone()).await;
+        assert_eq!(entry["ok"], true);
+        assert_eq!(
+            entry["nonce"], 1,
+            "the peer book's nonce, not the client edge's zero"
+        );
+        assert_eq!(
+            entry["cumulativeClaimed"], "1000",
+            "the peer book's cumulative amount, not the client edge's zero"
+        );
+        assert_eq!(entry["available"], (KNOWN_DEPOSIT - 1_000).to_string());
+        // Never the peer book's -- it journals no timestamp for an accepted
+        // inbound claim, and no payer reads this field.
+        assert!(entry["lastClaimTime"].is_null());
+
+        // And it keeps advancing, which is the whole point: the payer's
+        // next claim is nonce 2 for cumulative 2000, which advances the
+        // payee's watermark by the packet's value instead of by nothing.
+        assert_eq!(
+            connector.handle_peer_claim(peer_claim(&secret, 2, 2_000)),
+            ClaimAckOutcome::Accepted
+        );
+        let entry = ask(app).await;
+        assert_eq!(entry["nonce"], 2);
+        assert_eq!(entry["cumulativeClaimed"], "2000");
+    }
+
+    /// The other half of the rule: a channel this node holds no
+    /// `[[peer_channels]]` row for is still answered out of the client
+    /// edge's book, exactly as before. Same channel id, same challenge --
+    /// only the peer registration is gone, and with it the peer book's say.
+    #[tokio::test]
+    async fn a_channel_that_is_not_a_peer_channel_still_reads_the_client_edge_book() {
+        let (secret, _address) = evm_signer();
+        let expires = far_future_expiry();
+        let body = serde_json::json!({
+            "channels": [{
+                "blockchain": "evm",
+                "channelId": evm_channel_id_hex(),
+                "expires": expires,
+                "signature": evm_challenge_signature(&secret, EVM_CHANNEL_ID, expires),
+            }]
+        });
+
+        let response = post_claim_state(test_gate(), body).await;
+
+        let entry = &response["channels"][0];
+        assert_eq!(entry["ok"], true);
+        assert_eq!(entry["nonce"], 0);
+        assert_eq!(entry["cumulativeClaimed"], "0");
+        assert_eq!(entry["available"], KNOWN_DEPOSIT.to_string());
     }
 }

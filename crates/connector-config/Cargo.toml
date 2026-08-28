@@ -5,7 +5,13 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# A route's `price` is `connector_domain::Price` (ADR 0065): the schedule the
+# config file spells is the same value every gate charges against, so there is
+# one definition of it rather than a config-side twin. `connector-domain` is
+# pure and depends on no workspace crate, so this edge adds no cycle.
+connector-domain = { path = "../connector-domain" }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
 url = "2"
 thiserror = "2"

@@ -1,0 +1,129 @@
+# =============================================================================
+# local/two-hop -- connector B, the ACCEPTING half of the peering.
+#
+# LOCAL / DEV ONLY. `infra/linode-*` owns devnet; nothing here is deployed,
+# published or SSH'd anywhere, and every chain this file names is disposable.
+#
+# B terminates the app's prefix and accepts one peering. It dials nothing --
+# there is no `endpoint` on its `[[peers]]` row -- which on ILP-over-HTTP makes
+# it structurally the payee (peer-carriage-spec.md §6.4): only the dialing side
+# can originate, so packets and debt both flow one way across this peering.
+#
+# The packet the rehearsal sends is sealed to THIS node's `[signer]` identity,
+# not to A's (ADR 0018): a payload is sealed to the connector that TERMINATES
+# it, and A is a forwarding hop that cannot open it. `connector send`'s
+# `--seal-to` is what says so, and getting it wrong is reported distinctly --
+# "FULFILL WITH THE WRONG FULFILMENT" -- rather than as a decode failure.
+# =============================================================================
+
+client_edge_addr = "0.0.0.0:3000"
+
+# The peer claim ledger's home. This is the node that RECEIVES claims, so this
+# is the file the rehearsal reads to prove the peering was actually paid rather
+# than merely traversed (`peer-claims.log`, written by `ClaimBook`).
+state_dir = "/app/state"
+
+# CF-17: peer carriages ride this node's own listener, told apart from clients
+# by authentication rather than by port -- there is no second socket (ADR 0027).
+# `"http"` rather than `"both"` because this topology dials one carriage; the
+# BTP twin is exercised in-process by `two_connectors_peer.rs`, which runs every
+# assertion over both.
+peer_expose = "http"
+
+[signer]
+key_file = "/app/data/signer.key"
+
+# ── The terminated route ─────────────────────────────────────────────────────
+# `stub-app` is the connector image's second binary: it answers `POST /`, holds
+# no secret and performs no cryptography, so it supplies nothing toward the
+# packet's fulfilment -- the connector derives that itself from the sealed
+# request (ADR 0019).
+#
+# The trailing slash on handler_url is load-bearing. `HttpAppClient::deliver`
+# does `handler_url.join(&target)`, and RFC 3986 makes an absolute-path
+# reference REPLACE the base's path.
+#
+# `price = 1000`: THIS NODE BOTH TERMINATES AND PRICES THIS ROUTE, which is the
+# whole subject of the topology and is not a shape a peered config here could
+# hold until #1103. A peer PREPARE to a route its payee both terminates and
+# prices must arrive carrying a claim that covers that price, or it is refused
+# `F06` with the x402 greeting (`peer-carriage-spec.md` §3.1, issue #880).
+#
+# Under ADR 0004's postpay convention -- deleted in issue #1145, and the reason
+# this file could not hold a price before #1103 -- nothing could satisfy that,
+# and the failure was a deadlock rather than a degradation: value moved on
+# fulfilment, so a peering's payer owed nothing until a crossing had fulfilled
+# -- the FIRST crossing therefore carried no claim, was refused, never
+# fulfilled, left nothing owed, and the second carried none either. It never
+# recovered.
+#
+# WHAT BREAKS THE CIRCLE IS ON A, NOT HERE. A holds a `[[pay_channels]]` row
+# (ADR 0042 item 2), which covers each PREPARE *before* it is sent instead of
+# owing for it after it fulfils, so crossing 1 arrives already paid for. See
+# that row for the other half of this arrangement.
+#
+# That row asks THIS node, on every packet, where its claims on the channel
+# stand -- `POST /ilp/claim-state`, the receiver being the only authority on
+# its own watermark. Until #1103 this node answered a channel it holds as a
+# `[[peer_channels]]` row out of its CLIENT-edge book, which no peer claim ever
+# reaches: nonce 0 / cumulative 0 forever, so A re-signed one cumulative amount
+# at a fresh nonce on every packet, each claim was accepted and advanced
+# nothing, and every crossing after the first was refused `F06`,
+# `advanced: 0, shortfall: 1000` (issue #1102). Measured on this topology
+# before the fix, not reasoned about.
+#
+# THE FIGURE IS THE WHOLE OF WHAT A FORWARDS, AND A CHARGES A REAL FEE ON TOP
+# OF IT (issue #1144). The rehearsal sends 1100, A retains its `fee = 100` and
+# forwards 1000 -- exactly this price, so the gate still has no slack in either
+# direction. A claim advancing one unit less than the packet's own value is an
+# `F06` rather than a discount, and an arrival carrying less than this price is
+# an `F03` before the app is ever reached (`handle_peer_prepare`, ADR 0029).
+# The invariant that makes the two numbers fit -- A's `price - fee` is at least
+# this price -- is documented in `connector-a.toml` and enforced by nothing, so
+# it holds because these two files were written together.
+# `local_topologies_load.rs` holds this number, A's `price` and `fee`, and the
+# rehearsal's `--amount`/`PRICE`/`FEE` to one arithmetic; the rehearsal itself
+# then reads this node's claim journal and fails unless every crossing was
+# covered AND A retained exactly its fee.
+[[routes]]
+prefix = "g.local.two-hop.b.app"
+handler_url = "http://stub-app:3100/"
+price = 1000
+
+# ── The peering ──────────────────────────────────────────────────────────────
+# The same relation id A writes, and the same secret, from the same file
+# `local/keys.sh` copied into both key directories. No `endpoint`: A dials us.
+[[peers]]
+id = "a-b"
+
+
+# The other half of A's row. Same channel, same EIP-712 domain, and the
+# `counterparty_key` pointed the other way: this is A's SETTLEMENT address,
+# whose signature this node accepts on a claim for this channel -- never the
+# signer address the claim declares about itself (CF-23).
+[[peer_channels]]
+peer_id = "a-b"
+channel_id = "0x57c5462d40a3c60fa89b8fe4f3f24cf560947a413df9a691499e58abea1d63f8"
+counterparty_key = "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
+chain_id = 31337
+token_network = "0xCafac3dD18aC6c6e92c921884f9E4176737C052c"
+
+# No `[operator]` section, deliberately (CF-31): an absent table means the
+# surface is not started at all. Nothing sends to this node directly -- the
+# rehearsal hands its packet to A, which is the whole point -- so an operator
+# surface here would be an unused authenticated endpoint with two more key
+# files behind it.
+
+# ── Settlement: EVM only ─────────────────────────────────────────────────────
+# The same registry, token and decimals A names. It has to be the same
+# deployment: a claim this node accepts is written against the channel A opened
+# on these contracts, and a node pointed at a different registry cannot resolve
+# it.
+[settlement.evm]
+rpc_url = "http://anvil:8545"
+contract_address = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
+token_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+decimals = 6
+
+[settlement.evm.key]
+key_file = "/app/data/settlement.key"

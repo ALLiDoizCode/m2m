@@ -1,6 +1,17 @@
 # Client edge specification
 
-**Status:** Non-normative. [ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md) makes the
+**Status:** **Live — this is the client edge specification** (wayfinder map #1049, issues #1065, #1073).
+Its known corrections are applied: §2 and §3.4 no longer cite the spent ADR 0013, §3.2's
+`GET /ilp/versions` is retired in favour of the node self-description (#1054), and §1.4's claim that no
+settlement address is configured is corrected — they have been in the greeting since issue #617.
+
+**Its authentication, identity and privacy surface is now recorded**, in
+[ADR 0052](../adr/0052-permissionless-payment-is-guaranteed-and-a-claim-is-what-authorises.md): a
+conforming connector accepts payment from a buyer it has never heard of; a **claim** authorises and an
+identity does not; _unverifiable is never accepted, by configuration, flag or build profile_; and a
+claim may be presented plaintext or NIP-59-wrapped at the **client's** choice, with both accepted.
+Before that record this surface appeared in none of the first 51.
+_Originally:_ Non-normative. [ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md) makes the
 Rust implementation (`crates/connector-client-edge`) the definition of this wire, and the committed
 vector set (`vectors/wire-vectors.json`, issue #527) — fixed literal fixtures pushed through the
 real implementation and self-verified against the same functions the invariants listed in
@@ -18,10 +29,10 @@ future version would be introduced, per
 machines this repository's operators do not control.
 **Vocabulary:** [`CONTEXT.md`](../../CONTEXT.md).
 **Where the claim a client pays here goes next**, and why it is never forwarded onward:
-[`money-model.md`](money-model.md).
+[`money-model-pre-868.md`](money-model-pre-868.md).
 
 The **client edge** is the protocol a client speaks to the connector it attaches to
-(`CONTEXT.md`). Unlike the peer wire, it is versioned rather than redesigned: its far end is
+(`CONTEXT.md`). Unlike the peer semantics, it is versioned rather than redesigned: its far end is
 software this repository does not ship and cannot flag-day, so an old version keeps working
 after a new one exists ([ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md),
 [ADR 0001](../adr/0001-rust-workspace-library-first.md) — `connector-client-edge` is exposed as
@@ -36,14 +47,14 @@ traffic, and the one-shot ILP-over-HTTP binding (RFC-0035) at `POST /ilp` — it
 described this as the edge transport for one-shot, stateless purchases: a buyer, a NAT'd client, a
 browser, or an agent that only consumes. That source no longer exists in this repository but is
 recoverable from git history prior to #465. That BTP did double duty is exactly the conflation
-[ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md) retires: the peer wire
-(`docs/protocol/peer-wire-spec.md`) is redesigned freely because both its ends are
+[ADR 0003](../adr/0003-clean-room-peer-wire-versioned-client-edge.md) retires: the peer semantics
+(`docs/protocol/peer-semantics-pre-868.md`) is redesigned freely because both its ends are
 operator-controlled, which is never true of a client. This document therefore specifies the
 client edge as **ILP-over-HTTP** — `POST /ilp` — since that is the transport whose far end is
 genuinely uncontrolled and whose shape carries forward as "version 1" of the versioned scheme. A
 client that reached the old embedded node over BTP was, for the purposes of this spec, using the
-peer wire's pre-rewrite transport as a transitional convenience, not the client edge; it is out of
-scope here and is not preserved by the redesigned peer wire.
+peer semantics's pre-rewrite transport as a transitional convenience, not the client edge; it is out of
+scope here and is not preserved by the redesigned peer semantics.
 
 `POST /admin/ilp/send` was a distinct, operator-surface-adjacent interface the same removed
 embedded node exposed so an app behind this connector could ask its _own_ connector to originate a
@@ -56,9 +67,26 @@ connector's own app, not an unaffiliated payer — and is out of scope for this 
 ### 1.1 Transport and framing
 
 - **Method/path:** `POST /ilp`.
-- **Request body:** an ILPv4 PREPARE packet (RFC-0027), OER-encoded (RFC-0030),
-  `Content-Type: application/octet-stream`.
-- **Response:** `200 OK` with an OER-encoded FULFILL or REJECT body, `Content-Type:
+- **Request body:** an ILPv4 PREPARE packet, `Content-Type: application/octet-stream`. **ILPv4
+  semantics, TOON encoding**
+  ([ADR 0063](../adr/0063-the-ilp-packet-is-toons-dialect-not-rfc-0027s.md)): the three type bytes,
+  the field order and meanings, `condition = sha256(fulfilment)` and the `F`/`T`/`R` taxonomy are
+  RFC-0027's; the **bytes are not**. This packet is not byte-compatible with RFC 0027, has never
+  been, and is not going to be — an off-the-shelf ILPv4 encoder does not produce one this edge
+  accepts. It diverges in exactly three places:
+  - no outer type-length wrapper: the type byte is followed by the fields inline, not by a
+    VarOctetString;
+  - `amount` is a VarUInt, not a fixed 8-byte `UInt64`;
+  - `expiresAt` is a 19-byte GeneralizedTime, `YYYYMMDDHHMMSS.fffZ`, not the 17-byte Interledger
+    Timestamp.
+
+  **The bytes are pinned by `vectors/wire-vectors.json`**, whose `peer_carriage.prepare`
+  fixture carries a complete encoded PREPARE as `http_body_hex` and `btp_message_hex`. That
+  fixture is the cross-repo contract for this encoding
+  ([ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md)), not the RFC;
+  `vectors/README.md`'s "The ILP packet encoding" section walks it byte by byte.
+
+- **Response:** `200 OK` with a FULFILL or REJECT body in that same encoding, `Content-Type:
 application/octet-stream`. An ILP-level outcome — fulfilled or rejected — is always HTTP 200;
   a non-2xx status is reserved for a transport-level failure and never carries an OER body:
 
@@ -104,7 +132,7 @@ A request identifies its sender in one of two ways:
 
 A request pays with a claim header. The claim is a JSON object, `version: '1.0'`, discriminated
 by `blockchain: 'evm' | 'solana'` — the shape below is this document's own definition, not a
-pointer to source; the peer wire's predecessor (BTP protocol) carried the same shape, but that
+pointer to source; the peer semantics's predecessor (BTP protocol) carried the same shape, but that
 code no longer exists in this repository. `blockchain: 'mina'` is a distinct, invalid value here:
 see the note at the end of this section.
 
@@ -134,8 +162,18 @@ Required fields on every claim, regardless of chain: `version` (`'1.0'`), `block
   per-channel record instead.
 - **solana**: `programId`, `channelAccount` (both base58), `nonce`, `transferredAmount` (lamports,
   decimal string), `signature` (base64 Ed25519), `signerPublicKey` (base58); optional `cluster`.
+  `programId` MUST be the **settlement program the `channelAccount` lives under** — the program
+  that owns that account and that would redeem this claim on chain, which is byte-for-byte the
+  program id the payer put into the balance proof `signature` covers
+  ([ADR 0053](../adr/0053-a-solana-claim-binds-its-domain-the-way-an-evm-claim-does.md) puts it at
+  offset 16 of that message). It is not a free-form label and it is not the payer's own key: a
+  claim naming any other program names a program no channel of the payer's lives under. The
+  normative statement of this is `peer_carriage.claim_solana` in `vectors/wire-vectors.json`, whose
+  declared `programId` and whose `signed_message_hex` carry the same 32 bytes
+  ([ADR 0021](../adr/0021-vectors-are-normative-prose-is-not.md) — prose is not).
+  `signerPublicKey`, like an EVM claim's `signerAddress`, rides the wire but carries no authority.
 
-A present claim is validated by the same gate the peer wire uses (the inbound claim validator)
+A present claim is validated by the same gate the peer role uses (the inbound claim validator)
 before the PREPARE is routed, in this order — deliberately freshness-and-value before
 cryptography, so a replay or an underpayment never pays the cost of a signature verification and
 never reaches the terminating app:
@@ -172,6 +210,74 @@ never reaches the terminating app:
    per-channel record, so a claim has no say in what it is checked against. A forger who signs
    correctly with a key of their own and declares themselves the payer is refused here, because
    that key is not the channel's counterparty.
+
+   A `solana` claim's self-declared **`cluster` is cross-checked** against the cluster the
+   connector settles on, before its channel is resolved
+   ([issue #975](https://github.com/toon-protocol/connector/issues/975)). Where a connector
+   can tell which cluster it is on, it MUST refuse — under its own reason — a claim whose
+   optional `cluster` names a different one. The field is not an authority the check reads
+   _from_; it is an assertion the claim makes, and a claim naming a chain the connector is
+   not on is **wrong, not merely unverifiable**. Silently accepting it would leave a
+   settlement on one chain permanently labelled with another's name, invisible to both
+   parties — the payer sees a FULFILL, the operator sees nothing — and the claim is the
+   artifact each side keeps.
+
+   `cluster` gets this treatment because it is the one field naming a chain that **no
+   signature can ever bind**. Since [ADR 0053](../adr/0053-a-solana-claim-binds-its-domain-the-way-an-evm-claim-does.md)
+   a Solana balance proof signs the settlement program, and the verifier rebuilds that
+   message from the channel's own program id rather than the claim's — so cross-cluster
+   replay is closed by the bytes. A Solana program cannot learn which cluster it is running
+   on, so it could never rebuild a message containing one; the cluster stayed out of the
+   signed bytes for that reason, and this off-chain comparison is the only check it can get.
+   A claim's declared `programId` is a different case again, and the two halves of it should
+   not be confused. **What a payer must write there is pinned** — the settlement program the
+   `channelAccount` lives under, as the field list above and
+   `peer_carriage.claim_solana` now both say. **What a connector does with a disagreement is
+   still only to report it.** A connector MUST report one (this connector logs it at `warn`,
+   naming the channel and the declared value) and MUST NOT refuse on it, because the signature
+   is checked against the channel's own program either way: a claim that reaches this point is
+   one whose payer signed for this node's program whatever they wrote in that field, so it is
+   cryptographically correct and fully redeemable, and refusing it would refuse money the node
+   can actually collect.
+
+   That asymmetry is deliberate and dated. Until
+   [issue #1127](https://github.com/toon-protocol/connector/issues/1127) the field had no
+   pinned meaning at all: this document called it decorative and the one cross-repo statement
+   of it — `peer_carriage.claim_solana` — declared the **system program**, which is not a
+   settlement program and which no channel lives under. A payer built against that contract is
+   conforming to what it said. Refusing on the field is therefore gated on adoption, not on
+   this text: it becomes permissible once the payers on a connector's client edge are known to
+   emit the pinned value, and that is a fleet-by-fleet fact rather than a protocol one, since
+   the client edge is where buyers a connector has never heard of arrive. The vector's
+   `schema_version` bump to `2` is the signal that the reading changed.
+
+   **The duty to report is this edge's alone.** `peer-carriage-spec.md` §4 carries this whole
+   field list onto the peer edge unchanged — a peer claim is the same JSON object, and what a
+   payer MUST write in `programId` is the same there — but §4.1 deliberately does **not** carry
+   the reporting duty with it: a peer claim's declared `programId` is validated structurally and
+   then discarded, and this connector's shared claim codec drops it before the claim is judged.
+   Neither edge may refuse on the field. The difference is in what a report could find and who
+   could act on it, not in peers being trusted more. Since
+   [issue #1128](https://github.com/toon-protocol/connector/issues/1128) a Solana peering has
+   exactly one program it can be judged under — `[settlement.solana] program_id` — and that one
+   value both renders the field on an outbound peer claim and keys the channel an inbound one is
+   verified against, so a peer that declares a program it did not sign under is a disagreement
+   this connector cannot produce, and a peer that signs under a program this node does not settle
+   with already fails verification outright and carries no traffic at all. Here neither holds: the
+   payer is someone the operator has never heard of, running software the operator did not
+   configure and cannot reach, so this log line is the only channel by which the mislabelling can
+   become known to anyone — and it is the adoption signal a future refusal is gated on, for the
+   only population whose adoption is an open question. **Read issue #1127's "wait until the
+   warning stops firing" accordingly: it is a statement about client-edge payers, and the peer
+   edge's silence is not a gap in it.** §4.1 of that document states this difference and argues
+   it from the same two cases; the two texts are meant to be read as a pair, and neither should be
+   changed alone.
+
+   The cluster check is skipped where there is nothing to compare: a claim that omits
+   `cluster` declares none, and a connector with no `[settlement.solana]` table — or one
+   whose `rpc_url` names no cluster it recognises, a third-party RPC provider's say — knows
+   of none. A connector MUST NOT guess a cluster from such a URL: a wrong guess refuses every
+   genuine claim it ever receives.
 
    A claim naming a channel the connector has **no record of** is refused with its own reason,
    distinguishable from a bad signature and from an underpayment — there is nothing to verify it
@@ -408,7 +514,15 @@ signer is the best that can be done:
   window, or the index's own sync lagging or down) falls through to exactly the RPC-reading,
   budget-shaped resolution this section describes, unchanged — so a connector whose index has never
   once caught up behaves exactly as one with no index at all, and the rates and wait above remain the
-  bound for every lookup this index cannot yet answer.
+  bound for every lookup this index cannot yet answer. Since issue #1151 one further answer falls
+  through: an indexed, open channel whose counterparty **deposit reads zero**. The index reports zero
+  both for a channel that holds nothing and for one whose `ChannelNewDeposit` is younger than the
+  confirmation depth, and it can never separate the two — it is permanently that many blocks behind
+  head — so "for how much?" is asked of the chain in that case rather than answered from the map. It
+  is deliberately **not** answered with the declared-channel exemption (`DepositFloor::Unknown`,
+  `depositTotal: null`): that exemption covers every claim, and a channel opened and never funded
+  would become an unlimited line of credit no `claimFromChannel` could ever redeem. A resolved
+  channel still always reports a number; the number is now the chain's.
 
 The rates and the wait are a **deployment** choice for the same reason the three durations above are
 — what a connector can afford to spend discovering channels that do not exist depends on the
@@ -446,7 +560,7 @@ drops Mina from the Rust connector: a Mina claim's on-chain lifecycle (open, dep
 settle) has no Rust implementation and none is planned, so a connector that accepted a Mina claim
 would be accepting value it can never settle. `blockchain: 'mina'` is therefore refused as a
 structural validation failure (step 1 above) rather than parsed or cryptographically checked — the
-zkApp-specific fields the peer wire's predecessor once carried for it (`zkAppAddress`, `tokenId`,
+zkApp-specific fields the peer semantics's predecessor once carried for it (`zkAppAddress`, `tokenId`,
 `balanceCommitment`, `proof`, `salt`, and the dual-party `balanceB`/`signatureB` extension) are not
 part of this connector's claim shape and are not documented here. A Mina client's claim is rejected
 clearly and immediately; it is not owed a code path, only an unambiguous refusal.
@@ -487,7 +601,7 @@ required no claim and was carried for free; that was a free gateway, not a desig
 
 Two rules attach to the forwarded case and to nothing else. A client-edge PREPARE to a priced
 forwarded destination is refused `F03_INVALID_AMOUNT` when its declared `amount` exceeds that
-`price` — this connector never puts more value on the peer wire than it collected, and the
+`price` — this connector never puts more value on the peer semantics than it collected, and the
 refusal is decided before the claim is ingested so a packet that will not be carried never spends
 a watermark. And a _peer-role_ PREPARE is never answered with this greeting at all
 (`peer-carriage-spec.md` §3.1): everything in this section is the client-facing direction.
@@ -508,6 +622,7 @@ byte-for-byte, base64-encoded, in a `Payment-Required` response header:
 {
   "x402Version": 2,
   "resource": { "url": "g.example.app" },
+  "request": { "protocol": "nip90", "kinds": [5096, 5098] },
   "accepts": [
     {
       "scheme": "toon-channel",
@@ -531,11 +646,24 @@ byte-for-byte, base64-encoded, in a `Payment-Required` response header:
 the one payment method this client edge's own claim gate (§1.3) actually understands: a TOON
 payment channel claim, presented back over this same `POST /ilp`. There is no per-chain `exact`
 scheme entry naming a settlement `asset`/`payTo` address, for EVM, Solana or any other chain,
-because no settlement address is configured anywhere in this connector yet — answering terms
-(issue #526) is a smaller, different thing from adding that configuration. `extra` is limited to
+because this claim gate understands one payment method and an `exact` scheme entry would describe a
+second. **Not** because settlement facts are unavailable — they have been in the greeting's `extra`
+since issue #617, and are per-chain since #632 (corrected, issue #1073). `extra` is limited to
 what the code actually sets — `ilpAddress`, `endpoint`, `price` and `sessionLeaseTtlMs` on every
-greeting, plus whichever of `ilpAddresses`/`btpEndpoint`/`settlement`/`settlements`/
-`requiredTransport` this node has configured (below) — and carries nothing else.
+greeting, plus `pricePerKib` where the addressed route prices by size, plus whichever of
+`ilpAddresses`/`btpEndpoint`/`settlement`/`settlements`/`requiredTransport` this node has
+configured (below) — and carries nothing else.
+
+**`request`** ([issue #1210](https://github.com/toon-protocol/connector/issues/1210), [ADR
+0067](../adr/0067-a-route-declares-its-request-shape-and-the-connector-never-reads-it.md)) — a
+top-level member, present exactly when the addressed route's `[[routes]] request` table is
+configured, absent (not `null`) otherwise. It sits **beside** `resource`, not inside `accepts[]`:
+it describes what a client should send to use the addressed route — the resource itself — not a
+property of one particular payment method, and applies whichever entry in `accepts[]` a payer ends
+up satisfying. The value is the operator's table converted to JSON verbatim; this connector never
+reads a key out of it, never fetches it from anywhere, and never varies its behaviour on what it
+contains. A reader that predates this field ignores it, the same as any other addition to this
+forgiving-deserialization document.
 
 **`extra.ilpAddresses`/`extra.btpEndpoint`** ([issue
 #807](https://github.com/toon-protocol/connector/issues/807)): this node's own ILP address(es) and
@@ -547,9 +675,24 @@ these are this node's own authoritative facts regardless of what was probed; a c
 `ilpAddress` as a confirmation of a _guessed_ destination should prefer `ilpAddresses` when it is
 present, since the guess is exactly what a stale-or-missing-genesis-seed client cannot rely on.
 
-`price` (both the top-level `amount` and `extra.price`, always equal) is read from the same
-longest-prefix route lookup that §1.3's value binding and §1.7's `GET /ilp/routes/price` charge
-and answer against, so this response never states a price a real request wouldn't also be charged.
+`amount` and `extra.price` are read from the same longest-prefix route lookup that §1.3's value
+binding and §1.7's `GET /ilp/routes/price` charge and answer against, so this response never states
+a price a real request wouldn't also be charged.
+
+They are **equal for a flat route, and that is every route that predates
+[ADR 0065](../adr/0065-a-price-is-a-schedule-over-payload-length.md)**. Where a route's price
+carries a slope the two answer different questions and must not be conflated:
+
+- **`amount`** is what the request being answered would cost — the route's schedule evaluated at
+  that request's own payload length. This is x402's meaning of the field: what to pay for _this_.
+- **`extra.price`** is the schedule's **base**, and **`extra.pricePerKib`** its slope, in the same
+  decimal-string spelling. Together they let a client compute the cost of a packet it has not sent
+  yet, which is what keeps [ADR 0011](../adr/0011-rejects-accumulate-fees-and-probes-discover-cost.md)'s
+  cacheability true: one greeting answers every size, rather than one greeting per size.
+
+`extra.pricePerKib` is **absent**, not `"0"`, on a flat route, so a flat route's greeting is
+byte-identical to what it was before schedules existed and a parser written against that greeting
+is unaffected.
 
 **Transport policy** (issue #701, `toon-meta#262` decision 11): which transport(s) a terminated
 route accepts is per-connector config, not a protocol constant — `both` by default, so no deployed
@@ -607,7 +750,7 @@ connector no longer "charges a percentage spread with no per-hop fee accumulatio
 percentage anywhere ([ADR 0010](../adr/0010-flat-per-packet-fee-and-minimum-delivery.md)), and a
 REJECT genuinely does accumulate cost: `connector_domain::Reject` carries an `accumulated_cost`
 field that sums every hop's flat fee and adds a terminated route's price
-(`docs/protocol/peer-wire-spec.md` §5.2, issues #523/#545/#584). That field is **not** part of the
+(`docs/protocol/peer-semantics-pre-868.md` §5.2, issues #523/#545/#584). That field is **not** part of the
 RFC-0027 OER encoding — it rides beside the packet — so this edge reports it in a header. Version 1
 does not change to gain it: the request/response shape below is unchanged.
 
@@ -616,7 +759,7 @@ does not change to gain it: the request/response shape below is unchanged.
 application-level reject's own diagnostic payload (an `F99`/`T99`/`R99` from the terminating app),
 so `accumulatedCost` MUST NOT be packed into it; instead the connector returns it as a response
 header, `TOON-Accumulated-Cost` (decimal string, `uint64`), alongside the unchanged OER REJECT body
-— the client-edge equivalent of the peer wire carrying the field at the frame level, beside the
+— the client-edge equivalent of the peer semantics carrying the field at the frame level, beside the
 packet, rather than inside it. The header is present on every REJECT response this edge answers
 with, from `POST /ilp` and `POST /ilp/probe` alike, and is absent from a FULFILL. It is `0` when
 nothing was traversed and nothing terminated — no route matched, or a claim was refused as
@@ -665,7 +808,7 @@ remote connector raises there — a terminating connector adds its route's price
 ([ADR 0020](../adr/0020-a-price-is-flat-and-attaches-to-a-handler.md) — a price accumulates into a
 reject's running total; issues #545/#584) — with each hop on the way back adding its own fee, so
 what arrives is one figure covering both. Note that this is the ordinary packet path: a probe is
-gated at the client edge it enters, and the peer wire carries no probe frame, so a remote
+gated at the client edge it enters, and the peer semantics carries no probe frame, so a remote
 connector cannot tell a probe from any other packet and the "never delivered to a termination"
 rule above applies only to the connector the probe was submitted to.
 
@@ -696,6 +839,14 @@ state, and is never pushed into a network unprompted.
   ```json
   { "destination": "g.example.app", "price": 100 }
   ```
+  A route priced by payload length ([ADR
+  0065](../adr/0065-a-price-is-a-schedule-over-payload-length.md)) answers with its slope beside
+  its base, so one read still tells a caller what any packet will cost:
+  ```json
+  { "destination": "g.example.store", "price": 1000, "price_per_kib": 30 }
+  ```
+  `price_per_kib` is **omitted** on a flat route, so this answer is unchanged for every route
+  that predates schedules.
   `404` when no route this connector serves matches `destination` — this endpoint never fabricates
   a price for a route it does not serve. It answered `404` for a forwarded destination before ADR
   0028, which was correct only while such a destination was also uncharged; answering it now is
@@ -726,21 +877,38 @@ handler path, never in place of it
 handler, one price" true in the presence of a sender-chosen `target` — a route's configured handler
 is the one thing a sender's own envelope can never override.
 
-**A terminating connector tells the app nothing about the payment that brought a packet to it**
-([ADR 0036](../adr/0036-a-paid-deliverys-attribution-stays-on-the-connector.md)) — not who paid,
-not how much, not on what chain. The opened envelope's `method`, `target`, `headers` and `body` are
-the whole of what a handler ever receives; no header, query parameter or body field carries payer
-identity, amount or settlement chain, and none should be added. `amount` is implied by which
-handler fired (ADR 0020 — one handler, one price); `chain` never had an honest source and is
-dropped with no successor; `payer` is retained by the connector, as the client channel a covering
-claim was accepted on, and handing it to the app would be exactly the trusted, previous-hop-naming
-header ADR 0017 already documents as a mistake. An operator who needs to know which payer paid for
-a given delivery joins that connector's own `"packet"` log (ADR 0014, `client_channel_id`) to
-`state_dir/client-edge-claims.log`'s `InboundClaimAccepted` entries under the same chain-namespaced
-channel key, with the payer's identity from the channel's `[[client_channels]]`/chain-resolved
-record (ADR 0036) — connector-side records, never a fact the app is told. (`GET /channels`/`GET /claims`
-do not carry this: both project the node's own peer-wire channels, which a payer-opened client
-channel is not.)
+**A terminating connector tells the app about the payment it verified itself, and about no other**
+([ADR 0040](../adr/0040-a-verified-payment-is-stated-to-the-app.md), superseding
+[ADR 0036](../adr/0036-a-paid-deliverys-attribution-stays-on-the-connector.md)'s conclusion). Beyond the
+opened envelope's own `method`, `target`, `headers` and `body`, the request made to the route's
+`handler_url` carries three connector-stated headers:
+
+| Header          | Value                                                                                                         |
+| --------------- | ------------------------------------------------------------------------------------------------------------- |
+| `X-TOON-Payer`  | the client channel key a covering claim was admitted under — `evm:0x<64 lower-case hex>` or `solana:<base58>` |
+| `X-TOON-Amount` | the route's flat `price` (ADR 0020), decimal, in the settlement asset's base units                            |
+| `X-TOON-Chain`  | that channel key's own namespace — `evm` or `solana`                                                          |
+
+They are stated **only** for a delivery this connector was paid for at its own client edge: a
+packet no client claim admitted (a peer-role arrival, a forwarded packet, an unclaimed request) or
+a route priced at zero carries none of the three, absent rather than empty. `X-TOON-Payer` is
+therefore never the previous hop — on a longer path there is no client channel to name, and
+nothing is named (ADR 0017's defect, made unreachable rather than merely avoided). `X-TOON-Chain`
+comes from the verified claim, never from the destination address; `X-TOON-Amount` is the price
+this connector charged, never the arriving packet's sender-declared `amount`.
+
+A sender's own spelling of those three names, inside the sealed envelope, is **removed on every
+delivery** — including the deliveries that then state nothing. An app reading `X-TOON-Payer` is
+reading the connector or reading nothing, and MUST treat all three as optional rather than
+inferring "unpaid" from their absence: whatever reaches a handler was paid at that handler's one
+price (ADR 0020), whether or not this hop was the one that took the payment.
+
+The connector's own records are unchanged and remain the after-the-fact answer: an operator joins
+the `"packet"` log (ADR 0014, `client_channel_id`) to `state_dir/client-edge-claims.log`'s
+`InboundClaimAccepted` entries under that same chain-namespaced channel key, with the payer's
+identity from the channel's `[[client_channels]]`/chain-resolved record (ADR 0036).
+(`GET /channels`/`GET /claims` do not carry this: both project the node's own peer channels,
+which a payer-opened client channel is not.)
 
 ### 1.9 Client BTP websocket transport (issue #674 family)
 
@@ -753,25 +921,33 @@ over BTP is indistinguishable downstream from one that arrived over HTTP.
 
 **Peer sessions (ADR 0027).** This section previously stated that peers do not use this transport,
 so every BTP session was a client session by construction (ADR 0026). ADR 0027 reverses that: the
-raw-TCP peer wire is deleted and connectors peer over BTP on the same codec. A session is a **peer**
-session only if it presented a credential configured in `[[peers]]` _and_ has a `[[peer_channels]]`
-binding; anything else is a client session, with no fallthrough, and everything below in this section
-describes client sessions exactly as before. That credential admits nothing on its own: opening this
-transport is permissionless, a session presenting no credential at all is accepted and stays a
-client, and the credential only ever _upgrades_ an already-admitted session to peer role (see step 1
-below for what a client's `auth` entry is and is not). The peer sub-protocol entries — `claim-ack` and
-`toon-minimum-delivery` beside the `payment-channel-claim` and `toon-accumulated-cost` entries this
-section already defines — are specified for the peer direction, not here.
+raw-TCP transport is deleted and connectors peer over BTP on the same codec. A session is a **peer**
+session only while a frame it carries presents a claim on a channel one of that peering's
+`[[peer_channels]]` rows configures, whose signature verifies against the counterparty key that row
+configures ([ADR 0060](../adr/0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md),
+issue #1157; `peer-carriage-spec.md` §1.2); anything else is a client session, with no fallthrough,
+and everything below in this section describes client sessions exactly as before. **There is no
+peering credential**, and nothing replaced it: opening this transport is permissionless, a session
+that proves no peering is accepted and stays a client, and role attaches to a frame's own evidence
+rather than to the session's greeting (see step 1 below for what a client's `auth` entry is and is
+not). The peer sub-protocol entries — `claim-ack` beside the `payment-channel-claim` and
+`toon-accumulated-cost` entries this section already defines — are specified for the peer
+direction, not here. (`toon-minimum-delivery` was named here too; it is
+retired with the field, [ADR 0057](../adr/0057-minimum-delivery-is-retired-a-claim-bounds-erosion.md).)
 
 > **Superseded** by [ADR 0027](../adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md):
-> the raw-TCP peer wire is deleted (issue #679) and peers ride this same carriage, or
+> the raw-TCP transport is deleted (issue #679) and peers ride this same carriage, or
 > ILP-over-HTTP. A session is a _peer_ session if and only if it presented a configured peer
 > credential **and** has a `[[peer_channels]]` entry — role by authentication, not by transport
-> or port. "Every BTP session is a client session by construction" no longer holds, and the
-> classification it replaces is code, which is why it is a named stop-ship regression test on
-> both carriages. Everything else in this section — one gate, one journal, one refusal
-> taxonomy, indistinguishable downstream — is what ADR 0027 extends to peers rather than
-> changes. ADR 0026's carriage architecture stands; only its peer conclusion is superseded.
+> or port. (_The credential half was deleted by
+> [ADR 0060](../adr/0060-a-claim-proves-a-peering-and-the-shared-secret-is-deleted.md) (issue
+> #1157) and not replaced: role is the `[[peer_channels]]` binding plus a verified claim on one of
+> that peering's channels, decided per frame. ADR 0027's point here — role by authentication, not
+> by transport or port — is unchanged._) "Every BTP session is a client session by construction"
+> no longer holds, and the classification it replaces is code, which is why it is a named
+> stop-ship regression test on both carriages. Everything else in this section — one gate, one
+> journal, one refusal taxonomy, indistinguishable downstream — is what ADR 0027 extends to peers
+> rather than changes. ADR 0026's carriage architecture stands; only its peer conclusion is superseded.
 
 - **Method/path:** `GET /ilp/btp`, websocket upgrade. The `btp` subprotocol is selected when
   offered; an upgrade offering no subprotocol is accepted identically.
@@ -1003,7 +1179,9 @@ be replayed as a payment or vice versa:
   ClaimStateChallenge(bytes32 channelId,uint256 expires)
   ```
 - **solana** — Ed25519 over a tagged message distinct in both content and length from a real
-  claim's 48-byte balance-proof message:
+  claim's 96-byte balance-proof message (48 bytes before ADR 0053 bound the program id into it,
+  issue #1082; the challenge tag was chosen to be neither the same length as nor a prefix or suffix
+  of either layout):
   ```text
   message = "toon-claim-state-challenge-v1" || channelAccount(32 bytes) || expires(u64 LE)
   ```
@@ -1065,6 +1243,18 @@ endpoint reports, not a hypothetical one.
   available/nonce figures beside it remain exact across a restart regardless, since those still
   come from the durable watermark.
 
+**Which book answers (issue #1102).** A connector keeps two inbound books — this edge's own, and the
+peer semantics's `ClaimBook` — and the watermark reported above is the one belonging to the book that
+actually judges claims on that channel. Which book that is is a property of the **channel**, never of
+who is asking: a channel this node holds as a `[[peer_channels]]` row is judged by the peer book and
+MUST be reported from it; every other channel is this edge's and is reported from here. The two sets
+cannot overlap, because a channel named in both `[[peer_channels]]` and `[[client_channels]]` is a
+load-time refusal. This matters because a `[[pay_channels]]` payer (ADR 0042 item 2) asks this endpoint
+about a channel it holds with its next hop in both roles at once, and signs its next claim from the
+answer: answered out of the wrong book, it re-signs one cumulative amount at a fresh nonce forever.
+`lastClaimTime` is the one field that does not follow — the peer book records no timestamp for an
+accepted claim, so a peer channel reports `null` there, within the best-effort licence above.
+
 **What a failed entry reveals.** `ok: false` carries only `error`, one of:
 
 - `"expired"` — `expires` is not in the future. A fact about the request, safe to report exactly.
@@ -1089,8 +1279,10 @@ against `POST /ilp`. Nothing here calls into claim ingestion, and no per-packet 
 Version 1 has no field or header identifying its own version. That is the gap §3 closes: version
 1 is the version a client speaks when it addresses `POST /ilp` with none of the version-selection
 mechanism below, and is preserved exactly as specified above for as long as any client depends on
-it — per [ADR 0013](../adr/0013-cut-over-through-a-parallel-address-space.md), the old fleet stays
-up until nothing addresses its prefix.
+it. **That promise no longer rests on ADR 0013** (issue #1073): the parallel fleet it described was
+switched off by issue #872, so "the old fleet stays up until nothing addresses its prefix" refers to
+nothing. Version 1's preservation rests instead on §3.1's own guarantee — the unversioned path is a
+**permanent** alias for `v1`, and a client that never adopts versioning is never asked to change.
 
 ## 3. Introducing a new version
 
@@ -1108,17 +1300,26 @@ of any lower-numbered path.
 
 ### 3.2 Discovering what a connector supports
 
-`GET /ilp/versions` is unauthenticated (client-edge-facing, requiring no identity or claim) and
-returns:
+**Retired before it was ever built (issue #1054).** Version support is a fact about this node, and a
+node's facts live in **one** document: its self-description, which a `GET` on this connector's own URL
+returns ([ADR 0050](../adr/0050-a-connectors-url-resolves-to-its-self-description.md),
+[`self-description-spec.md`](self-description-spec.md)). A separate versions endpoint would have been a
+third surface describing the same node, after the greeting and the kind:10032 announce — which is the
+mess ADR 0046 and ADR 0050 exist to end.
+
+`supportedVersions` and `defaultVersion` are therefore fields on that document, carrying exactly what
+this section described. Built with #1080; on a connector serving only version 1 they read:
 
 ```json
-{ "supported": [1, 2], "default": 1 }
+{ "supportedVersions": [1], "defaultVersion": 1 }
 ```
 
-`default` is the version `POST /ilp` (unversioned) currently serves — always `1`, per §3.1's
+`defaultVersion` is the version `POST /ilp` (unversioned) currently serves — always `1`, per §3.1's
 permanence guarantee; the field exists so a client can assert its assumption rather than infer it.
-A client SHOULD call this once (and MAY cache the result) before deciding whether to address a
-version-qualified path, but is never required to — addressing `/ilp` directly always works.
+A client MAY read the document before deciding whether to address a version-qualified path, but is
+never required to — addressing `/ilp` directly always works. Note that reading it is a `GET` on the
+**same URL** the client already posts packets to, so there is no second address to discover, and the
+answer arrives with every other fact about the node rather than on its own.
 
 ### 3.3 Agreement
 
@@ -1136,9 +1337,9 @@ defined above.
 
 This spec defines only how a version is _introduced_ alongside an existing one. Retiring a
 version — ceasing to serve a version-qualified path — is a separate operational decision outside
-this document's scope, gated on nothing addressing that version's prefix, mirroring
-[ADR 0013](../adr/0013-cut-over-through-a-parallel-address-space.md)'s treatment of the peer-wire
-cutover.
+this document's scope, gated on nothing addressing that version's prefix. **The mirror this
+previously pointed at is gone** (issue #1073): ADR 0013's parallel fleet was switched off by issue
+#872. The gate itself stands on its own; it needs no precedent.
 
 ## 4. Consistency
 

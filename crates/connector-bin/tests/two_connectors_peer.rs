@@ -3,7 +3,7 @@
 //!
 //! The repo used to have this test. `paid_write_end_to_end.rs`'s own header
 //! records its deletion: `two_connectors_and_a_stub_app.rs`, *"since deleted
-//! with the raw-TCP peer wire it proved -- ADR 0027, issue #679."* That
+//! with the raw-TCP transport it proved -- ADR 0027, issue #679."* That
 //! deletion was right and nothing replaced it, so the nine PRs that landed
 //! the peer migration are verified only at unit and vector level, inside one
 //! process.
@@ -19,7 +19,7 @@
 //! | 1 | a packet crosses the peering and is fulfilled | [`two_connectors_move_a_paid_packet_over_btp`] / [`_over_http`](two_connectors_move_a_paid_packet_over_http) -- **runs, green** |
 //! | 2 | a claim advances the peer ledger and is acknowledged (§6) | [`a_peer_claim_is_acknowledged_over_btp`] / [`_over_http`](a_peer_claim_is_acknowledged_over_http) -- **runs, green** |
 //! | 3 | the idempotent re-ack of a byte-identical retransmission (§6.3) | same two tests, second half -- **runs, green** |
-//! | 4 | role-by-auth on a real socket (§1.9) | [`a_credential_that_fails_p1_or_p2_reaches_no_peer_handling_over_http`] and [`_over_btp`](a_credential_that_fails_p1_or_p2_reaches_no_peer_handling_over_btp) -- **runs, green** |
+//! | 4 | role-by-claim on a real socket (§1.9) | [`a_claim_that_fails_p2_or_p3_reaches_no_peer_handling_over_http`] and [`_over_btp`](a_claim_that_fails_p2_or_p3_reaches_no_peer_handling_over_btp) -- **runs, green** |
 //! | 5 | both carriages | every test above exists in a `wss://` and an `https://` form |
 //!
 //! # The client leg (issue #620, ADR 0028)
@@ -46,9 +46,9 @@
 //! arriving from #734 needs to know where the wiring lives:
 //!
 //! 1. **The accept side is bound to this node's own listeners.**
-//!    `connector-client-edge`'s `peer` module reads `Toon-Peer-Auth` on
-//!    `POST /ilp` and the `auth` entry on `GET /ilp/btp`, calls
-//!    [`connector_peer_auth::decide_role`], and hands a peer-role
+//!    `connector-client-edge`'s `peer` module reads the covering claim on
+//!    `POST /ilp` and on `GET /ilp/btp`, calls
+//!    [`connector_peer_btp::role_gate::decide`], and hands a peer-role
 //!    interaction to `connector-peer-http` or `connector-peer-btp`. There is
 //!    **no second socket**: `docs/operators/btp-peer-transport-bringup.md`
 //!    settles that peer carriages *"ride this node's own listeners"*, and
@@ -72,10 +72,18 @@
 //!
 //! Peer claims are EIP-712 balance proofs; `ClaimBook` verifies nothing else
 //! here. `[[peer_channels]]` itself grew a Solana shape (issue #759,
-//! `program_id` alongside `channel_account`/`counterparty_key`), but
-//! `ClaimBook` still has no `Connector` builder wiring a Solana row's
-//! verification key or signer from config -- issue #759's own follow-up
-//! note -- so this fixture's chain setup stays EVM. Everything below is
+//! `program_id` alongside `channel_account`/`counterparty_key`), and issue
+//! #998 gave `connector-cli::runtime::wire_peer_channels` the Solana arm
+//! that wires it into `ClaimBook` (`Connector::with_solana_channel`/
+//! `with_solana_signer`) -- so a Solana row is no longer inert at the
+//! config level, unit- and connector-level-tested in
+//! `connector-runtime::connector::tests::
+//! forwarding_to_a_solana_peer_signs_and_is_accepted_as_a_solana_claim` and
+//! `connector-cli::runtime::tests::solana_peer_channels_reach_the_claim_ledger`.
+//! This fixture's chain setup stays EVM regardless: proving it here needs a
+//! disposable `solana-test-validator` running the real `payment-channel`
+//! program alongside `anvil` in the same fixture, which is its own,
+//! separately-scoped follow-up, not part of #998. Everything below is
 //! therefore parameterised by *carriage*, never by chain, and the chain
 //! setup is one function ([`PeerFixture::spawn`]). A future issue extends
 //! this file by giving that function a Solana arm and the claim signer a
@@ -90,8 +98,8 @@ use futures_util::{SinkExt as _, StreamExt as _};
 use libsecp256k1::{Message, PublicKey, SecretKey};
 
 use connector_btp::{
-    decode_frame, encode_message, ProtocolData, AUTH_PROTOCOL, BTP_RESPONSE, CLAIM_ACK_PROTOCOL,
-    CLAIM_PROTOCOL, CONTENT_TYPE_TEXT,
+    decode_frame, encode_message, ProtocolData, BTP_RESPONSE, CLAIM_ACK_PROTOCOL, CLAIM_PROTOCOL,
+    CONTENT_TYPE_TEXT,
 };
 use connector_domain::{Prepare, Reject};
 use connector_settlement::SettlementBackend;
@@ -132,7 +140,7 @@ const PEER_FEE: u64 = 100;
 /// Equal to [`peer_bound_prepare`]'s declared `amount`, which is the whole
 /// arithmetic in one line: the payer collects `CLIENT_PRICE` from the
 /// client, forwards `CLIENT_PRICE - PEER_FEE` to the payee
-/// (`peer-wire-spec.md` §4), and so earns exactly `PEER_FEE`. A larger
+/// (`peer-semantics-pre-868.md` §4), and so earns exactly `PEER_FEE`. A larger
 /// declared amount is refused -- see
 /// [`a_client_may_not_declare_more_than_the_forwarded_route_charges`].
 const CLIENT_PRICE: u64 = 10 * PEER_FEE;
@@ -143,25 +151,18 @@ const CLIENT_PRICE: u64 = 10 * PEER_FEE;
 /// payer's `[[client_channels]]` is what makes its signature recognisable.
 const CLIENT_SECRET_SEED: u8 = 23;
 
-/// The shared secret the two nodes' `[[peers]]` entries agree on. A real
-/// value rather than the empty string, because an empty configured secret
-/// matches nothing by construction (§1.2 P1) and is refused at load.
-const PEER_SECRET: &str = "a-real-peering-secret";
-
 /// **One id, written by both operators.** `[[peers]].id` names the peering
-/// *relation*, and it is the `peerId` the dialing side presents in its
-/// credential (§1.4) -- so P1 ("a credential naming a peer id that appears
-/// in `[[peers]]`", §1.2) only holds when the two files agree on the
-/// literal string. The bring-up doc says the same thing from the other
-/// end: when the `peer_auth_refused` event you expect never arrives,
-/// *"check the id spelling on both sides"*.
+/// *relation*, and every `[[peer_channels]]` row of that relation binds its
+/// channels under it -- so the peer id a verified claim resolves to only
+/// matches a `[[routes]]` entry when the two files agree on the literal
+/// string. The bring-up doc says the same thing from the other end: when
+/// the `peer_auth_refused` event you expect never arrives, *"check the id
+/// spelling on both sides"*.
 ///
 /// This file used to carry two distinct ids -- `"alpha"` and `"beta"` --
 /// on the reasoning that each side names the *other*. Nothing had ever
 /// dialed, so nothing had contradicted it; the first real dial did, by
-/// presenting an id the far side had no entry for and being admitted as an
-/// ordinary client (which is exactly what §1.2 requires of an unrecognised
-/// id, and exactly the silent failure the bring-up doc warns about).
+/// naming a relation the far side had no entry for.
 const PEERING_ID: &str = "alpha-beta";
 
 /// The payee, as the payer's `[[routes]]` and `[[peers]]` name it -- the
@@ -263,18 +264,6 @@ fn evm_claim_json(
         token_network_address = to_hex(&token_network_address),
     )
     .replace("\\\n", "")
-}
-
-/// §1.4's credential, in its HTTP encoding: `base64(JSON)` of
-/// `{"peerId": …, "secret": …}`, on the `Toon-Peer-Auth` request header.
-fn peer_auth_header(peer_id: &str, secret: &str) -> String {
-    BASE64.encode(peer_credential(peer_id, secret))
-}
-
-/// The same credential in its BTP encoding: raw UTF-8 JSON in the `auth`
-/// protocolData entry. One JSON shape, two encodings (§1.4).
-fn peer_credential(peer_id: &str, secret: &str) -> String {
-    format!(r#"{{"peerId":"{peer_id}","secret":"{secret}"}}"#)
 }
 
 /// Which carriage a parameterised test is running over. §9 is blunt that a
@@ -391,9 +380,12 @@ impl PeerFixture {
         .expect("connect the payee's settlement identity to the same TokenNetwork");
         let payee_address = payee_backend.own_address().to_fixed_bytes();
 
-        // The payer opens the peering's channel naming the payee, and funds
-        // it with real on-chain value -- read back from the chain's own
-        // receipt, never invented here.
+        // The payer opens the peering's channel naming the payee, and puts
+        // its OWN collateral behind it -- read back from the chain's own
+        // receipt, never invented here. The payer is the side that signs
+        // claims here, so the payer's own deposit is what backs them:
+        // `fund` is a self-deposit (issue #1118), and this is the shape it
+        // exists for.
         let channel = payer_backend
             .open(payee_address.to_vec(), ChronoDuration::hours(1))
             .await
@@ -403,7 +395,7 @@ impl PeerFixture {
             .await
             .expect("fund the peering channel with real ERC-20 value");
         assert_eq!(
-            state.deposited,
+            state.own_deposited,
             u128::from(100 * PEER_FEE),
             "a real transaction genuinely moved this value on chain"
         );
@@ -421,8 +413,12 @@ impl PeerFixture {
             .open(client_address.to_vec(), ChronoDuration::hours(1))
             .await
             .expect("the payer opens a client channel");
+        // The other direction: on the client leg the *client* signs and
+        // the payer redeems, so the collateral has to sit on the client's
+        // side. On a real deployment the client deposits it themselves;
+        // here the fixture-only delegate deposit stands in (issue #1118).
         payer_backend
-            .fund(&client_channel, u128::from(100 * CLIENT_PRICE))
+            .fund_counterparty(&client_channel, u128::from(100 * CLIENT_PRICE))
             .await
             .expect("fund the client channel with real ERC-20 value");
 
@@ -500,13 +496,9 @@ const PEER_SETTLEMENT_KEY_PLACEHOLDER: &str = PAYEE_PRIVATE_KEY;
 
 /// Spawn the **payee**: a real compiled `connector` binary that terminates
 /// [`APP_PREFIX`] at a real stub app, exposes both peer carriages, and
-/// holds a `[[peer_channels]]` binding for the payer -- so a credential
-/// naming [`PAYER_ID`] satisfies both P1 and P2 (§1.2).
-///
-/// Also spawns a second, deliberately **unbound** peering (`ghost`): a
-/// `[[peers]]` entry with a good credential and no `[[peer_channels]]` row,
-/// which is §1.9 case 4 and is the one case a test cannot fabricate from
-/// the client side.
+/// holds a `[[peer_channels]]` binding for the payer -- so a claim the
+/// payer signs on that channel satisfies both P2 and P3 (§1.2), and
+/// nothing else does.
 fn spawn_payee(
     fixture: &PeerFixture,
     state_dir: &std::path::Path,
@@ -541,9 +533,6 @@ price = 0
 [[peers]]
 id = "{PAYER_ID}"
 
-[peers.credential]
-secret = "{PEER_SECRET}"
-
 # P2: the channel this relation's claims are judged against, and the
 # EIP-712 domain they are signed under (ADR 0024, §11).
 [[peer_channels]]
@@ -553,9 +542,9 @@ counterparty_key = "{payer}"
 chain_id = {ANVIL_CHAIN_ID}
 token_network = "{token_network}"
 
-# §1.9 case 4 -- a peering with a correct credential and no
-# `[[peer_channels]]` row -- is deliberately *absent* here, because it
-# cannot be written: `ConfigError::PeerUnbound` refuses it at load. See
+# §1.9's P2-alone case -- a peering with no `[[peer_channels]]` row -- is
+# deliberately *absent* here, because it cannot be written:
+# `ConfigError::PeerChannelUnbound` refuses it at load. See
 # `a_peer_with_no_channel_binding_refuses_to_start`, which is the only form
 # that case can take against a live binary.
 "#,
@@ -580,6 +569,7 @@ fn spawn_payer(
     state_dir: &std::path::Path,
     carriage: Carriage,
     payee_endpoint: &str,
+    payee_client_edge: &str,
 ) -> (
     ConnectorProcess,
     tempfile::NamedTempFile,
@@ -609,25 +599,22 @@ key_file = "{key_file}"
 # node terminates `{APP_PREFIX}`, so a fulfilled packet addressed there can
 # only have crossed the peering.
 #
-# ADR 0028's two numbers, and the whole of issue #620's client leg. `price`
-# is what this node's own client edge charges a client for a packet to this
-# prefix -- greeted, claim-gated and journaled exactly as a terminated
-# route's price is. `fee` is only what this hop retains of it; the
-# difference is what reaches the payee. Before ADR 0028 `price` here was a
-# hard config error, which is precisely why a forwarded route was a free
-# gateway that also paid its own peer.
+# ADR 0028's `price`, and the whole of issue #620's client leg: what this
+# node's own client edge charges a client for a packet to this prefix --
+# greeted, claim-gated and journaled exactly as a terminated route's price
+# is. Before ADR 0028 `price` here was a hard config error, which is
+# precisely why a forwarded route was a free gateway that also paid its own
+# peer. What this hop retains of it is the peering's `fee` below (ADR 0061),
+# and the difference is what reaches the payee.
 [[routes]]
 prefix = "{PEER_ROUTE_PREFIX}"
 peer_id = "{PAYEE_ID}"
-fee = {PEER_FEE}
 price = {CLIENT_PRICE}
 
 [[peers]]
 id = "{PAYEE_ID}"
 endpoint = "{payee_endpoint}"
-
-[peers.credential]
-secret = "{PEER_SECRET}"
+fee = {PEER_FEE}
 
 [[peer_channels]]
 peer_id = "{PAYEE_ID}"
@@ -635,6 +622,30 @@ channel_id = "{channel_id}"
 counterparty_key = "{payee}"
 chain_id = {ANVIL_CHAIN_ID}
 token_network = "{token_network}"
+
+# ADR 0042, and REQUIRED of any peering this node forwards to since issue
+# #1145: the channel this node pays the payee from, as an ordinary client
+# of it, covering each PREPARE **before** it is sent. Without this row the
+# binary refuses to start (`ConfigError::PayChannelUnbound`), because there
+# is no longer an uncovered path for a forward to take -- ADR 0004's
+# postpay convention, where the claim covering crossing n rode crossing
+# n + 1, is deleted.
+#
+# The same `channel_id` the `[[peer_channels]]` row above names, which is
+# the deployed shape: the peer role for what arrives, the client role for
+# what this node sends. `client_edge_url` is the payee's own `POST /ilp`,
+# where this node asks where its claims on that channel stand -- answered
+# out of the payee's PEER book, because that is the book the channel is
+# bound in there (issue #1102). It is HTTP even when the peering itself is
+# carried over BTP: the claim-state ask is its own request, and a `wss://`
+# peering has no HTTP client edge to derive one from, which is why this is
+# written out rather than inferred.
+[[pay_channels]]
+peer_id = "{PAYEE_ID}"
+channel_id = "{channel_id}"
+chain_id = {ANVIL_CHAIN_ID}
+token_network = "{token_network}"
+client_edge_url = "{payee_client_edge}"
 
 # The client leg's channel, in the *other* namespace (§1.8): whose
 # signature this node accepts on a claim presented at its client edge. A
@@ -654,6 +665,7 @@ token_network_address = "{token_network}"
         settlement = fixture.settlement_block(settlement_key_file.path()),
         channel_id = fixture.channel_id,
         payee = to_hex(&fixture.payee_address),
+        payee_client_edge = payee_client_edge,
         client_channel_id = fixture.client_channel_id,
         client = to_hex(&fixture.client_address),
         token_network = to_hex(&fixture.token_network_address),
@@ -676,12 +688,13 @@ fn peer_journal(state_dir: &std::path::Path) -> String {
 /// survive the hop's own fee.
 ///
 /// `support::sample_prepare` mints an `amount: 0` packet, which is right
-/// for a terminated route and wrong for a forwarding one: `peer-wire-spec.md`
-/// §4 computes `A' = A - fee` and rejects **`R01`** when `A'` falls below
-/// the sender's `minimumDelivery` floor, so a zero-amount packet never
-/// reaches the peer transport at all -- it is refused one layer earlier, by
-/// arithmetic. A test that used a zero amount here would be asserting the
-/// fee check, not the peering.
+/// for a terminated route and wrong for a forwarding one: a hop forwards
+/// `A - fee` and refuses `R01` when its own fee alone exceeds `A` (ADR
+/// 0010; RFC 0027's own meaning for that code, which ADR 0057 as corrected
+/// leaves standing), so a zero-amount packet never reaches the peer
+/// transport at all -- it is refused one layer earlier, by arithmetic. A
+/// test that used a zero amount here would be asserting the fee check, not
+/// the peering.
 fn peer_bound_prepare(destination: &str, body: &'static [u8], payee: &PublicKeyBytes) -> Prepare {
     let (data, shared_secret) = sealed_prepare_data(body, payee);
     Prepare {
@@ -690,22 +703,23 @@ fn peer_bound_prepare(destination: &str, body: &'static [u8], payee: &PublicKeyB
     }
 }
 
-/// Present `credential` and `claim` to a running connector's HTTP carriage
-/// exactly as §3/§4 require, and return the response's status, body and
-/// `Toon-Claim-Ack` header.
+/// Present `claim` to a running connector's HTTP carriage exactly as §3/§4
+/// require, and return the response's status, body and `Toon-Claim-Ack`
+/// header.
+///
+/// There is no credential parameter and no `Toon-Peer-Auth` header: ADR
+/// 0060 deleted both. The claim is the whole of what identifies the peering
+/// (§1.2), which is why every one of these calls carries one or deliberately
+/// does not.
 async fn post_peer_request(
     client: &reqwest::Client,
     addr: &str,
-    credential: Option<&str>,
     claim: Option<&str>,
     prepare: &Prepare,
 ) -> (reqwest::StatusCode, Vec<u8>, Option<String>) {
     let mut request = client
         .post(format!("http://{addr}/ilp"))
         .body(prepare.encode());
-    if let Some(credential) = credential {
-        request = request.header("toon-peer-auth", credential);
-    }
     if let Some(claim) = claim {
         request = request.header("ilp-payment-channel-claim", BASE64.encode(claim));
     }
@@ -720,46 +734,24 @@ async fn post_peer_request(
 }
 
 /// The BTP twin of [`post_peer_request`]: one websocket session to
-/// `/ilp/btp`, the `auth` entry on its own first MESSAGE, then a second
-/// MESSAGE carrying the claim entry and the OER PREPARE -- returning that
-/// second frame's answer and its `claim-ack` entry's payload, if one rode
-/// back.
+/// `/ilp/btp` carrying **one** MESSAGE -- the claim entry and the OER
+/// PREPARE together -- returning its answer and its `claim-ack` entry's
+/// payload, if one rode back.
 ///
-/// **Two frames, not one.** §1.4 puts the credential *"on the session's
-/// first MESSAGE"*, and a BTP `auth` frame is answered on its own on both
-/// edges: the client edge acknowledges it and reads nothing else off it,
-/// and so does the peer carriage. §1.5 is the reason -- role is bound
-/// before anything else on the session happens, and frames processed
-/// before the binding are client frames forever -- so a claim riding the
-/// very frame that binds the role would be a claim judged in whichever
-/// namespace the reader happened to check first.
+/// **One frame, not two.** It used to send an `auth` frame first, because a
+/// credential bound the session's role and §1.5 required that to happen
+/// before anything else. ADR 0060 deleted the credential and §1.5 inverted:
+/// role is a property of the frame, decided from the claim that frame
+/// carries, so the claim and the packet ride together and there is nothing
+/// to send ahead of them.
 async fn send_peer_message(
     addr: &str,
-    credential: Option<&str>,
     claim: Option<&str>,
     prepare: &Prepare,
 ) -> (Vec<u8>, Option<String>) {
     let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ilp/btp"))
         .await
         .expect("upgrade the peer carriage's websocket");
-
-    if let Some(credential) = credential {
-        let auth = ProtocolData {
-            name: AUTH_PROTOCOL.to_string(),
-            content_type: CONTENT_TYPE_TEXT,
-            data: credential.as_bytes().to_vec(),
-        };
-        socket
-            .send(tokio_tungstenite::tungstenite::Message::Binary(
-                encode_message(1, &[auth], &[]),
-            ))
-            .await
-            .expect("send the auth MESSAGE");
-        // Both roles answer an `auth` frame with the same empty RESPONSE:
-        // received, nothing more to say, and the role decision is not
-        // disclosed on either outcome.
-        next_binary(&mut socket).await;
-    }
 
     let mut protocol_data = Vec::new();
     if let Some(claim) = claim {
@@ -823,25 +815,20 @@ where
 /// `toon-sandbox` admitted an anonymous BTP session with
 /// `btp_auth … success:true mode:"no-auth"` and then treated it as a
 /// quasi-peer. §1.9 requires **both carriages** to carry a stop-ship
-/// regression named for it, asserting that each of five credential shapes
-/// is classified `client` and reaches no peer handling whatsoever.
+/// regression named for it, asserting that each shape below is classified
+/// `client` and reaches no peer handling whatsoever.
 ///
 /// "Reaches no peer handling" is asserted here the way §1.9 defines it: no
 /// `Toon-Claim-Ack` was emitted, and nothing was appended to the peer claim
 /// ledger -- read off the binary's own `state_dir`, not from anything the
 /// node says about itself.
 ///
-/// **What this proves on `main` today, honestly.** No carriage is wired
-/// into either binary (see this module's header, gap 1), so *no* credential
-/// currently reaches peer handling and this test passes for a reason weaker
-/// than the one it will have after #678. It is not `#[ignore]`d anyway,
-/// because after #678 it is the assertion that catches an admission bug on
-/// the way in -- which is the only time catching it is cheap. The claim it
-/// presents is genuinely signed against a genuinely funded channel, so
-/// nothing about it is a shortcut: it is a claim that *would* be accepted on
-/// the bound relation, offered on credentials that must not admit it.
+/// Since ADR 0060 the discriminator **is** the claim: what each case varies
+/// is which claim rides the request, because there is nothing else left to
+/// vary. The positive control is the other tests in this file, every one of
+/// which presents a genuine claim on the bound channel and is admitted.
 #[tokio::test]
-async fn a_credential_that_fails_p1_or_p2_reaches_no_peer_handling_over_http() {
+async fn a_claim_that_fails_p2_or_p3_reaches_no_peer_handling_over_http() {
     let Some(fixture) = PeerFixture::spawn().await else {
         return;
     };
@@ -850,19 +837,12 @@ async fn a_credential_that_fails_p1_or_p2_reaches_no_peer_handling_over_http() {
     let (payee, _config, _key) = spawn_payee(&fixture, state_dir.path(), &stub_app.addr);
     let payee_identity = identity_from_key_seed(PAYEE_SIGNER_SEED);
     let client = reqwest::Client::new();
-    let claim = fixture.claim(1);
 
-    for (case, credential) in refused_credentials() {
+    for (case, claim) in fixture.refused_claims() {
         let (data, shared) = sealed_prepare_data(case.as_bytes(), &payee_identity);
         let prepare = sample_prepare(APP_PREFIX, data, &shared);
-        let (status, _body, ack) = post_peer_request(
-            &client,
-            &payee.client_edge_addr,
-            credential.as_deref(),
-            Some(&claim),
-            &prepare,
-        )
-        .await;
+        let (status, _body, ack) =
+            post_peer_request(&client, &payee.client_edge_addr, claim.as_deref(), &prepare).await;
         assert!(
             status.is_success() || status == reqwest::StatusCode::BAD_REQUEST,
             "{case}: §6.2 reserves non-200 for a malformed request, never a claim verdict"
@@ -880,13 +860,13 @@ async fn a_credential_that_fails_p1_or_p2_reaches_no_peer_handling_over_http() {
 }
 
 /// The BTP twin of
-/// [`a_credential_that_fails_p1_or_p2_reaches_no_peer_handling_over_http`].
+/// [`a_claim_that_fails_p2_or_p3_reaches_no_peer_handling_over_http`].
 /// §1.9 requires the regression on **both** carriages, and §9 makes any
 /// peer behaviour present on one and absent on the other a defect rather
-/// than a carriage property -- so this is the same five cases, the same
-/// two observations, over a real websocket to the same real binary.
+/// than a carriage property -- so this is the same cases, the same two
+/// observations, over a real websocket to the same real binary.
 #[tokio::test]
-async fn a_credential_that_fails_p1_or_p2_reaches_no_peer_handling_over_btp() {
+async fn a_claim_that_fails_p2_or_p3_reaches_no_peer_handling_over_btp() {
     let Some(fixture) = PeerFixture::spawn().await else {
         return;
     };
@@ -894,18 +874,12 @@ async fn a_credential_that_fails_p1_or_p2_reaches_no_peer_handling_over_btp() {
     let stub_app = spawn_stub_app();
     let (payee, _config, _key) = spawn_payee(&fixture, state_dir.path(), &stub_app.addr);
     let payee_identity = identity_from_key_seed(PAYEE_SIGNER_SEED);
-    let claim = fixture.claim(1);
 
-    for (case, credential) in refused_credentials() {
+    for (case, claim) in fixture.refused_claims() {
         let (data, shared) = sealed_prepare_data(case.as_bytes(), &payee_identity);
         let prepare = sample_prepare(APP_PREFIX, data, &shared);
-        let (_packet, ack) = send_peer_message(
-            &payee.client_edge_addr,
-            credential.as_deref(),
-            Some(&claim),
-            &prepare,
-        )
-        .await;
+        let (_packet, ack) =
+            send_peer_message(&payee.client_edge_addr, claim.as_deref(), &prepare).await;
         assert_eq!(
             ack, None,
             "{case}: §1.7 -- a connector MUST NOT emit a claim-ack on a client interaction"
@@ -918,31 +892,53 @@ async fn a_credential_that_fails_p1_or_p2_reaches_no_peer_handling_over_btp() {
     }
 }
 
-/// §1.9's cases that a **wire** can present, in its own order, as
-/// `(name, credential)` -- shared so the two carriages cannot drift in
-/// *which* cases they cover, which is exactly the drift §9 warns about.
+/// §1.9's cases that a **wire** can present, as `(name, claim)` -- shared
+/// so the two carriages cannot drift in *which* cases they cover, which is
+/// exactly the drift §9 warns about.
 ///
-/// Four of §1.9's five. Its case 4 -- a correct credential for a peer with
-/// **no** `[[peer_channels]]` entry, P2 alone failing -- is missing because
-/// **it cannot be presented to a Rust connector at all**: this
-/// implementation refuses such a peering at config load
-/// (`ConfigError::PeerUnbound`), so no running binary can hold one to
-/// authenticate against. That is a *stronger* position than §1.9 requires,
+/// §1.9's P2-alone case -- a peering with **no** `[[peer_channels]]` entry
+/// -- is missing because **it cannot be presented to a Rust connector at
+/// all**: this implementation refuses such a peering at config load
+/// (`ConfigError::PeerChannelUnbound`), so no running binary can hold one
+/// for a claim to name. That is a *stronger* position than §1.9 requires,
 /// and it moves the case from the wire to startup; the live-binary form of
 /// it is [`a_peer_with_no_channel_binding_refuses_to_start`].
-fn refused_credentials() -> Vec<(&'static str, Option<String>)> {
-    vec![
-        ("no credential at all", None),
-        ("an empty secret", Some(peer_credential(PAYER_ID, ""))),
-        (
-            "a correct peer id with a wrong secret",
-            Some(peer_credential(PAYER_ID, "not-the-secret")),
-        ),
-        (
-            "a valid credential naming an unconfigured peer id",
-            Some(peer_credential("nobody", PEER_SECRET)),
-        ),
-    ]
+impl PeerFixture {
+    fn refused_claims(&self) -> Vec<(&'static str, Option<String>)> {
+        // A key that is nobody's counterparty on this channel.
+        let stranger = SecretKey::parse(&[0x5au8; 32]).expect("a valid secp256k1 key");
+        // A channel this node holds no `[[peer_channels]]` row for.
+        let unbound = format!("0x{:064x}", 0xdeadu64);
+        vec![
+            ("no claim at all", None),
+            (
+                "a claim whose signature does not recover to the row's key",
+                Some(evm_claim_json(
+                    &stranger,
+                    PAYER_ID,
+                    &self.channel_id,
+                    1,
+                    u128::from(PEER_FEE),
+                    self.token_network_address,
+                )),
+            ),
+            (
+                "a claim on a channel no [[peer_channels]] row binds",
+                Some(evm_claim_json(
+                    &self.payer_secret,
+                    PAYER_ID,
+                    &unbound,
+                    1,
+                    u128::from(PEER_FEE),
+                    self.token_network_address,
+                )),
+            ),
+            (
+                "a claim header that is not a claim",
+                Some("not a claim at all".to_string()),
+            ),
+        ]
+    }
 }
 
 /// **§1.9 case 4, in the only form a live binary can express it.**
@@ -971,9 +967,6 @@ key_file = "{key_file}"
 
 [[peers]]
 id = "unbound"
-
-[peers.credential]
-secret = "{PEER_SECRET}"
 "#,
         key_file = key_file.path().display(),
     ));
@@ -1090,8 +1083,14 @@ async fn two_connectors_move_a_paid_packet(carriage: Carriage) {
             Carriage::Http => "/ilp",
         }
     );
-    let (payer, _payer_config, _payer_key) =
-        spawn_payer(&fixture, payer_state.path(), carriage, &endpoint);
+    let payee_client_edge = format!("http://{}/ilp", payee.client_edge_addr);
+    let (payer, _payer_config, _payer_key) = spawn_payer(
+        &fixture,
+        payer_state.path(),
+        carriage,
+        &endpoint,
+        &payee_client_edge,
+    );
 
     // The packet is sealed to the **payee's** identity: it terminates
     // there, and the payer is a forwarding hop that cannot open it (§8.1).
@@ -1140,7 +1139,7 @@ async fn two_connectors_move_a_paid_packet(carriage: Carriage) {
         let addr = payer.client_edge_addr.clone();
         async move {
             let (status, body, _ack) =
-                post_peer_request(&client, &addr, None, Some(&claim), &prepare).await;
+                post_peer_request(&client, &addr, Some(&claim), &prepare).await;
             assert_eq!(status, reqwest::StatusCode::OK);
             connector_domain::Fulfill::decode(&body).unwrap_or_else(|_| {
                 let reject =
@@ -1156,13 +1155,19 @@ async fn two_connectors_move_a_paid_packet(carriage: Carriage) {
 
     cross(b"across the peering", 1).await;
 
-    // **Twice, because value moves on fulfilment** (ADR 0004,
-    // `peer-wire-spec.md` §3.2). The payer owes nothing until the first
-    // crossing has actually fulfilled, so the claim covering crossing *n*
-    // is signed after it and rides crossing *n + 1*. One packet proves
-    // delivery; the second is what proves the peering is *paid*, which is
-    // the property #620 exists for and the one a free-write path would
-    // silently lose.
+    // **Twice, and no longer for ADR 0004's reason** (issue #1145). It used
+    // to be that the payer owed nothing until the first crossing had
+    // fulfilled, so the claim covering crossing *n* was signed after it and
+    // rode crossing *n + 1* -- one packet could prove delivery and say
+    // nothing about payment. That model is deleted: crossing 1 arrives
+    // already covered.
+    //
+    // The second crossing still earns its place, for `local/two-hop`'s
+    // reason instead (issue #1102). A covering payer asks the payee where
+    // its claims stand on every packet, and a payee answering out of the
+    // wrong book reports nonce 0 forever -- so crossing 2 re-signs crossing
+    // 1's cumulative amount at a fresh nonce and advances nothing, which is
+    // accepted every time and buys nothing. One crossing cannot see that.
     cross(b"across the peering again", 2).await;
 
     // Delivery alone is what the deleted test settled for. This asserts the
@@ -1218,8 +1223,13 @@ async fn a_client_may_not_declare_more_than_the_forwarded_route_charges() {
     let (payee, _payee_config, _payee_key) =
         spawn_payee(&fixture, payee_state.path(), &stub_app.addr);
     let endpoint = format!("http://{}/ilp", payee.client_edge_addr);
-    let (payer, _payer_config, _payer_key) =
-        spawn_payer(&fixture, payer_state.path(), Carriage::Http, &endpoint);
+    let (payer, _payer_config, _payer_key) = spawn_payer(
+        &fixture,
+        payer_state.path(),
+        Carriage::Http,
+        &endpoint,
+        &endpoint,
+    );
 
     let payee_identity = identity_from_key_seed(PAYEE_SIGNER_SEED);
     let (data, shared_secret) = sealed_prepare_data(b"over-carried", &payee_identity);
@@ -1314,10 +1324,6 @@ async fn a_peer_claim_is_acknowledged(carriage: Carriage) {
     let stub_app = spawn_stub_app();
     let (payee, _config, _key) = spawn_payee(&fixture, state_dir.path(), &stub_app.addr);
     let payee_identity = identity_from_key_seed(PAYEE_SIGNER_SEED);
-    let credential = match carriage {
-        Carriage::Btp => peer_credential(PAYER_ID, PEER_SECRET),
-        Carriage::Http => peer_auth_header(PAYER_ID, PEER_SECRET),
-    };
     let client = reqwest::Client::new();
 
     // §6.3 is about *bytes*: the claim JSON carries a `timestamp`, so the
@@ -1330,25 +1336,14 @@ async fn a_peer_claim_is_acknowledged(carriage: Carriage) {
         let (data, shared) = sealed_prepare_data(body, &payee_identity);
         let prepare = sample_prepare(APP_PREFIX, data, &shared);
         let claim = claim.to_string();
-        let credential = credential.clone();
         let addr = payee.client_edge_addr.clone();
         let client = client.clone();
         async move {
             match carriage {
-                Carriage::Btp => {
-                    send_peer_message(&addr, Some(&credential), Some(&claim), &prepare)
-                        .await
-                        .1
-                }
+                Carriage::Btp => send_peer_message(&addr, Some(&claim), &prepare).await.1,
                 Carriage::Http => {
-                    let (status, _body, ack) = post_peer_request(
-                        &client,
-                        &addr,
-                        Some(&credential),
-                        Some(&claim),
-                        &prepare,
-                    )
-                    .await;
+                    let (status, _body, ack) =
+                        post_peer_request(&client, &addr, Some(&claim), &prepare).await;
                     assert_eq!(
                         status,
                         reqwest::StatusCode::OK,

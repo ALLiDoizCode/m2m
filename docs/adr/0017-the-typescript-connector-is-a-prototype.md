@@ -1,5 +1,7 @@
 # The TypeScript connector is a prototype, not a reference implementation
 
+**Status:** Accepted. **Supersedes [0016](0016-payload-opacity-is-a-property-of-carriage.md)'s conformance half and [0013](0013-cut-over-through-a-parallel-address-space.md)'s comparison half.** Its subject is gone from this repository: there is no `packages/connector`, and `fleet_compare.rs` was deleted as this record asked.
+
 **Scope:** fleet and operations — not connector-internal, not wire law. See the [ADR index](README.md).
 
 The Rust connector implements a wire of its own design and never client edge version 1. ADR 0016's

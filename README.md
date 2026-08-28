@@ -2,456 +2,612 @@
 
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A payment router for agent networks: an [Interledger](https://interledger.org) connector that
-forwards value-bearing packets between peers, terminates routes in front of
-payment-oblivious apps, charges for them, and settles the balance on chain.
+**A paid reverse proxy.** You put it in front of an ordinary HTTP app, you set a
+price, and it collects that price from whoever calls — in tokens, per request,
+without your app knowing payment exists.
 
-**This is a Rust repository.** The connector is a Cargo workspace under [`crates/`](crates/),
-built as one static binary that reads one TOML file. The TypeScript connector that used to live
-here was a prototype and has been removed —
-[ADR 0017](docs/adr/0017-the-typescript-connector-is-a-prototype.md), #465 and #543.
-`@toon-protocol/connector` remains on npm at its last release (4.0.0) for existing clients, but
-its source is only in git history, and nothing in this repository implements its wire.
+It does that by being an [Interledger](https://interledger.org) connector: value
+arrives wrapped in a protocol your app never speaks, and at the last hop this
+binary unwraps it, verifies it was paid for, and hands the app a plain HTTP
+request. **It terminates payments the way nginx terminates SSL.**
 
-## What the connector does
+You do not need to know anything about Interledger to run one. This page is the
+journey, in three steps:
 
-- **Routes.** Longest-prefix match on an ILP address (`g.example.app`) picks either a **peer** to
-  forward to or an **app** to terminate at. Routes are static configuration — the connector is
-  mechanism, not policy ([ADR 0006](docs/adr/0006-the-connector-is-mechanism-not-policy.md)); it
-  neither discovers nor advertises them
-  ([ADR 0022](docs/adr/0022-a-connector-answers-it-does-not-announce.md)).
-- **Charges.** A **fee** is flat, per packet, per peering relation; a **price** is flat and
-  attaches to a terminated route's handler. Neither is a percentage and neither is per byte
-  ([ADR 0010](docs/adr/0010-flat-per-packet-fee-and-minimum-delivery.md),
-  [ADR 0020](docs/adr/0020-a-price-is-flat-and-attaches-to-a-handler.md)). You pay for an answer,
-  not for the answer you wanted: a `404` from the app is a real answer and costs the same as a
-  `200`.
-- **Keeps the payload sealed.** A packet's `data` is a gift wrap sealed to the **terminating**
-  connector's identity key, carrying a 32-byte shared secret and an OER-encoded request envelope
-  ([ADR 0018](docs/adr/0018-a-payload-is-sealed-to-the-terminating-connector.md)). A forwarding hop
-  sees opaque bytes — not the method, target, headers or size of what crossed it. The terminating
-  connector opens it, makes exactly that HTTP request of the app, and seals the app's complete
-  response back under the same secret.
-- **Derives its own fulfilment.** The terminating connector derives the packet's 32-byte
-  fulfilment from that shared secret
-  ([ADR 0019](docs/adr/0019-a-terminating-connector-derives-the-fulfilment.md)). The app supplies
-  no preimage and is told nothing about the payment — no `TOON-Fulfillment`, no `X-TOON-Payer`,
-  no headers of any kind that this connector adds.
-- **Accounts and settles.** Fulfilments accrue as signed claims against a payment channel
-  ([ADR 0004](docs/adr/0004-value-moves-on-fulfilment.md),
-  [ADR 0005](docs/adr/0005-claims-are-truth-balances-are-a-projection.md)); the latest claim is
-  redeemed on chain against a deployed `TokenNetwork`, reached through a registry.
-  [`docs/protocol/money-model.md`](docs/protocol/money-model.md) walks one write end to end —
-  client edge to terminating app — with a diagram.
+|       | Step                                                | You end up with                                     |
+| ----- | --------------------------------------------------- | --------------------------------------------------- |
+| **1** | [Run a node](#1-run-a-node)                         | One binary, one config file, answering on a port.   |
+| **2** | [Put your app behind it](#2-put-your-app-behind-it) | Your app served through it, unchanged.              |
+| **3** | [Get paid](#3-get-paid)                             | A settlement chain, so anyone can pay what you ask. |
 
-## Build
+Then [peering](#peering), [the operator surface](#the-operator-surface) for
+inspecting a node and moving its money, and [operating it](#operating-it) day to
+day. When you do want the protocol, [`docs/rfcs/`](docs/rfcs/README.md) is the ten
+RFCs it is built from and where this connector departs from each.
 
-Rust stable (CI pins nothing tighter than `dtolnay/rust-toolchain@stable`). Clone with
-submodules — `packages/contracts` vendors OpenZeppelin and forge-std, and one test shells out to
-`forge build`:
+---
+
+## 1. Run a node
+
+The connector is one static binary that reads one TOML file. Two ways to get it.
+
+### With Docker
+
+The published image is how this is meant to be deployed. It runs as uid `10001`
+and creates `/app/state` owned by that uid, so a fresh named volume inherits the
+ownership.
+
+```bash
+docker pull ghcr.io/toon-protocol/connector:rust-main
+mkdir -p node/config node/data && cd node
+openssl rand -hex 32 > data/signer.key && chmod 600 data/signer.key
+```
+
+> [!NOTE]
+> **The published image is `linux/amd64` only.** On Apple Silicon (or any other
+> arm64 host), pull and run it under emulation:
+>
+> ```bash
+> docker pull --platform linux/amd64 ghcr.io/toon-protocol/connector:rust-main
+> ```
+>
+> and add `platform: linux/amd64` next to `image:` on the `connector` service in
+> `compose.yml` below.
+
+`compose.yml`:
+
+```yaml
+services:
+  connector:
+    image: ghcr.io/toon-protocol/connector:rust-main
+    command: ['/app/config/connector.toml']
+    volumes:
+      - ./config/connector.toml:/app/config/connector.toml:ro
+      - ./data:/app/data:ro
+      # A NAMED volume, not a bind mount. A host bind mount arrives root-owned
+      # and the connector refuses to start.
+      - connector-state:/app/state
+    ports:
+      # Loopback to begin with. The client edge is the paid surface; put a
+      # TLS-terminating reverse proxy in front of it before it faces the world.
+      - '127.0.0.1:3000:3000'
+    restart: unless-stopped
+    healthcheck:
+      # Free and unauthenticated. Answering it means the config loaded, every
+      # settlement backend connected, and the router is serving. `docker ps`
+      # showing "Up" proves none of that.
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:3000/ilp/identity']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  quotes:
+    image: your-quotes-app:latest
+  search:
+    image: your-search-app:latest
+
+volumes:
+  connector-state:
+```
+
+```bash
+docker compose up -d
+```
+
+### From source
+
+For changing the connector rather than running it. Rust stable, and clone with
+submodules — `packages/contracts` vendors OpenZeppelin and forge-std:
 
 ```bash
 git clone --recurse-submodules https://github.com/toon-protocol/connector.git
-cd connector
-cargo build --workspace
+cd connector && cargo build --workspace
+./target/debug/connector path/to/connector.toml
 ```
 
-The binary lands at `target/debug/connector` (`--release` for `target/release/connector`).
+Paths in the config are then yours, not the image's: `state_dir = "./state"`,
+`key_file = "./signer.key"`. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the test
+gate and the chain binaries it needs.
 
-## Configure
-
-One TOML file, read once at startup, fully validated, immutable for the process lifetime. There
-is **no environment-variable override layer**
-([ADR 0009](docs/adr/0009-one-typed-config-file-no-environment-layer.md)) — the only variable the
-binary reads is `RUST_LOG`, and that only sets log verbosity. Unknown keys are a hard load
-failure; the connector either runs with what you wrote or refuses to start and says why.
-
-[`deploy/connector-rust/connector.toml`](deploy/connector-rust/connector.toml) is the annotated
-template. A minimal file:
+### The config
 
 ```toml
 client_edge_addr = "0.0.0.0:3000"
+state_dir        = "/app/state"
 
 [signer]
 key_file = "/app/data/signer.key"   # 32 raw bytes, or 64 hex characters
 
+# One route per thing you serve. Longest matching prefix wins, so a more
+# specific prefix can sit beneath a broader one and take precedence.
+#
+# `price` is a whole number of the SMALLEST UNIT of the token you settle in
+# (step 3) — the way a card terminal counts in cents, never in dollars. How
+# many of those units make one token is the token's `decimals`. USDC has 6,
+# so 1,000,000 units are one USDC, and:
+#
+#     price = 1000        0.001 USDC   a tenth of a cent
+#     price = 100000      0.10  USDC   ten cents
+#     price = 1000000     1.00  USDC   one dollar
+#
+# A wallet or a dashboard shows the whole-token figure. This file never does.
 [[routes]]
-prefix      = "g.example.app"
-handler_url = "http://app:3100"
-price       = 100
+prefix      = "g.example.quotes"
+handler_url = "http://quotes:8080/"
+price       = 1000                       # 0.001 USDC per request
+
+[[routes]]
+prefix      = "g.example.search"
+handler_url = "http://search:8080/"
+price       = 2500                       # 0.0025 USDC
+
+# Same app, deeper prefix, different price. This wins over g.example.search
+# for g.example.search.bulk because it matches more labels.
+[[routes]]
+prefix      = "g.example.search.bulk"
+handler_url = "http://search:8080/bulk/"
+price       = 10000                      # 0.01 USDC, a cent
+
+# If your app's own costs go up with the size of what it is handed — storage,
+# uploads, anything you pay an upstream by the byte for — price it by size
+# instead of picking one number and losing money at one end of the range:
+#
+#     base     what every request pays, whatever it carries
+#     per_kib  added for each started kibibyte of the request's payload
+#
+# A caller is charged `base + per_kib × ceil(payload_size / 1024)`, and both
+# figures are published, so it can work out what a request costs before
+# sending it. Leave `price` a plain number when one number is right — that is
+# still what most routes want.
+[[routes]]
+prefix      = "g.example.store"
+handler_url = "http://store:8080/"
+price       = { base = 1000, per_kib = 30 }   # 0.001 USDC + 0.00003 per KiB
 ```
 
-| Key                     | Type        | Required  | Meaning                                                                                                       |
-| ----------------------- | ----------- | --------- | ------------------------------------------------------------------------------------------------------------- |
-| `client_edge_addr`      | `host:port` | yes       | Where `POST /ilp`, `GET /ilp/btp` (and, if configured, the operator surface) listen.                          |
-| `[signer]`              | table       | yes       | Exactly one of `key_file` or `kms_key_id` — a location, never a key value.                                    |
-| `[[routes]]`            | array       | no        | See below.                                                                                                    |
-| `apex`                  | ILP address | no        | Required only if `[[children]]` is used.                                                                      |
-| `[[children]]`          | array       | no        | `{ name, handler_url, price }` — sugar for a route at `<apex>.<name>`.                                        |
-| `[operator]`            | table       | no        | Absent ⇒ the operator surface is not mounted at all.                                                          |
-| `peer_expose`           | string      | no        | `btp` / `http` / `both` / `neither` — which peer carriages this node listens for. Absent ⇒ `neither`.         |
-| `[[peers]]`             | array       | no        | `{ id, endpoint, credential, … }` — the peerings `routes.peer_id` may name.                                   |
-| `[[peer_channels]]`     | array       | no        | `{ peer_id, channel_id, counterparty_key, chain_id, token_network }` — required for every peering.            |
-| `[settlement]`          | table       | no        | Absent ⇒ every channel operation answers `503`.                                                               |
-| `[[client_channels]]`   | array       | no        | Absent ⇒ the client edge has a record of no channel, so it refuses every claim.                               |
-| `[[client_identities]]` | array       | no        | `{ id, secret }` — the client-edge identities `POST /ilp` authenticates. Absent ⇒ every request is anonymous. |
-| `state_dir`             | path        | see below | Where this node writes its claim journals. Required whenever `[[client_channels]]` is set.                    |
-
-A `[[routes]]` entry sets **exactly one** of `handler_url` (terminate here) or `peer_id` (forward
-there). A terminated route **must** carry a `price` — write `price = 0` if free is deliberate,
-because it is never silently free. A forwarding route may carry a `fee` (default `0`).
-
-A `[[peers]]` entry's `endpoint` is a URL whose **scheme** selects the carriage — `wss://` for BTP,
-`https://` for ILP-over-HTTP (ADR 0027); the old `SocketAddr`-shaped `addr` and the top-level
-`peer_wire_addr` are refused by name — `peer_wire_addr` is still parsed, but only so a config that
-still sets it fails at boot with a named error rather than being silently ignored. Every peering
-needs a `credential` and at least one `[[peer_channels]]` row, because role is decided by
-authentication _and_ a channel binding. A `credential` sets **exactly one** of `secret_file` (a
-path to the secret — what a deployed node uses, so the peering can live in a committed config) or
-`secret` (the literal). See
-[`docs/operators/btp-peer-transport-bringup.md`](docs/operators/btp-peer-transport-bringup.md).
-
-`peer_expose` and `credential` are **peer-role** settings and nothing else. `peer_expose` opens no
-port: it turns on peer handling, behind the credential check, on the listeners this node already
-serves. A node that leaves it at its `neither` default still serves clients over BTP, and a node
-that sets it still admits a client that presents no credential at all — see "The client edge"
-below.
-
-`[settlement]` configures one or more chains, in either of two shapes (issue #628) — Mina is out of
-scope per [ADR 0002](docs/adr/0002-drop-mina-from-the-rust-connector.md) either way. The legacy
-flat shape — `chain = "evm"`, `rpc_url`, `contract_address` (the **`TokenNetworkRegistry`**, which
-`getTokenNetwork(token)` is called on — not a channel contract), `token_address`, non-zero
-`decimals`, and a `[settlement.key]` table — is frozen at `"evm"` and never accepts `"solana"`. To
-settle on Solana, or on both chains at once, use the keyed shape instead: `[settlement.evm]` (the
-same fields as the legacy shape, minus `chain`) and/or `[settlement.solana]` (`rpc_url`,
-`program_id` — the deployed `payment-channel` program, in place of `contract_address` —
-`token_address`, `decimals`, `[settlement.solana.key]`). Either shape's `key` table takes the same
-`key_file`/`kms_key_id` choice as `[signer]`. An absent `[settlement]` is fine; a present but wrong
-one is a startup failure — `connector-cli` constructs a real backend for every chain configured,
-EVM or Solana, before the node serves anything.
-
-`[settlement.evm]` takes two further optional knobs, both for the local channel index a node builds
-from its own `TokenNetwork`'s logs so that resolving an unfamiliar channel is a map hit rather than
-an RPC call (issue #661): `channel_index_from_block`, the block a cold start with no checkpoint
-backfills from — it defaults to `0`, so an operator who knows their `TokenNetwork`'s deploy block
-should set it rather than scan a public chain from genesis — and `channel_index_confirmations`,
-how many blocks behind head a log must be before the index applies it (default `5`; `0` is refused
-at load time, since there is deliberately no reorg-unwind path). Omitting both keeps today's
-behaviour: a channel the index has not caught up to falls through to the direct chain read.
-
-`decimals` is a declaration, not a conversion. Nothing scales by it: every amount on the value
-path — route prices, claim amounts, channel deposits — is already in the settlement token's base
-units, and [`docs/usdc-cross-chain-settlement.md`](docs/usdc-cross-chain-settlement.md)'s
-"6 decimals everywhere" keeps those units uniform across chains, so there is nothing to convert.
-It is checked instead: startup reads the token's own `decimals()` and refuses to start when the
-two disagree, naming both. Write the scale the deployed token actually has — today, `6`.
-
-`[[client_channels]]` is what makes a paid write possible: each entry names a payment channel this
-node accepts client-edge claims on, and the counterparty whose signature it accepts on that
-channel — `channel_id` (the on-chain 32-byte identifier), `counterparty` (a 20-byte EVM address),
-`chain_id` and `token_network_address` (the EIP-712 domain the balance proof is signed under, per
-[ADR 0024](docs/adr/0024-peer-wire-claims-sign-the-eip-712-balance-proof.md)). A claim's signature
-is checked against that recorded counterparty and never against the signer the claim declares for
-itself, and a claim naming a channel with no entry here is refused as unknown. A node configuring
-none therefore accepts no paid write at all — deliberately, since the only alternative to "no
-record of this channel" is believing what a claim says about itself.
-
-`[[client_identities]]` names the senders `POST /ilp` recognises by credential rather than by
-claim: each entry is an `id` a request presents in `ILP-Peer-Id` and the `secret` it must present
-in `Authorization: Bearer <secret>` (an empty or omitted `secret` makes that identity
-permissionless — the header may then be absent, mirroring BTP's `secret: ""` frame). A duplicated
-`id` is refused at load. This is **not** what admits a request: a request presenting no
-`ILP-Peer-Id` is anonymous, which is a first-class path — an unaffiliated buyer pays for a route
-without registering with the operator first — so a node configuring none of these serves clients
-exactly as it did before the section existed. What it changes is that an `ILP-Peer-Id` presented
-and _not_ authenticated is refused **401**, before the route is looked up. Distinct from
-`[[peers]]` (a peering this node dials, which has an endpoint) and from `[[client_channels]]`
-(which channel a claim is judged against, never who presented it).
-
-`state_dir` is where a claim's replay watermark is written down. Without it the watermarks live
-only in process memory, so a restart resets every channel to "no claim ever seen" — and a channel
-with no watermark accepts any nonce, which hands a client every claim it has already spent back
-as free service. Config load therefore **refuses** a file that sets `[[client_channels]]` without
-a `state_dir`, and startup refuses to boot at all if the directory cannot be written, naming the
-path. Two append-only files live there: `client-edge-claims.log` (claims accepted at `POST /ilp`)
-and `peer-claims.log` (the peer carriage's own `ClaimBook`). Both are replayed before the node
-serves; a journal that cannot be read, or that carries a line this build cannot decode, is a
-refusal to start rather than a silent restart from zero.
-
-In a container this must be a **mounted volume**, not a path in the writable layer — a watermark
-that dies with the container is the same defect one indirection down. The image runs as uid
-`10001`, so a named volume (chowned automatically) is simpler than a host bind mount (`chown
-10001:10001` it first).
-
-> Only `*.toml` describes this binary. The **retired TypeScript connector's** `*.yaml`
-> configuration (`nodeId`, `btpServerPort`, `adminApi`) is gone from the repo entirely — the
-> last copies went with the store box's `connector.yaml` (issue #901) and `infra/linode-node/`
-> (issue #872). The `deploy/pay-edge/` and `deploy/node-quickstart/` bundles that used to be
-> listed here are gone too — see [`deploy/README.md`](deploy/README.md).
-
-## Run
+Then ask the node what it is:
 
 ```bash
-cargo run -p connector --bin connector -- path/to/connector.toml
+curl http://localhost:3000/ilp
 ```
 
-(`--bin connector` is not optional: the package also builds `stub-app`, a payment-oblivious test
-app used by the integration tests.) The positional argument is the config path — there is one
-subcommand, `announce`, which publishes this node's discovery event instead of serving traffic; see
-[`docs/operators/announcing-a-node.md`](docs/operators/announcing-a-node.md). A missing argument
-prints the usage line and exits 1.
+That free, unauthenticated `GET` returns the node's self-description — its
+addresses, endpoints, identity key and settlement facts. A connector answers; it
+never announces. It is also the whole of what another operator needs to peer with
+you, once [`[node]` and `peer_expose`](#being-peerable) are set — this minimal
+config's own self-description has no endpoints and nothing to dial.
 
-Logs are structured JSON on stdout, one object per line. Every line emitted while handling a
-packet carries the same `correlation_id` — the packet's execution condition, hex-encoded — and
-because that condition is invariant across hops, the same id appears in every connector that
-handled the packet ([ADR 0014](docs/adr/0014-metrics-surface-and-packet-correlated-logs.md)). Set
-`RUST_LOG=debug` for more.
+> [!IMPORTANT]
+> **Three things about the config that bite people.**
+>
+> - **One TOML file, read once, immutable for the process lifetime.** There is
+>   no environment-variable layer — `CONFIG_FILE` and friends do nothing, and the
+>   only variable read is `RUST_LOG`. An unknown key is a hard load failure and a
+>   removed key is refused **by name**, so a stale config says so at boot instead
+>   of quietly doing nothing.
+> - **Every key is a path, never a value.** No inline keys, no mnemonic, nowhere
+>   to smuggle one through.
+> - **`state_dir` is where this node records which claims it has already been
+>   paid.** In a container it must be a mounted volume; a watermark that dies
+>   with the container hands every payer their spent claims back as free
+>   service.
 
-To run it as a container instead, see
-[`deploy/connector-rust/README.md`](deploy/connector-rust/README.md) — the published image is
-`ghcr.io/toon-protocol/connector`, tagged `rust-sha-<short>` per commit and `rust-main` on the
-default branch (#645). Pin an exact `rust-sha-` tag; `rust-main` moves. The separate
-`ghcr.io/toon-protocol/connector-rust` package this used to name is retired and gets no new
-builds.
+## 2. Put your app behind it
 
-## The client edge
+A route with a `handler_url` **terminates** there. The connector opens the sealed
+payload, makes exactly that HTTP request of your app, and seals the app's
+complete response back.
 
-What a client speaks to the connector it pays. Versioned rather than redesigned, because its far
-end is software this repository does not ship
-([ADR 0003](docs/adr/0003-clean-room-peer-wire-versioned-client-edge.md)). Six routes, all on
-`client_edge_addr`: the three below (`POST /ilp`, `GET /ilp/identity`, `GET /ilp/routes/price`),
-plus `POST /ilp/probe` (raises a `TOON-Accumulated-Cost` reject deliberately, for cost discovery),
-`GET /ilp/btp` (the BTP carriage's websocket upgrade, ADR 0027 — also where a BTP peer rides this
-listener, per [`docs/protocol/peer-carriage-spec.md`](docs/protocol/peer-carriage-spec.md)) and
-`POST /ilp/claim-state` (a bulk, signature-authenticated read of claim state for channels the
-caller controls). Full detail on all six:
-[`docs/protocol/client-edge-spec.md`](docs/protocol/client-edge-spec.md).
+**Your app is payment-oblivious, and that is the whole design.** It receives an
+ordinary HTTP request. It holds no key on your behalf, and it supplies nothing
+toward the packet's fulfilment — the connector derives that itself. So "the app
+answered" and "the packet was paid for" stay separable, and an app that knows
+nothing about payment cannot leak, forge or withhold one.
 
-**Opening a client BTP session takes no token.** `GET /ilp/btp` is permissionless: a client that
-presents no credential at all — or the `auth` frame the deployed client sends with `secret: ""` —
-is accepted and stays a client, its contents unverified. Nothing about the handshake is trusted.
-What authorizes a **write** is the signed payment-channel claim on each frame, exactly as on
-`POST /ilp` ([`client-edge-spec.md`](docs/protocol/client-edge-spec.md) §1.9 step 1: _"Authorization
-to write comes from the claim, never the session"_). The `credential` in `[[peers]]` upgrades an
-already-admitted session from client to peer; it is not what admits it. `[[client_identities]]` is
-`POST /ilp`'s own authentication and does not gate this handshake either — the `auth` frame's
-contents stay unverified.
+The one thing this connector does add is attribution, on a request it took the
+payment for itself: `X-TOON-Payer` (the paying channel), `X-TOON-Amount` (what
+that request was charged) and `X-TOON-Chain`. Your app is free to ignore all
+three — it is handed them so it can log or rate-limit by payer if it wants to,
+not so it can decide anything about the payment. They are absent on a request
+this node did not take the payment for, so treat them as optional. Whatever a
+caller writes under those names is stripped before your app sees it.
 
-### `POST /ilp`
+Two consequences before you price anything:
 
-Body: an OER-encoded ILPv4 PREPARE, `Content-Type: application/octet-stream`. Response: an
-OER-encoded FULFILL or REJECT, also `application/octet-stream`, at HTTP **200** — an ILP-level
-outcome is never an HTTP-level one.
+- **You are paid for an answer, not the answer the caller wanted.** A `404` from
+  your app is a real answer: it rides home on a `FULFILL` and costs the same as a
+  `200`. Only unreachability or a refused target produces a reject.
+- **The trailing slash on `handler_url` is load-bearing**, and a request's target
+  is resolved _beneath_ the handler's path — an absolute path, a `..` segment, a
+  scheme or an authority is refused before your app is touched.
 
-- **400** — the body did not decode as a PREPARE.
-- **401** — the request presented an `ILP-Peer-Id` that named no `[[client_identities]]` entry, or
-  named one but did not present its secret. Answered before the route is looked up, so an
-  unauthorised caller is never quoted a price instead.
-- **402** — the request carried no claim header and addressed a route this connector both
-  terminates and prices. The body is an x402 v2 `PaymentRequired` document
-  (`application/json`), repeated base64-encoded in a `Payment-Required` response header, with a
-  single `toon-channel` entry quoting the same price a real request would be charged.
+A terminated route **must** carry a `price`. Write `price = 0` if free is
+deliberate, because it is never silently free.
 
-A request pays with a claim in `ILP-Payment-Channel-Claim` (base64 JSON) or
-`ILP-Payment-Channel-Claim-Wrapped` (NIP-59-wrapped; plaintext wins if both are present). The
-claim is checked structure → freshness against the channel's watermark → value against the
-route's price → signature, in that order, so a replay or an underpayment never costs a signature
-verification. A failing claim rejects the packet before it reaches the app: `F03` for an
-underpayment, `F01` for everything else.
+## 3. Get paid
 
-### `GET /ilp/identity`
+A price makes a route cost something. A **settlement backend** is what lets
+anyone actually pay it. There are two chains. A node may carry either table or
+both — with both, it accepts claims on both at once.
 
-```json
-{ "keyId": "...", "publicKey": "0x04..." }
+```toml
+# EVM — Base Sepolia. These are live addresses, not placeholders.
+[settlement.evm]
+rpc_url          = "https://base-sepolia-rpc.publicnode.com"
+contract_address = "0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5"  # the TokenNetworkRegistry, not a TokenNetwork
+token_address    = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"  # the token every price on this node is in
+decimals         = 6              # units per token: 6 means 1,000,000 = 1.00
+
+[settlement.evm.key]
+key_file = "/app/data/settlement.key"
+
+# Solana — public devnet. Note `program_id` where EVM has `contract_address`:
+# there is no registry to resolve a channel contract through, so this names the
+# payment-channel program itself, and `token_address` is an SPL mint.
+[settlement.solana]
+rpc_url       = "https://api.devnet.solana.com"
+program_id    = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
+token_address = "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU"
+decimals      = 6
+
+[settlement.solana.key]
+key_file = "/app/data/settlement-solana.key"
 ```
 
-The uncompressed secp256k1 public key a sender seals a packet's payload to. Distinct from the
-operator surface's bearer-gated `GET /identity`, which answers a different question for a
-different caller.
+Those are the addresses the devnet fleet itself runs on, and copying them is the
+point rather than a shortcut: a claim resolves against **one** deployment, so
+every node that might accept a given claim has to name the same one.
 
-### `GET /ilp/routes/price?destination=<ILP address>`
+|                  | EVM                                                                                                                                                      | Solana                                                                                                                                                                          |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Chain            | Base Sepolia, chain id `84532`                                                                                                                           | public devnet (`solana:devnet`)                                                                                                                                                 |
+| RPC              | `https://base-sepolia-rpc.publicnode.com`                                                                                                                | `https://api.devnet.solana.com`                                                                                                                                                 |
+| Channels live in | [`0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5`](https://sepolia.basescan.org/address/0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5) — `TokenNetworkRegistry` | [`2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip`](https://explorer.solana.com/address/2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip?cluster=devnet) — the payment-channel program |
+| Token            | [`0x49beE1Bca5d15Fb0963117923403F9498119a9Ce`](https://sepolia.basescan.org/address/0x49beE1Bca5d15Fb0963117923403F9498119a9Ce) — mock USDC, 6 dp        | [`34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU`](https://explorer.solana.com/address/34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU?cluster=devnet) — mock USDC mint, 6 dp        |
+| Funding the key  | Base Sepolia ETH for gas; mock USDC from the [devnet faucet](https://faucet.devnet.toonprotocol.dev)                                                     | devnet SOL (`solana airdrop 1 <address> -u devnet`); mock USDC from the same faucet                                                                                             |
+| Full record      | [`packages/contracts/deployments/base-sepolia.md`](packages/contracts/deployments/base-sepolia.md)                                                       | [`packages/solana-program/deployments/devnet-public.md`](packages/solana-program/deployments/devnet-public.md)                                                                  |
 
-```json
-{ "destination": "g.example.app", "price": 100 }
+**That table is the whole list, and the omissions are deliberate.** There is no
+Solana _testnet_ deployment — the program is on devnet and nowhere else — and
+there is no mainnet on either chain. No EVM mainnet carries a `TokenNetwork` or a
+token for a registry to resolve, so `contract_address` has nothing to point at;
+and because a Solana claim's signed message binds the settlement program, a node
+pointing `[settlement.solana]` at a mainnet RPC while naming the devnet program
+id would take money for claims it can never redeem. Production is a **named,
+empty tier** ([ADR 0056](docs/adr/0056-production-is-a-named-empty-tier.md)), and
+[`connector.production.toml`](deploy/connector-rust/connector.production.toml) is
+a skeleton in which every value fails to load on purpose. Do not fill it in.
+
+`decimals` is what turns a `price` into money. Every `price` in the config is a
+count of the token's smallest unit, and `decimals` says how many of those make
+one whole token — so with `decimals = 6`, `price = 1000` is 0.001 of the token,
+and a route meant to cost ten cents of USDC is `price = 100000`. The node reads
+the token's own decimals at boot and **refuses to start** if the config
+disagrees, because a wrong `decimals` is not a rounding error: it misprices
+every route by a factor of ten or more.
+
+That check is one of several, and they are why there is no `--network` flag and
+no environment variable anywhere in this: which chain a node is on **is** these
+values and nothing else, so every one of them is verified against the chain
+before the node serves a packet. The EVM backend reads the chain id off the RPC
+and calls `getTokenNetwork()` to prove the address really is a registry; the
+Solana backend proves `program_id` is executable _and_ behaves like the
+payment-channel program, that `token_address` is an SPL mint, and asks the chain
+its own genesis hash so a claim declaring the wrong cluster is refused. A node
+that boots is a node whose chain agreed with its config.
+
+That is all of it. **You do not list the channels your payers will use, and you
+could not** — a client's channel does not exist until that client opens it on
+chain, long after your node booted. The settlement section does double duty: it
+gives this node its on-chain identity, and it is where a claim naming a channel
+you have never heard of is **resolved from chain** and accepted. That resolution
+is what makes paying you permissionless rather than an arrangement.
+
+> [!WARNING]
+> **Fund the settlement key _before_ you start the node**, and know that
+> **booting a config is not a dry run**. A Solana backend submits a real
+> transaction at `connect`; with no gas the connector exits 1 on a chain error
+> that reads like a config bug. With a funded key, starting a node "just to see
+> whether the TOML parses" spends real money.
+
+You do not need to build the payer —
+[`toon-client`](https://github.com/toon-protocol/toon-client) is that — but two
+things help when debugging "why is nobody paying me":
+
+- **An ILP outcome is never an HTTP one.** A `FULFILL` and a `REJECT` both come
+  back at HTTP **200**.
+- **A caller with no claim on a priced route gets `402`**, with an x402 document
+  quoting the same price a real request would be charged.
+
+Claims are the truth; a balance is a projection of them. Turning them into money
+on chain is [the operator surface](#the-operator-surface)'s job.
+
+---
+
+## Peering
+
+Terminating your own routes earns from callers who know your address. Peering
+puts you on paths that start somewhere else.
+
+### Being peerable
+
+Step 1's config boots and serves, but nobody can peer _with_ it: its
+self-description has no endpoints and `"peerCarriages": []`, so a
+counterparty's `POST /peers` at it answers `502`. Three more keys, none of
+them shown above, close that gap:
+
+```toml
+# Top level, so it goes above every table — beside step 1's client_edge_addr.
+peer_expose = "http"             # "btp", "http", "both", or "neither" (default)
+
+[node]
+addresses     = ["g.your.node"]
+http_endpoint = "https://your-node.example/ilp"
 ```
 
-Reads the same longest-prefix lookup that the x402 terms and the claim's value binding charge
-against, so it never quotes a price a real request would not also be charged. **404** when no
-locally-terminated route matches — it never fabricates a price for a route it does not serve.
+`peer_expose` says which carriage(s) _this_ node opens a peer listener for.
+`[node]` publishes where clients reach it — both listeners are served
+whatever `peer_expose` says, so publishing either endpoint is always allowed.
+What `peer_expose` decides is what you may _omit_: `btp_endpoint` is required
+only when `"btp"` or `"both"` is exposed, and `http_endpoint` is required
+whenever anything is exposed, because a peer pays you by asking your client
+edge over HTTP whichever carriage its packets ride. So an HTTP-only node
+writes `http_endpoint` and simply leaves `btp_endpoint` out; a BTP node writes
+both; and with `"neither"` (the default) a `[node]` naming only `addresses` is
+legal and still answers `GET /ilp`, it is just not dialable.
+
+For a local or pre-TLS trial only, add `peer_allow_plaintext_endpoints = true`
+at the top level so `http://`/`ws://` endpoints are accepted too — every
+deployed config should stay on `https://`/`wss://`.
+
+With that in place, `GET /ilp` really is the whole of what another operator
+needs to peer with you. It is one authenticated write:
+
+```
+POST /peers   { "id": "their-node", "url": "https://their-node.example/ilp",
+                "fee": 100, "max_packet_amount": 1000000 }
+```
+
+`url` is their connector's self-description URL — the one whose `GET` answers
+with that description (ADR 0050) — not their origin. The node fetches it, picks
+the carriage from their endpoint's scheme (`wss://` → BTP, `https://` →
+ILP-over-HTTP), finds the shared settlement chain, and derives the channel from
+the two participants — no channel identifier is ever exchanged, and there is no
+shared secret.
+
+A route can then **forward** to that peering instead of terminating:
+
+```toml
+[[routes]]
+prefix  = "g.partner"
+peer_id = "their-node"
+price   = 1500          # what a client pays you for the whole path
+```
+
+A route sets **exactly one** of `handler_url` or `peer_id`. A forwarding route
+carries a `price` too — it is what the caller pays for the path — while the
+`fee` you keep for your own hop lives on the peering, not the route.
+
+> [!NOTE]
+> **Four things to know before you run it.**
+>
+> - **It can spend gas**, because it may open a channel and wait for
+>   confirmation. Safe to retry: the same request against an established
+>   peering finds the same channel rather than opening a second one.
+> - **`fee` and `max_packet_amount` are yours to choose.** No document can
+>   supply them — they are your policy about this counterparty.
+> - **A `502` is about them, a `400` is about you.** Unreachable, redirecting,
+>   or describing a node you cannot peer with is `502` — go look at the URL.
+> - **Their identity is trust-on-first-use over TLS, pinned by nothing.** You
+>   are trusting whoever answers that URL today.
+
+### A route is a path, not a destination
+
+Every `PREPARE` you forward carries its own covering claim, so nothing is ever
+owed between packets — and equally, a hop can take your claim and decline to
+carry. That is not a defect to be engineered away; it is the shape of the
+protocol, and payment channels exist precisely so that it costs you almost
+nothing. Once a packet leaves you, its value is signed away: a fulfilment is a
+delivery receipt, not a payment trigger, and a `REJECT` (an `F02` for a name
+nobody routes, a `T01` for a peer that was not there) comes back with your
+claim already spent. What the channel buys you is that this can only ever
+happen to **one packet** — the last one in flight. Nobody holds your deposit;
+every hop holds only what you have already signed to it, and the most the next
+hop can walk away with is the one packet you just handed it.
+
+So the risk of a hop is not something you check, it is something you **size**.
+Keep packets small — a relay write is 1 micro-USDC, a store upload is priced
+per kibibyte, and "large volumes of low-value packets" is what ILPv4 is designed
+for (RFC 0027; RFC 0018 calls the small packet the default risk mitigation).
+Then let the amount grow with the route's record: a path that has fulfilled a
+thousand packets has earned a bigger one, a path you opened this morning has
+not. `max_packet_amount` is the same number seen from the other side — the
+largest single packet you will carry _for_ a peer, which is the most that peer
+can cost you at once — and it is yours to choose for the same reason.
+
+That is why this section is called peering and not addressing. A destination
+is just a prefix; what you actually commit money to is the **path** the packet
+takes to it — the hops between you and the prefix, each one a peering someone
+chose, each one taking its fee and each one a place the packet can stop. The
+relay in this fleet does not "send to the store"; it forwards
+`g.toon.relay.store` across the one peering it holds with the store, on the
+one channel it funded, at the one cap it set. Two paths to the same prefix
+are two different things to trust, and a well-trodden one is worth more than
+a short one. The kill switch for a path you have stopped trusting is
+`DELETE /peers/:id`.
+
+Hop count is worth thinking about the same way. Fees add up per hop; exposure
+does not. You hand your packet to the first hop and that hop is your only
+counterparty — what happens further down is the next hop's business, on the
+next hop's channel, under its own cap — so a packet that dies anywhere costs
+you the one packet you sent, whether it died at the second hop or the tenth.
+Ten well-walked hops therefore beat two with a stranger in them: the extra
+hops cost a few micro-USDC in fees, and the stranger can cost you the whole
+packet. Longer roads also tend to run through nodes that peer widely, which
+have another way onward when one leg goes dark.
+
+The long version of this — why Glinda says _follow the yellow brick road_
+rather than giving Dorothy an address — is
+[`docs/the-yellow-brick-road.md`](docs/the-yellow-brick-road.md).
+
+---
 
 ## The operator surface
 
-Mounted only when `[operator]` is configured, and **merged onto `client_edge_addr`** — there is
-no second port. The split is read from write
-([ADR 0008](docs/adr/0008-operator-surface-splits-read-from-write.md)):
+The control plane: how you inspect a running node and how you move its money.
 
-- **Reads** need `Authorization: Bearer <bearer_token>` and nothing else:
-  `GET /peers`, `/routes`, `/routes/leased`, `/routes/peers`, `/channels`, `/claims`, `/identity`,
-  `/audit-log`, and `/metrics` (Prometheus text: `toon_packets_total`,
-  `toon_packets_rejected_total`, `toon_fees_earned_total`, `toon_exposure` (always zero; kept for
-  scrape-config stability, [ADR 0033](docs/adr/0033-the-exposure-machinery-is-retired-not-restated.md)),
-  `toon_settlement_total`).
-- **Writes** need an RFC 9421 HTTP Message Signature from an ed25519 key on `write_keys`, with
-  the body bound by an RFC 9530 `Content-Digest`. A bearer token is never sufficient to move
-  value. `POST /packets`, `/routes/leased`, `/peers`, `/routes/peers`, `/channels`, and — all
-  under the channel they act on — `/channels/:id/fund`, `/channels/:id/redeem`,
-  `/channels/:id/redeem-latest`, `/channels/:id/close`, `/channels/:id/cooperative-close` — plus
-  `DELETE /peers/:id` and `DELETE /routes/peers/:prefix` (issue #884). Channel operations answer
-  `503` when no `[settlement]` backend is configured.
+It mounts **only** when `[operator]` is configured, and merges onto
+`client_edge_addr` — there is no second port and no second listener.
 
-`POST`/`DELETE /peers*` and `/routes/peers*` (issue #884) are the runtime-mutable, durable
-peer/route table: unlike `/routes/leased` (a TTL-bound push that lapses on its own and never
-survives a restart, ADR 0006), these persist to `state_dir` and are refused outright — never
-silently accepted as a shadow — when they'd collide with a row the config file already owns
-([ADR 0034](docs/adr/0034-a-runtime-peer-route-table-never-shadows-the-config-file.md)).
-
-There is **no health endpoint** on either surface, and **no unauthenticated metrics path** on
-either. `[operator]` is how a node opts into metrics at all: absent, `/metrics` is not mounted and
-answers 404 rather than 401 ([ADR 0014](docs/adr/0014-metrics-surface-and-packet-correlated-logs.md)
-— metrics are one more bearer-gated read, not a second differently-authenticated surface). The
-client edge's two free `GET`s answer what this node's _configuration_ says (`/ilp/identity`,
-`/ilp/routes/price`, [ADR 0022](docs/adr/0022-a-connector-answers-it-does-not-announce.md)); a
-counter is operational history and does not follow them onto the free side of that line. A public
-dashboard therefore needs a server-side holder for the token, never a token in the browser and
-never an open endpoint — see issue #669.
-
-## Peer carriage
-
-A peer rides one of the same two carriages a client speaks to, on `client_edge_addr` — there is no
-second listener and no raw-TCP frame protocol; that was deleted with the old peer wire
-([ADR 0027](docs/adr/0027-connectors-peer-over-btp-or-http-and-the-raw-tcp-peer-wire-is-deleted.md)).
-The peer endpoint's URL **scheme** picks the carriage — `wss://` for BTP (RFC-0023 frames),
-`https://` for ILP-over-HTTP — and **role is decided by authentication**: an interaction is a
-`peer` only if it presents a credential naming a peer id with a matching `[[peer_channels]]`
-binding, never by which port or listener it arrived on. A claim rides the _next_ frame or request
-to a peer after a fulfilment, not the PREPARE that caused it, and is signed as an EIP-712
-`BalanceProof` ([ADR 0024](docs/adr/0024-peer-wire-claims-sign-the-eip-712-balance-proof.md)).
-
-"Role is decided by authentication" says **which role you get**, not **whether you are let in**. An
-interaction presenting no credential — every ordinary client — is admitted as a `client`, and so is
-one whose credential does not satisfy both requirements. Neither is refused on the wire, because
-refusing would make the check an oracle for the peer ids this node configures. What an operator
-sees, though, depends on _which_ mistake was made:
-
-- A credential naming a **configured** peer id that then fails P1 (wrong secret) or P2 (no
-  `[[peer_channels]]` row) emits the rate-limited `peer_auth_refused` event
-  ([`peer-carriage-spec.md`](docs/protocol/peer-carriage-spec.md) §1.6).
-- A credential naming a peer id **no `[[peers]]` entry configures** emits **nothing at all**
-  ([`decide_role`](crates/connector-peer-auth/src/decision.rs)'s branch table). Every ordinary
-  client declares a `peerId` of its own on the same `auth` entry, so emitting there would fire on
-  essentially every client session and hand any anonymous caller a log-volume lever.
-
-The trap that falls out of it is worth memorising before you debug a peering: **a peer that
-mistypes its `id` presents as an ordinary client with nothing logged, while a peer that mistypes
-its `secret` is loud.** If the event you expect is missing entirely, check the id spelling on both
-sides — see
-[`docs/operators/btp-peer-transport-bringup.md`](docs/operators/btp-peer-transport-bringup.md).
-
-The carriage mapping is specified in
-[`docs/protocol/peer-carriage-spec.md`](docs/protocol/peer-carriage-spec.md). The semantics it
-carries — claim exchange, flush, fees, minimum delivery, the refusal taxonomy — are
-unchanged and still specified in [`docs/protocol/peer-wire-spec.md`](docs/protocol/peer-wire-spec.md)
-§3–§6; that document's §1–§2 (the deleted raw-TCP frame protocol) no longer describes anything
-this binary ships.
-
-## Tests
-
-The workspace gate, in the order CI runs it:
-
-```bash
-cargo fmt --all -- --check
-cargo build --workspace
-cargo test --workspace --exclude payment-channel
-cargo clippy --workspace --exclude payment-channel --all-targets -- -D warnings
+```toml
+[operator]
+bearer_token_file = "/app/data/operator-bearer-token"
+write_keys_file   = "/app/data/operator-write-keys"
 ```
 
-`make rust-build` and `make rust-test` are shorthands for the middle two. Fakes, not mocks
-([ADR 0007](docs/adr/0007-testing-doctrine-fakes-yes-mocks-no.md)): a port is defined by one
-contract suite that every implementation, real and fake, is run against.
+Each setting is spelled as **exactly one of** a literal or a path:
+`bearer_token` / `bearer_token_file`, `write_keys` / `write_keys_file`. The file
+forms are the deployed forms, because a fleet's config files are committed to a
+public repository and a literal cannot be.
 
-Some integration tests need a real chain and **skip locally when it is absent, but panic when
-`CI` is set** — so the gate can never go green without one:
+### Read and write are different authorities
 
-| Needs                   | Get it with                                    | Tests                                                                                              |
-| ----------------------- | ---------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `anvil` (Foundry)       | `curl -L https://foundry.paradigm.xyz \| bash` | `connector-settlement-evm`, `connector-cli`, `connector-client-edge`, `connector-bin`              |
-| `forge`                 | same                                           | `connector-settlement-evm`'s `abi_provenance` (rebuilds the contracts and diffs the committed ABI) |
-| `solana-test-validator` | Solana CLI                                     | `connector-settlement-solana`                                                                      |
+This is the whole design (ADR 0008), and the rules are numbered in
+[`operator-spec.md`](docs/protocol/operator-spec.md):
 
-`make anvil-up` / `make solana-up` bring up the Docker profiles if you would rather not install
-them. `packages/solana-program` is excluded from the workspace gate and has its own job
-(`cargo test-sbf`).
+- **Reads** take `Authorization: Bearer <token>` and nothing more.
+- **Writes** take an RFC 9421 HTTP Message Signature from an ed25519 key on
+  `write_keys`, with the body bound by an RFC 9530 `Content-Digest`.
+- **A bearer token is never sufficient to move value** (OP-03). Read authority
+  must not confer write authority.
+- **Every write is attributable and individually revocable** (OP-02). A shared
+  secret is neither: it cannot say which operator did a thing, and losing it
+  loses everything at once.
+- **An accepted write cannot be replayed** (OP-05). Signatures carry `created`
+  and `expires`, and an accepted signature is remembered until its own expiry.
+- **A surface with neither half authenticated refuses to start** (OP-04). An
+  unauthenticated operator surface is worse than none, because it looks like a
+  control plane.
 
-## Where the design lives
+`write_keys` holds only **public** halves. The private half lives with whoever is
+calling and never on the node. `connector send --operator-key <file>
+--print-keyid` prints the value that goes in the allowlist, derived by the binary
+that will do the signing.
 
-| Path                                 | What it is                                                                                                                                                                                                                                                                                                        |
-| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`CONTEXT.md`](CONTEXT.md)           | The vocabulary every doc here uses — connector, app, handler, packet, route, claim, watermark, exposure, fee, price, probe. Read this first.                                                                                                                                                                      |
-| [`docs/adr/`](docs/adr/)             | Numbered architecture decisions. Where an ADR and a spec disagree, the ADR wins.                                                                                                                                                                                                                                  |
-| [`docs/protocol/`](docs/protocol/)   | The client-edge, peer-carriage and peer-semantics specs, and the invariants behind the vectors.                                                                                                                                                                                                                   |
-| [`vectors/`](vectors/)               | `wire-vectors.json` — the cross-repo contract for `toon-client`, `rig` and `swap`. Generated, self-verified, and **normative**: prose is not ([ADR 0021](docs/adr/0021-vectors-are-normative-prose-is-not.md)). [`vectors/README.md`](vectors/README.md) documents it well enough to replay without reading Rust. |
-| [`docs/operators/`](docs/operators/) | The prefix-retirement checklist, and closed records. Note that `admin-api.md`, `admin-api-inventory.md` and `load-testing-guide.md` document the **retired** TypeScript connector and are banner-marked as such.                                                                                                  |
+### Reads
 
-Regenerate the vectors after any change to the envelope, the gift wrap, the fulfilment
-derivation or the claim signing scheme:
+| Endpoint             | Answers                                                   |
+| -------------------- | --------------------------------------------------------- |
+| `GET /peers`         | The peerings this node holds, config and runtime alike.   |
+| `GET /routes`        | The full routing table, with each row's source.           |
+| `GET /routes/leased` | TTL-bound pushed routes that lapse on their own.          |
+| `GET /routes/peers`  | The durable runtime peer-route table.                     |
+| `GET /channels`      | Every channel this node knows, with deposits and status.  |
+| `GET /claims`        | The claim journal — what you have been paid, and by whom. |
+| `GET /identity`      | This node's operator-facing identity.                     |
+| `GET /audit-log`     | Every accepted write, with the key that made it.          |
+| `GET /metrics`       | Prometheus text.                                          |
 
-```bash
-cargo run -p connector-vectors --bin generate-vectors
-```
+`/metrics` is a bearer-gated read like any other. There is **no** unauthenticated
+metrics path and **no** health endpoint; absent `[operator]`, `/metrics` is not
+mounted and answers 404 rather than 401. A _public_ status page — one strangers
+load — therefore needs a server-side holder for the token, never the token
+embedded in the page. Your own browser session is different, and that is what
+the dashboard below is.
 
-## What else is in this repository
+The counters are `toon_packets_total`, `toon_packets_rejected_total`,
+`toon_fees_earned_total`, `toon_settlement_total`, and `toon_exposure`, which is
+always zero and kept only so scrape configs do not break.
 
-| Crate                                       | Role                                                                                                                               |
-| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `connector-domain`                          | Pure logic, no I/O and no clock: packets, OER encoding, addresses, route selection, fee arithmetic, claim rules, the app envelope. |
-| `connector-runtime`                         | The packet plane and its ports: the `Connector`, peer transport, claim book, leased routes, metrics.                               |
-| `connector-signer`                          | The only crate that touches key material: the `Signer` port, gift wrap, claim-signature verification.                              |
-| `connector-config`                          | The one typed config file and every refuse-to-start error it can raise.                                                            |
-| `connector-btp`                             | The BTP frame codec and session framing (RFC-0023), transport-neutral — knows nothing about claims, routes or prices.              |
-| `connector-peer-auth`                       | Role-by-authentication: whether an interaction is a peer or a client, decided from credential and config alone (ADR 0027).         |
-| `connector-peer-btp`                        | The BTP peer carriage: dials and accepts peerings over `wss://`, atop `connector-btp`.                                             |
-| `connector-peer-http`                       | The ILP-over-HTTP peer carriage: dials and accepts peerings over `https://`.                                                       |
-| `connector-client-edge`                     | The client-edge router.                                                                                                            |
-| `connector-operator`                        | The operator router.                                                                                                               |
-| `connector-settlement`                      | The chain-agnostic settlement port and its contract suite.                                                                         |
-| `connector-settlement-evm`                  | EVM backend against `TokenNetwork` via `TokenNetworkRegistry`.                                                                     |
-| `connector-settlement-solana` (+`-program`) | Solana backend and the payment-channel program it drives.                                                                          |
-| `connector-cli` / `connector-bin`           | Config loading, router assembly, and the `connector` and `stub-app` binaries.                                                      |
-| `connector-vectors`                         | Generates `vectors/wire-vectors.json` from the real implementations.                                                               |
+### The dashboard
 
-Beside the workspace, and not part of the connector:
+`GET /dashboard` is the operator's own view of all of the above on one page the
+node serves (ADR 0066): packet traffic and rejects by code, fees earned, inbound
+and outbound claims, peerings and channels, every route with its source, and
+the audit log. It needs no token to load, because it holds nothing. Paste the
+bearer token in and it reads; paste an operator key in and it can peer, write a
+runtime route or lease one, signing each write in your browser exactly as
+`connector send` would. The key stays in the tab's memory — never stored, never
+sent — and config-file rows are shown with no button, because a price or a fee
+still changes by editing the file and restarting. Reach the page the way you
+reach `/metrics` on that box: on the fleet, an SSH tunnel to `client_edge_addr`.
 
-- [`packages/contracts`](packages/contracts) — the Solidity (Foundry) `TokenNetwork` and
-  `TokenNetworkRegistry` the EVM backend binds to.
-- [`packages/solana-program`](packages/solana-program) — the legacy SPL-token payment-channel
-  program.
-- `packages/faucet`, `packages/mina-zkapp`, `packages/mina-usdc-faucet-web`, `tools/fund-peers` —
-  devnet faucet tooling. These are the only reason npm, Jest and `package.json` are still here;
-  `npm test` runs them, not the connector.
-- [`packages/announcer`](packages/announcer) — a standalone `kind:10032` announcer sidecar for the
-  client edge (ADR 0022: the connector answers, it does not announce, so this lives outside it).
-- [`infra/`](infra) and [`deploy/`](deploy) — devnet overlays and deployment recipes.
+### Writes
 
-## Devnet
+| Endpoint                               | Does                                                                      |
+| -------------------------------------- | ------------------------------------------------------------------------- |
+| `POST /packets`                        | Originate a packet from this node.                                        |
+| `POST /peers`                          | Establish a peering from a URL. `DELETE /peers/:id` removes it.           |
+| `POST /routes/peers`                   | Write a durable runtime route. `DELETE /routes/peers/:prefix` removes it. |
+| `POST /routes/leased`                  | Push a TTL-bound route that lapses on its own.                            |
+| `POST /channels`                       | Open a payment channel.                                                   |
+| `POST /channels/:id/fund`              | **Self-deposit** — put your own collateral behind your own claims.        |
+| `POST /channels/:id/redeem`            | Redeem a specific claim on chain.                                         |
+| `POST /channels/:id/redeem-latest`     | Redeem the latest claim — **this is how you get paid**.                   |
+| `POST /channels/:id/settle`            | Settle the channel.                                                       |
+| `POST /channels/:id/close`             | Close it. `cooperative-close` is the agreed variant.                      |
+| `POST /channels/:id/cooperative-close` | Close by agreement with the counterparty.                                 |
 
-The TOON devnet settles on public chains (Base Sepolia, Solana devnet, Mina devnet). Get test
-funds from the [devnet faucet](https://faucet.devnet.toonprotocol.dev), and see the toon-client
-rig README's
-["Devnet reference (public chains)"](https://github.com/toon-protocol/toon-client/blob/main/packages/rig/README.md#devnet-reference-public-chains)
-and [toon-meta `docs/deployment.md`](https://github.com/toon-protocol/toon-meta/blob/main/docs/deployment.md)
-for current endpoints, contract addresses and token mints.
+Channel operations answer **503** when no `[settlement]` backend is configured —
+the node cannot reach a chain, and says so rather than pretending.
 
-## Contributing
+`POST`/`DELETE` on `/peers*` and `/routes/peers*` are the durable runtime table.
+Unlike a leased route, they survive a restart — and they are **refused outright**,
+never silently accepted as a shadow, when they would collide with a row the
+config file already owns.
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md). In short: the workspace gate above must pass, and a
-change to a documented wire is a change to `vectors/wire-vectors.json` first.
+### Signing a write
+
+The signature covers exactly three components — `@method`, `@path` and
+`content-digest` — with `alg="ed25519"` and `keyid` set to the signer's own
+ed25519 public key in hex. `connector send` is a worked example: it signs a
+`POST /packets` this way, and `--expect-fulfill` makes a non-fulfilled packet a
+non-zero exit, which is what turns a rehearsal into a gate.
+
+For every other write — `POST /peers` above all —
+[`docs/operators/sign-write.sh`](docs/operators/sign-write.sh) is a shell-and-`openssl` signer with
+a worked example in [`docs/operators/signing-a-write.md`](docs/operators/signing-a-write.md).
+
+---
+
+## Operating it
+
+**Logs** are structured JSON on stdout. Every line emitted while handling a
+packet carries the same `correlation_id` — the packet's execution condition — and
+because that value is invariant across hops, the same id appears in every
+connector that handled it. `RUST_LOG=debug` for more.
+
+**Releases.** A release is one dispatch of `release-connector.yml`: it builds the
+image, cuts a dated handle and opens a GitHub Release. It does not deploy, and
+nothing here moves a tag onto a box (ADR 0068) — a node repository pins the
+connector image it runs, by release handle, in its own `deploy/` bundle. Because
+the binary and a box's mounted TOML are a matched pair in both directions,
+**adding a required config key is a breaking deploy**: land the config first, then
+bump that pin.
+
+**Devnet** settles on Base Sepolia and Solana devnet; test funds come from the
+[devnet faucet](https://faucet.devnet.toonprotocol.dev). **Production is a named,
+empty tier** — no machines, no mainnet contracts, no keys.
+
+---
+
+## Where to go next
+
+| Path                                                                         | What it is                                                                                  |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| [`docs/the-yellow-brick-road.md`](docs/the-yellow-brick-road.md)             | **The idea.** Why you pay a path and not a destination, and why the road earns the traffic. |
+| [`docs/rfcs/`](docs/rfcs/README.md)                                          | **The protocol.** Interledger, the ten vendored RFCs, and where TOON departs from each.     |
+| [`docs/protocol/configuration-spec.md`](docs/protocol/configuration-spec.md) | Every config key, and what each one binds.                                                  |
+| [`docs/protocol/operator-spec.md`](docs/protocol/operator-spec.md)           | The operator surface's rules, numbered.                                                     |
+| [`docs/operators/`](docs/operators/)                                         | Runbooks: peering bring-up, key rotation, fleet release and health.                         |
+| [`deploy/connector-rust/README.md`](deploy/connector-rust/README.md)         | The container path in full, including a hand-built image.                                   |
+| [`local/`](local/README.md)                                                  | The shipped image against real chains — `make local-verify`.                                |
+| [`CONTEXT.md`](CONTEXT.md)                                                   | The vocabulary. Read before writing docs or naming anything.                                |
+| [`docs/adr/`](docs/adr/README.md)                                            | Why any of this is the way it is. The tiebreaker for everything.                            |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md)                                         | Building from source, the test gate, the chain binaries it needs.                           |
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
-
-## Links
-
-- [Interledger Protocol](https://interledger.org)
-- [RFC-0027 ILPv4](https://github.com/interledger/rfcs/blob/master/0027-interledger-protocol-4/0027-interledger-protocol-4.md)
-- [RFC-0030 OER encoding](https://github.com/interledger/rfcs/blob/master/0030-notes-on-oer-encoding/0030-notes-on-oer-encoding.md)
+MIT — see [`LICENSE`](LICENSE). Except [`docs/rfcs/`](docs/rfcs/README.md), which
+is CC BY-SA 4.0: it holds the Interledger Foundation's RFCs, reproduced
+unmodified.

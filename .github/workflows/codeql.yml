@@ -1,0 +1,117 @@
+# CodeQL code scanning, as an ADVANCED setup (issue #1235).
+#
+# Until this workflow landed, code scanning here was GitHub's default setup:
+# languages `actions, javascript, javascript-typescript, python, rust,
+# typescript`, the `default` query suite, a weekly schedule, configured
+# 2026-08-26. Default setup cannot take a query filter, and one query --
+# `rust/hard-coded-cryptographic-value` -- matched every literal claim nonce
+# in every claim test (463 open alerts on `main`), so the `CodeQL` check went
+# red on any PR touching one. This workflow runs the same analyses with
+# `.github/codeql/codeql-config.yml`, which excludes that one query and says
+# why. Nothing else changes: same suite, same languages, same cadence.
+#
+# The six default-setup language names are FOUR analyses -- `javascript`,
+# `typescript` and `javascript-typescript` are one extractor, and default
+# setup's own uploads were categorised `/language:actions`,
+# `/language:javascript-typescript`, `/language:python` and
+# `/language:rust`. The matrix below is that list. `build-mode: none` is what
+# default setup used for Rust (CodeQL's Rust extractor builds nothing, and
+# `none` is the only mode it offers); the other three are interpreted and have
+# no other mode.
+#
+# THE SWITCH IS NOT COMPLETE WHEN THIS MERGES. GitHub rejects SARIF from an
+# advanced workflow while default setup is enabled ("CodeQL analyses from
+# advanced configurations cannot be processed when the default setup is
+# enabled"), so between step 1 and step 2 below the `analyze` step fails on
+# upload. That red is the signal to do step 2, not a fault in the scan. The
+# ordered steps, of which the second is a HUMAN act in the repository
+# settings that no workflow here performs:
+#
+#   1. Merge the PR that adds this file.
+#   2. An admin disables default setup: Settings -> Code security ->
+#      Code scanning -> CodeQL analysis -> switch off, or
+#      `PATCH /repos/toon-protocol/connector/code-scanning/default-setup`
+#      with `{"state":"not-configured"}`.
+#   3. Dispatch this workflow (`gh workflow run codeql.yml`) or wait for the
+#      next push to `main`; all four `Analyze (<language>)` jobs go green.
+#   4. Confirm the 463 `rust/hard-coded-cryptographic-value` alerts close as
+#      "no longer detected" and that the other rules' alerts
+#      (`rust/cleartext-logging`, `actions/missing-workflow-permissions`,
+#      the dependency CVEs) survive. If they closed too, the filter is
+#      wrong; `fleet_release_gate.rs` pins it to exactly one query id.
+#
+# What used to be one `CodeQL` summary check-run is now four
+# `CodeQL / Analyze (<language>)` checks. `main` requires only
+# `CI Status Summary`, so no branch rule names the old check.
+
+name: CodeQL
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    # Weekly, as default setup's `schedule: weekly` was. Monday 03:17 UTC:
+    # an off-the-hour minute, and a quiet hour for a fleet that is not on a
+    # release cadence.
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+
+# A force-push supersedes the scan it was racing, the same as ci.yml. `push`
+# runs on `main` group by their own sha and never cancel one another.
+concurrency:
+  group: codeql-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    # The `init` action's README: every advanced-setup workflow needs
+    # `security-events: write`. `contents: read` checks the source out.
+    # `actions: read` is what GitHub's starter workflow grants for the
+    # upload's run-status lookup (it names it for private repositories; it
+    # costs nothing here). No `packages: read` -- there are no private query
+    # packs to fetch.
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+          - language: javascript-typescript
+            build-mode: none
+          - language: python
+            build-mode: none
+          - language: rust
+            build-mode: none
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v4
+        with:
+          # The same category default setup used, so each new upload
+          # supersedes the old analysis of the same language on the same ref
+          # rather than sitting beside it.
+          category: '/language:${{ matrix.language }}'

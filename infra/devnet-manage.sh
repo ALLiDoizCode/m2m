@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# TOON devnet lifecycle manager — provision, deploy, tear down, or probe the
-# devnet fleet: Store-DVM / Relay.
+# TOON devnet lifecycle manager — provision, point DNS at, tear down, or probe
+# the devnet fleet: Store-DVM / Relay. It no longer deploys to either box; see
+# the ADR 0068 note below.
 #
 # The apex ("toon"/g.toon proxy box) is GONE (issue #872, toon-meta#310 /
 # toon-meta#313's live cutover): the fleet is two connector-bearing boxes now
@@ -12,22 +13,49 @@
 #
 # The self-hosted EVM/Solana/Mina chain boxes this script once managed were
 # deleted 2026-07-19 — the devnet settles on PUBLIC chains now (Base Sepolia,
-# public Solana devnet, public Mina devnet); see infra/linode/endpoints.json's
+# public Solana devnet); see infra/linode/endpoints.json's
 # own note. Recreating them here would be a live footgun (issue #819), not a
 # restoration, so they are gone from this file too.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#   ./devnet-manage.sh up        Provision boxes + deploy all nodes
-#   ./devnet-manage.sh store     Provision + deploy ONLY the store (DVM) box
-#   ./devnet-manage.sh relay     Provision + deploy ONLY the relay box
+#   ./devnet-manage.sh up        Provision the store/relay boxes + DNS
+#   ./devnet-manage.sh store     Provision + DNS ONLY the store (DVM) box
+#   ./devnet-manage.sh relay     Provision + DNS ONLY the relay box
 #   ./devnet-manage.sh faucet    Provision ONLY the faucet box (no connector — connector#898)
 #   ./devnet-manage.sh faucet-cutover  Repoint faucet.devnet at the faucet box (run AFTER it's live)
-#   ./devnet-manage.sh down      Stop containers (boxes stay, restart is fast)
+#   ./devnet-manage.sh faucet-resize   Resize the faucet box to its NODE_TYPES plan (brief downtime)
 #   ./devnet-manage.sh destroy   Delete all Linode boxes (loses chain state)
 #   ./devnet-manage.sh status    Probe every public HTTPS endpoint
-#   ./devnet-manage.sh redeploy  Pull latest images + restart containers
 #   ./devnet-manage.sh ips       Print current box IPs
 #   ./devnet-manage.sh dns       Sync Porkbun A-records to current box IPs
-#   ./devnet-manage.sh endpoints Generate endpoints.json from live nodes
+#
+# ADR 0068 (issue #1213): `up`/`store`/`relay` PROVISION the box and its DNS
+# only. Neither box is deployed to FROM THIS SCRIPT any more — the store and
+# relay boxes each run their own repository's `deploy/` bundle
+# (`toon-protocol/store`, `toon-protocol/relay`), bootstrapped by that repo,
+# not by a checkout of this one. `deploy_store_node`/`deploy_relay_node` and
+# the `down`/`redeploy` verbs that drove `/root/connector`-checkout-based
+# compose stacks on those boxes are GONE — the box they targeted no longer
+# runs that stack. The faucet is unaffected: it still deploys from
+# `infra/linode-faucet/` in this repo, by hand, per
+# `docs/operators/faucet-box-bringup.md`.
+#
+# There is no `endpoints` verb any more (issue #1135). It printed a JSON
+# document assembled from three box labels that no longer exist
+# (`toon-devnet-evm`, `toon-devnet-sol`, `toon-devnet-store` -- the store box's
+# label is `ario`, see NODE_LABELS below), naming the self-hosted chains this
+# header already says were deleted, their mock tokens, the retired
+# `proxy.store.` edge, and a Solana payment-channel program id that was never
+# deployed to public devnet and was already superseded on the self-hosted
+# validator the day it was committed (the id itself, and its provenance, are
+# recorded in the guard named below -- it is deliberately not repeated here, so
+# there is one copy of a retired literal rather than two).
+# `infra/linode/README.md` had already recorded the generator as retired -- this
+# copy of it simply outlived that decision in a second file.
+# `infra/linode/endpoints.json` is the hand-maintained record; read it, or
+# `./devnet-manage.sh ips` for the boxes' current addresses.
+# `crates/connector-settlement-solana/tests/solana_program_ids.rs` is what now
+# fails the build if any committed file names a program id that is neither of
+# the two this repository records.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -53,8 +81,6 @@ SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_rsa}"
 # as written against DOMAIN, every update_dns call failed).
 DOMAIN="${DOMAIN:-devnet.toonprotocol.dev}"
 PORKBUN_DOMAIN="${PORKBUN_DOMAIN:-toonprotocol.dev}"
-BRANCH="${BRANCH:-feat/devnet-multi-node}"
-REPO_URL="https://github.com/toon-protocol/connector.git"
 LINODE_API="https://api.linode.com/v4"
 PORKBUN_API="https://api.porkbun.com/api/json/v3"
 
@@ -67,7 +93,27 @@ PORKBUN_API="https://api.porkbun.com/api/json/v3"
 # "ario", not "toon-devnet-store" — get_box_ip would find nothing under the
 # old name and `create_box` would stand up a SECOND store box.
 declare -A NODE_LABELS=( [store]=ario [relay]=relay [faucet]=faucet )
-declare -A NODE_TYPES=(  [store]=g6-standard-2 [relay]=g6-standard-2 [faucet]=g6-standard-2 )
+# Sizing: the store box was measured on 2026-08-27 using ~125MB of RAM across
+# all six of its containers, on a 4GB plan. g6-nanode-1 (1GB, 1 vCPU, 25GB) is
+# ample for it and costs $5/mo against $24.
+#
+# The faucet is a nanode for the same reason and on the same evidence: it runs
+# no connector, no chain and no validator — nginx, certbot and a Node process
+# serving two HTTP drip routes, measured the same day at 99MB resident and
+# 6.2GB of disk. It was sized to match the connector boxes only because its
+# Mina leg compiled zk circuits at boot and needed the memory to do it; ADR
+# 0065 deleted that leg, and the plan with it. The relay has NOT been measured
+# and stays on g6-standard-2 until it is.
+#
+# NOTE: create_box returns early if a box with the label already exists, so
+# changing a value here does NOT resize a live box. `./devnet-manage.sh
+# faucet-resize` is the path for the FAUCET — deliberately that box only, since
+# store and relay each run the connector, which is the client edge on both
+# machines (ADR 0041), and resizing one of those is not a thing to reach for a
+# generic command to do. Resizing the store is still a hand-made Linode API
+# call (POST /linode/instances/<id>/resize with allow_auto_disk_resize) against
+# a box whose disk usage already fits the smaller plan.
+declare -A NODE_TYPES=(  [store]=g6-nanode-1 [relay]=g6-standard-2 [faucet]=g6-nanode-1 )
 # Root passwords are GENERATED PER CREATE and thrown away — never committed,
 # never printed, never reused. Nothing needs them: every path into a box in this
 # file is `ssh -i "$SSH_KEY"` (see ssh_run below), and infra/harden-ssh.sh turns
@@ -148,60 +194,6 @@ ssh_run() {   # ip, command
   ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=30 "root@$1" "$2"
 }
 
-wait_ssh() {
-  local ip=$1
-  for _ in $(seq 1 30); do
-    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=5 "root@$ip" true 2>/dev/null && return 0
-    sleep 5
-  done
-  echo "ERROR: can't SSH to $ip" >&2; return 1
-}
-
-deploy_store_node() {  # ip, toon_mnemonic
-  local ip=$1 mnemonic=$2
-  wait_ssh "$ip"
-  ssh_run "$ip" "
-    set -e
-    command -v git >/dev/null || apt-get install -y git curl
-    [ -d /root/connector ] || git clone -b '$BRANCH' '$REPO_URL' /root/connector
-    cd /root/connector && git pull --ff-only origin '$BRANCH' 2>/dev/null || true
-    cat > infra/linode-store/.env <<'ENV'
-DOMAIN=$DOMAIN
-LETSENCRYPT_STAGING=0
-LETSENCRYPT_EMAIL=dev.jonathan.green@gmail.com
-TOON_MNEMONIC=$mnemonic
-LOG_LEVEL=info
-ENV
-    chmod +x infra/linode-store/bootstrap.sh infra/linode-store/init-letsencrypt.sh infra/linode-store/firewall.sh
-    ./infra/linode-store/bootstrap.sh
-  "
-}
-
-deploy_relay_node() {  # ip, toon_mnemonic
-  # Modeled on deploy_store_node — infra/linode-relay/ mirrors infra/linode-store/
-  # file for file (issue #816). RELAY_NOSTR_SECRET_KEY must carry over
-  # byte-identical: it is the relay app's own Nostr identity, and clients
-  # already discovered it under this pubkey (infra/linode-relay/.env.example).
-  local ip=$1 mnemonic=$2
-  wait_ssh "$ip"
-  ssh_run "$ip" "
-    set -e
-    command -v git >/dev/null || apt-get install -y git curl
-    [ -d /root/connector ] || git clone -b '$BRANCH' '$REPO_URL' /root/connector
-    cd /root/connector && git pull --ff-only origin '$BRANCH' 2>/dev/null || true
-    cat > infra/linode-relay/.env <<'ENV'
-DOMAIN=$DOMAIN
-LETSENCRYPT_STAGING=0
-LETSENCRYPT_EMAIL=dev.jonathan.green@gmail.com
-TOON_MNEMONIC=$mnemonic
-RELAY_NOSTR_SECRET_KEY=0000000000000000000000000000000000000000000000000000000000000002
-LOG_LEVEL=info
-ENV
-    chmod +x infra/linode-relay/bootstrap.sh infra/linode-relay/init-letsencrypt.sh infra/linode-relay/firewall.sh
-    ./infra/linode-relay/bootstrap.sh
-  "
-}
-
 probe() {  # url, label
   if curl -fsS -m 10 -o /dev/null "$1" 2>/dev/null; then
     printf "  ✅  %-40s %s\n" "$2" "$1"
@@ -222,15 +214,14 @@ print_ips() {
 case "${1:-help}" in
 
 up)
-  TOON_MNEMONIC="${TOON_MNEMONIC:-giant goat guide develop boy wolf target embody leave sunny paddle neutral}"
-  echo "==> [1/4] Provision boxes"
+  echo "==> [1/2] Provision boxes"
   for key in store relay; do create_box "$key"; done
   for key in store relay; do wait_box_running "${NODE_LABELS[$key]}"; done
 
   STORE_IP=$(get_box_ip "${NODE_LABELS[store]}")
   RELAY_IP=$(get_box_ip "${NODE_LABELS[relay]}")
 
-  echo "==> [2/4] Update DNS"
+  echo "==> [2/2] Update DNS"
   # `proxy.ario` is the store box's paid edge, matching the g.toon.ario
   # prefix it serves. It replaced `proxy.store.devnet` on 2026-08-05; that
   # name is RETIRED -- record deleted, dropped from the certificate and from
@@ -247,62 +238,47 @@ up)
   # (before that split landed) is gone entirely as of issue #872.
   update_dns "relay-ws.devnet"      "$RELAY_IP"
 
-  echo "==> [3/4] Deploy all nodes (parallel)"
-  deploy_store_node "$STORE_IP" "$TOON_MNEMONIC" &
-  PID_STORE=$!
-
-  deploy_relay_node "$RELAY_IP" "$TOON_MNEMONIC" &
-  PID_RELAY=$!
-
-  wait $PID_STORE && echo "  ✅ Store done" || echo "  ❌ Store failed"
-  wait $PID_RELAY && echo "  ✅ Relay done" || echo "  ❌ Relay failed"
-
-  echo "==> [4/4] Status check"
+  echo "Boxes provisioned. Deploy is no longer done from this script (ADR 0068):"
+  echo "  store -> bootstrap from toon-protocol/store's own deploy/ bundle"
+  echo "  relay -> bootstrap from toon-protocol/relay's own deploy/ bundle"
   "$0" status
   ;;
 
 store)
-  # Targeted: provision + deploy ONLY the store (DVM) box. Use this to add the
-  # store node without `up` re-running bootstrap on the live chain/toon boxes
-  # (which would re-pull images and re-provision the Mina lightnet).
-  TOON_MNEMONIC="${TOON_MNEMONIC:-giant goat guide develop boy wolf target embody leave sunny paddle neutral}"
-  echo "==> [1/3] Provision store box"
+  # Targeted: provision + DNS ONLY the store (DVM) box.
+  echo "==> [1/2] Provision store box"
   create_box store
   wait_box_running "${NODE_LABELS[store]}"
   STORE_IP=$(get_box_ip "${NODE_LABELS[store]}")
-  echo "==> [2/3] Update DNS"
+  echo "==> [2/2] Update DNS"
   update_dns "proxy.ario.devnet"  "$STORE_IP"
   update_dns "dvm.devnet"         "$STORE_IP"
-  echo "==> [3/3] Deploy store node"
-  deploy_store_node "$STORE_IP" "$TOON_MNEMONIC"
+  echo "Provisioned at ${STORE_IP:-<not found>}. Deploy from toon-protocol/store's own deploy/ bundle (ADR 0068)."
   "$0" status
   ;;
 
 relay)
-  # Targeted: provision + deploy ONLY the relay box, modeled on `store` above.
-  TOON_MNEMONIC="${TOON_MNEMONIC:-giant goat guide develop boy wolf target embody leave sunny paddle neutral}"
-  echo "==> [1/3] Provision relay box"
+  # Targeted: provision + DNS ONLY the relay box, modeled on `store` above.
+  echo "==> [1/2] Provision relay box"
   create_box relay
   wait_box_running "${NODE_LABELS[relay]}"
   RELAY_IP=$(get_box_ip "${NODE_LABELS[relay]}")
-  echo "==> [2/3] Update DNS"
+  echo "==> [2/2] Update DNS"
   update_dns "proxy.relay.devnet" "$RELAY_IP"
   # relay-ws.devnet belongs to this box too, post-#820 — see the `up)` case's
   # comment for why it used to sit on the apex and what had to land first.
   update_dns "relay-ws.devnet"    "$RELAY_IP"
-  echo "==> [3/3] Deploy relay node"
-  deploy_relay_node "$RELAY_IP" "$TOON_MNEMONIC"
+  echo "Provisioned at ${RELAY_IP:-<not found>}. Deploy from toon-protocol/relay's own deploy/ bundle (ADR 0068)."
   "$0" status
   ;;
 
 faucet)
   # Targeted: provision ONLY the faucet box (toon-meta#310 §4, connector#898).
-  # No TOON_MNEMONIC, no deploy_*_node call, and — unlike `store`/`relay`
-  # above — no automatic DNS repoint here either: this box has no connector
-  # (§4.5) and its USDC-only secrets are generated FRESH ON THE BOX by a
-  # human (§4.4, never copied from box 1), so there is nothing this script
-  # can write into a `.env` heredoc the way deploy_relay_node does for
-  # RELAY_NOSTR_SECRET_KEY. And per the ordering §6.2 runbook, faucet.devnet
+  # No automatic DNS repoint here either, unlike `store`/`relay` above: this
+  # box has no connector (§4.5) and its USDC-only secrets are generated FRESH
+  # ON THE BOX by a human (§4.4, never copied from box 1), so there is no
+  # `.env` heredoc this script can write the way `store`/`relay` provisioning
+  # used to. And per the ordering §6.2 runbook, faucet.devnet
   # must not be flipped at provision time — the record moves only once the
   # NEW box is live, funded and proven serving, which is what stops this
   # command from prescribing the outage the runbook exists to prevent. (It
@@ -331,26 +307,117 @@ faucet-cutover)
   update_dns "faucet.devnet" "$FAUCET_IP"
   ;;
 
-down)
-  # store/relay only — the faucet box is brought up and down on the box
-  # itself (infra/linode-faucet/bootstrap.sh), not from here. Same for
-  # `redeploy` below. See docs/operators/faucet-box-bringup.md. The apex
-  # ("toon") that used to sit alongside them here is gone (issue #872).
-  echo "==> Stopping containers on the store/relay nodes"
-  for key in store relay; do
-    local_label="${NODE_LABELS[$key]}"
-    ip=$(get_box_ip "$local_label") || continue
-    [ -z "$ip" ] && echo "  $local_label: not found" && continue
-    echo "  Stopping $local_label ($ip)..."
-    ssh_run "$ip" "
-      cd /root/connector 2>/dev/null || exit 0
-      if [ '$key' = 'store' ]; then
-        docker compose -f infra/linode-store/docker-compose.store.yml down 2>/dev/null || true
-      else
-        docker compose -f infra/linode-relay/docker-compose.relay.yml down 2>/dev/null || true
-      fi
-    " && echo "  $local_label stopped" || echo "  $local_label: could not stop"
+faucet-resize)
+  # Move the LIVE faucet box onto NODE_TYPES[faucet]. Deliberately its own
+  # verb and faucet-only: `store` and `relay` run the connector, which is the
+  # client edge on both machines (ADR 0041), and resizing one of those is not a
+  # thing to do by reaching for a generic command.
+  #
+  # Linode resizes by shutting the box down, migrating it and booting it again
+  # — the faucet is OFFLINE for the duration, typically 10-20 minutes. The
+  # compose stack comes back on its own (`restart: unless-stopped`); nothing
+  # here needs to redeploy it.
+  TARGET_TYPE="${NODE_TYPES[faucet]}"
+  FAUCET_LABEL="${NODE_LABELS[faucet]}"
+  FAUCET_ID=$(get_box_id "$FAUCET_LABEL")
+  [ -n "$FAUCET_ID" ] || { echo "ERROR: faucet box not found." >&2; exit 1; }
+
+  CURRENT_TYPE=$(linode_get "linode/instances/$FAUCET_ID" | jq -r '.type')
+  if [ "$CURRENT_TYPE" = "$TARGET_TYPE" ]; then
+    echo "==> faucet is already $TARGET_TYPE — nothing to do."
+    exit 0
+  fi
+
+  # Linode refuses a downsize while the box has more disk ALLOCATED than the
+  # smaller plan provides -- "Linode has allocated more disk than the new
+  # service plan allows", HTTP 400, whatever allow_auto_disk_resize says. The
+  # disk has to be shrunk first, and a disk can only be resized while the box
+  # is offline. So the order is: measure, power off, shrink, resize, boot.
+  #
+  # (allow_auto_disk_resize is still passed below. It is what keeps a LATER
+  # upsize from leaving the filesystem small, and it costs nothing here.)
+  DISKS=$(linode_get "linode/instances/$FAUCET_ID/disks")
+  EXT_IDS=$(echo "$DISKS" | jq -r '.data[] | select(.filesystem != "swap") | .id')
+  EXT_COUNT=$(echo "$EXT_IDS" | grep -c . || true)
+  if [ "$EXT_COUNT" != "1" ]; then
+    echo "ERROR: faucet has $EXT_COUNT non-swap disks; this verb shrinks exactly 1." >&2
+    echo "Resize its disks by hand in the Linode UI first, then re-run." >&2
+    exit 1
+  fi
+  EXT_ID=$EXT_IDS
+  EXT_SIZE=$(echo "$DISKS" | jq -r --arg id "$EXT_ID" '.data[] | select(.id == ($id|tonumber)) | .size')
+  SWAP_SIZE=$(echo "$DISKS" | jq '[.data[] | select(.filesystem == "swap") | .size] | add // 0')
+
+  # How much DATA is on the box. Read it from the guest: /disks reports each
+  # disk's ALLOCATED size, which is always the whole current plan and so is
+  # larger than every smaller plan by construction -- comparing that would
+  # refuse every downsize there is.
+  TARGET_DISK=$(curl -sf "$LINODE_API/linode/types/$TARGET_TYPE" | jq -r '.disk')
+  FAUCET_IP=$(get_box_ip "$FAUCET_LABEL")
+  USED_MB=$(ssh_run "$FAUCET_IP" "df -BM --output=used / | tail -1 | tr -dc '0-9'" 2>/dev/null || true)
+  if [ -z "$USED_MB" ]; then
+    echo "ERROR: could not read disk usage from $FAUCET_IP over SSH." >&2
+    echo "Refusing to resize blind: a shrink that does not fit strands the box offline." >&2
+    exit 1
+  fi
+
+  # Target ext size: the whole new plan minus swap. Keep a margin over what is
+  # actually used -- the filesystem needs room to work, and this box builds a
+  # container image on itself.
+  NEW_EXT_SIZE=$(( TARGET_DISK - SWAP_SIZE ))
+  NEEDED_MB=$(( USED_MB * 3 / 2 + 2048 ))
+  echo "==> $FAUCET_LABEL uses ${USED_MB}MB of ${EXT_SIZE}MB; $TARGET_TYPE provides ${TARGET_DISK}MB"
+  if [ "$NEEDED_MB" -gt "$NEW_EXT_SIZE" ]; then
+    echo "ERROR: ${USED_MB}MB used (+50% margin +2GB = ${NEEDED_MB}MB) does not fit ${NEW_EXT_SIZE}MB." >&2
+    echo "Free space on the box first, then re-run." >&2
+    exit 1
+  fi
+
+  echo "==> Resizing $FAUCET_LABEL ($FAUCET_ID): $CURRENT_TYPE -> $TARGET_TYPE"
+  echo "    The faucet will be DOWN for roughly 10-20 minutes."
+
+  if [ "$EXT_SIZE" -gt "$NEW_EXT_SIZE" ]; then
+    echo "==> [1/4] Powering off (a disk can only be resized offline)"
+    linode_post "linode/instances/$FAUCET_ID/shutdown" >/dev/null
+    for _ in $(seq 1 60); do
+      [ "$(get_box_status "$FAUCET_LABEL")" = "offline" ] && break
+      sleep 5
+    done
+    [ "$(get_box_status "$FAUCET_LABEL")" = "offline" ] || {
+      echo "ERROR: $FAUCET_LABEL did not power off; not touching its disk." >&2; exit 1; }
+
+    echo "==> [2/4] Shrinking the root disk ${EXT_SIZE}MB -> ${NEW_EXT_SIZE}MB"
+    linode_post "linode/instances/$FAUCET_ID/disks/$EXT_ID/resize" \
+      -d "{\"size\": $NEW_EXT_SIZE}" >/dev/null
+    # The disk goes `resizing` and back to `ready`; the box stays offline.
+    for _ in $(seq 1 120); do
+      st=$(linode_get "linode/instances/$FAUCET_ID/disks/$EXT_ID" | jq -r '.status')
+      [ "$st" = "ready" ] && break
+      sleep 10
+    done
+    [ "$st" = "ready" ] || { echo "ERROR: disk did not return to ready (status=$st)." >&2; exit 1; }
+  fi
+
+  echo "==> [3/4] Resizing the plan"
+  linode_post "linode/instances/$FAUCET_ID/resize" \
+    -d "{\"type\": \"$TARGET_TYPE\", \"allow_auto_disk_resize\": true}" >/dev/null
+
+  echo "==> [4/4] Waiting for it to come back"
+  # A plan resize reboots the box itself when it was running. It was not: we
+  # powered it off above, so boot it once the migration settles.
+  for _ in $(seq 1 120); do
+    st=$(get_box_status "$FAUCET_LABEL")
+    [ "$st" = "running" ] && break
+    [ "$st" = "offline" ] && linode_post "linode/instances/$FAUCET_ID/boot" >/dev/null 2>&1
+    sleep 10
   done
+  wait_box_running "$FAUCET_LABEL"
+
+  NEW_TYPE=$(linode_get "linode/instances/$FAUCET_ID" | jq -r '.type')
+  echo "==> $FAUCET_LABEL is now $NEW_TYPE"
+  echo "    Containers restart themselves; give them a moment, then:"
+  probe "https://faucet.$DOMAIN/health" "faucet health"
+  echo "    Re-check the drip legs too — /api/info must still report them ready."
   ;;
 
 destroy)
@@ -387,31 +454,6 @@ status)
   probe "https://proxy.relay.$DOMAIN/ilp/identity" "relay proxy/connector"
   ;;
 
-redeploy)
-  echo "==> Redeploying containers on all nodes (pulls latest images)"
-  for key in store relay; do
-    local_label="${NODE_LABELS[$key]}"
-    ip=$(get_box_ip "$local_label") || continue
-    [ -z "$ip" ] && echo "  $local_label: not found" && continue
-    echo "  Redeploying $local_label ($ip)..."
-    # Neither surviving box has a TypeScript service left to dodge (issue
-    # #901 deleted the store's, along with its now-dangling `nginx`
-    # `depends_on`; the relay leg never had one, issue #816; the apex's own
-    # copy of this hazard is gone with the apex itself, issue #872) -- both
-    # simply compose their base file with their Rust overlay and bring up
-    # every service in the file set, no service list and no `--no-deps`
-    # needed.
-    if [ "$key" = "store" ]; then
-      compose="docker compose -f infra/linode-store/docker-compose.store.yml -f infra/linode-store/docker-compose.store.rust.yml"
-    else
-      compose="docker compose -f infra/linode-relay/docker-compose.relay.yml -f infra/linode-relay/docker-compose.relay.rust.yml"
-    fi
-    ssh_run "$ip" "cd /root/connector && git pull --ff-only 2>/dev/null || true && $compose pull && $compose up -d" &
-  done
-  wait
-  "$0" status
-  ;;
-
 ips) print_ips ;;
 
 dns)
@@ -425,52 +467,6 @@ dns)
   # comment. The apex it used to follow before that split is gone (#872).
   [ -n "$RELAY_IP" ] && update_dns "relay-ws.devnet" "$RELAY_IP"    || true
   echo "Done."
-  ;;
-
-endpoints)
-  EVM_IP=$(get_box_ip toon-devnet-evm)
-  SOL_IP=$(get_box_ip toon-devnet-sol)
-  STORE_IP=$(get_box_ip toon-devnet-store)
-  cat <<JSON
-{
-  "_note": "TOON devnet — separate nodes per chain. Generated by devnet-manage.sh. The apex (g.toon proxy) is retired (issue #872) -- nothing answers at g.toon any more.",
-  "evm": {
-    "rpcUrl": "https://evm-rpc.${DOMAIN}",
-    "chainId": 31337,
-    "tokenAddress": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
-    "tokenDecimals": 6,
-    "registryAddress": "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512",
-    "nodeIp": "${EVM_IP}"
-  },
-  "solana": {
-    "rpcUrl": "https://solana-rpc.${DOMAIN}",
-    "wsUrl": "wss://solana-ws.${DOMAIN}",
-    "programId": "7CLmNaK9z6QgUWQpCFdeUTqfwXeZH5ssohAKtyXKY4Hp",
-    "tokenMint": "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H",
-    "tokenDecimals": 6,
-    "nodeIp": "${SOL_IP}"
-  },
-  "store": {
-    "proxyIlp": "https://proxy.store.${DOMAIN}/ilp",
-    "dvmHealth": "https://dvm.${DOMAIN}/health",
-    "ilpAddress": "g.proxy.store",
-    "relayHopAddress": "g.proxy.relay.store",
-    "dvmKinds": [5094],
-    "settlementAddresses": {
-      "evm": "0xF29fD62C4848B9573C9b90adbF61b664F386d9CF",
-      "solana": "A3FG5y6rfBNJQrsGYTNNR7UHAXCREPJgV362LdTQGNwK",
-      "mina": "B62qkEx3MsKtaEJqJMg8ZC2eXtz8FNpZy4huVpBnnUHVRUEf5f1vqdq"
-    },
-    "nodeIp": "${STORE_IP}"
-  },
-  "faucet": {
-    "baseSepoliaUrl": "https://faucet.${DOMAIN}/api/base-sepolia/request",
-    "solanaUrl": "https://faucet.${DOMAIN}/api/solana/usdc-request",
-    "minaUrl": "https://faucet.${DOMAIN}/api/mina/usdc-request",
-    "_note": "USDC only (connector#898) — the native-token legs (/api/request, /api/solana/request, /api/mina/request) are gone from the service and 404."
-  }
-}
-JSON
   ;;
 
 help|*)

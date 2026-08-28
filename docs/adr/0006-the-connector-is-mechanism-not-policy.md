@@ -1,5 +1,7 @@
 # The connector is mechanism; discovery and route policy live outside it
 
+**Status:** Accepted. **Restored without qualification by [0043](0043-purchasable-peering-is-removed.md)** — its one exception, a peering that could be bought, is gone. Extended rather than replaced by [0034](0034-a-runtime-peer-route-table-never-shadows-the-config-file.md): a runtime peer/route row is a third shape beside static and leased. Its forward reference to a "sold peering (#867)" lapsed with the feature.
+
 **Scope:** connector architecture — internal to this codebase. See the [ADR index](README.md).
 
 The connector forwards what it is told to forward and settles what it is told to settle. It

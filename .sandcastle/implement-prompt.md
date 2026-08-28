@@ -71,8 +71,9 @@ treasury, or a chain is ever passed into a container running agent-authored code
 mean the ticket needs a human.** Two reviewed workflows exist to perform exactly this class of
 operation, and your token can dispatch them:
 
-- **`.github/workflows/fleet-ops.yml`** — live devnet box work: `box-status`, `config-read`,
-  `pin-verify` (reads), and `config-apply`, `restart`, `announce` (writes).
+- **`.github/workflows/fleet-ops.yml`** — live faucet-box work: `box-status` (read), and
+  `restart`, `deploy` (writes). It offers no other box: the relay and store boxes deploy from
+  their own repositories now (ADR 0068).
 - **`.github/workflows/funded-ops.yml`** — EVM channel work needing a key that can sign and pay:
   `whoami`, `channel-status` (reads), and `deposit` (write).
 
@@ -143,25 +144,20 @@ a formatting slip fails the gate before your tests ever run.
 
 ## TypeScript — `packages/`
 
-connector is an npm-workspaces monorepo with a hand-ordered build
-(`shared` → `mina-zkapp` → the rest). If you touched anything under `packages/`,
-run connector's real gate from the repo root and make sure every command passes:
+connector is an npm-workspaces monorepo. If you touched anything under
+`packages/`, run connector's real gate from the repo root and make sure every
+command passes:
 
 - lint: `npm run lint --workspaces --if-present`
-- typecheck: `npm run typecheck` (builds `shared` + `mina-zkapp` first so the
-  project references resolve, then runs `tsc --noEmit` in each workspace)
-- build (ordered): `npm run build` (this is exactly
-  `shared` → `mina-zkapp` → `--workspaces --if-present`; do not reorder it)
+- typecheck: `npm run typecheck`
+- build: `npm run build`
 - test: `npm run test --workspaces --if-present`
 
-Two connector-specific gotchas when running the test gate:
+One connector-specific gotcha when running the test gate:
 
-- The `mina-zkapp` (o1js) jest suite is WASM-heavy. Run it with more heap and in
-  band or it OOMs:
-  `NODE_OPTIONS='--max-old-space-size=8192' npm test --workspace=packages/mina-zkapp -- --runInBand`
-- The npm workspaces that remain are devnet tooling only (the faucet, its Mina
-  zkApp, the faucet dApp, `tools/fund-peers`). The connector itself is Rust —
-  the Rust gate is the one that matters for connector changes.
+- The npm workspaces that remain are devnet tooling only (the faucet, the
+  announcer, `tools/fund-peers`). The connector itself is Rust — the Rust gate
+  is the one that matters for connector changes.
 
 Do not commit until the gates that apply to what you changed all pass.
 

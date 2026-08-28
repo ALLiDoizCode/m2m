@@ -1,0 +1,360 @@
+# =============================================================================
+# local/mixed-chain -- three connectors, two peerings, two chains.
+#
+# Merged ON TOP of the repository-root docker-compose.yml so the chains are the
+# SAME services `make anvil-up` / `make solana-up` bring up, on one network:
+#
+#   docker compose -f docker-compose.yml -f local/mixed-chain/compose.yml \
+#     --profile evm --profile solana --profile mixed-chain up -d
+#
+# `make local-up LOCAL_TOPOLOGY=mixed-chain` does exactly that.
+#
+#   connector-a  --EVM peering-->  connector-b  --Solana peering-->  connector-c
+#                 over BTP         (both backends)  over HTTP        stub-app
+#                 ws://…/ilp/btp                    http://…/ilp
+#
+# The packet is originated at A's operator surface and terminates at C's app,
+# and the money changes chain at B. Nothing in this repository covers that
+# shape: `two_ledgers_never_merge.rs` proves the two backends stay separate
+# in-process, `local/solo` boots one node with both attached, and
+# `two_connectors_peer.rs` peers two nodes on EVM -- none of them has a second
+# node on the far side of the OTHER chain.
+#
+# The CARRIAGE line under the arrows is issue #1155, and it needs no service of
+# its own: BTP rides the listener `client_edge_addr` already binds, on
+# `GET /ilp/btp`, so A reaches B on the same container port 3000 it always did
+# and this file gained no port, no service and no dependency for it. What it
+# bought is that `a-b` is the first peering any shipped image has carried a
+# packet over BTP on -- and, because `b-c` stayed on HTTP, that one packet now
+# crosses two carriages as well as two chains.
+# =============================================================================
+
+services:
+  # ── The payment-oblivious app, behind C ────────────────────────────────────
+  stub-app:
+    image: connector-rust:local
+    profiles: [mixed-chain]
+    entrypoint: ['/usr/local/bin/stub-app']
+    command: ['0.0.0.0:3100']
+    expose:
+      - '3100'
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+
+  # ── C: Solana only, terminates the app's prefix ────────────────────────────
+  # Brought up first and waited on by B, which is waited on by A: each node
+  # dials the next, and a peering whose far side is not serving answers `T01
+  # peer unreachable` rather than failing loudly, so an undefined start order
+  # would make the first rehearsal a coin toss.
+  connector-c:
+    image: connector-rust:local
+    profiles: [mixed-chain]
+    command: ['/app/config/connector.toml']
+    # PATHS ARE RELATIVE TO THE REPOSITORY ROOT, not to this file. Compose
+    # resolves relative bind mounts against the PROJECT directory, which is the
+    # directory of the FIRST `-f` file -- always ./docker-compose.yml here.
+    volumes:
+      - ./local/mixed-chain/connector-c.toml:/app/config/connector.toml:ro
+      - ./local/.keys/mixed-chain/connector-c:/app/data:ro
+      # A NAMED volume, not a bind mount: the image creates /app/state owned by
+      # uid 10001 so a fresh named volume inherits that ownership.
+      - mixed-chain-c-state:/app/state
+    ports:
+      - '127.0.0.1:3005:3000'
+    depends_on:
+      solana-validator:
+        condition: service_healthy
+      stub-app:
+        condition: service_started
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    healthcheck:
+      # 127.0.0.1, NOT localhost: `client_edge_addr = "0.0.0.0:3000"` binds
+      # IPv4 only, while `localhost` in-container resolves `::1` first.
+      test:
+        ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:3000/ilp/identity || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ── B: the chain boundary ──────────────────────────────────────────────────
+  # The only container here that depends on BOTH chains being healthy, which is
+  # the compose-level statement of what its config says: two settlement
+  # backends, either of which failing to connect is a refuse-to-start.
+  connector-b:
+    image: connector-rust:local
+    profiles: [mixed-chain]
+    command: ['/app/config/connector.toml']
+    volumes:
+      - ./local/mixed-chain/connector-b.toml:/app/config/connector.toml:ro
+      - ./local/.keys/mixed-chain/connector-b:/app/data:ro
+      - mixed-chain-b-state:/app/state
+    ports:
+      - '127.0.0.1:3004:3000'
+    depends_on:
+      anvil:
+        condition: service_healthy
+      solana-validator:
+        condition: service_healthy
+      connector-c:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:3000/ilp/identity || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ── A: EVM only, and the node the rehearsal is handed to ───────────────────
+  connector-a:
+    image: connector-rust:local
+    profiles: [mixed-chain]
+    command: ['/app/config/connector.toml']
+    volumes:
+      - ./local/mixed-chain/connector-a.toml:/app/config/connector.toml:ro
+      - ./local/.keys/mixed-chain/connector-a:/app/data:ro
+      - mixed-chain-a-state:/app/state
+    ports:
+      - '127.0.0.1:3003:3000'
+    depends_on:
+      anvil:
+        condition: service_healthy
+      connector-b:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:3000/ilp/identity || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ── The rehearsal ──────────────────────────────────────────────────────────
+  # Its own profile so `up` never starts it: a one-shot that exits 0 or 1, run
+  # by `make local-rehearse` via `docker compose run --rm`.
+  #
+  # TWO packets, and NOT for the reason they used to be. This topology was
+  # postpay: the claim covering crossing n was signed after it fulfilled and
+  # rode crossing n + 1, so one packet proved delivery and could say nothing at
+  # all about payment. That model is deleted (issue #1145) and both legs now
+  # cover each PREPARE before it is sent, so crossing 1 is already paid for.
+  #
+  # The second crossing still earns its place, for `local/two-hop`'s reason
+  # instead (issue #1102): a covering payer asks its payee where its claims
+  # stand on every packet, and a payee answering out of the wrong book reports
+  # nonce 0 forever -- accepted every time, advancing nothing. One crossing
+  # cannot see that. Two can.
+  #
+  # Then BOTH journals are read, and that pair is the whole topology in two
+  # greps: an EVM `channel_id` accepted at B, and a base58 Solana
+  # `channel_account` accepted at C. A packet that reached the app while either
+  # journal stayed empty crossed a chain boundary for free, and
+  # `--expect-fulfill` could not have noticed -- a peer claim's verdict rides
+  # back in `Toon-Claim-Ack` and never gates the packet.
+  #
+  # Since issue #1155 the first of those two greps says one more thing, for
+  # free. B's `peer_expose = "btp"` mounts NO ILP-over-HTTP peer carriage at
+  # all, so a claim in B's peer journal cannot have arrived on an HTTP request
+  # -- there is nothing there to accept one, and an A that fell back to
+  # `POST /ilp` would be admitted as an ordinary client whose claims never
+  # reach the peer book (§1.8). An accepted peer claim at B is therefore
+  # evidence the packet was carried over a BTP frame, not merely that it
+  # arrived.
+  #
+  # Around those, one on-chain read: the Solana channel account exists and
+  # belongs to the payment-channel program. A journal grep proves a claim was
+  # ACCEPTED, which is a signature check against a configured key and reads no
+  # chain -- so it stays green against a channel nobody ever opened, which is
+  # exactly what this topology used to ship.
+  sender:
+    image: connector-rust:local
+    profiles: [sender]
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        set -e
+
+        # The Solana peering's channel, BEFORE anything is sent. Nothing on the
+        # peer path reads a chain -- `ClaimBook` checks a claim's signature
+        # against the configured `counterparty_key` and nothing else (CF-23) --
+        # so a topology whose channel account was never opened rehearses
+        # exactly as green as one whose channel is real, journal grep included.
+        # This is the one check that can tell them apart, and it runs first so
+        # the failure names the missing channel rather than a puzzling claim.
+        #
+        # Existence and owner establish the address is a real account of the
+        # payment-channel program: it is a PDA
+        # `find_program_address(["channel", min, max, mint])` produces, and only
+        # the program itself can create an account at its own derived address.
+        # `local/keys.sh <topology> solana-channels` opens it and checks the
+        # participants, mint and status; this checks that the thing it opened
+        # is still there when the packet flies.
+        #
+        # And that it still holds B's COLLATERAL, which is the second half and
+        # the newer one. An open channel with a zero deposit is a channel whose
+        # claims are cryptographically perfect and worth nothing, and it looks
+        # identical from the peer path and from both journals -- the Solana leg
+        # of this topology shipped exactly that until `fund` became a
+        # self-deposit (issue #1118) and `local/keys.sh` started using it. The
+        # figure comes off the program's own account rather than out of a log
+        # line, for the same reason the owner does.
+        #
+        # `deposit_b` (offset 112, `packages/solana-program/src/state.rs`) and
+        # not `deposit_a`, because a channel is two-sided: `ClaimFromChannel`
+        # bounds a claim by the CLAIMER's own deposit, and B is the payer here
+        # -- B signs the claims, so B's own side is the one that has to be
+        # funded. Which slot B holds is decided by the 32-byte sort the PDA is
+        # derived from, and B's key sorts after C's, so B is participant_b.
+        # That constant cannot pass by accident if the topology's Solana
+        # indices ever change the order: it would read C's side, which nothing
+        # here funds, and report zero.
+        #
+        # `commitment: confirmed`, named rather than defaulted, and load-bearing:
+        # getAccountInfo defaults to FINALIZED, which a channel opened seconds
+        # ago by `make local-up` is not yet -- so the default made this fail on
+        # a good topology and pass a minute later. Confirmed is also the level
+        # the Solana backend itself reads and writes at
+        # (`CommitmentConfig::confirmed()`), so this sees exactly what the node
+        # that opened it sees.
+        #
+        # `content-type: application/json` likewise: busybox wget sends
+        # `application/x-www-form-urlencoded` for a --post-data body, and the
+        # validator answers that with 415.
+        channel_open() {
+          if ! wget -q -O - --header 'content-type: application/json' \
+              --post-data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getAccountInfo\",\"params\":[\"$$1\",{\"encoding\":\"base64\",\"commitment\":\"confirmed\"}]}" \
+              http://solana-validator:8899 >/tmp/channel.json; then
+            echo "NO CHANNEL: getAccountInfo for $$1 failed against the local validator." >&2
+            exit 1
+          fi
+          if ! grep -q "\"owner\":\"$$2\"" /tmp/channel.json; then
+            echo "NO CHANNEL: $$1 is not an account of the payment-channel program $$2 on the local validator." >&2
+            echo "            The Solana peering's claims would name a channel nobody could redeem." >&2
+            exit 1
+          fi
+          echo "--- the Solana peering's channel $$1 is live on chain, owned by $$2"
+
+          # The account's own bytes: base64 out of the JSON, then the u64 at
+          # $$3. busybox `od -tu8` reads it little-endian, which is the layout
+          # a Solana account is written in.
+          sed 's/.*"data":\["\([^"]*\)".*/\1/' /tmp/channel.json | base64 -d >/tmp/channel.bin
+          held=$$(od -An -tu8 -j"$$3" -N8 /tmp/channel.bin | tr -d ' ')
+          if [ -z "$$held" ] || [ "$$held" -lt "$$4" ]; then
+            echo "NO COLLATERAL: $$1 holds $$held base units at deposit offset $$3, not the $$4 the payer deposited." >&2
+            echo "               A claim against an unfunded channel is a signature, not a payment: the" >&2
+            echo "               program's ClaimFromChannel bounds a claim by the claimer's OWN deposit," >&2
+            echo "               so every claim this peering signs would be refused on redemption." >&2
+            echo "               'local/keys.sh mixed-chain solana-channels' is what deposits it." >&2
+            exit 1
+          fi
+          echo "--- it holds $$held base units of B's own collateral, at least the $$4 provisioning deposited"
+        }
+        channel_open G5mXQzfZb4tXWX7cQvXP9ZJnDBcUo6irWTmGGtX3xpzL HY4AYFNe5Vg5BkEwAURNsGY3uFAvGMNpAQPRtgoasJiR 112 100000000
+
+        # 1200 is this path's COST (`CONTEXT.md`), and equals A's own
+        # client-edge `price`: A's fee of 100 plus B's fee of 50 plus the 1050
+        # that reaches C's unpriced termination (issue #1144). Each hop takes a
+        # FLAT number of base units and forwards the rest, so 1200 leaves the
+        # sender, 1100 crosses the chain boundary and 1050 is delivered.
+        # `local_topologies_load.rs` holds this figure and the three committed
+        # configs to that one arithmetic -- nothing in this container can see a
+        # fee quietly dropped back to zero, because both journals below stay
+        # exactly as green when it is.
+        send() {
+          /usr/local/bin/connector send \
+            --operator     http://connector-a:3000 \
+            --operator-key /app/data/operator-send.key \
+            --to           g.local.mixed.b.c.app \
+            --seal-to      http://connector-c:3000/ilp \
+            --target       / \
+            --amount       1200 \
+            --body         /app/data/payload.json \
+            --expect-fulfill
+        }
+        echo '--- crossing 1: A -> B (EVM peering) -> C (Solana peering) -> the app'
+        send
+        echo '--- crossing 2: a second covered crossing on BOTH peerings (issue #1102)'
+        send
+
+        # $$1 state dir, $$2 channel, $$3 label, $$4 what ONE crossing must
+        # advance that channel by.
+        #
+        # The advance, not merely the existence of a claim, and that is new
+        # since issue #1145. This check could not ask for a figure while the
+        # legs were POSTPAY: the claim covering crossing n rode crossing
+        # n + 1, so after N crossings a journal legitimately held N - 1
+        # claims and the last crossing was unpaid by construction. Both legs
+        # cover before they send now, so N crossings owe exactly N advances
+        # and the arithmetic is checkable.
+        #
+        # What it catches that a grep cannot: a fee quietly changed on one
+        # hop. A hop covers `amount_after_fee(amount, fee)`, so B's fee is
+        # visibly the difference between the two figures below -- 1100
+        # accepted at B, 1050 accepted at C -- and a fee back at zero, or
+        # doubled, moves one of them while leaving both journals as green as
+        # ever. `local_topologies_load.rs` holds the committed configs to the
+        # same arithmetic from the other side; this is the running image's
+        # half of it.
+        #
+        # The last line for the channel is the highest cumulative: a claim
+        # book only ever advances, and only the highest-nonce claim is ever
+        # redeemable.
+        paid() {
+          if ! grep -q "$$2" "$$1/peer-claims.log" 2>/dev/null; then
+            echo "NOT PAID: $$3 records no accepted claim on $$2." >&2
+            cat "$$1/peer-claims.log" >&2 || echo '(the journal does not exist)' >&2
+            exit 1
+          fi
+          accepted=$$(grep -c "$$2" "$$1/peer-claims.log")
+          cumulative=$$(grep "$$2" "$$1/peer-claims.log" | tail -1 | cut -f4)
+          expected=$$((accepted * $$4))
+          if [ "$$cumulative" != "$$expected" ]; then
+            echo "UNDERPAID: $$3 accepted $$accepted claims on $$2 totalling $$cumulative," >&2
+            echo "           not the $$expected that $$accepted crossings at $$4 each owe it." >&2
+            echo "           Every hop covers amount_after_fee(amount, fee) BEFORE it sends" >&2
+            echo "           (ADR 0042), so a mismatch here is a fee that moved on one hop" >&2
+            echo "           without the committed figures moving with it." >&2
+            grep "$$2" "$$1/peer-claims.log" >&2
+            exit 1
+          fi
+          echo "--- $$3 accepted $$accepted claims on $$2, cumulative $$cumulative ($$4 per crossing)"
+        }
+        # 1200 leaves the sender; A keeps 100 and covers B for 1100; B keeps
+        # 50 and covers C for 1050. Two hops, two flat fees, one packet.
+        paid /app/b-state 0x221b5e73fba2099b690a94e668d575a75d136c249795f5b20146bf7d0403e423 "B (EVM)" 1100
+        paid /app/c-state G5mXQzfZb4tXWX7cQvXP9ZJnDBcUo6irWTmGGtX3xpzL "C (Solana)" 1050
+    volumes:
+      # A's keys: the sender signs the operator write with A's allowlisted key
+      # and posts the fixture body from the same directory.
+      - ./local/.keys/mixed-chain/connector-a:/app/data:ro
+      # The two payees' state volumes, READ-ONLY, purely to read their claim
+      # journals. The sender runs as the same uid 10001 that wrote them.
+      - mixed-chain-b-state:/app/b-state:ro
+      - mixed-chain-c-state:/app/c-state:ro
+
+volumes:
+  mixed-chain-a-state:
+  mixed-chain-b-state:
+  mixed-chain-c-state:

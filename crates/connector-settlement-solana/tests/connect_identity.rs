@@ -131,6 +131,60 @@ async fn connect_refuses_a_program_id_naming_some_other_executable_program() {
     );
 }
 
+/// Issue #1131: `connect` reads the chain's genesis hash to learn which
+/// cluster it is on, and a `solana-test-validator` mints a fresh genesis on
+/// every run -- so it matches no published cluster hash and can never match
+/// one.
+///
+/// The load-bearing assertion is that `connect` still *succeeds*. Every
+/// `local/` topology runs against exactly this validator, so a genesis read
+/// that refused an unrecognised chain would take `make local-verify` and all
+/// three CI topologies down; `cluster()` answering `None` is the same "this
+/// node cannot say where it is, so it compares nothing" that
+/// `SolanaSettlementConfig::cluster_hint` already answers for the
+/// `solana-validator:8899` hostname those topologies configure.
+#[tokio::test]
+async fn a_test_validators_fresh_genesis_names_no_cluster_and_still_connects() {
+    if !require_solana_test_validator() {
+        return;
+    }
+
+    let validator = SolanaValidator::spawn().await;
+    let program_id = Pubkey::from_str(LOCAL_TEST_PROGRAM_ID).expect("valid local test program id");
+    let deployed = SolanaSettlementBackend::deploy(&validator.rpc_url, program_id)
+        .await
+        .expect("bind to the genesis-loaded payment-channel program");
+    let token_mint = deployed.token_mint();
+
+    let rpc =
+        RpcClient::new_with_commitment(validator.rpc_url.clone(), CommitmentConfig::confirmed());
+    let seed = funded_seed(&rpc, [7u8; 32]).await;
+
+    let backend =
+        SolanaSettlementBackend::connect(&validator.rpc_url, &seed, program_id, token_mint, 6)
+            .await
+            .expect("a chain this connector cannot name must still be connectable");
+    assert_eq!(
+        backend.cluster(),
+        None,
+        "a fresh test-validator genesis matches no published cluster hash, so this node \
+         must record that it cannot name its cluster rather than guess one"
+    );
+
+    // And the genesis the validator actually reports really is one of the
+    // unnameable ones -- otherwise the assertion above would pass for a
+    // backend that never read the chain at all.
+    let genesis_hash = rpc
+        .get_genesis_hash()
+        .await
+        .expect("a running validator answers getGenesisHash");
+    assert_eq!(
+        connector_settlement_solana::cluster_for_genesis_hash(&genesis_hash),
+        None,
+        "the validator's own genesis hash {genesis_hash} must be one no public cluster published"
+    );
+}
+
 #[tokio::test]
 async fn connect_refuses_an_unreachable_rpc_endpoint() {
     // No validator spawned at all -- this must not hang or panic, just

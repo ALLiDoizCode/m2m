@@ -305,6 +305,42 @@ impl SolanaSettlementConfig {
     pub fn key(&self) -> &SecretLocation {
         &self.key
     }
+
+    /// The Solana cluster this table's `rpc_url` names, when it is one of
+    /// the well-known public endpoints or a loopback address -- `None` for
+    /// any other host, e.g. a paid third-party RPC provider (Helius,
+    /// Alchemy, QuickNode, ...) whose URL names no cluster at all (issue
+    /// #975). Guessing wrong from a substring match would be worse than not
+    /// checking, so this only recognises an exact, canonical hostname.
+    ///
+    /// A **hint**, and since issue #1131 the *fallback* rather than the
+    /// source: a running node takes its cluster from the chain's own
+    /// genesis hash, read once when the Solana backend connects
+    /// (`SolanaSettlementBackend::cluster`), which holds however the node
+    /// reached the chain and so covers every host this list does not. What
+    /// this still answers, and the genesis hash cannot, is the loopback
+    /// case: `solana-test-validator` mints a fresh genesis on every run and
+    /// therefore matches no published cluster hash, while its URL still
+    /// says `localnet`. Nothing consults this before a backend exists, so
+    /// there is no ordering problem -- the two are read together, in
+    /// `connector-cli`'s `client_channels`.
+    pub fn cluster_hint(&self) -> Option<&'static str> {
+        cluster_hint_for_rpc_url(&self.rpc_url)
+    }
+}
+
+/// [`SolanaSettlementConfig::cluster_hint`]'s free-function half, split out
+/// so it is testable against a bare URL string without building a whole
+/// resolved config.
+fn cluster_hint_for_rpc_url(rpc_url: &str) -> Option<&'static str> {
+    let host = Url::parse(rpc_url).ok()?.host_str()?.to_ascii_lowercase();
+    match host.as_str() {
+        "api.mainnet-beta.solana.com" => Some("mainnet-beta"),
+        "api.devnet.solana.com" => Some("devnet"),
+        "api.testnet.solana.com" => Some("testnet"),
+        "localhost" | "127.0.0.1" => Some("localnet"),
+        _ => None,
+    }
 }
 
 /// One fully validated per-chain settlement table -- typed by chain (issue
@@ -325,6 +361,85 @@ impl SettlementConfig {
             SettlementConfig::Evm(_) => SettlementChain::Evm,
             SettlementConfig::Solana(_) => SettlementChain::Solana,
         }
+    }
+}
+
+/// Which `[settlement.<chain>]` tables a config declares, and the one
+/// value out of them a channel row needs -- the single input every "the
+/// settlement table this channel needs is absent" rule reads (issue
+/// #1138).
+///
+/// There is **one** such rule and it governs all four channel tables,
+/// because the reason is one reason. A `[settlement.<chain>]` table is not
+/// merely how a node *submits* a redemption: it is where the node's
+/// on-chain identity on that chain comes from. `[settlement.evm.key]` is
+/// this node's EVM address and `[settlement.solana.key]` its Solana one,
+/// the connector holds a signer rather than a wallet (ADR 0012), and
+/// "there is no second key to configure and none is invented" (ADR 0030,
+/// as [`crate::ConfigError::PayChannelWithoutEvmSettlement`] already says).
+/// A node with no table for a chain therefore has no address on it at all,
+/// so it cannot be a participant of any channel there:
+/// `TokenNetwork.claimFromChannel` refuses a caller that is not a
+/// participant (`InvalidParticipant`,
+/// `packages/contracts/src/TokenNetwork.sol:308`) and the Solana program
+/// refuses a `claimer` account that is not one (`UnauthorizedSigner`,
+/// `packages/solana-program/src/processor.rs:747`).
+///
+/// So a channel row whose chain has no settlement table names a channel
+/// this node is not in, and every claim admitted on that row is carriage
+/// rendered for money it can never collect. That is a **fact** about the
+/// chain with exactly one answer, not a policy an operator may set -- the
+/// same category issue #1136 put the EIP-712 domain in, and the reason
+/// `connector_client_edge::DepositFloor::Unknown`'s latitude does not
+/// reach it: a deposit floor is how much risk to take on a channel this
+/// node *is* a participant of, so it presupposes redeemability rather than
+/// conferring it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SettlementTables<'a> {
+    evm: bool,
+    solana_program_id: Option<&'a str>,
+}
+
+impl<'a> SettlementTables<'a> {
+    /// Read the tables off an already-resolved settlement list. Called
+    /// once in `Config::load`, immediately after `resolve_settlement`, so
+    /// every channel table is resolved against the same answer.
+    pub(crate) fn of(settlements: &'a [SettlementConfig]) -> Self {
+        SettlementTables {
+            evm: settlements
+                .iter()
+                .any(|settlement| matches!(settlement, SettlementConfig::Evm(_))),
+            solana_program_id: settlements.iter().find_map(|settlement| match settlement {
+                SettlementConfig::Solana(solana) => Some(solana.program_id()),
+                SettlementConfig::Evm(_) => None,
+            }),
+        }
+    }
+
+    /// The same answer, stated directly, for a channel-table unit test
+    /// that is about the channel row rather than about how a settlement
+    /// table parses. `Config::load` always uses [`Self::of`].
+    #[cfg(test)]
+    pub(crate) fn for_tests(evm: bool, solana_program_id: Option<&'a str>) -> Self {
+        SettlementTables {
+            evm,
+            solana_program_id,
+        }
+    }
+
+    /// Whether this node has an EVM settlement table, and therefore an EVM
+    /// on-chain identity a channel can name as its other participant.
+    pub(crate) fn evm(&self) -> bool {
+        self.evm
+    }
+
+    /// `[settlement.solana] program_id` -- the one program this node can
+    /// redeem a Solana claim under, and since ADR 0053 part of what every
+    /// Solana claim signs. `None` is a node with no Solana table at all,
+    /// which is both "no program to judge a claim under" and "no Solana
+    /// identity for a channel to be paid at".
+    pub(crate) fn solana_program_id(&self) -> Option<&'a str> {
+        self.solana_program_id
     }
 }
 
@@ -855,6 +970,43 @@ key_file = "{}"
             SettlementConfig::Evm(_) => panic!("expected a solana settlement config"),
         }
         assert_eq!(resolved[0].chain(), SettlementChain::Solana);
+    }
+
+    #[test]
+    fn cluster_hint_recognises_the_canonical_public_solana_rpc_hosts() {
+        assert_eq!(
+            cluster_hint_for_rpc_url("https://api.mainnet-beta.solana.com"),
+            Some("mainnet-beta")
+        );
+        assert_eq!(
+            cluster_hint_for_rpc_url("https://api.devnet.solana.com"),
+            Some("devnet")
+        );
+        assert_eq!(
+            cluster_hint_for_rpc_url("https://api.testnet.solana.com"),
+            Some("testnet")
+        );
+        assert_eq!(
+            cluster_hint_for_rpc_url("http://127.0.0.1:8899"),
+            Some("localnet")
+        );
+        assert_eq!(
+            cluster_hint_for_rpc_url("http://localhost:8899"),
+            Some("localnet")
+        );
+    }
+
+    /// A third-party RPC provider's URL names no cluster at all -- this must
+    /// answer `None`, not guess, since a wrong guess would refuse every
+    /// genuine claim a node configured against it ever receives (issue
+    /// #975).
+    #[test]
+    fn cluster_hint_is_none_for_an_rpc_host_it_does_not_recognise() {
+        assert_eq!(
+            cluster_hint_for_rpc_url("https://solana-mainnet.g.alchemy.com/v2/abc123"),
+            None
+        );
+        assert_eq!(cluster_hint_for_rpc_url("https://example.com"), None);
     }
 
     #[test]

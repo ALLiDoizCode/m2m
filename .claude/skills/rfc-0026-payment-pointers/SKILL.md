@@ -1,36 +1,35 @@
 ---
 name: rfc-0026-payment-pointers
-description: Expert knowledge of Interledger RFC 0026 - Payment Pointers. Use when users ask about payment pointers, user-friendly payment addressing, HTTP(S) payment resolution, or simplified payment endpoints. Triggers on 'payment pointer', '$paymentpointer', 'payment address', or payment endpoint resolution.
+description: Expert knowledge of Interledger RFC 0026 - Payment Pointers. Use when users ask about payment pointers, user-friendly payment addressing, HTTP(S) payment resolution, or simplified payment endpoints. NOTE: this connector does not implement RFC 0026 — the skill explains what TOON does instead. Triggers on 'payment pointer', '$paymentpointer', 'payment address', or payment endpoint resolution.
 ---
 
 # RFC 0026: Payment Pointers
 
-## Overview
+## This connector does not implement it
 
-Provides expert guidance on payment pointer format, syntax, and resolution for user-friendly payment addressing.
+TOON addresses a route by ILP address and a node by its URL. There is no payment-pointer resolution anywhere.
 
-## Core Capabilities
+RFC 0026 is therefore **not vendored** into `docs/rfcs/`
+([ADR 0062](../../../docs/adr/0062-an-rfc-is-vendored-verbatim-and-profiled-never-forked.md)
+D4: a copy would assert a relevance this one does not have). The ten RFCs this
+connector *does* implement or profile are there, each with a TOON profile.
 
-### 1. RFC Documentation Search
-Access RFC specification details using the MCP tool:
-```
-mcp__interledger_org-v4_Docs__search_rfcs_documentation
-```
+Say this plainly when asked. Somebody looking for RFC 0026 behaviour in this
+codebase will not find it, and the useful answer is what replaced it — not a
+search.
 
-Search with queries like:
-- "payment pointers"
-- "payment pointer resolution"
-- "user-friendly addressing"
+## If you need the RFC itself
 
-### 2. Answer Questions
-Provide detailed explanations based on the RFC specification.
+It is upstream, and this repository holds no copy:
+<https://github.com/interledger/rfcs/blob/main/0026-payment-pointers/0026-payment-pointers.md>
 
-### 3. Implementation Guidance
-Help users implement and integrate the protocol or feature.
+Read it there when the question is about Interledger generally rather than about
+this connector. Do not vendor it in passing — that is ADR 0062 D4's decision,
+not a gap.
 
-## Common Topics
-- Payment pointer format and syntax
-- HTTP(S) resolution of payment endpoints
-- User-friendly payment addressing
-- Payment pointer validation
-- Integration with SPSP
+## Where to look instead
+
+- [`docs/rfcs/README.md`](../../../docs/rfcs/README.md) — the ten vendored RFCs.
+- [`CONTEXT.md`](../../../CONTEXT.md) — this project's vocabulary, which differs
+  from RFC 0019's in the places that matter here.
+- [`docs/adr/README.md`](../../../docs/adr/README.md) — the decisions, grouped.

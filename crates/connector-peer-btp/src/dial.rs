@@ -40,15 +40,12 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use connector_btp::{
-    BtpFrame, BtpSessionHandle, OriginateError, ProtocolData, AUTH_PROTOCOL, BTP_ERROR,
-    CONTENT_TYPE_TEXT,
-};
+use connector_btp::{BtpFrame, BtpSessionHandle, ProtocolData, BTP_ERROR};
 use connector_config::{PeerCarriage, PeerChannelConfig, PeerConfig};
 use connector_domain::x402::{GreetingError, X402PaymentRequired};
 use connector_domain::{Fulfill, PacketResponse, Prepare, Reject};
-use connector_peer_auth::{encode_raw, PresentedCredential};
 use connector_runtime::{ClaimAckOutcome, Clock, PeerForward, PeerTransport, WireClaim};
 use url::Url;
 
@@ -90,14 +87,18 @@ pub trait PeerDialer: Send + Sync {
 
 /// One peering relation, as the dial side needs it.
 ///
-/// Per **relation**, never per connection (§2.5): the timeouts, the
-/// credential and the claim domains all belong to the relation, and
-/// splitting them per connection is a double-spend surface.
+/// Per **relation**, never per connection (§2.5): the timeouts and the
+/// claim domains belong to the relation, and splitting them per connection
+/// is a double-spend surface.
+///
+/// There is nothing here to present on the way in. ADR 0060 deleted the
+/// `{peerId, secret}` credential this used to carry and dial with: what
+/// proves the peering at the far end is the claim covering each packet,
+/// which this transport already renders and sends.
 #[derive(Debug, Clone)]
 pub struct PeerRelation {
     peer_id: String,
     endpoint: Url,
-    credential: PresentedCredential,
     /// Canonical EVM channel id → the EIP-712 domain its claims are signed
     /// under, from that peering's EVM-shaped `[[peer_channels]]` rows.
     domains: HashMap<String, PeerClaimDomain>,
@@ -150,7 +151,6 @@ impl PeerRelation {
         Some(PeerRelation {
             peer_id: peer.id().to_string(),
             endpoint,
-            credential: PresentedCredential::new(peer.id(), peer.credential().secret()),
             domains,
             solana_program_ids,
             peer_answer_timeout: Duration::from_millis(peer.peer_answer_timeout_ms()),
@@ -164,7 +164,6 @@ impl PeerRelation {
     pub fn new(
         peer_id: impl Into<String>,
         endpoint: Url,
-        credential: PresentedCredential,
         domains: HashMap<String, PeerClaimDomain>,
         solana_program_ids: HashMap<String, String>,
         peer_answer_timeout: Duration,
@@ -173,7 +172,6 @@ impl PeerRelation {
         PeerRelation {
             peer_id: peer_id.into(),
             endpoint,
-            credential,
             solana_program_ids,
             domains,
             peer_answer_timeout,
@@ -212,15 +210,29 @@ pub struct BtpPeerTransport {
     /// of `signer_address` (issue #742), rendered as `senderId`/
     /// `signerPublicKey` on a claim `ClaimBook` signed through its
     /// `solana_signer`. `None` until something configures one with
-    /// [`Self::set_solana_signer_public_key`]; no `[[peer_channels]]` row
-    /// carries a Solana identity yet, so today that is always -- this
-    /// mirrors `ClaimBook::solana_signer`'s own "unconfigured means no
-    /// claim" contract at the transport's edge of it: a claim this
-    /// connector never had a Solana identity to sign never had one to
-    /// render either.
+    /// [`Self::set_solana_signer_public_key`], which
+    /// `connector-cli::peer_transport::build_peer_transport` does from the
+    /// `[settlement.solana]` key -- the same key `ClaimBook` signs a Solana
+    /// peer claim with (issue #998) -- so this is `None` on exactly the
+    /// nodes that have no such table. That mirrors
+    /// `ClaimBook::solana_signer`'s own "unconfigured means no claim"
+    /// contract at the transport's edge of it: a claim this connector never
+    /// had a Solana identity to sign never had one to render either.
     solana_signer_public_key: Option<[u8; 32]>,
     clock: Arc<dyn Clock>,
-    relations: HashMap<String, RelationState>,
+    /// Peer id → that peering's relation and its claim-exchange state.
+    ///
+    /// Copy-on-write behind an [`ArcSwap`] since ADR 0058: a peering
+    /// established over the operator surface must be dialable **while this
+    /// process serves**, and a map built once at boot is precisely what
+    /// made a runtime peer row a name with nothing behind it. Reads stay on
+    /// the packet path and stay lock-free; a write clones a map with one
+    /// entry per peering, which is an operator-frequency cost.
+    ///
+    /// Each entry is an [`Arc`] so a forward already in flight keeps the
+    /// state it started on even if the peering is deregistered underneath
+    /// it -- the alternative is a claim's pending set vanishing mid-request.
+    relations: ArcSwap<HashMap<String, Arc<RelationState>>>,
 }
 
 impl BtpPeerTransport {
@@ -235,7 +247,7 @@ impl BtpPeerTransport {
             signer_address,
             solana_signer_public_key: None,
             clock,
-            relations: HashMap::new(),
+            relations: ArcSwap::from_pointee(HashMap::new()),
         }
     }
 
@@ -248,22 +260,54 @@ impl BtpPeerTransport {
         self.solana_signer_public_key = Some(public_key);
     }
 
-    /// Register a peering this connector dials over BTP. Relations are
-    /// added before the transport is shared; the map itself is never
-    /// mutated afterwards, so reading it on the packet path takes no lock.
-    pub fn add_peer(&mut self, relation: PeerRelation) {
-        self.relations.insert(
-            relation.peer_id.clone(),
-            RelationState {
-                relation,
-                session: tokio::sync::Mutex::new(None),
-                pending: Mutex::new(Pending::default()),
-            },
-        );
+    /// Register a peering this connector dials over `wss://`, replacing
+    /// whatever was registered under the same id.
+    ///
+    /// Callable while the process serves (ADR 0058), not only during
+    /// construction: `POST /peers` establishes a peering and this is how it
+    /// becomes reachable without a restart.
+    pub fn add_peer(&self, relation: PeerRelation) {
+        self.rebind(|relations| {
+            relations.insert(
+                relation.peer_id.clone(),
+                Arc::new(RelationState {
+                    relation,
+                    session: tokio::sync::Mutex::new(None),
+                    pending: Mutex::new(Pending::default()),
+                }),
+            );
+        });
+    }
+
+    /// Stop dialing `peer_id`. A no-op for an id this transport never
+    /// held.
+    ///
+    /// The other half of runtime registration: `DELETE /peers` is the kill
+    /// switch ADR 0060 named when it removed the shared secret, and a kill
+    /// switch that leaves the carriage dialing is not one.
+    pub fn remove_peer(&self, peer_id: &str) {
+        self.rebind(|relations| {
+            relations.remove(peer_id);
+        });
+    }
+
+    /// Replace the relation map with a copy that has `change` applied. See
+    /// the field's own doc for what this costs and why the packet path
+    /// pays nothing for it.
+    fn rebind(&self, change: impl FnOnce(&mut HashMap<String, Arc<RelationState>>)) {
+        let mut next = (**self.relations.load()).clone();
+        change(&mut next);
+        self.relations.store(Arc::new(next));
+    }
+
+    /// The relation registered for `peer_id`, held past the read so a
+    /// forward in flight is unaffected by a concurrent deregistration.
+    fn relation(&self, peer_id: &str) -> Option<Arc<RelationState>> {
+        self.relations.load().get(peer_id).cloned()
     }
 
     /// Every `wss://` peering in a loaded config, with its channels.
-    pub fn add_peers_from_config(&mut self, peers: &[PeerConfig], channels: &[PeerChannelConfig]) {
+    pub fn add_peers_from_config(&self, peers: &[PeerConfig], channels: &[PeerChannelConfig]) {
         for peer in peers {
             if let Some(relation) = PeerRelation::from_config(peer, channels) {
                 self.add_peer(relation);
@@ -271,8 +315,17 @@ impl BtpPeerTransport {
         }
     }
 
-    /// The session for `peer_id`, dialing and authenticating one if there
-    /// is none.
+    /// The session for `peer_id`, dialing one if there is none.
+    ///
+    /// There is no handshake on it, and there used to be: the session's
+    /// first MESSAGE carried a `{peerId, secret}` credential in an `auth`
+    /// entry, and its answer doubled as a liveness check. ADR 0060 deleted
+    /// the credential, and an empty frame sent only to be answered is not a
+    /// substitute -- the far end takes its role from the claim on each
+    /// packet, so the first real MESSAGE is both the proof and the check. A
+    /// socket that dials and then cannot carry surfaces where every other
+    /// carriage failure does: as `T01` on the packet, naming the peer and
+    /// the endpoint (§2.2).
     async fn session(&self, state: &RelationState) -> Result<BtpSessionHandle, DialError> {
         let mut slot = state.session.lock().await;
         if let Some(handle) = slot.as_ref() {
@@ -282,38 +335,8 @@ impl BtpPeerTransport {
             .dialer
             .dial(&state.relation.peer_id, &state.relation.endpoint)
             .await?;
-
-        // §1.4: the credential rides the session's first MESSAGE as the
-        // `auth` protocolData entry, raw UTF-8 JSON -- the same entry, in
-        // the same shape, a client already sends. What differs is only
-        // that the far side *evaluates* P1 and P2 against it.
-        let auth = ProtocolData {
-            name: AUTH_PROTOCOL.to_string(),
-            content_type: CONTENT_TYPE_TEXT,
-            data: encode_raw(&state.relation.credential),
-        };
-        let answered = tokio::time::timeout(
-            state.relation.peer_answer_timeout,
-            handle.send_message(&[auth], &[]),
-        )
-        .await;
-        match answered {
-            Ok(Ok(frame)) if frame.frame_type != BTP_ERROR => {
-                *slot = Some(handle.clone());
-                Ok(handle)
-            }
-            other => Err(DialError {
-                peer_id: state.relation.peer_id.clone(),
-                endpoint: state.relation.endpoint.to_string(),
-                reason: match other {
-                    Ok(Ok(_)) => "the peer refused our credential".to_string(),
-                    Ok(Err(OriginateError::SessionGone)) => "the session closed".to_string(),
-                    Ok(Err(OriginateError::Timeout)) | Err(_) => {
-                        "the peer did not answer the auth frame".to_string()
-                    }
-                },
-            }),
-        }
+        *slot = Some(handle.clone());
+        Ok(handle)
     }
 
     /// Forget the session after a failure, so the next packet dials a new
@@ -463,12 +486,12 @@ impl PeerTransport for BtpPeerTransport {
         &self,
         peer_id: &str,
         prepare: Prepare,
-        minimum_delivery: u64,
         claim: Option<WireClaim>,
     ) -> PeerForward {
-        let Some(state) = self.relations.get(peer_id) else {
+        let Some(state) = self.relation(peer_id) else {
             return PeerForward::unreachable(peer_id);
         };
+        let state = state.as_ref();
         let handle = match self.session(state).await {
             Ok(handle) => handle,
             Err(error) => {
@@ -481,12 +504,6 @@ impl PeerTransport for BtpPeerTransport {
         if let Some(claim) = claim.as_ref() {
             entries.push(self.claim_entry(state, claim));
         }
-        // §5.1: the sender's declaration, re-emitted **unchanged** on this
-        // outbound hop. It is the one carriage-layer field that propagates
-        // rather than being re-derived (§8.3), and crossing carriages must
-        // not alter it.
-        entries.extend(fields::minimum_delivery_protocol_data(minimum_delivery));
-
         // §8.1: `data` rides byte-for-byte unchanged. `Prepare::encode` is
         // the same OER encoding every other carriage puts on a wire, and
         // nothing here re-wraps, pads or truncates a payload it holds no
@@ -558,9 +575,10 @@ impl PeerTransport for BtpPeerTransport {
     }
 
     async fn flush(&self, peer_id: &str, claim: WireClaim) -> ClaimAckOutcome {
-        let Some(state) = self.relations.get(peer_id) else {
+        let Some(state) = self.relation(peer_id) else {
             return ClaimAckOutcome::NotSent;
         };
+        let state = state.as_ref();
         let handle = match self.session(state).await {
             Ok(handle) => handle,
             Err(error) => {
@@ -622,7 +640,7 @@ impl BtpPeerTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use connector_btp::{BTP_RESPONSE, PAYMENT_REQUIRED_PROTOCOL};
+    use connector_btp::{BTP_RESPONSE, CONTENT_TYPE_TEXT, PAYMENT_REQUIRED_PROTOCOL};
     use connector_domain::RejectCode;
 
     /// The bytes the client edge's §1.9 greeting carries, in miniature.

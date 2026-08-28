@@ -1,5 +1,0 @@
-# Live deploy output written by tools/mina/deploy-usdc-token.ts.
-# Contains the public token/admin addresses from a real devnet deploy — kept out
-# of git so the committed sample (usdc-token.json.example) stays canonical and a
-# live deploy doesn't dirty the tree. devnet.sh + fund-mina-usdc.sh read this file.
-usdc-token.json

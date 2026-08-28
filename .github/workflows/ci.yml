@@ -4,15 +4,105 @@ on:
   push:
     branches:
       - main
+  # Every base branch, not just `main` (issue #1152). A `pull_request` trigger
+  # filters on the PR's BASE, so `branches: [main]` meant a stacked PR — one
+  # opened against another PR's branch — ran none of the jobs below. That did
+  # not surface as pending or skipped; it surfaced as nothing at all, while
+  # `local-topologies.yml` (which has no branch filter) went green beside it.
+  # #1149 sat at four green ticks carrying an 832-line Rust integration test
+  # on which `cargo fmt`, `cargo clippy -D warnings` and `cargo test
+  # --workspace` had never run once; it had to be recreated as #1150 against
+  # `main` to get a real signal.
+  #
+  # The cost is real and deliberately accepted: the Rust gate is ~8-12 minutes
+  # and every stacked PR now pays it (the `concurrency` group below is what
+  # keeps that bill down). The cheaper alternatives were both refused. A
+  # required status check cannot reach this case as configured: branch
+  # protection is a property of the BASE branch, `main` is the only protected
+  # branch (it requires `CI Status Summary`), and a stacked PR's base is an
+  # unprotected feature branch — so no rule applies, and even a repo-wide
+  # ruleset would only block the merge with "Expected", never make the gate
+  # run. And "just never stack" is a convention with nothing enforcing it,
+  # which is the class of problem #1150 was merged to fix.
+  #
+  # `push` stays on `main`: that is the post-merge signal and wants no
+  # widening. Every branch's pre-merge signal already arrives via the PR.
   pull_request:
     branches:
-      - main
+      - '**'
+
+# Widening the trigger above put every stacked PR on the full Rust gate, so
+# stop paying for runs that are already obsolete: a force-push or a new commit
+# cancels the run it supersedes instead of racing it. PR runs group by PR
+# number. `push` runs on `main` group by their own commit sha, so they can
+# never cancel one another — every merged commit keeps its own post-merge
+# signal, which is the one run nobody may lose.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
 
 jobs:
+  # A docs-only pull request does not pay for the chain-bound gate. Before
+  # this job existed a README edit cost the full Rust workspace gate, two
+  # Solana SBF builds and a devbox validation -- ten-plus minutes of runner
+  # time for a change nothing under crates/ could see. This job says what
+  # the PR touched, and `ci-status` at the bottom holds every heavy job to
+  # that verdict: a skip counts as a pass ONLY when this job said the gate
+  # had nothing to check, never because a job was cancelled or never ran.
+  #
+  # "Docs-only" is deliberately narrow -- every changed path is a Markdown
+  # file or lives under docs/ -- and it is NOT "test-free". Markdown is read
+  # by tests here: records_state_their_own_falsifier.rs walks all of docs/
+  # plus README.md, CONTEXT.md and CLAUDE.md; vendored_rfcs_are_unmodified.rs
+  # diffs docs/rfcs/; documented_config_keys.rs reads
+  # docs/protocol/configuration-spec.md; solana_program_ids.rs walks every
+  # tracked file. So a docs-only PR runs exactly those harnesses in
+  # `docs-gate` below, with no chain binary installed, instead of the whole
+  # workspace. Anything that is not Markdown -- a workflow, a TOML, a key
+  # file, a Makefile -- is code and gets the full gate.
+  #
+  # A `push` to main is never docs-only: the post-merge signal stays whole.
+  changes:
+    name: What changed
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+    steps:
+      - name: Classify the changed paths
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "not a pull request: full gate"
+            exit 0
+          fi
+          # The files API needs no checkout. Renames are classified by both
+          # names, so a file moved out of docs/ is code.
+          gh api --paginate "repos/${{ github.repository }}/pulls/${PR}/files" \
+            --jq '.[] | .filename, (.previous_filename // empty)' > changed.txt
+          echo "changed paths:"; sed 's/^/  /' changed.txt
+          # An empty list is an API failure, not an empty PR (the empty-PR
+          # guard runs elsewhere); 3000 is where that API stops listing.
+          if [ ! -s changed.txt ] || [ "$(wc -l < changed.txt)" -ge 3000 ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "could not classify every path: full gate"
+            exit 0
+          fi
+          if grep -vE '^(docs/|.*\.md$)' changed.txt; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "-> the paths above are not documentation: full gate"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "-> docs only: the record-reading tests, nothing chain-bound"
+          fi
+
   # The connector itself is Rust (ADR 0017) — `rust-gate` below is this repo's
   # real gate. The npm surface that remains is devnet tooling only (the faucet,
-  # its Mina zkApp, the faucet dApp, and tools/fund-peers), so this job just
-  # keeps it lint-clean and formatted.
+  # the announcer, and tools/fund-peers), so this job just keeps it lint-clean
+  # and formatted.
   lint-and-format:
     name: Lint and Format Check
     runs-on: ubuntu-latest
@@ -80,6 +170,8 @@ jobs:
   security:
     name: Security Audit
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     permissions:
       contents: read
       security-events: write
@@ -130,7 +222,7 @@ jobs:
           args: --severity-threshold=high
 
       - name: Upload Snyk results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         continue-on-error: true
         with:
@@ -145,6 +237,8 @@ jobs:
   rust-gate:
     name: Rust Workspace Gate
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
 
     steps:
       # `submodules: recursive` (matching contracts.yml): connector-settlement-evm's
@@ -200,13 +294,13 @@ jobs:
       # test would silently skip and report `passed` -- exactly the defect #471 closed for
       # anvil, see crates/connector-settlement-solana/tests/support/mod.rs.
       #
-      # Pinned to v2.1.21, not the newer v3.x line the pre-existing `solana-integration` job
-      # below installs: v3's solana-test-validator hard-requires io_uring, which is unavailable
-      # under this repo's agent-sandbox container's seccomp profile (verified: it panics with
-      # `assertion failed: io_uring_supported()` there). v2.1.21 needs no io_uring and matches
-      # the `=2.1.0` solana-program/solana-client/solana-sdk pin in
-      # crates/connector-settlement-solana{,-program}/Cargo.toml, so the CLI that deploys and
-      # drives the program is the same release line the program itself is built against.
+      # Pinned to v2.1.21, NOT the v3.1.12 the `solana-program` jobs below install. This
+      # repository installs two Solana CLIs on purpose and they are not interchangeable;
+      # crates/connector-settlement-solana/tests/solana_cli_pins.rs records which goes where,
+      # why, and what would have to be true to change either, and fails the build if this
+      # literal drifts from it. In short: v3's solana-test-validator hard-requires io_uring,
+      # which the agent sandbox's seccomp profile does not permit, and v2.1.21 matches the
+      # `=2.1.0` Solana crate pins the workspace compiles the program against.
       # `.sandcastle/Dockerfile` installs this exact version for the same reason Foundry is
       # pinned identically in both places: an agent that passes locally on a different
       # toolchain than the gate has learned nothing.
@@ -216,11 +310,14 @@ jobs:
           echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
 
       # connector-settlement-solana's test harness builds packages/solana-program with
-      # `cargo build-sbf --tools-version v1.52` when target/deploy/payment_channel.so is
-      # not already in the cached `target` dir (issue #567) -- cache the platform-tools
+      # the pinned platform-tools line when target/deploy/payment_channel.so is not
+      # already in the cached `target` dir (issue #567) -- cache the platform-tools
       # install exactly like the solana-program job below does, so a workspace-cache miss
-      # doesn't also re-download the SBF toolchain (and hit the flaky network resolution
-      # panic, issue #105) inside a test run.
+      # doesn't also re-download the SBF toolchain inside a test run.
+      #
+      # A speed-up, not a dependency: the harness builds through
+      # tools/solana/build-sbf.sh, which bootstraps $HOME/.cache/solana from cold.
+      # A miss here costs a download, not a red job.
       - name: Cache Solana platform-tools
         uses: actions/cache@v4
         with:
@@ -269,11 +366,17 @@ jobs:
       - name: Clippy (warnings denied)
         run: cargo clippy --workspace --exclude payment-channel --all-targets -- -D warnings
 
-  # Solana program tests (Rust/BPF) — packages/solana-program is the Cargo
-  # crate `payment-channel`, a Cargo workspace member, not a TypeScript package.
-  solana-program:
-    name: Solana Program Tests (Rust)
+  # The docs-only half of the gate (see `changes` above): the harnesses that
+  # read Markdown, and only those. No Foundry, no Solana CLI, no submodules --
+  # none of these tests touch a chain, and the EVM bindings build from the
+  # committed ABI. The `target` cache is restored from rust-gate's key and
+  # deliberately never saved from here, so a partial build can never become
+  # what the full gate restores.
+  docs-gate:
+    name: Docs Gate (record-reading tests)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'false'
 
     steps:
       - name: Checkout code
@@ -282,6 +385,62 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Restore Cargo registry and workspace target
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-gate-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            rust-gate-${{ runner.os }}-
+
+      - name: Run the tests that read Markdown
+        # `shell: bash` for the same reason as rust-gate: the pipe into tee
+        # must not swallow cargo's exit status (issue #652).
+        shell: bash
+        run: |
+          cargo test -p connector \
+            --test records_state_their_own_falsifier \
+            --test vendored_rfcs_are_unmodified \
+            --test documented_config_keys \
+            --test production_skeleton_is_inert 2>&1 | tee /tmp/cargo-test.log
+          cargo test -p connector-settlement-solana \
+            --test solana_program_ids 2>&1 | tee -a /tmp/cargo-test.log
+
+      - name: Assert no harness executed zero tests
+        # Same check as rust-gate (issue #471): a harness reporting
+        # `running 0 tests` is a broken harness, not a pass.
+        run: |
+          awk '
+            /^ *Running tests\// { harness = $0; next }
+            /^running 0 tests$/ && harness { print "EMPTY TEST HARNESS (reports success despite running nothing): " harness; found = 1; harness = "" }
+            /^running [0-9]/ { harness = "" }
+            END { if (found) exit 1 }
+          ' /tmp/cargo-test.log
+
+  # Solana program tests (Rust/BPF) — packages/solana-program is the Cargo
+  # crate `payment-channel`, a Cargo workspace member, not a TypeScript package.
+  solana-program:
+    name: Solana Program Tests (Rust)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # v3.1.12, NOT the v2.1.21 the rust-gate above installs -- the two are deliberate and
+      # not interchangeable. This job builds the program, and the deploy runbook
+      # (docs/solana-deployment.md) requires a CLI >= 3.1.12, so `cargo test-sbf` here runs
+      # the same toolchain driver the deploy path does. See
+      # crates/connector-settlement-solana/tests/solana_cli_pins.rs, which records both pins
+      # and fails the build if this literal drifts from them.
       - name: Install Solana CLI tools
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/v3.1.12/install)"
@@ -294,6 +453,15 @@ jobs:
         with:
           path: ~/.cache/solana
           key: solana-platform-tools-${{ runner.os }}-v1.52
+
+      # `cargo test-sbf` is cargo-build-sbf underneath, and that reads
+      # $HOME/.cache/solana before creating it -- a cold cache is a panic, not a
+      # download (tools/solana/build-sbf.sh's header). This job cannot go through
+      # that script (it runs test-sbf, not build-sbf), so it pre-creates the
+      # directory the same way the reproducibility job below does. A no-op once
+      # the cache restores.
+      - name: Ensure platform-tools cache directory exists
+        run: mkdir -p ~/.cache/solana
 
       - name: Cache Solana program build
         uses: actions/cache@v4
@@ -337,6 +505,8 @@ jobs:
   solana-program-reproducibility:
     name: Solana Program Build Reproducibility (mainnet deploy path)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
 
     steps:
       - name: Checkout code
@@ -345,43 +515,35 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # v3.1.12, and here the choice is load-bearing rather than merely consistent: with
+      # --tools-version v1.52 fixed on both sides, the CLI driving the build still changes the
+      # .so's bytes, so this job blesses the bytes of whichever CLI it installs. It has to be
+      # the one docs/solana-deployment.md tells a human to deploy with (>= 3.1.12). The
+      # measurement, and the two pins' full rationale, are in
+      # crates/connector-settlement-solana/tests/solana_cli_pins.rs, which also fails the build
+      # if this literal drifts.
       - name: Install Solana CLI tools
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/v3.1.12/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
 
-      # Caching the platform-tools dir keyed on the tools-version avoids the
-      # flaky network resolution panic (issue #105), same as the solana-program
-      # job above. mkdir -p defends against a cold cache (no prior key match):
-      # a from-scratch ~/.cache/solana directory with no `solana` subdirectory
-      # yet has been observed to make cargo-build-sbf panic on an internal
-      # unwrap before it ever reaches the network, rather than creating the
-      # directory itself -- pre-creating it is a no-op once the cache restores.
+      # Purely a speed-up now: both builds below go through
+      # tools/solana/build-sbf.sh, which creates $HOME/.cache/solana itself (the
+      # cold-cache panic this step's `mkdir -p` used to hand-patch) and retries
+      # the flaky version resolution (issue #105). A miss here costs a download,
+      # not a red job.
       - name: Cache Solana platform-tools
         uses: actions/cache@v4
         with:
           path: ~/.cache/solana
           key: solana-platform-tools-${{ runner.os }}-v1.52
 
-      - name: Ensure platform-tools cache directory exists
-        run: mkdir -p ~/.cache/solana
-
       # Quoted: an unquoted YAML scalar treats " #1 (clean)" as a comment, which
       # collapsed these four step names to "Build"/"Hash build" in the run log and
       # hid which of the two builds a failure came from.
       - name: "Build #1 (clean)"
         working-directory: packages/solana-program
-        run: |
-          n=0
-          until cargo build-sbf --tools-version v1.52; do
-            n=$((n + 1))
-            if [ "$n" -ge 3 ]; then
-              echo "cargo build-sbf (build #1) failed after $n attempts"
-              exit 1
-            fi
-            echo "cargo build-sbf attempt $n failed (likely flaky tools-version resolution) — retrying in 5s..."
-            sleep 5
-          done
+        run: ../../tools/solana/build-sbf.sh
 
       # No working-directory here on purpose: packages/solana-program is a member of
       # the root Cargo workspace, so cargo build-sbf writes to the workspace-root
@@ -393,32 +555,30 @@ jobs:
         run: |
           sha256sum target/deploy/payment_channel.so | awk '{print $1}' > /tmp/build1.sha256
           echo "Build #1 sha256: $(cat /tmp/build1.sha256)"
-          # The SBF target dir's name depends on the platform-tools line:
-          # v1.44+ writes target/sbpf-solana-solana, older lines wrote
-          # target/sbf-solana-solana (rust_target_triple() in Agave's
-          # cargo-build-sbf). Remove whichever exists — and FAIL if neither
-          # does, because rm'ing a nonexistent dir is exactly how this gate
-          # was once a tautology: build #2 recompiled nothing and the two
-          # hashes were equal by construction (this PR's review).
-          removed=0
-          for dir in target/sbf-solana-solana target/sbpf-solana-solana; do
-            if [ -d "$dir" ]; then
-              rm -rf "$dir"
-              echo "Reset $dir"
-              removed=1
-            fi
-          done
-          if [ "$removed" -eq 0 ]; then
-            echo "::error::no SBF target dir found to reset — the toolchain's target triple"
-            echo "::error::changed again, and build #2 would recompile nothing. Add the new"
-            echo "::error::dir name here, or the reproducibility assertion proves nothing."
+          # build-sbf.sh builds in a cargo target directory of the pinned
+          # platform-tools line's own — see reason (4) in its header — so the
+          # directory to reset is now named, not guessed. It used to be
+          # guessed: cargo-build-sbf's own target triple is the CLI's
+          # (rust_target_triple() in Agave), sbf-solana-solana on the 2.1 line
+          # and sbpf-solana-solana on 3.x, so this step had to try both.
+          # FAIL if it is not there, because rm'ing a nonexistent dir is
+          # exactly how this gate was once a tautology: build #2 recompiled
+          # nothing and the two hashes were equal by construction.
+          line_dir="target/sbf-tools-$(tools/solana/build-sbf.sh --print-tools-version)"
+          if [ ! -d "$line_dir" ]; then
+            echo "::error::$line_dir does not exist — build #1 did not build where this step"
+            echo "::error::resets, so build #2 would recompile nothing and this job would"
+            echo "::error::assert reproducibility by construction. Reconcile this with"
+            echo "::error::tools/solana/build-sbf.sh's --target-dir."
             exit 1
           fi
+          rm -rf "$line_dir"
+          echo "Reset $line_dir"
           rm -rf target/deploy
 
       - name: "Build #2 (clean)"
         working-directory: packages/solana-program
-        run: cargo build-sbf --tools-version v1.52
+        run: ../../tools/solana/build-sbf.sh
 
       - name: "Hash build #2 and assert reproducibility"
         run: |
@@ -434,14 +594,20 @@ jobs:
           fi
           echo "Reproducible: both clean builds hash identically ($(cat /tmp/build1.sha256))."
 
-  # Summary job to provide clear CI status
+  # Summary job to provide clear CI status -- and the ONLY status branch
+  # protection requires, which is why it runs on every PR (`if: always()`)
+  # and why the docs-only skip is decided here and not by a workflow-level
+  # path filter: a path-filtered required check never reports, and the PR
+  # sits at "Expected" forever.
   ci-status:
     name: CI Status Summary
     runs-on: ubuntu-latest
     needs:
       [
+        changes,
         lint-and-format,
         rust-gate,
+        docs-gate,
         security,
         solana-program,
         solana-program-reproducibility,
@@ -453,45 +619,77 @@ jobs:
     steps:
       - name: Check CI Results
         run: |
+          CODE="${{ needs.changes.outputs.code }}"
           echo "=========================================="
           echo "CI/CD Pipeline Summary"
           echo "=========================================="
           echo ""
+          echo "Change classification: ${{ needs.changes.result }} (code=${CODE:-unset})"
+          echo ""
           echo "Job Results:"
           echo "  Lint & Format: ${{ needs.lint-and-format.result }}"
+          echo "  Tracked Key Guard: ${{ needs.tracked-secrets.result }}"
           echo "  Rust Workspace Gate: ${{ needs.rust-gate.result }}"
+          echo "  Docs Gate: ${{ needs.docs-gate.result }}"
           echo "  EVM Contracts: see Contracts workflow (.github/workflows/contracts.yml)"
           echo "  Solana Program: ${{ needs.solana-program.result }}"
           echo "  Solana Build Reproducibility: ${{ needs.solana-program-reproducibility.result }}"
           echo "  Devbox Validation: ${{ needs.devbox-validate.result }}"
-          echo "  Security: ${{ needs.security.result }}"
-          echo "  Tracked Key Guard: ${{ needs.tracked-secrets.result }}"
+          echo "  Security: ${{ needs.security.result }} (advisory)"
           echo ""
 
-          # Security is advisory (transitive dependency vulnerabilities), so it
-          # does not gate. Every other job must report SUCCESS — the fleet rule
-          # from toon-meta#279: a skipped or cancelled gating job must never
-          # read as a pass, so anything other than 'success' fails the summary.
-          if [[ "${{ needs.lint-and-format.result }}" != "success" ]] || \
-             [[ "${{ needs.rust-gate.result }}" != "success" ]] || \
-             [[ "${{ needs.solana-program.result }}" != "success" ]] || \
-             [[ "${{ needs.solana-program-reproducibility.result }}" != "success" ]] || \
-             [[ "${{ needs.devbox-validate.result }}" != "success" ]] || \
-             [[ "${{ needs.tracked-secrets.result }}" != "success" ]]; then
+          fail=0
+          # The fleet rule from toon-meta#279: a skipped or cancelled gating
+          # job must never read as a pass. `always` is a job that runs on
+          # every PR and must succeed. `heavy` is a job the `changes` verdict
+          # may skip: on a code change it must succeed; on a docs-only change
+          # it must have been skipped by that verdict (or, if it ran anyway,
+          # succeeded) -- a failure or a cancellation is a failure either way.
+          always() {
+            if [[ "$2" != "success" ]]; then echo "❌ $1: $2"; fail=1; else echo "✅ $1"; fi
+          }
+          heavy() {
+            if [[ "$CODE" == "true" ]]; then
+              always "$1" "$2"
+            elif [[ "$2" == "skipped" ]]; then
+              echo "⏭️  $1: skipped (docs-only change)"
+            else
+              always "$1" "$2"
+            fi
+          }
+
+          always "What changed" "${{ needs.changes.result }}"
+          if [[ "$CODE" != "true" && "$CODE" != "false" ]]; then
+            echo "❌ the change classification produced no verdict"; fail=1
+          fi
+          always "Lint & Format" "${{ needs.lint-and-format.result }}"
+          always "Tracked Key Guard" "${{ needs.tracked-secrets.result }}"
+          heavy "Rust Workspace Gate" "${{ needs.rust-gate.result }}"
+          heavy "Solana Program" "${{ needs.solana-program.result }}"
+          heavy "Solana Build Reproducibility" "${{ needs.solana-program-reproducibility.result }}"
+          heavy "Devbox Validation" "${{ needs.devbox-validate.result }}"
+          if [[ "$CODE" == "false" ]]; then
+            always "Docs Gate" "${{ needs.docs-gate.result }}"
+          elif [[ "${{ needs.docs-gate.result }}" != "skipped" && "${{ needs.docs-gate.result }}" != "success" ]]; then
+            always "Docs Gate" "${{ needs.docs-gate.result }}"
+          fi
+          # Security is advisory (transitive dependency vulnerabilities) and
+          # does not gate.
+
+          echo ""
+          if [[ "$fail" -ne 0 ]]; then
             echo "❌ CI Pipeline FAILED"
             echo ""
             echo "Please check the failed jobs above for details."
             exit 1
-          else
-            echo "✅ CI Pipeline PASSED"
-            echo ""
-            echo "All critical checks completed successfully!"
           fi
+          echo "✅ CI Pipeline PASSED"
 
   devbox-validate:
     name: Devbox Environment Validation
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && (github.event_name == 'push' || github.event_name == 'pull_request')
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
